@@ -8,10 +8,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  batchFrameSequence,
   clickCount,
   mouseButtonFromEvent,
   wheelUnitFromEvent,
 } from "./protocol.ts";
+
+test("a screen batch carries its attachment-local sequence", () => {
+  const frame = new Uint8Array([0x02, 0, 0, 0, 0x78, 0x56, 0x34, 0x12]);
+  assert.equal(batchFrameSequence(frame.buffer), 0x12345678);
+  assert.equal(batchFrameSequence(frame.slice(0, 7).buffer), null);
+
+  frame[0] = 0x03;
+  assert.equal(batchFrameSequence(frame.buffer), null);
+  frame[0] = 0x02;
+  frame[1] = 1;
+  assert.equal(batchFrameSequence(frame.buffer), null);
+});
 
 test("an ordinary click run is passed through as the browser counted it", () => {
   assert.equal(clickCount(1), 1);

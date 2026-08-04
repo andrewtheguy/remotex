@@ -19,7 +19,7 @@ a fast machine skips through, and counts taken over a wall-clock window. Where a
 count is the point, assert a relationship that holds for any sample — `records >
 frames` — not a number that depends on how long the run happened to watch.
 
-`batch-envelope.spec.ts` is the v3 binary envelope, read off the SPA's own socket.
+`batch-envelope.spec.ts` is the v4 binary envelope, read off the SPA's own socket.
 It exists because it is the only test that watches the browser link as the browser
 actually uses it — the Rust E2E tests drive a raw WebSocket client, and the
 TypeScript unit tests parse frames they built themselves, so both ends can

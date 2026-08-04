@@ -742,9 +742,35 @@ export function useRemoteDesktop(
     // attachment it belonged to has already left behind.
     let resizeSeq = 0;
     const pendingResizes = new Map<number, RemoteSize>();
+    // The worker outlives socket reconnects, so a completion can return after
+    // the socket that posted its frame has died. A generation travels through
+    // the worker with each batch; only the live generation may acknowledge on
+    // the live socket. Batch sequences alone are insufficient because each new
+    // attachment starts them over.
+    let paintGeneration = 0;
+    let paintSocket: WebSocket | null = null;
     painter?.bind({
       onCacheReset: () => sendRef.current({ type: "cacheReset" }),
       onVideoError: setVideoError,
+      onPainted: (sequence, generation, queuedMs, drawMs) => {
+        const socket = paintSocket;
+        if (
+          generation !== paintGeneration ||
+          socket === null ||
+          socket !== ws ||
+          socket.readyState !== WebSocket.OPEN
+        ) {
+          return;
+        }
+        socket.send(
+          JSON.stringify({
+            type: "paintAck",
+            sequence,
+            queuedMs,
+            drawMs,
+          }),
+        );
+      },
       onResized: (seq) => {
         const applied = pendingResizes.get(seq);
         if (applied) {
@@ -971,6 +997,9 @@ export function useRemoteDesktop(
     const open = (sessionId: string) => {
       session = sessionId;
       const socket = new WebSocket(gatewaySocketUrl("/ws", sessionId));
+      paintGeneration += 1;
+      const generation = paintGeneration;
+      paintSocket = socket;
       socket.binaryType = "arraybuffer";
       ws = socket;
       wsRef.current = socket;
@@ -991,6 +1020,9 @@ export function useRemoteDesktop(
         }
         ws = null;
         wsRef.current = null;
+        if (paintSocket === socket) {
+          paintSocket = null;
+        }
         // Before either branch below: the link that owed us a clipboard reply
         // is gone, so fail any fetch now rather than leaving the button on
         // "Fetching…" until its timeout expires for an answer that cannot come.
@@ -1045,7 +1077,7 @@ export function useRemoteDesktop(
           // nothing else; the worker still reads the kind byte rather than
           // assuming it.
           if (data instanceof ArrayBuffer) {
-            painter?.draw(data);
+            painter?.draw(data, generation);
           }
           return;
         }
@@ -1550,6 +1582,8 @@ export function useRemoteDesktop(
 
     return () => {
       disposed = true;
+      paintGeneration += 1;
+      paintSocket = null;
       startRef.current = null;
       resizeToWindowRef.current = null;
       audioSocketRef.current = null;

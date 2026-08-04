@@ -38,8 +38,10 @@ use axum::{
 use futures_util::{SinkExt as _, StreamExt as _};
 use log::{info, warn};
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
@@ -69,6 +71,107 @@ const HEARTBEAT_TIMINGS: HeartbeatTimings = HeartbeatTimings {
     interval: HEARTBEAT_INTERVAL,
     timeout: REATTACH_GRACE_PERIOD,
 };
+
+/// Sent-batch timestamps retained while the painter owes an acknowledgment.
+/// Bounded independently of the eventual backpressure window: this first slice
+/// measures rather than changes pacing, and a broken or raw test client must not
+/// turn missing feedback into unbounded gateway memory.
+const MAX_TRACKED_PAINTS: usize = 4096;
+
+struct PendingPaint {
+    sequence: u32,
+    sent: Instant,
+}
+
+#[derive(Default)]
+struct PaintTracker {
+    pending: VecDeque<PendingPaint>,
+    sent: u64,
+    acknowledgments: u64,
+    completed: u64,
+    forgotten: u64,
+    stale: u64,
+    max_in_flight: u64,
+    queued_ms: u64,
+    max_queued_ms: u32,
+    draw_ms: u64,
+    max_draw_ms: u32,
+    end_to_end_ms: u64,
+    max_end_to_end_ms: u64,
+}
+
+impl PaintTracker {
+    fn sent(&mut self, sequence: u32) {
+        if self.pending.len() == MAX_TRACKED_PAINTS {
+            self.pending.pop_front();
+            self.forgotten += 1;
+        }
+        self.pending.push_back(PendingPaint {
+            sequence,
+            sent: Instant::now(),
+        });
+        self.sent += 1;
+        self.max_in_flight = self.max_in_flight.max(self.pending.len() as u64);
+    }
+
+    /// Remove a batch timestamp installed immediately before a socket write
+    /// that then failed. It is always the newest entry; keeping the operation
+    /// explicit avoids counting bytes the browser could never acknowledge.
+    fn unsent(&mut self, sequence: u32) {
+        if self.pending.back().is_some_and(|paint| paint.sequence == sequence) {
+            self.pending.pop_back();
+            self.sent -= 1;
+        }
+    }
+
+    fn acknowledge(&mut self, sequence: u32, queued_ms: u32, draw_ms: u32) {
+        let Some(position) = self.pending.iter().position(|paint| paint.sequence == sequence) else {
+            self.stale += 1;
+            return;
+        };
+        let elapsed = self.pending[position].sent.elapsed().as_millis();
+        let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
+        // The worker is strictly ordered, so completing this sequence also
+        // proves every older retained batch completed. Treat the ack as
+        // cumulative so a later coalescing change needs no protocol change.
+        for _ in 0..=position {
+            self.pending.pop_front();
+            self.completed += 1;
+        }
+        self.acknowledgments += 1;
+        self.queued_ms = self.queued_ms.saturating_add(u64::from(queued_ms));
+        self.max_queued_ms = self.max_queued_ms.max(queued_ms);
+        self.draw_ms = self.draw_ms.saturating_add(u64::from(draw_ms));
+        self.max_draw_ms = self.max_draw_ms.max(draw_ms);
+        self.end_to_end_ms = self.end_to_end_ms.saturating_add(elapsed);
+        self.max_end_to_end_ms = self.max_end_to_end_ms.max(elapsed);
+    }
+}
+
+impl std::fmt::Display for PaintTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let average = |total: u64| total.checked_div(self.acknowledgments).unwrap_or(0);
+        write!(
+            f,
+            "{} batch(es) sent, {} ack(s) completing {}, {} still in flight, max {} in flight, \
+             worker queue avg/max {}/{}ms, draw avg/max {}/{}ms, end-to-end avg/max {}/{}ms, \
+             {} timestamp(s) forgotten, {} stale ack(s)",
+            self.sent,
+            self.acknowledgments,
+            self.completed,
+            self.pending.len(),
+            self.max_in_flight,
+            average(self.queued_ms),
+            self.max_queued_ms,
+            average(self.draw_ms),
+            self.max_draw_ms,
+            average(self.end_to_end_ms),
+            self.max_end_to_end_ms,
+            self.forgotten,
+            self.stale,
+        )
+    }
+}
 
 #[derive(Deserialize)]
 pub struct WsParams {
@@ -153,8 +256,12 @@ async fn audio(
                 // absorb any.
                 for frame in wire.encode(vec![msg]) {
                     let frame = match frame {
-                        WireFrame::Binary(bytes) => Message::Binary(bytes.into()),
+                        WireFrame::Audio(bytes) => Message::Binary(bytes.into()),
                         WireFrame::Text(json) => Message::Text(json.into()),
+                        WireFrame::Batch { .. } => {
+                            warn!("ws: screen batch reached the audio socket");
+                            continue;
+                        }
                     };
                     if ws_tx.send(frame).await.is_err() {
                         return finish(&sessions, audio_id, &wire);
@@ -230,6 +337,8 @@ async fn session(
     // numbers needs no lock and cannot deadlock against the send path.
     let cache_epoch = Arc::new(AtomicU64::new(0));
     let inbound_epoch = Arc::clone(&cache_epoch);
+    let paint = Arc::new(Mutex::new(PaintTracker::default()));
+    let outbound_paint = Arc::clone(&paint);
 
     // Outbound: session events -> browser, batched through [`Wire`], whose
     // counters are logged when the attachment ends so the transport can be
@@ -288,11 +397,21 @@ async fn session(
             // Whatever was already encoded still goes out first: eviction is not a
             // reason to drop paint the client was owed.
             for frame in wire.encode(run) {
-                let frame = match frame {
-                    WireFrame::Binary(bytes) => Message::Binary(bytes.into()),
-                    WireFrame::Text(json) => Message::Text(json.into()),
+                let (frame, sequence) = match frame {
+                    WireFrame::Batch { sequence, bytes } => {
+                        outbound_paint.lock().unwrap().sent(sequence);
+                        (Message::Binary(bytes.into()), Some(sequence))
+                    }
+                    WireFrame::Text(json) => (Message::Text(json.into()), None),
+                    WireFrame::Audio(_) => {
+                        warn!("ws: audio frame reached the session socket");
+                        continue;
+                    }
                 };
                 if ws_tx.send(frame).await.is_err() {
+                    if let Some(sequence) = sequence {
+                        outbound_paint.lock().unwrap().unsent(sequence);
+                    }
                     break 'outbound; // browser gone
                 }
             }
@@ -361,6 +480,17 @@ async fn session(
                     inbound_epoch.fetch_add(1, Ordering::Relaxed);
                     sessions.forward_input(attach_id, ClientMsg::Refresh);
                 }
+                // Attachment transport feedback, not remote input. Consuming
+                // it here is what keeps an RDP/VNC engine from learning that a
+                // browser or a paint worker exists.
+                Ok(ClientMsg::PaintAck {
+                    sequence,
+                    queued_ms,
+                    draw_ms,
+                }) => paint
+                    .lock()
+                    .unwrap()
+                    .acknowledge(sequence, queued_ms, draw_ms),
                 // Everything else is engine input, routed to the current engine
                 // (dropped in the picker state). Routing through the manager —
                 // rather than a captured engine sender — means it always reaches
@@ -393,6 +523,7 @@ async fn session(
     {
         outbound.abort();
     }
+    info!("ws: paint totals: {}", paint.lock().unwrap());
     info!("ws: client detached");
 }
 
@@ -408,6 +539,48 @@ mod tests {
     use crate::config::{Protocol, Security, TargetConfig};
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
+
+    #[test]
+    fn paint_acknowledgments_are_ordered_and_cumulative() {
+        let mut paint = PaintTracker::default();
+        paint.sent(1);
+        paint.sent(2);
+        paint.sent(3);
+
+        paint.acknowledge(2, 7, 11);
+        assert_eq!(paint.sent, 3);
+        assert_eq!(paint.acknowledgments, 1);
+        assert_eq!(paint.completed, 2);
+        assert_eq!(paint.pending.len(), 1);
+        assert_eq!(paint.pending.front().unwrap().sequence, 3);
+        assert_eq!(paint.max_in_flight, 3);
+        assert_eq!(paint.queued_ms, 7);
+        assert_eq!(paint.max_queued_ms, 7);
+        assert_eq!(paint.draw_ms, 11);
+        assert_eq!(paint.max_draw_ms, 11);
+
+        paint.acknowledge(1, 100, 100);
+        assert_eq!(paint.stale, 1);
+        assert_eq!(paint.acknowledgments, 1);
+        assert_eq!(paint.pending.len(), 1);
+    }
+
+    #[test]
+    fn paint_tracking_is_bounded_and_a_failed_write_is_not_counted() {
+        let mut paint = PaintTracker::default();
+        for sequence in 1..=u32::try_from(MAX_TRACKED_PAINTS + 1).unwrap() {
+            paint.sent(sequence);
+        }
+        assert_eq!(paint.pending.len(), MAX_TRACKED_PAINTS);
+        assert_eq!(paint.forgotten, 1);
+        assert_eq!(paint.pending.front().unwrap().sequence, 2);
+
+        let last = u32::try_from(MAX_TRACKED_PAINTS + 1).unwrap();
+        paint.unsent(last);
+        assert_eq!(paint.sent, u64::from(last - 1));
+        assert_eq!(paint.pending.len(), MAX_TRACKED_PAINTS - 1);
+        assert_eq!(paint.pending.back().unwrap().sequence, last - 1);
+    }
 
     fn fake_target(audio: bool) -> TargetConfig {
         TargetConfig {
@@ -435,6 +608,61 @@ mod tests {
             render_motion_debug: false,
             video_codec: None,
         }
+    }
+
+    #[tokio::test]
+    async fn paint_feedback_stops_at_the_websocket_bridge() {
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let sessions = Arc::new(SessionManager::with_test_spawner(
+            vec![fake_target(false)],
+            move |_target, input_rx, frame_tx, _audio| {
+                engine_tx.send((input_rx, frame_tx)).unwrap();
+            },
+        ));
+        let token = sessions.claim(false, None).unwrap();
+        let app = Router::new().route(
+            "/ws",
+            any(move |ws: WebSocketUpgrade| {
+                let sessions = Arc::clone(&sessions);
+                let token = token.clone();
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        session(socket, sessions, Some(token), HEARTBEAT_TIMINGS)
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+        client
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .await
+            .unwrap();
+        let (mut input_rx, _frame_tx) = engine_rx.recv().await.unwrap();
+        // A following engine input is the ordering fence: when it arrives, the
+        // bridge has already parsed the paint acknowledgment before it. If the
+        // acknowledgment leaked through, it would be the first message here.
+        client
+            .send(ClientFrame::text(
+                r#"{"type":"paintAck","sequence":1,"queuedMs":7,"drawMs":11}"#,
+            ))
+            .await
+            .unwrap();
+        client
+            .send(ClientFrame::text(r#"{"type":"refresh"}"#))
+            .await
+            .unwrap();
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
+
+        drop(client);
+        server.abort();
     }
 
     #[tokio::test]

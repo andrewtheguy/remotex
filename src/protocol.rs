@@ -210,6 +210,21 @@ pub enum ClientMsg {
     /// Clear this attachment's tile-cache table and repaint. Unlike
     /// [`ClientMsg::Refresh`], this repairs disagreement about cache slots.
     CacheReset,
+    /// The browser's paint worker finished this screen batch, including every
+    /// asynchronous image or video decode ahead of its last draw.
+    ///
+    /// `sequence` comes from the batch header. `queued_ms` is how long the
+    /// command waited behind earlier painter work, and `draw_ms` is the time
+    /// spent parsing, decoding and drawing this batch once its turn began.
+    /// This is attachment transport feedback, consumed by `ws`; engines never
+    /// see it.
+    PaintAck {
+        sequence: u32,
+        #[serde(rename = "queuedMs")]
+        queued_ms: u32,
+        #[serde(rename = "drawMs")]
+        draw_ms: u32,
+    },
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
@@ -243,7 +258,8 @@ pub enum ClientMsg {
 /// offset 0: u8  frame kind, always 0x02 (batch)
 /// offset 1: u8  flags, always 0 — a receiver rejects anything else
 /// offset 2: u16 record count
-/// offset 4: records, back to back
+/// offset 4: u32 sequence, increasing per attachment
+/// offset 8: records, back to back
 ///
 /// record = u8 op | body   (little-endian throughout)
 ///
@@ -261,7 +277,7 @@ pub enum ClientMsg {
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
-    pub const HEADER_LEN: usize = 4;
+    pub const HEADER_LEN: usize = 8;
 
     pub const OP_TILE: u8 = 0x01;
     pub const OP_TILE_REF: u8 = 0x02;
@@ -857,7 +873,12 @@ pub enum ServerMsg {
 #[derive(Debug)]
 pub enum WireFrame {
     Text(String),
-    Binary(Vec<u8>),
+    /// One ordered screen batch. The sequence is repeated in the batch header
+    /// for the browser and held here so the socket can timestamp it without
+    /// reparsing bytes it just encoded.
+    Batch { sequence: u32, bytes: Vec<u8> },
+    /// One audio frame. Audio has its own socket and no paint acknowledgment.
+    Audio(Vec<u8>),
 }
 
 /// JSON shape of the text-frame control messages (`ServerMsg` minus tiles).
@@ -1117,6 +1138,17 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"paintAck","sequence":41,"queuedMs":7,"drawMs":13}"#
+            )
+            .unwrap(),
+            ClientMsg::PaintAck {
+                sequence: 41,
+                queued_ms: 7,
+                draw_ms: 13
+            }
         ));
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(r#"{"type":"clipboardRequest"}"#).unwrap(),

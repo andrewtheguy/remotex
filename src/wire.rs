@@ -125,7 +125,6 @@ impl Record {
 }
 
 /// Per-attachment encoder for the server -> client direction.
-#[derive(Default)]
 pub struct Wire {
     /// Records accumulated for the batch currently being built.
     ///
@@ -146,7 +145,23 @@ pub struct Wire {
     /// smaller than this predicted. Bounding high is the safe direction for a cap.
     pending_bytes: usize,
     slots: Slots,
+    /// Sequence written into the next screen batch. Per attachment because a
+    /// `Wire` belongs to one attachment; starts at one so zero can remain the
+    /// conspicuous value in malformed or hand-built frames.
+    next_sequence: u32,
     pub totals: Totals,
+}
+
+impl Default for Wire {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            pending_bytes: 0,
+            slots: Slots::default(),
+            next_sequence: 1,
+            totals: Totals::default(),
+        }
+    }
 }
 
 impl Wire {
@@ -178,7 +193,7 @@ impl Wire {
                     ServerMsg::Audio(packets) => {
                         let frame = protocol::audio::frame(&packets);
                         self.totals.audio(frame.len(), packets.len());
-                        frames.push(WireFrame::Binary(frame));
+                        frames.push(WireFrame::Audio(frame));
                     }
                     other => log::warn!("wire: dropping {other:?}, which has no encoding"),
                 },
@@ -256,6 +271,12 @@ impl Wire {
         frame.push(batch::FRAME_KIND);
         frame.push(0); // flags
         frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("one attachment cannot send u32::MAX screen batches");
+        frame.extend_from_slice(&sequence.to_le_bytes());
         for record in self.pending.drain(..) {
             let tile = match record {
                 Record::Video(unit) => {
@@ -282,7 +303,7 @@ impl Wire {
         }
         self.pending_bytes = 0;
         self.totals.frame(frame.len());
-        frames.push(WireFrame::Binary(frame));
+        frames.push(WireFrame::Batch { sequence, bytes: frame });
     }
 
     /// Forget every slot, because the client says it lost them.
@@ -531,8 +552,18 @@ mod tests {
         frames
             .iter()
             .filter_map(|f| match f {
-                WireFrame::Binary(bytes) => Some(bytes),
+                WireFrame::Batch { bytes, .. } | WireFrame::Audio(bytes) => Some(bytes),
                 WireFrame::Text(_) => None,
+            })
+            .collect()
+    }
+
+    fn sequences(frames: &[WireFrame]) -> Vec<u32> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                WireFrame::Batch { sequence, .. } => Some(*sequence),
+                WireFrame::Text(_) | WireFrame::Audio(_) => None,
             })
             .collect()
     }
@@ -543,6 +574,8 @@ mod tests {
         let mut wire = Wire::default();
         let frames = wire.encode((0..8).map(|i| tile(i * 64, 100)));
         assert_eq!(frames.len(), 1, "eight tiles must not cost eight frames");
+        assert_eq!(sequences(&frames), vec![1]);
+        assert_eq!(&binary(&frames)[0][4..8], &1u32.to_le_bytes());
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 8);
         // In order, each carrying its payload and the slot to keep it in.
@@ -584,11 +617,12 @@ mod tests {
         let mut wire = Wire::default();
         let frames = wire.encode(vec![tile(0, 50), tile(64, 50), resize(), tile(0, 50)]);
         assert!(
-            matches!(frames[0], WireFrame::Binary(_)),
+            matches!(frames[0], WireFrame::Batch { .. }),
             "the first two tiles go out before the resize"
         );
         assert!(matches!(frames[1], WireFrame::Text(_)));
-        assert!(matches!(frames[2], WireFrame::Binary(_)));
+        assert!(matches!(frames[2], WireFrame::Batch { .. }));
+        assert_eq!(sequences(&frames), vec![1, 2]);
         assert_eq!(frames.len(), 3);
         assert_eq!(records(binary(&frames)[0]).len(), 2);
         assert_eq!(records(binary(&frames)[1]).len(), 1);

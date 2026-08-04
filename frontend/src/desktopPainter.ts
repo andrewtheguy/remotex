@@ -4,8 +4,8 @@
 // drawing on an `OffscreenCanvas`, so a decode backlog costs the worker's
 // thread rather than React's and input's. This module is the main-thread side:
 // it transfers each binary frame over — `postMessage` with a transfer list
-// moves the buffer, it does not copy it — and carries the painter's two
-// callbacks back as messages.
+// moves the buffer, it does not copy it — and carries the painter's callbacks
+// and ordered completion feedback back as messages.
 //
 // One worker per canvas *element*, held at module level like the pointer rect
 // cache, and for a harder reason than tidiness: `transferControlToOffscreen`
@@ -16,6 +16,7 @@
 // worker — at which point the old one holds the bitmap of an element that is
 // gone, and is terminated rather than left decoding for it.
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
+import { batchFrameSequence } from "./protocol.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
@@ -23,6 +24,13 @@ export interface PainterHandlers {
   onCacheReset: () => void;
   /** Why a video target shows nothing, or null once it shows something. */
   onVideoError: (reason: string | null) => void;
+  /** One ordered screen batch finished in the worker. */
+  onPainted: (
+    sequence: number,
+    generation: number,
+    queuedMs: number,
+    drawMs: number,
+  ) => void;
   /**
    * A `resize` command has been applied — the bitmap it named is on screen.
    * The page defers the layout state that presents the bitmap (the CSS box,
@@ -40,7 +48,7 @@ export interface DesktopPainter {
   /** Drop the handlers; the worker idles until the next bind. */
   unbind(): void;
   /** Hand one binary socket frame to the worker. Transfers the buffer. */
-  draw(frame: ArrayBuffer): void;
+  draw(frame: ArrayBuffer, generation: number): void;
   /** Set the canvas bitmap (framebuffer pixels) and fill it black. */
   resize(bitmap: { w: number; h: number }, seq: number): void;
   setVideoFormat(stream: number, format: VideoFormat): void;
@@ -64,7 +72,7 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
     new URL("./desktopPainter.worker.ts", import.meta.url),
     { type: "module", name: "desktop-painter" },
   );
-  // Events carry no attachment tag, deliberately: for a stale event to reach a
+  // Most events carry no attachment tag: for a stale event to reach a
   // *new* binding, this worker would need two binds with the first having
   // produced worker activity — and two binds on one worker only happen under
   // StrictMode's synchronous remount, whose first effect run is disposed
@@ -72,7 +80,8 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
   // a format. (A real remount is a new canvas element, which replaces the
   // worker above; its events die with it.) The one event with per-attachment
   // meaning, `resized`, is matched against the binding's own pending map
-  // besides.
+  // besides. `painted` is the exception: the socket generation it echoes is
+  // what prevents an old completion from acknowledging a new attachment.
   let handlers: PainterHandlers | null = null;
   worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
     const event = ev.data;
@@ -80,8 +89,15 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
       handlers?.onCacheReset();
     } else if (event.type === "videoError") {
       handlers?.onVideoError(event.reason);
-    } else {
+    } else if (event.type === "resized") {
       handlers?.onResized(event.seq);
+    } else {
+      handlers?.onPainted(
+        event.sequence,
+        event.generation,
+        event.queuedMs,
+        event.drawMs,
+      );
     }
   };
   const post = (command: PainterCommand, transfer: Transferable[] = []) =>
@@ -95,8 +111,12 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
     unbind() {
       handlers = null;
     },
-    draw(frame) {
-      post({ type: "frame", data: frame }, [frame]);
+    draw(frame, generation) {
+      const sequence = batchFrameSequence(frame);
+      if (sequence === null) {
+        return;
+      }
+      post({ type: "frame", data: frame, sequence, generation }, [frame]);
     },
     resize(bitmap, seq) {
       post({ type: "resize", w: bitmap.w, h: bitmap.h, seq });

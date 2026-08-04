@@ -48,6 +48,7 @@ function batchFrame(records: Record[]): ArrayBuffer {
     bytes.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
   bytes.push(0x02, 0x00);
   u16(records.length);
+  u32(1); // attachment-local batch sequence
   for (const record of records) {
     if (record.op === "ref") {
       bytes.push(OP_TILE_REF);
@@ -638,8 +639,8 @@ test("a video record with an unknown flag drops the batch", async () => {
   const frame = batchFrame([
     { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
   ]);
-  // Byte 4 is the op, 5 the stream, 6 the flags.
-  new Uint8Array(frame)[6] = 0x02;
+  // Byte 8 is the op, 9 the stream, 10 the flags.
+  new Uint8Array(frame)[10] = 0x02;
   await announced().draw(frame);
   assert.deepEqual(
     chunkTypes,
