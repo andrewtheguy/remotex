@@ -25,6 +25,7 @@ use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::dvc::DrdynvcClient;
 use ironrdp::graphics::image_processing::PixelFormat;
+use ironrdp::graphics::pointer::DecodedPointer;
 use ironrdp::pdu::gcc::{ConnectionType, KeyboardType};
 use ironrdp::pdu::input::MousePdu;
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
@@ -47,7 +48,9 @@ use crate::config::TargetConfig;
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
-use crate::protocol::{ClientMsg, ClipboardSnapshot, MouseButton, ServerMsg, UNSCALED};
+use crate::protocol::{
+    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED,
+};
 use crate::rdp_audio;
 use crate::rdp_clipboard::{self, ClipboardEvent};
 use crate::tiles::{self, Rect, Shadow};
@@ -537,6 +540,100 @@ impl std::fmt::Display for Layout {
     }
 }
 
+/// The pointer, as this engine hands it to the browser.
+///
+/// RDP servers do not draw the cursor into the screen bitmap — they send its
+/// shape and leave the drawing to whoever presents the framebuffer. IronRDP will
+/// do that compositing itself (`pointer_software_rendering`), which is what this
+/// engine asked for until now, and it made every mouse move a screen update:
+/// damage, the [`DAMAGE_INTERVAL`] flush, an encode, the socket, a decode and a
+/// paint before the pointer had visibly moved. Forwarding the shape instead puts
+/// it on the browser's own hardware pointer, which moves with the mouse and
+/// costs the session nothing per move — the same arrangement VNC's Cursor
+/// pseudo-encoding already has, through the same [`ServerMsg::Cursor`].
+#[derive(Default)]
+struct Pointer {
+    /// The decoded pointer the current `shape` was built from. A pointer the
+    /// server re-selects out of its own cache arrives as the same `Arc` every
+    /// time, so identity settles "already sent" without a pixel compare or a
+    /// second PNG encode.
+    source: Option<Arc<DecodedPointer>>,
+    /// What the browser should draw, `None` being its own arrow — see
+    /// [`ServerMsg::Cursor`].
+    shape: Option<CursorShape>,
+    /// `shape` has moved since the browser was last told.
+    changed: bool,
+}
+
+impl Pointer {
+    /// The server named a shape.
+    fn set(&mut self, decoded: &Arc<DecodedPointer>) {
+        if self.source.as_ref().is_some_and(|held| Arc::ptr_eq(held, decoded)) {
+            return;
+        }
+        self.source = Some(Arc::clone(decoded));
+        self.shape = shape_of(decoded);
+        self.changed = true;
+    }
+
+    /// The server hid the pointer, or asked for the client's default one. Both
+    /// are the browser's own arrow here: this end has no default shape of its
+    /// own to send, and on a remote desktop a pointer you cannot see at all is
+    /// worse than a generic one.
+    fn cleared(&mut self) {
+        if self.source.is_none() && self.shape.is_none() {
+            return;
+        }
+        self.source = None;
+        self.shape = None;
+        self.changed = true;
+    }
+
+    /// The change to send, taken once per batch of outputs rather than per
+    /// output: selecting a cached pointer produces a hide *and* a shape, and the
+    /// browser should see the shape rather than flicker through its own arrow on
+    /// the way to it.
+    fn change(&mut self) -> Option<ServerMsg> {
+        std::mem::take(&mut self.changed).then(|| ServerMsg::Cursor(self.shape.clone()))
+    }
+
+    /// The pointer a freshly attached browser cannot otherwise learn: the server
+    /// sends a shape only when it changes, which may have been long before this
+    /// browser arrived. Sent even when nothing has arrived yet, because it is
+    /// also this engine's statement that the browser owns the pointer from here
+    /// — without it a client would hide its own and draw nothing until the first
+    /// pointer PDU.
+    fn attached(&mut self) -> ServerMsg {
+        self.changed = false;
+        ServerMsg::Cursor(self.shape.clone())
+    }
+}
+
+/// A decoded pointer as the shape the browser draws, or `None` for one it should
+/// not draw: the server's invisible pointer, and anything this client will not
+/// render.
+///
+/// `bitmap_data` is RGBA with straight alpha, which is what the `Accelerated`
+/// bitmap target means and what PNG wants; the software target's premultiplied
+/// pixels would need undoing here.
+fn shape_of(decoded: &DecodedPointer) -> Option<CursorShape> {
+    let (w, h) = (decoded.width, decoded.height);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    if w > MAX_CURSOR_DIM || h > MAX_CURSOR_DIM {
+        warn!("rdp: ignoring an oversized {w}x{h} pointer");
+        return None;
+    }
+    match CursorShape::from_rgba(w, h, decoded.hotspot_x, decoded.hotspot_y, &decoded.bitmap_data) {
+        Ok(shape) => Some(shape),
+        Err(e) => {
+            warn!("rdp: ignoring a {w}x{h} pointer: {e}");
+            None
+        }
+    }
+}
+
 async fn active_loop(
     connection_result: ConnectionResult,
     mut framed: UpgradedFramed,
@@ -572,6 +669,8 @@ async fn active_loop(
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
     let mut last_pos: (u16, u16) = (desktop.width / 2, desktop.height / 2);
+    // The pointer shape, on its way to the browser that draws it.
+    let mut pointer = Pointer::default();
 
     // The remote's clipboard as last fetched, which is what answers the panel's
     // Fetch — RDP, like RFB, has no way to *ask* for the current contents, only
@@ -611,8 +710,8 @@ async fn active_loop(
 
     // Damage accumulated toward the next tile flush, and its deadline. A busy RDP
     // server reports damage far faster than anything presents it — ~126 batches a
-    // second measured against a 60 Hz screen — and the pointer being composited
-    // into the framebuffer means even a still desktop produces one per mouse event.
+    // second measured against a 60 Hz screen, back when the pointer was composited
+    // into the framebuffer and even a still desktop produced one per mouse event.
     // Each used to take the pack-and-compare walk on arrival. Now a batch on a
     // quiet screen still goes out on the spot, and everything inside one interval
     // after it coalesces — overlapping reports collapse to one rectangle — and is
@@ -705,6 +804,9 @@ async fn active_loop(
                         })
                         .await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
+                    // Not part of the repaint: the pixels carry no pointer, and
+                    // the server only names a shape when it changes.
+                    sink.msg(pointer.attached()).await?;
                     send_tiles(
                         &image,
                         Rect {
@@ -1060,6 +1162,17 @@ async fn active_loop(
                         },
                     );
                 }
+                ActiveStageOutput::PointerBitmap(decoded) => pointer.set(&decoded),
+                ActiveStageOutput::PointerHidden | ActiveStageOutput::PointerDefault => {
+                    pointer.cleared();
+                }
+                // Where the *server* thinks the pointer is. Dropped: the browser
+                // draws the pointer at the position of the mouse driving it, and
+                // the browser's own pointer is the one that moved. Nothing here
+                // can place a hardware pointer anyway, so a server-initiated warp
+                // is a desync this end cannot fix — the same limit the VNC path
+                // has.
+                ActiveStageOutput::PointerPosition { .. } => {}
                 ActiveStageOutput::Terminate(reason) => {
                     info!("rdp: session terminated by server: {reason:?}");
                     // Best effort, and only for the pixels still pending: the
@@ -1114,6 +1227,9 @@ async fn active_loop(
                 }
                 _ => {}
             }
+        }
+        if let Some(msg) = pointer.change() {
+            sink.msg(msg).await?;
         }
         // A quiet screen's damage leaves on the spot — the first batch after an idle
         // interval pays no added latency — and everything after it within one
@@ -1497,8 +1613,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
 /// stream's 30.
 ///
 /// The interval coalesces, it does not merely defer: a busy server's ~126 damage
-/// batches a second overlap heavily — the pointer rectangle repeats with every
-/// mouse event — and [`stage_damage`] folds an overlapping report into the one
+/// batches a second overlap heavily and [`stage_damage`] folds an overlapping
+/// report into the one
 /// already waiting, so the deadline packs and compares each region once instead of
 /// per report.
 const DAMAGE_INTERVAL: Duration = Duration::from_millis(16);
@@ -1512,7 +1628,7 @@ const DAMAGE_RECTS_CAP: usize = 32;
 ///
 /// A report overlapping one already staged is unioned into it — the common case,
 /// since a busy server re-reports the same regions many times per interval — and a
-/// disjoint one is kept apart, so a cursor and a video at opposite corners do not
+/// disjoint one is kept apart, so a caret and a video at opposite corners do not
 /// conspire to repack the whole desktop.
 fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
     let union = |a: &Rect, b: &Rect| Rect {
@@ -1539,12 +1655,13 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
 /// most [`crate::protocol::CELL_H`] rows each. How that region is cut, and what
 /// each piece is encoded as, is [`TileSink::damage`]'s business.
 ///
-/// Comparing against `shadow` earns its keep on this engine in particular. The RDP
-/// pointer is composited into the framebuffer (`pointer_software_rendering:
-/// true`), so *every* mouse event over a still desktop produces a damage
-/// rectangle — and this engine also repaints regions that did not change, which
-/// nothing upstream filters. Both come back as `None` here and cost nothing but a
-/// pack and a `memcmp`.
+/// Comparing against `shadow` earns its keep on this engine in particular: it
+/// repaints regions that did not change, which nothing upstream filters. They come
+/// back as `None` here and cost nothing but a pack and a `memcmp`. (The other
+/// source used to be the pointer, composited into the framebuffer so that every
+/// mouse event over a still desktop produced a damage rectangle. It is the browser
+/// that draws it now — see [`Pointer`] — so those never reach the framebuffer at
+/// all.)
 ///
 /// The pack happens either way; what is skipped is the PNG encode, which is far
 /// the more expensive half (~8–10× the hash it replaced, measured in
@@ -1673,9 +1790,12 @@ fn build_connector_config(config: &TargetConfig) -> Config {
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         platform: MajorPlatformType::UNIX,
 
-        // Render the server pointer into the framebuffer so the cursor is visible.
+        // Take the server's pointer updates, and take them as *updates*: with
+        // software rendering off IronRDP decodes each shape and hands it over
+        // instead of drawing it into the framebuffer, which is what lets the
+        // browser wear it on its own hardware pointer — see [`Pointer`].
         enable_server_pointer: true,
-        pointer_software_rendering: true,
+        pointer_software_rendering: false,
         request_data: None,
         // INFO_AUTOLOGON in the Client Info PDU. Without it xrdp treats the
         // credentials sent in that same PDU as pre-fill and still shows its own
@@ -1705,6 +1825,108 @@ mod tests {
 
     fn rect(left: u16, top: u16, right: u16, bottom: u16) -> Rect {
         Rect { left, top, right, bottom }
+    }
+
+    /// A decoded pointer of `w`x`h` opaque red, as IronRDP hands one over.
+    fn decoded(w: u16, h: u16) -> Arc<DecodedPointer> {
+        Arc::new(DecodedPointer {
+            width: w,
+            height: h,
+            hotspot_x: 1,
+            hotspot_y: 2,
+            bitmap_data: [255, 0, 0, 255].repeat(usize::from(w) * usize::from(h)),
+        })
+    }
+
+    fn shape(msg: &ServerMsg) -> Option<&CursorShape> {
+        match msg {
+            ServerMsg::Cursor(shape) => shape.as_ref(),
+            other => panic!("expected a cursor message, got {other:?}"),
+        }
+    }
+
+    /// The whole point of forwarding the shape: it reaches the browser, hotspot
+    /// and all, and does so once.
+    #[test]
+    fn a_shape_travels_once_and_carries_its_hotspot() {
+        let mut pointer = Pointer::default();
+        pointer.set(&decoded(32, 32));
+        let msg = pointer.change().expect("the first shape is a change");
+        let shape = shape(&msg).expect("a shape, not the client's own arrow");
+        assert_eq!((shape.w, shape.h, shape.hx, shape.hy), (32, 32, 1, 2));
+        assert!(pointer.change().is_none(), "nothing changed since");
+    }
+
+    /// A pointer the server re-selects out of its cache arrives as the same
+    /// `Arc`, and re-sending its pixels every time the mouse crosses a window
+    /// edge is exactly the traffic this change exists to remove.
+    #[test]
+    fn reselecting_the_same_pointer_says_nothing() {
+        let mut pointer = Pointer::default();
+        let arrow = decoded(32, 32);
+        pointer.set(&arrow);
+        assert!(pointer.change().is_some());
+        pointer.set(&arrow);
+        assert!(pointer.change().is_none());
+        // A different pointer with identical pixels is still a different
+        // selection, and cheap enough to send.
+        pointer.set(&decoded(32, 32));
+        assert!(pointer.change().is_some());
+    }
+
+    /// Selecting a cached pointer produces a hide *and* a shape in one batch of
+    /// outputs. The browser should see the shape, not flicker through its own
+    /// arrow on the way to it.
+    #[test]
+    fn a_hide_followed_by_a_shape_is_one_message() {
+        let mut pointer = Pointer::default();
+        pointer.set(&decoded(32, 32));
+        assert!(pointer.change().is_some());
+        pointer.cleared();
+        pointer.set(&decoded(48, 48));
+        let msg = pointer.change().expect("the batch ended on a new shape");
+        assert_eq!(shape(&msg).expect("a shape").w, 48);
+        assert!(pointer.change().is_none());
+    }
+
+    /// Hiding is a change the browser has to hear — it draws its own arrow for
+    /// it — but only the first time.
+    #[test]
+    fn hiding_an_already_hidden_pointer_says_nothing() {
+        let mut pointer = Pointer::default();
+        pointer.set(&decoded(32, 32));
+        assert!(pointer.change().is_some());
+        pointer.cleared();
+        assert!(shape(&pointer.change().expect("the hide is a change")).is_none());
+        pointer.cleared();
+        assert!(pointer.change().is_none());
+    }
+
+    /// A shape this client will not draw still hands pointer ownership over: the
+    /// browser draws its own arrow rather than nothing, which is what it would
+    /// draw if the message never came.
+    #[test]
+    fn a_pointer_too_large_to_draw_becomes_the_clients_own() {
+        let mut pointer = Pointer::default();
+        pointer.set(&decoded(MAX_CURSOR_DIM + 1, 1));
+        assert!(shape(&pointer.change().expect("a change")).is_none());
+        // And the server's invisible pointer reads the same way.
+        let mut pointer = Pointer::default();
+        pointer.set(&Arc::new(DecodedPointer::new_invisible()));
+        assert!(shape(&pointer.change().expect("a change")).is_none());
+    }
+
+    /// A browser that attaches mid-session is told the pointer state whether or
+    /// not it has moved: the server names a shape only when it changes, and a
+    /// client with no message hides its own pointer and draws nothing.
+    #[test]
+    fn an_attaching_browser_is_told_the_pointer_either_way() {
+        let mut pointer = Pointer::default();
+        assert!(shape(&pointer.attached()).is_none(), "before any pointer PDU");
+        pointer.set(&decoded(32, 32));
+        // The replay covers the pending change rather than doubling it.
+        assert!(shape(&pointer.attached()).is_some());
+        assert!(pointer.change().is_none());
     }
 
     /// The reason the interval coalesces rather than defers: the same region

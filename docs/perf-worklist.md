@@ -12,10 +12,6 @@ bottom.
 
 ## Next, not backlog
 
-- **RDP cursor rendered locally.** `src/rdp.rs` currently asks IronRDP to composite
-  the pointer into the framebuffer, making every mouse move wait for the remote,
-  tile pacing, encode, socket, decode and paint. Use IronRDP's pointer outputs and
-  the existing browser `Cursor` path instead.
 - **VNC Continuous Updates and browser CopyRect.** Generic VNC polls once per
   `FramebufferUpdate` and expands CopyRect back into encoded pixels for the browser.
   Negotiate Continuous Updates where supported and add an ordered copy record that
@@ -37,6 +33,32 @@ bottom.
   `ard` improvements.
 
 ## Done
+
+- **RDP cursor rendered locally** (`src/rdp.rs`, `Pointer`). IronRDP is no longer
+  asked to composite the pointer into the framebuffer
+  (`pointer_software_rendering: false`); it decodes each shape and hands it over,
+  and the engine forwards it as the `ServerMsg::Cursor` the browser has always
+  drawn for VNC. A mouse move now costs the session nothing — it moved the
+  browser's own hardware pointer — where before every one of them went through a
+  damage rectangle, the 16ms flush interval, an encode, the socket, a decode and a
+  paint before the pointer appeared to have moved, and left a trail of small
+  rectangles behind it for the motion cleanup to sharpen.
+
+  Three details are not incidental. A pointer the server re-selects from its cache
+  arrives as the same `Arc`, so identity — not a pixel compare, and not a second
+  PNG — is what says "already sent"; that matters because such a selection is
+  exactly what a mouse crossing a window edge produces. A cached selection also
+  produces a hide *and* a shape in one batch of outputs, so the change is taken
+  once per batch rather than per output, or the browser would flicker through its
+  own arrow on the way to every shape. And an attaching browser is told the
+  pointer whether or not it has changed: a client that has heard no `cursor`
+  message hides its own pointer, so silence here would mean no pointer at all
+  until the server next happened to change shape.
+
+  Positions are dropped. A `PointerPosition` says where the *server* thinks the
+  pointer is, the browser's is already where its mouse is, and nothing on this end
+  can move a hardware pointer — so a server-initiated warp is a desync neither
+  this engine nor the VNC one can fix.
 
 - **End-to-end screen backpressure** (`src/ws.rs`). The completion feedback below
   made the browser's backlog observable; this bounds it. A screen batch now waits
@@ -234,8 +256,10 @@ bottom.
 - **Tile-path pacing** (`src/rdp.rs`, `DAMAGE_INTERVAL`). Damage now
   accumulates for 16 ms and coalesces before pack + shadow + encode —
   overlapping reports union into one rectangle (`stage_damage`, capped at a
-  bounding-box collapse), so the pointer rectangle repeated per mouse event is
-  packed once per interval, against the newest framebuffer. Leading edge kept:
+  bounding-box collapse), so a region re-reported many times over an interval is
+  packed once, against the newest framebuffer. (The case that motivated it was
+  the pointer rectangle repeated per mouse event, which the browser now draws
+  instead — see the cursor entry above.) Leading edge kept:
   a batch on a quiet screen still leaves on the spot. Cleared where the
   geometry dies (reactivation) or a full repaint subsumes it (`Refresh`). VNC
   is left unpaced on purpose — RFB updates arrive only when the client asks,

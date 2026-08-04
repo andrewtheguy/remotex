@@ -207,6 +207,11 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     // desktop (and at a different height than it first offered).
     let mut coverage: Option<TileCoverage> = None;
     let mut sent_refresh = false;
+    // Whether the server's pointer reached this client as a shape. RDP does not
+    // draw the cursor into the framebuffer and this end no longer composites it
+    // either, so `cursor` is the only way a pointer arrives at all — an
+    // attachment that never hears one hides its own and draws nothing.
+    let mut owns_pointer = false;
     // Resolves cache references, so this counts pixels *painted* rather than
     // pixels that happened to be on the wire.
     let mut stream = common::TileStream::new();
@@ -235,6 +240,25 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                         coverage = Some(TileCoverage::new(w, h));
                         sent_refresh = false;
                     }
+                    if control["type"] == "cursor" {
+                        // `image` is present either way: a base64 PNG, or null
+                        // for the client's own arrow.
+                        assert!(
+                            control.get("image").is_some(),
+                            "a cursor message carries an image field: {text}"
+                        );
+                        // A shape is the whole path proved — the server's
+                        // pointer PDU decoded, encoded and put on the wire
+                        // instead of into the framebuffer. Only that counts
+                        // here; `null` is also what an attach sends before any
+                        // pointer PDU has arrived.
+                        if !control["image"].is_null() {
+                            let w = control["w"].as_u64().expect("a shape carries w");
+                            let h = control["h"].as_u64().expect("a shape carries h");
+                            assert!(w > 0 && h > 0, "a cursor shape of {w}x{h}");
+                            owns_pointer = true;
+                        }
+                    }
                 }
                 Message::Binary(frame) => {
                     let coverage = coverage.as_mut().expect("tile arrived before resize");
@@ -249,6 +273,10 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                         coverage.add(tile);
                     }
                     if coverage.is_complete() {
+                        assert!(
+                            owns_pointer,
+                            "a whole desktop was painted without the pointer arriving as a shape"
+                        );
                         return;
                     }
                     if !sent_refresh {

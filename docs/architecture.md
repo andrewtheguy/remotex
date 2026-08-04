@@ -204,16 +204,17 @@ their damage through:
   be replaced by a rectangle covering it; anything else takes the base encode
   instead. Damage is clipped to the cell rather than snapped out to it, so two sends
   can be two different slivers of one cell, and overwriting the first debt with the
-  second left the first sliver lossy with nothing that knew it was owed. That is the
-  pointer trail on RDP — the cursor is composited into the framebuffer, so crossing a
-  cell leaves a run of small rectangles of which only the last would ever have been
-  cleaned up. A debt a crisp send only *partly* covers is not cancelled but brought
+  second left the first sliver lossy with nothing that knew it was owed. That was the
+  pointer trail on RDP, back when the cursor was composited into the framebuffer, so
+  crossing a cell left a run of small rectangles of which only the last would ever
+  have been cleaned up (the browser draws that pointer now — see `Pointer` in
+  `rdp.rs` — but the case is general, and any small object crossing a cell repeats
+  it). A debt a crisp send only *partly* covers is not cancelled but brought
   up to date, the newer pixels written over the ones it is holding. A debt holds the
   frame it was recorded on, and the cleanup restores it faithfully — including
-  whatever has changed underneath it since and already gone out crisp. On RDP that is
-  the composited pointer painted back onto a spot it has left: wrong content rather
-  than coarse content, and permanent, since the shadow counts the newer pixels as
-  delivered and nothing sends them twice. A `CLEANUP_TICK` interval in `order_loop`
+  whatever has changed underneath it since and already gone out crisp. That is wrong
+  content rather than coarse content, and permanent, since the shadow counts the
+  newer pixels as delivered and nothing sends them twice. A `CLEANUP_TICK` interval in `order_loop`
   re-sends cells
   idle past `CLEANUP_IDLE` at the *base* encode, `MAX_CLEANUPS_PER_TICK` at a time
   and oldest first, so a paused screen sharpens on its own without a client
@@ -721,6 +722,15 @@ IronRDP handles TLS and optional NLA/CredSSP. The engine maintains a decoded
 framebuffer, compares dirty rectangles with a shadow of pixels already sent,
 splits remaining damage into bands, and encodes PNG off the protocol read loop.
 Input uses fast-path PDUs after DOM-code-to-scancode mapping.
+
+The pointer is not part of that framebuffer. IronRDP is asked for the server's
+pointer updates rather than for compositing them
+(`pointer_software_rendering: false`), and each decoded shape goes to the client
+as `cursor`, which draws it on its own hardware pointer. A mouse move therefore
+costs the session nothing at all, where a composited pointer put every one of
+them through damage, the flush interval, an encode, the socket, a decode and a
+paint. The server's own pointer *positions* are dropped: the browser's pointer is
+already where the mouse is, and nothing here can move a hardware pointer.
 
 With `resize = true`, the Display Control Virtual Channel applies explicit
 desktop-size requests, and also matches the client's display density: a monitor

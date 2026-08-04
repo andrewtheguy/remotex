@@ -57,7 +57,7 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
-use crate::protocol::{CursorShape, DisplayInfo};
+use crate::protocol::{CursorShape, DisplayInfo, MAX_CURSOR_DIM};
 use crate::vnc::ENCODING_ZLIB;
 use crate::vnc_encodings::inflate_independent;
 
@@ -181,9 +181,6 @@ const LAYOUT_FIELDS: usize = 0x2a;
 /// Bytes of a layout payload before its first record, *including* the `u16`
 /// length prefix — see [`parse_layout`] for why that is the reading used.
 const LAYOUT_HEAD: usize = 0x14;
-/// Largest cursor edge accepted, matching the plain RFB path. Real pointers are
-/// 32x32 or 64x64.
-const MAX_CURSOR_DIM: u16 = 256;
 /// Identify this client to Screen Sharing before enabling its optional control
 /// messages. The 62-byte body is the native numeric-version form measured on
 /// macOS 26; there are no counted strings in it.

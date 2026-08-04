@@ -50,8 +50,8 @@ body {
   position: absolute;
   inset: 0;
   outline: none;
-  /* Default for engines that composite the cursor into the framebuffer (RDP,
-     and VNC servers that ignore the Cursor pseudo-encoding): hide the
+  /* Default for engines that composite the cursor into the framebuffer (a VNC
+     server that ignores the Cursor pseudo-encoding): hide the
      browser's own cursor so only one pointer shows. When the engine sends
      shapes instead, useRemoteDesktop overrides this inline with the remote
      shape — see paintCursor. */
