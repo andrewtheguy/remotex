@@ -38,7 +38,7 @@ use tokio::time::Instant;
 use crate::config::VideoCodec;
 use crate::protocol::{CELL_H, CELL_W, VideoUnit, batch};
 use crate::tiles::Rect;
-use crate::video::{Mark, Mirror, Stream};
+use crate::video::{AccessUnit, Mark, Mirror, Stream};
 
 /// The most streams one session runs at once.
 ///
@@ -742,6 +742,8 @@ impl Regions {
             mark: self.mark,
             skipped: 0,
             epoch: self.epoch,
+            #[cfg(test)]
+            rendezvous: None,
         })
     }
 
@@ -838,10 +840,14 @@ impl Regions {
 /// One round of encoding: the mirror and every stream, away from [`Regions`] for the
 /// duration of a blocking worker.
 ///
-/// The streams are encoded one after another rather than fanned out across workers.
-/// Their rectangles are disjoint and bounded by the desktop, so the round's total
-/// work is what the whole-desktop transport already spends on one frame — and doing
-/// it in one task keeps the mirror a plain `&`, with no sharing to reason about.
+/// One round is one frame of the desktop however many regions it took, and what the
+/// pipelined queue pays for it is its **wall-clock**, not its total CPU — no new
+/// round can be taken while one is out, so a slow round is what caps the frame
+/// rate. The dirty streams therefore encode concurrently ([`Self::encode`]): with
+/// cores free to run them, a round costs its slowest stream rather than the sum of
+/// them, and under CPU contention the scheduler serializes some of that overlap and
+/// the cost degrades back toward the sum — which is what the serial loop always
+/// cost, so the bound never inverts.
 pub struct Round {
     mirror: Mirror,
     live: Vec<Live>,
@@ -850,19 +856,89 @@ pub struct Round {
     /// The [`Regions::epoch`] this round was taken under, so [`Regions::put_back`]
     /// can tell a round that outlived its desktop from one worth restoring.
     epoch: u64,
+    /// A rendezvous every encode passes through when a test arms one, so a test can
+    /// prove the streams really overlap: under a serial loop the first encode waits
+    /// for a sibling that never starts, and the bounded wait fails the test.
+    #[cfg(test)]
+    rendezvous: Option<std::sync::Arc<Rendezvous>>,
+}
+
+/// See [`Round::rendezvous`]. Its wait is bounded so a regression to serial
+/// encoding fails with a message instead of hanging the suite; the bound is a
+/// hang guard, not a timing assertion — both threads exist before either waits,
+/// so only an encode that cannot start until its sibling *finishes* can miss it.
+#[cfg(test)]
+struct Rendezvous {
+    expected: usize,
+    arrived: std::sync::Mutex<usize>,
+    all_here: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl Rendezvous {
+    fn new(expected: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            expected,
+            arrived: std::sync::Mutex::new(0),
+            all_here: std::sync::Condvar::new(),
+        })
+    }
+
+    fn arrive(&self) {
+        let mut arrived = self.arrived.lock().unwrap();
+        *arrived += 1;
+        if *arrived >= self.expected {
+            self.all_here.notify_all();
+            return;
+        }
+        let (_arrived, waited) = self
+            .all_here
+            .wait_timeout_while(arrived, Duration::from_secs(10), |n| *n < self.expected)
+            .unwrap();
+        assert!(
+            !waited.timed_out(),
+            "the round's streams did not encode concurrently: a sibling never started"
+        );
+    }
+}
+
+/// [`Rendezvous::arrive`] when one is armed; nothing otherwise. A function rather
+/// than an inline `if let`, so the call sites inside `encode`'s closures stay one
+/// `cfg`-gated line each.
+#[cfg(test)]
+fn rendezvous_arrive(rendezvous: &Option<std::sync::Arc<Rendezvous>>) {
+    if let Some(rendezvous) = rendezvous {
+        rendezvous.arrive();
+    }
 }
 
 impl Round {
     /// Encode every stream with pixels waiting. Blocking: call it on a worker.
+    ///
+    /// The dirty streams encode **concurrently** — one scoped thread per stream past
+    /// the first, which runs on the worker itself, since most rounds have exactly
+    /// one. The sharing is what the types already promise: every `Stream` is `Send`
+    /// (the whole round crosses a `spawn_blocking`), each thread holds one stream
+    /// `&mut`, and the mirror is read everywhere and written nowhere, so
+    /// `std::thread::scope` proves the whole arrangement at compile time with
+    /// nothing `unsafe`. Units keep stream order whichever encode finishes first,
+    /// and an error is returned only after every stream has had its attempt — the
+    /// session ends on it either way, but no stream is left half-done by a
+    /// sibling's failure.
     ///
     /// A stream the encoder produced no bitstream for keeps its dirty flag and its
     /// keyframe, so those pixels ride the next round — which is what stops a frame
     /// that produced nothing from becoming pixels the client never gets.
     pub fn encode(&mut self) -> anyhow::Result<Produced> {
         self.mirror.pad_edges();
-        let mut produced =
-            Produced { formats: Vec::new(), units: Vec::with_capacity(self.live.len()) };
-        for live in &mut self.live {
+        let (mirror, mark) = (&self.mirror, self.mark);
+        #[cfg(test)]
+        let rendezvous = self.rendezvous.clone();
+
+        // Keyframes are armed before the fan-out: arming needs the same `&mut` the
+        // encode does, and it is not the part worth overlapping.
+        let mut waiting: Vec<(usize, &mut Live)> = Vec::new();
+        for (at, live) in self.live.iter_mut().enumerate() {
             live.carried = false;
             if !live.dirty {
                 continue;
@@ -870,9 +946,57 @@ impl Round {
             if live.keyframe_owed {
                 live.stream.force_keyframe();
             }
-            let Some(unit) = live.stream.encode(&self.mirror, self.mark)? else {
-                self.skipped += 1;
-                continue;
+            waiting.push((at, live));
+        }
+
+        let outcomes: Vec<(usize, anyhow::Result<Option<AccessUnit>>)> =
+            std::thread::scope(|scope| {
+                let mut waiting = waiting.into_iter();
+                let first = waiting.next();
+                let spawned: Vec<_> = waiting
+                    .map(|(at, live)| {
+                        #[cfg(test)]
+                        let rendezvous = rendezvous.clone();
+                        let handle = scope.spawn(move || {
+                            #[cfg(test)]
+                            rendezvous_arrive(&rendezvous);
+                            live.stream.encode(mirror, mark)
+                        });
+                        (at, handle)
+                    })
+                    .collect();
+                let mut outcomes = Vec::with_capacity(spawned.len() + 1);
+                if let Some((at, live)) = first {
+                    #[cfg(test)]
+                    rendezvous_arrive(&rendezvous);
+                    outcomes.push((at, live.stream.encode(mirror, mark)));
+                }
+                for (at, handle) in spawned {
+                    // A panicking encode is re-raised rather than absorbed: release
+                    // builds abort on panic anyway, and a debug run should die where
+                    // the fault is.
+                    let outcome =
+                        handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    outcomes.push((at, outcome));
+                }
+                outcomes
+            });
+
+        let mut produced =
+            Produced { formats: Vec::new(), units: Vec::with_capacity(outcomes.len()) };
+        let mut failed: Option<anyhow::Error> = None;
+        for (at, outcome) in outcomes {
+            let live = &mut self.live[at];
+            let unit = match outcome {
+                Ok(Some(unit)) => unit,
+                Ok(None) => {
+                    self.skipped += 1;
+                    continue;
+                }
+                Err(e) => {
+                    failed.get_or_insert(e);
+                    continue;
+                }
             };
             live.dirty = false;
             live.keyframe_owed = false;
@@ -901,7 +1025,10 @@ impl Round {
                 data: unit.data,
             });
         }
-        Ok(produced)
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(produced),
+        }
     }
 
     /// Streams whose encode yielded no bitstream. Must stay zero: `skip_frames(false)`
@@ -918,6 +1045,13 @@ impl Round {
     /// buffer hands the worker.
     fn mirror(&self) -> &Mirror {
         &self.mirror
+    }
+
+    /// Make the next [`Self::encode`] prove that `streams` encodes overlap in time —
+    /// each waits at a rendezvous until all have started, which a serial loop can
+    /// never satisfy.
+    fn expect_overlap(&mut self, streams: usize) {
+        self.rendezvous = Some(Rendezvous::new(streams));
     }
 }
 
@@ -1137,6 +1271,30 @@ mod tests {
         let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
         assert_eq!(regions.live.len(), 2, "expected two regions, got {ids:?}");
         assert_ne!(ids[0], ids[1], "both regions were sent as the same stream");
+    }
+
+    /// A round with several dirty streams encodes all of them, **concurrently** —
+    /// the rendezvous holds each encode until every one has started, which a serial
+    /// loop can never satisfy — and the contract that survives any scheduling still
+    /// holds: every stream produces its unit, the units keep stream order whichever
+    /// encode finished first, and each announces its format ahead of its first unit.
+    #[tokio::test]
+    async fn a_round_with_two_streams_produces_both_units_in_stream_order() {
+        let mut regions = sized(1600, 128).await;
+        regions.retune(&[(0, 0), (0, 1), (3, 0), (3, 1)], Instant::now()).expect("two streams");
+        let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
+        assert_eq!(ids.len(), 2, "expected two regions, got {ids:?}");
+
+        let mut round = regions.take_round().expect("both streams are dirty from birth");
+        round.expect_overlap(2);
+        let produced = round.encode().expect("an encode");
+        assert_eq!(round.skipped(), 0, "a stream's pixels were lost to the fan-out");
+        let streams: Vec<u8> = produced.units.iter().map(|unit| unit.stream).collect();
+        assert_eq!(streams, ids, "units must keep stream order whichever encode finishes first");
+        assert!(produced.units.iter().all(|unit| unit.keyframe), "each stream's first unit");
+        assert_eq!(produced.formats.len(), 2, "each stream announces before its first unit");
+        regions.put_back(round, Instant::now());
+        assert!(!regions.dirty(), "both streams were carried");
     }
 
     /// And a stream that survives a retune keeps the id it had, whatever is built

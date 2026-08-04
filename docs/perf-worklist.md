@@ -170,15 +170,26 @@ bottom.
 - **Encoder output capacity** (`src/protocol.rs`). PNG and JPEG tiles encode
   into a buffer sized to a conservative compression ratio up front instead of
   growing a `Vec::new()` through repeated reallocation.
+- **Concurrent region encodes within a round** (`src/regions.rs`,
+  `Round::encode`). The serial loop was defended by a CPU-bound argument
+  ("total work is one desktop frame") that answered the wrong question: the
+  pipelined queue pays a round's *wall-clock*, and no new round can be taken
+  while one is out, so a round of several streams cost the sum unconditionally,
+  where with cores free to run them it can cost the max — under CPU contention
+  the overlap shrinks back toward the sum, but never past what the serial loop
+  always cost. Dirty streams now encode on scoped threads (the first on the
+  worker itself — most rounds have one), sharing `&Mirror` and each holding its
+  own stream `&mut`, checked by `std::thread::scope` with nothing `unsafe`.
+  Units keep stream order regardless of finish order, and an error surfaces
+  only after every stream's attempt. This also makes the one-thread-per-region
+  rationale in `video::threads_for` true rather than circular — region streams
+  really do parallelize with each other now.
 
 ## Gateway — screen
 
-All addressed — see Done — except two smaller items, assessed and left:
+All addressed — see Done — except one smaller item, assessed and left:
 ~144 tile records can buffer across three queues in series while supersede sees
-only the final batch (speculative, no measurement saying the depths bind), and
-region streams encode serially within a round — deliberate, and now argued in
-`Round`'s doc: the regions are disjoint, so a round's total work is one desktop
-frame however it is cut, and one task keeps the mirror a plain `&`.
+only the final batch (speculative, no measurement saying the depths bind).
 
 ## Gateway — audio
 
