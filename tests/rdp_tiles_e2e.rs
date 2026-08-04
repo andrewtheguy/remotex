@@ -108,8 +108,8 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
 }
 
 /// Validate one binary batch frame against the documented layout, returning the
-/// area it painted in pixels.
-fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u64 {
+/// rectangles it painted.
+fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> Vec<(u32, u32, u32, u32)> {
     let tiles = stream.paint(frame);
     assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
     for tile in &tiles {
@@ -131,8 +131,58 @@ fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u64 {
     }
     tiles
         .iter()
-        .map(|tile| u64::from(tile.w) * u64::from(tile.h))
-        .sum()
+        .map(|tile| {
+            (
+                u32::from(tile.x),
+                u32::from(tile.y),
+                u32::from(tile.w),
+                u32::from(tile.h),
+            )
+        })
+        .collect()
+}
+
+/// Pixel coverage for one announced desktop. Tiles may overlap or repaint a
+/// region, so a pixel advances the completion count at most once.
+struct TileCoverage {
+    width: u32,
+    height: u32,
+    pixels: Vec<bool>,
+    covered: u64,
+}
+
+impl TileCoverage {
+    fn new(width: u32, height: u32) -> Self {
+        let pixels = usize::try_from(u64::from(width) * u64::from(height))
+            .expect("desktop is too large to track coverage");
+        Self {
+            width,
+            height,
+            pixels: vec![false; pixels],
+            covered: 0,
+        }
+    }
+
+    fn add(&mut self, (x, y, w, h): (u32, u32, u32, u32)) {
+        let right = x.saturating_add(w).min(self.width);
+        let bottom = y.saturating_add(h).min(self.height);
+        let x = x.min(self.width);
+        let y = y.min(self.height);
+        for y in y..bottom {
+            for x in x..right {
+                let at = usize::try_from(u64::from(y) * u64::from(self.width) + u64::from(x))
+                    .expect("desktop index does not fit usize");
+                if !self.pixels[at] {
+                    self.pixels[at] = true;
+                    self.covered += 1;
+                }
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.covered == u64::from(self.width) * u64::from(self.height)
+    }
 }
 
 #[tokio::test]
@@ -155,9 +205,8 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     // more than one: xrdp's auto-login path hands the connection to its session
     // module through a deactivation-reactivation, which may re-announce the
     // desktop (and at a different height than it first offered).
-    let mut desktop: Option<u64> = None;
+    let mut coverage: Option<TileCoverage> = None;
     let mut sent_refresh = false;
-    let mut painted: u64 = 0;
     // Resolves cache references, so this counts pixels *painted* rather than
     // pixels that happened to be on the wire.
     let mut stream = common::TileStream::new();
@@ -175,18 +224,20 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                     let control: serde_json::Value =
                         serde_json::from_str(&text).expect("control message is JSON");
                     if control["type"] == "resize" {
-                        let w = control["w"].as_u64().expect("resize carries w");
-                        let h = control["h"].as_u64().expect("resize carries h");
-                        desktop = Some(w * h);
+                        let w = u32::try_from(control["w"].as_u64().expect("resize carries w"))
+                            .expect("resize width fits u32");
+                        let h = u32::try_from(control["h"].as_u64().expect("resize carries h"))
+                            .expect("resize height fits u32");
+                        assert!(w > 0 && h > 0, "resize dimensions must be positive: {w}x{h}");
                         // A new surface starts blank; what was painted on the
                         // old one no longer counts toward covering it, and it
                         // gets its own refresh.
-                        painted = 0;
+                        coverage = Some(TileCoverage::new(w, h));
                         sent_refresh = false;
                     }
                 }
                 Message::Binary(frame) => {
-                    let desktop = desktop.expect("tile arrived before resize");
+                    let coverage = coverage.as_mut().expect("tile arrived before resize");
                     // Area rather than a tile count: how many tiles a paint
                     // splits into is the encoder's business, and how much of
                     // the mostly-black failed-login screen survives the
@@ -194,8 +245,10 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                     // for a `refresh` — it forgets the shadow and repaints the
                     // whole desktop — and a desktop's worth of painted pixels
                     // becomes the deterministic finish line.
-                    painted += check_tile_frame(&mut stream, &frame);
-                    if painted >= desktop {
+                    for tile in check_tile_frame(&mut stream, &frame) {
+                        coverage.add(tile);
+                    }
+                    if coverage.is_complete() {
                         return;
                     }
                     if !sent_refresh {
@@ -208,7 +261,10 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                 _ => {}
             }
         }
-        panic!("websocket closed after {painted} painted pixels without covering the desktop");
+        panic!(
+            "websocket closed after {} uniquely covered pixels without covering the desktop",
+            coverage.as_ref().map_or(0, |coverage| coverage.covered)
+        );
     })
     .await
     .expect("timed out waiting for tile frames");
