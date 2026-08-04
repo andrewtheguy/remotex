@@ -94,6 +94,13 @@ export interface AudioPlayer {
 const STREAM_RATE = 48_000;
 
 /**
+ * How long a splice boundary fade lasts. Long enough to turn a waveform
+ * discontinuity's click into nothing, short enough — a fifth of one 20 ms Opus
+ * packet — that it is not itself audible as a dip.
+ */
+const SPLICE_FADE_S = 0.004;
+
+/**
  * Nominal length of one packet, in microseconds, from what the gateway said.
  *
  * A decoder needs *increasing* timestamps on its input and derives nothing else
@@ -183,7 +190,8 @@ export function createAudioPlayer(
   let timestamp = 0;
   let closed = false;
   // Buffers scheduled past a lead clamp must be stopped to prevent overlap.
-  let playing: AudioBufferSourceNode[] = [];
+  // Each keeps its gain node so the stop can be a fade rather than a cut.
+  let playing: { source: AudioBufferSourceNode; gain: GainNode }[] = [];
 
   // Null on the passthrough path, where a packet is already samples. That is the
   // whole of the difference: everything below `schedule` is shared, because a
@@ -230,15 +238,27 @@ export function createAudioPlayer(
     if (closed || buffer.length === 0) {
       return;
     }
+    // Whether this buffer butts seamlessly onto the one before it. Anything
+    // else — the underrun re-cushion, the ceiling's trim, the first buffer —
+    // starts mid-waveform or after silence, and is faded in over a few
+    // milliseconds rather than spliced hard, which is a click.
+    const joined = nextAt;
     const at: Scheduled = scheduleBuffer(
       nextAt,
       context.currentTime,
       buffer.duration,
     );
     if (at.clamped) {
-      // Everything already scheduled beyond the ceiling gives way to this buffer.
-      for (const source of playing) {
-        source.stop(at.startAt);
+      // Everything already scheduled beyond the ceiling gives way to this
+      // buffer — faded out into the splice, not cut mid-waveform.
+      for (const held of playing) {
+        const level = held.gain.gain;
+        level.setValueAtTime(
+          1,
+          Math.max(context.currentTime, at.startAt - SPLICE_FADE_S),
+        );
+        level.linearRampToValueAtTime(0, at.startAt);
+        held.source.stop(at.startAt);
       }
     }
     nextAt = at.nextAt;
@@ -249,11 +269,19 @@ export function createAudioPlayer(
 
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    const gain = context.createGain();
+    source.connect(gain);
+    gain.connect(context.destination);
+    if (at.clamped || at.startAt > joined) {
+      gain.gain.setValueAtTime(0, at.startAt);
+      gain.gain.linearRampToValueAtTime(1, at.startAt + SPLICE_FADE_S);
+    }
+    const held = { source, gain };
     source.onended = () => {
-      playing = playing.filter((held) => held !== source);
+      playing = playing.filter((h) => h !== held);
+      gain.disconnect();
     };
-    playing.push(source);
+    playing.push(held);
     // The offset *is* the catch-up: skipping the front of a buffer needs no copy and
     // no resample, only a different argument.
     source.start(at.startAt, at.trim);
@@ -264,8 +292,8 @@ export function createAudioPlayer(
       return;
     }
     closed = true;
-    for (const source of playing) {
-      source.stop();
+    for (const held of playing) {
+      held.source.stop();
     }
     playing = [];
     if (decoder && decoder.state !== "closed") {
@@ -354,6 +382,32 @@ export function pcmChannels(
   // ever built on, and saying so here is what lets the buffer be filled directly.
 ): Float32Array<ArrayBuffer>[] {
   const frames = Math.floor(packet.byteLength / (channels * 2));
+  const planes: Float32Array<ArrayBuffer>[] = [];
+  // An `Int16Array` view when one is possible — several times faster than a
+  // DataView at the ~96k reads/s a stereo stream costs, and the wire format is
+  // little-endian, which is the only order such a view can read. The view needs
+  // an even byte offset; `decodeAudioFrame` hands out subarrays whose offsets
+  // are even in practice (2-byte headers between packets), so the DataView
+  // below is the floor, not the common case.
+  if (PLATFORM_LE && packet.byteOffset % 2 === 0) {
+    const samples = new Int16Array(
+      packet.buffer,
+      packet.byteOffset,
+      frames * channels,
+    );
+    for (let channel = 0; channel < channels; channel++) {
+      const plane = new Float32Array(frames);
+      for (
+        let frame = 0, at = channel;
+        frame < frames;
+        frame++, at += channels
+      ) {
+        plane[frame] = samples[at] / 32_768;
+      }
+      planes.push(plane);
+    }
+    return planes;
+  }
   // A view over the packet's own bytes: `decodeAudioFrame` hands out subarrays,
   // so the offset is not zero and `new DataView(packet.buffer)` would read some
   // other packet in the same frame.
@@ -362,7 +416,6 @@ export function pcmChannels(
     packet.byteOffset,
     packet.byteLength,
   );
-  const planes: Float32Array<ArrayBuffer>[] = [];
   for (let channel = 0; channel < channels; channel++) {
     const plane = new Float32Array(frames);
     for (let frame = 0; frame < frames; frame++) {
@@ -373,6 +426,12 @@ export function pcmChannels(
   }
   return planes;
 }
+
+// Whether this machine's own byte order is the wire's. `Int16Array` reads in
+// platform order, so the fast path above is only correct where this is true —
+// which is every browser platform that exists, but checked rather than assumed.
+const PLATFORM_LE =
+  new Uint8Array(new Uint16Array([0x0102]).buffer)[0] === 0x02;
 
 /** One passthrough packet as something Web Audio can play. */
 function pcmToAudioBuffer(

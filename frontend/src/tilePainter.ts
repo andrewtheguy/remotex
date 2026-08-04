@@ -35,6 +35,10 @@ type PaintJob =
       codec: TileMsg["codec"];
       /** True when the server believes this client is keeping these bytes. */
       cached: boolean;
+      /** Which slot a decoded bitmap may be kept under, or NO_SLOT. */
+      slot: number;
+      /** A decoded bitmap already held for this slot, acquired at resolve time. */
+      decoded: DecodedTile | null;
     }
   | {
       kind: "video";
@@ -47,6 +51,26 @@ type PaintJob =
       keyframe: boolean;
       data: Uint8Array;
     };
+
+// One slot's decoded bitmap. The encoded slot table is the contract with the
+// server; this is a client-side economy on top of it, so an entry can always be
+// dropped and the reference re-decoded from the encoded bytes.
+//
+// `refs` counts batches holding the bitmap between resolve and draw. `dead`
+// marks an entry dropped from the cache while still referenced — the overwrite
+// and the draw can share a batch — so the close waits for the last release
+// instead of pulling the bitmap out from under a pending draw.
+interface DecodedTile {
+  bitmap: ImageBitmap;
+  bytes: number;
+  refs: number;
+  dead: boolean;
+}
+
+// Decoded pixels kept, across all slots, before the least recently used go.
+// The encoded table is bounded by the wire (SLOT_COUNT × the 32 KB record cap);
+// decoded bands are far larger, and this is the lid on that difference.
+const DECODED_BUDGET_BYTES = 16 * 1024 * 1024;
 
 export interface TilePainter {
   /**
@@ -95,6 +119,68 @@ export function createTilePainter(options: {
 }): TilePainter {
   const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
+
+  // Which attachment the caches belong to. `clear()` is the attachment
+  // boundary and is not queued behind draws — an eviction closes the socket
+  // from under whatever batch is mid-decode — so a draw that outlives the
+  // generation it started in must not paint onto, or cache into, the next one.
+  let generation = 0;
+
+  // Decoded bitmaps by slot, so a TILE_REF is a draw rather than a Blob, a
+  // decode and a GPU upload. A Map because insertion order is the recency
+  // order: a hit is re-inserted, and eviction walks from the front.
+  const decodedCache = new Map<number, DecodedTile>();
+  let decodedBytes = 0;
+
+  const releaseDecoded = (entry: DecodedTile) => {
+    entry.refs -= 1;
+    if (entry.dead && entry.refs === 0) {
+      entry.bitmap.close();
+    }
+  };
+
+  // Out of the cache now; the bitmap itself goes when nothing is drawing it.
+  const dropDecoded = (slot: number) => {
+    const entry = decodedCache.get(slot);
+    if (!entry) {
+      return;
+    }
+    decodedCache.delete(slot);
+    decodedBytes -= entry.bytes;
+    entry.dead = true;
+    if (entry.refs === 0) {
+      entry.bitmap.close();
+    }
+  };
+
+  const clearDecoded = () => {
+    for (const slot of [...decodedCache.keys()]) {
+      dropDecoded(slot);
+    }
+  };
+
+  // Adopt a freshly decoded slot bitmap, evicting the least recently used past
+  // the budget. Called in wire order (from the draw loop), so when one batch
+  // writes a slot twice the bitmap kept is the one the encoded table kept.
+  const adoptDecoded = (slot: number, bitmap: ImageBitmap) => {
+    dropDecoded(slot);
+    const bytes = bitmap.width * bitmap.height * 4 || 0;
+    if (bytes > DECODED_BUDGET_BYTES) {
+      bitmap.close();
+      return;
+    }
+    decodedCache.set(slot, { bitmap, bytes, refs: 0, dead: false });
+    decodedBytes += bytes;
+    for (const held of decodedCache.keys()) {
+      if (decodedBytes <= DECODED_BUDGET_BYTES) {
+        break;
+      }
+      // A referenced entry is mid-draw; it will be releasable by the next adopt.
+      if ((decodedCache.get(held)?.refs ?? 0) === 0) {
+        dropDecoded(held);
+      }
+    }
+  };
 
   // The decoders, for a target that streams. Built on the first access unit
   // rather than up front, because most targets send none at all.
@@ -147,8 +233,12 @@ export function createTilePainter(options: {
           data: new Uint8Array(record.data),
           codec: record.codec,
         };
+        // The old picture is stale the moment the encoded table changes: a
+        // reference later in this same batch must decode the new bytes, not
+        // reuse this. The new bitmap is adopted by the draw loop.
+        dropDecoded(record.slot);
       }
-      return { ...record, cached };
+      return { ...record, cached, decoded: null };
     }
     const held = tileCache[record.slot];
     if (!held) {
@@ -157,7 +247,24 @@ export function createTilePainter(options: {
       askForCacheReset(batch);
       return null;
     }
-    return { kind: "tile", x: record.x, y: record.y, ...held, cached: true };
+    const decoded = decodedCache.get(record.slot) ?? null;
+    if (decoded) {
+      // Acquired now, synchronously, so nothing decoded between resolve and
+      // draw can close it — and re-inserted, which is what makes the Map's
+      // order a recency order.
+      decoded.refs += 1;
+      decodedCache.delete(record.slot);
+      decodedCache.set(record.slot, decoded);
+    }
+    return {
+      kind: "tile",
+      x: record.x,
+      y: record.y,
+      ...held,
+      cached: true,
+      slot: record.slot,
+      decoded,
+    };
   };
 
   const decodeJob = async (job: PaintJob | null, batch: Batch) => {
@@ -166,6 +273,11 @@ export function createTilePainter(options: {
     }
     if (job.kind === "video") {
       return decodeAccessUnit(job);
+    }
+    if (job.decoded) {
+      // The whole point of the decoded cache: a reference is a draw, not a
+      // Blob, a decode and a GPU upload.
+      return job.decoded.bitmap;
     }
     try {
       // Tiles are opaque sRGB screen pixels: skipping color-space conversion
@@ -237,31 +349,62 @@ export function createTilePainter(options: {
     );
   };
 
-  // Every image is closed whether or not it was drawn: with no canvas to draw
-  // into there is nothing to paint, but the decoded pictures still have to go.
-  const paintBatch = (
-    jobs: (PaintJob | null)[],
-    decoded: (ImageBitmap | VideoFrame | null)[],
+  // One record onto the canvas, and its image to wherever it goes next: back to
+  // the decoded cache for a slot tile, closed for everything else. Every image
+  // is settled whether or not it was drawn — with no canvas there is nothing to
+  // paint, but the decoded pictures still have to go somewhere.
+  const paintJob = (
+    ctx: CanvasRenderingContext2D | null,
+    job: PaintJob,
+    image: ImageBitmap | VideoFrame,
   ) => {
-    const ctx = options.context();
-    for (let i = 0; i < decoded.length; i += 1) {
-      const image = decoded[i];
-      const job = jobs[i];
-      if (!image || !job) {
-        continue;
-      }
-      if (job.kind === "video") {
-        // Cropped by the source rectangle rather than drawn whole: the encoders
-        // are held to even sides and a region at the edge of an odd desktop does
-        // not have them, so the decoded picture can be a pixel wider or taller
-        // than the rectangle. The record carries the *true* rectangle, which is
-        // where it belongs on the canvas.  It is the mirror's padding that makes
-        // this a crop rather than a codec's requirement, so it holds for VP9 too.
-        ctx?.drawImage(image, 0, 0, job.w, job.h, job.x, job.y, job.w, job.h);
-      } else {
-        ctx?.drawImage(image, job.x, job.y);
-      }
+    if (job.kind === "video") {
+      // Cropped by the source rectangle rather than drawn whole: the encoders
+      // are held to even sides and a region at the edge of an odd desktop does
+      // not have them, so the decoded picture can be a pixel wider or taller
+      // than the rectangle. The record carries the *true* rectangle, which is
+      // where it belongs on the canvas.  It is the mirror's padding that makes
+      // this a crop rather than a codec's requirement, so it holds for VP9 too.
+      ctx?.drawImage(image, 0, 0, job.w, job.h, job.x, job.y, job.w, job.h);
       image.close();
+      return;
+    }
+    ctx?.drawImage(image, job.x, job.y);
+    if (job.decoded) {
+      releaseDecoded(job.decoded);
+    } else if (job.slot !== NO_SLOT) {
+      // Adopted here, in wire order, rather than when its decode happened to
+      // finish: two writes to one slot in a batch must leave the bitmap that
+      // matches the encoded bytes, whichever decode was slower.
+      adoptDecoded(job.slot, image as ImageBitmap);
+    } else {
+      image.close();
+    }
+  };
+
+  // Settle one landed decode: paint it, or — when `stale`, because `clear()`
+  // ran while the decode was in flight — let its image go without touching
+  // the next attachment's canvas or caches. A stale tile painted would be the
+  // previous desktop showing through; either way the image has to be settled,
+  // released back to the (cleared) cache if held, closed if the batch owned it.
+  const settleJob = (
+    ctx: CanvasRenderingContext2D | null,
+    job: PaintJob | null,
+    image: ImageBitmap | VideoFrame | null,
+    stale: boolean,
+  ) => {
+    if (stale) {
+      if (job?.kind === "tile" && job.decoded) {
+        releaseDecoded(job.decoded);
+      } else {
+        image?.close();
+      }
+      return;
+    }
+    if (image && job) {
+      paintJob(ctx, job, image);
+    } else if (job?.kind === "tile" && job.decoded) {
+      releaseDecoded(job.decoded);
     }
   };
 
@@ -273,18 +416,30 @@ export function createTilePainter(options: {
       }
       const batch: Batch = { resetAsked: false };
       const jobs = records.map((record) => resolveRecord(record, batch));
-      paintBatch(
-        jobs,
-        await Promise.all(jobs.map((job) => decodeJob(job, batch))),
-      );
+      // All decodes start at once; the paint takes them in wire order — a later
+      // tile must overwrite an earlier one — as each lands, so one slow decode
+      // holds back what follows it and nothing before it, and a decoded image
+      // is released the moment it is drawn instead of the whole batch's worth
+      // staying alive until the slowest.
+      const decodes = jobs.map((job) => decodeJob(job, batch));
+      const ctx = options.context();
+      const born = generation;
+      for (let i = 0; i < jobs.length; i += 1) {
+        const image = await decodes[i];
+        settleJob(ctx, jobs[i], image, generation !== born);
+      }
       // Cleared after the pass so references may use slots filled earlier in
-      // it, which the gateway does emit within a single batch.
-      if (batch.resetAsked) {
+      // it, which the gateway does emit within a single batch. A fenced batch
+      // must not wipe the next attachment's table with its own stale miss.
+      if (batch.resetAsked && generation === born) {
         tileCache.fill(null);
+        clearDecoded();
       }
     },
     clear() {
+      generation += 1;
       tileCache.fill(null);
+      clearDecoded();
       releaseVideo();
     },
     setVideoFormat(stream, format) {

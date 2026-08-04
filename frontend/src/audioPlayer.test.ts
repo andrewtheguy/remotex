@@ -93,6 +93,19 @@ test("a packet is read from its own bytes, not its buffer's", () => {
   assert.deepEqual(Array.from(planes[1]), [8 / 32_768]);
 });
 
+test("an odd byte offset reads the same samples as an even one", () => {
+  // An even offset takes the `Int16Array` fast path and an odd one cannot —
+  // the two must agree, or a packet's alignment would change its sound.
+  const bytes = new Uint8Array(9);
+  const view = new DataView(bytes.buffer);
+  view.setInt16(1, -12_345, true);
+  view.setInt16(3, 6_789, true);
+  const odd = pcmChannels(bytes.subarray(1, 5), 2);
+  const even = pcmChannels(wave([[-12_345, 6_789]]), 2);
+  assert.deepEqual(Array.from(odd[0]), Array.from(even[0]));
+  assert.deepEqual(Array.from(odd[1]), Array.from(even[1]));
+});
+
 test("a trailing part-frame is dropped rather than misread", () => {
   // Two whole frames and three bytes of a third. Reading the remainder would
   // shift every channel against the others for the rest of the packet.
