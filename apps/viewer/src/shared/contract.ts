@@ -8,12 +8,18 @@
 //
 // Type-only, so nothing of the client's is bundled into the main process — the
 // import is erased.
+//
+// From `nativeHost.contract.ts` rather than `nativeHost.ts`, and that is not a
+// detail: the second one imports React, so type-checking this tree against it
+// needs the client's `node_modules` to be installed. That is true on any machine
+// where somebody has worked on the client and false on a CI runner that installed
+// only this package — green here, `Cannot find module 'react'` there.
 
 export type {
   NativeCommand,
   NativeEvent,
   NativeState,
-} from "../../../../frontend/src/nativeHost.ts";
+} from "../../../../frontend/src/nativeHost.contract.ts";
 
 /** The IPC channels, and the whole of them. */
 export const CHANNEL = {
