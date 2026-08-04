@@ -11,7 +11,8 @@ import type {
 } from "../shared/contract.ts";
 
 export interface ShellBridge {
-  onStatus(handler: (status: ShellStatus) => void): void;
+  /** Subscribe to status pushes; the returned function detaches the listener. */
+  onStatus(handler: (status: ShellStatus) => void): () => void;
   act(action: ShellAction): void;
   readConfig(): Promise<string>;
   saveConfig(text: string): Promise<ConfigSaveResult>;

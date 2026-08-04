@@ -53,6 +53,38 @@ describe("what the page reported", () => {
     expect(state.size).toBeNull();
   });
 
+  test("a size that is not a size is no size", () => {
+    // `NaN` and `Infinity` are numbers, and from here they reach a window resize and
+    // a menu that reads "Remote NaN × NaN".
+    for (const size of [
+      { w: Number.NaN, h: 1080, scale: 1 },
+      { w: 1920, h: Number.POSITIVE_INFINITY, scale: 1 },
+      { w: 1920, h: 1080, scale: 0 },
+      { w: -1920, h: 1080, scale: 1 },
+    ]) {
+      expect(acceptState({ size }).size).toBeNull();
+    }
+    const good = { w: 1920, h: 1080, scale: 2 };
+    expect(acceptState({ size: good }).size).toEqual(good);
+  });
+
+  test("a display list is taken whole or not at all", () => {
+    const display = {
+      id: 1,
+      label: "Display 1",
+      detail: "1920×1080",
+      main: true,
+      virtual: false,
+    };
+    expect(acceptState({ displays: [display] }).displays).toEqual([display]);
+    // One malformed entry discredits the list: a menu that silently drops a screen
+    // is harder to notice than one that offers none.
+    expect(acceptState({ displays: [display, { id: 2 }] }).displays).toEqual(
+      [],
+    );
+    expect(acceptState({ displays: ["Display 1"] }).displays).toEqual([]);
+  });
+
   test("something that is not a report at all is the blank state", () => {
     expect(acceptState(null)).toEqual(blankState());
     expect(acceptState("state")).toEqual(blankState());

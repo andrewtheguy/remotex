@@ -67,6 +67,18 @@ describe("finding the gateway and the client", () => {
     expect(layout.webRoot).toBe("/tmp/my-web");
   });
 
+  test("an empty override is not an override", () => {
+    // `REMOTEX_GATEWAY_BIN=` is how a shell unsets what it exported a moment ago,
+    // and an empty string is not nullish — so taken literally the app spawns `""`
+    // and reports a bundle problem it does not have.
+    const layout = resourceLayout(true, "/Resources", "/Resources/dist", {
+      REMOTEX_GATEWAY_BIN: "",
+      REMOTEX_WEB_ROOT: "   ",
+    });
+    expect(layout.binary).toBe("/Resources/remotex-gateway");
+    expect(layout.webRoot).toBe("/Resources/web");
+  });
+
   test("the shell's own pages always travel with the bundle", () => {
     // Never overridable and never in Resources: they are the screen that explains a
     // gateway that would not start, so they cannot depend on one.

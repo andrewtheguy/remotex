@@ -42,8 +42,9 @@ function toElectron(
   const command = item.command;
   const action = item.action;
   // A role's own behaviour is the point of having one, so a role is never overridden
-  // by a click. Quit carries both: the role is what macOS expects to find in the
-  // application menu, and the action is what the descriptor says it does.
+  // by a click. Quit is the one item carrying both, and the role wins: macOS expects
+  // to find `quit` in the application menu, and `action: "quit"` beside it is the
+  // descriptor saying what the item does, never a second implementation of it.
   if (!item.role && (command || action)) {
     options.click = () => {
       if (command) {

@@ -74,6 +74,25 @@ export function acceptState(reported: unknown): NativeState {
 
   const string = (v: unknown) => typeof v === "string";
   const bool = (v: unknown) => typeof v === "boolean";
+  // Finite and positive, not merely `number`: `NaN` and `Infinity` are numbers, and
+  // they reach a window resize and a menu title from here. A desktop "NaN × NaN" is
+  // the readable half of that; the other half is a window asked for a size no
+  // display has.
+  const size = (v: unknown) =>
+    typeof v === "number" && v > 0 && Number.isFinite(v);
+  const display = (v: unknown) => {
+    if (typeof v !== "object" || v === null) {
+      return false;
+    }
+    const d = v as Record<string, unknown>;
+    return (
+      typeof d.id === "number" &&
+      typeof d.label === "string" &&
+      typeof d.detail === "string" &&
+      typeof d.main === "boolean" &&
+      typeof d.virtual === "boolean"
+    );
+  };
 
   return {
     branding: take("branding", (v) => string(v) && v !== ""),
@@ -86,9 +105,9 @@ export function acceptState(reported: unknown): NativeState {
       (v) =>
         typeof v === "object" &&
         v !== null &&
-        typeof (v as { w?: unknown }).w === "number" &&
-        typeof (v as { h?: unknown }).h === "number" &&
-        typeof (v as { scale?: unknown }).scale === "number",
+        size((v as { w?: unknown }).w) &&
+        size((v as { h?: unknown }).h) &&
+        size((v as { scale?: unknown }).scale),
     ),
     canResize: take("canResize", bool),
     canAutoResize: take("canAutoResize", bool),
@@ -97,7 +116,9 @@ export function acceptState(reported: unknown): NativeState {
     canAudio: take("canAudio", bool),
     audioEnabled: take("audioEnabled", bool),
     audioError: take("audioError", (v) => string(v) || v === null),
-    displays: take("displays", Array.isArray),
+    // All or nothing: a list with one malformed entry is a report to distrust, and
+    // a menu that silently drops a screen is worse than one that lists none.
+    displays: take("displays", (v) => Array.isArray(v) && v.every(display)),
     activeDisplayId: take(
       "activeDisplayId",
       (v) => typeof v === "number" || v === null,

@@ -39,6 +39,27 @@ describe("--instance-dir", () => {
     ).toBe("/Users/a");
   });
 
+  test("the equals spelling is the same flag", () => {
+    // The form somebody types. Missing it would not read as a broken flag — it
+    // would read as a QA run that quietly used the real instance.
+    expect(
+      instanceDirFromArgv(argv("--instance-dir=/tmp/qa"), "/work", "/Users/a"),
+    ).toBe("/tmp/qa");
+    expect(
+      instanceDirFromArgv(argv("--instance-dir=~/qa"), "/work", "/Users/a"),
+    ).toBe("/Users/a/qa");
+  });
+
+  test("an equals with nothing after it is refused like the other spelling", () => {
+    const said: string[] = [];
+    expect(
+      instanceDirFromArgv(argv("--instance-dir="), "/work", "/Users/a", (m) =>
+        said.push(m),
+      ),
+    ).toBeNull();
+    expect(said).toHaveLength(1);
+  });
+
   test("a flag with nothing after it is refused out loud", () => {
     // Falling back silently is the wrong direction for a flag whose whole purpose
     // is keeping a test run away from the real instance.

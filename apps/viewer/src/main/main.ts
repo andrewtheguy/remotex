@@ -91,7 +91,11 @@ app.setPath("userData", instance.profileDir);
 // apps that share nothing. Taken after the override above, so the lock lives in the
 // instance's own profile.
 if (!app.requestSingleInstanceLock()) {
-  app.quit();
+  // `exit`, not `quit`: this is module scope, and `quit` only *asks* — the lines
+  // below would run anyway, so the loser would declare the scheme, start a second
+  // gateway on the winner's instance directory and open a window before its request
+  // to quit was ever honoured.
+  app.exit(0);
 }
 
 // --- Chromium switches ----------------------------------------------------
@@ -277,7 +281,7 @@ async function launch(): Promise<void> {
   gateway.onUnexpectedExit = (died) => {
     // A gateway that dies while a desktop is up is the same situation as one that
     // would not start, and the same screen says so.
-    void showLaunchScreenWith(died);
+    report(died);
   };
 
   try {
@@ -297,7 +301,12 @@ function report(error: unknown): void {
     error instanceof LaunchFailure
       ? error
       : new LaunchFailure("notStarted", String(error));
-  void showLaunchScreenWith(launchFailure);
+  void showLaunchScreenWith(launchFailure).catch((second) => {
+    // The screen that says what went wrong is itself a page load, and it can fail
+    // too. There is nothing left to show it on, so it goes where a launch failure
+    // already goes: `gateway.log`'s neighbour, the terminal.
+    console.error("remotex: could not show the launch screen:", second);
+  });
 }
 
 async function showLaunchScreenWith(error: LaunchFailure): Promise<void> {
@@ -369,7 +378,7 @@ function getWindow(): BrowserWindow {
     window = createViewerWindow(distDir, (message) => {
       // Straight to the launch screen: a client that cannot reach its shell is not
       // a client, and the alternative is a login form for a gateway nobody named.
-      void showLaunchScreenWith(new LaunchFailure("clientMissing", message));
+      report(new LaunchFailure("clientMissing", message));
     });
     window.on("closed", () => {
       window = null;
@@ -402,7 +411,7 @@ ipcMain.on(CHANNEL.event, (_event, reported: NativeEvent) => {
       // The gateway did not take the token this app minted for it. Nothing on the
       // page can fix that — there is no login here — so the app takes the screen
       // back and offers the restart that mints a new one.
-      void showLaunchScreenWith(
+      report(
         new LaunchFailure(
           "refused",
           "The local gateway did not accept this session. Restart it to try again.",
@@ -457,14 +466,20 @@ app.on("before-quit", () => {
   void gateway.stop();
 });
 
-app.whenReady().then(async () => {
-  app.setAboutPanelOptions({
-    applicationName: viewer.state.branding,
-    applicationVersion: __VIEWER_VERSION__,
-  });
-  refuseEveryPermission();
-  serveShellScheme({ web: layout.webRoot, shell: layout.shellRoot });
-  getWindow();
-  refresh();
-  await launch();
-});
+app
+  .whenReady()
+  .then(async () => {
+    app.setAboutPanelOptions({
+      applicationName: viewer.state.branding,
+      applicationVersion: __VIEWER_VERSION__,
+    });
+    refuseEveryPermission();
+    serveShellScheme({ web: layout.webRoot, shell: layout.shellRoot });
+    getWindow();
+    refresh();
+    await launch();
+  })
+  // `launch` reports what the gateway does; this catches what nothing else can —
+  // a page that would not load, which is every step of the sequence above. Without
+  // it that is an unhandled rejection and a window showing nothing at all.
+  .catch(report);

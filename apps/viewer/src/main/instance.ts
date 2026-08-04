@@ -58,11 +58,19 @@ export function instanceDirFromArgv(
   home: string = homedir(),
   warn: (message: string) => void = () => {},
 ): string | null {
+  // Both spellings. `--instance-dir=<path>` is the one somebody types, and missing
+  // it would not be an error — it would be a QA run landing quietly in the *real*
+  // instance, which is the one outcome this flag exists to prevent.
+  const joined = argv.find((arg) => arg.startsWith(`${INSTANCE_FLAG}=`));
   const index = argv.indexOf(INSTANCE_FLAG);
-  if (index === -1) {
+  if (joined === undefined && index === -1) {
     return null;
   }
-  const raw = (argv[index + 1] ?? "").trim();
+  const raw = (
+    joined !== undefined
+      ? joined.slice(INSTANCE_FLAG.length + 1)
+      : (argv[index + 1] ?? "")
+  ).trim();
   if (raw === "" || raw.startsWith("-")) {
     // A trailing `--instance-dir` with nothing after it is a mistake, and falling
     // back to the default is the wrong direction for a flag whose whole purpose is

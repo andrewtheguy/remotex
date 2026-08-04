@@ -168,6 +168,14 @@ export class EmbeddedGateway {
   private readonly tail = new LogTail();
   /** True while `stop()` is the reason the process is ending. */
   private stopping = false;
+  /**
+   * Whether the current child has ended.
+   *
+   * Its own flag rather than `child.exitCode`, which is `null` for a process killed
+   * by a signal — so a gateway that took a `SIGTERM` would read as running, and
+   * `stop()` would wait out its grace period for an exit that had already happened.
+   */
+  private exited = false;
   private stderrClosed = false;
   private stderrClosedWaiters: (() => void)[] = [];
   private readonly hooks: GatewayHooks;
@@ -192,7 +200,7 @@ export class EmbeddedGateway {
   }
 
   isRunning(): boolean {
-    return this.child !== null && this.child.exitCode === null;
+    return this.child !== null && !this.exited;
   }
 
   /**
@@ -212,6 +220,7 @@ export class EmbeddedGateway {
     this.tail.clear();
     this.stopping = false;
     this.stderrClosed = false;
+    this.exited = false;
 
     const child = this.hooks.spawn(
       this.paths.binary,
@@ -310,6 +319,7 @@ export class EmbeddedGateway {
       });
 
       child.on("exit", (code, signal) => {
+        this.exited = true;
         this.logFile?.end();
         this.logFile = null;
         const wasStopping = this.stopping;
@@ -352,9 +362,13 @@ export class EmbeddedGateway {
     }
     this.stopping = true;
     this.child = null;
-    if (child.exitCode !== null) {
+    if (this.exited) {
       return;
     }
+    // Closing the pipe on a process that has already gone is an `EPIPE` on the
+    // stream, and an unhandled `error` on a stream takes the app down — which would
+    // turn "the gateway died first" into "the app crashed on quit".
+    child.stdin?.on("error", () => {});
     child.stdin?.end();
     child.kill("SIGTERM");
     await new Promise<void>((done) => {

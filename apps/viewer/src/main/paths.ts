@@ -55,13 +55,25 @@ export function resourceLayout(
 ): ResourceLayout {
   return {
     binary:
-      env.REMOTEX_GATEWAY_BIN ??
+      override(env.REMOTEX_GATEWAY_BIN) ??
       (packaged
         ? join(appRoot, "remotex-gateway")
         : resolve(appRoot, "target/release/remotex")),
     webRoot:
-      env.REMOTEX_WEB_ROOT ??
+      override(env.REMOTEX_WEB_ROOT) ??
       (packaged ? join(appRoot, "web") : resolve(appRoot, "frontend/dist")),
     shellRoot: join(dist, "shell"),
   };
+}
+
+/**
+ * An override somebody actually set.
+ *
+ * `REMOTEX_GATEWAY_BIN=` is how a shell unsets a variable it exported a moment ago,
+ * and an empty string is not nullish — so without this it wins over the fallback and
+ * the app spawns `""`: "the local gateway could not be started", for a bundle with
+ * nothing wrong with it.
+ */
+function override(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === "" ? undefined : value;
 }

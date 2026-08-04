@@ -13,7 +13,7 @@
 //
 // The routing itself is in `scheme-routes.ts`, where it can be tested.
 
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { net, protocol } from "electron";
 import {
@@ -64,12 +64,39 @@ export function serveShellScheme(roots: ShellRoots): void {
     if ("status" in routed) {
       return new Response(null, { status: routed.status });
     }
-    if (!existsSync(routed.file)) {
+    // A regular file, not merely something that exists: a directory passes
+    // `existsSync` and then fails inside `net.fetch`, which is a rejected handler
+    // promise — a request that never gets an answer — rather than the 404 the same
+    // URL deserves.
+    if (!isRegularFile(routed.file)) {
       return new Response(`Not found: ${request.url}`, {
         status: 404,
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
-    return await net.fetch(pathToFileURL(routed.file).toString());
+    try {
+      return await net.fetch(pathToFileURL(routed.file).toString());
+    } catch (error) {
+      // Unreadable between the check above and here — a permission, a disk, a file
+      // that went away. Said in a response, because a handler that throws leaves the
+      // page waiting rather than showing anything.
+      return new Response(
+        `Cannot read: ${request.url}\n${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        {
+          status: 500,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        },
+      );
+    }
   });
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }

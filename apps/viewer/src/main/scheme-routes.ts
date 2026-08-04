@@ -25,12 +25,28 @@ export interface ShellRoots {
   shell: string;
 }
 
-/** Resolve one request path against a root, or `null` if it escapes. */
+/**
+ * Resolve one request path against a root, or `null` if it escapes.
+ *
+ * `null` for a path that cannot be decoded at all, and for one carrying a NUL: both
+ * are refusals rather than errors. A malformed `%` throws out of
+ * `decodeURIComponent`, and a NUL throws out of every `fs` call that would touch the
+ * result — either way an unhandled rejection inside the scheme handler, where a
+ * request simply hangs instead of being answered.
+ */
 export function resolveUnderRoot(
   root: string,
   pathname: string,
 ): string | null {
-  const decoded = decodeURIComponent(pathname).replace(/^\/+/, "");
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname).replace(/^\/+/, "");
+  } catch {
+    return null;
+  }
+  if (decoded.includes("\0")) {
+    return null;
+  }
   const target = resolve(root, decoded);
   const rel = relative(root, target);
   if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {

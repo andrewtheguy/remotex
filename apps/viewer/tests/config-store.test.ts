@@ -6,8 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
-  existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -35,6 +35,13 @@ afterEach(() => {
 const accepts = () => Promise.resolve({ ok: true as const });
 const refuses = (message: string) => () =>
   Promise.resolve({ ok: false as const, error: message });
+
+/** Whatever a write left behind. The directory is documented as holding three. */
+const leftovers = () =>
+  readdirSync(instance.dir).filter((name) => name.endsWith(".new"));
+
+/** Past every pending microtask, so "has it started yet" is a settled question. */
+const flush = () => new Promise((done) => setImmediate(done));
 
 describe("reading", () => {
   test("a first launch gets the template, and the template has no targets", () => {
@@ -69,7 +76,7 @@ describe("saving", () => {
     const result = await store.save("[server]\nport = 1\n");
     expect(result.ok).toBe(false);
     expect(readFileSync(instance.configPath, "utf8")).toBe(before);
-    expect(existsSync(`${instance.configPath}.new`)).toBe(false);
+    expect(leftovers()).toEqual([]);
   });
 
   test("the complaint is passed through untouched", async () => {
@@ -93,7 +100,34 @@ describe("saving", () => {
       'branding = "work"\n',
     );
     expect(statSync(instance.configPath).mode & 0o777).toBe(0o600);
-    expect(existsSync(`${instance.configPath}.new`)).toBe(false);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a second save waits for the first, check and write together", async () => {
+    // A check takes as long as the gateway takes, so two Saves can be outstanding
+    // at once. Interleaved they are two staging files with one name, and the file on
+    // disk is whichever rename happened to land second — not the edit last pressed.
+    const started: string[] = [];
+    const gates: ((result: { ok: true }) => void)[] = [];
+    const store = new ConfigStore(instance, (text) => {
+      started.push(text);
+      return new Promise((resolve) => gates.push(resolve));
+    });
+
+    const first = store.save("first\n");
+    const second = store.save("second\n");
+    await flush();
+    expect(started).toEqual(["first\n"]);
+
+    gates[0]({ ok: true });
+    expect(await first).toEqual({ ok: true });
+    await flush();
+    expect(started).toEqual(["first\n", "second\n"]);
+
+    gates[1]({ ok: true });
+    expect(await second).toEqual({ ok: true });
+    expect(readFileSync(instance.configPath, "utf8")).toBe("second\n");
+    expect(leftovers()).toEqual([]);
   });
 });
 

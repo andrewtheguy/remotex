@@ -66,6 +66,22 @@ describe("routing", () => {
       "/app/web/assets/app.js",
     );
   });
+
+  test("a path that cannot be decoded is refused, not thrown", () => {
+    // Both of these used to throw out of the handler rather than answer it — a
+    // stray `%` inside `decodeURIComponent`, and a NUL inside every `fs` call that
+    // would have touched the result. A rejected handler promise is a request that
+    // hangs, which is the one failure with nothing to read anywhere.
+    for (const path of ["/%", "/%zz/app.js", "/assets/%E0%A4%A", "/a%00b"]) {
+      expect(resolveUnderRoot("/app/web", path)).toBeNull();
+      expect(routeShellRequest(`remotex://app${path}`, roots)).toEqual({
+        status: 403,
+      });
+      expect(routeShellRequest(`remotex://app/_shell${path}`, roots)).toEqual({
+        status: 403,
+      });
+    }
+  });
 });
 
 describe("what this window may load", () => {

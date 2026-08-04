@@ -71,7 +71,11 @@ export function validatorOverBinary(binary: string): Validator {
           error: `The configuration could not be checked: ${error.message}`,
         });
       });
-      child.on("exit", (code) => {
+      // `close` rather than `exit`: the two are not the same moment, and the
+      // difference is the whole message. `exit` fires when the process ends, which
+      // can be before its stderr has been drained — so a refusal read there is a
+      // refusal with the reason missing.
+      child.on("close", (code) => {
         settle(
           code === 0
             ? { ok: true }
@@ -89,6 +93,16 @@ export function validatorOverBinary(binary: string): Validator {
 }
 
 export class ConfigStore {
+  /**
+   * The tail of the save queue. A check takes as long as the gateway takes, so two
+   * saves can be in flight at once — and interleaved they are two staging files
+   * with one name, where the loser's text can land on top of the winner's. Queued
+   * whole, check and write together, so the last Save pressed is the file on disk.
+   */
+  private saving: Promise<unknown> = Promise.resolve();
+  /** Distinguishes one staging file from another; see {@link write}. */
+  private writes = 0;
+
   constructor(
     private readonly instance: InstanceDirectory,
     private readonly validate: Validator,
@@ -122,7 +136,16 @@ export class ConfigStore {
    * checking first is that the config on disk is always one the gateway starts on,
    * so a rejected edit leaves the app exactly as usable as it was.
    */
-  async save(text: string): Promise<CheckResult> {
+  save(text: string): Promise<CheckResult> {
+    const queued = this.saving
+      // A failed save must not wedge the queue: the next one is a fresh attempt.
+      .catch(() => {})
+      .then(() => this.checkAndWrite(text));
+    this.saving = queued;
+    return queued;
+  }
+
+  private async checkAndWrite(text: string): Promise<CheckResult> {
     const checked = await this.validate(text);
     if (!checked.ok) {
       return checked;
@@ -147,15 +170,20 @@ export class ConfigStore {
    * may be restarted the instant it changes: a half-written config is one the gateway
    * refuses, and the way never to have one is never to have it visible. `0600` for
    * the same reason the directory is `0700`.
+   *
+   * The staging name is this write's own — the rename is what has to be atomic, and
+   * a name two writes can share is a way for one of them to be renamed holding the
+   * other's text.
    */
   private write(text: string): void {
-    const temporary = `${this.instance.configPath}.new`;
+    this.writes += 1;
+    const temporary = `${this.instance.configPath}.${process.pid}-${this.writes}.new`;
     try {
       writeFileSync(temporary, text, { mode: 0o600 });
       chmodSync(temporary, 0o600);
       renameSync(temporary, this.instance.configPath);
     } finally {
-      // A `remotex.toml.new` left behind by a failed write is litter in a directory
+      // A `remotex.toml.*.new` left behind by a failed write is litter in a directory
       // documented as holding three files, and the next save would be writing over
       // somebody's unexplained leftovers.
       rmSync(temporary, { force: true });
