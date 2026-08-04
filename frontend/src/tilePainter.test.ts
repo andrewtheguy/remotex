@@ -416,6 +416,44 @@ test("a slow decode holds back the tiles after it and none before it", async () 
   );
 });
 
+test("clear() during a stalled decode fences the rest of the batch", async () => {
+  // `clear()` is the attachment boundary and is not queued behind draws — an
+  // eviction closes the socket from under a batch mid-decode. What resumes
+  // afterwards must not paint the previous desktop onto the next attachment's
+  // canvas, must not seed its caches, and must still settle its images.
+  stalled = new Set([2]);
+  const p = painter();
+  const done = p.draw(
+    batchFrame([
+      { op: "tile", slot: 1, x: 0, y: 0, payload: [1] },
+      { op: "tile", slot: 2, x: 1, y: 0, payload: [2] },
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    drawn.map((d) => d.tag),
+    [1],
+  );
+  p.clear();
+  releaseDecodes();
+  await done;
+  assert.deepEqual(
+    drawn.map((d) => d.tag),
+    [1],
+    "a stale tile painted onto the next attachment",
+  );
+  assert.ok(
+    decoded.every((bitmap) => bitmap.closed),
+    "the fenced batch left a bitmap alive",
+  );
+  await p.draw(batchFrame([{ op: "ref", slot: 2, x: 0, y: 0 }]));
+  assert.equal(
+    resets,
+    1,
+    "the fenced batch left slot state behind for the next attachment",
+  );
+});
+
 test("a cache reset closes the decoded bitmaps with the table", async () => {
   const p = painter();
   await p.draw(batchFrame([{ op: "tile", slot: 5, x: 0, y: 0, payload: [1] }]));

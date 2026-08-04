@@ -117,14 +117,19 @@ export function createSender(
       ws.send(JSON.stringify(msg));
       return;
     }
-    if (ws.bufferedAmount > 0) {
-      deferred = { move: msg, ws };
-      arm();
-      return;
-    }
+    // The frame budget is checked first: right after a send, `bufferedAmount`
+    // still counts the sent bytes, so testing it first routed every same-frame
+    // move to the 8 ms drain poll — which can fire inside the frame and send a
+    // second position. The frame callback hands off to the poll itself when
+    // the socket is still backed up at the boundary.
     if (sentThisFrame) {
       deferred = { move: msg, ws };
       armFrame();
+      return;
+    }
+    if (ws.bufferedAmount > 0) {
+      deferred = { move: msg, ws };
+      arm();
       return;
     }
     deferred = null;

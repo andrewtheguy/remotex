@@ -1026,23 +1026,44 @@ export function useRemoteDesktop(
       // queueing behind a decode backlog, and the clipboard's fetch timeout was
       // paying for one.
       let queue: Promise<void> = Promise.resolve();
-      socket.onmessage = (ev) => {
-        const data = ev.data;
-        if (typeof data !== "string") {
-          queue = queue.then(() => handleFrame(data)).catch(() => {});
-          return;
-        }
+      // True while this socket is the one the session is riding. Checked at
+      // dispatch — a superseded socket keeps firing `onmessage` until its close
+      // lands — and checked *again* inside each queued continuation, because a
+      // reconnect can replace the socket while a decode backlog is still
+      // draining, and an old resize applied then would tear down the new
+      // attachment's canvas.
+      const owned = () => !disposed && ws === socket;
+      const dispatchControl = (text: string) => {
         let msg: ControlMsg;
         try {
-          msg = JSON.parse(data) as ControlMsg;
+          msg = JSON.parse(text) as ControlMsg;
         } catch {
           return;
         }
         if (DRAW_ORDERED.has(msg.type)) {
-          queue = queue.then(() => handleControlMsg(msg)).catch(() => {});
+          queue = queue
+            .then(() => {
+              if (owned()) {
+                handleControlMsg(msg);
+              }
+            })
+            .catch(() => {});
         } else {
           handleControlMsg(msg);
         }
+      };
+      socket.onmessage = (ev) => {
+        if (!owned()) {
+          return;
+        }
+        const data = ev.data;
+        if (typeof data !== "string") {
+          queue = queue
+            .then(() => (owned() ? handleFrame(data) : undefined))
+            .catch(() => {});
+          return;
+        }
+        dispatchControl(data);
       };
     };
 

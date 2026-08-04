@@ -123,6 +123,22 @@ test("a move deferred on one socket is not replayed onto the next", () => {
   );
 });
 
+test("lingering bufferedAmount does not route a same-frame move to the drain poll", async () => {
+  // Right after a send, `bufferedAmount` still counts the sent bytes. A move
+  // arriving then must wait for the frame boundary, not the 8 ms poll — the
+  // poll can fire inside the frame and break one-move-per-frame.
+  const ws = openSocket();
+  const send = sender(ws);
+  send({ type: "mouseMove", x: 1, y: 1 });
+  ws.bufferedAmount = 10; // the move above, still in the socket's buffer
+  send({ type: "mouseMove", x: 2, y: 2 });
+  ws.bufferedAmount = 0; // and now taken by the OS, well inside the frame
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(sent.length, 1, "the drain poll sent inside the frame");
+  tick();
+  assert.deepEqual(sent.at(-1), { type: "mouseMove", x: 2, y: 2 });
+});
+
 test("a backed-up socket defers, and the newest goes when it drains", async () => {
   // Left on the real drain poll deliberately: resolving the deferral is what
   // stops the poll, so the test must see it through rather than abandon a

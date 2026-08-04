@@ -120,6 +120,12 @@ export function createTilePainter(options: {
   const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
 
+  // Which attachment the caches belong to. `clear()` is the attachment
+  // boundary and is not queued behind draws — an eviction closes the socket
+  // from under whatever batch is mid-decode — so a draw that outlives the
+  // generation it started in must not paint onto, or cache into, the next one.
+  let generation = 0;
+
   // Decoded bitmaps by slot, so a TILE_REF is a draw rather than a Blob, a
   // decode and a GPU upload. A Map because insertion order is the recency
   // order: a hit is re-inserted, and eviction walks from the front.
@@ -376,6 +382,32 @@ export function createTilePainter(options: {
     }
   };
 
+  // Settle one landed decode: paint it, or — when `stale`, because `clear()`
+  // ran while the decode was in flight — let its image go without touching
+  // the next attachment's canvas or caches. A stale tile painted would be the
+  // previous desktop showing through; either way the image has to be settled,
+  // released back to the (cleared) cache if held, closed if the batch owned it.
+  const settleJob = (
+    ctx: CanvasRenderingContext2D | null,
+    job: PaintJob | null,
+    image: ImageBitmap | VideoFrame | null,
+    stale: boolean,
+  ) => {
+    if (stale) {
+      if (job?.kind === "tile" && job.decoded) {
+        releaseDecoded(job.decoded);
+      } else {
+        image?.close();
+      }
+      return;
+    }
+    if (image && job) {
+      paintJob(ctx, job, image);
+    } else if (job?.kind === "tile" && job.decoded) {
+      releaseDecoded(job.decoded);
+    }
+  };
+
   return {
     async draw(frame: ArrayBuffer) {
       const records = decodeBatchFrame(frame);
@@ -391,23 +423,21 @@ export function createTilePainter(options: {
       // staying alive until the slowest.
       const decodes = jobs.map((job) => decodeJob(job, batch));
       const ctx = options.context();
+      const born = generation;
       for (let i = 0; i < jobs.length; i += 1) {
         const image = await decodes[i];
-        const job = jobs[i];
-        if (image && job) {
-          paintJob(ctx, job, image);
-        } else if (job?.kind === "tile" && job.decoded) {
-          releaseDecoded(job.decoded);
-        }
+        settleJob(ctx, jobs[i], image, generation !== born);
       }
       // Cleared after the pass so references may use slots filled earlier in
-      // it, which the gateway does emit within a single batch.
-      if (batch.resetAsked) {
+      // it, which the gateway does emit within a single batch. A fenced batch
+      // must not wipe the next attachment's table with its own stale miss.
+      if (batch.resetAsked && generation === born) {
         tileCache.fill(null);
         clearDecoded();
       }
     },
     clear() {
+      generation += 1;
       tileCache.fill(null);
       clearDecoded();
       releaseVideo();
