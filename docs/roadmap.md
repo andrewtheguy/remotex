@@ -88,10 +88,10 @@ for a key, not a reason to ask the browser again.
 
 ### Companion Chrome extension
 
-The native macOS shell is gone. It was one window around this same page, and it
-existed for two things a page genuinely cannot do for itself. Both survive it, and
-both were measured against stock Chrome plus a small MV3 extension before the shell
-was removed — the spike is a proof of viability, not a design:
+`remotex.app` (`apps/viewer`) has these two things today, because it is a window
+this program controls. Most people are in a browser, and this is what would give
+them the same two. Both were measured against stock Chrome plus a small MV3
+extension — the spike is a proof of viability, not a design:
 
 - **A clipboard that keeps syncing while the window is unfocused or minimized.**
   `navigator.clipboard.readText()` is refused unless the document is focused, which
@@ -109,16 +109,17 @@ was removed — the spike is a proof of viability, not a design:
   captures ⌘W/⌘Q windowed. Held Esc always escapes the lock, by design, and is the
   one chord a remote session can never have.
 
-Only those two. Everything else the shell owned was a menu bar standing in front of
-this client's own controls, and a browser needs none of it.
+Only those two. Everything else the app owns is a menu bar standing in front of
+this client's own controls, and a browser needs none of it — which is also why the
+app hides the floating menu rather than duplicating what it does.
 
 The shape of the work: a `window.postMessage` handshake the page uses to notice the
 extension and degrade without it, `clipboard-changed` from the extension calling the
 same `sendClipboard` path a focus push takes (the echo guards `lastFromRemoteRef` and
 `lastToRemoteRef` already cover it), and the reverse direction replacing what
-`mirrorRemoteClipboard` used to hand the shell. The keyboard half restores the fuller
-Command chord table `macKeys.ts` used to select for the shell, gated on the extension
-being present rather than on a build flag. Distribution is "Load unpacked" for
+`mirrorRemoteClipboard` hands the app. The keyboard half wants the fuller Command
+chord table `macKeys.ts` already selects for the app, gated on the extension being
+present rather than on a build flag. Distribution is "Load unpacked" for
 personal use, or a local `.crx` pinned through `ExtensionSettings` policy.
 
 ## Not planned

@@ -805,6 +805,36 @@ Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
 
+### remotex.app, the macOS shell
+
+`apps/viewer` is an Electron shell around that same SPA — the same
+`frontend/dist`, the same gateway, the same wire — adding only what a page cannot
+do for itself: every ⌘ chord reaching the guest, a clipboard that keeps syncing
+while the window is unfocused, a menu bar, and a gateway of its own. It holds no
+session, so there is no version pair between it and the gateway; a protocol change
+is a change to the client and to nothing else.
+
+It runs `remotex serve-embedded --instance-dir <dir> --web-root <dir>`, which
+binds `127.0.0.1:0` and prints one JSON line — `{"port","token"}` — before serving
+(`src/embedded.rs`, `Audience::Embedded`). The token goes in the same
+`remotex_session` cookie a login would set, so one page load carries it to
+`/api/*` and to the socket upgrades alike. Nothing is passed the other way: the
+app never gets to choose the port or the secret, and `src/cli.rs` refuses flags
+that would let it. The gateway stops when the app's end of its stdin closes,
+which the kernel does however the app ends.
+
+The page loads as `remotex://app` out of the bundle rather than from the gateway's
+ephemeral port, so the client's remembered preferences have an origin that holds
+still. That makes its calls cross-origin, which `shell_origin_cors` in
+`src/server.rs` answers for that one literal origin when the gateway
+authenticates by token.
+
+The seam is `frontend/src/nativeHost.ts`: one state object the menus derive
+themselves from, and commands back for the controls the shell hides. Keys are not
+on it — the app drops its own menu accelerators while a live desktop has focus, so
+⌘W and ⌘Q arrive as ordinary key events on the client's existing path. See
+[`docs/macos-viewer.md`](macos-viewer.md).
+
 ## Configuration and testing
 
 Configuration is one TOML file with `[server]` and `[[targets]]` sections.
