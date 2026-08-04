@@ -385,7 +385,11 @@ picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `tilePainter.ts` — the shared batch
 loop, which keys a decoder per `stream` id and replaces one whose region has
-restarted on a different size.
+restarted on a different size. That whole loop — parse, decode, paint, and the
+decoders with it — runs in a dedicated worker drawing on an `OffscreenCanvas`
+(`desktopPainterWorker.ts`, handled from the page by `desktopPainter.ts`), so a
+decode backlog costs the worker's thread rather than React's and input's; each
+binary frame is transferred there, not copied.
 
 `VideoDecoder` is secure-context only — the same limit remote audio already has, but a
 worse one to hit, since no audio decoder means silence beside a working desktop and no

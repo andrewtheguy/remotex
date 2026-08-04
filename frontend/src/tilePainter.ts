@@ -72,6 +72,14 @@ interface DecodedTile {
 // decoded bands are far larger, and this is the lid on that difference.
 const DECODED_BUDGET_BYTES = 16 * 1024 * 1024;
 
+// The destination's 2D context. A union rather than the element's alone because
+// the painter now runs inside the paint worker, drawing through an
+// `OffscreenCanvas` — the element context remains for the unit tests, which
+// drive the painter directly.
+export type PaintContext =
+  | CanvasRenderingContext2D
+  | OffscreenCanvasRenderingContext2D;
+
 export interface TilePainter {
   /**
    * Decode one binary batch frame and paint it. Records are decoded
@@ -102,7 +110,7 @@ export function createTilePainter(options: {
    * The destination, read per batch rather than captured, so a resize that
    * replaces the 2D context does not need the painter rebuilt.
    */
-  context: () => CanvasRenderingContext2D | null;
+  context: () => PaintContext | null;
   /**
    * The two ends disagree about the slot table and only the server can repair
    * it. Called at most once per batch: fifty references into a cache this
@@ -354,7 +362,7 @@ export function createTilePainter(options: {
   // is settled whether or not it was drawn — with no canvas there is nothing to
   // paint, but the decoded pictures still have to go somewhere.
   const paintJob = (
-    ctx: CanvasRenderingContext2D | null,
+    ctx: PaintContext | null,
     job: PaintJob,
     image: ImageBitmap | VideoFrame,
   ) => {
@@ -388,7 +396,7 @@ export function createTilePainter(options: {
   // previous desktop showing through; either way the image has to be settled,
   // released back to the (cleared) cache if held, closed if the batch owned it.
   const settleJob = (
-    ctx: CanvasRenderingContext2D | null,
+    ctx: PaintContext | null,
     job: PaintJob | null,
     image: ImageBitmap | VideoFrame | null,
     stale: boolean,
