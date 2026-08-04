@@ -64,6 +64,15 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
     new URL("./desktopPainter.worker.ts", import.meta.url),
     { type: "module", name: "desktop-painter" },
   );
+  // Events carry no attachment tag, deliberately: for a stale event to reach a
+  // *new* binding, this worker would need two binds with the first having
+  // produced worker activity — and two binds on one worker only happen under
+  // StrictMode's synchronous remount, whose first effect run is disposed
+  // before its session claim resolves and so never posts a frame, a resize or
+  // a format. (A real remount is a new canvas element, which replaces the
+  // worker above; its events die with it.) The one event with per-attachment
+  // meaning, `resized`, is matched against the binding's own pending map
+  // besides.
   let handlers: PainterHandlers | null = null;
   worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
     const event = ev.data;
