@@ -34,6 +34,8 @@ interface Record {
   /** Tiles only. */
   format?: number;
   payloadLen?: number;
+  /** Copies only: the source and destination rectangles. */
+  copy?: { sx: number; sy: number; x: number; y: number; w: number; h: number };
 }
 
 interface Batch {
@@ -66,17 +68,31 @@ function parseBatch(payload: Buffer): Batch {
       at += TILE_REF_LEN;
       continue;
     }
-    // A copy carries no payload and no slot, so there is nothing here to record
-    // but the fact of it. Transcribed even though a Mac never sends one — the
-    // encoding lists for both Apple subtypes omit CopyRect, so only generic VNC
-    // can produce this — because a parser that is a partial transcription of the
-    // wire reports the next record it does not know as a corrupt frame.
+    // A copy carries no payload and no slot, only the two rectangles. Transcribed
+    // even though a Mac never sends one — the encoding lists for both Apple
+    // subtypes omit CopyRect, so only generic VNC can produce this — because a
+    // parser that is a partial transcription of the wire reports the next record it
+    // does not know as a corrupt frame. Both rectangles are kept rather than the
+    // fact of the record alone, so the loop below can check a copy the way it
+    // checks everything else instead of falling through to the tile rules and
+    // failing on a format it does not have.
     if (op === OP_COPY) {
       if (at + COPY_LEN > payload.length) {
         exact = false;
         break;
       }
-      records.push({ op, slot: NO_SLOT });
+      records.push({
+        op,
+        slot: NO_SLOT,
+        copy: {
+          sx: payload.readUInt16LE(at + 1),
+          sy: payload.readUInt16LE(at + 3),
+          x: payload.readUInt16LE(at + 5),
+          y: payload.readUInt16LE(at + 7),
+          w: payload.readUInt16LE(at + 9),
+          h: payload.readUInt16LE(at + 11),
+        },
+      });
       at += COPY_LEN;
       continue;
     }
@@ -177,6 +193,16 @@ test.describe("v4 batch envelope", () => {
           // A reference names a slot the SPA is keeping. Seven bytes, no payload,
           // and the slot must be inside the fixed cache the wire promises.
           expect(record.slot).toBeLessThan(SLOT_COUNT);
+          continue;
+        }
+        if (record.op === OP_COPY) {
+          // Both rectangles are the same size and cover real pixels — a copy of
+          // nothing is a record for nothing, and the destination is where the SPA
+          // is about to blit.
+          const copy = record.copy;
+          expect(copy).toBeDefined();
+          expect(copy?.w).toBeGreaterThan(0);
+          expect(copy?.h).toBeGreaterThan(0);
           continue;
         }
         // The gateway encodes tiles as PNG, JPEG, or WebP according to the target's

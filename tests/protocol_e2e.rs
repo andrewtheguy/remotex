@@ -1070,17 +1070,50 @@ async fn expect_tile(ws: &mut Ws) {
 /// Read from the socket until a batch frame carrying a `COPY` record arrives,
 /// returning `(sx, sy, x, y, w, h)`.
 ///
-/// Fails if a tile turns up carrying the copied region as pixels instead: that is
-/// the gateway having fallen back, which is a legitimate answer to an unknown
-/// source and the wrong one here, where the source was painted first.
+/// Fails on the spot if a tile turns up carrying the copied region as pixels
+/// instead. That is the gateway having fallen back — a legitimate answer to a
+/// source the shadow never learned, and the wrong one here, where the source was
+/// painted first and acknowledged before the scroll was cued. Named rather than
+/// left to the timeout, because "no copy arrived in ten seconds" and "the copy
+/// arrived as an encode of the whole region" are different bugs.
 async fn expect_copy(ws: &mut Ws) -> (u16, u16, u16, u16, u16, u16) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     for record in common::batch_records(&frame) {
-                        if let common::BatchRecord::Copy { sx, sy, x, y, w, h } = record {
-                            return (sx, sy, x, y, w, h);
+                        match record {
+                            common::BatchRecord::Copy { sx, sy, x, y, w, h } => {
+                                return (sx, sy, x, y, w, h);
+                            }
+                            // The destination is the right half, and nothing in
+                            // this script paints there: the server sent one raw
+                            // rectangle covering the left half and then a CopyRect.
+                            // So anything painting past the halfway line is the
+                            // expansion, not the paint that seeded it.
+                            //
+                            // A reference counts, and is in fact the shape the
+                            // fallback takes here: the two halves are the same
+                            // colour, so the expanded pixels encode to the bytes
+                            // already in a slot and go out as a position. Cheaper
+                            // than a payload and still not a copy — the gateway
+                            // held the whole region's pixels to find that out.
+                            common::BatchRecord::Tile(tile) if tile.x + tile.w > SCROLL_W => {
+                                panic!(
+                                    "the gateway expanded the copy: a {}x{} tile at ({}, {}) \
+                                     carries the copied region as pixels",
+                                    tile.w, tile.h, tile.x, tile.y
+                                );
+                            }
+                            common::BatchRecord::Reference { slot, x, y }
+                                if x >= SCROLL_W =>
+                            {
+                                panic!(
+                                    "the gateway expanded the copy: slot {slot} redrawn at \
+                                     ({x}, {y}), which is the copy's destination"
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }

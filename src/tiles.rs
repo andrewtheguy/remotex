@@ -393,18 +393,26 @@ impl Shadow {
     /// the remote — and as a `COPY` record is about to move them on the client's
     /// canvas.
     ///
-    /// `None` when the source cannot be reproduced, which is [`Self::copy_out`]'s
-    /// refusal and means the same thing: the caller asks for a repaint rather than
-    /// being handed a guess. `Some(false)` when the destination already held those
+    /// `None` when the move cannot be made, which the caller answers with a repaint
+    /// rather than a guess: a source [`Self::copy_out`] refuses, or a destination
+    /// off the framebuffer. `Some(false)` when the destination already held those
     /// exact pixels, which is the same dedup [`Self::accept`] does and worth doing
     /// here for the same reason — a copy nothing can see is a record and a canvas
     /// blit for nothing.
+    ///
+    /// The destination is checked here rather than left to `accept`, which answers
+    /// a rectangle it does not cover with "all of it changed" and records nothing.
+    /// That is right for pixels that arrived — sending a tile that was not needed
+    /// beats withholding one that was — and wrong for this, where the answer is a
+    /// `COPY` record: the client would be told to move pixels while this side kept
+    /// no account of it, and the two would disagree until something else repainted
+    /// that region.
     ///
     /// The source is read whole before anything is written, so a copy overlapping
     /// its own source moves the original pixels. Both ends of the link do that;
     /// this is only the third copy of them agreeing.
     pub fn copy_within(&mut self, src: Rect, dst: Rect) -> Option<bool> {
-        if src.w() != dst.w() || src.h() != dst.h() {
+        if src.w() != dst.w() || src.h() != dst.h() || dst.right >= self.w || dst.bottom >= self.h {
             return None;
         }
         let pixels = self.copy_out(src)?;

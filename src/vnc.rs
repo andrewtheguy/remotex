@@ -5319,6 +5319,45 @@ mod tests {
         assert_eq!(written(&sent), client_fence(FENCE_BLOCK_BEFORE, b"marker"));
     }
 
+    /// A payload past what the extension defines is echoed back cut to length, and
+    /// read in full regardless. The two are separate obligations: the echo is bounded
+    /// because the specification bounds it, and the *read* is not, because a message
+    /// stepped over by the wrong number of bytes desyncs everything behind it — which
+    /// is what the update after the fence is here to catch.
+    #[tokio::test]
+    async fn an_oversized_fence_payload_is_echoed_cut_to_length_and_read_whole() {
+        let payload: Vec<u8> = (0..=u8::try_from(MAX_FENCE_PAYLOAD).unwrap()).collect();
+        assert!(payload.len() > MAX_FENCE_PAYLOAD, "the payload has to be over the cap");
+        let mut wire = server_fence(FENCE_REQUEST, &payload);
+        wire.extend_from_slice(&raw_update());
+
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            None,
+            sink.clone(),
+        )
+        .await;
+
+        // Request is not echoed and nothing else was set, so the flags go back empty.
+        let mut expected = client_fence(0, &payload[..MAX_FENCE_PAYLOAD]);
+        expected.extend_from_slice(&update_request(true, (2, 2)));
+        assert_eq!(written(&sent), expected);
+        sink.flush().await;
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|m| matches!(m, ServerMsg::Tile(_))),
+            "the rectangle behind the oversized fence has to survive it"
+        );
+    }
+
     /// A fence with no Request bit is an answer to something this side never asked,
     /// and answering it would be a fence of this client's own. Its payload is still
     /// consumed: the RFB stream has no framing above the record layer, so a message

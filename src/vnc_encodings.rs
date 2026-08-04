@@ -1438,4 +1438,23 @@ mod tests {
         );
         assert!(reader.is_empty(), "the source position is consumed either way");
     }
+
+    /// And the other end of the same rectangle. `read_rect` bounds-checks a
+    /// destination before any of this runs, so this is [`Shadow::copy_within`]'s own
+    /// guard rather than a case the engine can reach — but the answer it gives is
+    /// what decides whether a `COPY` record can be trusted, and "all of it changed,
+    /// recorded nowhere" is what it would otherwise inherit from `accept`.
+    #[tokio::test]
+    async fn a_copy_rect_landing_off_the_framebuffer_is_refused_too() {
+        let rgb: Vec<u8> = (0..8u8).flat_map(|i| [i * 0x10, 0x20, 0x30]).collect();
+        let shadow = shadow_of(8, 1, &rgb);
+        // Four pixels wide starting at 6, on a framebuffer eight wide.
+        let wire = copy_rect_payload(0, 0);
+        let mut reader = wire.as_slice();
+        assert_eq!(
+            copy_rect(&mut reader, &shadow, Some((6, 0)), 4, 1).await.unwrap(),
+            Decoded::Unavailable
+        );
+        assert!(reader.is_empty(), "the source position is consumed either way");
+    }
 }
