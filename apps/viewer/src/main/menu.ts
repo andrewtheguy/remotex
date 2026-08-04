@@ -174,6 +174,18 @@ function remoteMenu(context: MenuContext): MenuSpec {
       enabled: canClipboard(viewer),
       command: { type: "openClipboard" },
     },
+    // The client's own Help card, which is the only place the session's numbers are
+    // written down: the remote's size and density against this window's, the
+    // connection and its subtype, the render dial, the video codec and the exact
+    // configuration each decoder was built with. In a browser it is behind the ☰
+    // button this shell hides, so without an item here it is unreachable — and
+    // rebuilding it natively would be a second copy of a dozen values derived from
+    // state only the page has. The item opens the page's own card.
+    {
+      label: "Session Info…",
+      enabled: onDesktop,
+      command: { type: "openSessionInfo" },
+    },
     // Sound from the remote. Greyed rather than hidden for a target that has none: a
     // menu whose items come and go is harder to learn than one that is sometimes
     // disabled. It says nothing about whether sound is *arriving*, because from this

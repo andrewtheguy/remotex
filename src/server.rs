@@ -517,6 +517,12 @@ async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Js
 struct TargetInfo {
     name: String,
     protocol: &'static str,
+    /// The target's `subtype` where it has one, `null` otherwise — the same
+    /// field [`crate::protocol::ServerMsg::Connected`] carries, and here for the
+    /// same reason one step earlier: three entries in this list say `vnc`, and
+    /// which of them is a Mac in Standard mode and which is High Performance is
+    /// what somebody is choosing between.
+    subtype: Option<&'static str>,
     host: String,
     port: u16,
 }
@@ -531,6 +537,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
         .map(|t| TargetInfo {
             name: t.name.clone(),
             protocol: t.protocol.name(),
+            subtype: t.subtype.map(crate::config::Subtype::name),
             host: t.host.clone(),
             port: t.port,
         })
@@ -1133,6 +1140,36 @@ mod tests {
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+    }
+
+    /// The exact `/api/targets` entry. Pinned because the picker reads every key
+    /// of it, and because `subtype` is `null` far more often than it is set — a
+    /// field that were *absent* on those targets is one the client has to test for
+    /// two ways.
+    #[test]
+    fn a_target_entry_names_its_subtype_or_says_it_has_none() {
+        let mac = serde_json::to_string(&TargetInfo {
+            name: "mac".to_owned(),
+            protocol: "vnc",
+            subtype: Some("ard-high-performance"),
+            host: "192.0.2.10".to_owned(),
+            port: 5900,
+        })
+        .unwrap();
+        assert_eq!(
+            mac,
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard-high-performance","host":"192.0.2.10","port":5900}"#
+        );
+
+        let win = serde_json::to_string(&TargetInfo {
+            name: "win".to_owned(),
+            protocol: "rdp",
+            subtype: None,
+            host: "192.0.2.11".to_owned(),
+            port: 3389,
+        })
+        .unwrap();
+        assert!(win.contains(r#""subtype":null"#), "{win}");
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the
