@@ -184,6 +184,26 @@ bottom.
   only after every stream's attempt. This also makes the one-thread-per-region
   rationale in `video::threads_for` true rather than circular — region streams
   really do parallelize with each other now.
+- **The parse→decode→paint path off the main thread**
+  (`frontend/src/desktopPainterWorker.ts`, `desktopPainter.ts`,
+  `desktopPainter.worker.ts`; the audit's one architectural item). The
+  painter — slot table, decoded-bitmap cache, `VideoDecoder` table, batch draw
+  loop — is unchanged but runs in a dedicated worker drawing on an
+  `OffscreenCanvas`, so a decode backlog costs that worker's thread rather
+  than React's and input's. Each binary frame is *transferred* (zero-copy),
+  and the main thread's per-connection promise queue is gone: postMessage
+  order is the wire order, one chain in the worker preserves it across async
+  decodes, and `clear` holds its place in that chain — jumping it would let a
+  frame posted earlier paint the previous desktop onto the next attachment's
+  canvas (pinned in `desktopPainterWorker.test.ts`). A resize's *state* half
+  (CSS box, `size`, the status overlay's "is there a desktop yet") waits for
+  the worker's `resized` echo, keeping the old behind-the-backlog semantics —
+  applying it on arrival could flash the previous desktop after a target
+  switch. One worker per canvas element, held at module level, because
+  `transferControlToOffscreen` works once per element and StrictMode reruns
+  the effect. Costs accepted: the element context's `desynchronized` present
+  path does not exist on the commit path a transferred canvas uses, and
+  `cacheReset` gains a postMessage hop.
 
 ## Gateway — screen
 
@@ -197,11 +217,7 @@ All addressed — see Done.
 
 ## Client
 
-All addressed — see Done — except the one architectural item, deliberately
-left: no worker/`OffscreenCanvas`, so the parse→decode→paint path shares the
-main thread with React and input. The painter is already factored behind
-`options.context()` if jank isolation is ever wanted; it is a restructure, not
-a hot-path fix.
+All addressed — see Done.
 
 ## Audited and sound — do not regress
 
