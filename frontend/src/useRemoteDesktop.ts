@@ -186,6 +186,20 @@ const pointerRectCache = createRectCache((clear) =>
   requestAnimationFrame(clear),
 );
 
+// Control messages that must keep their place in line behind queued draws.
+// `resize` replaces and clears the canvas; `videoFormat` with a changed decode
+// string drops a live decoder that units already queued still need
+// (videoDecoder.ts, setFormat); `connected` and `picker` change what the
+// desktop *is*, and must not take effect under a backlog still painting the
+// old one. Everything else — cursor, clipboard, displays, remoteOs, error,
+// audioFormat — reads and writes nothing a draw does, and runs on arrival.
+const DRAW_ORDERED: ReadonlySet<string> = new Set([
+  "resize",
+  "videoFormat",
+  "connected",
+  "picker",
+]);
+
 // The one way a 2D context is taken from the desktop canvas, so the two call
 // sites (connect and resize) cannot disagree about its attributes — a second
 // `getContext` on the same canvas returns the first context and silently
@@ -267,7 +281,10 @@ function paintCursor(
   touchAt: Point | null,
 ): void {
   const image = cursorImage(remote);
-  const rect = els.canvas?.getBoundingClientRect();
+  // Through the shared rect cache: this is the same measurement the pointer
+  // mapping needs, and a gesture frame that wrote canvas styles pays for at
+  // most one layout flush between the two of them.
+  const rect = els.canvas ? pointerRectCache.read(els.canvas) : undefined;
   // The desktop's on-screen scale, framebuffer pixels to CSS pixels: both
   // pointers are sized through it. 1:1 until the first resize names a size.
   const view = rect && size && size.w > 0 ? rect.width / size.w : 1;
@@ -671,17 +688,31 @@ export function useRemoteDesktop(
 
   // Re-apply the pointer to the DOM. Called whenever the shape, the virtual
   // pointer position, or the canvas geometry (resize, zoom, pan, dpr) changes.
+  //
+  // Coalesced to one paint per frame, at the frame boundary: `paintCursor`
+  // reads the canvas rect, and its callers — a pinch's applyView above all —
+  // have usually just written canvas styles, so an inline read was a forced
+  // layout per gesture event. A rAF callback runs after the writes and before
+  // the paint, so nothing on screen ever shows the deferral.
+  const cursorSyncArmed = useRef(false);
   const syncCursor = useCallback(() => {
-    paintCursor(
-      {
-        overlay: overlayRef.current,
-        canvas: canvasRef.current,
-        pointer: pointerRef.current,
-      },
-      sizeRef.current,
-      cursorRef.current,
-      touchCursorRef.current,
-    );
+    if (cursorSyncArmed.current) {
+      return;
+    }
+    cursorSyncArmed.current = true;
+    requestAnimationFrame(() => {
+      cursorSyncArmed.current = false;
+      paintCursor(
+        {
+          overlay: overlayRef.current,
+          canvas: canvasRef.current,
+          pointer: pointerRef.current,
+        },
+        sizeRef.current,
+        cursorRef.current,
+        touchCursorRef.current,
+      );
+    });
   }, [canvasRef, overlayRef, pointerRef]);
 
   // The single choke point for everything sent to the server, including the
@@ -986,27 +1017,36 @@ export function useRemoteDesktop(
         // longer closes the socket; the server returns it to the picker.)
         scheduleRetry();
       };
-      // Tiles decode asynchronously (createImageBitmap), so all messages are
-      // chained through one promise queue: draws land in arrival order (later
-      // tiles must overwrite earlier ones) and a resize can't jump the queue.
-      // The catch keeps a garbled frame from stalling the chain.
+      // Tiles decode asynchronously (createImageBitmap), so draws are chained
+      // through one promise queue: they land in arrival order (later tiles must
+      // overwrite earlier ones), and the control messages that touch what draws
+      // touch — the canvas and the decoder table — wait in the same line. The
+      // catch keeps a garbled frame from stalling the chain. Everything else
+      // runs on arrival: a cursor shape or a clipboard answer gains nothing by
+      // queueing behind a decode backlog, and the clipboard's fetch timeout was
+      // paying for one.
       let queue: Promise<void> = Promise.resolve();
       socket.onmessage = (ev) => {
-        queue = queue.then(() => handleMessage(ev.data)).catch(() => {});
-      };
-    };
-
-    const handleMessage = async (data: unknown) => {
-      if (typeof data === "string") {
+        const data = ev.data;
+        if (typeof data !== "string") {
+          queue = queue.then(() => handleFrame(data)).catch(() => {});
+          return;
+        }
         let msg: ControlMsg;
         try {
           msg = JSON.parse(data) as ControlMsg;
         } catch {
           return;
         }
-        handleControlMsg(msg);
-        return;
-      }
+        if (DRAW_ORDERED.has(msg.type)) {
+          queue = queue.then(() => handleControlMsg(msg)).catch(() => {});
+        } else {
+          handleControlMsg(msg);
+        }
+      };
+    };
+
+    const handleFrame = async (data: unknown) => {
       if (!(data instanceof ArrayBuffer)) {
         return;
       }

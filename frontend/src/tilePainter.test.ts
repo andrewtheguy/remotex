@@ -111,6 +111,11 @@ let resets = 0;
 let videoErrors: (string | null)[] = [];
 /** Payload first bytes the stubbed decoder refuses. */
 let undecodable = new Set<number>();
+/** Dimensions the stub reports, so a test can spend the decoded byte budget. */
+let bitmapDims = { width: 1, height: 1 };
+/** Payload first bytes whose decode waits until `releaseDecodes` runs. */
+let stalled = new Set<number>();
+let releaseDecodes = () => {};
 
 const context = {
   drawImage(bitmap: FakeBitmap, ...args: number[]) {
@@ -221,15 +226,27 @@ beforeEach(() => {
       this.data = init.data;
     }
   };
+  bitmapDims = { width: 1, height: 1 };
+  stalled = new Set();
+  releaseDecodes = () => {};
   globals.createImageBitmap = async (blob: Blob) => {
     const tag = new Uint8Array(await blob.arrayBuffer())[0];
+    if (stalled.has(tag)) {
+      await new Promise<void>((resolve) => {
+        const previous = releaseDecodes;
+        releaseDecodes = () => {
+          previous();
+          resolve();
+        };
+      });
+    }
     if (undecodable.has(tag)) {
       throw new Error("undecodable");
     }
     const bitmap: FakeBitmap = { tag, closed: false };
     decoded.push(bitmap);
     return {
-      ...bitmap,
+      ...bitmapDims,
       close() {
         bitmap.closed = true;
       },
@@ -304,6 +321,113 @@ test("a reference may name a slot filled earlier in its own batch", async () => 
     { tag: 5, x: 0, y: 0 },
     { tag: 5, x: 8, y: 8 },
   ]);
+});
+
+test("a reference reuses the slot's decoded bitmap rather than decoding again", async () => {
+  // The decoded cache's whole point: a TILE_REF was a Blob, a decode and a GPU
+  // upload per reference, for pixels this client had already decoded.
+  const p = painter();
+  await p.draw(batchFrame([{ op: "tile", slot: 7, x: 0, y: 0, payload: [9] }]));
+  await p.draw(batchFrame([{ op: "ref", slot: 7, x: 64, y: 128 }]));
+  assert.equal(decoded.length, 1, "the reference decoded a second copy");
+  assert.deepEqual(drawn, [
+    { tag: 9, x: 0, y: 0 },
+    { tag: 9, x: 64, y: 128 },
+  ]);
+  assert.ok(!decoded[0].closed, "a cached bitmap must stay drawable");
+});
+
+test("overwriting a slot closes its old bitmap; later references get the new one", async () => {
+  const p = painter();
+  await p.draw(batchFrame([{ op: "tile", slot: 7, x: 0, y: 0, payload: [1] }]));
+  await p.draw(batchFrame([{ op: "tile", slot: 7, x: 0, y: 0, payload: [2] }]));
+  assert.ok(decoded[0].closed, "the stale bitmap was left holding GPU memory");
+  await p.draw(batchFrame([{ op: "ref", slot: 7, x: 8, y: 8 }]));
+  assert.deepEqual(drawn.at(-1), { tag: 2, x: 8, y: 8 });
+});
+
+test("an in-batch overwrite draws each reference against the bytes in force", async () => {
+  // The overwrite drops the decoded bitmap at resolve time and the new one is
+  // adopted in wire order at draw time, so neither reference can see the wrong
+  // side of the overwrite however the decodes interleave.
+  await painter().draw(
+    batchFrame([
+      { op: "tile", slot: 3, x: 0, y: 0, payload: [1] },
+      { op: "ref", slot: 3, x: 1, y: 0 },
+      { op: "tile", slot: 3, x: 2, y: 0, payload: [2] },
+      { op: "ref", slot: 3, x: 3, y: 0 },
+    ]),
+  );
+  assert.deepEqual(
+    drawn.map((d) => d.tag),
+    [1, 1, 2, 2],
+  );
+});
+
+test("the decoded cache evicts its least recently used past the byte budget", async () => {
+  bitmapDims = { width: 2048, height: 1024 }; // 8 MiB decoded apiece
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "tile", slot: 1, x: 0, y: 0, payload: [1] },
+      { op: "tile", slot: 2, x: 0, y: 0, payload: [2] },
+      { op: "tile", slot: 3, x: 0, y: 0, payload: [3] },
+    ]),
+  );
+  assert.ok(decoded[0].closed, "the oldest entry was kept past the budget");
+  assert.ok(!decoded[2].closed, "the newest entry went instead of the oldest");
+  const before = decoded.length;
+  await p.draw(batchFrame([{ op: "ref", slot: 1, x: 0, y: 0 }]));
+  assert.equal(
+    decoded.length,
+    before + 1,
+    "an evicted slot re-decodes from its encoded bytes",
+  );
+  assert.deepEqual(drawn.at(-1), { tag: 1, x: 0, y: 0 });
+  await p.draw(batchFrame([{ op: "ref", slot: 3, x: 0, y: 0 }]));
+  assert.equal(decoded.length, before + 1, "a kept slot decoded again");
+});
+
+test("a slow decode holds back the tiles after it and none before it", async () => {
+  // The old shape awaited the whole batch before painting anything, so one
+  // slow decode gated every tile and the batch's decoded images were all alive
+  // at once. Wire order still holds: the stalled tile paints before the one
+  // behind it, however early that one decoded.
+  stalled = new Set([2]);
+  const p = painter();
+  const done = p.draw(
+    batchFrame([
+      { op: "tile", slot: NO_SLOT, x: 0, y: 0, payload: [1] },
+      { op: "tile", slot: NO_SLOT, x: 1, y: 0, payload: [2] },
+      { op: "tile", slot: NO_SLOT, x: 2, y: 0, payload: [3] },
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    drawn.map((d) => d.tag),
+    [1],
+    "the tile before the stall waited for it",
+  );
+  releaseDecodes();
+  await done;
+  assert.deepEqual(
+    drawn.map((d) => d.tag),
+    [1, 2, 3],
+  );
+});
+
+test("a cache reset closes the decoded bitmaps with the table", async () => {
+  const p = painter();
+  await p.draw(batchFrame([{ op: "tile", slot: 5, x: 0, y: 0, payload: [1] }]));
+  await p.draw(batchFrame([{ op: "ref", slot: 200, x: 0, y: 0 }]));
+  assert.ok(decoded[0].closed, "a reset left a cached bitmap alive");
+});
+
+test("clear() closes the decoded bitmaps, not only the slot table", async () => {
+  const p = painter();
+  await p.draw(batchFrame([{ op: "tile", slot: 5, x: 0, y: 0, payload: [1] }]));
+  p.clear();
+  assert.ok(decoded[0].closed, "the cache belongs to one attachment");
 });
 
 test("a batch of misses asks for one reset, not one per miss", async () => {

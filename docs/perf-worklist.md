@@ -75,6 +75,53 @@ bottom.
   and retaining ~12 s when the client discards past 1.5 s on arrival could only
   ever waste the congested link's bandwidth.
 
+- **Decoded `ImageBitmap` cache for `TILE_REF`** (`frontend/src/tilePainter.ts`).
+  The slot cache stored encoded bytes, so every reference paid a Blob, a decode
+  and a GPU upload for pixels this client had already decoded. Decoded bitmaps
+  are now kept per slot under a 16 MiB budget (LRU by re-insertion into a
+  `Map`), refcounted so an overwrite mid-batch closes the old bitmap after the
+  last pending draw rather than under it. The encoded table stays authoritative:
+  an evicted slot re-decodes from its bytes, and adoption happens in wire order
+  at draw time so an in-batch double write keeps the bitmap that matches the
+  bytes.
+- **Wire-order painting without the whole-batch barrier** (`tilePainter.ts`).
+  `Promise.all` made every batch paint at its slowest decode with up to 4096
+  decoded images alive at once. Decodes still all start together, but the paint
+  loop awaits them in wire order and draws each as it lands — one slow decode
+  holds back what follows it and nothing before it, and each image is released
+  the moment it is drawn.
+- **Control messages out of the decode queue** (`frontend/src/useRemoteDesktop.ts`).
+  Every message rode one promise chain behind tile decodes, so a cursor shape or
+  a clipboard answer queued behind a pixel backlog. Only `resize`, `videoFormat`,
+  `connected` and `picker` still do — `resize` clears the canvas, and the audit's
+  claim that `videoFormat` needs no ordering was wrong: with a changed decode
+  string it drops a live decoder that queued units still need (`setFormat`).
+  Everything else runs on arrival. `VideoDecoder.decodeQueueSize` observability
+  was not added; it is a diagnostic, not a hot path.
+- **Cursor repaint coalesced to the frame** (`useRemoteDesktop.ts`,
+  `syncCursor`; `paintCursor` now reads through the shared pointer rect cache).
+  `applyView` wrote canvas styles and `syncCursor` immediately read the rect
+  those writes invalidated — a forced layout per pinch/pan event. The repaint
+  now runs once per frame in a rAF callback, after the writes and before the
+  paint, so a gesture frame pays for at most one layout flush shared with the
+  pointer mapping, and nothing on screen shows the deferral.
+- **Frame-aligned motion coalescing** (`frontend/src/outbound.ts`). Coalescing
+  was gated on `bufferedAmount > 0`, which a healthy link never shows. The first
+  move of a burst still leaves immediately; after it, moves within one frame
+  collapse to the newest, sent at the rAF boundary. The congestion path (drain
+  poll) is unchanged and takes over when the socket backs up. Unit-tested in
+  `outbound.test.ts` with an injected frame boundary.
+- **`Int16Array` fast path in `pcmChannels`** (`frontend/src/audioPlayer.ts`).
+  ~96k `DataView.getInt16` calls/s on the main thread become a typed-array view
+  when the packet's byte offset is even (which frame layout makes the common
+  case) and the platform is little-endian (checked, not assumed). The DataView
+  loop remains as the floor, pinned against the fast path by test.
+- **Splice-seam fades** (`audioPlayer.ts`). Both boundary corrections — the
+  underrun re-cushion and the ceiling's trim — were hard splices, a click each.
+  Every source now runs through its own gain node: a buffer that does not butt
+  seamlessly onto its predecessor fades in over 4 ms, and sources stopped by the
+  ceiling clamp fade out into the splice instead of cutting mid-waveform.
+
 ## Gateway — screen
 
 - **Per-pixel swizzle loops on the engine read loop.** `pack_rgb`
@@ -116,34 +163,11 @@ All addressed — see Done.
 
 ## Client
 
-- **The slot cache stores encoded bytes, so every `TILE_REF` re-decodes**
-  (`frontend/src/tilePainter.ts`): Blob + `createImageBitmap` + GPU upload per
-  reference. Cache decoded `ImageBitmap`s under a byte budget (decoded bands
-  are far larger than the 32 KB encoded cap) with refcounting against
-  `paintBatch`'s close.
-- **Whole-batch `Promise.all` before any paint** (`tilePainter.ts`): the batch
-  paints at its slowest decode, and up to 4096 decoded images can be alive at
-  once. Await sequentially in wire order while decodes run concurrently to fix
-  both, and to stop still tiles gating video frames on the `stream` dial.
-- **Control messages queue behind pixel decode** (`useRemoteDesktop.ts`, the
-  serial promise chain): only `resize` needs ordering against draws; cursor,
-  clipboard, `videoFormat` do not. Nothing reads `VideoDecoder.decodeQueueSize`,
-  so decoder lag is invisible.
-- **Touch path layout thrash** (`useRemoteDesktop.ts`): `applyView` writes
-  canvas styles then `syncCursor` reads the rect it just invalidated — a forced
-  layout per pinch/pan frame on the weakest devices.
-- **Mousemove coalescing never engages** (`frontend/src/outbound.ts`): gated on
-  `bufferedAmount > 0`, which a healthy link never shows. rAF-align to one
-  newest-position send per frame.
-- **PCM passthrough sample conversion** (`frontend/src/audioPlayer.ts`,
-  `pcmChannels`): ~96k `DataView.getInt16` calls/s on the main thread; an
-  `Int16Array` view (when byte-aligned) is several times faster.
-- **Audio schedule seams** (`audioPlayer.ts`, `audioSchedule.ts`): both
-  boundary corrections — underrun re-cushion and ceiling trim — are hard
-  splices; no crossfade or gradual drift correction.
-- **Architectural**: no worker/`OffscreenCanvas`; the parse→decode→paint path
-  shares the main thread with React and input. The painter is already factored
-  behind `options.context()` if jank isolation is ever wanted.
+All addressed — see Done — except the one architectural item, deliberately
+left: no worker/`OffscreenCanvas`, so the parse→decode→paint path shares the
+main thread with React and input. The painter is already factored behind
+`options.context()` if jank isolation is ever wanted; it is a restructure, not
+a hot-path fix.
 
 ## Audited and sound — do not regress
 
