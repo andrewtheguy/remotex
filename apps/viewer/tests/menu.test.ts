@@ -74,21 +74,15 @@ describe("the shape of the bar", () => {
     // desktop is focused. Roles are the only things in this tree that carry one,
     // and only three menus are allowed them.
     const menus = buildMenuSpec(context());
+    const allowed = new Set([menus[0].label, "Edit", "Window"]);
     for (const spec of menus) {
-      if (
-        ["Edit", "Window", spec.label === "remotex" ? "remotex" : ""].includes(
-          spec.label,
-        )
-      ) {
+      if (allowed.has(spec.label)) {
         continue;
       }
-      const withRoles = everyItem([spec])
-        .filter((item) => item.role)
-        .map((item) => item.label);
-      // `togglefullscreen` is the exception the platform owns: it is the standard
-      // View item, and its chord is a function key rather than a ⌘ chord.
       expect(
-        withRoles.filter((label) => label !== "Toggle Full Screen"),
+        everyItem([spec])
+          .filter((item) => item.role)
+          .map((item) => item.label),
       ).toEqual([]);
     }
   });
@@ -97,6 +91,20 @@ describe("the shape of the bar", () => {
     // ⌘W is one of the two chords this app exists to hand over. An item carrying it
     // would take it back the moment the desktop lost focus for an instant.
     expect(find(buildMenuSpec(context()), "Close")).toBeUndefined();
+  });
+
+  test("full screen is left to AppKit, which adds its own", () => {
+    // It inserts *Enter Full Screen* into any menu titled "View", so an item here
+    // is the second copy of it — which is what shipped, and what this stops.
+    const view = menu(buildMenuSpec(context()), "View");
+    expect(view.items.map((item) => item.role)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(
+      find(buildMenuSpec(context()), "Toggle Full Screen"),
+    ).toBeUndefined();
   });
 });
 

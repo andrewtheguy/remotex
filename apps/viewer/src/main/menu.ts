@@ -268,6 +268,14 @@ function displayMenu(context: MenuContext): MenuSpec {
   return { label: "Display", items };
 }
 
+/**
+ * The three resize items, and **no full-screen item**.
+ *
+ * AppKit inserts its own *Enter Full Screen* into any menu titled "View", so one
+ * here is the second copy of it. Leaving it to the platform also leaves it the
+ * ⌃⌘F it has always had, which is not a ⌘ chord and so is not one the guest is
+ * waiting for.
+ */
 function viewMenu(context: MenuContext): MenuSpec {
   const { viewer } = context;
   return {
@@ -292,8 +300,6 @@ function viewMenu(context: MenuContext): MenuSpec {
         enabled: canResizeToDisplay(viewer),
         action: "resizeToDisplay",
       },
-      SEPARATOR,
-      { label: "Toggle Full Screen", role: "togglefullscreen" },
     ],
   };
 }
