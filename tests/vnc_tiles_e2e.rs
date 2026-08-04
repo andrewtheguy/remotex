@@ -127,17 +127,32 @@ fn check_tile_frame(
     desktop_w: u32,
     desktop_h: u32,
 ) -> u64 {
-    let tiles = stream.paint(frame);
-    assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
+    let painted = stream.paint(frame);
+    assert!(!painted.is_empty(), "a batch frame that paints nothing");
     let mut area = 0u64;
-    for tile in tiles {
-        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
-        let (x, y, w, h) = (tile.x, tile.y, tile.w, tile.h);
-        assert!(w > 0 && h > 0, "empty tile {w}x{h}");
+    for record in painted {
+        let (x, y, w, h) = record.rect();
+        assert!(w > 0 && h > 0, "empty rectangle {w}x{h}");
         assert!(
             u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
-            "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
+            "rectangle {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
         );
+        area += u64::from(w) * u64::from(h);
+        // A copy carries no payload — that is the whole of what it saves — so its
+        // geometry above is everything there is to check. Its *source* is checked
+        // too: a copy naming pixels off the desktop is one the client cannot read.
+        if let common::Painted::Copy { sx, sy, .. } = record {
+            assert!(
+                u32::from(sx) + u32::from(w) <= desktop_w
+                    && u32::from(sy) + u32::from(h) <= desktop_h,
+                "copy source {w}x{h}+{sx}+{sy} exceeds the {desktop_w}x{desktop_h} desktop"
+            );
+            continue;
+        }
+        let common::Painted::Tile(tile) = record else {
+            unreachable!("a copy was handled above");
+        };
+        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
         // Length first: a malformed payload is exactly what these markers are here
         // to catch, and slicing a short one would panic on the index instead of
         // reporting what was wrong.
@@ -151,7 +166,6 @@ fn check_tile_frame(
             b"\x89PNG\r\n\x1a\n",
             "payload is not a PNG stream"
         );
-        area += u64::from(w) * u64::from(h);
     }
     area
 }

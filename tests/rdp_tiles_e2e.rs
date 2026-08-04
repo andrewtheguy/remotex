@@ -110,8 +110,17 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
 /// Validate one binary batch frame against the documented layout, returning the
 /// rectangles it painted.
 fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> Vec<(u32, u32, u32, u32)> {
-    let tiles = stream.paint(frame);
-    assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
+    let painted = stream.paint(frame);
+    assert!(!painted.is_empty(), "a batch frame with no tiles in it");
+    let tiles: Vec<_> = painted
+        .into_iter()
+        .map(|record| match record {
+            common::Painted::Tile(tile) => tile,
+            // RFB's, and only RFB's: an RDP session never sends a copy, because
+            // nothing in that protocol says a region moved.
+            common::Painted::Copy { .. } => panic!("an RDP session sent a copy record"),
+        })
+        .collect();
     for tile in &tiles {
         assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
         assert!(tile.w > 0 && tile.h > 0, "empty tile {}x{}", tile.w, tile.h);

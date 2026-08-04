@@ -12,10 +12,8 @@ bottom.
 
 ## Next, not backlog
 
-- **VNC Continuous Updates and browser CopyRect.** Generic VNC polls once per
-  `FramebufferUpdate` and expands CopyRect back into encoded pixels for the browser.
-  Negotiate Continuous Updates where supported and add an ordered copy record that
-  lets the painter blit pixels it already holds.
+Nothing. The two items that were here are in Done.
+
 ## Backlog — explicitly not prioritized
 
 - **IronRDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics`, use its real
@@ -33,6 +31,71 @@ bottom.
   `ard` improvements.
 
 ## Done
+
+- **VNC Continuous Updates** (`src/vnc.rs`). Generic `vnc` now advertises the
+  ContinuousUpdates pseudo-encoding (-313) and, where a server answers with the
+  `EndOfContinuousUpdates` that is the only announcement the extension has, asks
+  for the whole desktop and stops polling. A round trip leaves every frame: RFB's
+  request-per-update cycle meant the gateway learned a region had changed no
+  sooner than one LAN round trip after the server knew, on every frame of every
+  scroll and every keystroke.
+
+  What that removes is the pacing this engine had, which the backpressure entry
+  below already found insufficient — 461 batches deep on generic VNC under motion
+  — but which was not *nothing*. Fence (-312) is what replaces it, and is why the
+  two are advertised together: a TigerVNC-family server measures the link by
+  sending a marker down the stream and asking for it back, and cannot do that
+  unless the pseudo-encoding is offered. The echo goes out from the read task
+  rather than the input side, because a fence that waited behind a queue would
+  report a link slower than it is; `SyncNext` is not implemented and so is not
+  claimed back in the echoed flags.
+
+  Non-incremental requests are untouched. They are not polling — they are the
+  repaint that no amount of waiting for damage produces — and a reattach, a
+  resize and a CopyRect from an unlearned source all need one. A resize also
+  re-sends the enable, since the enabled region is part of the request and a
+  server left holding the old rectangle would push updates for pixels that are
+  gone. A second `EndOfContinuousUpdates` is the acknowledgement of a disable this
+  client never asks for, so it is read as the server stopping on its own and the
+  polling loop starts again rather than the screen freezing.
+
+  Not offered to either Apple subtype: those encoding lists are measured exact and
+  adding to one costs the display layout. Verified against a real Xtigervnc
+  (`vnc_tiles_e2e`, which now runs the whole test with the extension on), and
+  pinned at the wire by a scripted server in `protocol_e2e` that reads the
+  client's own messages — the enable arrives, the fence comes back, and no
+  incremental request is ever sent.
+
+- **Browser CopyRect** (`COPY`, op `0x04`; `src/wire.rs`, `src/tiles.rs`,
+  `frontend/src/tilePainter.ts`). CopyRect saved the RFB link its pixels and then
+  paid the browser link in full: the source was read back out of the shadow and
+  re-encoded, which for a scrolling window is most of a desktop per frame. It is
+  now a thirteen-byte record naming where the client already has the pixels, and
+  the painter blits its own canvas.
+
+  Three things make it sound rather than merely small. A copy **reads** the
+  canvas, so `wire.rs`'s coverage rule may not reach back past one — a tile it
+  would drop as "a paint nobody could have seen" is the copy's input — which is
+  what `copy_barrier` holds; the scan is forward from it, so tiles *after* a copy
+  still supersede each other and the common case (no copies) is one comparison.
+  A copy is never itself dropped, cached or referenced: it is an instruction, not
+  a picture. And it is only sent where the client's canvas is made **entirely** of
+  tiles (`TileSink::copies`) — under a `Tile` motion encode a moving cell owes a
+  cleanup from stashed pixels that a later tick would restore over anything copied
+  in, permanently, since the shadow has already recorded them as delivered; under
+  either streaming plan the client's pixels come from a decoder and the mirror,
+  not the canvas, is what a region encodes from. Both fall back to reading the
+  source out of the shadow, exactly as before. A lossy `base` codec is not an
+  objection: the canvas has always been JPEG's or WebP's reading of the shadow
+  there, and moving those pixels is no further from the truth than drawing them
+  was.
+
+  The shadow moves its own copy in step (`Shadow::copy_within`), reading the
+  source whole before writing so an overlapping copy moves the original pixels —
+  which is what a canvas blit does anyway, and what RFB requires. A destination
+  already holding those exact pixels sends nothing, the same dedup `accept`
+  already does. A source the shadow never learned still costs one non-incremental
+  repaint rather than a guess.
 
 - **RDP cursor rendered locally** (`src/rdp.rs`, `Pointer`). IronRDP is no longer
   asked to composite the pointer into the framebuffer
@@ -262,8 +325,12 @@ bottom.
   instead — see the cursor entry above.) Leading edge kept:
   a batch on a quiet screen still leaves on the spot. Cleared where the
   geometry dies (reactivation) or a full repaint subsumes it (`Refresh`). VNC
-  is left unpaced on purpose — RFB updates arrive only when the client asks,
-  so the client's request cadence is already the pacing.
+  is left unpaced on purpose. That read at the time as "RFB updates arrive only
+  when the client asks, so the request cadence is already the pacing", which
+  Continuous Updates has since made false — a server now pushes as it changes.
+  The conclusion stands on the other leg it always had: the pacing that matters
+  is at the browser hop, which the window below bounds, and the fence echo is
+  what lets an RFB server pace itself.
 - **Whole-desktop encode threading** (`src/vp9.rs`, `src/h264.rs`,
   `video::threads_for`). A stream covering the whole mirror has no sibling
   regions to overlap with, so it now gets up to half the cores (capped at 4),

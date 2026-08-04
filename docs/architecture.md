@@ -500,6 +500,7 @@ TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
 VIDEO    op 0x03: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
+COPY     op 0x04: u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
 ```
 
 Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
@@ -532,6 +533,22 @@ decoder it belongs to, since a session may run several at once, and its keyframe
 comes from the encoder rather than from parsing the payload — VP9 carries no parameter
 sets to read one out of. The rectangle is the region's true one, and the decoded picture
 may exceed it by a pixel on either axis (see the render dial).
+
+`COPY` moves pixels the client already holds from `(sx, sy)` to `(x, y)`, both
+`w`x`h`: RFB's CopyRect carried through to the browser instead of stopping at the
+gateway, which used to read the source out of its shadow and re-encode it. Thirteen
+bytes whatever the rectangle, which for a scrolling window is most of a desktop.
+The client blits its own canvas, so an overlapping copy moves the original pixels.
+
+A copy *reads* the canvas at its place in the order, which is one more constraint
+than the other records carry: everything before it in the batch has to have been
+drawn, so `wire.rs` will not drop a tile that precedes one — coverage reaches back
+only as far as the last `COPY`. A copy is never itself dropped, cached or
+referenced; it is an instruction and not a picture. Only a target whose canvas is
+made entirely of tiles is sent them (`TileSink::copies`): under a motion strategy a
+cell owes a cleanup from stashed pixels that would be restored over anything copied
+in, and under either streaming plan the client's pixels come from a decoder rather
+than from tiles at all. Both fall back to reading the source out of the shadow.
 
 A client that cannot decode a cached tile or receives a reference to a missing
 slot sends `cacheReset`. This clears the outbound slot table and requests a
@@ -771,9 +788,29 @@ CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first 
 supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
 moves. Tight, TightPNG, JPEG and H.264 are deliberately absent: vendor or lossy,
 and this gateway re-encodes every tile for the browser anyway. CopyRect names a
-source region rather than carrying pixels; the VNC read path does not forward
-blits, so the pixels are read back out of the shadow, and a source the shadow does
-not know costs one non-incremental repaint rather than an invented picture.
+source region rather than carrying pixels, and where the client's canvas is made
+entirely of tiles that carries straight through as a `COPY` record: the shadow
+moves its own copy of the pixels and the browser blits its own canvas, so a scroll
+costs thirteen bytes on both links instead of an encode on the second. Where it
+does not — a motion or streaming plan — the pixels are read back out of the shadow
+as before. Either way a source the shadow does not know costs one non-incremental
+repaint rather than an invented picture.
+
+Generic `vnc` also advertises **ContinuousUpdates** and **Fence**, which go
+together. A server that supports the first answers the `SetEncodings` carrying it
+with an `EndOfContinuousUpdates` message — the only way it is ever announced — and
+the client then asks for the whole desktop and stops polling: updates arrive as
+the screen changes rather than one per request, which takes a round trip out of
+every frame. Non-incremental requests are unaffected and still go where they went,
+because a repaint no amount of waiting for damage will produce is exactly what a
+reattach, a resize and an unknown CopyRect source need; a resize also re-sends the
+enable, since the region is part of the request. What that removes is this
+engine's only pacing, which is what Fence restores: the server sends a marker down
+the stream and asks for it back, and the read loop echoes it immediately, so its
+congestion control can measure this end. A server offering neither is unaffected —
+it says nothing and the polling loop never stops. The Apple subtypes are not
+offered either: their encoding lists are measured exact, and adding to one costs
+the display layout.
 
 With `resize = true`,
 the client advertises DesktopSize and ExtendedDesktopSize against servers that

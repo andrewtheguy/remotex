@@ -15,6 +15,7 @@ import { createTilePainter, type TilePainter } from "./tilePainter.ts";
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
+const OP_COPY = 0x04;
 const FORMAT_PNG = 1;
 
 type Record =
@@ -29,6 +30,15 @@ type Record =
       h?: number;
     }
   | { op: "ref"; slot: number; x: number; y: number }
+  | {
+      op: "copy";
+      sx: number;
+      sy: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+    }
   | {
       op: "video";
       stream: number;
@@ -55,6 +65,16 @@ function batchFrame(records: Record[]): ArrayBuffer {
       u16(record.slot);
       u16(record.x);
       u16(record.y);
+      continue;
+    }
+    if (record.op === "copy") {
+      bytes.push(OP_COPY);
+      u16(record.sx);
+      u16(record.sy);
+      u16(record.x);
+      u16(record.y);
+      u16(record.w);
+      u16(record.h);
       continue;
     }
     if (record.op === "video") {
@@ -107,6 +127,17 @@ let cropped: {
   dw: number;
   dh: number;
 }[] = [];
+/** Nine-argument draws whose source was the canvas itself: a COPY record. */
+let blitted: {
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+  dx: number;
+  dy: number;
+  dw: number;
+  dh: number;
+}[] = [];
 let decoded: FakeBitmap[] = [];
 let resets = 0;
 let videoErrors: (string | null)[] = [];
@@ -118,10 +149,16 @@ let bitmapDims = { width: 1, height: 1 };
 let stalled = new Set<number>();
 let releaseDecodes = () => {};
 
+// The surface a copy names as its own source. Identity is the whole test: a
+// nine-argument draw off the canvas is a blit, and off a decoded picture it is a
+// padded video frame being cropped.
+const canvas = { id: "the canvas itself" };
+
 const context = {
-  drawImage(bitmap: FakeBitmap, ...args: number[]) {
+  canvas,
+  drawImage(source: FakeBitmap | typeof canvas, ...args: number[]) {
     if (args.length === 8) {
-      cropped.push({
+      (source === canvas ? blitted : cropped).push({
         sx: args[0],
         sy: args[1],
         sw: args[2],
@@ -133,7 +170,7 @@ const context = {
       });
       return;
     }
-    drawn.push({ tag: bitmap.tag, x: args[0], y: args[1] });
+    drawn.push({ tag: (source as FakeBitmap).tag, x: args[0], y: args[1] });
   },
 } as unknown as CanvasRenderingContext2D;
 
@@ -209,6 +246,7 @@ const hadWindow = "window" in globals;
 beforeEach(() => {
   drawn = [];
   cropped = [];
+  blitted = [];
   decoded = [];
   resets = 0;
   videoErrors = [];
@@ -296,6 +334,91 @@ test("tiles are drawn in wire order at their own coordinates", async () => {
     { tag: 2, x: 30, y: 40 },
     { tag: 3, x: 10, y: 20 },
   ]);
+});
+
+test("a copy blits the canvas onto itself, source rectangle to destination", async () => {
+  await painter().draw(
+    batchFrame([{ op: "copy", sx: 0, sy: 64, x: 0, y: 0, w: 1920, h: 936 }]),
+  );
+  assert.deepEqual(blitted, [
+    { sx: 0, sy: 64, sw: 1920, sh: 936, dx: 0, dy: 0, dw: 1920, dh: 936 },
+  ]);
+  assert.deepEqual(drawn, [], "a copy decodes nothing");
+  assert.deepEqual(cropped, [], "and is not a video frame being cropped");
+  assert.equal(resets, 0);
+});
+
+test("a copy reads the canvas the records before it left behind", async () => {
+  // The ordering claim the whole record rests on. Its source is drawn by a tile in
+  // the same batch, and tiles decode asynchronously — so a copy that did not keep
+  // its place in the wire order would blit pixels that were not there yet.
+  stalled = new Set([1]);
+  const p = painter();
+  const pending = p.draw(
+    batchFrame([
+      { op: "tile", slot: NO_SLOT, x: 0, y: 0, payload: [1] },
+      { op: "copy", sx: 0, sy: 0, x: 64, y: 0, w: 32, h: 32 },
+      { op: "tile", slot: NO_SLOT, x: 128, y: 0, payload: [2] },
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    blitted,
+    [],
+    "the copy went first past a decode it must wait for",
+  );
+  releaseDecodes();
+  await pending;
+  assert.deepEqual(drawn, [
+    { tag: 1, x: 0, y: 0 },
+    { tag: 2, x: 128, y: 0 },
+  ]);
+  assert.equal(blitted.length, 1);
+  assert.deepEqual(blitted[0], {
+    sx: 0,
+    sy: 0,
+    sw: 32,
+    sh: 32,
+    dx: 64,
+    dy: 0,
+    dw: 32,
+    dh: 32,
+  });
+});
+
+test("a copy neither claims a slot nor asks for a cache reset", async () => {
+  // It is an instruction, not a picture: nothing to remember, and a client that
+  // has drawn it holds no bytes the server could later reference.
+  const p = painter();
+  await p.draw(batchFrame([{ op: "tile", slot: 0, x: 0, y: 0, payload: [9] }]));
+  await p.draw(
+    batchFrame([{ op: "copy", sx: 0, sy: 0, x: 8, y: 8, w: 4, h: 4 }]),
+  );
+  await p.draw(batchFrame([{ op: "ref", slot: 0, x: 16, y: 16 }]));
+  assert.deepEqual(drawn, [
+    { tag: 9, x: 0, y: 0 },
+    { tag: 9, x: 16, y: 16 },
+  ]);
+  assert.equal(resets, 0, "the copy did not disturb the slot table");
+});
+
+test("a copy that arrives after the attachment ended is not painted", async () => {
+  // Same rule as a stale tile, and for a sharper reason: a blit onto the next
+  // attachment's canvas moves *its* pixels, not the ones the record was about.
+  stalled = new Set([1]);
+  const p = painter();
+  const pending = p.draw(
+    batchFrame([
+      { op: "tile", slot: NO_SLOT, x: 0, y: 0, payload: [1] },
+      { op: "copy", sx: 0, sy: 0, x: 64, y: 0, w: 32, h: 32 },
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  p.clear();
+  releaseDecodes();
+  await pending;
+  assert.deepEqual(blitted, []);
+  assert.deepEqual(drawn, []);
 });
 
 test("a reference redraws its slot's payload at its own position", async () => {

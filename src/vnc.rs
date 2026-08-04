@@ -38,12 +38,12 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM,
-    MouseButton, ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
+    self, ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES,
+    MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
-use crate::vnc_encodings::{Decoders, Payload};
+use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::vnc_clipboard;
 use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
@@ -104,6 +104,30 @@ const ENCODING_EXTENDED_DESKTOP_SIZE: i32 = -308;
 /// header's count said. Servers use it to start sending an update before they know
 /// how many rectangles it will hold, declaring `0xffff` of them.
 const ENCODING_LAST_RECT: i32 = -224;
+/// Fence pseudo-encoding: the server may send a marker down the stream and ask for
+/// it back, which is how it measures the round trip and sizes its congestion window.
+///
+/// Advertised for [`ENCODING_CONTINUOUS_UPDATES`]'s sake rather than for its own:
+/// with updates arriving unasked, echoing fences is the only thing left telling the
+/// server how fast this end is actually keeping up.
+const ENCODING_FENCE: i32 = -312;
+/// ContinuousUpdates pseudo-encoding: ask the server to send framebuffer updates
+/// for a region as it changes, rather than one per request.
+const ENCODING_CONTINUOUS_UPDATES: i32 = -313;
+/// EndOfContinuousUpdates, both a support announcement and the acknowledgement of a
+/// disable. Server message type; there is no client message with this number.
+const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
+/// ServerFence and ClientFence share a message type in the two directions.
+const MSG_FENCE: u8 = 248;
+/// A fence the server wants echoed. Nothing else in the flags word obliges a
+/// client, and the two it may keep are [`FENCE_BLOCK_BEFORE`] and
+/// [`FENCE_BLOCK_AFTER`].
+const FENCE_REQUEST: u32 = 1 << 31;
+const FENCE_BLOCK_BEFORE: u32 = 1 << 0;
+const FENCE_BLOCK_AFTER: u32 = 1 << 1;
+/// Longest fence payload the extension defines. A server sending more is malformed;
+/// the excess is consumed to keep the stream in step and left out of the echo.
+const MAX_FENCE_PAYLOAD: usize = 64;
 /// Bytes per pixel of the format we force with SetPixelFormat.
 pub(crate) const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
@@ -812,6 +836,14 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
     // Cursor is unconditional (the browser can always draw a pointer). The resize
     // pseudo-encodings are advertised only when the target opts in; without them
     // the server never announces support and keeps its connect-time size.
+    //
+    // ContinuousUpdates and Fence are unconditional and go together. The first asks
+    // the server to send updates for the whole desktop as it changes instead of once
+    // per request, which removes a round trip from every frame — and with it the
+    // request cadence that was this engine's only pacing, which is what the second is
+    // for: the server measures the link by fences it asks this end to echo, and
+    // cannot do that unless the pseudo-encoding is in this list. A server with
+    // neither is unaffected: it says nothing, and the polling loop below never stops.
     let mut encodings = vec![
         ENCODING_COPY_RECT,
         ENCODING_ZRLE,
@@ -820,6 +852,8 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
         ENCODING_RRE,
         ENCODING_RAW,
         ENCODING_CURSOR,
+        ENCODING_CONTINUOUS_UPDATES,
+        ENCODING_FENCE,
     ];
     if resize {
         encodings.push(ENCODING_EXTENDED_DESKTOP_SIZE);
@@ -1329,6 +1363,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // The connection's decoder state: the deflate streams and whatever else an
     // encoding carries from one rectangle to the next.
     let mut decoders = Decoders::default();
+    // Whether the server is pushing updates unasked, and whether it has ever said it
+    // could. Two flags rather than one because the extension uses the same message
+    // for both answers: the first is the support announcement, and any later one is
+    // the acknowledgement of a disable — which this client never asks for, so seeing
+    // a second means the server has stopped on its own and the polling loop has to
+    // take over again.
+    let mut continuous = false;
+    let mut continuous_supported = false;
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -1427,6 +1469,19 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // out still reaches it.
                 sink.frame().await?;
                 let size = desktop.lock().unwrap().size;
+                // The enabled region is part of the request, so a resize invalidates
+                // it: without this the server would go on pushing updates for a
+                // rectangle the desktop no longer has.
+                if continuous && resized {
+                    send(uplink, &enable_continuous_updates(true, size)).await?;
+                }
+                // With the server pushing, asking for an *incremental* update is the
+                // one thing that has to stop — it is the round trip per frame this
+                // removes. Non-incremental requests are unaffected and still go where
+                // they went: this gateway needs a full repaint that no amount of
+                // waiting for damage will produce, on a reattach, a resize, or a
+                // CopyRect whose source it never learned.
+                let poll = poll && !continuous;
                 if full_repaint_owed {
                     // Layout metadata and empty updates can arrive before the
                     // pixels this request earns. Hold the polling loop until the
@@ -1538,6 +1593,56 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 {
                     return Ok(()); // browser link gone; the session layer handles it
                 }
+            }
+            // EndOfContinuousUpdates, which carries nothing: the message is the
+            // whole content, and which of its two meanings it has depends only on
+            // whether one has arrived before.
+            //
+            // The first is the server answering the SetEncodings that advertised the
+            // pseudo-encoding — the only way it ever says it supports the extension —
+            // and is answered by turning it on. A later one is the acknowledgement of
+            // a disable, which this client never sends, so the honest reading is that
+            // the server has stopped pushing; polling resumes and one request is sent
+            // to restart the cycle it had replaced.
+            MSG_END_OF_CONTINUOUS_UPDATES => {
+                let size = desktop.lock().unwrap().size;
+                if continuous_supported {
+                    info!("vnc: the server ended continuous updates; polling again");
+                    continuous = false;
+                    if poll {
+                        send(uplink, &update_request(true, size)).await?;
+                    }
+                    continue;
+                }
+                info!("vnc: the server offers continuous updates; enabling them");
+                continuous_supported = true;
+                continuous = true;
+                send(uplink, &enable_continuous_updates(true, size)).await?;
+            }
+            // ServerFence: a marker the server sends down the stream and asks back,
+            // which is how it measures this end and paces itself. Echoed here, on the
+            // read task, so the answer is not queued behind anything the input side is
+            // doing — a fence that waited would report a link slower than it is.
+            MSG_FENCE => {
+                let mut padding = [0u8; 3];
+                reader.read_exact(&mut padding).await?;
+                let flags = reader.read_u32().await?;
+                let len = usize::from(reader.read_u8().await?);
+                let mut payload = vec![0u8; len];
+                reader.read_exact(&mut payload).await?;
+                if flags & FENCE_REQUEST == 0 {
+                    // A fence this end never asked for. Not fatal — nothing here is
+                    // waiting on it — but worth a line, because it means the server
+                    // believes it is answering something.
+                    debug!("vnc: ignoring an unrequested server fence");
+                    continue;
+                }
+                payload.truncate(MAX_FENCE_PAYLOAD);
+                // Only the two flags this loop actually honours are claimed back;
+                // `SyncNext` in particular is not implemented and must not be echoed
+                // as though it were.
+                let flags = flags & (FENCE_BLOCK_BEFORE | FENCE_BLOCK_AFTER);
+                send(uplink, &client_fence(flags, &payload)).await?;
             }
             // Apple's pasteboard status. `cmd = 2` says the remote clipboard
             // changed and must be fetched; `cmd = 3` asks for the browser's last
@@ -2151,14 +2256,36 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // position — sends that framing whatever its geometry says, and the RFB stream
     // has no framing of its own above the record layer, so stepping past by the
     // wrong number of bytes desyncs everything after it.
-    let Some(rgb) = decoders.decode(reader, payload, shadow, w, h).await? else {
+    let decoded = decoders
+        .decode(reader, payload, shadow, sink.copies().then_some((x, y)), w, h)
+        .await?;
+    let Some(rect) = Rect::from_size(x, y, w, h) else {
+        return Ok(RectEffect::NOTHING);
+    };
+    let rgb = match decoded {
+        Decoded::Pixels(rgb) => rgb,
+        // A CopyRect this client can do itself. The shadow has already moved its
+        // own copy of the pixels, so the record is all that is owed — and it goes
+        // through `msg` rather than the tile path because that is the queue whose
+        // order against the tiles is the contract a copy reads the canvas under.
+        Decoded::Copied(src) => {
+            sink.msg(ServerMsg::Copy(protocol::CopyRect {
+                sx: src.left,
+                sy: src.top,
+                x,
+                y,
+                w,
+                h,
+            }))
+            .await?;
+            return Ok(RectEffect::pixels(rect));
+        }
+        // A CopyRect onto pixels identical to the ones already there.
+        Decoded::Unchanged => return Ok(RectEffect::pixels(rect)),
         // A CopyRect whose source this side never learned. Guessing would leave
         // wrong pixels on screen until something else happened to change that area;
         // one full request makes the source known instead.
-        return Ok(RectEffect::FULL_REPAINT);
-    };
-    let Some(rect) = Rect::from_size(x, y, w, h) else {
-        return Ok(RectEffect::NOTHING);
+        Decoded::Unavailable => return Ok(RectEffect::FULL_REPAINT),
     };
 
     // What of this rect the browser does not already have. A server that
@@ -2775,6 +2902,36 @@ fn update_request(incremental: bool, size: (u16, u16)) -> [u8; 10] {
     // msg[2..6]: x, y = 0
     msg[6..8].copy_from_slice(&size.0.to_be_bytes());
     msg[8..10].copy_from_slice(&size.1.to_be_bytes());
+    msg
+}
+
+/// EnableContinuousUpdates for the whole desktop.
+///
+/// Sent only after the server has announced support by sending
+/// [`MSG_END_OF_CONTINUOUS_UPDATES`], and re-sent whenever the desktop changes size:
+/// the region is part of the request, so a server told about the old one would go on
+/// pushing updates for a rectangle that no longer exists.
+fn enable_continuous_updates(enable: bool, size: (u16, u16)) -> [u8; 10] {
+    let mut msg = [0u8; 10];
+    msg[0] = MSG_END_OF_CONTINUOUS_UPDATES; // the client message shares the number
+    msg[1] = u8::from(enable);
+    // msg[2..6]: x, y = 0
+    msg[6..8].copy_from_slice(&size.0.to_be_bytes());
+    msg[8..10].copy_from_slice(&size.1.to_be_bytes());
+    msg
+}
+
+/// ClientFence: the server's own marker handed straight back.
+///
+/// BlockBefore and BlockAfter need nothing done to honour them — this loop reads and
+/// acts on one message at a time, in order — so the whole of the obligation is the
+/// echo, and the flags this end does not implement are dropped from it rather than
+/// claimed.
+fn client_fence(flags: u32, payload: &[u8]) -> Vec<u8> {
+    let mut msg = vec![MSG_FENCE, 0, 0, 0];
+    msg.extend_from_slice(&flags.to_be_bytes());
+    msg.push(payload.len() as u8);
+    msg.extend_from_slice(payload);
     msg
 }
 
@@ -3521,6 +3678,8 @@ mod tests {
                 ENCODING_RRE,
                 ENCODING_RAW,
                 ENCODING_CURSOR,
+                ENCODING_CONTINUOUS_UPDATES,
+                ENCODING_FENCE,
             ]
         );
 
@@ -4599,10 +4758,11 @@ mod tests {
         assert_eq!(tiles, 1, "five encodings of one picture, one tile");
     }
 
-    /// CopyRect saves the VNC link the pixels but not the browser link: the tile
-    /// still has to be sent, built out of the shadow rather than off the wire.
+    /// CopyRect saves the VNC link its pixels, and now the browser link too: the
+    /// destination is a thirteen-byte record naming where the client already has
+    /// them, not an encode of pixels it is holding.
     #[tokio::test]
-    async fn a_copy_rect_moves_pixels_the_browser_already_has() {
+    async fn a_copy_rect_reaches_the_browser_as_a_copy() {
         let wire = update(&[
             raw_rect(0, 0, 2, 2, [0x30, 0x20, 0x10]),
             copy_rect((2, 0, 2, 2), (0, 0)),
@@ -4628,11 +4788,74 @@ mod tests {
 
         sink.flush().await;
         let mut tiles = Vec::new();
-        while let Ok(ServerMsg::Tile(tile)) = rx.try_recv() {
-            tiles.push(tile);
+        let mut copies = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                ServerMsg::Tile(tile) => tiles.push(tile),
+                ServerMsg::Copy(copy) => copies.push(copy),
+                _ => {}
+            }
         }
-        assert_eq!(tiles.len(), 2, "the painted rect and the copy of it");
+        assert_eq!(tiles.len(), 1, "only the painted rect carried pixels");
         assert_eq!((tiles[0].x, tiles[0].y), (0, 0));
+        assert_eq!(
+            copies,
+            vec![protocol::CopyRect { sx: 0, sy: 0, x: 2, y: 0, w: 2, h: 2 }],
+            "the copy names the source and lands at the destination"
+        );
+    }
+
+    /// The plans a copy is not sound on fall back to what this engine always did:
+    /// the source read out of the shadow and encoded as a tile. Under a motion
+    /// strategy a moving cell owes a cleanup from stashed pixels, and copied-in ones
+    /// would be restored away by a debt holding an older picture.
+    #[tokio::test]
+    async fn a_target_with_a_motion_strategy_still_gets_the_pixels() {
+        let wire = update(&[
+            raw_rect(0, 0, 2, 2, [0x30, 0x20, 0x10]),
+            copy_rect((2, 0, 2, 2), (0, 0)),
+        ]);
+
+        let (uplink, _sent) = test_uplink();
+        let (frame_tx, mut rx) = mpsc::channel(8);
+        let sink = TileSink::new(
+            "vnc",
+            frame_tx,
+            crate::config::RenderPlan::Tiles {
+                base: crate::config::TileCodec::Png,
+                motion: Some(crate::config::MotionEncode::Tile(
+                    crate::config::TileCodec::Jpeg(60),
+                )),
+                debug: false,
+            },
+        );
+        assert!(!sink.copies(), "a motion plan must not be offered copies");
+        let shared = test_shared(
+            uplink,
+            shared_desktop((4, 2), None, None),
+            test_shadow((4, 2)),
+        );
+        let err = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
+
+        sink.flush().await;
+        let mut tiles = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                ServerMsg::Tile(tile) => tiles.push(tile),
+                ServerMsg::Copy(_) => panic!("a motion plan was sent a copy record"),
+                _ => {}
+            }
+        }
+        assert_eq!(tiles.len(), 2, "the painted rect and the copy of it, as pixels");
         assert_eq!(
             (tiles[1].x, tiles[1].y, tiles[1].w, tiles[1].h),
             (2, 0, 2, 2),
@@ -4923,6 +5146,214 @@ mod tests {
                 if poll { "" } else { " not" }
             );
         }
+    }
+
+    // MARK: continuous updates and fences
+
+    /// A bare `EndOfContinuousUpdates`, which is the whole message.
+    fn end_of_continuous_updates() -> Vec<u8> {
+        vec![MSG_END_OF_CONTINUOUS_UPDATES]
+    }
+
+    /// A ServerFence: three bytes of padding, the flags, and a counted payload.
+    fn server_fence(flags: u32, payload: &[u8]) -> Vec<u8> {
+        let mut msg = vec![MSG_FENCE, 0, 0, 0];
+        msg.extend_from_slice(&flags.to_be_bytes());
+        msg.push(payload.len() as u8);
+        msg.extend_from_slice(payload);
+        msg
+    }
+
+    /// The extension's whole handshake: the server's one-message answer to the
+    /// SetEncodings that advertised it, and this side turning it on for the desktop
+    /// it currently has.
+    #[tokio::test]
+    async fn a_server_that_offers_continuous_updates_is_asked_for_them() {
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((640, 480), None, None),
+            test_shadow((640, 480)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(end_of_continuous_updates()),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            None,
+            sink,
+        )
+        .await;
+
+        assert_eq!(written(&sent), enable_continuous_updates(true, (640, 480)));
+    }
+
+    /// The point of the extension: with the server pushing, the round trip per frame
+    /// goes away. Nothing but the enable is written, where a polling session answers
+    /// every update with a request.
+    #[tokio::test]
+    async fn a_continuous_session_stops_asking_for_the_next_update() {
+        for continuous in [true, false] {
+            let mut wire = Vec::new();
+            if continuous {
+                wire.extend_from_slice(&end_of_continuous_updates());
+            }
+            wire.extend_from_slice(&raw_update());
+
+            let (uplink, sent) = test_uplink();
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(
+                uplink,
+                shared_desktop((2, 2), None, None),
+                test_shadow((2, 2)),
+            );
+            let _ = read_loop(
+                std::io::Cursor::new(wire),
+                shared,
+                ReadFlags { clipboard: false, poll: true },
+                None,
+                sink,
+            )
+            .await;
+
+            let expected = if continuous {
+                enable_continuous_updates(true, (2, 2)).to_vec()
+            } else {
+                update_request(true, (2, 2)).to_vec()
+            };
+            assert_eq!(written(&sent), expected, "continuous = {continuous}");
+        }
+    }
+
+    /// A second `EndOfContinuousUpdates` is the acknowledgement of a disable, and
+    /// this client never asks for one — so the server has stopped on its own, and
+    /// the polling loop it replaced has to start again or the screen freezes.
+    #[tokio::test]
+    async fn a_server_that_stops_pushing_is_polled_again() {
+        let mut wire = end_of_continuous_updates();
+        wire.extend_from_slice(&end_of_continuous_updates());
+        wire.extend_from_slice(&raw_update());
+
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            None,
+            sink,
+        )
+        .await;
+
+        let mut expected = enable_continuous_updates(true, (2, 2)).to_vec();
+        expected.extend_from_slice(&update_request(true, (2, 2)));
+        expected.extend_from_slice(&update_request(true, (2, 2)));
+        assert_eq!(
+            written(&sent),
+            expected,
+            "the disable acknowledgement restarts the cycle, and the update after it is polled"
+        );
+    }
+
+    /// The enabled region is part of the request, so a desktop that changed size
+    /// invalidates it — and a server left holding the old rectangle would go on
+    /// pushing updates for pixels that are no longer there.
+    #[tokio::test]
+    async fn a_resize_re_enables_continuous_updates_for_the_new_desktop() {
+        let mut wire = end_of_continuous_updates();
+        wire.extend_from_slice(&update(&[geometry(0, 0, 8, 4, ENCODING_DESKTOP_SIZE)]));
+
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            None,
+            sink,
+        )
+        .await;
+
+        let mut expected = enable_continuous_updates(true, (2, 2)).to_vec();
+        expected.extend_from_slice(&enable_continuous_updates(true, (8, 4)));
+        // A resize still costs one full request: the client has just cleared a
+        // framebuffer of a different size and nothing it holds is worth keeping.
+        expected.extend_from_slice(&update_request(false, (8, 4)));
+        assert_eq!(written(&sent), expected);
+    }
+
+    /// The server's marker, handed straight back. This is the only thing telling a
+    /// pushing server how fast this end is keeping up, so it has to leave the read
+    /// task rather than wait behind anything.
+    #[tokio::test]
+    async fn a_requested_fence_is_echoed_without_the_flags_this_client_does_not_honour() {
+        // Request, BlockBefore, and SyncNext — which is not implemented and must not
+        // be claimed back.
+        let flags = FENCE_REQUEST | FENCE_BLOCK_BEFORE | (1 << 2);
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(server_fence(flags, b"marker")),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            None,
+            sink,
+        )
+        .await;
+
+        assert_eq!(written(&sent), client_fence(FENCE_BLOCK_BEFORE, b"marker"));
+    }
+
+    /// A fence with no Request bit is an answer to something this side never asked,
+    /// and answering it would be a fence of this client's own. Its payload is still
+    /// consumed: the RFB stream has no framing above the record layer, so a message
+    /// stepped over by the wrong number of bytes desyncs everything behind it.
+    #[tokio::test]
+    async fn an_unrequested_fence_is_stepped_over_rather_than_answered() {
+        let mut wire = server_fence(FENCE_BLOCK_AFTER, b"unasked");
+        wire.extend_from_slice(&raw_update());
+
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            None,
+            sink.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            written(&sent),
+            update_request(true, (2, 2)),
+            "the update behind the fence was read, and nothing answered the fence"
+        );
+        sink.flush().await;
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|m| matches!(m, ServerMsg::Tile(_))),
+            "the rectangle behind the fence has to survive it"
+        );
     }
 
     #[test]

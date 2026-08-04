@@ -18,8 +18,10 @@ const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
+const OP_COPY = 0x04;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
+const COPY_LEN = 13;
 const NO_SLOT = 0xffff;
 const SLOT_COUNT = 256;
 const TILE_FORMAT_PNG = 1;
@@ -62,6 +64,20 @@ function parseBatch(payload: Buffer): Batch {
       }
       records.push({ op: OP_TILE_REF, slot: payload.readUInt16LE(at + 1) });
       at += TILE_REF_LEN;
+      continue;
+    }
+    // A copy carries no payload and no slot, so there is nothing here to record
+    // but the fact of it. Transcribed even though a Mac never sends one — the
+    // encoding lists for both Apple subtypes omit CopyRect, so only generic VNC
+    // can produce this — because a parser that is a partial transcription of the
+    // wire reports the next record it does not know as a corrupt frame.
+    if (op === OP_COPY) {
+      if (at + COPY_LEN > payload.length) {
+        exact = false;
+        break;
+      }
+      records.push({ op, slot: NO_SLOT });
+      at += COPY_LEN;
       continue;
     }
     // An op this parser does not know stops it here, which is where the bad byte

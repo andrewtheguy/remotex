@@ -173,6 +173,188 @@ async fn serve_fake_vnc(
     }
 }
 
+// ── Continuous Updates, Fence and CopyRect, scripted ────────────────────────
+//
+// A second RFB 3.8 server, separate from the one above rather than a flag on it,
+// because it plays a different game: it announces the ContinuousUpdates extension,
+// pushes updates the client never asked for, and moves a region with CopyRect so
+// the browser link is handed a `COPY` record instead of an encode.
+//
+// Written from the extension's own definition, not from `src/vnc.rs` — the point of
+// an e2e here is that two independent readings of the wire agree.
+
+/// The pseudo-encodings under test, and the two message numbers they add.
+const ENCODING_FENCE: i32 = -312;
+const ENCODING_CONTINUOUS_UPDATES: i32 = -313;
+const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
+const MSG_FENCE: u8 = 248;
+/// The half of the fake desktop that is painted, then copied to the other half.
+const SCROLL_W: u16 = FAKE_DESKTOP / 2;
+
+/// What the scripted server saw the client do, in wire order.
+#[derive(Debug, PartialEq, Eq)]
+enum ScrollRequest {
+    /// Whether the client advertised the two pseudo-encodings this depends on.
+    Encodings { continuous: bool, fence: bool },
+    UpdateRequest { incremental: bool },
+    EnableContinuousUpdates { enable: bool, w: u16, h: u16 },
+    /// A fence handed back, with the flags and payload the client returned.
+    Fence { flags: u32, payload: Vec<u8> },
+}
+
+/// A scripted RFB 3.8 server that supports Continuous Updates and scrolls.
+///
+/// The sequence, and every step of it is answered rather than timed:
+///
+/// 1. `SetEncodings` is answered with `EndOfContinuousUpdates`, which is the only
+///    way the extension is ever announced.
+/// 2. A non-incremental request paints the left half of the desktop.
+/// 3. `EnableContinuousUpdates` is answered with a fence asking to be echoed, so
+///    the echo can be asserted rather than assumed.
+/// 4. A pointer event — which the test sends once it has seen the paint — pushes a
+///    CopyRect moving that half to the right, **unasked**. Nothing in RFB permits
+///    that without the extension, so the record arriving at the browser is also the
+///    proof that continuous updates are on.
+async fn spawn_scrolling_vnc() -> (u16, mpsc::UnboundedReceiver<ScrollRequest>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = serve_scrolling_vnc(stream, tx).await;
+            });
+        }
+    });
+    (port, rx)
+}
+
+async fn serve_scrolling_vnc(
+    mut stream: TcpStream,
+    seen: mpsc::UnboundedSender<ScrollRequest>,
+) -> std::io::Result<()> {
+    stream.write_all(b"RFB 003.008\n").await?;
+    stream.read_exact(&mut [0u8; 12]).await?;
+    stream.write_all(&[1, 1]).await?; // one security type: None
+    stream.read_exact(&mut [0u8; 1]).await?;
+    stream.write_all(&0u32.to_be_bytes()).await?; // SecurityResult: ok
+    stream.read_exact(&mut [0u8; 1]).await?; // ClientInit
+
+    let mut server_init = Vec::new();
+    server_init.extend_from_slice(&FAKE_DESKTOP.to_be_bytes());
+    server_init.extend_from_slice(&FAKE_DESKTOP.to_be_bytes());
+    server_init.extend_from_slice(&[0u8; 16]);
+    server_init.extend_from_slice(&6u32.to_be_bytes());
+    server_init.extend_from_slice(b"scroll");
+    stream.write_all(&server_init).await?;
+
+    loop {
+        let mut msg_type = [0u8; 1];
+        stream.read_exact(&mut msg_type).await?;
+        match msg_type[0] {
+            // SetPixelFormat
+            0 => {
+                stream.read_exact(&mut [0u8; 19]).await?;
+            }
+            // SetEncodings, answered with the extension's announcement.
+            2 => {
+                let mut head = [0u8; 3];
+                stream.read_exact(&mut head).await?;
+                let count = usize::from(u16::from_be_bytes([head[1], head[2]]));
+                let mut body = vec![0u8; count * 4];
+                stream.read_exact(&mut body).await?;
+                let advertised: Vec<i32> = body
+                    .chunks_exact(4)
+                    .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let _ = seen.send(ScrollRequest::Encodings {
+                    continuous: advertised.contains(&ENCODING_CONTINUOUS_UPDATES),
+                    fence: advertised.contains(&ENCODING_FENCE),
+                });
+                stream.write_all(&[MSG_END_OF_CONTINUOUS_UPDATES]).await?;
+            }
+            // FramebufferUpdateRequest: paint the left half, once, in full.
+            3 => {
+                let mut req = [0u8; 9];
+                stream.read_exact(&mut req).await?;
+                let _ = seen.send(ScrollRequest::UpdateRequest { incremental: req[0] != 0 });
+                if req[0] != 0 {
+                    continue;
+                }
+                let mut update = vec![0u8, 0];
+                update.extend_from_slice(&1u16.to_be_bytes()); // one rect
+                for value in [0u16, 0, SCROLL_W, FAKE_DESKTOP] {
+                    update.extend_from_slice(&value.to_be_bytes());
+                }
+                update.extend_from_slice(&0i32.to_be_bytes()); // raw
+                // BGRX, and asymmetric so a swapped channel is not invisible.
+                update.extend(
+                    std::iter::repeat_n(
+                        [0x10u8, 0x40, 0x90, 0],
+                        usize::from(SCROLL_W) * usize::from(FAKE_DESKTOP),
+                    )
+                    .flatten(),
+                );
+                stream.write_all(&update).await?;
+            }
+            // KeyEvent
+            4 => {
+                stream.read_exact(&mut [0u8; 7]).await?;
+            }
+            // PointerEvent: the cue to scroll. The client asked for nothing here.
+            5 => {
+                stream.read_exact(&mut [0u8; 5]).await?;
+                let mut update = vec![0u8, 0];
+                update.extend_from_slice(&1u16.to_be_bytes());
+                for value in [SCROLL_W, 0, SCROLL_W, FAKE_DESKTOP] {
+                    update.extend_from_slice(&value.to_be_bytes());
+                }
+                update.extend_from_slice(&1i32.to_be_bytes()); // CopyRect
+                update.extend_from_slice(&0u16.to_be_bytes()); // source x
+                update.extend_from_slice(&0u16.to_be_bytes()); // source y
+                stream.write_all(&update).await?;
+            }
+            // ClientCutText
+            6 => {
+                let mut head = [0u8; 7];
+                stream.read_exact(&mut head).await?;
+                let len = u32::from_be_bytes([head[3], head[4], head[5], head[6]]);
+                stream.read_exact(&mut vec![0u8; len as usize]).await?;
+            }
+            // EnableContinuousUpdates, answered with a fence to be echoed.
+            MSG_END_OF_CONTINUOUS_UPDATES => {
+                let mut body = [0u8; 9];
+                stream.read_exact(&mut body).await?;
+                let _ = seen.send(ScrollRequest::EnableContinuousUpdates {
+                    enable: body[0] != 0,
+                    w: u16::from_be_bytes([body[5], body[6]]),
+                    h: u16::from_be_bytes([body[7], body[8]]),
+                });
+                stream
+                    .write_all(&{
+                        let mut fence = vec![MSG_FENCE, 0, 0, 0];
+                        fence.extend_from_slice(&(1u32 << 31 | 1).to_be_bytes());
+                        fence.push(4);
+                        fence.extend_from_slice(b"tick");
+                        fence
+                    })
+                    .await?;
+            }
+            // ClientFence, the echo of the one above.
+            MSG_FENCE => {
+                let mut head = [0u8; 8];
+                stream.read_exact(&mut head).await?;
+                let flags = u32::from_be_bytes([head[3], head[4], head[5], head[6]]);
+                let mut payload = vec![0u8; usize::from(head[7])];
+                stream.read_exact(&mut payload).await?;
+                let _ = seen.send(ScrollRequest::Fence { flags, payload });
+            }
+            other => panic!("scrolling vnc server got unexpected message type {other}"),
+        }
+    }
+}
+
 // ── Apple Screen Sharing (RFB 003.889), scripted ────────────────────────────
 //
 // The `ard-high-performance` subtype's whole wire, played from the server side:
@@ -885,6 +1067,43 @@ async fn expect_tile(ws: &mut Ws) {
     .expect("timed out waiting for a tile");
 }
 
+/// Read from the socket until a batch frame carrying a `COPY` record arrives,
+/// returning `(sx, sy, x, y, w, h)`.
+///
+/// Fails if a tile turns up carrying the copied region as pixels instead: that is
+/// the gateway having fallen back, which is a legitimate answer to an unknown
+/// source and the wrong one here, where the source was painted first.
+async fn expect_copy(ws: &mut Ws) -> (u16, u16, u16, u16, u16, u16) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Binary(frame) => {
+                    for record in common::batch_records(&frame) {
+                        if let common::BatchRecord::Copy { sx, sy, x, y, w, h } = record {
+                            return (sx, sy, x, y, w, h);
+                        }
+                    }
+                }
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                }
+                Message::Close(frame) => panic!("closed while waiting for a copy: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for a copy");
+    })
+    .await
+    .expect("timed out waiting for a copy record")
+}
+
+async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) -> ScrollRequest {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timed out waiting for a message from the client")
+        .expect("the scripted server's channel closed")
+}
+
 /// Read from the socket until it closes; returns the close code (if any).
 async fn expect_close(ws: &mut Ws) -> Option<u16> {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -995,6 +1214,78 @@ async fn an_audio_socket_without_a_valid_token_is_closed_with_4000() {
             .is_err(),
         "a valid claim's audio socket should stay open"
     );
+}
+
+/// The two halves of the RFB scroll path, end to end over the real socket: the
+/// server drives the update cycle, and a region it says has moved reaches the
+/// browser as thirteen bytes naming where the pixels already are.
+///
+/// Both are asserted from the other side of a wire nothing in `src/vnc.rs` wrote:
+/// the scripted server reads the client's messages itself, and the records are
+/// parsed by `common::batch_records`.
+#[tokio::test]
+async fn continuous_updates_carry_a_copyrect_to_the_browser_as_a_copy() {
+    let (vnc_port, mut seen) = spawn_scrolling_vnc().await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+
+    assert_eq!(
+        next_scroll_request(&mut seen).await,
+        ScrollRequest::Encodings { continuous: true, fence: true },
+        "the extension is only ever offered by advertising the pseudo-encoding"
+    );
+    assert_eq!(
+        next_scroll_request(&mut seen).await,
+        ScrollRequest::UpdateRequest { incremental: false },
+        "the session still opens with one full request"
+    );
+    assert_eq!(
+        next_scroll_request(&mut seen).await,
+        ScrollRequest::EnableContinuousUpdates {
+            enable: true,
+            w: FAKE_DESKTOP,
+            h: FAKE_DESKTOP,
+        },
+        "the announcement has to be answered, or the server sends nothing unasked"
+    );
+    assert_eq!(
+        next_scroll_request(&mut seen).await,
+        ScrollRequest::Fence {
+            // Request is dropped on the way back, SyncNext was never claimed, and
+            // BlockBefore — which this client honours by reading in order — stays.
+            flags: 1,
+            payload: b"tick".to_vec(),
+        },
+        "an unanswered fence is a server that cannot measure this end"
+    );
+
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    expect_tile(&mut ws).await;
+
+    // The cue for the scroll, and an input event rather than a request: what comes
+    // back is an update this client never asked for.
+    ws.send(Message::text(r#"{"type":"mouseMove","x":1,"y":1}"#))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        expect_copy(&mut ws).await,
+        (0, 0, SCROLL_W, 0, SCROLL_W, FAKE_DESKTOP),
+        "the copy names the source and lands at the destination"
+    );
+
+    // Nothing between the first request and the copy was an incremental poll: the
+    // round trip per frame is the whole point of the extension.
+    while let Ok(request) = seen.try_recv() {
+        assert_ne!(
+            request,
+            ScrollRequest::UpdateRequest { incremental: true },
+            "a continuous session polled anyway"
+        );
+    }
 }
 
 #[tokio::test]
