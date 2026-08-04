@@ -20,7 +20,7 @@
 //! advertises one RDPSND format and it qualifies, so the refusal is for a server
 //! that answers with something other than what it was offered.
 
-use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+use rubato::audioadapter_buffers::direct::{SequentialSliceOfSlices, SequentialSliceOfVecs};
 use rubato::{Fft, FixedSync, Resampler};
 
 use crate::audio::PcmFormat;
@@ -65,10 +65,21 @@ pub struct Pcm48 {
     /// interpolating across interleaved samples would blend the channels into
     /// each other.
     pending: Vec<Vec<f32>>,
+    /// Frames at the front of every `pending` channel the resampler has already
+    /// consumed. A cursor rather than a per-group `drain(..)`: draining shifts
+    /// the whole tail down once per group — around a quarter megabyte of memmove
+    /// per 32 KB wave buffer — where advancing an index moves nothing. The fronts
+    /// are dropped once per [`Self::push`], when only the carried remainder
+    /// (under one group) is left to move.
+    pending_taken: usize,
     /// Scratch: the resampler's output, one `Vec` per channel.
     resampled: Vec<Vec<f32>>,
     /// Resampled frames a codec has not taken yet, interleaved.
     ready: Vec<f32>,
+    /// Samples at the front of `ready` the codec has already taken — the same
+    /// cursor as `pending_taken`, for the same reason: a codec draws 20 ms at a
+    /// time out of a buffer holding a whole wave buffer's worth.
+    ready_taken: usize,
     /// A trailing byte of a wave buffer that split a sample in half. RDP has no
     /// reason to do this, but the queue carries bytes rather than samples, so
     /// nothing in the types rules it out.
@@ -116,8 +127,10 @@ impl Pcm48 {
             resampler,
             frames_per_group,
             pending: vec![Vec::new(); channels],
+            pending_taken: 0,
             resampled: vec![vec![0.0; GROUP_FRAMES]; channels],
             ready: Vec::new(),
+            ready_taken: 0,
             odd_byte: None,
             next_channel: 0,
         })
@@ -127,11 +140,21 @@ impl Pcm48 {
         self.channels
     }
 
+    /// Frames of leading transient the resampler adds, at [`SAMPLE_RATE`].
+    ///
+    /// A decoder should discard them along with the encoder's own lookahead —
+    /// they are settling, not sound — which is what `OpusHead`'s `pre_skip`
+    /// says. Zero when the input needs no resampling.
+    pub fn output_delay(&self) -> usize {
+        self.resampler.as_ref().map_or(0, Resampler::output_delay)
+    }
+
     /// Absorb one wave buffer, resampling every whole group it completed.
     ///
     /// What it did not complete is carried: nothing is padded and nothing is
     /// dropped, down to a byte that split a sample in half.
     pub fn push(&mut self, pcm: &[u8]) -> Result<(), anyhow::Error> {
+        self.compact();
         self.accumulate(pcm);
         // The shortest channel, not the first: a buffer ending mid-frame leaves
         // left one sample ahead of right, and resampling then would read past the
@@ -144,7 +167,7 @@ impl Pcm48 {
 
     /// Resampled frames waiting to be taken, per channel.
     pub fn ready_frames(&self) -> usize {
-        self.ready.len() / self.channels
+        (self.ready.len() - self.ready_taken) / self.channels
     }
 
     /// Take exactly `frames` interleaved frames as `f32`, which is what libopus wants.
@@ -153,12 +176,52 @@ impl Pcm48 {
     /// both are the caller's own arithmetic rather than anything the stream decides.
     pub fn take_f32(&mut self, frames: usize, out: &mut [f32]) {
         let samples = frames * self.channels;
-        out[..samples].copy_from_slice(&self.ready[..samples]);
-        self.ready.drain(..samples);
+        let from = self.ready_taken;
+        out[..samples].copy_from_slice(&self.ready[from..from + samples]);
+        self.ready_taken += samples;
+    }
+
+    /// Drop the consumed fronts of `pending` and `ready`, moving only what the
+    /// cursors carried past a whole wave buffer: the remainder under one group,
+    /// and any samples a codec has not drawn yet.
+    fn compact(&mut self) {
+        if self.pending_taken > 0 {
+            for pending in &mut self.pending {
+                pending.drain(..self.pending_taken);
+            }
+            self.pending_taken = 0;
+        }
+        if self.ready_taken > 0 {
+            self.ready.drain(..self.ready_taken);
+            self.ready_taken = 0;
+        }
     }
 
     /// Splits interleaved little-endian 16-bit PCM into per-channel `f32`.
     fn accumulate(&mut self, pcm: &[u8]) {
+        // The aligned stereo case — which is every buffer the negotiated format
+        // can produce — deinterleaves in whole frames, with no per-sample channel
+        // arithmetic in the loop. The general path below exists for a carried
+        // half-sample or a buffer ending mid-frame, which only that path creates.
+        if self.odd_byte.is_none()
+            && self.next_channel == 0
+            && self.channels == 2
+            && pcm.len().is_multiple_of(4)
+        {
+            let [left, right] = &mut self.pending[..] else {
+                unreachable!("two channels means two pending buffers");
+            };
+            left.reserve(pcm.len() / 4);
+            right.reserve(pcm.len() / 4);
+            for frame in pcm.chunks_exact(4) {
+                // i16::MIN maps to exactly -1.0; the asymmetry of two's complement
+                // means dividing by 32768 rather than 32767 keeps it in range.
+                left.push(f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32_768.0);
+                right.push(f32::from(i16::from_le_bytes([frame[2], frame[3]])) / 32_768.0);
+            }
+            return;
+        }
+
         let mut bytes = pcm.iter().copied();
         // A byte held back from last time pairs with the first byte of this buffer.
         if let Some(low) = self.odd_byte.take() {
@@ -179,22 +242,32 @@ impl Pcm48 {
         }
     }
 
-    /// Frames every channel has, which is what a group can be cut from.
+    /// Frames every channel has, past the cursor, which is what a group can be
+    /// cut from.
     fn buffered_frames(&self) -> usize {
-        self.pending.iter().map(Vec::len).min().unwrap_or(0)
+        self.pending.iter().map(Vec::len).min().unwrap_or(0) - self.pending_taken
     }
 
     fn push_sample(&mut self, sample: i16) {
-        // i16::MIN maps to exactly -1.0; the asymmetry of two's complement means
-        // dividing by 32768 rather than 32767 is what keeps it in range.
+        // See the fast path above for the 32768.
         self.pending[self.next_channel].push(f32::from(sample) / 32_768.0);
-        self.next_channel = (self.next_channel + 1) % self.channels;
+        self.next_channel += 1;
+        if self.next_channel == self.channels {
+            self.next_channel = 0;
+        }
     }
 
     fn resample_one_group(&mut self) -> Result<(), anyhow::Error> {
         let taken = self.frames_per_group;
+        let from = self.pending_taken;
         if let Some(resampler) = &mut self.resampler {
-            let input = SequentialSliceOfVecs::new(&self.pending, self.channels, taken)
+            // Slices from the cursor, so consuming a group never moves the tail.
+            let slices: Vec<&[f32]> = self
+                .pending
+                .iter()
+                .map(|pending| &pending[from..from + taken])
+                .collect();
+            let input = SequentialSliceOfSlices::new(&slices, self.channels, taken)
                 .map_err(|e| anyhow::anyhow!("wrap the resampler input: {e}"))?;
             let mut output =
                 SequentialSliceOfVecs::new_mut(&mut self.resampled, self.channels, GROUP_FRAMES)
@@ -204,17 +277,24 @@ impl Pcm48 {
                 .map_err(|e| anyhow::anyhow!("resample to 48 kHz: {e}"))?;
         } else {
             for (channel, out) in self.resampled.iter_mut().enumerate() {
-                out.copy_from_slice(&self.pending[channel][..GROUP_FRAMES]);
+                out.copy_from_slice(&self.pending[channel][from..from + taken]);
             }
         }
-        for pending in &mut self.pending {
-            pending.drain(..taken);
-        }
+        self.pending_taken += taken;
 
         self.ready.reserve(GROUP_FRAMES * self.channels);
-        for frame in 0..GROUP_FRAMES {
-            for channel in 0..self.channels {
-                self.ready.push(self.resampled[channel][frame]);
+        if let [left, right] = &self.resampled[..] {
+            // The stereo interleave, zipped so the compiler sees the two reads
+            // per frame instead of an indexed inner loop.
+            for (l, r) in left[..GROUP_FRAMES].iter().zip(&right[..GROUP_FRAMES]) {
+                self.ready.push(*l);
+                self.ready.push(*r);
+            }
+        } else {
+            for frame in 0..GROUP_FRAMES {
+                for channel in 0..self.channels {
+                    self.ready.push(self.resampled[channel][frame]);
+                }
             }
         }
         Ok(())

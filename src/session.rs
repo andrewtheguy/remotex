@@ -56,21 +56,18 @@ fn frame_buffer(target: &TargetConfig) -> usize {
 /// How deep the audio socket's outbound queue is, in wave buffers.
 ///
 /// One message here is one of the remote's wave buffers — ~32 KB, or ~186 ms, from a
-/// Windows host at 44.1 kHz — so sixteen is about three seconds.
+/// Windows host at 44.1 kHz.
 ///
-/// It is not a play-out buffer and must not be read as one: the client throws away
-/// backlog past their own ceiling on arrival. The depth exists so that an ordinary
-/// socket write in flight never stalls the pump, because a stalled pump stops draining
-/// [`crate::audio::AUDIO_QUEUE_DEPTH`] and what gives way *there* is audible. That is
-/// the asymmetry that makes this deeper than [`VIDEO_FRAME_BUFFER`]'s four (744 ms of
-/// sound): a dropped video frame is replaced by the next one, and a dropped wave buffer
-/// is a hole.
-///
-/// Shallower than the bridge's sixty-four, equally deliberately. This queue is FIFO, so
-/// depth here is stale sound faithfully delivered and then discarded; the bridge drops
-/// its *oldest* and keeps sound that is still live. Losses on a slow link belong there,
-/// which means this one only has to be deep enough to absorb a write.
-const AUDIO_SOCKET_BUFFER: usize = 16;
+/// Two, because this queue's one job is to keep an ordinary socket write in flight
+/// from stalling the pump — one message being written and one waiting is that, and
+/// nothing more. This queue is FIFO, so every slot past that is stale sound
+/// faithfully delivered on a link that is already behind, spent against the very
+/// pictures that put it behind, and then thrown away by the client's own ceiling.
+/// The bridge behind the pump drops its *oldest* and keeps sound that is still
+/// live — losses on a slow link belong there
+/// ([`crate::audio::AUDIO_QUEUE_DEPTH`]), and a stalled pump is what sends them
+/// there.
+const AUDIO_SOCKET_BUFFER: usize = 2;
 
 /// How long an engine remains available for a browser to reattach after its
 /// WebSocket disappears. Applies equally to RDP and VNC.

@@ -329,7 +329,7 @@ pub mod audio {
     /// and `pcm_stream`'s at the length field itself, which is the one place a
     /// *remote's* buffer size could otherwise reach this — and a wave buffer holding
     /// 65 535 packets of 20 ms would be twenty minutes of audio in one buffer.
-    pub fn frame(packets: &[Vec<u8>]) -> Vec<u8> {
+    pub fn frame(packets: &[bytes::Bytes]) -> Vec<u8> {
         let len: usize = packets.iter().map(|p| PACKET_HEADER_LEN + p.len()).sum();
         let mut frame = Vec::with_capacity(HEADER_LEN + len);
         frame.push(FRAME_KIND);
@@ -823,8 +823,10 @@ pub enum ServerMsg {
     /// One wave buffer's worth of audio packets, framed by [`audio::frame`].
     ///
     /// Like a tile, this has no text encoding and is not a control message: it is a
-    /// binary frame, and [`crate::wire`] is what turns it into one.
-    Audio(Vec<Vec<u8>>),
+    /// binary frame, and [`crate::wire`] is what turns it into one. [`bytes::Bytes`]
+    /// because a passthrough packet is a refcounted slice of the wave buffer the
+    /// bridge holds — see [`crate::pcm_stream`] — and a `Vec` here would copy it back.
+    Audio(Vec<bytes::Bytes>),
     /// How to decode the video that follows on one stream, sent before its first
     /// [`ServerMsg::Video`] and again whenever it changes.
     ///
@@ -1167,7 +1169,9 @@ mod tests {
         assert_eq!(&decoded[0..8], b"OpusHead");
 
         assert!(
-            ServerMsg::Audio(vec![vec![1, 2, 3]]).text_frame().is_none(),
+            ServerMsg::Audio(vec![bytes::Bytes::from_static(&[1, 2, 3])])
+                .text_frame()
+                .is_none(),
             "packets are a binary frame, like a tile"
         );
     }

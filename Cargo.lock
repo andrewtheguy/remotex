@@ -2815,6 +2815,7 @@ dependencies = [
  "axum",
  "base64",
  "bcrypt",
+ "bytes",
  "clap",
  "des 0.8.1",
  "env_logger",

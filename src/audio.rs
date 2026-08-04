@@ -8,6 +8,7 @@
 
 use std::sync::Mutex;
 
+use bytes::Bytes;
 use futures_util::Stream;
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, watch};
@@ -17,7 +18,14 @@ use crate::opus_stream::{OpusStream, OPUS_CODEC};
 use crate::pcm_stream::{PcmStream, PCM_CODEC};
 
 /// Complete PCM wave buffers retained before the oldest one is dropped.
-pub const AUDIO_QUEUE_DEPTH: usize = 64;
+///
+/// Sixteen is about three seconds at the tested Windows host's ~186 ms buffers.
+/// The client discards backlog past its own 1.5-second ceiling on arrival, so
+/// retaining much more than that ceiling cannot be heard — it can only be
+/// delivered across a link that is already behind and then thrown away. The
+/// margin above the ceiling is for a remote that sends smaller buffers, where
+/// sixteen of them absorb a shorter stall.
+pub const AUDIO_QUEUE_DEPTH: usize = 16;
 
 /// Linear PCM parameters: the only kind of audio this path carries.
 ///
@@ -63,7 +71,10 @@ pub const PCM_CD_QUALITY: PcmFormat = PcmFormat {
 /// The seam between an engine receiving PCM and the session encoding it.
 #[derive(Debug)]
 pub struct AudioBridge {
-    waves: broadcast::Sender<Vec<u8>>,
+    /// [`Bytes`] rather than `Vec<u8>`: a broadcast receiver clones the slot it
+    /// reads, and cloning `Bytes` bumps a refcount where cloning a `Vec` copies
+    /// the whole wave buffer per listener per buffer.
+    waves: broadcast::Sender<Bytes>,
     /// The negotiated format, `None` until the engine's audio channel has come up
     /// and again once it closes. Nothing depends on it — the response opens either
     /// way — so it is a record rather than a gate: what the log says about whether
@@ -146,8 +157,11 @@ impl AudioBridge {
 
     /// Queue one buffer. Never blocks and never fails visibly: a full queue
     /// drops its oldest buffer and no listener drops this one.
+    ///
+    /// Takes the `Vec` an engine already owns; wrapping it in [`Bytes`] here is
+    /// free, and everything downstream shares it instead of copying it.
     pub fn wave(&self, samples: Vec<u8>) {
-        let _ = self.waves.send(samples);
+        let _ = self.waves.send(Bytes::from(samples));
     }
 
     /// How many listeners are reading this queue.
@@ -177,7 +191,7 @@ impl Default for AudioBridge {
 
 /// One client's read side of an [`AudioBridge`].
 pub struct AudioListener {
-    waves: broadcast::Receiver<Vec<u8>>,
+    waves: broadcast::Receiver<Bytes>,
     format: watch::Receiver<Option<PcmFormat>>,
 }
 
@@ -201,10 +215,10 @@ impl AudioListener {
         self,
         format: PcmFormat,
         codec: AudioCodec,
-    ) -> Result<EncodedAudio<impl Stream<Item = Vec<Vec<u8>>>>, anyhow::Error> {
+    ) -> Result<EncodedAudio<impl Stream<Item = Vec<Bytes>>>, anyhow::Error> {
         struct State {
             encoder: PacketEncoder,
-            waves: broadcast::Receiver<Vec<u8>>,
+            waves: broadcast::Receiver<Bytes>,
             /// When this listener attached, which only the diagnostic line below
             /// reads: frames encoded against time elapsed is how a stream that is
             /// drifting from real time shows itself.
@@ -351,7 +365,7 @@ impl PacketEncoder {
         }
     }
 
-    fn push(&mut self, pcm: &[u8]) -> Result<Vec<Vec<u8>>, anyhow::Error> {
+    fn push(&mut self, pcm: &Bytes) -> Result<Vec<Bytes>, anyhow::Error> {
         match self {
             Self::Opus(stream) => stream.push(pcm),
             Self::Pcm(stream) => stream.push(pcm),
@@ -402,7 +416,7 @@ mod tests {
     /// The packet stream alone, with the header asserted to be one — every test
     /// here is about the queue rather than the encoder, and none of them should
     /// pass if a listener came back without a way to decode it.
-    fn packets_of(listener: AudioListener) -> impl Stream<Item = Vec<Vec<u8>>> {
+    fn packets_of(listener: AudioListener) -> impl Stream<Item = Vec<Bytes>> {
         let encoded = listener
             .into_packets(PCM_CD_QUALITY, AudioCodec::default())
             .expect("the negotiated format must be encodable");
@@ -410,7 +424,7 @@ mod tests {
         encoded.packets
     }
 
-    async fn next(stream: &mut (impl Stream<Item = Vec<Vec<u8>>> + Unpin)) -> Option<Vec<Vec<u8>>> {
+    async fn next(stream: &mut (impl Stream<Item = Vec<Bytes>> + Unpin)) -> Option<Vec<Bytes>> {
         tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .expect("timed out waiting for the audio stream")
@@ -582,7 +596,7 @@ mod tests {
         }
 
         let mut lagged = None;
-        let mut survived: Vec<Vec<u8>> = Vec::new();
+        let mut survived: Vec<Bytes> = Vec::new();
         loop {
             match listener.waves.try_recv() {
                 Ok(buffer) => survived.push(buffer),

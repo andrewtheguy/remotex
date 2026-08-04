@@ -394,8 +394,8 @@ mod tests {
     /// nothing at all. `cargo test` has no per-test timeout, so an unguarded `next()`
     /// would hang the suite instead of naming the hop that stopped forwarding.
     async fn next_packets(
-        stream: &mut (impl futures_util::Stream<Item = Vec<Vec<u8>>> + Unpin),
-    ) -> Vec<Vec<u8>> {
+        stream: &mut (impl futures_util::Stream<Item = Vec<bytes::Bytes>> + Unpin),
+    ) -> Vec<bytes::Bytes> {
         use futures_util::StreamExt as _;
 
         tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())

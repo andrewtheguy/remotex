@@ -4,6 +4,7 @@
 //! [`crate::pcm48`]; this is only the codec. Each listener owns fresh codec state
 //! downstream of the nonblocking RDP queue; quiet remotes emit nothing.
 
+use bytes::Bytes;
 use opus::{Application, Bitrate, Channels, Encoder};
 
 use crate::audio::PcmFormat;
@@ -68,16 +69,20 @@ impl OpusStream {
             .set_complexity(5)
             .map_err(|e| anyhow::anyhow!("set the opus complexity: {e}"))?;
 
-        // The encoder's own delay, in 48 kHz samples. Written into `OpusHead` so a
-        // decoder discards it instead of playing it as leading silence.
-        let pre_skip = encoder
+        let pcm = Pcm48::new(format)?;
+        // The path's whole delay, in 48 kHz samples: the encoder's lookahead plus
+        // the resampler's own transient. Written into `OpusHead` so a decoder
+        // discards it instead of playing it as leading silence.
+        let lookahead = encoder
             .get_lookahead()
             .map_err(|e| anyhow::anyhow!("read the opus lookahead: {e}"))?
-            .max(0) as u16;
+            .max(0) as usize;
+        let pre_skip = u16::try_from(lookahead + pcm.output_delay())
+            .expect("a lookahead and a resampler transient are a few hundred samples");
 
         let stream = Self {
             encoder,
-            pcm: Pcm48::new(format)?,
+            pcm,
             frame: vec![0.0; FRAME_FRAMES * channel_count],
             packet: vec![0; MAX_PACKET_BYTES],
             frames_encoded: 0,
@@ -90,7 +95,7 @@ impl OpusStream {
     ///
     /// Empty when the buffer did not add up to a whole 20 ms frame, which is
     /// normal: the remainder is carried.
-    pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<Vec<u8>>, anyhow::Error> {
+    pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<Bytes>, anyhow::Error> {
         self.pcm.push(pcm)?;
         let mut packets = Vec::new();
         while self.pcm.ready_frames() >= FRAME_FRAMES {
@@ -110,14 +115,14 @@ impl OpusStream {
         self.frames_encoded
     }
 
-    fn encode_one_frame(&mut self) -> Result<Vec<u8>, anyhow::Error> {
+    fn encode_one_frame(&mut self) -> Result<Bytes, anyhow::Error> {
         self.pcm.take_f32(FRAME_FRAMES, &mut self.frame);
         let len = self
             .encoder
             .encode_float(&self.frame, &mut self.packet)
             .map_err(|e| anyhow::anyhow!("encode an opus packet: {e}"))?;
         self.frames_encoded += 1;
-        Ok(self.packet[..len].to_vec())
+        Ok(Bytes::copy_from_slice(&self.packet[..len]))
     }
 }
 
