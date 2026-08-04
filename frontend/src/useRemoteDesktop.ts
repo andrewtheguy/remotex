@@ -13,6 +13,7 @@ import {
   type RemoteCursor,
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
+import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
@@ -32,7 +33,6 @@ import {
   type RemoteClipboard,
   wheelUnitFromEvent,
 } from "./protocol.ts";
-import { createTilePainter } from "./tilePainter.ts";
 import {
   attachTouchGestures,
   MAX_ZOOM,
@@ -185,32 +185,6 @@ const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 const pointerRectCache = createRectCache((clear) =>
   requestAnimationFrame(clear),
 );
-
-// Control messages that must keep their place in line behind queued draws.
-// `resize` replaces and clears the canvas; `videoFormat` with a changed decode
-// string drops a live decoder that units already queued still need
-// (videoDecoder.ts, setFormat); `connected` and `picker` change what the
-// desktop *is*, and must not take effect under a backlog still painting the
-// old one. Everything else — cursor, clipboard, displays, remoteOs, error,
-// audioFormat — reads and writes nothing a draw does, and runs on arrival.
-const DRAW_ORDERED: ReadonlySet<string> = new Set([
-  "resize",
-  "videoFormat",
-  "connected",
-  "picker",
-]);
-
-// The one way a 2D context is taken from the desktop canvas, so the two call
-// sites (connect and resize) cannot disagree about its attributes — a second
-// `getContext` on the same canvas returns the first context and silently
-// ignores different options. The framebuffer is opaque, so `alpha: false`
-// spares the compositor a blend it could never see; `desynchronized` asks for
-// the low-latency present path where the browser has one.
-function desktop2dContext(
-  canvas: HTMLCanvasElement,
-): CanvasRenderingContext2D | null {
-  return canvas.getContext("2d", { alpha: false, desynchronized: true });
-}
 
 // The canvas bitmap remains the full remote framebuffer; only its CSS box is
 // sized here, in the remote's own points. This is the same high-density canvas
@@ -599,7 +573,6 @@ export function useRemoteDesktop(
   // effect, called by the toolbar. Null while nothing is subscribed, which is also
   // when there is no chord to unwind.
   const localShortcutRef = useRef<(() => void) | null>(null);
-  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
   const sizeRef = useRef<RemoteSize | null>(null);
@@ -746,10 +719,6 @@ export function useRemoteDesktop(
 
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
-    ctxRef.current = canvasRef.current
-      ? desktop2dContext(canvasRef.current)
-      : null;
-
     let disposed = false;
     let ws: WebSocket | null = null;
     // Sound has a socket of its own, so that it never queues behind a picture — see
@@ -758,11 +727,31 @@ export function useRemoteDesktop(
     // The claim the sockets attach with, kept so audio can be opened and closed at any
     // point in the session rather than only when the session socket is built.
     let session: string | null = null;
-    // The slot table, the video decoders and the batch draw loop — see tilePainter.ts.
-    const painter = createTilePainter({
-      context: () => ctxRef.current,
+    // The parse→decode→paint path — the slot table, the video decoders and the
+    // batch draw loop — runs in a worker that owns this canvas's bitmap, so a
+    // decode backlog never competes with React or input for this thread. This
+    // effect only posts to it; the worker itself outlives the effect (see
+    // desktopPainter.ts), and `bind` points its callbacks at this run.
+    const painter = canvasRef.current
+      ? desktopPainterFor(canvasRef.current)
+      : null;
+    // Resizes in flight to the worker, by sequence number. The state half of a
+    // resize — the CSS box, `size`, the cursor — waits for the worker's echo
+    // (see `onResized` in desktopPainter.ts for why), and `clearDesktop`
+    // abandons whatever is pending so a late echo cannot resurrect a size the
+    // attachment it belonged to has already left behind.
+    let resizeSeq = 0;
+    const pendingResizes = new Map<number, RemoteSize>();
+    painter?.bind({
       onCacheReset: () => sendRef.current({ type: "cacheReset" }),
       onVideoError: setVideoError,
+      onResized: (seq) => {
+        const applied = pendingResizes.get(seq);
+        if (applied) {
+          pendingResizes.delete(seq);
+          presentResize(applied);
+        }
+      },
     });
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
@@ -776,22 +765,21 @@ export function useRemoteDesktop(
     const clearDesktop = () => {
       sizeRef.current = null;
       setSize(null);
-      const canvas = canvasRef.current;
-      if (canvas) {
-        canvas.width = 0;
-        canvas.height = 0;
-      }
-      ctxRef.current = null;
+      // A resize still waiting on its echo belongs to the attachment this is
+      // ending; letting it land later would resurrect that desktop's size
+      // under the next one's overlay.
+      pendingResizes.clear();
       // Pointer ownership is per-engine: the next target may well composite
       // its own cursor, so drop back to hiding the browser's until it says
       // otherwise. A reattach to the same engine gets the shape replayed.
       cursorRef.current = null;
       touchCursorRef.current = null;
-      // The next attachment's server starts with an empty slot table, so holding
-      // these would only cost memory. (Nothing could be *drawn* wrongly: a
-      // reference always follows the tile that filled its slot on the same
-      // socket.)
-      painter.clear();
+      // One message: the worker zeroes the canvas bitmap it owns and drops the
+      // slot table and the decoders with it. The next attachment's server
+      // starts with an empty table, so holding any of it would only cost
+      // memory. (Nothing could be *drawn* wrongly: a reference always follows
+      // the tile that filled its slot on the same socket.)
+      painter?.clear();
       // Sound's own socket goes with this one. The gateway would keep the
       // subscription alive across a reattach — it belongs to the claim now — but this
       // browser cannot: rebuilding a decoder needs an AudioContext, and a context
@@ -1017,21 +1005,26 @@ export function useRemoteDesktop(
         // longer closes the socket; the server returns it to the picker.)
         scheduleRetry();
       };
-      // Tiles decode asynchronously (createImageBitmap), so draws are chained
-      // through one promise queue: they land in arrival order (later tiles must
-      // overwrite earlier ones), and the control messages that touch what draws
-      // touch — the canvas and the decoder table — wait in the same line. The
-      // catch keeps a garbled frame from stalling the chain. Everything else
-      // runs on arrival: a cursor shape or a clipboard answer gains nothing by
-      // queueing behind a decode backlog, and the clipboard's fetch timeout was
-      // paying for one.
-      let queue: Promise<void> = Promise.resolve();
-      // True while this socket is the one the session is riding. Checked at
-      // dispatch — a superseded socket keeps firing `onmessage` until its close
-      // lands — and checked *again* inside each queued continuation, because a
-      // reconnect can replace the socket while a decode backlog is still
-      // draining, and an old resize applied then would tear down the new
-      // attachment's canvas.
+      // Binary frames go straight to the paint worker, buffer transferred, in
+      // arrival order — postMessage order *is* the draw order, so the promise
+      // queue that used to hold draws and draw-ordered control messages in
+      // line on this thread lives in the worker now. The control messages
+      // whose effects touch what draws touch still keep their place there:
+      // `resize` and `videoFormat` post commands behind the frames already
+      // sent, and `connected`/`picker` post `clear` the same way (see
+      // desktopPainterWorker.ts for why the clear must hold its place too).
+      // Their *state* halves run on arrival now rather than behind the
+      // backlog, which is fine because every mode they switch to hides the
+      // canvas behind an overlay until the worker's queue has caught up.
+      // Everything else always ran on arrival: a cursor shape or a clipboard
+      // answer gains nothing by queueing behind a decode backlog.
+      //
+      // `owned` is checked at dispatch — a superseded socket keeps firing
+      // `onmessage` until its close lands, and its frames and control messages
+      // must not reach the new attachment's worker or state. That check is
+      // also what lets the worker run on order alone: a dead socket's frames
+      // stop being posted before `clearDesktop` posts the clear that ends
+      // their attachment, so nothing can arrive there out of place.
       const owned = () => !disposed && ws === socket;
       const dispatchControl = (text: string) => {
         let msg: ControlMsg;
@@ -1040,17 +1033,7 @@ export function useRemoteDesktop(
         } catch {
           return;
         }
-        if (DRAW_ORDERED.has(msg.type)) {
-          queue = queue
-            .then(() => {
-              if (owned()) {
-                handleControlMsg(msg);
-              }
-            })
-            .catch(() => {});
-        } else {
-          handleControlMsg(msg);
-        }
+        handleControlMsg(msg);
       };
       socket.onmessage = (ev) => {
         if (!owned()) {
@@ -1058,25 +1041,16 @@ export function useRemoteDesktop(
         }
         const data = ev.data;
         if (typeof data !== "string") {
-          queue = queue
-            .then(() => (owned() ? handleFrame(data) : undefined))
-            .catch(() => {});
+          // Sound is on its own socket, so this one carries batches and
+          // nothing else; the worker still reads the kind byte rather than
+          // assuming it.
+          if (data instanceof ArrayBuffer) {
+            painter?.draw(data);
+          }
           return;
         }
         dispatchControl(data);
       };
-    };
-
-    const handleFrame = async (data: unknown) => {
-      if (!(data instanceof ArrayBuffer)) {
-        return;
-      }
-      // Sound is on its own socket now, so this one carries batches and nothing else.
-      // The kind is still read rather than assumed: a batch parser handed anything
-      // else would spend its way through the bytes looking for tile records.
-      if (binaryFrameKind(data) === "batch") {
-        await painter.draw(data);
-      }
     };
 
     // Sound arrives on its own socket, so nothing it does can be delayed by a repaint
@@ -1213,21 +1187,18 @@ export function useRemoteDesktop(
       }
     };
 
-    const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
-      const canvas = canvasRef.current;
-      const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
-      if (canvas) {
-        const { bitmap } = desktopCanvasGeometry(s, s.scale);
-        canvas.width = bitmap.w;
-        canvas.height = bitmap.h;
-        applyCanvasCss(canvas, s, viewRef.current, bottomInsetRef.current);
-        const ctx = desktop2dContext(canvas);
-        ctxRef.current = ctx;
-        if (ctx) {
-          ctx.fillStyle = "#000";
-          ctx.fillRect(0, 0, msg.w, msg.h);
-        }
-      }
+    // The state half of a resize, run when the worker's echo says the bitmap
+    // it describes is real. Running it on the control message's arrival
+    // instead would read as a glimpse of the previous desktop: the overlay
+    // hides the canvas only while `size` is null, and the worker could still
+    // be painting the old attachment's backlog onto the old bitmap.
+    const presentResize = (s: RemoteSize) => {
+      applyCanvasCss(
+        canvasRef.current,
+        s,
+        viewRef.current,
+        bottomInsetRef.current,
+      );
       sizeRef.current = s;
       setSize(s);
       syncCursor();
@@ -1237,6 +1208,22 @@ export function useRemoteDesktop(
       if (mobileSizePending) {
         sendMobileSize();
       }
+    };
+
+    const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
+      const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
+      if (!painter) {
+        // No canvas, so nothing queues either; the state may as well be true.
+        presentResize(s);
+        return;
+      }
+      // The bitmap belongs to the worker; this command queues behind the
+      // frames already posted, which is the place the old draw-ordered queue
+      // gave a resize — the previous desktop finishes painting before its
+      // canvas is replaced and filled black.
+      const seq = ++resizeSeq;
+      pendingResizes.set(seq, s);
+      painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq);
     };
 
     // The remote's display list, and the one follow-up a change of display needs:
@@ -1404,11 +1391,12 @@ export function useRemoteDesktop(
           setVideoDecodeStrings((held) =>
             held.includes(msg.decode) ? held : [...held, msg.decode],
           );
-          // Straight to the painter, which owns the decoders. Nothing here holds it:
-          // this is the announcement, and every unit after it is already routed by
-          // `stream` id. A browser that cannot decode what it names finds out from the
-          // decoder's own error, which arrives at `onVideoError` naming the codec.
-          painter.setVideoFormat(msg.stream, {
+          // Straight to the painter, which owns the decoders — queued in the
+          // worker behind the frames already posted, because a changed decode
+          // string drops a live decoder that queued units still need. A browser
+          // that cannot decode what it names finds out from the decoder's own
+          // error, which arrives at `onVideoError` naming the codec.
+          painter?.setVideoFormat(msg.stream, {
             codec: msg.codec,
             decode: msg.decode,
           });
@@ -1573,10 +1561,14 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       clearTimeout(resizeTimer);
       ws?.close();
-      // The painter belongs to this effect, and under `render_type = "video"` it
-      // holds a `VideoDecoder` — hardware, not just memory. `clearDesktop` frees
-      // it on every path *through* the session; this is the one that leaves.
-      painter.clear();
+      // The worker outlives this effect — its canvas element can only be
+      // transferred once, and StrictMode reruns the effect on the same element
+      // (see desktopPainter.ts) — but what it holds must not: under
+      // `render_type = "video"` that includes a `VideoDecoder`, hardware
+      // rather than just memory. `clearDesktop` frees it on every path
+      // *through* the session; this is the one that leaves.
+      painter?.clear();
+      painter?.unbind();
       releaseAudio();
     };
   }, [

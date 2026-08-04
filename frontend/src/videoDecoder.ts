@@ -57,7 +57,10 @@ export function videoUnavailable(): string | null {
   if (typeof VideoDecoder !== "undefined") {
     return null;
   }
-  if (!window.isSecureContext) {
+  // `globalThis`, not `window`: this runs inside the paint worker, which has no
+  // `window` — and a worker's secure-context bit is its creator document's, so
+  // the answer is the same one the page would give.
+  if (!globalThis.isSecureContext) {
     return "This target sends video, which needs a secure context: reach this gateway over HTTPS (or localhost).";
   }
   return "This target sends video, and this browser has no WebCodecs video decoder.";
