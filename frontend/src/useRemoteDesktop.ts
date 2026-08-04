@@ -178,6 +178,18 @@ const ATTEMPTS_BEFORE_REPORTING = 4;
 // a slow link or a fetch made mid-reconnect can still leave a request unanswered.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
+// The one way a 2D context is taken from the desktop canvas, so the two call
+// sites (connect and resize) cannot disagree about its attributes — a second
+// `getContext` on the same canvas returns the first context and silently
+// ignores different options. The framebuffer is opaque, so `alpha: false`
+// spares the compositor a blend it could never see; `desynchronized` asks for
+// the low-latency present path where the browser has one.
+function desktop2dContext(
+  canvas: HTMLCanvasElement,
+): CanvasRenderingContext2D | null {
+  return canvas.getContext("2d", { alpha: false, desynchronized: true });
+}
+
 // The canvas bitmap remains the full remote framebuffer; only its CSS box is
 // sized here, in the remote's own points. This is the same high-density canvas
 // split used by ordinary DPR-aware renderers, except the guest has already drawn
@@ -692,7 +704,9 @@ export function useRemoteDesktop(
 
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
-    ctxRef.current = canvasRef.current?.getContext("2d") ?? null;
+    ctxRef.current = canvasRef.current
+      ? desktop2dContext(canvasRef.current)
+      : null;
 
     let disposed = false;
     let ws: WebSocket | null = null;
@@ -1135,7 +1149,7 @@ export function useRemoteDesktop(
         canvas.width = bitmap.w;
         canvas.height = bitmap.h;
         applyCanvasCss(canvas, s, viewRef.current, bottomInsetRef.current);
-        const ctx = canvas.getContext("2d");
+        const ctx = desktop2dContext(canvas);
         ctxRef.current = ctx;
         if (ctx) {
           ctx.fillStyle = "#000";
@@ -1815,11 +1829,27 @@ export function useRemoteDesktop(
         })
       : null;
 
+    // The canvas rect, read at most once per displayed frame. Reading it in
+    // every mousemove forces a synchronous layout flush at pointer rate; a
+    // per-frame cache needs no list of what can move the canvas, because
+    // anything that does — resize, scroll, zoom, pan — shows on screen no
+    // sooner than the frame that clears this.
+    let pointerRect: DOMRect | null = null;
+    const rectOf = (target: Element) => {
+      if (!pointerRect) {
+        pointerRect = target.getBoundingClientRect();
+        requestAnimationFrame(() => {
+          pointerRect = null;
+        });
+      }
+      return pointerRect;
+    };
+
     const toRemote = (e: MouseEvent) => {
       // Map through the canvas rect (not the overlay): it reflects the
       // displayed framebuffer under the current touch zoom/pan, and on
       // desktop it coincides with the overlay anyway.
-      const rect = (canvasRef.current ?? el).getBoundingClientRect();
+      const rect = rectOf(canvasRef.current ?? el);
       const remote = sizeRef.current;
       const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
       const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
