@@ -2628,6 +2628,65 @@ mod tests {
         );
     }
 
+    /// The wake-up contract both engines rely on now that the encode is pipelined:
+    /// while a round is away, `frame()` is a no-op that consumes nothing — not even
+    /// a keyframe ask — and the order task signals [`TileSink::round_returned`] when
+    /// the round lands with pixels still waiting, which is what re-arms an engine
+    /// parked on a clean `due_at`.
+    ///
+    /// The round is taken and pushed by hand rather than through `frame()`, so it is
+    /// *deterministically* in flight for the middle of the test: a real `frame()`
+    /// races the encode worker, and this contract must not be asserted by timing. No
+    /// paused clock is needed for the same reason — `due_at` is armed only by the
+    /// `frame()` that takes a round, which this test never lets happen until the end,
+    /// where the preserved keyframe ask bypasses the interval anyway. The timeout is
+    /// a hang guard on a broken signal, not an assertion about speed.
+    #[tokio::test]
+    async fn a_round_in_flight_defers_frame_and_its_return_wakes_the_engine() {
+        let (sink, mut frame_rx) = video_sink(64, 64).await;
+        sink.tile(0, 0, 64, 64, rgb(64, 64, 1)).await.unwrap();
+        let mut round =
+            sink.shared.video.lock().await.regions.take_round().expect("a dirty stream");
+
+        // frame() while the round is out: early return, with the keyframe ask left
+        // for a call that has streams to arm.
+        sink.reset_render();
+        sink.frame().await.unwrap();
+        assert!(
+            sink.shared.keyframe_owed.load(Ordering::Relaxed),
+            "the keyframe ask was consumed while the live table was away"
+        );
+
+        // Damage lands while the round is out. Nothing can be dirty yet — the live
+        // table is on the worker — which is exactly why the wake-up has to exist.
+        sink.tile(0, 0, 64, 64, rgb(64, 64, 2)).await.unwrap();
+        assert!(!sink.shared.video.lock().await.regions.dirty());
+
+        // Hand the round to the real order task, the way frame() does.
+        let handle = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let produced = round.encode();
+            (round, produced, micros(started))
+        });
+        sink.push(Pending::Round(handle)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), sink.round_returned())
+            .await
+            .expect("the order task never signalled the returning round");
+        assert!(
+            sink.shared.video.lock().await.regions.dirty(),
+            "the wake-up promised pixels no access unit has carried"
+        );
+
+        // The woken engine's next frame() carries them, and the preserved ask makes
+        // its unit one a decoder can start from.
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let units = drain_units(&mut frame_rx, 2).await;
+        assert!(units[0].keyframe, "the first unit of a stream starts its decoder");
+        assert!(units[1].keyframe, "the preserved keyframe ask never reached the encoder");
+        assert!(frame_rx.try_recv().is_err(), "two rounds produced more than two units");
+    }
+
     /// The test for the whole design: `damage` is called once per damage
     /// *rectangle*, and a frame is what the engine says it is. Three rectangles
     /// between two frame boundaries have to be one access unit, not three — and not

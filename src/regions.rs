@@ -104,6 +104,12 @@ struct Live {
     /// debts are keyed by, and what "this cell is in a stream" is answered from.
     cells: Vec<(u16, u16)>,
     stream: Stream,
+    /// The dial this stream's encoder is *known* to be running at — recorded only on
+    /// a successful `set_quality`, unlike the stream's own notion, which the VP9 arm
+    /// updates before the calls that can fail. What [`Regions::put_back`] compares
+    /// against, so an unchanged dial costs a returned stream nothing and a failed
+    /// retune is retried instead of believed.
+    quality: u8,
     /// Whether anything has been blitted into this region since its last access unit.
     dirty: bool,
     /// Whether the next access unit must be one a decoder can start from.
@@ -638,6 +644,8 @@ impl Regions {
             rect,
             cells,
             stream,
+            // What the encoder was just built at, per the comment above.
+            quality: self.quality,
             // Its whole region is owed: nothing has carried these pixels yet.
             dirty: true,
             keyframe_owed: true,
@@ -766,10 +774,18 @@ impl Regions {
                 live.dirty = true;
             }
             // And the congestion loop may have moved the dial while the streams were
-            // out of reach. A failure to retune keeps the quality the stream already
-            // has, the same answer `adjust` gives.
-            if let Err(e) = live.stream.set_quality(self.quality) {
-                log::warn!("video regions: a returned stream refused quality {}: {e:#}", self.quality);
+            // out of reach — compared against what each encoder is *known* to run at,
+            // so an unchanged dial costs nothing here. A failure to retune keeps the
+            // quality the stream already has, the same answer `adjust` gives, and
+            // leaves `live.quality` alone so the next round tries again.
+            if live.quality != self.quality {
+                match live.stream.set_quality(self.quality) {
+                    Ok(()) => live.quality = self.quality,
+                    Err(e) => log::warn!(
+                        "video regions: a returned stream refused quality {}: {e:#}",
+                        self.quality
+                    ),
+                }
             }
         }
         if self.policy == Policy::Moving {
@@ -792,6 +808,7 @@ impl Regions {
         self.quality = quality;
         for live in &mut self.live {
             live.stream.set_quality(quality)?;
+            live.quality = quality;
         }
         Ok(())
     }

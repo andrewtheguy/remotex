@@ -456,17 +456,24 @@ pub fn crop(src: &[u8], rect: Rect, sub: Rect, out: &mut Vec<u8>) {
     }
 }
 
-/// The first and last byte index at which two equal-length rows differ.
+/// The first and last byte index at which two **equal-length** rows differ.
 ///
 /// Only called for rows already known to differ, so there is always an answer.
 /// Saturating instead of unwrapping anyway: the caller is one line away today, and
 /// a panic here would take a whole session down over an update that could simply
-/// have been sent whole.
+/// have been sent whole. The length precondition is held to the same standard —
+/// asserted in debug, answered with "the whole row differs" in release — because
+/// the remainder scans below index `b` at offsets derived from `a`, and two
+/// different widths would otherwise be the one input that panics.
 ///
 /// Word-compared eight bytes at a time from both ends — the byte-at-a-time scans
 /// this replaces ran the full width of every changed row, and the reverse one
 /// defeated autovectorization outright.
 fn differing_bytes(a: &[u8], b: &[u8]) -> (usize, usize) {
+    debug_assert_eq!(a.len(), b.len(), "differing_bytes compares two rows of one width");
+    if a.len() != b.len() {
+        return (0, a.len().saturating_sub(1));
+    }
     const WORD: usize = 8;
     let word = |chunk: &[u8]| u64::from_ne_bytes(chunk.try_into().expect("an 8-byte chunk"));
 
