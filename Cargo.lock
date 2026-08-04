@@ -1986,7 +1986,7 @@ source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-202607
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260803200400-d592833#d59283389b435bce98e5c46d5fb5074e23e8baf6"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260804003457-6bca589#6bca589a7ed6e94a3b85943296bba063f421808a"
 
 [[package]]
 name = "libwebp-sys"
