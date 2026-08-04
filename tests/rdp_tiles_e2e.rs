@@ -3,8 +3,9 @@
 //! Starts the dummy xrdp container (`tests/xrdp-dummy/`) with podman or
 //! docker, points the real axum server at it, and connects a raw WebSocket
 //! client. Browser automation deliberately does not validate canvas paint
-//! timing or pixels (see CLAUDE.md). xrdp paints its login
-//! screen even with no session backend, so real bitmap updates flow through
+//! timing or pixels (see CLAUDE.md). The gateway's autologon attempt fails in
+//! the container — sesman runs but the user does not exist — so xrdp paints
+//! its login screen with the error, and real bitmap updates flow through
 //! the whole pipeline: IronRDP session -> `ServerMsg::Tile` -> binary WS
 //! frames, which this test validates byte-for-byte against the wire layout
 //! documented in `src/protocol.rs` / `frontend/src/protocol.ts`.
@@ -14,7 +15,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
+use futures_util::{SinkExt as _, StreamExt as _};
 use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
@@ -54,8 +55,8 @@ async fn wait_for_rdp_port(port: u16) {
     .expect("dummy RDP server never answered the X.224 probe");
 }
 
-/// Start the real server pointed at the dummy RDP target (xrdp ignores the
-/// credentials until login is submitted, which this test never does).
+/// Start the real server pointed at the dummy RDP target (the autologon the
+/// gateway always requests fails there, leaving the login screen on show).
 async fn spawn_app(rdp_port: u16) -> SocketAddr {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -106,9 +107,9 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary batch frame against the documented layout, returning how
-/// many tiles it painted.
-fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u32 {
+/// Validate one binary batch frame against the documented layout, returning the
+/// area it painted in pixels.
+fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u64 {
     let tiles = stream.paint(frame);
     assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
     for tile in &tiles {
@@ -128,7 +129,10 @@ fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u32 {
             "payload is not a PNG stream"
         );
     }
-    tiles.len() as u32
+    tiles
+        .iter()
+        .map(|tile| u64::from(tile.w) * u64::from(tile.h))
+        .sum()
 }
 
 #[tokio::test]
@@ -147,10 +151,15 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     // The fresh attach lands on the picker; pick the target to start the engine.
     common::connect_target(&mut ws, "xrdp-dummy").await;
 
-    let mut got_resize = false;
-    let mut tiles = 0u32;
-    // Resolves cache references, so this counts tiles *painted* rather than tiles
-    // whose pixels happened to be on the wire.
+    // The current desktop, from the last `resize` control message. There can be
+    // more than one: xrdp's auto-login path hands the connection to its session
+    // module through a deactivation-reactivation, which may re-announce the
+    // desktop (and at a different height than it first offered).
+    let mut desktop: Option<u64> = None;
+    let mut sent_refresh = false;
+    let mut painted: u64 = 0;
+    // Resolves cache references, so this counts pixels *painted* rather than
+    // pixels that happened to be on the wire.
     let mut stream = common::TileStream::new();
 
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -158,34 +167,49 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     // The only text frames are control messages; the session
-                    // must not fail, and resize must precede any tile.
+                    // must not fail, and a resize must precede the first tile.
                     assert!(
                         !text.contains(r#""type":"error""#),
                         "session failed: {text}"
                     );
-                    if text.contains(r#""type":"resize""#) {
-                        assert_eq!(tiles, 0, "resize arrived after tiles");
-                        got_resize = true;
+                    let control: serde_json::Value =
+                        serde_json::from_str(&text).expect("control message is JSON");
+                    if control["type"] == "resize" {
+                        let w = control["w"].as_u64().expect("resize carries w");
+                        let h = control["h"].as_u64().expect("resize carries h");
+                        desktop = Some(w * h);
+                        // A new surface starts blank; what was painted on the
+                        // old one no longer counts toward covering it, and it
+                        // gets its own refresh.
+                        painted = 0;
+                        sent_refresh = false;
                     }
                 }
                 Message::Binary(frame) => {
-                    assert!(got_resize, "tile arrived before resize");
-                    // Tiles, not frames: a batch carries however many were ready
-                    // at once, so counting frames would stop the test early.
-                    tiles += check_tile_frame(&mut stream, &frame);
-                    // The xrdp login screen paints in well over 20 strips;
-                    // that's enough to call the transport exercised.
-                    if tiles >= 20 {
+                    let desktop = desktop.expect("tile arrived before resize");
+                    // Area rather than a tile count: how many tiles a paint
+                    // splits into is the encoder's business, and how much of
+                    // the mostly-black failed-login screen survives the
+                    // shadow-copy trim is too. So once tiles flow at all, ask
+                    // for a `refresh` — it forgets the shadow and repaints the
+                    // whole desktop — and a desktop's worth of painted pixels
+                    // becomes the deterministic finish line.
+                    painted += check_tile_frame(&mut stream, &frame);
+                    if painted >= desktop {
                         return;
+                    }
+                    if !sent_refresh {
+                        sent_refresh = true;
+                        ws.send(Message::Text(r#"{"type":"refresh"}"#.into()))
+                            .await
+                            .expect("send refresh");
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed after {tiles} tiles without reaching the target");
+        panic!("websocket closed after {painted} painted pixels without covering the desktop");
     })
     .await
     .expect("timed out waiting for tile frames");
-
-    assert!(got_resize, "never received the resize control message");
 }

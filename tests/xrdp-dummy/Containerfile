@@ -1,13 +1,16 @@
 # Dummy RDP server for e2e tests (see tests/rdp_tiles_e2e.rs).
 #
-# Plain xrdp with no session backend: it still completes the full RDP
-# handshake (TLS via the snakeoil cert the package generates) and paints its
-# own login screen, which is all the tests need — real bitmap updates flowing
-# to the client. Nothing can actually log in, and nothing listens beyond the
-# published port.
+# xrdp plus its sesman, but no session backend: the full RDP handshake
+# completes (TLS via the snakeoil cert the package generates), the client's
+# autologon attempt reaches sesman and fails — the "dummy" user does not
+# exist — and xrdp paints its login screen with the error, which is all the
+# tests need: real bitmap updates flowing to the client. Sesman is required
+# since the gateway always connects with INFO_AUTOLOGON (src/rdp.rs); without
+# a sesman to refuse the login, xrdp paints nothing at all. Nothing can
+# actually log in, and nothing listens beyond the published port.
 FROM debian:bookworm-slim
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xrdp \
     && rm -rf /var/lib/apt/lists/*
 EXPOSE 3389
-CMD ["xrdp", "--nodaemon"]
+CMD ["sh", "-c", "xrdp-sesman && exec xrdp --nodaemon"]
