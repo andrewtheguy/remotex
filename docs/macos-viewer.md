@@ -5,15 +5,18 @@ A macOS window around the client, built with Electron and living in
 
 It is a **shell**, not a second client. Everything below the title bar is the same
 SPA a browser loads, from the same `frontend/dist`, talking to a gateway over the
-same socket. The app owns the window, the menu bar, the pasteboard and the gateway
-process, and nothing else: no claim, no session, no framebuffer, no wire format. A
-protocol change is a change to the client and to nothing else, which is why there is
-no version pair to keep in step.
+same sockets it uses in a browser — the session's, and `/ws/audio` with its own
+queue beside it. The app owns the window, the menu bar, the pasteboard and the
+gateway process, and nothing else: no claim, no session, no framebuffer, no wire
+format. The protocol belongs to the client and the gateway, which is why there is no
+version pair between the app and either of them.
 
 What it adds is only what a page genuinely cannot do for itself:
 
-- **Every ⌘ chord reaches the guest**, ⌘W and ⌘Q included. A browser tab never sees
-  them.
+- **Every ⌘ chord the menu bar would have taken reaches the guest**, ⌘W and ⌘Q
+  included. A browser tab never sees them. What macOS keeps for itself — ⌘Space,
+  ⌘Tab, the screenshot chords — no app sees, here included; **Send Keys** is the
+  answer to those.
 - **A clipboard that keeps syncing while the window is unfocused or minimised.**
   `navigator.clipboard.readText()` is refused unless the document is focused.
 - **A real menu bar**, and sound started from it — a menu press is not a gesture in
@@ -191,7 +194,9 @@ development fallback is the **release** gateway on purpose: an unpackaged run is
 manual QA run, and a debug build of the encoders is too slow to judge a remote
 desktop by.
 
-`bun run check` and `bun test tests` are the gate. The tests cover the handshake,
+`bun run check` and `bun test tests`, both **from `apps/viewer/`**, are the gate —
+the subshells above leave the caller where it started, so a `cd` of your own is the
+first half of running them. The tests cover the handshake,
 the log tail, the instance directory, the scheme's routing, the clipboard's echo
 guards, the window arithmetic, the config store, the bundle's own paths, and every
 menu title, tick and greyed item — all without an app running, because only

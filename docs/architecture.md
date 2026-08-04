@@ -811,8 +811,9 @@ reclaim actions.
 `frontend/dist`, the same gateway, the same wire — adding only what a page cannot
 do for itself: every ⌘ chord reaching the guest, a clipboard that keeps syncing
 while the window is unfocused, a menu bar, and a gateway of its own. It holds no
-session, so there is no version pair between it and the gateway; a protocol change
-is a change to the client and to nothing else.
+session and no wire format, so there is no version pair between it and the gateway:
+the protocol is the client's and the gateway's, changed in both as it always is, and
+the shell is not a third party to keep in step.
 
 It runs `remotex serve-embedded --instance-dir <dir> --web-root <dir>`, which
 binds `127.0.0.1:0` and prints one JSON line — `{"port","token"}` — before serving

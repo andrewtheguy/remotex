@@ -119,8 +119,11 @@ same `sendClipboard` path a focus push takes (the echo guards `lastFromRemoteRef
 `lastToRemoteRef` already cover it), and the reverse direction replacing what
 `mirrorRemoteClipboard` hands the app. The keyboard half wants the fuller Command
 chord table `macKeys.ts` already selects for the app, gated on the extension being
-present rather than on a build flag. Distribution is "Load unpacked" for
-personal use, or a local `.crx` pinned through `ExtensionSettings` policy.
+present rather than on a build flag. Distribution is "Load unpacked" for personal
+use; anything managed goes through `ExtensionSettings` with
+`installation_mode: force_installed` and an `update_url` — a hosted update manifest
+beside the `.crx`, or the Web Store's. A policy has no way to pin a `.crx` sitting
+on the disk.
 
 ## Not planned
 
