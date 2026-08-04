@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { gatewayFetch } from "./gateway.ts";
 import { gatewayConfig } from "./gatewayConfig.ts";
 import Login from "./Login.tsx";
+import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import RemoteDesktop from "./RemoteDesktop.tsx";
 import { SESSION_KEY } from "./useRemoteDesktop.ts";
 
@@ -62,7 +63,20 @@ export default function App() {
   // the in-memory store): back to the login screen.
   const unauthorized = useCallback(() => setAuthState("unauthenticated"), []);
 
+  // Inside `remotex.app` there is no login screen to fall back to: the gateway
+  // takes the launch token the app put in the cookie store, and if that is not
+  // what it minted, nobody can type their way out of it. Tell the app, which has a
+  // screen for exactly this, and show it nothing meanwhile.
+  useEffect(() => {
+    if (NATIVE_HOST && authState === "unauthenticated") {
+      postToHost({ type: "unauthenticated" });
+    }
+  }, [authState]);
+
   if (authState !== "authenticated") {
+    if (NATIVE_HOST) {
+      return null;
+    }
     return (
       <Login
         checking={authState === "checking"}

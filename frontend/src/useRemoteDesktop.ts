@@ -14,6 +14,7 @@ import {
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
+import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
 import {
   binaryFrameKind,
@@ -97,7 +98,7 @@ const AUDIO_KEY = "remotex.audioByDefault";
 const IS_MAC_HOST = isMacHost();
 
 // Whether Command chords should be translated for a non-Mac guest, as last set
-// here. Absent means on.
+// here. Absent means on, matching the viewer's default-on menu item.
 function readMacKeyOverridesPreference(): boolean {
   try {
     return localStorage.getItem(MAC_KEYS_KEY) !== "off";
@@ -1253,6 +1254,14 @@ export function useRemoteDesktop(
       if (alreadyMirrored || echoedFromHost) {
         return;
       }
+      // Inside `remotex.app` the app owns the pasteboard and writes it with
+      // AppKit. Not a preference: `navigator.clipboard.writeText` in a web view
+      // has no user gesture behind it, so it is refused, and the remote's copy
+      // would silently never arrive on the Mac.
+      if (NATIVE_HOST) {
+        postToHost({ type: "clipboardFromRemote", text });
+        return;
+      }
       void navigator.clipboard?.writeText?.(text).catch(() => {});
     };
 
@@ -1537,6 +1546,13 @@ export function useRemoteDesktop(
     sendRef.current({ type: "selectDisplay", id });
   }, []);
 
+  // Re-announce the size and repaint everything, for a canvas that has gone
+  // wrong. Only the native shell offers it — a browser has reload, which does
+  // this and more.
+  const refresh = useCallback(() => {
+    sendRef.current({ type: "refresh" });
+  }, []);
+
   // Start or stop the remote's sound (the floating menu's Audio button).
   //
   // **Must be called from a click**, and the AudioContext is why: a context created
@@ -1636,15 +1652,32 @@ export function useRemoteDesktop(
     sendRef.current({ type: "clipboard", text });
   }, []);
 
+  // The host's clipboard changed and something outside this page noticed. Only
+  // the native shell has such a thing — it polls `NSPasteboard.changeCount` —
+  // and it lands here rather than in `sendClipboard` so it passes the same echo
+  // guards the browser's own focus push does: a value that came *from* the remote
+  // a moment ago must not go straight back to it.
+  const pushLocalClipboard = useCallback((text: string) => {
+    if (
+      text === "" ||
+      overClipboardLimit(text) ||
+      text === lastFromRemoteRef.current ||
+      text === lastToRemoteRef.current
+    ) {
+      return;
+    }
+    lastToRemoteRef.current = text;
+    sendRef.current({ type: "clipboard", text });
+  }, []);
+
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
   // values are skipped locally; the explicit panel reports the limit.
   //
-  // On focus, because that is the only moment a page may read the clipboard at
-  // all: `navigator.clipboard.readText` is refused while the document is hidden
-  // or unfocused, which is the gap docs/roadmap.md's companion extension exists
-  // to close.
+  // Not in the native shell, where the app polls `NSPasteboard.changeCount` and
+  // pushes what it finds: reading the pasteboard from a page there would ask macOS
+  // for permission a second time, on behalf of a "browser" the user cannot see.
   useEffect(() => {
-    if (mode !== "desktop" || !canClipboard) {
+    if (NATIVE_HOST || mode !== "desktop" || !canClipboard) {
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
@@ -1724,7 +1757,8 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    const macKeys = new MacKeyboardTranslator();
+    // The native shell is given every Command chord, so it gets the fuller table.
+    const macKeys = new MacKeyboardTranslator(NATIVE_HOST);
 
     // Touch gestures, only on pinch-zoom-capable devices — they
     // drive the same view transform applyCanvasCss renders.
@@ -1853,10 +1887,11 @@ export function useRemoteDesktop(
     // it emits rather than what arrived, so releaseAll can undo a chord the guest
     // was told about in different codes than the user typed.
     //
-    // Taken apart from the DOM event so a second source of keys — anything that
-    // already carries a DOM `code` — can take this exact path, the same translator
-    // instance and the same held-key set, rather than a parallel one where a chord
-    // started at the keyboard could be released by the other half.
+    // Taken apart from the DOM event so the translation and the held-key
+    // bookkeeping have one home. Inside `remotex.app` the chords a browser never
+    // sees — ⌘W, ⌘Q, ⌘T — arrive here as ordinary `keydown` events, because the
+    // shell drops its menu accelerators while the desktop has focus rather than
+    // injecting keys down a side channel. See nativeHost.ts.
     const emitKey = (
       code: string,
       pressed: boolean,
@@ -1957,10 +1992,12 @@ export function useRemoteDesktop(
     resizeToWindow,
     setAutoResize,
     selectDisplay,
+    refresh,
     setAudio,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
+    pushLocalClipboard,
     setBottomInset,
   };
 }
