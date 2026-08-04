@@ -14,11 +14,10 @@
 # not match the regex (the `.` after `version` breaks it), which is what keeps
 # the root package from shadowing it.
 [workspace]
-members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.105"
+version = "0.0.106"
 
 [package]
 name = "remotex"
