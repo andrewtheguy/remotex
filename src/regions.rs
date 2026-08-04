@@ -742,6 +742,8 @@ impl Regions {
             mark: self.mark,
             skipped: 0,
             epoch: self.epoch,
+            #[cfg(test)]
+            rendezvous: None,
         })
     }
 
@@ -841,8 +843,11 @@ impl Regions {
 /// One round is one frame of the desktop however many regions it took, and what the
 /// pipelined queue pays for it is its **wall-clock**, not its total CPU — no new
 /// round can be taken while one is out, so a slow round is what caps the frame
-/// rate. The dirty streams therefore encode concurrently ([`Self::encode`]) and a
-/// round costs its slowest stream rather than the sum of them.
+/// rate. The dirty streams therefore encode concurrently ([`Self::encode`]): with
+/// cores free to run them, a round costs its slowest stream rather than the sum of
+/// them, and under CPU contention the scheduler serializes some of that overlap and
+/// the cost degrades back toward the sum — which is what the serial loop always
+/// cost, so the bound never inverts.
 pub struct Round {
     mirror: Mirror,
     live: Vec<Live>,
@@ -851,6 +856,60 @@ pub struct Round {
     /// The [`Regions::epoch`] this round was taken under, so [`Regions::put_back`]
     /// can tell a round that outlived its desktop from one worth restoring.
     epoch: u64,
+    /// A rendezvous every encode passes through when a test arms one, so a test can
+    /// prove the streams really overlap: under a serial loop the first encode waits
+    /// for a sibling that never starts, and the bounded wait fails the test.
+    #[cfg(test)]
+    rendezvous: Option<std::sync::Arc<Rendezvous>>,
+}
+
+/// See [`Round::rendezvous`]. Its wait is bounded so a regression to serial
+/// encoding fails with a message instead of hanging the suite; the bound is a
+/// hang guard, not a timing assertion — both threads exist before either waits,
+/// so only an encode that cannot start until its sibling *finishes* can miss it.
+#[cfg(test)]
+struct Rendezvous {
+    expected: usize,
+    arrived: std::sync::Mutex<usize>,
+    all_here: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl Rendezvous {
+    fn new(expected: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            expected,
+            arrived: std::sync::Mutex::new(0),
+            all_here: std::sync::Condvar::new(),
+        })
+    }
+
+    fn arrive(&self) {
+        let mut arrived = self.arrived.lock().unwrap();
+        *arrived += 1;
+        if *arrived >= self.expected {
+            self.all_here.notify_all();
+            return;
+        }
+        let (_arrived, waited) = self
+            .all_here
+            .wait_timeout_while(arrived, Duration::from_secs(10), |n| *n < self.expected)
+            .unwrap();
+        assert!(
+            !waited.timed_out(),
+            "the round's streams did not encode concurrently: a sibling never started"
+        );
+    }
+}
+
+/// [`Rendezvous::arrive`] when one is armed; nothing otherwise. A function rather
+/// than an inline `if let`, so the call sites inside `encode`'s closures stay one
+/// `cfg`-gated line each.
+#[cfg(test)]
+fn rendezvous_arrive(rendezvous: &Option<std::sync::Arc<Rendezvous>>) {
+    if let Some(rendezvous) = rendezvous {
+        rendezvous.arrive();
+    }
 }
 
 impl Round {
@@ -873,6 +932,8 @@ impl Round {
     pub fn encode(&mut self) -> anyhow::Result<Produced> {
         self.mirror.pad_edges();
         let (mirror, mark) = (&self.mirror, self.mark);
+        #[cfg(test)]
+        let rendezvous = self.rendezvous.clone();
 
         // Keyframes are armed before the fan-out: arming needs the same `&mut` the
         // encode does, and it is not the part worth overlapping.
@@ -893,10 +954,21 @@ impl Round {
                 let mut waiting = waiting.into_iter();
                 let first = waiting.next();
                 let spawned: Vec<_> = waiting
-                    .map(|(at, live)| (at, scope.spawn(move || live.stream.encode(mirror, mark))))
+                    .map(|(at, live)| {
+                        #[cfg(test)]
+                        let rendezvous = rendezvous.clone();
+                        let handle = scope.spawn(move || {
+                            #[cfg(test)]
+                            rendezvous_arrive(&rendezvous);
+                            live.stream.encode(mirror, mark)
+                        });
+                        (at, handle)
+                    })
                     .collect();
                 let mut outcomes = Vec::with_capacity(spawned.len() + 1);
                 if let Some((at, live)) = first {
+                    #[cfg(test)]
+                    rendezvous_arrive(&rendezvous);
                     outcomes.push((at, live.stream.encode(mirror, mark)));
                 }
                 for (at, handle) in spawned {
@@ -973,6 +1045,13 @@ impl Round {
     /// buffer hands the worker.
     fn mirror(&self) -> &Mirror {
         &self.mirror
+    }
+
+    /// Make the next [`Self::encode`] prove that `streams` encodes overlap in time —
+    /// each waits at a rendezvous until all have started, which a serial loop can
+    /// never satisfy.
+    fn expect_overlap(&mut self, streams: usize) {
+        self.rendezvous = Some(Rendezvous::new(streams));
     }
 }
 
@@ -1194,10 +1273,11 @@ mod tests {
         assert_ne!(ids[0], ids[1], "both regions were sent as the same stream");
     }
 
-    /// A round with several dirty streams encodes all of them — concurrently, though
-    /// what a test can hold it to is the contract that survives any scheduling: every
-    /// stream produces its unit, the units keep stream order whichever encode
-    /// finished first, and each announces its format ahead of its first unit.
+    /// A round with several dirty streams encodes all of them, **concurrently** —
+    /// the rendezvous holds each encode until every one has started, which a serial
+    /// loop can never satisfy — and the contract that survives any scheduling still
+    /// holds: every stream produces its unit, the units keep stream order whichever
+    /// encode finished first, and each announces its format ahead of its first unit.
     #[tokio::test]
     async fn a_round_with_two_streams_produces_both_units_in_stream_order() {
         let mut regions = sized(1600, 128).await;
@@ -1206,6 +1286,7 @@ mod tests {
         assert_eq!(ids.len(), 2, "expected two regions, got {ids:?}");
 
         let mut round = regions.take_round().expect("both streams are dirty from birth");
+        round.expect_overlap(2);
         let produced = round.encode().expect("an encode");
         assert_eq!(round.skipped(), 0, "a stream's pixels were lost to the fan-out");
         let streams: Vec<u8> = produced.units.iter().map(|unit| unit.stream).collect();

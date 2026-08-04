@@ -174,8 +174,10 @@ bottom.
   `Round::encode`). The serial loop was defended by a CPU-bound argument
   ("total work is one desktop frame") that answered the wrong question: the
   pipelined queue pays a round's *wall-clock*, and no new round can be taken
-  while one is out, so a round of several streams cost the sum where it should
-  cost the max. Dirty streams now encode on scoped threads (the first on the
+  while one is out, so a round of several streams cost the sum unconditionally,
+  where with cores free to run them it can cost the max — under CPU contention
+  the overlap shrinks back toward the sum, but never past what the serial loop
+  always cost. Dirty streams now encode on scoped threads (the first on the
   worker itself — most rounds have one), sharing `&Mirror` and each holding its
   own stream `&mut`, checked by `std::thread::scope` with nothing `unsafe`.
   Units keep stream order regardless of finish order, and an error surfaces
