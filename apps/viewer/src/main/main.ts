@@ -16,7 +16,7 @@
 // the page.
 
 import { mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, screen } from "electron";
 import {
   CHANNEL,
@@ -36,7 +36,7 @@ import {
 } from "./instance.ts";
 import type { LocalAction } from "./menu.ts";
 import { installMenu } from "./menu-install.ts";
-import { resourceLayout } from "./paths.ts";
+import { distDirFor, resourceLayout } from "./paths.ts";
 import { declareShellScheme, serveShellScheme } from "./scheme.ts";
 import { shellPageUrl } from "./scheme-routes.ts";
 import {
@@ -61,10 +61,13 @@ import {
 /** Stamped in at build time from `Cargo.toml`'s workspace version. */
 declare const __VIEWER_VERSION__: string;
 
-const distDir = __dirname;
+// Deliberately not `__dirname` — see `distDirFor`, which is where that story is.
+const distDir = distDirFor(app.getAppPath());
+// `<repo>/apps/viewer/dist` → `<repo>`, which is where a development run finds the
+// gateway and the client it was told nothing else about.
 const appRoot = app.isPackaged
   ? process.resourcesPath
-  : resolve(dirname(distDir), "../..");
+  : resolve(distDir, "../../..");
 const layout = resourceLayout(app.isPackaged, appRoot, distDir);
 
 // --- Instance and profile -------------------------------------------------
@@ -363,7 +366,11 @@ async function openConfiguration(): Promise<void> {
 
 function getWindow(): BrowserWindow {
   if (!window) {
-    window = createViewerWindow(distDir);
+    window = createViewerWindow(distDir, (message) => {
+      // Straight to the launch screen: a client that cannot reach its shell is not
+      // a client, and the alternative is a login form for a gateway nobody named.
+      void showLaunchScreenWith(new LaunchFailure("clientMissing", message));
+    });
     window.on("closed", () => {
       window = null;
     });

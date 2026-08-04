@@ -8,7 +8,10 @@ import { CLIENT_URL, isShellUrl, shellPageUrl } from "./scheme-routes.ts";
 /** How small the window may get before it stops being a desktop. */
 export const MINIMUM_SIZE = { width: 720, height: 480 };
 
-export function createViewerWindow(distDir: string): BrowserWindow {
+export function createViewerWindow(
+  distDir: string,
+  onPreloadError: (message: string) => void,
+): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -29,6 +32,19 @@ export function createViewerWindow(distDir: string): BrowserWindow {
   });
 
   lockDownNavigation(window);
+
+  // A preload that does not load is the worst failure this app has, because it does
+  // not look like a failure: the client's two globals are the only thing that tells
+  // it which host it is in, and without them it concludes it is in a browser and
+  // draws a login screen for a gateway whose address it was never given. That is a
+  // working-looking window in which nothing can work. So it is reported, loudly,
+  // rather than left to be diagnosed from the symptom.
+  window.webContents.on("preload-error", (_event, path, error) => {
+    onPreloadError(
+      `The client bridge did not load (${path}): ${error.message}`,
+    );
+  });
+
   window.once("ready-to-show", () => window.show());
   return window;
 }
