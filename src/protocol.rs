@@ -1,7 +1,8 @@
 //! Client wire types: tagged JSON for control and input, binary batches for still
-//! tiles and H.264 access units, and binary frames for Opus audio. WebSocket
-//! ordering is required because resize messages change the coordinate space of
-//! following tiles — and because an access unit means nothing out of sequence.
+//! tiles and VP9/H.264 access units, and binary frames for Opus or PCM audio.
+//! WebSocket ordering is required because resize messages change the coordinate
+//! space of following tiles — and because an access unit means nothing out of
+//! sequence. Audio travels on its own WebSocket.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -11,14 +12,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// is split into strips before being sent, so a full-screen repaint doesn't
 /// produce one huge WebSocket message.
 pub const STRIP_ROWS: u16 = 64;
-
-/// Version of [`ClientMsg`], [`ControlMsg`], and the binary layouts. The native
-/// viewer requires an exact match. Bump it when an older peer would otherwise
-/// fail without a useful compatibility error; clients ignore additive control
-/// tags they do not know.
-/// Version 12 is the video negotiation: a `VIDEO` record grew a flags byte carrying its keyframe
-/// bit, so the binary layout moved, which no client can decode its way around.
-pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -310,8 +303,7 @@ pub mod batch {
     pub const MAX_CACHED_BYTES: usize = 32 * 1024;
 }
 
-/// The layout of a server -> client **audio** frame: one wave buffer's worth of
-/// Opus packets.
+/// The layout of a server -> client **audio** frame: one outbound audio chunk.
 ///
 /// ```text
 /// offset 0: u8  frame kind, always 0x03 (audio)
@@ -371,14 +363,12 @@ pub const CELL_H: u16 = STRIP_ROWS;
 
 /// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
 /// [`batch`] frame. The payload is an image stream the client decodes natively —
-/// PNG or JPEG, named by the `format` byte so `createImageBitmap` gets the right
-/// MIME type.
+/// PNG, JPEG, or WebP, named by the `format` byte so `createImageBitmap` gets the
+/// right MIME type.
 ///
 /// The RDP and VNC engines decode a framebuffer and compress it here: lossless
 /// PNG ([`Tile::from_rgb`], the default) or, for a target on the fixed-quality
-/// dial, JPEG ([`Tile::from_rgb_jpeg`]) or WebP ([`Tile::from_rgb_webp`]). A
-/// pass-through path also exists for a source that hands over frames already
-/// encoded ([`Tile::encoded`]), which no current engine uses; either way the
+/// dial, JPEG ([`Tile::from_rgb_jpeg`]) or WebP ([`Tile::from_rgb_webp`]). The
 /// format travels with the tile instead of being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
@@ -419,10 +409,9 @@ impl Tile {
     }
 
     /// Build a tile from packed RGB888 pixels, JPEG-compressing the payload at a
-    /// fixed `quality` (1–100). The lossy counterpart to [`Tile::from_rgb`], taken
-    /// by an engine only when its target set `render_type = "fixed-quality"`,
-    /// `render_subtype = "jpeg"` (see [`crate::config::RenderType`]); the format
-    /// byte carries the choice, so no client is told anything new.
+    /// fixed `quality` (1–100). The lossy counterpart to [`Tile::from_rgb`], used
+    /// for a JPEG base or JPEG motion encode (see [`crate::config::RenderType`]);
+    /// the format byte carries the choice, so no client is told anything new.
     ///
     /// Every tile goes to JPEG here — there is no content classifier — so flat UI
     /// and text soften along with everything else. That is the documented trade of
@@ -469,21 +458,6 @@ impl Tile {
             h,
             data,
         })
-    }
-
-    /// Wrap an already-encoded payload, for a caller that did the encoding itself.
-    ///
-    /// The pass-through for a source that hands over frames already encoded, so the
-    /// gateway never decodes and re-encodes a pixel.
-    pub fn encoded(format: u8, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> Self {
-        Self {
-            format,
-            x,
-            y,
-            w,
-            h,
-            data,
-        }
     }
 
     /// What this tile will cost inside a batch, payload included.
@@ -610,8 +584,7 @@ pub struct CursorShape {
     /// PNG-encoded RGBA image (the alpha channel carries the cursor mask).
     ///
     /// PNG rather than the tile codec because [`CursorShape::png`] rides the JSON
-    /// control channel as base64, and the macOS agent's own shapes arrive PNG from
-    /// AppKit and are relayed unmodified.
+    /// control channel as base64 and needs one self-describing image.
     pub png: Vec<u8>,
 }
 
@@ -633,8 +606,7 @@ impl CursorShape {
 /// already large for screen content, and this runs on the session's hot path.
 ///
 /// Shared by [`Tile::from_rgb`] (RGB screen tiles) and [`CursorShape::from_rgba`]
-/// (RGBA cursor shapes), so a PNG tile from the gateway is byte-for-byte the same
-/// shape a decoder sees from the agent's own PNG branch.
+/// (RGBA cursor shapes).
 fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
@@ -649,8 +621,7 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
 
 /// JPEG-encode packed RGB888 at a fixed `quality` (1–100). The lossy tile path
 /// ([`Tile::from_rgb_jpeg`]); JPEG embeds its own quantization tables, so the
-/// quality rides no wire and the decoder needs no telling. Salvaged from the
-/// deleted agent's encoder (commit 8990971).
+/// quality rides no wire and the decoder needs no telling.
 fn encode_jpeg(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
@@ -724,9 +695,10 @@ pub struct DisplayInfo {
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
     Tile(Tile),
-    /// One H.264 access unit for one region. Like a tile this has no text encoding
-    /// and is not a control message: it is a binary record, and [`crate::wire`] is
-    /// what puts it in a batch — in its place among the tiles, which is load-bearing.
+    /// One VP9 or H.264 access unit for one region. Like a tile this has no text
+    /// encoding and is not a control message: it is a binary record, and
+    /// [`crate::wire`] puts it in a batch in its place among the tiles, which is
+    /// load-bearing.
     Video(VideoUnit),
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
@@ -760,17 +732,10 @@ pub enum ServerMsg {
     /// the first is whether a client may resize the remote when the user asks, the
     /// second whether it may hand the size to its window and let every drag report.
     /// Only plain `vnc` gets the second — see [`crate::config::TargetConfig::auto_resize`].
-    /// `auto_resize` is required rather than defaulted, which is what moved
-    /// [`PROTOCOL_VERSION`] to 9: version 8 shipped this message without it, so a
-    /// gateway that omits it must be refused by version rather than decoded into a
-    /// target that silently cannot follow the window.
-    ///
-    /// `video` is the codec family this session's streams are being encoded with, or `None` for a
-    /// target that streams nothing. Its point is the *takeover*: a browser that attaches to a
-    /// session somebody else started never sent `ClientMsg::Connect` and so had no say in the
-    /// negotiation, and this is what lets it say "this session is streaming VP9, which I cannot
-    /// decode" immediately rather than after the first keyframe fails to decode. A client that
-    /// *did* negotiate learns nothing new from it.
+    /// `video` is the codec family this session's streams are being encoded with,
+    /// or `None` for a target that streams nothing. The target config chooses it;
+    /// carrying it here lets a browser that takes over a running session identify
+    /// the codec even though it sent no [`ClientMsg::Connect`].
     Connected {
         name: String,
         protocol: &'static str,
@@ -805,11 +770,10 @@ pub enum ServerMsg {
     /// Whether the remote runs macOS, discovered by the engine as it connects
     /// and sent once, next to the first [`ServerMsg::Resize`].
     ///
-    /// Only a native host reads it, and only to decide whether a local Command
-    /// shortcut belongs to the Mac the user is sitting at or the Mac at the far
-    /// end. That is the whole reason this exists — which is why it is one bit
-    /// discovered from the connection rather than an OS name someone has to
-    /// keep correct in the config file.
+    /// The browser uses it for one keyboard convention: whether selected local
+    /// Command shortcuts remain Command or become remote Control. It is one bit
+    /// discovered from the connection rather than an OS name someone has to keep
+    /// correct in the config file.
     RemoteOs { macos: bool },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
@@ -1523,32 +1487,6 @@ mod tests {
         assert_eq!(out.len(), batch::TILE_REF_LEN);
     }
 
-    // The pass-through path: the macOS agent's already-encoded bytes reach the
-    // browser byte for byte, with the format byte it chose.
-    #[test]
-    fn encoded_tile_passes_the_payload_and_format_through_untouched() {
-        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
-        let tile = Tile::encoded(Tile::FORMAT_JPEG, 0x0102, 0x0304, 320, 64, jpeg.clone());
-        let mut out = Vec::new();
-        tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[0], batch::OP_TILE);
-        assert_eq!(out[1], Tile::FORMAT_JPEG);
-        assert_eq!(&out[4..6], &[0x02, 0x01]); // x, little-endian
-        assert_eq!(&out[6..8], &[0x04, 0x03]); // y
-        assert_eq!(&out[8..10], &[0x40, 0x01]); // w = 320
-        assert_eq!(&out[10..12], &[64, 0]); // h
-        assert_eq!(&out[batch::TILE_HEADER_LEN..], jpeg.as_slice());
-
-        // A PNG the agent encoded itself takes the same path, differing only in
-        // the format byte — the gateway looks inside neither.
-        let png = vec![0x89, b'P', b'N', b'G'];
-        let tile = Tile::encoded(Tile::FORMAT_PNG, 0, 0, 1, 1, png.clone());
-        let mut out = Vec::new();
-        tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[1], Tile::FORMAT_PNG);
-        assert_eq!(&out[batch::TILE_HEADER_LEN..], png.as_slice());
-    }
-
     // from_rgb still stamps PNG, so RDP and VNC are unaffected by the new field.
     #[test]
     fn from_rgb_still_marks_its_payload_as_png() {
@@ -1734,8 +1672,6 @@ mod tests {
     }
 
     /// Flat UI: a few colours and hard edges, which is what most of a desktop is.
-    /// Deliberately the same shape of content as the agent's classifier test, so
-    /// the two halves of the system are judged on the same material.
     fn flat_ui_rgb(w: u16, h: u16) -> Vec<u8> {
         let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
         for y in 0..h {

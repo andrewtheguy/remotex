@@ -42,10 +42,10 @@ const VIDEO_FRAME_BUFFER: usize = 4;
 /// congestion loop is correspondingly less sharp there, which is a thing to know when
 /// reading `coarsened` in the `encode totals` line.
 ///
-/// Matches the config axis rather than asking for a [`crate::config::RenderPlan`], because a plan
-/// needs the negotiated codec and this is called from [`SessionManager::attach`] — before any
-/// negotiation has happened, and over targets nobody has connected to. The two say the same thing:
-/// `render_type = "video"` is the only value that produces a plan with no tiles in it.
+/// Matches the config axis rather than asking for a [`crate::config::RenderPlan`],
+/// because this is called from [`SessionManager::attach`] over targets nobody has
+/// connected to. The two say the same thing: `render_type = "video"` is the only
+/// value that produces a plan with no tiles in it.
 fn frame_buffer(target: &TargetConfig) -> usize {
     match target.render_type {
         crate::config::RenderType::Video => VIDEO_FRAME_BUFFER,

@@ -42,7 +42,7 @@ body {
   display: block;
   /* Tiles land 1:1 in the framebuffer-sized canvas bitmap. When guest and host
      densities differ, let the browser smoothly resample that finished bitmap
-     into the CSS box, as Core Animation does for the native viewer. */
+     into the CSS box. */
   image-rendering: auto;
 }
 

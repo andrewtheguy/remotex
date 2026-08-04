@@ -14,10 +14,10 @@ test("a desktop with no cursor image hides the local pointer", () => {
 });
 
 test("no desktop gives the pointer back", () => {
-  // The regression this exists for: the macOS viewer keeps its canvas page mounted
-  // *under* the target picker so the framebuffer survives a trip there and back, so
-  // a page still claiming `none` after `clear` left the picker with no pointer at
-  // all. Hiding it is a property of a desktop being on screen, not of the page.
+  // The regression this exists for: the canvas stays mounted under the target
+  // picker, so a page still claiming `none` after `clear` left the picker with no
+  // pointer at all. Hiding it is a property of a desktop being on screen, not of
+  // the page.
   assert.equal(bareCursorCss(false), "default");
 });
 

@@ -386,7 +386,7 @@ impl Motion {
     /// history has emptied is dropped outright, so the map stays the size of the
     /// screen's recent activity rather than of the session.
     ///
-    /// Only the region policy asks (`render_motion_subtype = "h264"`), and only once
+    /// Only the region policy asks (`render_motion_subtype = "stream"`), and only once
     /// per retune.
     fn moving(&mut self, now: tokio::time::Instant) -> Vec<(u16, u16)> {
         let Some(origin) = self.origin else {
@@ -1127,8 +1127,8 @@ impl TileSink {
     /// client to decode from a frame it never saw.
     ///
     /// Its call sites are exactly the moments a client's decoder has to be able to
-    /// start over, which is why the keyframe is armed here rather than anywhere that
-    /// knows about H.264.
+    /// start over, which is why the keyframe is armed here rather than in a
+    /// codec-specific path.
     pub fn reset_render(&self) {
         self.shared.motion.lock().unwrap().clear();
         self.shared.keyframe_owed.store(true, Ordering::Relaxed);
@@ -1623,7 +1623,7 @@ fn micros(since: Instant) -> u64 {
 ///
 /// `tiles` counts still tiles and `unit` counts access units, so both are comparable
 /// across every dial: a `motion` session's tiles are the same kind of thing as a
-/// `motion` + `h264` session's, and only `bytes` compares the two transports.
+/// `motion` + `stream` session's, and only `bytes` compares the two transports.
 struct Totals {
     tiles: u64,
     encoded_bytes: u64,
@@ -2537,7 +2537,7 @@ mod tests {
             panic!("the first thing a stream sends must be its format, got {:?}", out[0]);
         };
         assert_eq!(*stream, 0, "one desktop, one stream");
-        assert_eq!(*codec, VideoCodec::Vp9.name(), "the negotiated codec, not the fallback");
+        assert_eq!(*codec, VideoCodec::Vp9.name(), "the configured codec, not a fallback");
         assert!(decode.starts_with("vp09.00."), "not a VP9 profile-0 configuration: {decode}");
         let announced = decode.clone();
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));

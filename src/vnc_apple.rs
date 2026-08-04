@@ -1,8 +1,8 @@
 //! Apple's Screen Sharing messages and encodings. `ard` is Standard mode over
 //! RFB 3.8 and uses the display, cursor, and pasteboard pieces for the Mac's
-//! physical displays. The
-//! `ard-high-performance` subtype uses Apple's record layer in
-//! [`crate::vnc_record`], adds zlib, and requests a virtual display.
+//! physical displays. Both subtypes switch to zlib after their first display
+//! layout. The `ard-high-performance` subtype additionally uses Apple's record
+//! layer in [`crate::vnc_record`] and requests a virtual display.
 //!
 //! Everything here is either a message this client builds or a rectangle payload
 //! it parses. The transport is [`crate::vnc_record`]'s and the session loop is

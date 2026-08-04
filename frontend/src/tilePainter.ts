@@ -11,8 +11,7 @@ import {
   type VideoStreams,
 } from "./videoDecoder.ts";
 
-// The tile cache and the batch draw loop, shared by the browser SPA and the
-// macOS viewer's canvas page.
+// The browser SPA's tile cache and batch draw loop.
 //
 // The cache is fixed length because the wire says how many slots there are, so
 // a server cannot grow it — and the client never evicts: the server names the

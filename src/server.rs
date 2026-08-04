@@ -18,7 +18,6 @@ use crate::{
     auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
-    protocol,
     session::SessionManager,
     ws,
 };
@@ -37,10 +36,11 @@ pub struct AppState {
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
 ///   liveness probe.
-/// - the rest of `/api/*` and `/ws` — refuse requests that do not carry the
-///   session cookie; unknown `/api/*` paths return 404 rather than the SPA, so
-///   API clients get an honest error.
-/// - `/ws` — binary WebSocket carrying the remote-desktop session, including audio.
+/// - the rest of `/api/*`, `/ws`, and `/ws/audio` — refuse requests that do not
+///   carry the session cookie; unknown `/api/*` paths return 404 rather than the
+///   SPA, so API clients get an honest error.
+/// - `/ws` — the remote-desktop control and picture WebSocket.
+/// - `/ws/audio` — the dedicated remote-audio WebSocket.
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).
@@ -346,22 +346,14 @@ async fn logout_handler(
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ConfigResponse {
     branding: String,
-    /// [`protocol::PROTOCOL_VERSION`] — what a client checks before it opens a
-    /// session.
-    protocol_version: u32,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
-/// browser tab title carry the deployment's branding before authentication, and
-/// so a client can refuse a wire protocol it cannot speak.
+/// browser tab title carry the deployment's branding before authentication.
 async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
-    Json(ConfigResponse {
-        branding: state.config.branding.clone(),
-        protocol_version: protocol::PROTOCOL_VERSION,
-    })
+    Json(ConfigResponse { branding: state.config.branding.clone() })
 }
 
 #[derive(Serialize)]
@@ -893,16 +885,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;
     }
 
-    /// The exact `/api/config` body. Pinned because a client reads
-    /// `protocolVersion` out of it to decide whether it can speak to this gateway
-    /// at all: a rename here would read as an unreachable gateway.
+    /// The exact `/api/config` body. Pinned because the login screen reads the
+    /// branding before authentication.
     #[test]
-    fn config_response_serializes_camel_case() {
+    fn config_response_contains_only_public_branding() {
         let json = serde_json::to_string(&ConfigResponse {
             branding: "remotex".to_owned(),
-            protocol_version: 1,
         })
         .unwrap();
-        assert_eq!(json, r#"{"branding":"remotex","protocolVersion":1}"#);
+        assert_eq!(json, r#"{"branding":"remotex"}"#);
     }
 }

@@ -11,10 +11,10 @@
 // The one browser-dependent thing is the H.264 target, and it is asked rather than
 // assumed — see the probe in the last test.
 //
-// It needs a gateway whose config hard-codes the targets, which `tmp/qa_vp9.toml`
-// does:
+// It needs a gateway whose local config hard-codes the targets. Keep that
+// gitignored file under `tmp/`, for example `tmp/qa_video.toml`:
 //
-//     cargo run -- serve --config tmp/qa_vp9.toml
+//     cargo run -- serve --config tmp/qa_video.toml
 //
 //     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
 //     REMOTEX_PLAYWRIGHT_USERNAME=admin \

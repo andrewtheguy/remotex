@@ -168,8 +168,7 @@ const MAX_RETRY_DELAY_MS = 15_000;
 // before the reason is shown as well. Four, because the backoff above reaches its
 // cap at the fourth attempt: about half a minute, which is long enough that a
 // gateway coming up would have come up, and short enough that nobody has gone to
-// read DNS records yet. Matches `SessionStateMachine.attemptsBeforeReporting` in
-// the macOS viewer, which answers the same complaint.
+// read DNS records yet.
 const ATTEMPTS_BEFORE_REPORTING = 4;
 
 // How long `requestClipboard` waits for the server's answer before giving up.
@@ -696,8 +695,7 @@ export function useRemoteDesktop(
     // The claim the sockets attach with, kept so audio can be opened and closed at any
     // point in the session rather than only when the session socket is built.
     let session: string | null = null;
-    // The slot table, the video decoders and the batch draw loop, shared with the
-    // macOS viewer's canvas page — see tilePainter.ts.
+    // The slot table, the video decoders and the batch draw loop — see tilePainter.ts.
     const painter = createTilePainter({
       context: () => ctxRef.current,
       onCacheReset: () => sendRef.current({ type: "cacheReset" }),
@@ -1238,9 +1236,8 @@ export function useRemoteDesktop(
           applyAutoResize(true);
         }
       }
-      // And this screen's density, which is what lets a display the agent made
-      // come up matching the window it is about to be shown in rather than at
-      // whatever density it was left at.
+      // And this screen's density, so a resizable remote uses the browser's
+      // backing/logical ratio rather than whatever density it last used.
       lastHostScale = null;
       sharedDisplay = null;
       sendHostScale();
@@ -1629,7 +1626,7 @@ export function useRemoteDesktop(
     }, []);
 
   // Put `text` on the remote's clipboard. Fire and forget: neither VNC's
-  // ClientCutText nor the agent's pasteboard write is acknowledged, so there is
+  // ClientCutText nor Apple's pasteboard write is acknowledged, so there is
   // nothing to await.
   const sendClipboard = useCallback((text: string) => {
     // Recorded even for a manual Send from the panel: some VNC servers echo a

@@ -1,5 +1,4 @@
-// Pointer rendering, shared by the browser SPA and the macOS viewer's canvas
-// page.
+// Pointer rendering for the browser SPA.
 //
 // Engines whose server hands the cursor shape over instead of drawing it into
 // the framebuffer (VNC's Cursor pseudo-encoding — macOS Screen Sharing never
@@ -93,11 +92,10 @@ export function cursorImage(remote: RemoteCursor | null): CursorImage | null {
 /// ignores the Cursor pseudo-encoding composite their pointer into the framebuffer,
 /// so showing the local one too would draw two.
 ///
-/// **With no desktop**, hiding it is a bug, and one that outlives the desktop: the
-/// macOS viewer keeps its web view mounted under the target picker so the framebuffer
-/// survives a trip there and back, so a page still claiming `none` leaves the person
-/// choosing a target with no pointer at all. The pointer belongs to whatever is drawn
-/// over the page, and it has to be given back.
+/// **With no desktop**, hiding it is a bug: the canvas remains mounted under the
+/// target picker, so a page still claiming `none` leaves the person choosing a
+/// target with no pointer at all. The pointer belongs to whatever is drawn over the
+/// page, and it has to be given back.
 export function bareCursorCss(hasDesktop: boolean): string {
   return hasDesktop ? "none" : "default";
 }

@@ -261,10 +261,9 @@ pub fn keysym(code: &str, shift: bool) -> Option<u32> {
 mod tests {
     use super::{keysym, scancode};
 
-    // Every DOM code the native macOS viewer can emit. Browser and native input
-    // share ClientMsg::Key, so recognizing a code in only one engine is a
-    // backend conformance bug rather than a viewer capability difference.
-    const NATIVE_VIEWER_CODES: &[&str] = &[
+    // The ordinary DOM keyboard codes the browser client expects both engines to
+    // accept. Recognizing one in only one engine is a backend conformance bug.
+    const CLIENT_KEY_CODES: &[&str] = &[
         "Escape",
         "F1",
         "F2",
@@ -399,8 +398,8 @@ mod tests {
     }
 
     #[test]
-    fn native_viewer_keys_are_supported_by_both_backends() {
-        for code in NATIVE_VIEWER_CODES {
+    fn client_keys_are_supported_by_both_backends() {
+        for code in CLIENT_KEY_CODES {
             assert!(scancode(code).is_some(), "RDP does not map {code}");
             assert!(keysym(code, false).is_some(), "VNC does not map {code}");
         }

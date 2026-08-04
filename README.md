@@ -2,7 +2,9 @@
 
 A single-user remote desktop gateway for RDP and VNC targets, including Macs
 using the built-in Screen Sharing service. The Rust backend owns each protocol
-session and streams image tiles over one WebSocket protocol to the browser SPA.
+session and streams desktop updates over a WebSocket protocol to the browser
+SPA. Remote audio uses a dedicated second WebSocket so sound never queues behind
+the picture.
 
 One reason the RDP path exists: Microsoft Remote Desktop on macOS handles
 resize-to-window badly, and fonts can come out blurry after a resize. Here a
@@ -63,13 +65,16 @@ session.
 
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
-raw, and supports the native Apple pasteboard. Apple Screen Sharing High
+at full fidelity, and supports the native Apple pasteboard. After the initial
+display layout it asks the Mac to switch from raw rectangles to zlib; that second
+encoding request is required in both Apple modes. Apple Screen Sharing High
 Performance mode (`ard-high-performance`, **experimental**) takes the same
 credentials, requests
 one virtual display at the target's configured `width` and `height`, disables the
 remote Mac's physical displays once connected, and puts all of the remote Mac's
-windows on that virtual display. It also adds zlib compression over Apple's
-record-layer revision (around fifty times fewer bytes on a static desktop).
+windows on that virtual display. It carries the same zlib rectangles over Apple's
+encrypted record-layer revision (around fifty times fewer bytes than raw on a
+static desktop).
 Apple's official macOS Screen Sharing client can instead choose up to two virtual
 displays. Both Apple subtypes
 support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
@@ -172,7 +177,7 @@ All fields and per-protocol examples are in
 ## Checks
 
 ```sh
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test
 
 cd frontend

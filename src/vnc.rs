@@ -3,7 +3,8 @@
 //! **RFB 3.8**, which is every VNC server including a Mac's under `subtype =
 //! "ard"`: classic or Apple DH authentication. A Mac also accepts Apple's
 //! metadata and pasteboard messages on this transport, exposing the Mac's physical
-//! display list, selection and density while pixels stay raw.
+//! display list, selection and density. After the first layout, a second encoding
+//! request switches the rectangles from raw to zlib.
 //!
 //! **RFB 003.889**, Apple's own revision, under `subtype =
 //! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
@@ -3079,8 +3080,8 @@ fn parse_version(greeting: &[u8; 12]) -> Option<(u32, u32)> {
 /// alongside the standard ones — no other server does either.
 ///
 /// A third-party VNC server running on a Mac looks like any other server here
-/// and is reported as not-macOS. What that costs is the native viewer's
-/// keyboard convention, not correctness, which is why guessing from a desktop
+/// and is reported as not-macOS. What that costs is the browser client's
+/// Command-key convention, not correctness, which is why guessing from a desktop
 /// name is not worth it.
 fn is_macos_server(minor: u32, security_types: &[u8]) -> bool {
     minor == 889 || security_types.iter().any(|t| matches!(t, 30 | 35))
@@ -4887,7 +4888,7 @@ mod tests {
     }
 
     /// Under `AutoFrameBufferUpdate` the server drives, so a request per update
-    /// would be a second client racing the first.
+    /// would race the server's own update schedule.
     #[tokio::test]
     async fn an_armed_session_does_not_poll_for_the_next_update() {
         for poll in [true, false] {

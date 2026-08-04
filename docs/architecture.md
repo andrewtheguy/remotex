@@ -15,15 +15,16 @@ browser SPA over loopback or the network
    ▼
 axum server ── single session slot ── protocol engine
                                          ├─ RDP through IronRDP
-                                         └─ built-in RFB 3.8 client
+                                         └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
-RDP and VNC frames are decoded in the gateway and encoded as tiles — lossless PNG
-by default, or JPEG or WebP at a fixed quality when a target says so. A Mac is
-reached with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8
-with Apple Remote Desktop authentication. RDP audio is converted from PCM to
-Opus and sent on the same WebSocket independently of the tile encoder and batching
-queue.
+RDP and VNC frames are decoded in the gateway and sent as independent image tiles
+or as VP9/H.264 streams, according to the target's render plan. Tiles are lossless
+PNG by default, with JPEG and WebP available at fixed quality. A Mac is reached
+with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
+Apple Remote Desktop authentication, or with the experimental
+`ard-high-performance` RFB 003.889 path. RDP audio is either encoded as Opus or
+passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 
 ## Constraints
 
@@ -47,7 +48,7 @@ queue.
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
 | `vp9.rs`, `h264.rs` | libvpx and openh264 — the default video codec and the other one |
-| `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding or PCM passthrough, resampling, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -456,8 +457,9 @@ logins.
 ## Client protocol
 
 `src/protocol.rs` and `frontend/src/protocol.ts` define the client contract.
-`GET /api/config` publishes the protocol version, so a client that did not ship
-with this gateway can reject one it cannot speak.
+`GET /api/config` publishes the deployment branding before authentication. There
+is no client/server version negotiation: the gateway serves the matching SPA from
+the same build, and no second client is supported.
 
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
@@ -612,9 +614,9 @@ costs a new framebuffer and nothing else, where RDP's costs a
 Deactivation-Reactivation Sequence and High Performance's replaces a virtual
 display, and both of those have a fault in [`known-issues.md`](known-issues.md)
 that a window drag reaches far more often than a button press does. Where the
-mode is refused the clients grey it and label it inapplicable rather than hiding
-it, since the manual control beside it plainly works. Neither client decides any
-of this: `TargetConfig::auto_resize` does, and it is not a config key — the
+mode is refused the client greys it and labels it inapplicable rather than hiding
+it, since the manual control beside it plainly works. The client does not decide
+any of this: `TargetConfig::auto_resize` does, and it is not a config key — the
 operator has no way to know which engines survive a stream of resizes.
 
 Within the mode, the client's own choice is remembered across connections and
@@ -729,9 +731,9 @@ CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first 
 supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
 moves. Tight, TightPNG, JPEG and H.264 are deliberately absent: vendor or lossy,
 and this gateway re-encodes every tile for the browser anyway. CopyRect names a
-source region rather than carrying pixels; the clients cannot blit, so the pixels
-are read back out of the shadow, and a source the shadow does not know costs one
-non-incremental repaint rather than an invented picture.
+source region rather than carrying pixels; the VNC read path does not forward
+blits, so the pixels are read back out of the shadow, and a source the shadow does
+not know costs one non-incremental repaint rather than an invented picture.
 
 With `resize = true`,
 the client advertises DesktopSize and ExtendedDesktopSize against servers that
