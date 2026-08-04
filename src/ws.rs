@@ -152,6 +152,22 @@ struct PendingPaint {
     sent: Instant,
 }
 
+/// What waiting for the window cost one batch — reported by
+/// [`wait_for_paint_window`] and recorded only once that batch is on the socket,
+/// because a batch the socket refused waited for nothing and went past nothing.
+///
+/// An enum rather than two flags: running past the window implies having waited
+/// on it, and there is no fourth state to represent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Admission {
+    /// The window had room; nothing waited.
+    Immediate,
+    /// Parked until an acknowledgment opened the window.
+    Waited,
+    /// Parked until [`PAINT_WINDOW_GRACE`] gave up on one arriving.
+    PastWindow,
+}
+
 #[derive(Default)]
 struct PaintTracker {
     pending: VecDeque<PendingPaint>,
@@ -210,6 +226,20 @@ impl PaintTracker {
         });
         self.sent += 1;
         self.max_in_flight = self.max_in_flight.max(self.pending.len() as u64);
+    }
+
+    /// Record what a batch's admission cost, once that batch is on the socket.
+    /// Separate from [`Self::sent`] because the two become true at different
+    /// moments: the timestamp before the write, this after it.
+    fn admitted(&mut self, admission: Admission) {
+        match admission {
+            Admission::Immediate => {}
+            Admission::Waited => self.window_waits += 1,
+            Admission::PastWindow => {
+                self.window_waits += 1;
+                self.past_window += 1;
+            }
+        }
     }
 
     /// Remove a batch timestamp installed immediately before a socket write
@@ -282,6 +312,10 @@ impl std::fmt::Display for PaintTracker {
 /// wakeup this waits for. Nothing here polls the lag: it shrinks when a batch is
 /// completed and at no other time.
 ///
+/// Reports what the wait cost rather than recording it: the totals are about
+/// batches that reached the browser, and whether this one does is not known until
+/// the write after this returns. See [`send_batch`].
+///
 /// Called with the frame already encoded and about to be written, so a control
 /// message queued behind a batch cannot overtake it: this delays the whole write
 /// sequence in wire order rather than letting anything past. The inbound half is
@@ -297,7 +331,7 @@ async fn wait_for_paint_window<S>(
     room: &tokio::sync::Notify,
     heartbeat: &mut tokio::time::Interval,
     ws_tx: &mut S,
-) -> Result<(), S::Error>
+) -> Result<Admission, S::Error>
 where
     S: futures_util::Sink<Message> + Unpin,
 {
@@ -307,27 +341,44 @@ where
         // Registered before the check, so an acknowledgment landing in between
         // is a wakeup this loop still sees rather than one it slept through.
         let room = room.notified();
-        {
-            let mut paint = paint.lock().unwrap();
-            if paint.admits_a_batch() {
-                if waited {
-                    paint.window_waits += 1;
-                }
-                return Ok(());
-            }
-            waited = true;
+        if paint.lock().unwrap().admits_a_batch() {
+            return Ok(if waited {
+                Admission::Waited
+            } else {
+                Admission::Immediate
+            });
         }
+        waited = true;
         tokio::select! {
             () = room => {}
             _ = heartbeat.tick() => ws_tx.send(Message::Ping(Vec::new().into())).await?,
-            () = tokio::time::sleep_until(deadline) => {
-                let mut paint = paint.lock().unwrap();
-                paint.window_waits += 1;
-                paint.past_window += 1;
-                return Ok(());
-            }
+            () = tokio::time::sleep_until(deadline) => return Ok(Admission::PastWindow),
         }
     }
+}
+
+/// Write one screen batch, in the order its two facts become true: the timestamp
+/// goes in before the write, so an acknowledgment racing the write still finds
+/// the batch to complete, and the window counters go in after it, so a batch the
+/// socket refused is counted nowhere. A failed write leaves the tracker as though
+/// the batch had never been admitted.
+async fn send_batch<S>(
+    paint: &Mutex<PaintTracker>,
+    ws_tx: &mut S,
+    sequence: u32,
+    batch: Message,
+    admission: Admission,
+) -> Result<(), S::Error>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    paint.lock().unwrap().sent(sequence);
+    if let Err(e) = ws_tx.send(batch).await {
+        paint.lock().unwrap().unsent(sequence);
+        return Err(e);
+    }
+    paint.lock().unwrap().admitted(admission);
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -578,38 +629,44 @@ async fn session(
                 }
             };
             for frame in frames {
-                let (frame, sequence) = match frame {
+                match frame {
                     WireFrame::Batch { sequence, bytes } => {
                         // The one hop with no backpressure of its own. Waiting
                         // here — before the write, after the encode — is what
                         // makes the browser's paint queue as bounded as every
                         // queue behind it: the events channel fills while this
                         // is parked, then the pump's, and the engine feels it.
-                        if wait_for_paint_window(
+                        let Ok(admission) = wait_for_paint_window(
                             &outbound_paint,
                             &outbound_room,
                             &mut heartbeat,
                             &mut ws_tx,
                         )
                         .await
+                        else {
+                            break 'outbound; // browser gone
+                        };
+                        if send_batch(
+                            &outbound_paint,
+                            &mut ws_tx,
+                            sequence,
+                            Message::Binary(bytes.into()),
+                            admission,
+                        )
+                        .await
                         .is_err()
                         {
                             break 'outbound; // browser gone
                         }
-                        outbound_paint.lock().unwrap().sent(sequence);
-                        (Message::Binary(bytes.into()), Some(sequence))
                     }
-                    WireFrame::Text(json) => (Message::Text(json.into()), None),
+                    WireFrame::Text(json) => {
+                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            break 'outbound; // browser gone
+                        }
+                    }
                     WireFrame::Audio(_) => {
                         warn!("ws: audio frame reached the session socket");
-                        continue;
                     }
-                };
-                if ws_tx.send(frame).await.is_err() {
-                    if let Some(sequence) = sequence {
-                        outbound_paint.lock().unwrap().unsent(sequence);
-                    }
-                    break 'outbound; // browser gone
                 }
             }
 
@@ -815,7 +872,7 @@ mod tests {
                     &mut futures_util::sink::drain(),
                 )
                 .await
-                .unwrap();
+                .unwrap()
             }
         });
         // Yields rather than a sleep: the clock is paused and this task stays
@@ -827,11 +884,11 @@ mod tests {
 
         paint.lock().unwrap().acknowledge(1, 3, 5);
         room.notify_one();
-        waiter.await.unwrap();
-
-        let paint = paint.lock().unwrap();
-        assert_eq!(paint.window_waits, 1);
-        assert_eq!(paint.past_window, 0, "the window opened, so nothing ran past it");
+        assert_eq!(
+            waiter.await.unwrap(),
+            Admission::Waited,
+            "the window opened, so nothing ran past it"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -843,7 +900,7 @@ mod tests {
         // Nothing acknowledges anything: with the clock paused this returns only
         // by the grace deadline, which is the point — a silent client costs the
         // session pacing, never progress.
-        wait_for_paint_window(
+        let admission = wait_for_paint_window(
             &paint,
             &room,
             &mut heartbeat,
@@ -852,10 +909,9 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(admission, Admission::PastWindow);
         assert!(started.elapsed() >= PAINT_WINDOW_GRACE);
         let paint = paint.lock().unwrap();
-        assert_eq!(paint.window_waits, 1);
-        assert_eq!(paint.past_window, 1);
         assert_eq!(paint.in_flight(), PAINT_WINDOW, "nothing was acknowledged");
     }
 
@@ -881,7 +937,7 @@ mod tests {
                     &mut futures_util::sink::drain(),
                 )
                 .await
-                .unwrap();
+                .unwrap()
             }
         });
         for _ in 0..8 {
@@ -893,8 +949,95 @@ mod tests {
         // there is no oldest batch to be behind on any more.
         paint.lock().unwrap().acknowledge(1, 3, 5);
         room.notify_one();
-        waiter.await.unwrap();
-        assert_eq!(paint.lock().unwrap().past_window, 0);
+        assert_eq!(waiter.await.unwrap(), Admission::Waited);
+    }
+
+    /// A sink that refuses every write, which is what a browser that went away
+    /// looks like from the outbound half.
+    struct DeadSocket;
+
+    impl futures_util::Sink<Message> for DeadSocket {
+        type Error = ();
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), ()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), ()> {
+            Err(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), ()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), ()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The totals count batches the browser was actually given. A write that
+    /// fails takes its batch out of every one of them — including the two the
+    /// window keeps, which is what the wait reporting its cost rather than
+    /// recording it is for.
+    #[tokio::test]
+    async fn a_batch_the_socket_refuses_is_counted_nowhere() {
+        let paint = Arc::new(Mutex::new(PaintTracker::default()));
+        let refused = send_batch(
+            &paint,
+            &mut DeadSocket,
+            1,
+            Message::Binary(Vec::new().into()),
+            // The admission that used to be recorded before the write, so a
+            // failed write reported a batch as having run past the window while
+            // the same batch was rolled out of `sent`.
+            Admission::PastWindow,
+        )
+        .await;
+
+        assert!(refused.is_err());
+        let paint = paint.lock().unwrap();
+        assert_eq!(paint.sent, 0);
+        assert_eq!(paint.in_flight(), 0);
+        assert_eq!(paint.window_waits, 0);
+        assert_eq!(paint.past_window, 0);
+        let totals = paint.to_string();
+        assert!(totals.starts_with("0 batch(es) sent"), "{totals}");
+        assert!(
+            totals.ends_with("0 batch(es) waited on the window, 0 sent past it"),
+            "{totals}"
+        );
+    }
+
+    /// The other half of the same rule: a batch that does reach the socket
+    /// carries its wait into the totals, so the counters are not simply dead.
+    #[tokio::test]
+    async fn a_batch_that_reaches_the_socket_carries_its_wait_into_the_totals() {
+        let paint = Arc::new(Mutex::new(PaintTracker::default()));
+        send_batch(
+            &paint,
+            &mut futures_util::sink::drain(),
+            1,
+            Message::Binary(Vec::new().into()),
+            Admission::PastWindow,
+        )
+        .await
+        .unwrap();
+
+        let paint = paint.lock().unwrap();
+        assert_eq!(paint.sent, 1);
+        assert_eq!(paint.in_flight(), 1);
+        assert_eq!(paint.window_waits, 1);
+        assert_eq!(paint.past_window, 1);
     }
 
     fn fake_target(audio: bool) -> TargetConfig {
