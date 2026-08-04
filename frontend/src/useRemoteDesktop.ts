@@ -1657,18 +1657,29 @@ export function useRemoteDesktop(
   // and it lands here rather than in `sendClipboard` so it passes the same echo
   // guards the browser's own focus push does: a value that came *from* the remote
   // a moment ago must not go straight back to it.
-  const pushLocalClipboard = useCallback((text: string) => {
-    if (
-      text === "" ||
-      overClipboardLimit(text) ||
-      text === lastFromRemoteRef.current ||
-      text === lastToRemoteRef.current
-    ) {
-      return;
-    }
-    lastToRemoteRef.current = text;
-    sendRef.current({ type: "clipboard", text });
-  }, []);
+  const pushLocalClipboard = useCallback(
+    (text: string) => {
+      // The shell polls the pasteboard and stops when it thinks the session cannot
+      // take one, but what it thinks is one IPC hop behind what this page knows —
+      // and the session it *would* reach after a target switch is a different
+      // machine. So the page decides too, from the same two values its own focus
+      // push uses.
+      if (mode !== "desktop" || !canClipboard) {
+        return;
+      }
+      if (
+        text === "" ||
+        overClipboardLimit(text) ||
+        text === lastFromRemoteRef.current ||
+        text === lastToRemoteRef.current
+      ) {
+        return;
+      }
+      lastToRemoteRef.current = text;
+      sendRef.current({ type: "clipboard", text });
+    },
+    [mode, canClipboard],
+  );
 
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
   // values are skipped locally; the explicit panel reports the limit.

@@ -26,13 +26,21 @@ declare global {
 const CONFIGURED =
   typeof window === "undefined" ? undefined : window.__remotexGateway;
 
+/// The document's own origin, or an empty string where there is no document.
+///
+/// Guarded the same way `CONFIGURED` above is, and for the same reason: this module
+/// is imported by tests that run outside a browser, and one that throws on the way
+/// in cannot be tested at all.
+const DOCUMENT_ORIGIN =
+  typeof window === "undefined" ? "" : window.location.origin;
+
 /// The gateway's origin, with no trailing slash.
 ///
 /// `location.origin` is the browser's answer, and the fallback. In the shell it is
 /// `remotex://app`, which serves the client and nothing else — so if the shell ever
 /// failed to set the global, every call below fails loudly at the first request
 /// rather than quietly resolving to something wrong.
-export const GATEWAY_ORIGIN = (CONFIGURED ?? window.location.origin).replace(
+export const GATEWAY_ORIGIN = (CONFIGURED ?? DOCUMENT_ORIGIN).replace(
   /\/$/,
   "",
 );

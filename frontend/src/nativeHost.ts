@@ -56,10 +56,17 @@ interface NativeHostBridge {
  * document, and cannot appear later — and a value that could change mid-session
  * would put the FAB and the menu bar on screen at the same time.
  */
+const EXPOSED =
+  typeof window === "undefined"
+    ? undefined
+    : (window as unknown as { remotexNative?: NativeHostBridge | null })
+        .remotexNative;
+
+// `!== null` as well as the `typeof`, which alone is true of `null`: a bridge that
+// is present and empty would put this page in "the shell is listening" mode with
+// nothing on the other end, and `useNativeCommands` would throw on mount.
 export const NATIVE_HOST: boolean =
-  typeof window !== "undefined" &&
-  typeof (window as unknown as { remotexNative?: NativeHostBridge })
-    .remotexNative === "object";
+  typeof EXPOSED === "object" && EXPOSED !== null;
 
 function bridge(): NativeHostBridge {
   return (window as unknown as { remotexNative: NativeHostBridge })

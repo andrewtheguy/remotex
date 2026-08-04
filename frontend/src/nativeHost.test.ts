@@ -59,11 +59,8 @@ test("a bridge that throws does not take the page down with it", () => {
   fake.remotexNative.post = good;
 });
 
-test("unsubscribing detaches the handler", () => {
-  const seen: unknown[] = [];
-  const off = fake.remotexNative.onCommand((command) => seen.push(command));
-  assert.equal(handlers.size, 1);
-  off();
-  assert.equal(handlers.size, 0, "a menu must not reach a dead session");
-  assert.deepEqual(seen, []);
-});
+// What is deliberately *not* tested here: that `useNativeCommands` detaches on
+// unmount. The subscription is the return value of a `useEffect`, so the only thing
+// that can exercise it is React — and a test that calls the fake's `onCommand` and
+// then its disposer, as one here used to, asserts that a Set in this file adds and
+// deletes. That reads as coverage of the contract and is coverage of nothing.
