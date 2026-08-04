@@ -90,6 +90,14 @@ async fn serve_embedded(
     web_root: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     tokio::select! {
+        // In order, and the order is the point. `serve` reads and checks the config
+        // before its first `await`, so it is ready with a refusal on the very first
+        // poll — while `parent_closed` can be ready on *its* first poll too, when
+        // the reading thread gets to an already-closed stdin before this one gets
+        // back from `spawn`. Under the unbiased default the two race, and the arm
+        // that wins decides whether a refused config is reported at all: `[server]`
+        // in the file, and one run in five exits 0 with nothing on stderr.
+        biased;
         result = remotex::embedded::serve(instance, web_root) => result?,
         _ = remotex::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");

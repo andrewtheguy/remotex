@@ -882,15 +882,17 @@ impl ConfigFile {
             // Refused rather than ignored, and named as a whole block rather than
             // key by key: every one of them is a decision the app has already made
             // for this gateway — an ephemeral loopback port it reads back off the
-            // socket, no web root because no SPA ships in the bundle, and a token
-            // instead of a login. A key that is quietly overridden is worse than
+            // socket, a web root the app hands over on the command line
+            // (`serve-embedded --web-root`), and a token instead of a login. A key
+            // that is quietly overridden is worse than
             // one that is refused: it reads as configuration and behaves as
             // decoration.
             anyhow::ensure!(
                 config.server.is_none(),
                 "this config is remotex.app's own and may not have a [server] block: \
-                 the app decides where its gateway listens, serves no web UI, and \
-                 authenticates itself. Only branding and [[targets]] belong here"
+                 the app decides where its gateway listens, where the client it \
+                 serves comes from, and how it authenticates. Only branding and \
+                 [[targets]] belong here"
             );
         } else {
             anyhow::ensure!(

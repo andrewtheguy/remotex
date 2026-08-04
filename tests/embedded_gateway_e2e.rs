@@ -360,8 +360,13 @@ fn a_server_block_refuses_the_start() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "it must not start");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "it must not start: {} said {stderr:?} and printed {:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(stderr.contains("[server]"), "{stderr}");
     assert!(stderr.contains("[[targets]]"), "{stderr}");
     assert!(
@@ -429,7 +434,13 @@ async fn two_instances_share_nothing() {
     assert_ne!(a.token, b.token);
     assert_ne!(a.dir.path(), b.dir.path());
 
-    // And one's token is refused by the other, which is the part that matters.
-    let (status, _) = b.get("/api/targets", Some(&format!("Bearer {}", a.token))).await;
+    // And one's cookie is refused by the other, which is the part that matters —
+    // spelled the way a browser would send it, because a value in the wrong shape
+    // would be refused by a gateway that shared the token and prove nothing.
+    let (status, _) = b.get("/api/targets", Some(&a.cookie())).await;
     assert_eq!(status, 401);
+    // The same cookie is what gets in at home, so the refusal above is about which
+    // gateway minted it and not about the request.
+    let (status, _) = a.get("/api/targets", Some(&a.cookie())).await;
+    assert_eq!(status, 200);
 }

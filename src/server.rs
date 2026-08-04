@@ -144,16 +144,18 @@ pub(crate) fn router_with_sessions(
 
     routed
         .fallback_service(spa)
-        // Inside the redirect below, so a preflight is answered before anything
-        // tries to send one somewhere else: a 307 on an `OPTIONS` is a preflight
-        // that never completes, and the request it was clearing then never happens.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             shell_origin_cors,
         ))
-        // Outermost, so it sees the request before routing does: what it acts on
-        // is the `Host` a browser arrived under, not which handler would answer.
-        // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
+        // Added last and therefore **outermost**: it sees every request before the
+        // CORS layer and before routing, because what it acts on is the `Host` a
+        // browser arrived under rather than which handler would answer. Inert unless
+        // `[server].dev_subdomain` is set *and* that host is loopback — and the two
+        // never meet, because `ConfigFile::resolve_embedded` leaves `dev_hostname`
+        // `None` on the only gateway that answers the shell origin. That is what
+        // keeps a 307 off an `OPTIONS`: a redirected preflight never completes, and
+        // the request it was clearing then never happens.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dev_hostname_redirect,
@@ -191,7 +193,7 @@ const SHELL_ORIGIN: &str = "remotex://app";
 ///   what makes this safe is that it is a token minted for one launch and given to
 ///   one page — not a login cookie a person typed a password for, which is what
 ///   would be at stake if the two fields ever came apart. Checked here rather than
-///   trusted from [`crate::config::RawConfig::resolve_embedded`], because a
+///   trusted from [`crate::config::ConfigFile::resolve_embedded`], because a
 ///   middleware relying on a distant constructor to hold an invariant it depends on
 ///   is one refactor from not holding it.
 /// - **Only for `Origin: remotex://app`.** Every other origin is either same-origin
