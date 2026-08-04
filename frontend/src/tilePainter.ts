@@ -168,8 +168,11 @@ export function createTilePainter(options: {
       return decodeAccessUnit(job);
     }
     try {
+      // Tiles are opaque sRGB screen pixels: skipping color-space conversion
+      // and alpha premultiplication drops per-tile work the paint never uses.
       return await createImageBitmap(
         new Blob([job.data as Uint8Array<ArrayBuffer>], { type: job.codec }),
+        { colorSpaceConversion: "none", premultiplyAlpha: "none" },
       );
     } catch {
       // A tile that will not decode is one dropped tile — unless the server is

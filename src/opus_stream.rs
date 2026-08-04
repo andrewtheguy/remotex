@@ -62,6 +62,11 @@ impl OpusStream {
         encoder
             .set_bitrate(Bitrate::Bits(OPUS_BITRATE_BPS))
             .map_err(|e| anyhow::anyhow!("set the opus bitrate: {e}"))?;
+        // libopus defaults to complexity 9; 5 costs a fraction of the encoder CPU
+        // for no audible difference at this bitrate on desktop audio.
+        encoder
+            .set_complexity(5)
+            .map_err(|e| anyhow::anyhow!("set the opus complexity: {e}"))?;
 
         // The encoder's own delay, in 48 kHz samples. Written into `OpusHead` so a
         // decoder discards it instead of playing it as leading silence.

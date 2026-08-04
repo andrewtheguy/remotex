@@ -602,8 +602,10 @@ impl CursorShape {
     }
 }
 
-/// PNG-encode packed 8-bit pixels. Fast compression: the win over raw is
-/// already large for screen content, and this runs on the session's hot path.
+/// PNG-encode packed 8-bit pixels. `Fastest` compression: it selects the same
+/// `FdeflateUltraFast` deflate as `Fast` but a single `Up` filter pass where
+/// `Fast` means `Filter::Adaptive` — all five PNG filters run and scored per
+/// row — and this runs on the session's hot path.
 ///
 /// Shared by [`Tile::from_rgb`] (RGB screen tiles) and [`CursorShape::from_rgba`]
 /// (RGBA cursor shapes).
@@ -612,7 +614,7 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
     encoder.set_color(color);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
+    encoder.set_compression(png::Compression::Fastest);
     let mut writer = encoder.write_header()?;
     writer.write_image_data(pixels)?;
     writer.finish()?;
