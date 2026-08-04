@@ -1,0 +1,71 @@
+# What goes in remotex.app, and how it is signed.
+#
+# The bundle carries two executables and one directory, and it is not an app
+# without all three: the shell, the gateway it runs, and the client it shows.
+# `scripts/dist.ts` is what invokes this — it stamps the version out of Cargo.toml
+# and decides the disk image's name.
+
+appId: dev.remotex.viewer
+# Kept across every rename: TCC grants, saved window state and the default instance
+# directory are all keyed on it, so changing it makes a new app that has forgotten
+# which local networks it was allowed to reach.
+productName: remotex
+copyright: ""
+
+directories:
+  output: ../../dist
+  buildResources: build
+
+# Everything the main process needs, and nothing else. There are no runtime
+# dependencies at all, so no node_modules goes in.
+files:
+  - dist/**
+  - package.json
+asar: true
+
+extraResources:
+  # The client. Built by `bun run build` in frontend/ and shipped by every other
+  # consumer too — one build, and `Contents/Resources/web` is served as
+  # `remotex://app` here and over http:// by the gateway beside it at the same time.
+  - from: ../../frontend/dist
+    to: web
+  # The gateway. The same binary the tarball ships; CI takes it out of the release
+  # artifact rather than building a second one that could differ.
+  - from: ../../target/release/remotex
+    to: remotex-gateway
+
+mac:
+  category: public.app-category.utilities
+  icon: build/icon.icns
+  minimumSystemVersion: "13.0"
+  target:
+    - target: dmg
+      arch: [arm64]
+  hardenedRuntime: true
+  # Signed as part of the bundle rather than left as an unsigned payload: a
+  # hardened-runtime app cannot exec one, so this is what makes the gateway
+  # runnable at all.
+  binaries:
+    - Contents/Resources/remotex-gateway
+  # Ad-hoc unless `scripts/dist.ts` was given a CODESIGN_IDENTITY. Nothing here is
+  # notarized, so a downloaded image still has its quarantine bit cleared by hand.
+  identity: "-"
+
+dmg:
+  # `${env.REMOTEX_DMG_SUFFIX}` is "-unsigned" without an identity. `remotex-viewer`
+  # rather than `remotex`, because `remotex-<version>-macos-arm64.tar.gz` is already
+  # the gateway's own asset on the same release.
+  artifactName: remotex-viewer-${version}-macos-${arch}${env.REMOTEX_DMG_SUFFIX}.dmg
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# No update feed and no `latest-mac.yml`: there is nothing to update from.
+publish: null
+# Nothing native to rebuild, and this keeps a bun-installed node_modules from being
+# handed to npm.
+npmRebuild: false

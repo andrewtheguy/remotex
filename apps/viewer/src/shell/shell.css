@@ -1,0 +1,116 @@
+/* The shell's own two documents. Deliberately plain: these exist to say one
+   sentence and offer two buttons, and anything more would be a second design to
+   keep in step with the client's. */
+
+:root {
+  color-scheme: dark;
+  --bg: #101014;
+  --panel: #1a1a20;
+  --text: #e8e8ee;
+  --muted: #9a9aa8;
+  --line: #2c2c36;
+  --accent: #4c8dff;
+  --bad: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 2rem;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    13px / 1.5 -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    sans-serif;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+p {
+  margin: 0;
+  color: var(--muted);
+}
+
+p.problem {
+  color: var(--bad);
+  white-space: pre-wrap;
+}
+
+pre {
+  flex: 1;
+  min-height: 6rem;
+  margin: 0;
+  padding: 0.75rem;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font:
+    11px / 1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+textarea {
+  flex: 1;
+  min-height: 18rem;
+  padding: 0.75rem;
+  resize: none;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font:
+    12px / 1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+button {
+  padding: 0.4rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #08080c;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hidden {
+  display: none;
+}

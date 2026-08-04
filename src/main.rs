@@ -28,14 +28,26 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve()?;
             serve(config).await?;
         }
-        Commands::CheckConfig { config } => {
-            // The message is the product here: this subcommand exists to be run
-            // against a file somebody is about to fix, and to have its stderr read.
-            // `{:#}` keeps the whole `anyhow` chain, which is what names the target
-            // the complaint is about.
-            if let Err(e) =
-                remotex::config::check(&remotex::config::read_candidate(config.as_deref())?)
-            {
+        Commands::ServeEmbedded {
+            instance_dir,
+            web_root,
+        } => {
+            serve_embedded(&remotex::embedded::Instance::new(instance_dir), web_root).await?;
+        }
+        Commands::CheckConfig { config, embedded } => {
+            let audience = if embedded {
+                remotex::config::Audience::Embedded
+            } else {
+                remotex::config::Audience::Served
+            };
+            // The message is the product here: this subcommand exists to be run by
+            // the app's configuration editor and have its stderr shown to somebody
+            // about to fix the file. `{:#}` keeps the whole `anyhow` chain, which
+            // is what names the target the complaint is about.
+            if let Err(e) = remotex::embedded::check(
+                &remotex::embedded::read_candidate(config.as_deref())?,
+                audience,
+            ) {
                 eprintln!("{e:#}");
                 std::process::exit(1);
             }
@@ -67,10 +79,41 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the gateway `remotex.app` started, and stop when the app does.
+///
+/// Three ways out, and the first is the one the guarantee rests on: the app's end
+/// of our stdin closing, which happens however the app ended — see
+/// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
+/// hand, and the server arm only completes by failing.
+async fn serve_embedded(
+    instance: &remotex::embedded::Instance,
+    web_root: std::path::PathBuf,
+) -> anyhow::Result<()> {
+    tokio::select! {
+        // In order, and the order is the point. `serve` reads and checks the config
+        // before its first `await`, so it is ready with a refusal on the very first
+        // poll — while `parent_closed` can be ready on *its* first poll too, when
+        // the reading thread gets to an already-closed stdin before this one gets
+        // back from `spawn`. Under the unbiased default the two race, and the arm
+        // that wins decides whether a refused config is reported at all: `[server]`
+        // in the file, and one run in five exits 0 with nothing on stderr.
+        biased;
+        result = remotex::embedded::serve(instance, web_root) => result?,
+        _ = remotex::embedded::parent_closed() => {
+            info!("stdin closed: whatever started this gateway is gone; stopping");
+        }
+        _ = shutdown_signal() => info!("shutdown signal received; stopping"),
+    }
+    Ok(())
+}
+
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
     // Surface a misconfigured static path before we start listening. The SPA
     // handler still 404s per-request; this just makes the cause obvious.
-    remotex::config::warn_if_no_web_root(&config.static_dir);
+    remotex::config::warn_if_no_web_root(
+        &config.static_dir,
+        "set static_dir under [server]",
+    );
 
     let app = server::router(config.clone());
 
@@ -110,7 +153,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             target.name, target.host, target.port, target.protocol
         );
     }
-    info!("web login: user {:?}", config.auth.username());
+    if let remotex::auth::GatewayAuth::Login(site_passwd) = &config.auth {
+        info!("web login: user {:?}", site_passwd.username());
+    }
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

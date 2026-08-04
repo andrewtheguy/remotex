@@ -14,6 +14,12 @@
 #
 # Run on each target platform you want to ship (macOS builds the mac tarball,
 # Linux builds the linux tarball) — this does not cross-compile.
+#
+# This is the gateway, and only the gateway. remotex.app is a separate program with
+# a separate install story: an Electron shell in apps/viewer, built by
+# `bun run dist` there and shipped as a .dmg by the mac-viewer job in
+# .github/workflows/release.yml. That bundle carries a copy of the binary this
+# script builds — nothing here needs to know about it.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

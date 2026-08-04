@@ -1,8 +1,12 @@
 # The gateway is the only package here. The macOS agent and the protocol crate it
 # shared were removed (see docs/roadmap.md for the virtual-display utility idea
 # that could one day revive its one kept feature), and so was the native macOS
-# viewer that embedded Chromium — the client is a browser client, and what the
-# shell used to add is a Chrome extension's to add now (docs/roadmap.md).
+# viewer that embedded Chromium by hand.
+#
+# `remotex.app` is back and is not in this workspace: it is `apps/viewer`, an
+# Electron shell around the same SPA, built with bun and electron-builder. What it
+# needs from this crate is a mode — `serve-embedded` (src/embedded.rs) — and the
+# binary itself, which its bundle carries. See docs/macos-viewer.md.
 #
 # One version for the whole workspace. `[workspace.package]` below is the only
 # literal `version` in the tree — the root package inherits it with
@@ -17,7 +21,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.106"
+version = "0.0.107"
 
 [package]
 name = "remotex"

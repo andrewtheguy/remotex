@@ -19,11 +19,13 @@ Apple Screen Sharing do with a stream of them.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
 
-There is one client, and it is the page a browser loads. A native macOS shell
-around it was built and removed; what it added that a browser cannot do on its
-own — ⌘Q and ⌘W reaching the guest, and a clipboard that keeps syncing while the
-window is unfocused — is a companion Chrome extension's to add, measured and
-written up in [`docs/roadmap.md`](docs/roadmap.md).
+There is one client, and it is the page a browser loads. **remotex.app** shows
+that same page in a macOS window with a gateway of its own, and adds the two
+things a browser cannot do: ⌘Q and ⌘W reaching the guest, and a clipboard that
+keeps syncing while the window is unfocused. It is a released disk image, and
+[`docs/macos-viewer.md`](docs/macos-viewer.md) describes it. Giving a *browser*
+those same two is a companion Chrome extension's to do, measured and written up
+in [`docs/roadmap.md`](docs/roadmap.md).
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather

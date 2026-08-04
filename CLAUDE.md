@@ -10,17 +10,16 @@
   (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
   do not detect a stale bundle. For source-based iteration, use
   `REMOTEX_DEV_BACKEND=<port> bun run dev`.
-- **There is one client, and it is the page a browser loads.** A native macOS
-  shell around it — `remotex.app`, an embedded Chromium plus a Swift menu bar, with
-  a `serve-embedded` gateway of its own — was built and then removed. Do not
-  reintroduce it, and do not add a second implementation of anything the page
-  already does. What that shell added and a browser genuinely cannot do — ⌘Q and
-  ⌘W reaching the guest, and a clipboard that keeps syncing while the window is
-  unfocused — is a companion Chrome extension's, measured and written up under
-  **Companion Chrome extension** in [`docs/roadmap.md`](docs/roadmap.md).
-- One `bun run build`, one `frontend/dist`, one consumer shape: served over HTTP
-  from an origin root. Every URL the page uses goes through
-  `frontend/src/gateway.ts`.
+- **There is one client, and it is the page a browser loads.** `remotex.app`
+  (`apps/viewer`, Electron) shows that same page, so a frontend change is a change
+  to both — and `NATIVE_HOST` in `frontend/src/nativeHost.ts` is the only thing
+  that may differ between them. Do not add a second implementation of anything the
+  page already does. After viewer changes run `bun run check` and `bun test tests`
+  in `apps/viewer/`.
+- One `bun run build`, one `frontend/dist`, both hosts. It is served over HTTP
+  from an origin root, and `Contents/Resources/web` is that same directory served
+  as `remotex://app` by the app and over `http://` by the gateway beside it at the
+  same time. Every URL the page uses goes through `frontend/src/gateway.ts`.
 - Put temporary files and test config under `tmp/`. Run efficient local Python
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.

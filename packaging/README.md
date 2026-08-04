@@ -30,6 +30,10 @@ assets relative to its real path and loads the stable config from
 | `uninstall.sh` | remove an installation or one version |
 | `Dockerfile` | build an image from an extracted release tarball |
 
+remotex.app is not built here. It is an Electron shell in
+[`apps/viewer`](../apps/viewer) — `bun run dist` there — and it carries a copy of
+the gateway this directory packages. See [`docs/macos-viewer.md`](../docs/macos-viewer.md).
+
 The repository-root `install.sh` downloads and verifies a release before
 calling `packaging/install.sh`.
 

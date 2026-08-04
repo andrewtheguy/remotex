@@ -12,6 +12,10 @@
 # browser tab title. Defaults to "remotex". Top-level rather than under [server]:
 # it names the deployment rather than the server, and one value with two spellings
 # is one of them going stale.
+#
+# It is also the one setting this file shares with remotex.app's own config, which
+# has no [server] block at all — the app decides where its gateway listens and
+# serves no web UI. Edit that one from the app, not here.
 #branding = "remotex"
 
 [server]
