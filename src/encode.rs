@@ -27,14 +27,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 
 use crate::config::{MotionEncode, RenderPlan, TileCodec, VideoCodec};
-use crate::protocol::{ServerMsg, Tile, VideoUnit};
-use crate::regions::{Policy, Regions};
+use crate::protocol::{ServerMsg, Tile};
+use crate::regions::{Policy, Produced, Regions, Round};
 use crate::tiles::{Changed, Rect};
 use crate::video;
 
@@ -279,21 +279,20 @@ impl Video {
 enum Pending {
     /// An encode in flight, yielding the tile and the microseconds it cost.
     Tile(JoinHandle<anyhow::Result<(Tile, u64)>>),
-    /// One round of the video streams: every access unit produced at one frame
-    /// boundary, already encoded, and what the round cost.
+    /// One round of the video streams in flight: an encode on a blocking worker,
+    /// yielding the round itself (to be put back), what it produced, and the
+    /// microseconds it cost — the same handle contract [`Pending::Tile`] has.
     ///
-    /// The streams' shape, and the one thing they cannot borrow from the still path:
-    /// their frames are links in a chain, each encoded from a mirror the read loop is
-    /// writing, so they cannot be raced across workers the way independent stills can.
-    /// A round is encoded under a lock on the caller's own task and only its *place in
-    /// the order* is queued — the same contract [`Pending::Tile`] has, minus the
-    /// parallelism there is nothing here to overlap with.
+    /// The streams' frames are links in a chain, so rounds stay serial with each
+    /// other — [`Regions::round_out`] refuses a second while one is here — but the
+    /// engine's read loop no longer waits the encode out: the spare mirror takes its
+    /// blits meanwhile, and the order task puts the round back when it lands.
     ///
     /// One queue slot per round rather than per unit, because a round is one frame of
     /// the desktop however many regions it took: that is what [`ENCODE_DEPTH`] should
     /// be counting, and it is what makes the congestion loop's one measurement of how
     /// long a push blocked mean one thing.
-    Round { units: Vec<VideoUnit>, encode_micros: u64 },
+    Round(JoinHandle<(Round, anyhow::Result<Produced>, u64)>),
     Msg(ServerMsg),
     /// A caller waiting for everything pushed before it to have reached `frame_tx`.
     Flush(oneshot::Sender<()>),
@@ -590,11 +589,16 @@ struct Shared {
     /// than a bare closed channel. See [`TileSink::closed`].
     failure: Mutex<Option<String>>,
     motion: Mutex<Motion>,
-    /// A `tokio` mutex rather than a `std` one because its guard is held across the
-    /// `spawn_blocking` that encodes. That is not incidental — it is what makes "one
-    /// access unit at a time, in push order, over a mirror nobody else is writing" a
-    /// fact about the type instead of a hope about the callers.
+    /// A `tokio` mutex rather than a `std` one because several of its critical
+    /// sections span awaits. It is *not* held across the encode any more: a round
+    /// owns its mirror and streams outright for the duration
+    /// ([`Regions::take_round`]), the spare mirror takes the blits meanwhile, and
+    /// "one round at a time, in order" is `Regions::round_out`'s guarantee.
     video: tokio::sync::Mutex<Video>,
+    /// Signalled by the order task when a pipelined round has come back with pixels
+    /// (or a keyframe) still waiting, so an engine parked on a clean `due_at` finds
+    /// out the mirror is dirty again. See [`TileSink::round_returned`].
+    round_returned: Notify,
     /// Set by [`TileSink::reset_render`], consumed by [`TileSink::frame`]. An atomic
     /// rather than a field on [`Video`] so that resetting stays synchronous: its four
     /// call sites are already awaiting other things, and none of them should have to
@@ -658,6 +662,7 @@ impl Shared {
             failure: Mutex::default(),
             motion: Mutex::default(),
             video: tokio::sync::Mutex::new(Video::new(policy, codec, quality, mark)),
+            round_returned: Notify::new(),
             keyframe_owed: AtomicBool::new(false),
             tiles: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
@@ -949,9 +954,13 @@ impl TileSink {
     /// most of which redraw nothing. So this is also a no-op when nothing was blitted:
     /// without that, a still screen would encode a frame per PDU.
     ///
-    /// The encode runs on a blocking worker with the streams' lock held across it —
-    /// serial, which is what an inter-frame stream requires and what the still path
-    /// deliberately is not. Only the finished round's place in the order is queued.
+    /// The encode runs on a blocking worker with only the *round* — mirror and
+    /// streams, taken outright — and its place in the order queued, which is the
+    /// tile path's own contract: the read loop keeps decoding into the spare mirror
+    /// while the worker encodes, and the order task puts the round back when it
+    /// lands. Rounds stay serial with each other ([`Regions::round_out`]), which is
+    /// what an inter-frame stream requires; what no longer happens is the engine
+    /// waiting the encode out.
     ///
     /// **Calling it is a proposal, not an instruction.** At most one round is produced
     /// per [`VIDEO_FRAME_INTERVAL`]; a call inside that window leaves the mirror dirty
@@ -963,6 +972,13 @@ impl TileSink {
             return Ok(());
         }
         let mut video = self.shared.video.lock().await;
+        if video.regions.round_out() {
+            // The previous round is still encoding, and it *is* this call's answer:
+            // its return re-arms the engine (`Self::round_returned`), and taking
+            // anything now — even the keyframe flag — would act on a live table
+            // that is away on the worker.
+            return Ok(());
+        }
         // Read before it is consumed, because it decides whether the interval below
         // applies at all. A forced keyframe is never deferred: `reset_render` arms it
         // for a repaint, a reattach, a takeover or a resize, and every one of those is
@@ -994,65 +1010,44 @@ impl TileSink {
             return Ok(());
         };
         video.due_at = Some(now + VIDEO_FRAME_INTERVAL);
-
-        let started = Instant::now();
-        let (round, produced) = tokio::task::spawn_blocking(move || {
-            let produced = round.encode();
-            (round, produced)
-        })
-        .await
-        .map_err(|e| {
-            // Not recoverable by rebuilding: a fresh stream would hand a blank mirror
-            // to a keyframe, which is wrong pixels rather than coarse ones, and the
-            // shadow already counts the real ones as delivered.
-            let message = format!("video encoder stopped: {e}");
-            give_up(self.engine, &self.shared, message.clone());
-            anyhow::anyhow!(message)
-        })?;
-        let encode_micros = micros(started);
         let quality = video.regions.quality();
-        // Streams that produced nothing keep their dirty flag and their keyframe, so
-        // those pixels ride the next round. `skip_frames(false)` should make that
-        // unreachable; the counter is how we would find out that it is not.
-        if round.skipped() > 0 {
-            self.shared.skipped.fetch_add(round.skipped(), Ordering::Relaxed);
-            warn!(
-                "{}: {} video frame(s) encoded to nothing; their pixels wait for the next",
-                self.engine,
-                round.skipped()
-            );
-        }
-        video.regions.put_back(round, now);
-        let produced = produced?;
-        if produced.units.is_empty() {
-            return Ok(());
-        }
-        // Dropped before the push, which may block: holding the streams' lock while
-        // waiting on a full queue would make every later `damage` wait on the socket.
+        // Dropped before the spawn and the push: the whole point is that `damage`
+        // gets the lock back while the worker encodes.
         drop(video);
 
-        // Every announcement first, so a client's decoder is configured before the units that
-        // need it arrive. Pushed as ordinary queue items rather than sent directly, because the
-        // queue *is* the order: a `VideoFormat` that overtook the tiles ahead of it would be a
-        // decoder reconfigured for a region the client has not been shown yet. `crate::wire`
-        // flushes the pending batch before any text frame, which is what carries the ordering
-        // through to the socket.
-        for format in produced.formats {
-            self.push(Pending::Msg(ServerMsg::VideoFormat {
-                stream: format.stream,
-                codec: format.codec,
-                decode: format.decode,
-            }))
-            .await?;
-        }
-
+        let handle = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let produced = round.encode();
+            (round, produced, micros(started))
+        });
         let queued = Instant::now();
-        let pushed = self.push(Pending::Round { units: produced.units, encode_micros }).await;
+        let pushed = self.push(Pending::Round(handle)).await;
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
-        // is about the link rather than about this round.
+        // is about the link rather than about this round. The queue backing up far
+        // enough to block here still means the socket is not draining rounds.
         self.adjust(queued.elapsed(), quality).await;
         pushed
+    }
+
+    /// Completes when a pipelined round has come back with pixels or a keyframe
+    /// still waiting — the engines' third wake-up source, beside their own frame
+    /// boundaries and [`Self::due_at`].
+    ///
+    /// Needed because `due_at` reads the live table, and while a round is out the
+    /// table is empty: an engine that went idle then would park on a clean mirror
+    /// and never hear that the returning round re-dirtied it. A permit is stored if
+    /// nobody is waiting, so the signal cannot be lost to timing; a spurious
+    /// wake-up costs one no-op [`Self::frame`].
+    pub async fn round_returned(&self) {
+        self.shared.round_returned.notified().await;
+    }
+
+    /// Whether anything downstream reads [`Changed::cells`]. Only a motion strategy
+    /// does; the shadow uses this to skip classifying which cells differ
+    /// ([`Shadow::classify_cells`](crate::tiles::Shadow::classify_cells)).
+    pub fn wants_cells(&self) -> bool {
+        matches!(self.plan, RenderPlan::Tiles { motion: Some(_), .. })
     }
 
     /// Whether this target's moving pixels go out as access units — either the whole
@@ -1493,16 +1488,78 @@ async fn order_loop(
                 let _ = ack.send(());
                 continue;
             }
-            Pending::Round { units, encode_micros } => {
+            Pending::Round(handle) => {
+                // Timed like a tile: `waiting` accrues only while the handle is
+                // found unfinished, so a round already encoded when its turn comes
+                // adds encode time and no waiting — the read loop overlapped it.
+                let started = Instant::now();
+                let joined = handle.await;
+                shared.waited_micros.fetch_add(micros(started), Ordering::Relaxed);
+                let (round, produced, encode_micros) = match joined {
+                    Ok(finished) => finished,
+                    // Only reachable by cancellation — `panic = "abort"` in release
+                    // means a panicking worker never gets this far.
+                    Err(e) => {
+                        give_up(engine, &shared, format!("video encoder stopped: {e}"));
+                        break;
+                    }
+                };
                 shared.encode_micros.fetch_add(encode_micros, Ordering::Relaxed);
-                // Counted as waiting too, and honestly so: this round was encoded on
-                // the engine's own task, so the read loop really did wait the whole of
-                // it. That keeps `encode` against `waiting` meaning what its doc says
-                // — and it reads 1.0 for a session that is all stream, which is the
-                // truth: an inter-frame stream has nothing to overlap with.
-                shared.waited_micros.fetch_add(encode_micros, Ordering::Relaxed);
+                // Streams that produced nothing keep their dirty flag and their
+                // keyframe, so those pixels ride the next round. `skip_frames(false)`
+                // should make that unreachable; the counter is how we would find out
+                // that it is not.
+                if round.skipped() > 0 {
+                    shared.skipped.fetch_add(round.skipped(), Ordering::Relaxed);
+                    warn!(
+                        "{engine}: {} video frame(s) encoded to nothing; their pixels \
+                         wait for the next",
+                        round.skipped()
+                    );
+                }
+                let dirty = {
+                    let mut video = shared.video.lock().await;
+                    video.regions.put_back(round, tokio::time::Instant::now());
+                    video.regions.dirty()
+                };
+                // Damage may have landed while the round was out, and the engine may
+                // be parked on a `due_at` computed when the table was empty — this is
+                // what tells it the mirror is dirty again. The keyframe flag is the
+                // same shape: armed while nothing was home to take it.
+                if dirty || shared.keyframe_owed.load(Ordering::Relaxed) {
+                    shared.round_returned.notify_one();
+                }
+                let produced = match produced {
+                    Ok(produced) => produced,
+                    // Not recoverable by rebuilding: a fresh stream would hand a
+                    // blank mirror to a keyframe, which is wrong pixels rather than
+                    // coarse ones, and the shadow already counts the real ones as
+                    // delivered.
+                    Err(e) => {
+                        give_up(engine, &shared, format!("video encode failed: {e}"));
+                        break;
+                    }
+                };
                 let mut gone = false;
-                for unit in units {
+                // Every announcement first, so a client's decoder is configured
+                // before the units that need it arrive. Sent here rather than pushed,
+                // because this *is* the ordered task: nothing queued behind this
+                // round can overtake it.
+                for format in produced.formats {
+                    let msg = ServerMsg::VideoFormat {
+                        stream: format.stream,
+                        codec: format.codec,
+                        decode: format.decode,
+                    };
+                    if frame_tx.send(msg).await.is_err() {
+                        gone = true;
+                        break;
+                    }
+                }
+                if gone {
+                    break; // browser gone; the engine learns it from its own next push
+                }
+                for unit in produced.units {
                     let bytes = unit.data.len() as u64;
                     shared.units.fetch_add(1, Ordering::Relaxed);
                     shared.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
@@ -1693,7 +1750,7 @@ impl fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::UNSCALED;
+    use crate::protocol::{UNSCALED, VideoUnit};
 
     fn plan(base: TileCodec, motion: Option<TileCodec>) -> RenderPlan {
         RenderPlan::Tiles { base, motion: motion.map(MotionEncode::Tile), debug: false }
@@ -2569,6 +2626,65 @@ mod tests {
             matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe),
             "a re-announced stream owes a keyframe too"
         );
+    }
+
+    /// The wake-up contract both engines rely on now that the encode is pipelined:
+    /// while a round is away, `frame()` is a no-op that consumes nothing — not even
+    /// a keyframe ask — and the order task signals [`TileSink::round_returned`] when
+    /// the round lands with pixels still waiting, which is what re-arms an engine
+    /// parked on a clean `due_at`.
+    ///
+    /// The round is taken and pushed by hand rather than through `frame()`, so it is
+    /// *deterministically* in flight for the middle of the test: a real `frame()`
+    /// races the encode worker, and this contract must not be asserted by timing. No
+    /// paused clock is needed for the same reason — `due_at` is armed only by the
+    /// `frame()` that takes a round, which this test never lets happen until the end,
+    /// where the preserved keyframe ask bypasses the interval anyway. The timeout is
+    /// a hang guard on a broken signal, not an assertion about speed.
+    #[tokio::test]
+    async fn a_round_in_flight_defers_frame_and_its_return_wakes_the_engine() {
+        let (sink, mut frame_rx) = video_sink(64, 64).await;
+        sink.tile(0, 0, 64, 64, rgb(64, 64, 1)).await.unwrap();
+        let mut round =
+            sink.shared.video.lock().await.regions.take_round().expect("a dirty stream");
+
+        // frame() while the round is out: early return, with the keyframe ask left
+        // for a call that has streams to arm.
+        sink.reset_render();
+        sink.frame().await.unwrap();
+        assert!(
+            sink.shared.keyframe_owed.load(Ordering::Relaxed),
+            "the keyframe ask was consumed while the live table was away"
+        );
+
+        // Damage lands while the round is out. Nothing can be dirty yet — the live
+        // table is on the worker — which is exactly why the wake-up has to exist.
+        sink.tile(0, 0, 64, 64, rgb(64, 64, 2)).await.unwrap();
+        assert!(!sink.shared.video.lock().await.regions.dirty());
+
+        // Hand the round to the real order task, the way frame() does.
+        let handle = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let produced = round.encode();
+            (round, produced, micros(started))
+        });
+        sink.push(Pending::Round(handle)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), sink.round_returned())
+            .await
+            .expect("the order task never signalled the returning round");
+        assert!(
+            sink.shared.video.lock().await.regions.dirty(),
+            "the wake-up promised pixels no access unit has carried"
+        );
+
+        // The woken engine's next frame() carries them, and the preserved ask makes
+        // its unit one a decoder can start from.
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let units = drain_units(&mut frame_rx, 2).await;
+        assert!(units[0].keyframe, "the first unit of a stream starts its decoder");
+        assert!(units[1].keyframe, "the preserved keyframe ask never reached the encoder");
+        assert!(frame_rx.try_recv().is_err(), "two rounds produced more than two units");
     }
 
     /// The test for the whole design: `damage` is called once per damage

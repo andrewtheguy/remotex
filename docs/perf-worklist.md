@@ -122,40 +122,63 @@ bottom.
   seamlessly onto its predecessor fades in over 4 ms, and sources stopped by the
   ceiling clamp fade out into the splice instead of cutting mid-waveform.
 
+- **Swizzle loops on the engine read loop** (`src/rdp.rs` `pack_rgb`,
+  `src/vnc_encodings.rs` `bgrx_to_rgb`). Both were one small `extend_from_slice`
+  per pixel; both are now sized writes at a literal 4-in/3-out stride, which is
+  what lets the compiler vectorize the shuffle. Hextile's raw tiles reuse one
+  scratch buffer through `bgrx_to_rgb_into` instead of allocating per 16×16
+  tile, and RDP's per-piece repack for the encoder is gone: pieces are row-wise
+  `tiles::crop`s out of the pack the shadow compare already made.
+- **Tile-path pacing** (`src/rdp.rs`, `DAMAGE_INTERVAL`). Damage now
+  accumulates for 16 ms and coalesces before pack + shadow + encode —
+  overlapping reports union into one rectangle (`stage_damage`, capped at a
+  bounding-box collapse), so the pointer rectangle repeated per mouse event is
+  packed once per interval, against the newest framebuffer. Leading edge kept:
+  a batch on a quiet screen still leaves on the spot. Cleared where the
+  geometry dies (reactivation) or a full repaint subsumes it (`Refresh`). VNC
+  is left unpaced on purpose — RFB updates arrive only when the client asks,
+  so the client's request cadence is already the pacing.
+- **Whole-desktop encode threading** (`src/vp9.rs`, `src/h264.rs`,
+  `video::threads_for`). A stream covering the whole mirror has no sibling
+  regions to overlap with, so it now gets up to half the cores (capped at 4),
+  with `VP9E_SET_ROW_MT` and tile columns to make VP9's threads real work.
+  Region streams keep one thread each; their parallelism is with each other.
+- **Pipelined video encode** (`src/encode.rs` `frame()`, `src/regions.rs`,
+  `src/video.rs`). The video lock is no longer held across the
+  `spawn_blocking`: a round is pushed as a *handle* into the ordered queue —
+  the tile path's own contract — and the mirror is double-buffered, so the
+  engine keeps decoding and blitting (into the spare, synced rect-by-rect at
+  the swap, bounded by damage rather than desktop size) while the worker
+  encodes. Rounds stay serial (`round_out`); damage that lands mid-round is
+  replayed as dirty marks at `put_back`; a round that outlives a resize is
+  discarded by epoch; and `TileSink::round_returned` wakes an engine parked on
+  a clean `due_at` when the returning round re-dirties the mirror.
+  Regression-tested in `regions.rs` (mid-round damage survives into the next
+  round's mirror; a stale round is dropped whole).
+- **Shadow hot loop** (`src/tiles.rs`). An `unknown` counter skips the per-row
+  scan of the `known` flags outright in the steady state (everything seen);
+  `differing_bytes` compares eight bytes at a time from both ends instead of
+  byte-at-a-time scans (the reverse one defeated autovectorization); and the
+  per-cell classification is skipped entirely when nothing reads it —
+  `Shadow::classify_cells`, driven by `TileSink::wants_cells`, since only a
+  motion strategy consults `Changed::cells`.
+- **Whole-mirror copy per video frame** (`src/video.rs` `Mirror::whole`,
+  both encoders). A stream whose rectangle is the coded picture feeds the
+  mirror's own buffer to `I420::read_rgb`; the full-framebuffer crop remains
+  only for sub-rectangles and for the debug outline, which must not paint on
+  the source.
+- **Encoder output capacity** (`src/protocol.rs`). PNG and JPEG tiles encode
+  into a buffer sized to a conservative compression ratio up front instead of
+  growing a `Vec::new()` through repeated reallocation.
+
 ## Gateway — screen
 
-- **Per-pixel swizzle loops on the engine read loop.** `pack_rgb`
-  (`src/rdp.rs`) does one 3-byte `extend_from_slice` per pixel and each rect is
-  packed twice (shadow compare, then per band for the encoder; a third time
-  into the mirror under video). `bgrx_to_rgb` (`src/vnc_encodings.rs`) is the
-  same pattern plus a fresh full-rect allocation per rectangle. Rewrite as
-  vectorizable fixed-stride loops and reuse buffers across calls.
-- **No pacing on the tile path.** `VIDEO_FRAME_INTERVAL` exists because a busy
-  RDP desktop reports damage ~126×/s against a 60 Hz screen; tiles still take
-  every `GraphicsUpdate` straight through pack + shadow + encode. The shadow
-  suppresses unchanged pixels, so the waste is pack/compare passes and streams
-  of small encodes rather than full re-encodes — an accumulation interval
-  (~16 ms) coalescing overlapping damage would cut both.
-- **Whole-desktop `video` encodes on one thread.** `g_threads = 1`
-  (`src/vp9.rs`) and `.num_threads(1)` (`src/h264.rs`) are justified by
-  inter-region parallelism, which `Policy::Whole` does not have. Enable
-  threads + `VP9E_SET_ROW_MT` (rustdesk also sets tile columns) when the plan
-  is the whole desktop; keep 1 for region streams.
-- **Video mutex held across the encode** (`src/encode.rs`, `frame()`): the
-  engine read loop waits out the whole `spawn_blocking` encode, so decode and
-  encode never overlap. A double-buffered mirror would pipeline them.
-- **Shadow hot loop** (`src/tiles.rs`): `first_unknown` scans the `known` flags
-  for every row even when the row's memcmp said identical (the comment above it
-  claims otherwise); `differing_bytes` ends with a reverse scalar scan; the
-  per-cell classification is computed then discarded on the default
-  `Tiles { motion: None }` plan.
-- **Whole-mirror copy per video frame** (`src/video.rs`, `crop_into` under
-  `Policy::Whole`): a full-framebuffer memcpy whose only purpose is letting the
-  debug outline draw on a copy; with `mark == None` the mirror could feed
-  `I420::read_rgb` directly.
-- Smaller: encoder output `Vec::new()` realloc growth (`src/protocol.rs`);
-  ~144 tile records bufferable across three queues in series while supersede
-  sees only the final batch; region streams encode serially within a round.
+All addressed — see Done — except two smaller items, assessed and left:
+~144 tile records can buffer across three queues in series while supersede sees
+only the final batch (speculative, no measurement saying the depths bind), and
+region streams encode serially within a round — deliberate, and now argued in
+`Round`'s doc: the regions are disjoint, so a round's total work is one desktop
+frame however it is cut, and one task keeps the mirror a plain `&`.
 
 ## Gateway — audio
 

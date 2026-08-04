@@ -222,6 +222,7 @@ impl Decoders {
         let mut out = vec![0u8; usize::from(w) * usize::from(h) * 3];
         // One tile's worth of scratch, reused: the biggest is 16x16.
         let mut tile = vec![0u8; HEXTILE * HEXTILE * 3];
+        let mut raw_rgb = Vec::new();
         for ty in (0..h).step_by(HEXTILE) {
             let th = HEXTILE.min(usize::from(h - ty)) as u16;
             for tx in (0..w).step_by(HEXTILE) {
@@ -236,7 +237,8 @@ impl Decoders {
                     // and the carried colours are neither read nor changed.
                     let mut pixels = vec![0u8; usize::from(tw) * usize::from(th) * BPP];
                     reader.read_exact(&mut pixels).await?;
-                    blit(&mut out, w, (tx, ty), (tw, th), &bgrx_to_rgb(&pixels));
+                    bgrx_to_rgb_into(&pixels, &mut raw_rgb);
+                    blit(&mut out, w, (tx, ty), (tw, th), &raw_rgb);
                     continue;
                 }
                 if sub & HEXTILE_BACKGROUND != 0 {
@@ -627,11 +629,25 @@ fn fill(out: &mut [u8], stride: u16, at: (u16, u16), size: (u16, u16), rgb: [u8;
 
 /// Repack BGRX pixels (our forced format on the wire) into packed RGB888.
 pub fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity(bgrx.len() / BPP * 3);
-    for px in bgrx.chunks_exact(BPP) {
-        rgb.extend_from_slice(&[px[2], px[1], px[0]]);
-    }
+    let mut rgb = Vec::new();
+    bgrx_to_rgb_into(bgrx, &mut rgb);
     rgb
+}
+
+/// [`bgrx_to_rgb`] into a buffer the caller reuses, for the paths that repack in a
+/// loop — hextile pays this once per 16×16 tile.
+///
+/// Sized writes into a zeroed buffer rather than a byte-at-a-time `extend`: the
+/// fixed 4-in/3-out stride is what lets the compiler vectorize the shuffle.
+pub fn bgrx_to_rgb_into(bgrx: &[u8], rgb: &mut Vec<u8>) {
+    let pixels = bgrx.len() / BPP;
+    rgb.clear();
+    rgb.resize(pixels * 3, 0);
+    for (out, px) in rgb.chunks_exact_mut(3).zip(bgrx.chunks_exact(BPP)) {
+        out[0] = px[2];
+        out[1] = px[1];
+        out[2] = px[0];
+    }
 }
 
 /// An inflater whose lifetime is chosen by the encoding that owns it.

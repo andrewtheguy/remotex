@@ -91,6 +91,7 @@ pub struct Mark {
 /// extra pixels — a client is told the true size and crops — and they are filled from
 /// their neighbours rather than left black, because a hard black edge beside content is
 /// a strong feature an encoder would pay for in every frame.
+#[derive(Clone)]
 pub struct Mirror {
     /// The desktop as the client knows it, and as a record header reports it.
     size: (u16, u16),
@@ -185,6 +186,36 @@ impl Mirror {
         Ok(())
     }
 
+    /// Copy `rect`'s pixels from `src` — the double-buffer sync in
+    /// [`crate::regions::Regions::take_round`].
+    ///
+    /// The two mirrors are twins by construction (the spare is a clone of the
+    /// current one), and every staged rect went through [`Self::blit`]'s bounds
+    /// check, so a mismatch here is a bug in that bookkeeping rather than a state a
+    /// session can reach — asserted in debug, clamped to a no-op in release, where
+    /// the worst outcome is a stale region the next damage repaints.
+    pub fn adopt(&mut self, src: &Mirror, rect: Rect) {
+        debug_assert_eq!(self.coded, src.coded, "a mirror adopted from a differently sized twin");
+        if self.coded != src.coded || rect.right >= self.coded.0 || rect.bottom >= self.coded.1 {
+            return;
+        }
+        let stride = usize::from(self.coded.0) * 3;
+        let (w, h) = (usize::from(rect.w()), usize::from(rect.h()));
+        for row in 0..h {
+            let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 3;
+            self.rgb[at..at + w * 3].copy_from_slice(&src.rgb[at..at + w * 3]);
+        }
+    }
+
+    /// The whole coded picture as one packed RGB888 slice, when `rect` *is* the
+    /// coded picture — the `Policy::Whole` stream, whose crop was a full-framebuffer
+    /// copy producing byte-for-byte what this buffer already holds. `None` for any
+    /// smaller rectangle, whose rows are not contiguous here.
+    pub fn whole(&self, rect: Rect) -> Option<&[u8]> {
+        (rect.left == 0 && rect.top == 0 && (rect.w(), rect.h()) == self.coded)
+            .then_some(&self.rgb)
+    }
+
     /// Fill the at-most-one padding column and row from their neighbours.
     ///
     /// Only an odd-sized desktop has any. Called once per encode round rather than per
@@ -273,6 +304,26 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
         rect.h()
     );
     Ok(coded)
+}
+
+/// How many threads a stream's encoder gets: several for the one stream that covers
+/// the whole mirror, one for a region stream.
+///
+/// Region streams are disjoint and encode in parallel with each other on the same
+/// round, which is where the cores go — a second level of threading inside each
+/// would oversubscribe them. `Policy::Whole` has exactly one stream and nothing to
+/// overlap with, so its parallelism has to come from inside the picture: row-based
+/// multithreading for VP9 (set by the caller alongside this count), slices for
+/// H.264. Half the machine, capped: the engine's read loop, the socket and the tile
+/// workers still need somewhere to run.
+pub fn threads_for(coded: Rect, mirror: (u16, u16)) -> usize {
+    let whole = coded.left == 0
+        && coded.top == 0
+        && (coded.w(), coded.h()) == mirror;
+    if !whole {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
 
 /// One picture as I420, and the RGB→YUV conversion both codecs go through.

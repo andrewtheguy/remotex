@@ -48,6 +48,10 @@ use crate::video::{Mark, Mirror, Stream};
 /// moving — which is what merging produces anyway.
 pub const MAX_STREAMS: usize = 4;
 
+/// Most rectangles the staged-damage list holds before collapsing to a bounding
+/// box — see [`Regions::stage`].
+const STAGED_CAP: usize = 32;
+
 /// The wire's `stream` byte has to be able to name every stream this will run.
 const _: () = assert!(MAX_STREAMS <= batch::MAX_STREAMS as usize);
 
@@ -100,6 +104,12 @@ struct Live {
     /// debts are keyed by, and what "this cell is in a stream" is answered from.
     cells: Vec<(u16, u16)>,
     stream: Stream,
+    /// The dial this stream's encoder is *known* to be running at — recorded only on
+    /// a successful `set_quality`, unlike the stream's own notion, which the VP9 arm
+    /// updates before the calls that can fail. What [`Regions::put_back`] compares
+    /// against, so an unchanged dial costs a returned stream nothing and a failed
+    /// retune is retried instead of believed.
+    quality: u8,
     /// Whether anything has been blitted into this region since its last access unit.
     dirty: bool,
     /// Whether the next access unit must be one a decoder can start from.
@@ -300,6 +310,23 @@ pub struct Regions {
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
     mirror: Option<Mirror>,
+    /// The mirror's double buffer. While a round is away being encoded it holds that
+    /// round's mirror's *twin*: [`Self::take_round`] hands the up-to-date mirror to
+    /// the encode and installs this one as current, so blits keep landing while the
+    /// encode runs instead of waiting out the whole of it under the lock.
+    spare: Option<Mirror>,
+    /// Rectangles blitted into `mirror` since `spare` last matched it — what
+    /// [`Self::take_round`] copies across before the swap, and what
+    /// [`Self::put_back`] replays as dirty marks for damage that arrived while the
+    /// live table was away.
+    staged: Vec<Rect>,
+    /// Whether a round is away on a blocking worker. At most one ever is: taking a
+    /// second would hand two encoders one chain of frames.
+    round_out: bool,
+    /// Bumped whenever everything is dropped ([`Self::forget`]). A returning round
+    /// stamped with an older epoch is state for a desktop that no longer exists,
+    /// and is discarded rather than restored.
+    epoch: u64,
     live: Vec<Live>,
     /// Cells inside a live region, so [`Self::covers`] is a lookup rather than a scan.
     covered: HashSet<(u16, u16)>,
@@ -320,6 +347,10 @@ impl Regions {
             quality,
             size: None,
             mirror: None,
+            spare: None,
+            staged: Vec::new(),
+            round_out: false,
+            epoch: 0,
             live: Vec::new(),
             covered: HashSet::new(),
             debts: HashMap::new(),
@@ -339,6 +370,8 @@ impl Regions {
         if self.size != Some((w, h)) {
             self.size = Some((w, h));
             self.mirror = None;
+            self.spare = None;
+            self.staged.clear();
             self.forget();
         }
     }
@@ -349,6 +382,9 @@ impl Regions {
     /// the base encode, which discharges anything that was owed, and a client with
     /// nothing on screen cannot decode from the middle of a stream.
     pub fn forget(&mut self) {
+        // A round away on a worker carries streams and a mirror this is dropping;
+        // the epoch is what tells `put_back` not to bring them back from the dead.
+        self.epoch += 1;
         self.live.clear();
         self.covered.clear();
         self.debts.clear();
@@ -394,10 +430,13 @@ impl Regions {
     /// truth rather than the parts that happened to be moving.
     pub fn blit(&mut self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         self.mirror_mut()?.blit(rect, rgb)?;
+        self.stage(rect);
         // A whole-desktop stream is created here rather than in `retune`, because
         // there is no decision to make: the region is the desktop, and the first
-        // pixels to arrive are the ones it exists to carry.
-        if self.policy == Policy::Whole && self.live.is_empty() {
+        // pixels to arrive are the ones it exists to carry. Not while a round is
+        // out, though — the live table is empty then because the stream is away
+        // encoding, not because there is none.
+        if self.policy == Policy::Whole && self.live.is_empty() && !self.round_out {
             let whole = self.mirror.as_ref().expect("just blitted into it").rect();
             self.start(whole, Instant::now())?;
         }
@@ -407,6 +446,34 @@ impl Regions {
             }
         }
         Ok(())
+    }
+
+    /// Note that `rect` now differs between the current mirror and the spare.
+    ///
+    /// Capped: past [`STAGED_CAP`] the list collapses to one bounding box, so the
+    /// sync copies some slop that did not change — bounded by what the shadow
+    /// already paid to compare — where an unbounded list on a target that never
+    /// takes a round (streams configured, nothing ever moving) would grow forever.
+    fn stage(&mut self, rect: Rect) {
+        if self.staged.len() >= STAGED_CAP {
+            let mut whole = rect;
+            for r in &self.staged {
+                whole.left = whole.left.min(r.left);
+                whole.top = whole.top.min(r.top);
+                whole.right = whole.right.max(r.right);
+                whole.bottom = whole.bottom.max(r.bottom);
+            }
+            self.staged.clear();
+            self.staged.push(whole);
+        } else {
+            self.staged.push(rect);
+        }
+    }
+
+    /// Whether a round is away being encoded. While one is, the live table and the
+    /// hot mirror are on the worker, and a second round cannot be taken.
+    pub fn round_out(&self) -> bool {
+        self.round_out
     }
 
     /// `cell`'s pixels as the mirror holds them — the newest source, which is what
@@ -577,6 +644,8 @@ impl Regions {
             rect,
             cells,
             stream,
+            // What the encoder was just built at, per the comment above.
+            quality: self.quality,
             // Its whole region is owed: nothing has carried these pixels yet.
             dirty: true,
             keyframe_owed: true,
@@ -637,20 +706,42 @@ impl Regions {
 
     /// Take the mirror and every stream, for an encode on a blocking worker.
     ///
-    /// `None` when no stream has anything waiting, so a still screen costs neither
-    /// the hand-off nor the encode. Everything is taken, not just the dirty ones: an
-    /// encoder cannot be borrowed across a `spawn_blocking`, and leaving half of them
-    /// behind would make [`Self::covers`] answer differently depending on whether a
-    /// round is out.
+    /// `None` when no stream has anything waiting — so a still screen costs neither
+    /// the hand-off nor the encode — and while a previous round is still away, which
+    /// is what keeps the inter-frame chain serial now that the caller no longer
+    /// waits the encode out. Everything is taken, not just the dirty ones: an
+    /// encoder cannot be borrowed across a `spawn_blocking`, and leaving half of
+    /// them behind would make [`Self::covers`] answer differently depending on
+    /// whether a round is out.
+    ///
+    /// The spare mirror is brought up to date — rect by rect, bounded by the damage
+    /// since the last round rather than by the desktop — and installed as current,
+    /// so blits land somewhere real while the encode runs.
     pub fn take_round(&mut self) -> Option<Round> {
-        if !self.dirty() {
+        if self.round_out || !self.dirty() {
             return None;
         }
+        let current = self.mirror.take().expect("a dirty stream means a mirror");
+        let spare = match self.spare.take() {
+            Some(mut spare) => {
+                for rect in &self.staged {
+                    spare.adopt(&current, *rect);
+                }
+                spare
+            }
+            // The first round of a session (or the first after a resize) clones
+            // whole: there is no spare yet to sync.
+            None => current.clone(),
+        };
+        self.staged.clear();
+        self.mirror = Some(spare);
+        self.round_out = true;
         Some(Round {
-            mirror: self.mirror.take().expect("a dirty stream means a mirror"),
+            mirror: current,
             live: std::mem::take(&mut self.live),
             mark: self.mark,
             skipped: 0,
+            epoch: self.epoch,
         })
     }
 
@@ -662,8 +753,41 @@ impl Regions {
     /// cell whose stream produced a frame this round cannot also be idle, so nothing
     /// can clean it up from underneath a unit still on its way to the socket.
     pub fn put_back(&mut self, round: Round, now: Instant) {
-        self.mirror = Some(round.mirror);
+        self.round_out = false;
+        if round.epoch != self.epoch {
+            // The desktop was resized, or everything forgotten, while this round was
+            // encoding: its mirror and streams describe a framebuffer that no longer
+            // exists. Its access units were still delivered — the ordered queue puts
+            // them ahead of the resize the client hears about — but nothing here is
+            // worth keeping.
+            return;
+        }
+        // The returned mirror is stale by exactly the rects blitted since the swap,
+        // which is what `staged` has been accumulating; it becomes the spare and the
+        // next take's sync settles the difference.
+        self.spare = Some(round.mirror);
         self.live = round.live;
+        for live in &mut self.live {
+            // Damage that arrived while the round was out marked no stream dirty —
+            // the live table was empty — so it is replayed from the staged rects.
+            if self.staged.iter().any(|rect| live.rect.intersect(rect).is_some()) {
+                live.dirty = true;
+            }
+            // And the congestion loop may have moved the dial while the streams were
+            // out of reach — compared against what each encoder is *known* to run at,
+            // so an unchanged dial costs nothing here. A failure to retune keeps the
+            // quality the stream already has, the same answer `adjust` gives, and
+            // leaves `live.quality` alone so the next round tries again.
+            if live.quality != self.quality {
+                match live.stream.set_quality(self.quality) {
+                    Ok(()) => live.quality = self.quality,
+                    Err(e) => log::warn!(
+                        "video regions: a returned stream refused quality {}: {e:#}",
+                        self.quality
+                    ),
+                }
+            }
+        }
         if self.policy == Policy::Moving {
             for live in &self.live {
                 if live.carried {
@@ -684,6 +808,7 @@ impl Regions {
         self.quality = quality;
         for live in &mut self.live {
             live.stream.set_quality(quality)?;
+            live.quality = quality;
         }
         Ok(())
     }
@@ -722,6 +847,9 @@ pub struct Round {
     live: Vec<Live>,
     mark: Option<Mark>,
     skipped: u64,
+    /// The [`Regions::epoch`] this round was taken under, so [`Regions::put_back`]
+    /// can tell a round that outlived its desktop from one worth restoring.
+    epoch: u64,
 }
 
 impl Round {
@@ -781,6 +909,15 @@ impl Round {
     /// it is not.
     pub fn skipped(&self) -> u64 {
         self.skipped
+    }
+}
+
+#[cfg(test)]
+impl Round {
+    /// The mirror this round would encode, for tests asserting what the double
+    /// buffer hands the worker.
+    fn mirror(&self) -> &Mirror {
+        &self.mirror
     }
 }
 
@@ -1108,5 +1245,75 @@ mod tests {
         // A box entirely off the desktop is not a rectangle at all, which is what a
         // stale churn key after a resize would produce.
         assert!(boxed(40, 0, 40, 0).to_rect(1919, 1079).is_none());
+    }
+
+    /// A whole-desktop target with pixels in it, the pipelined shape.
+    fn whole_regions(w: u16, h: u16) -> Regions {
+        let mut regions = Regions::new(Policy::Whole, VideoCodec::Vp9, 60, None);
+        regions.want(w, h);
+        regions
+    }
+
+    fn flat(w: u16, h: u16, value: u8) -> Vec<u8> {
+        vec![value; usize::from(w) * usize::from(h) * 3]
+    }
+
+    fn placed(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// The double buffer, end to end: rounds stay serial, damage that lands while a
+    /// round is away re-dirties the returning stream, and the pixels it carried
+    /// reach the next round's mirror — including through the spare-sync at the swap.
+    #[test]
+    fn damage_during_a_round_survives_into_the_next() {
+        let mut regions = whole_regions(64, 64);
+        let whole = placed(0, 0, 64, 64);
+        regions.blit(whole, &flat(64, 64, 10)).expect("a blit");
+        let first = regions.take_round().expect("a dirty stream means a round");
+        assert!(regions.take_round().is_none(), "two rounds out would race one chain");
+
+        // Damage lands while the round is away...
+        regions.blit(whole, &flat(64, 64, 20)).expect("a blit mid-round");
+        assert!(regions.take_round().is_none(), "still away");
+        regions.put_back(first, Instant::now());
+
+        // ...and the returning stream is dirty with it, over the newer pixels.
+        let second = regions.take_round().expect("the staged damage re-dirtied the stream");
+        let mut out = Vec::new();
+        second.mirror().crop_into(whole, &mut out).expect("a crop");
+        assert!(out.iter().all(|&b| b == 20), "the double buffer lost mid-round damage");
+        regions.put_back(second, Instant::now());
+
+        // The third round encodes from the spare that was synced at the last swap:
+        // anything still 10 in it would be the sync not happening.
+        let corner = placed(0, 0, 4, 4);
+        regions.blit(corner, &flat(4, 4, 30)).expect("a corner blit");
+        let third = regions.take_round().expect("dirty again");
+        third.mirror().crop_into(corner, &mut out).expect("a crop");
+        assert!(out.iter().all(|&b| b == 30));
+        let elsewhere = placed(32, 32, 4, 4);
+        third.mirror().crop_into(elsewhere, &mut out).expect("a crop");
+        assert!(out.iter().all(|&b| b == 20), "the spare was not synced before the swap");
+    }
+
+    /// A resize while a round is away: the returning round is state for a desktop
+    /// that no longer exists, and none of it may come back.
+    #[test]
+    fn a_round_that_outlives_its_desktop_is_dropped_on_return() {
+        let mut regions = whole_regions(64, 64);
+        regions.blit(placed(0, 0, 64, 64), &flat(64, 64, 10)).expect("a blit");
+        let stale = regions.take_round().expect("a round");
+        regions.want(32, 32);
+        regions.put_back(stale, Instant::now());
+        assert!(regions.take_round().is_none(), "a stale round was restored");
+
+        // The new desktop starts clean and streams its own pixels.
+        let small = placed(0, 0, 32, 32);
+        regions.blit(small, &flat(32, 32, 40)).expect("a blit at the new size");
+        let fresh = regions.take_round().expect("a stream over the new desktop");
+        let mut out = Vec::new();
+        fresh.mirror().crop_into(small, &mut out).expect("a crop");
+        assert!(out.iter().all(|&b| b == 40));
     }
 }
