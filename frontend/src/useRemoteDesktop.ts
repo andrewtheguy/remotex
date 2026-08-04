@@ -17,6 +17,7 @@ import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
+import { createRectCache } from "./pointerRect.ts";
 import {
   binaryFrameKind,
   type ClientMsg,
@@ -178,6 +179,13 @@ const ATTEMPTS_BEFORE_REPORTING = 4;
 // a slow link or a fetch made mid-reconnect can still leave a request unanswered.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
+// One instance for the one desktop canvas a page has: `applyCanvasCss` is a
+// module-level function, and this is how it reaches the cache the pointer
+// mapping reads. See pointerRect.ts for why invalidation has two triggers.
+const pointerRectCache = createRectCache((clear) =>
+  requestAnimationFrame(clear),
+);
+
 // The one way a 2D context is taken from the desktop canvas, so the two call
 // sites (connect and resize) cannot disagree about its attributes — a second
 // `getContext` on the same canvas returns the first context and silently
@@ -203,6 +211,9 @@ function applyCanvasCss(
   if (!canvas || !size) {
     return;
   }
+  // Every write below moves or resizes the canvas box, and a pointer event in
+  // the same frame must not map through the box it replaced.
+  pointerRectCache.invalidate();
   if (CAN_PINCH_ZOOM) {
     // Touch: fit-to-width base scale with the pinch zoom on top;
     // the pan offset (≤ 0 per axis) slides the scaled desktop under the
@@ -1829,27 +1840,17 @@ export function useRemoteDesktop(
         })
       : null;
 
-    // The canvas rect, read at most once per displayed frame. Reading it in
-    // every mousemove forces a synchronous layout flush at pointer rate; a
-    // per-frame cache needs no list of what can move the canvas, because
-    // anything that does — resize, scroll, zoom, pan — shows on screen no
-    // sooner than the frame that clears this.
-    let pointerRect: DOMRect | null = null;
-    const rectOf = (target: Element) => {
-      if (!pointerRect) {
-        pointerRect = target.getBoundingClientRect();
-        requestAnimationFrame(() => {
-          pointerRect = null;
-        });
-      }
-      return pointerRect;
-    };
+    // Scroll and window resize move the canvas without going through
+    // `applyCanvasCss`, so they invalidate the pointer rect cache themselves —
+    // scroll on capture, because the scrolling element is whichever ancestor
+    // overflowed, and scroll events do not bubble.
+    const invalidatePointerRect = () => pointerRectCache.invalidate();
 
     const toRemote = (e: MouseEvent) => {
       // Map through the canvas rect (not the overlay): it reflects the
       // displayed framebuffer under the current touch zoom/pan, and on
       // desktop it coincides with the overlay anyway.
-      const rect = rectOf(canvasRef.current ?? el);
+      const rect = pointerRectCache.read(canvasRef.current ?? el);
       const remote = sizeRef.current;
       const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
       const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
@@ -1973,6 +1974,11 @@ export function useRemoteDesktop(
     el.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
     window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("scroll", invalidatePointerRect, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener("resize", invalidatePointerRect);
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("contextmenu", onContextMenu);
     // Keyboard is scoped to the focused overlay (not window) so the remote
@@ -1988,6 +1994,10 @@ export function useRemoteDesktop(
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("scroll", invalidatePointerRect, {
+        capture: true,
+      });
+      window.removeEventListener("resize", invalidatePointerRect);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
       el.removeEventListener("keydown", onKeyDown);

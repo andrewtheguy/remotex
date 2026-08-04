@@ -34,10 +34,15 @@ bottom.
   opaque sRGB screen pixels, so color management and premultiplication were
   per-tile work the paint never used.
 - **Cached canvas rect for pointer mapping**
-  (`frontend/src/useRemoteDesktop.ts`, `rectOf`). `toRemote` called
-  `getBoundingClientRect()` per mousemove — a forced layout flush at pointer
-  rate. The rect is now read at most once per displayed frame; anything that
-  moves the canvas shows no sooner than the frame that clears the cache.
+  (`frontend/src/pointerRect.ts`, wired in `useRemoteDesktop.ts`). `toRemote`
+  called `getBoundingClientRect()` per mousemove — a forced layout flush at
+  pointer rate. The cache invalidates on every known geometry change —
+  `applyCanvasCss` (zoom, pan, resize message, soft-keyboard inset), scroll on
+  capture, window resize — so a pointer event after an in-frame change measures
+  again, with a per-frame clear as the backstop for anything unannounced.
+  Unit-tested in `pointerRect.test.ts`; a Playwright version would need
+  synthetic pointer input with layout-dependent coordinates, which the browser
+  test rules place out of scope.
 
 ## Gateway — screen
 
