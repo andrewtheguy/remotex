@@ -1,15 +1,75 @@
 # Client ↔ gateway performance worklist
 
-Findings from the 2026-08-04 audit of the screen and audio hot paths, ranked by
-expected payoff. Each item names the code it is about; strike through or move to
-Done as they land. The audit's method: three passes (gateway screen, gateway
-audio, browser client) over the data path from engine read loop to canvas and
-speaker, checked against the reference implementations under
-`tmp/programs_for_reference` (rustdesk's libvpx tuning, Guacamole's audio
-transport, noVNC's paint loop).
+Findings from the 2026-08-04 audits of the screen and audio hot paths, ranked by
+expected payoff. Each item names the code it is about; move it to Done as it
+lands. The audits trace the data path from engine read loop to canvas and speaker
+and compare it with the reference implementations under
+`tmp/programs_for_reference` (IronRDP, FreeRDP, Guacamole, noVNC, RoyalVNC and
+rustdesk).
 
 What the audit found *sound* — and later work should not regress — is at the
 bottom.
+
+## In progress — end-to-end screen backpressure
+
+**Highest expected impact, shared by every target.** The gateway's bounded queues
+currently stop at the browser WebSocket. The classic WebSocket API has no receive
+backpressure: `useRemoteDesktop.ts` transfers every binary frame immediately to
+the painter worker, and `desktopPainterWorker.ts` appends every frame to an
+unbounded promise chain. A fast socket and a slow decode/paint worker therefore
+look healthy to `src/encode.rs`; its queue-stall congestion signal cannot see the
+latency the user is actually watching.
+
+Guacamole closes this loop with a frame `sync`: the browser answers only after its
+display flush completes, and the server uses the returned processing lag to pace
+later frames. Remotex should take the same shape without adding a second client:
+
+1. Put a monotonically increasing attachment-local sequence in every screen batch.
+2. Have the painter worker echo that sequence only after its ordered
+   parse/decode/draw pass, together with time queued and time spent drawing.
+3. Consume the acknowledgment in `src/ws.rs`, never forward it to an RDP/VNC
+   engine, and report worker queue, draw and end-to-end latency in the attachment
+   totals. Fence late worker completions by the browser's socket generation so an
+   old attachment cannot acknowledge a new one.
+4. Once field measurements establish the normal in-flight depth, bound batches
+   outstanding past the WebSocket and make the video quality/pacing decision read
+   acknowledged presentation lag rather than socket-write stall alone. Preserve
+   video dependency order: old delta frames may not simply be dropped.
+
+The first implementation slice is steps 1–3. It is observability and the wire
+contract needed for real application-level backpressure; step 4 is the behaviour
+change and remains open until those measurements choose its window.
+
+## Next, not backlog
+
+- **RDP cursor rendered locally.** `src/rdp.rs` currently asks IronRDP to composite
+  the pointer into the framebuffer, making every mouse move wait for the remote,
+  tile pacing, encode, socket, decode and paint. Use IronRDP's pointer outputs and
+  the existing browser `Cursor` path instead.
+- **VNC Continuous Updates and browser CopyRect.** Generic VNC polls once per
+  `FramebufferUpdate` and expands CopyRect back into encoded pixels for the browser.
+  Negotiate Continuous Updates where supported and add an ordered copy record that
+  lets the painter blit pixels it already holds.
+- **Presentation pacing after paint feedback.** Whole-desktop video is capped at
+  30 Hz and RDP tile damage at 16 ms. Revisit those limits only after acknowledged
+  paint latency makes it possible to distinguish useful additional frames from a
+  deeper client backlog.
+
+## Backlog — explicitly not prioritized
+
+- **IronRDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics`, use its real
+  frame boundaries/acknowledgments and surface compositor, then separately assess
+  AVC420 pass-through. The tested Windows server offers the channel and the pinned
+  IronRDP revision contains a client, but this is a larger protocol integration than
+  the common browser feedback work.
+- **Tight/JPEG/H.264 VNC decode or pass-through.** Generic VNC intentionally
+  advertises only the current lossless encodings. Tight-family decoding and direct
+  source-payload delivery can remove upstream bytes and a transcode, but neither is
+  a near-term priority.
+- **Apple Adaptive media.** High Performance currently supplies its virtual display
+  over zlib rectangles; Apple's HEVC/AAC-over-SRTP path remains reverse-engineering
+  work with no specification. Do not deepen it ahead of the shared path or standard
+  `ard` improvements.
 
 ## Done
 
@@ -207,9 +267,11 @@ bottom.
 
 ## Gateway — screen
 
-All addressed — see Done — except one smaller item, assessed and left:
-~144 tile records can buffer across three queues in series while supersede sees
-only the final batch (speculative, no measurement saying the depths bind).
+The cross-boundary paint acknowledgment above is active. One smaller local item
+remains assessed and left: ~144 tile records can buffer across three queues in
+series while supersede sees only the final batch (speculative, no measurement
+saying the depths bind). Reassess it with the worker queue measurements rather
+than changing another depth in isolation.
 
 ## Gateway — audio
 
@@ -217,7 +279,9 @@ All addressed — see Done.
 
 ## Client
 
-All addressed — see Done.
+The parse/decode/paint hot path items are in Done. End-to-end completion feedback
+is active above; the browser worker is no longer treated as the endpoint merely
+because the main thread handed it an `ArrayBuffer`.
 
 ## Audited and sound — do not regress
 
