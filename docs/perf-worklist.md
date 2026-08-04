@@ -44,6 +44,37 @@ bottom.
   synthetic pointer input with layout-dependent coordinates, which the browser
   test rules place out of scope.
 
+- **`Bytes` through the audio packet path** (`src/audio.rs`, `src/pcm_stream.rs`,
+  `src/opus_stream.rs`, `src/protocol.rs`). The bridge's broadcast queue
+  deep-cloned every 32 KB wave buffer per receiver; it now carries
+  `bytes::Bytes`, so a receive bumps a refcount. Passthrough — the mode whose
+  point is touching nothing — went from three full copies per buffer to one:
+  a packet is a refcounted slice of the buffer the bridge holds, cut on frame
+  boundaries by `Bytes::slice`, and `ServerMsg::Audio` carries that same `Bytes`
+  through the queues. The copy that remains is `audio::frame` serializing each
+  packet into the wire frame's `Vec<u8>` — unavoidable while packets share one
+  frame with headers between them. On the Opus side the equivalent leftover is
+  the ~240-byte encoded packet leaving the encoder's scratch buffer, which is
+  noise.
+- **`pcm48` hot loops** (`src/pcm48.rs`). The deinterleave was byte-at-a-time
+  with a `%` per sample; aligned stereo — every buffer the negotiated format
+  produces — now deinterleaves whole frames through `chunks_exact`. The
+  per-group `drain(..)` on `pending` and `ready` shifted ~550 KB of tail per
+  32 KB wave buffer; both are cursors now (`pending_taken`/`ready_taken`,
+  through `SequentialSliceOfSlices`), compacted once per push when only the
+  sub-group remainder is left to move.
+- **Resampler delay in `pre_skip`** (`src/opus_stream.rs`). `OpusHead` carried
+  only the encoder's lookahead; the resampler's own leading transient
+  (`Pcm48::output_delay`, 160 samples at 48 kHz) is now added, so the decoder
+  discards it instead of playing it.
+- **Audio queue depths** (`src/session.rs`, `src/audio.rs`).
+  `AUDIO_SOCKET_BUFFER` 16 → 2: the queue is FIFO and its one job is keeping a
+  socket write in flight from stalling the pump — every slot past that was ~3 s
+  of stale sound faithfully delivered over a link already behind, then discarded
+  by the client's ceiling. `AUDIO_QUEUE_DEPTH` 64 → 16: the bridge drops oldest,
+  and retaining ~12 s when the client discards past 1.5 s on arrival could only
+  ever waste the congested link's bandwidth.
+
 ## Gateway — screen
 
 - **Per-pixel swizzle loops on the engine read loop.** `pack_rgb`
@@ -81,21 +112,7 @@ bottom.
 
 ## Gateway — audio
 
-- **~610 KB of copy/memmove per 32 KB wave buffer** on the Opus path:
-  the broadcast channel deep-clones per receiver (`src/audio.rs` — carry
-  `Bytes`/`Arc<[u8]>` instead of `Vec<u8>`); byte-at-a-time deinterleave with a
-  `%` per sample (`src/pcm48.rs`); front-`drain` on plain `Vec`s in the group
-  loop (`VecDeque` or a cursor). PCM passthrough — the mode whose point is
-  touching nothing — copies each buffer three times.
-- **`AUDIO_SOCKET_BUFFER = 16` is deeper than its own justification**
-  (`src/session.rs`): "absorb a socket write in flight" needs 2–3 slots. The
-  client's 1.5 s ceiling bounds what the user hears, but a congested link first
-  receives ~3 s of stale audio — bandwidth spent against the video that is
-  causing the congestion, then an audible client-side splice — before losses
-  move to the drop-oldest bridge where they belong.
-- Minor: the resampler's 160-sample delay is not added to `OpusHead.pre_skip`
-  (`src/opus_stream.rs`); `packet[..len].to_vec()` per packet defeats the
-  scratch buffer beside it.
+All addressed — see Done.
 
 ## Client
 

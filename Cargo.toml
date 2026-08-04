@@ -43,6 +43,10 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 futures-util = "0.3"
+# Refcounted buffers for the audio path: a wave buffer is handed to the bridge
+# once and every hop after it — the broadcast queue, the passthrough packets —
+# clones a pointer instead of 32 KB. Already in the tree through axum.
+bytes = "1"
 toml = "1"
 # Tiles and cursor shapes both. The RDP and VNC engines PNG-compress screen tiles
 # (`Tile::from_rgb`), and VNC cursor shapes ride the JSON control channel as base64

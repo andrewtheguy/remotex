@@ -605,7 +605,10 @@ mod tests {
     #[test]
     fn audio_alone_through_the_wire_is_one_binary_frame_and_no_batch() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![ServerMsg::Audio(vec![vec![1, 2, 3], vec![4, 5]])]);
+        let frames = wire.encode(vec![ServerMsg::Audio(vec![
+            bytes::Bytes::from_static(&[1, 2, 3]),
+            bytes::Bytes::from_static(&[4, 5]),
+        ])]);
 
         assert_eq!(frames.len(), 1, "no batch is flushed around it");
         let binary = binary(&frames);
@@ -631,7 +634,10 @@ mod tests {
 
         // Lengths are per packet, so packets of different sizes stay separable —
         // which a concatenation with one total length would not.
-        let frame = protocol::audio::frame(&[vec![9; 300], vec![7; 1]]);
+        let frame = protocol::audio::frame(&[
+            bytes::Bytes::from(vec![9; 300]),
+            bytes::Bytes::from(vec![7; 1]),
+        ]);
         assert_eq!(
             u16::from_le_bytes([frame[2], frame[3]]),
             2,

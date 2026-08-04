@@ -18,6 +18,8 @@
 //! wave PDU. There is nothing to accumulate for, so accumulating would only add
 //! delay.
 
+use bytes::Bytes;
+
 use crate::audio::PcmFormat;
 
 /// What the client is told this is.
@@ -105,31 +107,35 @@ impl PcmStream {
     /// One wave buffer as one packet, or nothing when it did not complete a frame.
     ///
     /// More than one only past [`MAX_PACKET_BYTES`], which no tested remote
-    /// reaches. The common case copies once and touches no sample: `carry` is
-    /// empty, the buffer divides by the frame size, and the packet is the buffer.
-    pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<Vec<u8>>, anyhow::Error> {
-        let mut packet = if self.carry.is_empty() {
-            pcm.to_vec()
+    /// reaches. The common case copies **nothing** and touches no sample: `carry`
+    /// is empty, the buffer divides by the frame size, and the packet *is* the
+    /// buffer — a refcounted slice of the [`Bytes`] the bridge already holds. The
+    /// only path that copies is a remote splitting a frame across buffers, which
+    /// none has been seen to do.
+    pub fn push(&mut self, pcm: &Bytes) -> Result<Vec<Bytes>, anyhow::Error> {
+        let packet = if self.carry.is_empty() {
+            let whole = pcm.len() - pcm.len() % self.block_align;
+            self.carry.extend_from_slice(&pcm[whole..]);
+            pcm.slice(..whole)
         } else {
             let mut joined = std::mem::take(&mut self.carry);
             joined.extend_from_slice(pcm);
-            joined
+            let whole = joined.len() - joined.len() % self.block_align;
+            self.carry.extend_from_slice(&joined[whole..]);
+            joined.truncate(whole);
+            Bytes::from(joined)
         };
-
-        let whole = packet.len() - packet.len() % self.block_align;
-        self.carry.extend_from_slice(&packet[whole..]);
-        packet.truncate(whole);
         if packet.is_empty() {
             return Ok(Vec::new());
         }
-        self.frames_encoded += (whole / self.block_align) as u64;
+        self.frames_encoded += (packet.len() / self.block_align) as u64;
 
-        if whole <= self.max_packet {
+        if packet.len() <= self.max_packet {
             return Ok(vec![packet]);
         }
-        Ok(packet
-            .chunks(self.max_packet)
-            .map(<[u8]>::to_vec)
+        Ok((0..packet.len())
+            .step_by(self.max_packet)
+            .map(|at| packet.slice(at..(at + self.max_packet).min(packet.len())))
             .collect())
     }
 
@@ -173,7 +179,7 @@ mod tests {
             wave.extend_from_slice(&(-frame).to_le_bytes());
         }
 
-        let packets = stream.push(&wave).expect("push");
+        let packets = stream.push(&Bytes::from(wave.clone())).expect("push");
         assert_eq!(packets.len(), 1, "one buffer in, one packet out");
         assert_eq!(packets[0], wave, "not a sample of it was touched");
         assert_eq!(stream.frames_encoded(), 882);
@@ -187,7 +193,7 @@ mod tests {
         // 32768 bytes is what the tested Windows host sends, and 100 is a size no
         // codec's frame divides. Both go straight out.
         for bytes in [32_768, 400, 4] {
-            let packets = stream.push(&vec![7u8; bytes]).expect("push");
+            let packets = stream.push(&Bytes::from(vec![7u8; bytes])).expect("push");
             assert_eq!(packets.len(), 1);
             assert_eq!(packets[0].len(), bytes);
         }
@@ -201,11 +207,11 @@ mod tests {
     fn a_split_frame_is_carried_rather_than_shipped_or_dropped() {
         let (mut stream, _head) = PcmStream::new(PCM_CD_QUALITY).expect("a stream");
 
-        let packets = stream.push(&[1, 2, 3]).expect("push");
+        let packets = stream.push(&Bytes::from_static(&[1, 2, 3])).expect("push");
         assert!(packets.is_empty(), "three bytes is not a frame yet");
         assert_eq!(stream.frames_encoded(), 0);
 
-        let packets = stream.push(&[4, 5, 6]).expect("push");
+        let packets = stream.push(&Bytes::from_static(&[4, 5, 6])).expect("push");
         assert_eq!(
             packets,
             vec![vec![1, 2, 3, 4]],
@@ -221,9 +227,9 @@ mod tests {
     #[test]
     fn nothing_that_goes_out_is_ever_an_empty_packet() {
         let (mut stream, _head) = PcmStream::new(PCM_CD_QUALITY).expect("a stream");
-        assert!(stream.push(&[]).expect("push").is_empty());
-        assert!(stream.push(&[9]).expect("push").is_empty());
-        assert!(stream.push(&[9, 9, 9]).expect("push")[0].len() == 4);
+        assert!(stream.push(&Bytes::new()).expect("push").is_empty());
+        assert!(stream.push(&Bytes::from_static(&[9])).expect("push").is_empty());
+        assert!(stream.push(&Bytes::from_static(&[9, 9, 9])).expect("push")[0].len() == 4);
     }
 
     /// A buffer too large for the wire's `u16` packet length is split rather than
@@ -234,7 +240,7 @@ mod tests {
     fn a_buffer_past_the_wires_packet_length_is_split_on_a_frame_boundary() {
         let (mut stream, _head) = PcmStream::new(PCM_CD_QUALITY).expect("a stream");
         let huge: Vec<u8> = (0..200_000u32).map(|byte| byte as u8).collect();
-        let packets = stream.push(&huge).expect("push");
+        let packets = stream.push(&Bytes::from(huge.clone())).expect("push");
 
         assert!(packets.len() > 1, "one packet could not have carried it");
         for packet in &packets {
