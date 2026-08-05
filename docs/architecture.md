@@ -590,7 +590,7 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
 | `opus` (default) | `opus` | 96 kbps | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps | the remote's | 0 (self-describing) | empty |
+| `pcm` | `pcm-s16le` | 1.41 Mbps | 44 100 | 0 (self-describing) | empty |
 
 `pcm` is passthrough: the remote's wave buffer becomes one packet, byte for
 byte, with no encoder in the gateway and no decoder in the client. `pcm-s16le`
