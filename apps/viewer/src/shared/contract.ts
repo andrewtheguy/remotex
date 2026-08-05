@@ -21,6 +21,15 @@ export type {
   NativeState,
 } from "../../../../frontend/src/nativeHost.contract.ts";
 
+/**
+ * The path the shell's own documents are served under, and the whole of how they
+ * are told apart from the client.
+ *
+ * Here rather than in `scheme-routes.ts` because the preload needs it too, and
+ * `scheme-routes.ts` imports `node:path` — which a sandboxed preload does not have.
+ */
+export const SHELL_PATH_PREFIX = "/_shell/";
+
 /** The IPC channels, and the whole of them. */
 export const CHANNEL = {
   /** renderer → main: one `NativeEvent`, fire and forget. */

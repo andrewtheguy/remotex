@@ -5,6 +5,7 @@
 // that got through would hand out anything the user can read.
 
 import { isAbsolute, relative, resolve } from "node:path";
+import { SHELL_PATH_PREFIX } from "../shared/contract.ts";
 
 export const SHELL_SCHEME = "remotex";
 export const SHELL_HOST = "app";
@@ -15,7 +16,7 @@ export const CLIENT_URL = `${SHELL_ORIGIN}/index.html`;
 
 /** The shell's own documents, which are served beside the client, not from it. */
 export function shellPageUrl(page: string): string {
-  return `${SHELL_ORIGIN}/_shell/${page}`;
+  return `${SHELL_ORIGIN}${SHELL_PATH_PREFIX}${page}`;
 }
 
 export interface ShellRoots {
@@ -65,8 +66,11 @@ export function routeShellRequest(
     return { status: 404 };
   }
   const path = parsed.pathname === "/" ? "/index.html" : parsed.pathname;
-  if (path.startsWith("/_shell/")) {
-    const file = resolveUnderRoot(roots.shell, path.slice("/_shell/".length));
+  if (path.startsWith(SHELL_PATH_PREFIX)) {
+    const file = resolveUnderRoot(
+      roots.shell,
+      path.slice(SHELL_PATH_PREFIX.length),
+    );
     return file ? { file } : { status: 403 };
   }
   const file = resolveUnderRoot(roots.web, path);

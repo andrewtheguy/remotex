@@ -20,7 +20,7 @@ export function createViewerWindow(
     show: false,
     backgroundColor: "#101014",
     webPreferences: {
-      preload: join(distDir, "client.cjs"),
+      preload: join(distDir, "bridge.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -37,8 +37,9 @@ export function createViewerWindow(
   // not look like a failure: the client's two globals are the only thing that tells
   // it which host it is in, and without them it concludes it is in a browser and
   // draws a login screen for a gateway whose address it was never given. That is a
-  // working-looking window in which nothing can work. So it is reported, loudly,
-  // rather than left to be diagnosed from the symptom.
+  // working-looking window in which nothing can work. The launch screen fails the
+  // same way from the same cause — it keeps saying the gateway is starting. So it is
+  // reported, loudly, rather than left to be diagnosed from the symptom.
   window.webContents.on("preload-error", (_event, path, error) => {
     onPreloadError(
       `The client bridge did not load (${path}): ${error.message}`,

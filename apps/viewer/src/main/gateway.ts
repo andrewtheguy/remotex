@@ -339,10 +339,15 @@ export class EmbeddedGateway {
               : this.tail.text(),
             this.tail.text(),
           );
+          // Refused *or* reported, never both. After a successful start there is
+          // nobody waiting on the promise and the callback is the only way the app
+          // hears about it; during a start there is, and telling it twice means two
+          // launch screens loading over each other, one of which aborts the other.
+          const started = settled;
           finish(() => refuse(failure));
-          // Reported as well as refused: after a successful start there is nobody
-          // waiting on the promise, and this is the only way the app hears about it.
-          this.onUnexpectedExit?.(failure);
+          if (started) {
+            this.onUnexpectedExit?.(failure);
+          }
         });
       });
     });

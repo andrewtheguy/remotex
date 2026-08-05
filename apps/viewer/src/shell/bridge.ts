@@ -1,4 +1,4 @@
-// What `src/preload/shell.ts` exposes, declared once.
+// What `src/preload/bridge.ts` exposes to a `/_shell/` document, declared once.
 //
 // Once, because both of the shell's documents see the same global: two `declare
 // global` blocks describing halves of it are two descriptions to disagree, and
