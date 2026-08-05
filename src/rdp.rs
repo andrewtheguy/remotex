@@ -25,11 +25,12 @@
 //! the IronRDP engine this replaced: the same damage coalescing, the same shadow,
 //! the same tiles.
 //!
-//! ## What is not here
+//! ## Sound is not on that diagram
 //!
-//! **Audio.** The archives carry `rdpsnd` and nothing binds it yet, so
-//! `src/config.rs` refuses `audio` on an RDP target at parse time rather than
-//! accepting a key that does nothing. See docs/roadmap.md.
+//! Deliberately. The remote's audio leaves FreeRDP through a sink called in
+//! place on its thread and goes straight into [`crate::audio`]'s queue — it never
+//! enters the event channel above, and so can never queue behind a backlog of
+//! damage rectangles. [`crate::rdp_audio`] is the whole of the adapter.
 //!
 //! See docs/architecture.md for the design.
 
@@ -49,6 +50,7 @@ use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED,
 };
+use crate::rdp_audio;
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
 use crate::tiles::{self, Rect, Shadow};
 
@@ -174,18 +176,18 @@ fn connect_budget() -> Duration {
 /// would put the browser back on the picker with nothing to explain why. The body has
 /// several early returns; this has one exit, and [`TileSink::finish`] is on it.
 ///
-/// `_audio` is always `None` on this path today and the parameter is kept anyway:
-/// it is the seam [`crate::session::spawn_engine`] hands every engine, and RDP is
-/// the protocol audio will come back to. `src/config.rs` is what makes it `None`,
-/// by refusing the key.
+/// `audio` is `Some` exactly for a target that opted in, and it goes no further
+/// than [`rdp_audio::connect`]: sound leaves this engine by the sink FreeRDP
+/// calls on its own thread, never through the `select!` below. That is the whole
+/// separation — see [`crate::rdp_audio`].
 pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
-    _audio: Option<Arc<AudioBridge>>,
+    audio: Option<Arc<AudioBridge>>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, config.render_plan());
-    session(config, input_rx, &sink).await;
+    session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }
 
@@ -228,8 +230,9 @@ async fn session(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
+    audio: Option<Arc<AudioBridge>>,
 ) {
-    let (session, events) = Session::start(connect_config(&config));
+    let (session, events) = Session::start(connect_config(&config, audio));
     let mut events = bridge_events(events);
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
@@ -355,7 +358,7 @@ async fn await_desktop(
 /// whichever protocol is carrying it, and so
 /// [`engine::keepalive_budget`](crate::engine::keepalive_budget) — which an error
 /// message quotes — cannot drift from what the RDP path actually asks for.
-fn connect_config(config: &TargetConfig) -> Connect {
+fn connect_config(config: &TargetConfig, audio: Option<Arc<AudioBridge>>) -> Connect {
     Connect {
         host: config.host.clone(),
         port: config.port,
@@ -370,6 +373,7 @@ fn connect_config(config: &TargetConfig) -> Connect {
             Security::Tls => freerdp::Security::Tls,
         },
         clipboard: config.clipboard,
+        audio: rdp_audio::connect(audio),
         resize: config.resize,
         connect_timeout: engine::TCP_CONNECT_TIMEOUT,
         keepalive: engine::keepalive(),

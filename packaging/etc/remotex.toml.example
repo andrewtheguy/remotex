@@ -139,17 +139,10 @@ password = "change-me"
 # Performance carries its fetches and data inside the encrypted record transport.
 #clipboard = false
 
-# Remote audio: **refused on every target at the moment, and the gateway will not
-# start with it set.** The RDP engine moved to FreeRDP and its `rdpsnd` channel is
-# not bound yet; the channel is in the archives and everything downstream of it
-# still works, so this is a "not yet" rather than a "never" — see docs/roadmap.md.
-# Refused rather than ignored, because a key that silently does nothing is worse
-# than an error naming why.
-#
-# What it will mean again, once that is done: redirect this target's sound when
-# the client asks for it, with the floating menu's Audio button. RDP only —
-# MS-RDPEA is the one audio channel the gateway speaks, so it stays refused on
-# "vnc" whatever happens.
+# Remote audio: redirect this target's sound when the client asks for it, with the
+# floating menu's Audio button. RDP only — MS-RDPEA is the one audio channel the
+# gateway speaks and RFB has no equivalent, so it is refused on "vnc" rather than
+# ignored there.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the

@@ -21,7 +21,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.115"
+version = "0.0.116"
 
 [package]
 name = "remotex"
@@ -211,7 +211,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260805153834-d54dea0" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260805185142-1373f5e" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
