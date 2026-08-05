@@ -53,11 +53,15 @@ One thing that makes it look intermittent from a browser: only a size change tha
 is *real* reactivates at all. Asking twice for the same size triggers it once, and
 a request equal to the current size never triggers it.
 
-**How often it can be reached is bounded.** Clients may resize an RDP target only
-when the user asks; the window is never allowed to drive the size continuously,
-which is a permission the gateway withholds (`TargetConfig::auto_resize`). That is
-containment, not a fix — one "Resize to window" can still land on this — but a
-drag that used to walk into it repeatedly now cannot.
+**The containment has been lifted, deliberately.** An RDP target used to be
+resizable only when the user asked, the window never being allowed to drive the
+size continuously — a permission the gateway withheld
+(`TargetConfig::auto_resize`). It now grants it, because the containment and the
+experiment are the same switch: the fault is reached far more often by a window
+reporting on every drag than by a person pressing a button, so withholding the
+permission is precisely what kept "does this survive FreeRDP" unanswered. If
+sessions start ending on a drag, that line is the first thing to put back — and
+this entry stops being one about an engine that was replaced.
 
 What would move it: a packet capture of a failing sequence, to say what actually
 arrived where the expected PDU should have been.

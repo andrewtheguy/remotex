@@ -659,11 +659,14 @@ every `viewport` it is sent and an engine without it drops them all.
 on the `connected` message. The client offers two ways to drive a size: a manual
 "Resize to Window", and a mode that hands the size to the window so every change
 reports one. The manual control follows `resize`. The mode follows `autoResize`,
-which the gateway grants to plain `vnc` alone — its DesktopSize renegotiation
-costs a new framebuffer and nothing else, where RDP's costs a
-Deactivation-Reactivation Sequence and High Performance's replaces a virtual
-display, and both of those have a fault in [`known-issues.md`](known-issues.md)
-that a window drag reaches far more often than a button press does. Where the
+which the gateway grants to plain `vnc` and to `rdp` and withholds from
+`ard-high-performance`, whose resize replaces a virtual display that can be left
+wrong for the rest of the session — a fault in
+[`known-issues.md`](known-issues.md) that a window drag reaches far more often
+than a button press does. RDP was withheld it for that file's reactivation entry
+and now has it back on trial: the entry was measured against IronRDP, which no
+longer drives the path, and withholding the permission is what stopped that being
+re-measured. Where the
 mode is refused the client greys it and labels it inapplicable rather than hiding
 it, since the manual control beside it plainly works. The client does not decide
 any of this: `TargetConfig::auto_resize` does, and it is not a config key — the

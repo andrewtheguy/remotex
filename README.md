@@ -10,9 +10,10 @@ One reason the RDP path exists: Microsoft Remote Desktop on macOS handles
 resize-to-window badly, and fonts can come out blurry after a resize. Here a
 resize renegotiates the desktop with the server, so the framebuffer is the size
 that was asked for rather than a resampling of the size it used to be. It is a
-resize you ask for: only plain `vnc` lets the window drive the remote's size
-continuously — see [`docs/known-issues.md`](docs/known-issues.md) for what RDP and
-Apple Screen Sharing do with a stream of them.
+resize you ask for by default, and `vnc` and `rdp` can also be handed the window
+so every change reports one — see [`docs/known-issues.md`](docs/known-issues.md)
+for why Apple Screen Sharing cannot, and for what RDP's own history with a stream
+of them is.
 
 - RDP uses **FreeRDP 3**, linked from static archives that
   [libfreerdp-prebuilt](https://github.com/andrewtheguy/libfreerdp-prebuilt) builds
@@ -85,8 +86,8 @@ displays. Both Apple subtypes
 support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
 High Performance supports **Resize to Window** like RDP, using Apple's dynamic
 resolution feature to replace the virtual display's mode from client viewport
-reports — when you ask for one, which is the only way it is offered here: auto
-resize is plain `vnc`'s alone. Every fresh connection turns the Mac's Dynamic
+reports — when you ask for one, which is the only way it is offered here: it is
+the one target auto resize is withheld from. Every fresh connection turns the Mac's Dynamic
 resolution setting back on. Standard `ard` still refuses resize, and the
 one/two-virtual-display control is not implemented. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).

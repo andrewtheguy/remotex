@@ -626,24 +626,39 @@ impl TargetConfig {
     /// the "auto resize" both clients offer — as opposed to resizing when the user
     /// asks for it, which is [`Self::resize`] and nothing more.
     ///
-    /// Plain `vnc` only, and deliberately not a config key: it is a statement about
-    /// which engines survive a stream of resizes, which the operator has no way to
-    /// know and no way to change. DesktopSize/ExtendedDesktopSize renegotiation is
-    /// the one resize path here that costs nothing but a new framebuffer.
+    /// Plain `vnc` and `rdp`, and deliberately not a config key: it is a statement
+    /// about which engines survive a stream of resizes, which the operator has no
+    /// way to know and no way to change. DesktopSize/ExtendedDesktopSize
+    /// renegotiation is the one resize path here that costs nothing but a new
+    /// framebuffer.
     ///
-    /// The two that are excluded each have a fault in
-    /// [`docs/known-issues.md`](../docs/known-issues.md), and both are reached far
-    /// more often by a window that reports continuously than by a person pressing a
-    /// button: RDP answers a real size change with a Deactivation-Reactivation
-    /// Sequence that sometimes ends the session, and `ard-high-performance`
-    /// renegotiates a virtual display that can be left wrong for the rest of the
+    /// **RDP holds this back, and it is on trial.** It was withheld for the
+    /// reactivation fault in [`docs/known-issues.md`](../docs/known-issues.md) — a
+    /// real size change answered by a Deactivation-Reactivation Sequence that
+    /// sometimes ended the session — and that fault was measured entirely against
+    /// IronRDP, which no longer drives this path. FreeRDP runs the sequence inside
+    /// `freerdp_check_event_handles`, so the failure cannot occur as it was written
+    /// down, and whether anything underneath it survived the engine swap is
+    /// unmeasured. Withholding the permission is what stops it being measured: the
+    /// fault is reached far more often by a window reporting continuously than by a
+    /// person pressing a button, so the containment and the experiment are the same
+    /// switch. If sessions start ending on a drag, this line is the first thing to
+    /// put back.
+    ///
+    /// `ard-high-performance` keeps the exclusion, and for a reason the engine swap
+    /// did not touch: a viewport report replaces its virtual display's mode, and
+    /// doing that on every drag is how the desktop is left wrong for the rest of the
     /// session. Standard `ard` refuses `resize` outright and so never reaches here
     /// with it set.
     ///
     /// Manual resize stays available on all of them. A fault the user provoked, once,
     /// with a visible cause is a different thing from one a window drag walks into.
     pub fn auto_resize(&self) -> bool {
-        self.resize && self.protocol == Protocol::Vnc && self.subtype.is_none()
+        self.resize
+            && match self.protocol {
+                Protocol::Rdp => true,
+                Protocol::Vnc => self.subtype.is_none(),
+            }
     }
 
     /// The tile encoders to use for this target. This is the whole of the render
@@ -2801,11 +2816,11 @@ mod tests {
     }
 
     /// `resize` is permission to resize when asked; letting the window drive it is
-    /// a second permission the gateway decides, and only plain `vnc` has it. Each
-    /// engine that is refused it is named here, so removing one from the rule has
-    /// to be a deliberate edit to this list.
+    /// a second permission the gateway decides. Each engine that is refused it is
+    /// named here, so removing one from the rule has to be a deliberate edit to
+    /// this list.
     #[test]
-    fn only_plain_vnc_may_be_resized_by_the_window() {
+    fn only_ard_high_performance_is_kept_from_being_resized_by_the_window() {
         let plain = &ConfigFile::parse(&vnc_toml("resize = true")).unwrap().targets[0];
         assert!(plain.resize && plain.auto_resize());
 
@@ -2820,7 +2835,9 @@ mod tests {
         .targets[0];
         assert!(hp.resize && !hp.auto_resize());
 
-        // RDP the same, for the reactivation a real size change costs.
+        // RDP has it back. The reactivation fault that withheld it was measured
+        // against IronRDP, which no longer drives this path, and withholding the
+        // permission is exactly what stops that being re-measured.
         let rdp = &ConfigFile::parse(&format!(
             r#"
             [server]
@@ -2836,7 +2853,7 @@ mod tests {
         ))
         .unwrap()
         .targets[0];
-        assert!(rdp.resize && !rdp.auto_resize());
+        assert!(rdp.resize && rdp.auto_resize());
 
         // And neither permission without the operator's, which is what keeps this
         // from becoming "plain vnc always follows the window".

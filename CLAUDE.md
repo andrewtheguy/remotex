@@ -66,10 +66,16 @@ never permits client scaling.
 
 `resize` is permission to resize **when the user asks**. Letting the window drive
 the size unasked is a second permission — `TargetConfig::auto_resize`, carried as
-`autoResize` on `connected` — and plain `vnc` alone has it. RDP and both Apple
-subtypes offer the manual control only, because of the faults in
-[`docs/known-issues.md`](docs/known-issues.md); it is not a config key, since the
-operator cannot know which engines survive a stream of resizes.
+`autoResize` on `connected` — held by plain `vnc` and by `rdp`. It is not a config
+key, since the operator cannot know which engines survive a stream of resizes.
+
+`ard-high-performance` offers the manual control only, for the fault in
+[`docs/known-issues.md`](docs/known-issues.md); standard `ard` refuses `resize`
+outright. **RDP's is on trial**: it was withheld for that file's reactivation
+entry, which was measured entirely against IronRDP and so says nothing about the
+engine now driving the path — and withholding the permission is what stopped it
+being re-measured. If a drag starts ending sessions, `TargetConfig::auto_resize`
+is the line to put back.
 
 Apple display modes:
 

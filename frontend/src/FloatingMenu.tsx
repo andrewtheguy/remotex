@@ -390,11 +390,11 @@ function AudioSection({
 // at — sends nothing until the button is pressed.
 //
 // Manual is offered on every protocol that allows resize at all. Auto is not: it
-// is the gateway's second permission (`autoResize`), held by plain VNC alone, and
-// where it is missing the button stays visible and inactive rather than
-// disappearing — the same choice `MacKeyboardSection` makes, because it is the
-// same situation. The feature exists and this remote cannot take it, which is
-// worth saying; an absent control would read as one the operator forgot.
+// is the gateway's second permission (`autoResize`), which Apple High Performance
+// is held back from, and where it is missing the button stays visible and inactive
+// rather than disappearing — the same choice `MacKeyboardSection` makes, because
+// it is the same situation. The feature exists and this remote cannot take it,
+// which is worth saying; an absent control would read as one the operator forgot.
 function ResizeSection({
   available,
   autoAvailable,

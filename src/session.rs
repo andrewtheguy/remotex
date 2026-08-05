@@ -1150,13 +1150,10 @@ mod tests {
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
                 // The second permission, and the fake targets are all subtype-less,
-                // so here it is exactly "resize, and plain VNC". What the whole rule
-                // is — including the Apple subtypes — belongs to config.rs.
-                assert_eq!(
-                    got_auto_resize,
-                    meta.resize && meta.protocol == Protocol::Vnc,
-                    "auto resize metadata for {name}"
-                );
+                // so here it follows the first exactly — the one target held back
+                // from it is `ard-high-performance`, which has a subtype. What the
+                // whole rule is belongs to config.rs.
+                assert_eq!(got_auto_resize, meta.resize, "auto resize metadata for {name}");
                 assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
             }
@@ -1262,14 +1259,12 @@ mod tests {
     }
 
     /// The two resize permissions are separate on the wire, and a target that has
-    /// one need not have the other: both RDP and VNC may be resized when the user
-    /// asks, and only VNC may be handed to the window. Spelled out rather than left
-    /// to the helper above, because this is the whole point of the second flag.
+    /// one need not have the other — `ard-high-performance` is resized when the
+    /// user asks and never by the window. Spelled out rather than left to the
+    /// helper above, because this is the whole point of the second flag.
     #[tokio::test]
-    async fn only_plain_vnc_may_let_the_window_drive_the_size() {
-        for (name, protocol, auto) in
-            [("vnc-resize", "vnc", true), ("rdp-resize", "rdp", false)]
-        {
+    async fn both_engines_carry_their_own_second_resize_permission() {
+        for (name, protocol, auto) in [("vnc-resize", "vnc", true), ("rdp-resize", "rdp", true)] {
             let (mgr, _hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
