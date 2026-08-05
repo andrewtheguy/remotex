@@ -23,10 +23,8 @@ or as VP9/H.264 streams, according to the target's render plan. Tiles are lossle
 PNG by default, with JPEG and WebP available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the experimental
-`ard-high-performance` RFB 003.889 path. Redirected audio is either encoded as Opus
-or passed through as PCM and sent on `/ws/audio`, never on the picture queue —
-though nothing currently feeds it, since the RDP engine's `rdpsnd` is unbound and
-`audio` is refused at parse time.
+`ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
+Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 
 ## Constraints
 
@@ -50,7 +48,8 @@ though nothing currently feeds it, since the RDP engine's `rdpsnd` is unbound an
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
 | `vp9.rs`, `h264.rs` | libvpx and openh264 — the default video codec and the other one |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling. The MS-RDPEA client that fed them went with IronRDP — see docs/roadmap.md |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling |
+| `rdp_audio.rs` | the adapter between FreeRDP's `rdpsnd` device and that queue |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -616,9 +615,14 @@ audio this way and only this way (its single encoder emits
 the other implementations worth comparing against.
 
 An audio-enabled RDP engine negotiates one 44.1 kHz, 16-bit stereo PCM format
-when it connects. Windows requires `rdpdr` to be advertised alongside the
-static `rdpsnd` or dynamic `AUDIO_PLAYBACK_DVC` channel; both audio transports
-feed the same bounded queue. Under `opus` the gateway resamples that PCM to
+when it connects, and offers no other — MS-RDPEA identifies a buffer's format by
+index, so one advertised format makes the index unambiguous. The gateway does not
+implement the channel itself: it registers as FreeRDP's `rdpsnd` output *device*,
+the piece an ordinary client points at ALSA or CoreAudio (`src/rdp_audio.rs`).
+Both transports are registered — the static `rdpsnd` channel and the dynamic
+`AUDIO_PLAYBACK_DVC` — because which one a server drives is the server's choice,
+and the wrapper lets only the first to open fill the queue. Windows also requires
+`rdpdr` to be advertised alongside them. Under `opus` the gateway resamples that PCM to
 48 kHz in exact 882-to-960 groups (`src/pcm48.rs`) and cuts packets out of the
 result; under `pcm` it does neither, and the buffer is only cut on a frame
 boundary so a split sample cannot transpose the channels.
@@ -776,11 +780,14 @@ reactivation. RDP reports no scale factor back, so the density here is declared
 rather than measured. With `clipboard = true`, MS-RDPECLIP carries
 `CF_UNICODETEXT` with CRLF/LF conversion.
 
-**`audio` is refused at parse time on every target** while the FreeRDP engine's
-`rdpsnd` channel is unbound. The channel is compiled into the archives and
-everything downstream of it — the audio socket, the bridge, the encoders — is
-protocol-agnostic and untouched, so this is a "not yet" rather than a "never".
-See [`docs/roadmap.md`](roadmap.md).
+With `audio = true`, `rdpsnd` carries the remote's sound — see [Audio
+frames](#audio-frames). Enabling it has one side effect worth knowing: a Windows
+host starts measuring the link, and this gateway has declined to be measured
+(`ConnectionType` is declared a LAN rather than probed, because a server's own
+estimate of the hop between it and a gateway beside it throttled updates badly).
+Declining the answer is not enough on its own — the message channel those PDUs
+arrive on has to be closed too, or the session dies when one is asked. That is
+the wrapper's business, and it is measured there.
 
 A size change that is *real* costs a Deactivation-Reactivation Sequence, which
 FreeRDP runs internally and reports as a new desktop size; asking twice for the

@@ -73,27 +73,6 @@ It would not bring the probe back either. The client-side codec negotiation was 
 and removed (see [`architecture.md`](architecture.md)); a third codec is a third value
 for a key, not a reason to ask the browser again.
 
-### RDP audio, over FreeRDP's `rdpsnd`
-
-`audio` is refused at config parse time on every target while this is missing —
-a key that silently does nothing is worse than a parse error naming why, and that
-error is this entry.
-
-Nothing about it is speculative. The channel is compiled into the archives the
-gateway already links, and everything downstream of it is protocol-agnostic and
-untouched: `/ws/audio`, `AudioBridge`, `SessionManager::arm_audio`/`evict_audio`,
-`opus_stream`, `pcm_stream` and `pcm48` all still work and are all still tested.
-What is missing is the piece between them — a custom `rdpsndDevicePlugin` that
-hands each wave buffer to the bridge, in place of the hand-written MS-RDPEA state
-machine that went with IronRDP. That machine was 803 lines because IronRDP had no
-DVC audio client; FreeRDP has one, so this should be much smaller.
-
-The static and dynamic halves are both in the archives, and which one a server
-picks is the server's choice — the old engine implemented both for that reason.
-Note also `rdpdr`: a Windows host gates audio redirection on device redirection
-being advertised, which is why it is in the channel set even though nothing is
-ever redirected through it.
-
 ### Source payloads the gateway decodes instead of forwarding
 
 Three places where a remote could hand this gateway something closer to what the

@@ -6,8 +6,6 @@
 //! is the target's ([`AudioCodec`]) — Opus packets, or the same bytes back out
 //! again — and everything else here is the same either way.
 
-use std::sync::Mutex;
-
 use bytes::Bytes;
 use futures_util::Stream;
 use log::{debug, info, warn};
@@ -80,9 +78,6 @@ pub struct AudioBridge {
     /// way — so it is a record rather than a gate: what the log says about whether
     /// the remote's audio is set up, and what an indicator would read one day.
     format: watch::Sender<Option<PcmFormat>>,
-    /// Which MS-RDPEA transport is filling this queue — see
-    /// [`Self::claim_transport`].
-    transport: Mutex<Option<&'static str>>,
 }
 
 impl AudioBridge {
@@ -90,38 +85,6 @@ impl AudioBridge {
         Self {
             waves: broadcast::channel(AUDIO_QUEUE_DEPTH).0,
             format: watch::Sender::new(None),
-            transport: Mutex::new(None),
-        }
-    }
-
-    /// Claim this bridge for one transport, refusing a second claimant.
-    ///
-    /// MS-RDPEA carries audio over *either* the static `rdpsnd` channel or the
-    /// dynamic `AUDIO_PLAYBACK_DVC`, and remotex registers both because which one
-    /// a server uses is the server's choice. Nothing in
-    /// the protocol says a server may drive both at once, and none does — but if
-    /// one ever did, both would push buffers into this one queue and the result
-    /// would be interleaved noise with no error anywhere to explain it. First
-    /// claim wins, so that misbehaviour costs a log line instead of a mystery.
-    pub fn claim_transport(&self, name: &'static str) -> bool {
-        let mut held = self.transport.lock().unwrap();
-        match *held {
-            Some(owner) if owner != name => {
-                warn!("audio: ignoring {name}, this session's audio already arrives over {owner}");
-                false
-            }
-            _ => {
-                *held = Some(name);
-                true
-            }
-        }
-    }
-
-    /// Release the transport claim: that channel closed, and another may take it.
-    pub fn release_transport(&self, name: &'static str) {
-        let mut held = self.transport.lock().unwrap();
-        if *held == Some(name) {
-            *held = None;
         }
     }
 

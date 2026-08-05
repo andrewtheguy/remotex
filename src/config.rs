@@ -935,29 +935,23 @@ impl ConfigFile {
             );
         }
         for target in &config.targets {
-            // **Audio is refused on every target for now**, and this is a wider
-            // rule than the one it replaced. Until the RDP engine moved to
-            // FreeRDP it was refused only on VNC, because MS-RDPEA was the one
-            // audio channel this gateway spoke and RDP was the only protocol
-            // carrying it. That engine's hand-written RDPEA client went with
-            // IronRDP; FreeRDP's `rdpsnd` is compiled into the archives the
-            // gateway links and nothing binds it yet, so RDP has temporarily
-            // joined VNC in having nowhere to put the key.
+            // Audio is RDP's alone, and refused elsewhere rather than ignored.
+            // MS-RDPEA is the one audio channel this gateway speaks; RFB has no
+            // equivalent at all, so `audio = true` on a VNC target could only
+            // ever be a mistake about what the protocol carries. Naming that at
+            // parse time is the difference between a config error and a session
+            // that is silent for no stated reason.
             //
-            // Refused rather than accepted and left inert, for the same reason
-            // as before: a key that silently does nothing is worse than a parse
-            // error that names why, and this error is also the roadmap entry.
-            // Everything downstream of the channel — the audio socket, the
-            // bridge, the encoders — is protocol-agnostic and untouched, so
-            // rebuilding this is `rdpsnd` and nothing else.
+            // Everything downstream of the channel — the socket, the bridge, the
+            // encoders — is protocol-agnostic, which is why this rule is about
+            // the *engine* and not about any of them.
             anyhow::ensure!(
-                !target.audio,
-                "target {:?} sets audio, which no target supports at the moment: the RDP \
-                 engine now runs on FreeRDP and its rdpsnd channel is not bound yet. The \
-                 channel is in the archives and everything downstream of it still works, so \
-                 this is a \"not yet\" rather than a \"never\" — see docs/roadmap.md. Remove \
-                 the key to start the session without sound.",
-                target.name
+                !target.audio || target.protocol == Protocol::Rdp,
+                "target {:?} sets audio on a {} target, and only rdp carries it: MS-RDPEA is \
+                 an RDP channel and RFB has no equivalent. Remove the key to start the \
+                 session without sound.",
+                target.name,
+                target.protocol.name()
             );
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
@@ -2935,39 +2929,32 @@ mod tests {
         assert!(config.targets[0].clipboard);
     }
 
-    /// **Audio is refused on every protocol at the moment**, which is wider than
-    /// the rule this replaced: it used to be refused only on VNC, where there is
-    /// no audio channel behind RFB at all. RDP joined it when the engine moved to
-    /// FreeRDP, whose `rdpsnd` is compiled into the archives and not yet bound.
+    /// Audio is RDP's, and refused on VNC by name.
     ///
-    /// The error has to say "not yet" and name the channel, because that is the
-    /// difference between a user waiting for a feature and a user editing a
-    /// config that will never work.
+    /// The error has to say which protocol carries it, because the mistake
+    /// behind the key is a belief about what RFB does rather than a typo — and a
+    /// target that silently ignored it would be a desktop that is simply quiet,
+    /// with nothing anywhere to say why.
     #[test]
-    fn audio_is_refused_on_every_protocol_for_now() {
-        for protocol in ["rdp", "vnc"] {
-            let err = ConfigFile::parse(&format!(
-                r#"
-                [server]
-                {}
+    fn audio_belongs_to_rdp_and_is_refused_on_vnc() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
 
-                [[targets]]
-                name = "nope"
-                protocol = "{protocol}"
-                host = "10.0.0.5"
-                audio = true
-                "#,
-                site_passwd_line()
-            ))
-            .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains("audio"), "{rendered}");
-            assert!(rendered.contains("rdpsnd"), "the channel is named: {rendered}");
-            assert!(rendered.contains("not yet"), "and it is a not-yet: {rendered}");
-        }
+            [[targets]]
+            name = "nope"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            audio = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("audio"), "{rendered}");
+        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
 
-        // The key being absent is not the same as it being false, and neither is
-        // an error — this is what every working config now looks like.
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -2977,24 +2964,17 @@ mod tests {
             name = "win"
             protocol = "rdp"
             host = "10.0.0.5"
-            audio = false
+            audio = true
             "#,
             site_passwd_line()
         ))
         .unwrap()
         .resolve()
         .unwrap();
-        assert!(!config.targets[0].audio);
+        assert!(config.targets[0].audio);
     }
 
     /// An unset codec reads as Opus, and passthrough can be asked for by name.
-    ///
-    /// Asserted on the type rather than through a parsed config, because a target
-    /// carrying `audio = true` no longer parses at all — see
-    /// [`audio_is_refused_on_every_protocol_for_now`]. The default is the
-    /// load-bearing half and outlives that refusal: it is what will keep every
-    /// existing config encoding exactly what it encoded before, once `rdpsnd` is
-    /// bound and the key comes back.
     #[test]
     fn the_audio_codec_defaults_to_opus() {
         // Through `unwrap_or_default` because that is how every reader of the field
@@ -3004,6 +2984,25 @@ mod tests {
         }
         assert_eq!(resolved(None), AudioCodec::Opus);
         assert_eq!(resolved(Some(AudioCodec::Pcm)), AudioCodec::Pcm);
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            audio = true
+            audio_codec = "pcm"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert_eq!(config.targets[0].audio_codec, Some(AudioCodec::Pcm));
     }
 
     /// A codec without the audio it would encode is refused rather than ignored:
