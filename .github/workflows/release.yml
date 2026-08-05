@@ -225,8 +225,14 @@ jobs:
           }
           npx --yes @electron/asar list "$app/Contents/Resources/app.asar" \
             > "$RUNNER_TEMP/asar.txt"
-          for needed in /dist/main.cjs /dist/client.cjs /dist/shell.cjs \
-            /dist/shell/launch.html /dist/shell/config.html; do
+          # One preload, not two: it belongs to a window and the one window shows
+          # both the launch screen and the client, so it picks its bridge from the
+          # document's own URL. The `.js` files are here because a shell document
+          # whose script did not ship is a page frozen on its own markup — which is
+          # exactly the failure that put this line here.
+          for needed in /dist/main.cjs /dist/bridge.cjs \
+            /dist/shell/launch.html /dist/shell/launch.js \
+            /dist/shell/config.html /dist/shell/config.js; do
             grep -qx "$needed" "$RUNNER_TEMP/asar.txt" || {
               echo "::error::remotex.app is missing ${needed}"
               exit 1
