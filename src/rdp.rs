@@ -292,9 +292,15 @@ async fn await_desktop(
         let _ = sink.msg(ServerMsg::Error { message: format!("RDP connect failed: {message}") }).await;
     };
 
+    // One deadline for the whole wait rather than one per event. The budget is
+    // how long a session may take to report its *first desktop*, and a timeout
+    // restarted on every event that is not `Connected` bounds the gap between
+    // two events instead — which is not a bound at all for a session that keeps
+    // saying something other than the thing being waited for.
     let budget = connect_budget();
+    let deadline = Instant::now() + budget;
     loop {
-        match tokio::time::timeout(budget, events.recv()).await {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(Event::Connected { width, height })) => {
                 // Narrowed rather than trusted: everything downstream — the
                 // shadow, the tile grid, the pointer clamp — is `u16`, and a
@@ -519,6 +525,10 @@ struct Pointer {
     /// What the browser should draw, `None` being its own arrow — see
     /// [`ServerMsg::Cursor`].
     shape: Option<CursorShape>,
+    /// The image `shape` was encoded from — `None` for the hidden and default
+    /// pointers, which have no image of their own. Kept so a repeat is
+    /// recognised before [`shape_of`] rather than after it.
+    source: Option<freerdp::CursorImage>,
     /// `shape` has moved since the browser was last told.
     changed: bool,
 }
@@ -531,14 +541,24 @@ impl Pointer {
     /// default shape of its own to send, and on a remote desktop a pointer you
     /// cannot see at all is worse than a generic one.
     fn set(&mut self, cursor: freerdp::Cursor) {
-        let shape = match cursor {
-            freerdp::Cursor::Image(image) => shape_of(&image),
+        let image = match cursor {
+            freerdp::Cursor::Image(image) => Some(image),
             freerdp::Cursor::Hidden | freerdp::Cursor::Default => None,
         };
-        // Compared rather than assumed different: a server re-selecting a pointer
-        // out of its own cache sends the same shape again, and re-encoding those
-        // pixels every time the mouse crosses a window edge is exactly the
-        // traffic that forwarding the shape exists to remove.
+        // Compared rather than assumed different, and compared **before**
+        // [`shape_of`]: a server re-selecting a pointer out of its own cache
+        // sends the same image again, and `shape_of` PNG-encodes it. Comparing
+        // the encoded shapes instead still paid for the encode every time the
+        // mouse crossed a window edge and saved only the bytes on the wire.
+        if image == self.source {
+            return;
+        }
+        let shape = image.as_ref().and_then(shape_of);
+        self.source = image;
+        // A new image whose shape is not new: an oversized or malformed pointer
+        // encodes to `None`, and so may the one before it. Nothing to say then,
+        // but the image is still worth remembering — it is what stops the next
+        // copy of it reaching the encoder.
         if shape == self.shape {
             return;
         }
@@ -728,11 +748,24 @@ async fn active_loop(
                     // session on its own, which is why `applied` follows the
                     // pending layout rather than assuming there was one.
                     Event::Resize { width, height } => {
-                        if let Some(pending) = pending_layout.take() {
+                        desktop = (narrow(width), narrow(height));
+                        // A resize is the only acknowledgment this protocol has
+                        // and it is an ambiguous one, since a server also
+                        // renegotiates the desktop unprompted. So a pending
+                        // layout counts as confirmed only when the size that
+                        // came back is the size that went out — `adjusted`,
+                        // because that is the one `request_layout` sends — and
+                        // an unsolicited resize leaves it pending with its
+                        // ladder still running. Taking it either way was the
+                        // fault `applied` is documented against: the density of
+                        // a layout the server had just thrown away became the
+                        // `scale` announced for the desktop it built instead.
+                        if let Some(pending) =
+                            pending_layout.take_if(|p| confirms(p, desktop))
+                        {
                             applied = pending.layout.density;
                             layout_retry_at = None;
                         }
-                        desktop = (narrow(width), narrow(height));
                         info!("rdp: resized, desktop {}x{}", desktop.0, desktop.1);
                         // Damage staged before the resize names rectangles of a
                         // framebuffer that no longer exists.
@@ -979,12 +1012,12 @@ async fn active_loop(
                 };
                 let wanted = pending.layout;
                 match request_layout(input, resize_ready, Layout::current(desktop, applied), wanted) {
-                    // Queued, or not yet sendable — either way the desktop has not
-                    // moved, so ask again until it does or the schedule runs out.
+                    // Sent, but nothing acknowledges a layout — so ask again
+                    // until a resize proves it or the schedule runs out.
                     // Dropping the request is all that giving up takes: `applied`
                     // was never advanced, so the announced scale still describes
                     // the desktop that is actually there.
-                    Asked::Sent | Asked::NotReady => match pending.wait_again() {
+                    Asked::Sent => match pending.wait_again() {
                         Some(delay) => layout_retry_at = Some(Instant::now() + delay),
                         None => {
                             warn!(
@@ -995,6 +1028,16 @@ async fn active_loop(
                             pending_layout = None;
                         }
                     },
+                    // Not an attempt. The channel is not open, so no rung of the
+                    // ladder could have worked, and spending one costs the
+                    // request the attempts it needs once the channel *is* there
+                    // — which is the whole failure `install_layout` describes,
+                    // since both of a session's opening reports arrive before
+                    // DisplayControl comes up. Nothing is re-armed here either:
+                    // `Event::ResizeReady` is the event being waited for and it
+                    // re-arms any layout still pending, so a server that never
+                    // offers the channel is waited on rather than polled.
+                    Asked::NotReady => {}
                     // Nothing more to try: the desktop already agrees.
                     Asked::Redundant => pending_layout = None,
                 }
@@ -1241,6 +1284,26 @@ fn install_layout(
 /// density is part of that comparison, so a request that only changes the density
 /// — which is what a client dragged between two screens of the same size sends —
 /// is not mistaken for a repeat.
+/// Whether a desktop the server has just reported is the answer to `pending`.
+///
+/// A pure function beside [`install_layout`] and [`request_layout`] for the same
+/// reason they are: this is where the errors live, and it can be asserted without
+/// a session.
+///
+/// Against `adjusted`, because that is the layout [`request_layout`] actually
+/// sends — comparing against the unadjusted one would refuse to recognise the
+/// server's answer to an odd viewport width, and the retry ladder would then run
+/// to exhaustion against a desktop that was already right.
+///
+/// The density is not compared and cannot be: MS-RDPEDISP carries the scale
+/// factor on the same PDU as the size but the server acknowledges neither, and no
+/// PDU reports the scale a server settled on. The size is the only evidence there
+/// is, which is why it has to be the evidence used.
+fn confirms(pending: &PendingLayout, desktop: (u16, u16)) -> bool {
+    let want = pending.layout.adjusted();
+    (want.w, want.h) == (u32::from(desktop.0), u32::from(desktop.1))
+}
+
 fn request_layout(input: &Input, ready: bool, current: Layout, wanted: Layout) -> Asked {
     let wanted = wanted.adjusted();
     if !ready {
@@ -2004,6 +2067,25 @@ mod tests {
             request_layout(input, true, current, Layout { w: 1281, h: 800, density: Density::One }),
             Asked::Redundant
         );
+    }
+
+    /// A resize is the only acknowledgment a layout gets, and the same event
+    /// arrives when a server resizes a session on its own. Telling the two apart
+    /// is what stops an unsolicited resize from claiming a density the server
+    /// never applied — the fault `applied` carries a paragraph about.
+    #[test]
+    fn only_the_size_that_was_asked_for_confirms_a_layout() {
+        let pending = PendingLayout::new(Layout { w: 1600, h: 900, density: Density::Two });
+        assert!(confirms(&pending, (1600, 900)), "the size that went out came back");
+        assert!(!confirms(&pending, (1280, 800)), "a desktop the server chose for itself");
+        assert!(!confirms(&pending, (1600, 1000)), "one axis is not enough");
+
+        // Through the adjustment, because an odd width is not what was sent: a
+        // server answering 1600 has answered the request, and a comparison
+        // against the 1601 asked for would retry until the ladder ran out.
+        let odd = PendingLayout::new(Layout { w: 1601, h: 900, density: Density::One });
+        assert!(confirms(&odd, (1600, 900)));
+        assert!(!confirms(&odd, (1601, 900)), "1601 is not a size this can be sent as");
     }
 
     /// The pack drops the fourth byte and keeps the order. Its own test because
