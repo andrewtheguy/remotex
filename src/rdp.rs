@@ -1,70 +1,61 @@
-//! Server-side RDP session driven by [IronRDP](https://crates.io/crates/ironrdp).
+//! Server-side RDP session driven by [FreeRDP](https://www.freerdp.com), through
+//! the safe wrapper in the [`freerdp`] crate.
 //!
 //! The web server never speaks RDP to the browser: [`crate::ws`] bridges a
-//! browser WebSocket to [`run`] here over a pair of channels. `run` connects to
-//! the configured RDP host (TCP → TLS → RDP activation), then drives the active
-//! session — decoding the framebuffer into [`ServerMsg::Tile`] updates and
-//! injecting [`ClientMsg`] input as RDP fast-path PDUs.
+//! browser WebSocket to [`run`] here over a pair of channels. `run` starts a
+//! session — FreeRDP's own thread does TCP, TLS, CredSSP and activation — then
+//! drives it, turning damage into [`ServerMsg::Tile`] updates and [`ClientMsg`]
+//! input into RDP input events.
+//!
+//! ## Threads
+//!
+//! There are three, and only the middle one is new here:
+//!
+//! ```text
+//!   session thread (current-thread tokio)  ──  the select! loop below
+//!         │  Input/Clipboard commands                    ▲  Event
+//!         ▼                                              │
+//!   the wrapper's queue ──> FreeRDP's thread ──> a forwarding thread ──> tokio
+//! ```
+//!
+//! FreeRDP's event loop is a blocking `WaitForMultipleObjects`, so it owns an OS
+//! thread and hands events out through a `std::sync::mpsc::Receiver` — which
+//! cannot be awaited. [`bridge_events`] is the one-line thread that turns it into
+//! something `select!` can take. Everything downstream of that is unchanged from
+//! the IronRDP engine this replaced: the same damage coalescing, the same shadow,
+//! the same tiles.
+//!
+//! ## What is not here
+//!
+//! **Audio.** The archives carry `rdpsnd` and nothing binds it yet, so
+//! `src/config.rs` refuses `audio` on an RDP target at parse time rather than
+//! accepting a key that does nothing. See docs/roadmap.md.
 //!
 //! See docs/architecture.md for the design.
 
 use std::sync::Arc;
 
-use ironrdp::cliprdr::pdu::{ClipboardFormat, ClipboardFormatId, FormatDataResponse};
-use ironrdp::cliprdr::{Client, CliprdrClient, CliprdrSvcMessages};
-use ironrdp::core::IntoOwned as _;
-use ironrdp::pdu::PduResult;
-use ironrdp::connector::connection_activation::{
-    ConnectionActivationFactory, ConnectionActivationSequence, ConnectionActivationState,
-};
-use ironrdp::connector::{
-    ClientConnector, ConnectionResult, Config, Credentials, DesktopSize, ServerName,
-};
-use ironrdp::core::WriteBuf;
-use ironrdp::displaycontrol::client::DisplayControlClient;
-use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
-use ironrdp::dvc::DrdynvcClient;
-use ironrdp::graphics::image_processing::PixelFormat;
-use ironrdp::graphics::pointer::DecodedPointer;
-use ironrdp::pdu::gcc::{ConnectionType, KeyboardType};
-use ironrdp::pdu::input::MousePdu;
-use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
-use ironrdp::pdu::input::mouse::PointerFlags;
-use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
-use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp::rdpdr::{NoopRdpdrBackend, Rdpdr};
-use ironrdp::rdpsnd::client::Rdpsnd;
-use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
-use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use ironrdp_tokio::{FramedWrite as _, TokioFramed, single_sequence_step};
+use freerdp::{Clipboard, ClipboardEvent, ClipboardFormat, Connect, Event, Frame, Framebuffer,
+    Input, MouseButton as RdpButton, Session};
 use log::{debug, info, warn};
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::AudioBridge;
-use crate::config::TargetConfig;
+use crate::config::{Security, TargetConfig};
 use crate::encode::TileSink;
-use crate::engine::{self, clamp_u16, host_port};
+use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED,
 };
-use crate::rdp_audio;
-use crate::rdp_clipboard::{self, ClipboardEvent};
+use crate::rdp_clipboard::{self, CF_UNICODETEXT};
 use crate::tiles::{self, Rect, Shadow};
-
-// A type-erased async stream, so the connect path (which upgrades TCP → TLS) can
-// return a single concrete framed type.
-trait AsyncReadWrite: AsyncRead + AsyncWrite {}
-impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
-type UpgradedFramed = TokioFramed<Box<dyn AsyncReadWrite + Unpin + Send + Sync>>;
 
 // A Windows peer can advertise Unicode text, fail the first FormatDataRequest,
 // then satisfy a retry shortly afterward. Retrying only after that explicit
 // failure keeps the normal path fast and stays entirely separate from a remote
-// Paste, which arrives as ClipboardEvent::DataRequested instead.
+// Paste, which arrives as ClipboardEvent::LocalDataRequest instead.
 const CLIPBOARD_READ_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(50),
     Duration::from_millis(150),
@@ -72,12 +63,12 @@ const CLIPBOARD_READ_RETRY_DELAYS: [Duration; 3] = [
 ];
 
 struct PendingClipboardRead {
-    format: ClipboardFormatId,
+    format: u32,
     failures: usize,
 }
 
 impl PendingClipboardRead {
-    fn new(format: ClipboardFormatId) -> Self {
+    fn new(format: u32) -> Self {
         Self { format, failures: 0 }
     }
 
@@ -94,14 +85,20 @@ impl PendingClipboardRead {
 // not answered.
 //
 // Two things are waited out here, and a single schedule covers both. The first is
-// the Display Control channel not yet having its capabilities: a layout sent then
-// cannot go out at all, which is exactly what a resize reported from `connected`
-// hits, before the channel is up. The second is Windows applying a monitor layout
-// only once the session it is starting has settled — one sent seconds after
-// connect is discarded in silence *even after* the channel is ready. Nothing in
-// the protocol names what is still missing, and nothing acknowledges a layout
-// either, so the only way to tell a refusal from a delay is that the reactivation
-// never comes.
+// the Display Control channel not yet being up: a layout sent then cannot go out
+// at all, which is exactly what a resize reported from `connected` hits. The
+// second is Windows applying a monitor layout only once the session it is
+// starting has settled — one sent seconds after connect is discarded in silence
+// *even after* the channel is ready. Nothing in the protocol names what is still
+// missing, and nothing acknowledges a layout either, so the only way to tell a
+// refusal from a delay is that the resize never comes.
+//
+// That second half was re-measured against the same Windows host through FreeRDP
+// while this engine was being written, and it is not a quirk of either library:
+// a byte-identical 800x600 layout was discarded 400 ms after the server's own
+// DisplayControl capabilities PDU and honoured 6.7 s into the same session. The
+// engine crate documents it and deliberately does not retry — a ladder needs a
+// clock and a policy, and both are here.
 //
 // Hence a schedule rather than a single attempt, and one retry rather than two:
 // FreeRDP's own Display Control client (client/X11/xf_disp.c) holds a single
@@ -138,21 +135,31 @@ impl PendingLayout {
 
 /// What came of asking for a layout.
 ///
-/// Four outcomes and not a bool, because two of them are worth another attempt and
-/// two are not, and a caller that cannot tell them apart either gives up on a
-/// channel that was merely still opening or retries a layout that will be refused
-/// identically every time.
+/// Three outcomes and not a bool, because one of them is worth another attempt
+/// and two are not, and a caller that cannot tell them apart either gives up on a
+/// channel that was merely still opening or asks forever for a desktop it already
+/// has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Asked {
-    /// Written to the channel. Not a confirmation: only a reactivation is that, so
-    /// this is still worth repeating if none arrives.
+    /// Queued for the remote. Not a confirmation: only a resize is that, so this
+    /// is still worth repeating if none arrives.
     Sent,
     /// The desktop already has this layout, so there was nothing to ask.
     Redundant,
     /// The channel cannot carry it yet. Worth asking again unchanged.
     NotReady,
-    /// The layout itself was refused, so asking again would fail the same way.
-    Refused,
+}
+
+/// How long a session may take to report its first desktop.
+///
+/// FreeRDP owns the socket now, so this covers what used to be two budgets: the
+/// TCP connect (bounded inside FreeRDP by [`Connect::connect_timeout`], which is
+/// set from [`engine::TCP_CONNECT_TIMEOUT`] so a switched-off host is still
+/// reported as a connect failure rather than as a stall) and everything after it
+/// — TLS, CredSSP, licensing, capability exchange. Their sum, so neither can eat
+/// the other's time.
+fn connect_budget() -> Duration {
+    engine::TCP_CONNECT_TIMEOUT + engine::HANDSHAKE_TIMEOUT
 }
 
 /// Connect to the RDP host, then drive the session until it ends.
@@ -160,67 +167,83 @@ enum Asked {
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Both closing (browser gone / RDP ended) tears the session down.
 ///
-/// When present, `audio` receives redirected PCM. Each attachment subscribes
-/// independently and sends encoded packets over the session WebSocket.
-///
 /// A thin wrapper so the shutdown cannot be missed. Everything this engine sends the
 /// client goes through a [`TileSink`], which forwards from a task of its own — and
 /// the engine thread's runtime dies with this function, so anything the sink still
 /// held would be lost. That includes the session's final `Error`, whose absence
 /// would put the browser back on the picker with nothing to explain why. The body has
 /// several early returns; this has one exit, and [`TileSink::finish`] is on it.
+///
+/// `_audio` is always `None` on this path today and the parameter is kept anyway:
+/// it is the seam [`crate::session::spawn_engine`] hands every engine, and RDP is
+/// the protocol audio will come back to. `src/config.rs` is what makes it `None`,
+/// by refusing the key.
 pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
-    audio: Option<Arc<AudioBridge>>,
+    _audio: Option<Arc<AudioBridge>>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, config.render_plan());
-    session(config, input_rx, &sink, audio).await;
+    session(config, input_rx, &sink).await;
     sink.finish().await;
+}
+
+/// Turn the wrapper's blocking event receiver into one `select!` can await.
+///
+/// One thread, doing nothing but forwarding. It exists because the two halves
+/// disagree about blocking, not because anything here needs concurrency: FreeRDP's
+/// loop is a blocking wait on handles it owns, so its events come out of a
+/// `std::sync::mpsc::Receiver`, and awaiting one of those inside a tokio task would
+/// park the whole runtime.
+///
+/// Unbounded, and that is safe for the same reason the damage path is: an `Event`
+/// carries a *rectangle*, never pixels — the pixels are in the shared framebuffer —
+/// and `stage_damage` folds overlapping rectangles and collapses past a cap. A slow
+/// consumer makes the rectangles coarser rather than the queue longer.
+///
+/// The thread ends when either end goes: FreeRDP's session finishing closes the
+/// sender, and this loop dropping the receiver ends the session.
+fn bridge_events(events: std::sync::mpsc::Receiver<Event>) -> mpsc::UnboundedReceiver<Event> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    if let Err(e) = std::thread::Builder::new()
+        .name("rdp-events".into())
+        .spawn(move || {
+            for event in events {
+                if tx.send(event).is_err() {
+                    break; // the session loop has gone
+                }
+            }
+        })
+    {
+        // The closure was never spawned, so its `tx` died with it and `rx` is
+        // already closed — which the caller reads as a session that ended before
+        // it connected, with this line as the reason.
+        warn!("rdp: could not spawn the event forwarding thread: {e}");
+    }
+    rx
 }
 
 async fn session(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
-    audio: Option<Arc<AudioBridge>>,
 ) {
-    // The clipboard channel processor runs inside `ActiveStage` and can only
-    // report through a channel — see [`crate::rdp_clipboard`]. Created here so
-    // it outlives `connect`, which is where the backend is handed over.
-    let (clip_tx, clip_rx) = mpsc::unbounded_channel();
+    let (session, events) = Session::start(connect_config(&config));
+    let mut events = bridge_events(events);
 
-    // The budget covers negotiation, the TLS upgrade and CredSSP — each of which
-    // can stall on a host that accepts the connection and then says nothing, which
-    // no socket timeout catches. The TCP connect has its own deadline inside the
-    // helper, so a slow one is reported as what it is.
-    let dest = host_port(&config.host, config.port);
-    let Some((connection_result, framed)) = engine::connect_and_handshake(
-        "rdp",
-        &dest,
-        engine::HANDSHAKE_TIMEOUT,
-        sink,
-        |stream| connect(&config, stream, clip_tx, audio),
-    )
-    .await
-    else {
+    let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
         return;
     };
+    info!("rdp: connected, desktop {width}x{height}");
 
-    let desktop = connection_result.desktop_size;
-    info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
     // 1x, always: the density this session ends up at is the attached client's to
-    // state, and it has not spoken yet — the handshake above happens before
+    // state, and it has not spoken yet — the connect above happens before
     // `ServerMsg::Connected` reaches it. A Retina client is therefore one
     // reactivation away from where it wants to be, which is the price of learning
     // the density from whoever attaches rather than from the config file.
     if sink
-        .msg(ServerMsg::Resize {
-            w: desktop.width,
-            h: desktop.height,
-            scale: Density::One.scale(),
-        })
+        .msg(ServerMsg::Resize { w: width, h: height, scale: Density::One.scale() })
         .await
         .is_err()
     {
@@ -232,178 +255,121 @@ async fn session(
     }
 
     if let Err(e) = active_loop(
-        connection_result,
-        framed,
+        &session,
+        events,
         Flags {
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: (config.width, config.height),
         },
-        clip_rx,
+        (width, height),
         input_rx,
         sink,
     )
     .await
     {
         warn!("rdp: session error: {e:#}");
-        let _ = sink
-            .msg(ServerMsg::Error {
-                message: format!("RDP session ended: {e}"),
-            })
-            .await;
+        let _ = sink.msg(ServerMsg::Error { message: format!("RDP session ended: {e}") }).await;
     }
     info!("rdp: session terminated");
 }
 
-/// RDP negotiation → TLS upgrade → CredSSP/finalize, on a connected socket.
+/// Wait for the first desktop, reporting a failure to the client exactly as
+/// [`engine::connect_and_handshake`] does for the engines that still open their
+/// own socket.
 ///
-/// The TCP connect happens in [`run`] (see [`engine::connect_and_handshake`]) so
-/// its deadline and this handshake's are sequential rather than nested.
-///
-/// `clip_tx` is handed to the clipboard backend when the target opted in; it is
-/// dropped unused otherwise, and the channel is then never registered at all.
-/// `audio` works the same way — and *has* to happen here rather than later,
-/// because RDPSND is negotiated when the connection is established: an HTTP
-/// listener appearing afterwards cannot add the channel to a live connection.
-async fn connect(
+/// That symmetry is the point: the picker shows this sentence, and a user
+/// switching between an RDP and a VNC target should not be able to tell which
+/// library produced it. `None` means the caller has nothing left to do.
+async fn await_desktop(
+    events: &mut mpsc::UnboundedReceiver<Event>,
     config: &TargetConfig,
-    stream: tokio::net::TcpStream,
-    clip_tx: mpsc::UnboundedSender<ClipboardEvent>,
-    audio: Option<Arc<AudioBridge>>,
-) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
-    let server_name = config.host.clone();
+    sink: &TileSink,
+) -> Option<(u16, u16)> {
+    let dest = engine::host_port(&config.host, config.port);
+    let report = async |message: String| {
+        warn!("rdp: connect failed: {message}");
+        let _ = sink.msg(ServerMsg::Error { message: format!("RDP connect failed: {message}") }).await;
+    };
 
-    let client_addr = stream
-        .local_addr()
-        .map_err(|e| anyhow::anyhow!("get local address: {e}"))?;
-
-    let mut framed = TokioFramed::new(stream);
-    let mut connector = register_channels(
-        ClientConnector::new(build_connector_config(config), client_addr),
-        config,
-        clip_tx,
-        audio,
-    );
-
-    let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
-        .await
-        .map_err(|e| anyhow::anyhow!("RDP negotiation (connect_begin): {}", describe(&e)))?;
-
-    let (initial_stream, leftover) = framed.into_inner();
-
-    let (tls_stream, tls_cert) = ironrdp_tls::upgrade(initial_stream, &server_name)
-        .await
-        .map_err(|e| anyhow::anyhow!("TLS upgrade: {e}"))?;
-
-    let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-
-    let erased: Box<dyn AsyncReadWrite + Unpin + Send + Sync> = Box::new(tls_stream);
-    let mut upgraded_framed = TokioFramed::new_with_leftover(erased, leftover);
-
-    let server_public_key = ironrdp_tls::extract_tls_server_public_key(&tls_cert)
-        .ok_or_else(|| anyhow::anyhow!("could not extract TLS server public key"))?
-        .to_owned();
-
-    let connection_result = ironrdp_tokio::connect_finalize(
-        upgraded,
-        connector,
-        &mut upgraded_framed,
-        &mut ReqwestNetworkClient::new(),
-        ServerName::new(&server_name),
-        server_public_key,
-        None,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("RDP activation (connect_finalize): {}", describe(&e)))?;
-
-    Ok((connection_result, upgraded_framed))
+    let budget = connect_budget();
+    loop {
+        match tokio::time::timeout(budget, events.recv()).await {
+            Ok(Some(Event::Connected { width, height })) => {
+                // Narrowed rather than trusted: everything downstream — the
+                // shadow, the tile grid, the pointer clamp — is `u16`, and a
+                // desktop larger than that is a server saying something this
+                // gateway cannot represent.
+                return Some((narrow(width), narrow(height)));
+            }
+            // A failure before the desktop. `Ok(())` here is the odd one: an
+            // *orderly* end with nothing having connected, which is what a
+            // server that accepts and then drops the session looks like.
+            Ok(Some(Event::Ended(result))) => {
+                let cause = match result {
+                    // The hint is *mentioned*, never concluded — the same posture
+                    // `engine::tcp_connect` takes for the same permission, and for
+                    // the same reason: on macOS 15 a denied local-network
+                    // permission is refused indistinguishably from an address with
+                    // no route, and nothing on this side can tell them apart.
+                    Err(e) if e.is_unreachable() => {
+                        format!("{e}{}", engine::LOCAL_NETWORK_HINT)
+                    }
+                    Err(e) => e.to_string(),
+                    Ok(()) => format!("{dest} closed the session before it opened a desktop"),
+                };
+                report(cause).await;
+                return None;
+            }
+            // Anything else before `Connected` is FreeRDP being busy, not an
+            // answer — keep waiting rather than treating a cursor as a desktop.
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                report(format!("the {dest} session ended before it reported a desktop")).await;
+                return None;
+            }
+            Err(_) => {
+                report(format!(
+                    "{dest} did not open a desktop within {}s",
+                    budget.as_secs()
+                ))
+                .await;
+                return None;
+            }
+        }
+    }
 }
 
-/// Registers the virtual channels a target's flags ask for.
+/// Everything the engine crate needs to open this target's session.
 ///
-/// Separate from [`connect`] so the registration can be asserted on without a
-/// socket: `ClientConnector::static_channels` is public, so a test can name the
-/// channels this puts on the wire. That matters most for `rdpdr`, which is
-/// invisible in every other way — nothing is redirected through it — and whose
-/// absence costs an audio target all of its sound.
-fn register_channels(
-    mut connector: ClientConnector,
-    config: &TargetConfig,
-    clip_tx: mpsc::UnboundedSender<ClipboardEvent>,
-    audio: Option<Arc<AudioBridge>>,
-) -> ClientConnector {
-    // One `drdynvc` for every dynamic channel this session wants, because there is
-    // only one to have: registering it twice would advertise the channel twice and
-    // leave the second registration's listeners on a channel the server never
-    // talks to. Resize wants the Display Control channel, audio wants
-    // `AUDIO_PLAYBACK_DVC`, and either alone is reason enough to negotiate it.
-    if config.resize || audio.is_some() {
-        let mut drdynvc = DrdynvcClient::new();
-        if config.resize {
-            // The Display Control Virtual Channel, so the session can drive the
-            // remote resolution from the browser viewport (client-initiated
-            // resize). The capabilities callback is a no-op — `encode_resize`
-            // reads the channel state directly once the server answers.
-            drdynvc = drdynvc
-                .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
-        }
-        if let Some(audio) = &audio {
-            // The dynamic half of MS-RDPEA. The Windows host tested against picks
-            // the static channel instead, but FreeRDP is offered this one on the
-            // same host, so which half a server uses is not ours to predict —
-            // see [`crate::rdp_audio`], which implements both.
-            drdynvc = drdynvc
-                .with_dynamic_channel(rdp_audio::AudioPlaybackDvc::new(Arc::clone(audio)));
-        }
-        connector = connector.with_static_channel(drdynvc);
+/// The keepalive is restated rather than applied: FreeRDP owns the socket, and it
+/// applies `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT` — and Linux's
+/// `TCP_USER_TIMEOUT` — itself in `libfreerdp/core/tcp.c`. The numbers come from
+/// [`crate::engine`] so that a silent host is noticed on the same schedule
+/// whichever protocol is carrying it, and so
+/// [`engine::keepalive_budget`](crate::engine::keepalive_budget) — which an error
+/// message quotes — cannot drift from what the RDP path actually asks for.
+fn connect_config(config: &TargetConfig) -> Connect {
+    Connect {
+        host: config.host.clone(),
+        port: config.port,
+        username: config.username.clone(),
+        password: config.password.clone(),
+        domain: config.domain.clone(),
+        width: u32::from(config.width),
+        height: u32::from(config.height),
+        security: match config.security {
+            Security::Auto => freerdp::Security::Auto,
+            Security::Nla => freerdp::Security::Nla,
+            Security::Tls => freerdp::Security::Tls,
+        },
+        clipboard: config.clipboard,
+        resize: config.resize,
+        connect_timeout: engine::TCP_CONNECT_TIMEOUT,
+        keepalive: engine::keepalive(),
     }
-    if config.clipboard {
-        // MS-RDPECLIP. Registered only on opt-in, so a target without the flag
-        // never even negotiates the channel and the remote cannot advertise a
-        // clipboard at us.
-        connector = connector.with_static_channel(CliprdrClient::new(Box::new(
-            rdp_clipboard::Backend::new(clip_tx),
-        )));
-    }
-    if let Some(audio) = audio {
-        // And the static half, on the same opt-in terms. Both are registered
-        // because which one a server uses is the server's choice; the bridge
-        // settles which one ends up feeding the queue.
-        connector = connector
-            .with_static_channel(Rdpsnd::new(Box::new(rdp_audio::Handler::new(audio))));
-        // MS-RDPEFS, announced with no devices and an inert backend: nothing is
-        // ever redirected through it, and it is not optional. Windows gates audio
-        // redirection on device redirection being advertised — with `rdpsnd` alone
-        // the tested host opened neither audio channel and sent no format PDU;
-        // adding this made the same host start redirecting immediately, over the
-        // static channel. FreeRDP encodes the rule as forcing device redirection
-        // on whenever audio playback is on ("rdpsnd requires rdpdr to be
-        // registered", client/common/cmdline.c). The published spec states only
-        // the converse — [MS-RDPEFS] Appendix A<1>: without "RDPSND" advertised
-        // the server issues nothing on "RDPDR" — so the pairing is observed
-        // behaviour rather than a documented rule, but it is what makes the
-        // difference between silence and sound.
-        connector = connector.with_static_channel(Rdpdr::new(
-            Box::new(NoopRdpdrBackend),
-            // Only ever user-visible as the "on <computer>" suffix File Explorer
-            // puts after a redirected drive, and we announce no drives.
-            "remotex".to_owned(),
-        ));
-    }
-    connector
 }
 
-/// Drive the active RDP session: server frames in, input out, tiles back.
-///
-/// `resize` mirrors the target's config flag: when set, the Display Control
-/// channel was negotiated at connect and browser [`ClientMsg::Viewport`] reports
-/// drive a client-initiated resolution change (see [`resize_desktop`]).
-///
-/// `clipboard` does the same for MS-RDPECLIP, and `clip_rx` carries what that
-/// channel's processor noticed. Both clipboard buffers live here rather than in
-/// the backend: the backend is called from inside `ActiveStage`, which this
-/// function owns exclusively, so keeping the state on this side avoids sharing
-/// it through a lock.
 /// What [`active_loop`] needs off the target profile, grouped the way
 /// [`crate::vnc`]'s own `Flags` is: three values that always travel together and
 /// are only ever read from the same place.
@@ -449,12 +415,12 @@ impl Density {
 
     /// Percent, for the monitor layout's `DesktopScaleFactor`.
     ///
-    /// Both values sit inside MS-RDPBCGR's legal 100 to 500, which is load-bearing
+    /// Both values sit inside MS-RDPEDISP's legal 100 to 500, which is load-bearing
     /// rather than incidental: a server MUST ignore *both* scale factors when
     /// either is out of range, so an out-of-spec density would quietly cost the
-    /// whole feature rather than part of it. Nothing in FreeRDP's core enforces
-    /// that either — only its command line does — so the clamp has to live at
-    /// whichever end invents the number.
+    /// whole feature rather than part of it. The engine crate clamps to the same
+    /// window, so this is belt and braces — but it is the end that *invents* the
+    /// number, which is the end that has to be right.
     fn percent(self) -> u32 {
         match self {
             Self::One => 100,
@@ -487,10 +453,8 @@ impl Density {
 /// direction. A size with no density tells the server to ignore the scale factor,
 /// which on a live 2x session means dropping back to 1x UI in a 2x framebuffer;
 /// a density with no size leaves the desktop the same number of pixels and merely
-/// shrinks everything drawn in them.
-///
-/// `u32` because that is what [`MonitorLayoutEntry::adjust_display_size`] and
-/// `encode_resize` work in.
+/// shrinks everything drawn in them. MS-RDPEDISP puts both on one PDU, and
+/// [`Input::resize`] takes both for the same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Layout {
     w: u32,
@@ -500,18 +464,18 @@ struct Layout {
 
 impl Layout {
     /// The desktop as it currently stands, at the density it was last asked for.
-    fn current(desktop: DesktopSize, density: Density) -> Self {
-        Self {
-            w: u32::from(desktop.width),
-            h: u32::from(desktop.height),
-            density,
-        }
+    fn current(desktop: (u16, u16), density: Density) -> Self {
+        Self { w: u32::from(desktop.0), h: u32::from(desktop.1), density }
     }
 
     /// The same request at the size the protocol would actually accept: an even
     /// width, and 200 to 8192 per axis.
+    ///
+    /// Through the engine crate's own rule rather than a copy of it, because this
+    /// is used to decide *whether to ask at all* — and a comparison against a
+    /// number different from the one that will be sent asks forever.
     fn adjusted(self) -> Self {
-        let (w, h) = MonitorLayoutEntry::adjust_display_size(self.w, self.h);
+        let (w, h) = freerdp::sanitise_size(self.w, self.h);
         Self { w, h, ..self }
     }
 
@@ -543,21 +507,15 @@ impl std::fmt::Display for Layout {
 /// The pointer, as this engine hands it to the browser.
 ///
 /// RDP servers do not draw the cursor into the screen bitmap — they send its
-/// shape and leave the drawing to whoever presents the framebuffer. IronRDP will
-/// do that compositing itself (`pointer_software_rendering`), which is what this
-/// engine asked for until now, and it made every mouse move a screen update:
-/// damage, the [`DAMAGE_INTERVAL`] flush, an encode, the socket, a decode and a
-/// paint before the pointer had visibly moved. Forwarding the shape instead puts
-/// it on the browser's own hardware pointer, which moves with the mouse and
-/// costs the session nothing per move — the same arrangement VNC's Cursor
-/// pseudo-encoding already has, through the same [`ServerMsg::Cursor`].
+/// shape and leave the drawing to whoever presents the framebuffer. Forwarding
+/// the shape puts it on the browser's own hardware pointer, which moves with the
+/// mouse and costs the session nothing per move — the same arrangement VNC's
+/// Cursor pseudo-encoding already has, through the same [`ServerMsg::Cursor`].
+/// The alternative, compositing it into the framebuffer, made every mouse move a
+/// screen update: damage, the [`DAMAGE_INTERVAL`] flush, an encode, the socket, a
+/// decode and a paint before the pointer had visibly moved.
 #[derive(Default)]
 struct Pointer {
-    /// The decoded pointer the current `shape` was built from. A pointer the
-    /// server re-selects out of its own cache arrives as the same `Arc` every
-    /// time, so identity settles "already sent" without a pixel compare or a
-    /// second PNG encode.
-    source: Option<Arc<DecodedPointer>>,
     /// What the browser should draw, `None` being its own arrow — see
     /// [`ServerMsg::Cursor`].
     shape: Option<CursorShape>,
@@ -566,31 +524,30 @@ struct Pointer {
 }
 
 impl Pointer {
-    /// The server named a shape.
-    fn set(&mut self, decoded: &Arc<DecodedPointer>) {
-        if self.source.as_ref().is_some_and(|held| Arc::ptr_eq(held, decoded)) {
+    /// The server named a shape, hid the pointer, or asked for the client's
+    /// default one.
+    ///
+    /// The last two are both the browser's own arrow here: this end has no
+    /// default shape of its own to send, and on a remote desktop a pointer you
+    /// cannot see at all is worse than a generic one.
+    fn set(&mut self, cursor: freerdp::Cursor) {
+        let shape = match cursor {
+            freerdp::Cursor::Image(image) => shape_of(&image),
+            freerdp::Cursor::Hidden | freerdp::Cursor::Default => None,
+        };
+        // Compared rather than assumed different: a server re-selecting a pointer
+        // out of its own cache sends the same shape again, and re-encoding those
+        // pixels every time the mouse crosses a window edge is exactly the
+        // traffic that forwarding the shape exists to remove.
+        if shape == self.shape {
             return;
         }
-        self.source = Some(Arc::clone(decoded));
-        self.shape = shape_of(decoded);
+        self.shape = shape;
         self.changed = true;
     }
 
-    /// The server hid the pointer, or asked for the client's default one. Both
-    /// are the browser's own arrow here: this end has no default shape of its
-    /// own to send, and on a remote desktop a pointer you cannot see at all is
-    /// worse than a generic one.
-    fn cleared(&mut self) {
-        if self.source.is_none() && self.shape.is_none() {
-            return;
-        }
-        self.source = None;
-        self.shape = None;
-        self.changed = true;
-    }
-
-    /// The change to send, taken once per batch of outputs rather than per
-    /// output: selecting a cached pointer produces a hide *and* a shape, and the
+    /// The change to send, taken once per batch of events rather than per
+    /// event: selecting a cached pointer produces a hide *and* a shape, and the
     /// browser should see the shape rather than flicker through its own arrow on
     /// the way to it.
     fn change(&mut self) -> Option<ServerMsg> {
@@ -610,14 +567,12 @@ impl Pointer {
 }
 
 /// A decoded pointer as the shape the browser draws, or `None` for one it should
-/// not draw: the server's invisible pointer, and anything this client will not
-/// render.
+/// not draw: anything this client will not render.
 ///
-/// `bitmap_data` is RGBA with straight alpha, which is what the `Accelerated`
-/// bitmap target means and what PNG wants; the software target's premultiplied
-/// pixels would need undoing here.
-fn shape_of(decoded: &DecodedPointer) -> Option<CursorShape> {
-    let (w, h) = (decoded.width, decoded.height);
+/// The engine crate converts FreeRDP's xor/and masks to straight-alpha RGBA on
+/// its side, which is what PNG wants.
+fn shape_of(image: &freerdp::CursorImage) -> Option<CursorShape> {
+    let (w, h) = (narrow(image.width), narrow(image.height));
     if w == 0 || h == 0 {
         return None;
     }
@@ -625,7 +580,8 @@ fn shape_of(decoded: &DecodedPointer) -> Option<CursorShape> {
         warn!("rdp: ignoring an oversized {w}x{h} pointer");
         return None;
     }
-    match CursorShape::from_rgba(w, h, decoded.hotspot_x, decoded.hotspot_y, &decoded.bitmap_data) {
+    let (hx, hy) = (narrow(image.hotspot_x), narrow(image.hotspot_y));
+    match CursorShape::from_rgba(w, h, hx, hy, &image.rgba) {
         Ok(shape) => Some(shape),
         Err(e) => {
             warn!("rdp: ignoring a {w}x{h} pointer: {e}");
@@ -635,40 +591,26 @@ fn shape_of(decoded: &DecodedPointer) -> Option<CursorShape> {
 }
 
 async fn active_loop(
-    connection_result: ConnectionResult,
-    mut framed: UpgradedFramed,
+    session: &Session,
+    mut events: mpsc::UnboundedReceiver<Event>,
     flags: Flags,
-    mut clip_rx: mpsc::UnboundedReceiver<ClipboardEvent>,
+    connected_at: (u16, u16),
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
     let Flags { resize, clipboard, default_size } = flags;
-    // Retained so a DeactivateAll (the server-side half of a resize) can drive a
-    // fresh Deactivation-Reactivation Sequence. The builder below only consumes
-    // the channel/share fields, so pull this out first.
-    let activation_factory = connection_result.activation_factory;
+    let input = session.input();
+    let framebuffer = session.framebuffer();
 
-    let mut desktop = connection_result.desktop_size;
-    let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
+    let mut desktop = connected_at;
     // The pixels the browser has already been sent. Lives beside the framebuffer
     // it shadows, and is forgotten on a repaint and on a resize.
-    let mut shadow = Shadow::new("rdp", desktop.width, desktop.height);
+    let mut shadow = Shadow::new("rdp", desktop.0, desktop.1);
     shadow.classify_cells(sink.wants_cells());
 
-    let mut active_stage = ActiveStageBuilder {
-        static_channels: connection_result.static_channels,
-        user_channel_id: connection_result.user_channel_id,
-        io_channel_id: connection_result.io_channel_id,
-        message_channel_id: connection_result.message_channel_id,
-        share_id: connection_result.share_id,
-        compression_type: connection_result.compression_type,
-        enable_server_pointer: connection_result.enable_server_pointer,
-        pointer_software_rendering: connection_result.pointer_software_rendering,
-    }
-    .build();
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
-    let mut last_pos: (u16, u16) = (desktop.width / 2, desktop.height / 2);
+    let mut last_pos: (u16, u16) = (desktop.0 / 2, desktop.1 / 2);
     // The pointer shape, on its way to the browser that draws it.
     let mut pointer = Pointer::default();
 
@@ -688,16 +630,19 @@ async fn active_loop(
     let mut clipboard_retry_at: Option<Instant> = None;
 
     // The density the desktop is *known* to be at — known, because this only moves
-    // when a reactivation proves it.
+    // when a resize proves it.
     //
     // Believing a write instead was a bug with two faces. The desktop stayed 1x
     // while this end declared 2x, so every later resize went out with a density the
     // server had thrown away, and — the one a person actually notices — a reattach
     // announced `scale` 2.0 for a 1x framebuffer, which a client presents at half
     // size. Nothing acknowledges a layout on this protocol, so the absence of a
-    // reactivation is the only evidence there is, and it has to be the evidence
-    // used.
+    // resize is the only evidence there is, and it has to be the evidence used.
     let mut applied = Density::One;
+    // Whether the remote has offered DisplayControl. Until it has, a layout has
+    // nowhere to go — the engine crate would hold it, but holding it there loses
+    // the retry ladder below, which is what a Windows host actually needs.
+    let mut resize_ready = false;
     // The layout in flight — a size, a density, or both — and when to repeat it.
     // The client states each *once per attach* and then dedupes it (a viewport,
     // and `sendHostScale` in frontend/src/useRemoteDesktop.ts), so nothing will ask
@@ -721,18 +666,6 @@ async fn active_loop(
     let mut damage_due: Option<Instant> = None;
 
     loop {
-        // The clipboard sender lives inside `active_stage`, so it is only
-        // closed when the target did not opt in and the backend was never
-        // built. Parking on a future that never completes retires the branch;
-        // returning `None` into the `select!` instead would spin the loop, and
-        // treating it as end-of-session would end every non-clipboard session
-        // before the first tile.
-        let clipboard_event = async {
-            match clip_rx.recv().await {
-                Some(event) => event,
-                None => std::future::pending().await,
-            }
-        };
         let clipboard_retry = async {
             match clipboard_retry_at {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -747,7 +680,7 @@ async fn active_loop(
         };
         // Video only, and `None` unless the mirror is holding pixels no access unit
         // has carried — see `TileSink::due_at` for why a paced stream cannot rely on
-        // the next `outputs` batch to come and collect them. A clean mirror parks on
+        // the next event to come and collect them. A clean mirror parks on
         // the round-returned signal instead of forever: while a round is away being
         // encoded the live table is empty and `due_at` cannot see the damage that
         // lands meanwhile, so the round's return is what re-arms this.
@@ -765,21 +698,106 @@ async fn active_loop(
             }
         };
 
-        let outputs = tokio::select! {
-            frame = framed.read_pdu() => {
-                let (action, payload) = frame.map_err(|e| anyhow::anyhow!("read frame: {e}"))?;
-                active_stage
-                    .process(&mut image, action, &payload)
-                    .map_err(|e| anyhow::anyhow!("process frame: {e}"))?
+        tokio::select! {
+            event = events.recv() => {
+                let Some(event) = event else {
+                    // The forwarding thread ended without an `Ended` event, which
+                    // means its own channel broke rather than the session closing.
+                    anyhow::bail!("the RDP engine stopped reporting");
+                };
+                match event {
+                    Event::Paint(rect) => {
+                        // Staged rather than sent: whether this goes out now or at
+                        // the deadline is decided once, at the end of the loop.
+                        stage_damage(&mut pending_damage, damaged(rect));
+                    }
+                    Event::Cursor(cursor) => pointer.set(cursor),
+                    Event::ResizeReady { max_monitors, max_area } => {
+                        debug!("rdp: the remote offers dynamic resize, up to {max_monitors} monitors and {max_area} pixels");
+                        resize_ready = true;
+                        // Whatever was asked for while the channel was still
+                        // opening, asked for again now rather than waiting out
+                        // the rest of its schedule.
+                        if pending_layout.is_some() {
+                            layout_retry_at = Some(Instant::now());
+                        }
+                    }
+                    // The server renegotiated the desktop — its answer to a
+                    // monitor layout, and the only confirmation a layout ever
+                    // gets. It also arrives unprompted when a server resizes a
+                    // session on its own, which is why `applied` follows the
+                    // pending layout rather than assuming there was one.
+                    Event::Resize { width, height } => {
+                        if let Some(pending) = pending_layout.take() {
+                            applied = pending.layout.density;
+                            layout_retry_at = None;
+                        }
+                        desktop = (narrow(width), narrow(height));
+                        info!("rdp: resized, desktop {}x{}", desktop.0, desktop.1);
+                        // Damage staged before the resize names rectangles of a
+                        // framebuffer that no longer exists.
+                        pending_damage.clear();
+                        damage_due = None;
+                        shadow.resize(desktop.0, desktop.1);
+                        // The cell grid is anchored at (0,0) in framebuffer pixels, so
+                        // a new size makes every key name somewhere else.
+                        sink.reset_render();
+                        last_pos = (
+                            last_pos.0.min(desktop.0.saturating_sub(1)),
+                            last_pos.1.min(desktop.1.saturating_sub(1)),
+                        );
+                        sink.msg(ServerMsg::Resize {
+                            w: desktop.0,
+                            h: desktop.1,
+                            scale: applied.scale(),
+                        }).await?;
+                        // The framebuffer was cleared by the resize and a server
+                        // is not obliged to repaint. Asked for from here rather
+                        // than by the engine crate, which must not send it from
+                        // inside the callback — that fires part-way through the
+                        // reactivation, before the connection can carry client
+                        // PDUs. Going through the queue puts it after.
+                        input.refresh();
+                    }
+                    Event::Clipboard(event) => {
+                        handle_clipboard(
+                            session.clipboard(),
+                            event,
+                            clipboard,
+                            &mut local_clipboard,
+                            &mut remote_clipboard,
+                            &mut pending_clipboard_read,
+                            &mut clipboard_retry_at,
+                            sink,
+                        ).await?;
+                    }
+                    Event::Ended(result) => {
+                        info!("rdp: session ended: {result:?}");
+                        // Best effort, and only for the pixels still pending: the
+                        // session is over either way, and the shadow's claim about them
+                        // dies with it.
+                        for rect in pending_damage.drain(..) {
+                            if send_tiles(framebuffer, rect, &mut shadow, sink).await.is_err() {
+                                break;
+                            }
+                        }
+                        let _ = sink.frame().await;
+                        return result.map_err(|e| anyhow::anyhow!("{e}"));
+                    }
+                    // The desktop this session already reported, restated when a
+                    // reactivation re-runs the connection sequence. Nothing to do:
+                    // `Event::Resize` is what carries a size change.
+                    Event::Connected { .. } => {}
+                }
             }
-            input = input_rx.recv() => {
-                let Some(input) = input else {
+            msg = input_rx.recv() => {
+                let Some(msg) = msg else {
                     info!("rdp: input channel closed; session shut down");
                     break;
                 };
                 // A (re)attached browser needs the desktop size and a full
                 // repaint from the server-owned framebuffer.
-                if matches!(input, ClientMsg::Refresh) {
+                if matches!(msg, ClientMsg::Refresh) {
                     // The repaint below covers every pixel, so damage waiting out
                     // its interval is subsumed by it.
                     pending_damage.clear();
@@ -796,33 +814,30 @@ async fn active_loop(
                     // encode, which settles every debt and makes every cell's
                     // history a single redraw rather than motion.
                     sink.reset_render();
-                    sink
-                        .msg(ServerMsg::Resize {
-                            w: desktop.width,
-                            h: desktop.height,
-                            scale: applied.scale(),
-                        })
-                        .await?;
+                    sink.msg(ServerMsg::Resize {
+                        w: desktop.0,
+                        h: desktop.1,
+                        scale: applied.scale(),
+                    }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
                     send_tiles(
-                        &image,
+                        framebuffer,
                         Rect {
                             left: 0,
                             top: 0,
-                            right: desktop.width.saturating_sub(1),
-                            bottom: desktop.height.saturating_sub(1),
+                            right: desktop.0.saturating_sub(1),
+                            bottom: desktop.1.saturating_sub(1),
                         },
                         &mut shadow,
                         sink,
                     )
                     .await?;
-                    // A repaint is a frame, and this arm never reaches the one at the
-                    // end of the outputs loop — it `continue`s from here. Without
-                    // this, the whole repaint would sit in the video mirror unsent,
-                    // while the shadow already counts every pixel of it as delivered.
+                    // A repaint is a frame. Without this, the whole repaint would
+                    // sit in the video mirror unsent, while the shadow already
+                    // counts every pixel of it as delivered.
                     sink.frame().await?;
                     continue;
                 }
@@ -833,7 +848,7 @@ async fn active_loop(
                 // Recorded and scheduled rather than asked for here, so the retry
                 // branch is the single place a layout is requested from — one
                 // attempt and five look the same to this arm.
-                if let ClientMsg::HostScale { scale } = input {
+                if let ClientMsg::HostScale { scale } = msg {
                     if resize {
                         // Only the density changes; the size the desktop should be
                         // stays what it is. Re-express whatever size is already
@@ -867,7 +882,7 @@ async fn active_loop(
                 // here: the target's configured `width`/`height`, read as points,
                 // which is what this session connected at while it was still 1x.
                 // See [`ClientMsg::DefaultSize`].
-                let wanted_size = match input {
+                let wanted_size = match msg {
                     ClientMsg::Viewport { w, h } => Some((u32::from(w), u32::from(h))),
                     ClientMsg::DefaultSize => Some(applied.pixels(default_size)),
                     _ => None,
@@ -876,7 +891,7 @@ async fn active_loop(
                     if resize {
                         // Scheduled, not sent-and-forgotten, for the same reason a
                         // density is: a size that arrives before the Display Control
-                        // channel has its capabilities cannot go out, and a client
+                        // channel is up cannot go out, and a client
                         // states its viewport once and dedupes it, so nothing would
                         // re-send it. This is the start of every session with
                         // auto-resize on by default — both reports come from
@@ -885,7 +900,7 @@ async fn active_loop(
                         // resize landed. The size arrives in the announced density's
                         // pixels; if a denser layout is already pending it is carried
                         // up to that density, so the two go out as one layout and
-                        // never as two reactivations racing to set `applied`.
+                        // never as two resizes racing to set `applied`.
                         let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
                         install_layout(
                             Layout { w, h, density: applied }.at_density(density),
@@ -898,10 +913,10 @@ async fn active_loop(
                 }
                 // The clipboard pair, intercepted here for the same reason as
                 // the two above: they act on a virtual channel rather than
-                // translating to fast-path input. Both are no-ops when the
+                // translating to input. Both are no-ops when the
                 // target did not opt in — the browser hides the control then,
                 // so this is the belt to that UI's braces.
-                if let ClientMsg::Clipboard { text } = &input {
+                if let ClientMsg::Clipboard { text } = &msg {
                     if clipboard {
                         // We are taking ownership of the remote clipboard, so
                         // an older remote Copy/Cut can no longer be fetched.
@@ -911,17 +926,9 @@ async fn active_loop(
                         // bytes if and when someone pastes.
                         match rdp_clipboard::to_remote(text) {
                             Some(text) => {
-                                debug!(
-                                    "rdp: advertising {} bytes to the remote clipboard",
-                                    text.len()
-                                );
+                                debug!("rdp: advertising {} bytes to the remote clipboard", text.len());
                                 local_clipboard = Some(text);
-                                advertise_clipboard(
-                                    &mut active_stage,
-                                    &mut framed,
-                                    local_clipboard.as_deref(),
-                                )
-                                .await?;
+                                advertise_clipboard(session.clipboard(), local_clipboard.as_deref());
                             }
                             // Refused, so the remote keeps whatever it had:
                             // advertising a partial copy would hand out a paste
@@ -936,7 +943,7 @@ async fn active_loop(
                     }
                     continue;
                 }
-                if matches!(input, ClientMsg::ClipboardRequest) {
+                if matches!(msg, ClientMsg::ClipboardRequest) {
                     // Answered from the buffer the channel fills. Empty until
                     // the remote copies something, which reads in the panel as
                     // "nothing has been copied over there yet".
@@ -944,159 +951,35 @@ async fn active_loop(
                         let snapshot = remote_clipboard
                             .clone()
                             .unwrap_or_else(ClipboardSnapshot::unobserved);
-                        sink
-                            .msg(ServerMsg::Clipboard {
-                                text: snapshot.text,
-                                changed_at_ms: snapshot.changed_at_ms,
-                                requested: true,
-                                oversized_bytes: snapshot.oversized_bytes,
-                            })
-                            .await?;
+                        sink.msg(ServerMsg::Clipboard {
+                            text: snapshot.text,
+                            changed_at_ms: snapshot.changed_at_ms,
+                            requested: true,
+                            oversized_bytes: snapshot.oversized_bytes,
+                        }).await?;
                     }
                     continue;
                 }
-                let events = translate_input(input, &mut last_pos);
-                if events.is_empty() {
-                    continue;
-                }
-                active_stage
-                    .process_fastpath_input(&mut image, &events)
-                    .map_err(|e| anyhow::anyhow!("process input: {e}"))?
-            }
-
-            // The clipboard channel processor ran inside `active_stage.process`
-            // above and left its findings here. Acting on them is a separate
-            // turn of the loop because the callbacks cannot answer themselves.
-            event = clipboard_event => {
-                match event {
-                    // Both mean "advertise what we have". The first
-                    // `initiate_copy` is load-bearing beyond the advertisement
-                    // itself: it carries the Capabilities and TemporaryDirectory
-                    // PDUs that finish the handshake, so an empty clipboard
-                    // still has to answer.
-                    ClipboardEvent::Ready | ClipboardEvent::FormatListRequested => {
-                        advertise_clipboard(
-                            &mut active_stage,
-                            &mut framed,
-                            local_clipboard.as_deref(),
-                        )
-                        .await?;
-                    }
-                    // Ask straight away rather than waiting for the panel's
-                    // Fetch, so a copy on the remote reaches the browser
-                    // unprompted exactly as it does for VNC.
-                    ClipboardEvent::RemoteFormats(formats) => {
-                        match rdp_clipboard::pick_text_format(&formats) {
-                            Some(format) => {
-                                pending_clipboard_read =
-                                    Some(PendingClipboardRead::new(format));
-                                clipboard_retry_at = None;
-                                request_clipboard(&mut active_stage, &mut framed, format).await?;
-                            }
-                            None => {
-                                pending_clipboard_read = None;
-                                clipboard_retry_at = None;
-                                debug!("rdp: the remote copied no text format we can carry");
-                                remote_clipboard = Some(ClipboardSnapshot::changed(
-                                    String::new(),
-                                    remote_clipboard.as_ref(),
-                                ));
-                            }
-                        }
-                    }
-                    ClipboardEvent::RemoteData(text) => {
-                        pending_clipboard_read = None;
-                        clipboard_retry_at = None;
-                        let snapshot = match rdp_clipboard::from_remote(&text) {
-                            Ok(text) => {
-                                debug!("rdp: remote clipboard updated, {} bytes", text.len());
-                                ClipboardSnapshot::changed(text, remote_clipboard.as_ref())
-                            }
-                            // Reported as its size instead of the first 64 KiB
-                            // of it: the panel can say what happened, where a
-                            // truncated paste could not be told from a whole one.
-                            Err(bytes) => {
-                                debug!(
-                                    "rdp: remote clipboard is {bytes} bytes, over the {} byte limit",
-                                    crate::protocol::MAX_CLIPBOARD_BYTES
-                                );
-                                ClipboardSnapshot::oversized(bytes, remote_clipboard.as_ref())
-                            }
-                        };
-                        remote_clipboard = Some(snapshot.clone());
-                        sink
-                            .msg(ServerMsg::Clipboard {
-                                text: snapshot.text,
-                                changed_at_ms: snapshot.changed_at_ms,
-                                requested: false,
-                                oversized_bytes: snapshot.oversized_bytes,
-                            })
-                            .await?;
-                    }
-                    // Nothing to show, and deliberately not forwarded as empty
-                    // text: that would wipe the panel over a transient refusal.
-                    // MS-RDPECLIP's CB_RESPONSE_FAIL does not identify why the
-                    // peer could not process the request. A live Windows peer
-                    // recovered when the same advertised format was retried.
-                    ClipboardEvent::RemoteDataRefused => {
-                        if let Some(read) = pending_clipboard_read.as_mut() {
-                            match read.retry_after_failure() {
-                                Some(delay) => {
-                                    debug!(
-                                        "rdp: retrying refused remote clipboard read in {}ms",
-                                        delay.as_millis()
-                                    );
-                                    clipboard_retry_at = Some(Instant::now() + delay);
-                                }
-                                None => {
-                                    debug!("rdp: remote clipboard read exhausted its retries");
-                                    pending_clipboard_read = None;
-                                    clipboard_retry_at = None;
-                                }
-                            }
-                        }
-                    }
-                    // Invalid bytes cannot become valid by repeating the same
-                    // request. Keep the last good clipboard value and finish
-                    // this read without scheduling a retry.
-                    ClipboardEvent::RemoteDataMalformed => {
-                        pending_clipboard_read = None;
-                        clipboard_retry_at = None;
-                    }
-                    ClipboardEvent::DataRequested(format) => {
-                        provide_clipboard(
-                            &mut active_stage,
-                            &mut framed,
-                            format,
-                            local_clipboard.as_deref(),
-                        )
-                        .await?;
-                    }
+                for event in translate_input(msg, &mut last_pos) {
+                    event.apply(input);
                 }
                 continue;
             }
             _ = clipboard_retry => {
                 clipboard_retry_at = None;
-                if let Some(read) = pending_clipboard_read.as_ref() {
-                    request_clipboard(&mut active_stage, &mut framed, read.format).await?;
+                if let (Some(read), Some(cb)) = (pending_clipboard_read.as_ref(), session.clipboard()) {
+                    cb.request(read.format);
                 }
                 continue;
             }
             _ = layout_retry => {
                 layout_retry_at = None;
                 let Some(pending) = pending_layout.as_mut() else {
-                    continue; // a reactivation confirmed it first
+                    continue; // a resize confirmed it first
                 };
                 let wanted = pending.layout;
-                let asked = request_layout(
-                    &mut active_stage,
-                    &mut framed,
-                    Layout::current(desktop, applied),
-                    wanted,
-                )
-                .await?;
-                match asked {
-                    // Written, or not yet writable — either way the desktop has not
+                match request_layout(input, resize_ready, Layout::current(desktop, applied), wanted) {
+                    // Queued, or not yet sendable — either way the desktop has not
                     // moved, so ask again until it does or the schedule runs out.
                     // Dropping the request is all that giving up takes: `applied`
                     // was never advanced, so the announced scale still describes
@@ -1112,10 +995,8 @@ async fn active_loop(
                             pending_layout = None;
                         }
                     },
-                    // Nothing more to try: a refused layout fails identically on
-                    // every attempt, and a redundant one means the desktop already
-                    // agrees.
-                    Asked::Redundant | Asked::Refused => pending_layout = None,
+                    // Nothing more to try: the desktop already agrees.
+                    Asked::Redundant => pending_layout = None,
                 }
                 continue;
             }
@@ -1128,7 +1009,7 @@ async fn active_loop(
             }
             _ = damage_flush => {
                 for rect in pending_damage.drain(..) {
-                    send_tiles(&image, rect, &mut shadow, sink).await?;
+                    send_tiles(framebuffer, rect, &mut shadow, sink).await?;
                 }
                 damage_flushed = Instant::now();
                 damage_due = None;
@@ -1138,96 +1019,8 @@ async fn active_loop(
                 sink.frame().await?;
                 continue;
             }
-        };
-
-        for out in outputs {
-            match out {
-                ActiveStageOutput::ResponseFrame(frame) => {
-                    framed
-                        .write_all(&frame)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("write response: {e}"))?;
-                }
-                ActiveStageOutput::GraphicsUpdate(region) => {
-                    // Staged rather than sent: whether this batch goes out now or at
-                    // the deadline is decided once, after the whole batch — see the
-                    // end of the loop.
-                    stage_damage(
-                        &mut pending_damage,
-                        Rect {
-                            left: region.left,
-                            top: region.top,
-                            right: region.right,
-                            bottom: region.bottom,
-                        },
-                    );
-                }
-                ActiveStageOutput::PointerBitmap(decoded) => pointer.set(&decoded),
-                ActiveStageOutput::PointerHidden | ActiveStageOutput::PointerDefault => {
-                    pointer.cleared();
-                }
-                // Where the *server* thinks the pointer is. Dropped: the browser
-                // draws the pointer at the position of the mouse driving it, and
-                // the browser's own pointer is the one that moved. Nothing here
-                // can place a hardware pointer anyway, so a server-initiated warp
-                // is a desync this end cannot fix — the same limit the VNC path
-                // has.
-                ActiveStageOutput::PointerPosition { .. } => {}
-                ActiveStageOutput::Terminate(reason) => {
-                    info!("rdp: session terminated by server: {reason:?}");
-                    // Best effort, and only for the pixels still pending: the
-                    // session is over either way, and the shadow's claim about them
-                    // dies with it.
-                    for rect in pending_damage.drain(..) {
-                        if send_tiles(&image, rect, &mut shadow, sink).await.is_err() {
-                            break;
-                        }
-                    }
-                    let _ = sink.frame().await;
-                    return Ok(());
-                }
-                ActiveStageOutput::DeactivateAll => {
-                    // The server accepted a resolution change: run the
-                    // Deactivation-Reactivation Sequence to learn the new size,
-                    // rebuild the framebuffer, and tell the browser to resize.
-                    //
-                    // This is also the only confirmation a layout ever gets. The
-                    // server acts on the most recent layout it was sent, so a
-                    // reactivation while one is in flight is that layout — size and
-                    // density together — taking effect. `applied` follows the
-                    // density that just landed; the new size is read back from the
-                    // reactivation itself, just below.
-                    if let Some(pending) = pending_layout.take() {
-                        applied = pending.layout.density;
-                        layout_retry_at = None;
-                    }
-                    desktop = reactivate(&mut active_stage, &mut framed, &activation_factory)
-                        .await?;
-                    image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
-                    // Damage staged before the reactivation names rectangles of a
-                    // framebuffer that no longer exists; the server repaints the
-                    // new one in full.
-                    pending_damage.clear();
-                    damage_due = None;
-                    shadow.resize(desktop.width, desktop.height);
-                    // The cell grid is anchored at (0,0) in framebuffer pixels, so
-                    // a new size makes every key name somewhere else.
-                    sink.reset_render();
-                    last_pos = (
-                        last_pos.0.min(desktop.width.saturating_sub(1)),
-                        last_pos.1.min(desktop.height.saturating_sub(1)),
-                    );
-                    sink
-                        .msg(ServerMsg::Resize {
-                            w: desktop.width,
-                            h: desktop.height,
-                            scale: applied.scale(),
-                        })
-                        .await?;
-                }
-                _ => {}
-            }
         }
+
         if let Some(msg) = pointer.change() {
             sink.msg(msg).await?;
         }
@@ -1238,7 +1031,7 @@ async fn active_loop(
         if !pending_damage.is_empty() {
             if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
                 for rect in pending_damage.drain(..) {
-                    send_tiles(&image, rect, &mut shadow, sink).await?;
+                    send_tiles(framebuffer, rect, &mut shadow, sink).await?;
                 }
                 damage_flushed = Instant::now();
                 damage_due = None;
@@ -1246,7 +1039,7 @@ async fn active_loop(
                 damage_due = Some(damage_flushed + DAMAGE_INTERVAL);
             }
         }
-        // The closest thing RDP offers to the end of a frame: one batch of outputs is
+        // The closest thing this engine has to the end of a frame: one event is
         // everything one PDU produced, and a video stream needs to be told when to
         // stop accumulating and encode. Most turns of this loop redraw nothing, which
         // is why this is a no-op when nothing was blitted rather than a frame per PDU.
@@ -1257,16 +1050,152 @@ async fn active_loop(
     Ok(())
 }
 
+/// Act on one thing the remote clipboard did.
+///
+/// Its own function rather than an arm of the loop because there are six
+/// outcomes and the loop is long enough; the state it moves is all passed in, so
+/// nothing here is reachable from anywhere else.
+#[allow(clippy::too_many_arguments)]
+async fn handle_clipboard(
+    clipboard: Option<&Clipboard>,
+    event: ClipboardEvent,
+    enabled: bool,
+    local: &mut Option<String>,
+    remote: &mut Option<ClipboardSnapshot>,
+    pending: &mut Option<PendingClipboardRead>,
+    retry_at: &mut Option<Instant>,
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    match event {
+        // The capability exchange finished. Advertising even an empty clipboard
+        // is what tells the remote there is a client on this end at all.
+        ClipboardEvent::Ready => advertise_clipboard(clipboard, local.as_deref()),
+        // Ask straight away rather than waiting for the panel's Fetch, so a copy
+        // on the remote reaches the browser unprompted exactly as it does for VNC.
+        ClipboardEvent::RemoteFormats(formats) => {
+            match rdp_clipboard::pick_text_format(&formats) {
+                Some(format) => {
+                    *pending = Some(PendingClipboardRead::new(format));
+                    *retry_at = None;
+                    if let Some(cb) = clipboard {
+                        cb.request(format);
+                    }
+                }
+                None => {
+                    *pending = None;
+                    *retry_at = None;
+                    debug!("rdp: the remote copied no text format we can carry");
+                    *remote = Some(ClipboardSnapshot::changed(String::new(), remote.as_ref()));
+                }
+            }
+        }
+        ClipboardEvent::RemoteData { data, .. } => {
+            *pending = None;
+            *retry_at = None;
+            // Invalid bytes cannot become valid by repeating the same request, so
+            // a malformed payload keeps the last good clipboard value and
+            // schedules nothing.
+            let Some(text) = rdp_clipboard::decode_unicode(&data) else {
+                warn!("rdp: undecodable clipboard text from the remote, {} bytes", data.len());
+                return Ok(());
+            };
+            let snapshot = match rdp_clipboard::from_remote(&text) {
+                Ok(text) => {
+                    debug!("rdp: remote clipboard updated, {} bytes", text.len());
+                    ClipboardSnapshot::changed(text, remote.as_ref())
+                }
+                // Reported as its size instead of the first 64 KiB
+                // of it: the panel can say what happened, where a
+                // truncated paste could not be told from a whole one.
+                Err(bytes) => {
+                    debug!(
+                        "rdp: remote clipboard is {bytes} bytes, over the {} byte limit",
+                        crate::protocol::MAX_CLIPBOARD_BYTES
+                    );
+                    ClipboardSnapshot::oversized(bytes, remote.as_ref())
+                }
+            };
+            *remote = Some(snapshot.clone());
+            sink.msg(ServerMsg::Clipboard {
+                text: snapshot.text,
+                changed_at_ms: snapshot.changed_at_ms,
+                requested: false,
+                oversized_bytes: snapshot.oversized_bytes,
+            })
+            .await?;
+        }
+        // Nothing to show, and deliberately not forwarded as empty
+        // text: that would wipe the panel over a transient refusal.
+        // MS-RDPECLIP's CB_RESPONSE_FAIL does not identify why the
+        // peer could not process the request. A live Windows peer
+        // recovered when the same advertised format was retried.
+        ClipboardEvent::RemoteDataFailed { .. } => {
+            if let Some(read) = pending.as_mut() {
+                match read.retry_after_failure() {
+                    Some(delay) => {
+                        debug!(
+                            "rdp: retrying refused remote clipboard read in {}ms",
+                            delay.as_millis()
+                        );
+                        *retry_at = Some(Instant::now() + delay);
+                    }
+                    None => {
+                        debug!("rdp: remote clipboard read exhausted its retries");
+                        *pending = None;
+                        *retry_at = None;
+                    }
+                }
+            }
+        }
+        // The remote is pasting and **is waiting**. Every one of these must be
+        // answered, including with `None` — a request left unanswered is a remote
+        // application blocked in its paste handler, which on Windows is a frozen
+        // window rather than an error.
+        ClipboardEvent::LocalDataRequest { format } => {
+            let Some(cb) = clipboard else { return Ok(()) };
+            let data = match local.as_deref() {
+                Some(text) if format == CF_UNICODETEXT => {
+                    debug!("rdp: handing {} bytes to the remote's paste", text.len());
+                    Some(rdp_clipboard::encode_unicode(text))
+                }
+                Some(_) => {
+                    warn!("rdp: the remote asked for clipboard format {format}, which we never offered");
+                    None
+                }
+                None => None,
+            };
+            cb.respond(format, data);
+        }
+    }
+    Ok(())
+}
+
+/// Tell the remote what our clipboard now holds (MS-RDPECLIP Format List).
+///
+/// `text` of `None` advertises nothing, which is the honest answer before the
+/// browser has sent anything and is still worth sending.
+fn advertise_clipboard(clipboard: Option<&Clipboard>, text: Option<&str>) {
+    let Some(clipboard) = clipboard else { return }; // the target did not opt in
+    let formats = match text {
+        Some(_) => vec![ClipboardFormat::new(CF_UNICODETEXT)],
+        None => Vec::new(),
+    };
+    clipboard.advertise(formats);
+}
+
 /// Install `wanted` as the layout to ask the server for, or clear the schedule
 /// when there is nothing to ask.
 ///
 /// The first attempt belongs in the retry branch with the rest, so this only
-/// records the want and dates the deadline now; it never writes to the channel.
-/// Two cases need no schedule: the desktop is already `current` (so a screen
-/// change that moved back before the remote caught up, or a viewport equal to the
-/// desktop, asks for nothing), and the identical layout is already pending (so a
-/// deduped-but-repeated report does not reset the attempt count). The comparison
-/// is against the adjusted `wanted`, matching what [`request_layout`] will send.
+/// records the want and dates the deadline now; it never asks. Two cases need no
+/// schedule: the desktop is already `current` (so a screen change that moved back
+/// before the remote caught up, or a viewport equal to the desktop, asks for
+/// nothing), and the identical layout is already pending (so a deduped-but-repeated
+/// report does not reset the attempt count). The comparison is against the adjusted
+/// `wanted`, matching what [`request_layout`] will send.
 fn install_layout(
     wanted: Layout,
     current: Layout,
@@ -1282,285 +1211,154 @@ fn install_layout(
     }
 }
 
-/// Ask the server for a different desktop — a size, a density, or both — over the
-/// Display Control channel. Sizes are adjusted to the protocol's constraints (even
-/// width, 200 to 8192 per axis). The server answers by deactivating the session —
-/// see the `DeactivateAll` arm.
+/// Ask the server for a different desktop — a size, a density, or both. The
+/// server answers by renegotiating the session, which arrives as
+/// [`Event::Resize`].
 ///
-/// Returns which of the four [`Asked`] outcomes happened, rather than whether
+/// Returns which of the three [`Asked`] outcomes happened, rather than whether
 /// anything went out, because the retry branch has to know which layouts are
-/// worth another attempt and only two of the four are. Note that even
-/// [`Asked::Sent`] is not a confirmation: this
-/// protocol acknowledges nothing, so a layout the server silently discards looks
-/// from here exactly like one it is about to act on.
+/// worth another attempt. Note that even [`Asked::Sent`] is not a confirmation:
+/// this protocol acknowledges nothing, so a layout the server silently discards
+/// looks from here exactly like one it is about to act on.
 ///
-/// The first thing checked is whether the channel has had the server's
-/// capabilities, because `encode_resize` does *not* check: it asks only whether
-/// the channel has an id, and a layout written between the channel opening and its
-/// caps arriving is discarded by the server with no reply — IronRDP's own
-/// [`DisplayControlClient::new`] says so ("attempting to send messages before the
-/// capabilities are received will result in an error or a silent failure"). That
-/// window is under a second, which is why a human clicking "Resize to window"
-/// never found it and a density sent automatically on connect finds it every time.
+/// The first thing checked is whether the remote has offered DisplayControl at
+/// all. The engine crate would hold a layout sent before that and send it when
+/// the channel opens — which is *worse* than not sending it, because the moment
+/// the channel opens is precisely when a Windows host ignores layouts, and the
+/// held request would be spent on the one attempt least likely to work.
 ///
 /// Also a no-op when the desktop is already that layout, and that guard earns its
 /// place here rather than at the callers: this is the one engine where asking for
 /// what you already have is *expensive*, since the server answers any request with
-/// a full Deactivation-Reactivation. VNC drops an unchanged request itself, so
+/// a full renegotiation. VNC drops an unchanged request itself, so
 /// this is what makes the client requests idempotent across both engines —
 /// which matters most for the automatic [`ClientMsg::DefaultSize`] a
 /// mobile client sends on every reattach.
 ///
-/// Compared after `adjust_display_size`, because that is the layout that would
+/// Compared after the size adjustment, because that is the layout that would
 /// actually be asked for: an odd width lands on the even one beside it, and
 /// comparing before the adjustment would call that a change when it is not. The
 /// density is part of that comparison, so a request that only changes the density
 /// — which is what a client dragged between two screens of the same size sends —
 /// is not mistaken for a repeat.
-///
-/// The density goes out as `DesktopScaleFactor`. IronRDP pins the companion
-/// `DeviceScaleFactor` to 100% whenever a desktop scale factor is given, which is
-/// also what FreeRDP's SDL clients send for a 2x display.
-async fn request_layout(
-    active_stage: &mut ActiveStage,
-    framed: &mut UpgradedFramed,
-    current: Layout,
-    wanted: Layout,
-) -> anyhow::Result<Asked> {
+fn request_layout(input: &Input, ready: bool, current: Layout, wanted: Layout) -> Asked {
     let wanted = wanted.adjusted();
-    if !display_control_ready(active_stage) {
-        debug!("rdp: {wanted} requested before the Display Control channel has its capabilities");
-        return Ok(Asked::NotReady);
+    if !ready {
+        debug!("rdp: {wanted} requested before the remote offered dynamic resize");
+        return Asked::NotReady;
     }
     if wanted == current {
-        debug!("rdp: the desktop is already {wanted}; not asking for a reactivation");
-        return Ok(Asked::Redundant);
+        debug!("rdp: the desktop is already {wanted}; not asking for a resize");
+        return Asked::Redundant;
     }
-    match active_stage.encode_resize(wanted.w, wanted.h, Some(wanted.density.percent()), None) {
-        Some(Ok(frame)) => {
-            info!("rdp: requesting {wanted}");
-            framed
-                .write_all(&frame)
-                .await
-                .map_err(|e| anyhow::anyhow!("write resize: {e}"))?;
-            Ok(Asked::Sent)
-        }
-        // The layout, not the channel: encoding the same one again would fail the
-        // same way, so this is where a retry has to stop.
-        Some(Err(e)) => {
-            warn!("rdp: could not encode {wanted}: {e}");
-            Ok(Asked::Refused)
-        }
-        None => {
-            debug!("rdp: {wanted} requested before the Display Control channel is open");
-            Ok(Asked::NotReady)
-        }
+    info!("rdp: requesting {wanted}");
+    input.resize(wanted.w, wanted.h, wanted.density.percent());
+    Asked::Sent
+}
+
+/// A `u32` from the engine crate as the `u16` everything downstream of here is.
+///
+/// Saturating rather than `as`, which would wrap: a 70000-pixel desktop is a server
+/// saying something this gateway cannot represent, and 4464 pixels is a worse answer
+/// to that than 65535. Nothing real reaches the ceiling — RDP's own limit is 8192 a
+/// side — so this is about what happens when something is *not* real.
+fn narrow(v: u32) -> u16 {
+    v.min(u32::from(u16::MAX)) as u16
+}
+
+/// One damage rectangle, in the inclusive-edge form the tile path uses.
+///
+/// The two disagree on purpose and the conversion is the only place that knows: the
+/// engine crate reports position-and-size, and [`Rect`] is inclusive on all four
+/// edges because that is how RFB reports one and both engines share the tile path.
+/// Saturating throughout, so an oversized rectangle becomes a clamped one rather
+/// than an overflow — `send_tiles` intersects it with the framebuffer anyway.
+fn damaged(rect: freerdp::Rect) -> Rect {
+    Rect {
+        left: narrow(rect.x),
+        top: narrow(rect.y),
+        right: narrow(rect.x.saturating_add(rect.width)).saturating_sub(1),
+        bottom: narrow(rect.y.saturating_add(rect.height)).saturating_sub(1),
     }
 }
 
-/// Whether the Display Control channel has had the server's capabilities, and so
-/// whether a monitor layout written to it now would be read.
+/// One thing to do to the remote, translated out of a browser message.
 ///
-/// The channel tracks this itself and says so through `ready`, but nothing on the
-/// path from `encode_resize` down consults it — see [`request_layout`], which is
-/// the only caller and the reason this exists.
-fn display_control_ready(active_stage: &mut ActiveStage) -> bool {
-    active_stage
-        .get_dvc::<DisplayControlClient>()
-        .and_then(|dvc| dvc.channel_processor_downcast_ref::<DisplayControlClient>())
-        .is_some_and(DisplayControlClient::ready)
+/// An enum rather than a direct call on [`Input`], so [`translate_input`] stays a
+/// pure function of its arguments and the mapping — which is where the errors in
+/// an input path live — can be asserted without a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteInput {
+    Move { x: u16, y: u16 },
+    Button { button: RdpButton, down: bool, x: u16, y: u16 },
+    Wheel { delta: i16, horizontal: bool, x: u16, y: u16 },
+    Key { scancode: u8, extended: bool, down: bool },
 }
 
-/// Tell the remote what our clipboard now holds (MS-RDPECLIP Format List).
-///
-/// `text` of `None` advertises nothing, which is the honest answer before the
-/// browser has sent anything and is still worth sending — see the handshake
-/// note at the call site.
-async fn advertise_clipboard(
-    active_stage: &mut ActiveStage,
-    framed: &mut UpgradedFramed,
-    text: Option<&str>,
-) -> anyhow::Result<()> {
-    let formats: &[ClipboardFormat] = match text {
-        Some(_) => &[ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)],
-        None => &[],
-    };
-    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
-        return Ok(()); // the target did not opt in
-    };
-    let messages = cliprdr.initiate_copy(formats);
-    write_clipboard(active_stage, framed, messages, "advertise").await
-}
-
-/// Ask the remote for its clipboard in `format` (Format Data Request).
-async fn request_clipboard(
-    active_stage: &mut ActiveStage,
-    framed: &mut UpgradedFramed,
-    format: ClipboardFormatId,
-) -> anyhow::Result<()> {
-    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
-        return Ok(());
-    };
-    let messages = cliprdr.initiate_paste(format);
-    write_clipboard(active_stage, framed, messages, "paste request").await
-}
-
-/// Hand the remote the text it just asked for (Format Data Response).
-///
-/// Answers with the PDU's error form when we hold nothing, or when the remote
-/// asks for a format we never advertised. Staying silent instead would leave
-/// the paste hanging until the remote's own timeout.
-async fn provide_clipboard(
-    active_stage: &mut ActiveStage,
-    framed: &mut UpgradedFramed,
-    format: ClipboardFormatId,
-    text: Option<&str>,
-) -> anyhow::Result<()> {
-    let response = match text {
-        Some(text) if format == ClipboardFormatId::CF_UNICODETEXT => {
-            debug!("rdp: handing {} bytes to the remote's paste", text.len());
-            FormatDataResponse::new_unicode_string(text)
-        }
-        Some(_) => {
-            warn!("rdp: the remote asked for clipboard format {format:?}, which we never offered");
-            FormatDataResponse::new_error()
-        }
-        None => FormatDataResponse::new_error(),
-    };
-    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
-        return Ok(());
-    };
-    let messages = cliprdr.submit_format_data(response.into_owned());
-    write_clipboard(active_stage, framed, messages, "data response").await
-}
-
-/// Encode clipboard PDUs onto the wire, reporting failures rather than raising
-/// them.
-///
-/// Nothing here is worth ending a session over. The likeliest failure is a
-/// server that accepted our channel registration and then never joined the
-/// channel, which makes `process_svc_processor_messages` fail with "channel not
-/// found" on every copy — the clipboard should degrade to doing nothing while
-/// the desktop keeps working.
-// `&mut` rather than the `&` that `process_svc_processor_messages` would
-// accept: `ActiveStage` holds a `Box<dyn SvcProcessor>`, which is `Send` but
-// not `Sync`, so a shared reference held across the `.await` below makes the
-// whole engine future non-`Send`. The engine runs on its own current-thread
-// runtime today (`session::spawn_engine`) and so does not need `Send`, but
-// giving that up for nothing would be a poor trade.
-async fn write_clipboard(
-    active_stage: &mut ActiveStage,
-    framed: &mut UpgradedFramed,
-    messages: PduResult<CliprdrSvcMessages<Client>>,
-    what: &str,
-) -> anyhow::Result<()> {
-    let messages = match messages {
-        Ok(messages) => messages,
-        Err(e) => {
-            warn!("rdp: could not encode a clipboard {what}: {e}");
-            return Ok(());
-        }
-    };
-    match active_stage.process_svc_processor_messages(messages) {
-        Ok(frame) => framed
-            .write_all(&frame)
-            .await
-            .map_err(|e| anyhow::anyhow!("write clipboard {what}: {e}")),
-        Err(e) => {
-            warn!("rdp: could not send a clipboard {what}: {e}");
-            Ok(())
+impl RemoteInput {
+    fn apply(self, input: &Input) {
+        match self {
+            Self::Move { x, y } => input.mouse_move(x, y),
+            Self::Button { button, down, x, y } => input.mouse_button(button, down, x, y),
+            Self::Wheel { delta, horizontal, x, y } => input.wheel(delta, horizontal, x, y),
+            Self::Key { scancode, extended, down } => input.key(scancode, extended, down),
         }
     }
 }
 
-/// Drive a fresh Deactivation-Reactivation Sequence after the server sent
-/// DeactivateAll (its response to a resize). Returns the renegotiated desktop
-/// size. The `ActiveStage` is kept — only its share id changes — so the live
-/// channel set (and thus the Display Control channel) survives.
-async fn reactivate(
-    active_stage: &mut ActiveStage,
-    framed: &mut UpgradedFramed,
-    activation_factory: &ConnectionActivationFactory,
-) -> anyhow::Result<DesktopSize> {
-    let mut sequence: ConnectionActivationSequence = activation_factory.create();
-    let mut buf = WriteBuf::new();
-    loop {
-        single_sequence_step(framed, &mut sequence, &mut buf)
-            .await
-            .map_err(|e| anyhow::anyhow!("reactivation: {}", describe(&e)))?;
-        if let ConnectionActivationState::Finalized {
-            desktop_size,
-            share_id,
-            ..
-        } = sequence.connection_activation_state()
-        {
-            active_stage.set_share_id(share_id);
-            info!(
-                "rdp: reactivated, desktop {}x{}",
-                desktop_size.width, desktop_size.height
-            );
-            return Ok(desktop_size);
-        }
-    }
-}
+/// One notch of a conventional wheel, in the rotation units RDP counts.
+const WHEEL_NOTCH: i16 = 120;
 
-/// Translate one browser input message into RDP fast-path input events.
-fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathInputEvent> {
+/// Translate one browser input message into what to do to the remote.
+fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInput> {
     match input {
         ClientMsg::MouseMove { x, y } => {
             let (x, y) = (clamp_u16(x), clamp_u16(y));
             *last_pos = (x, y);
-            vec![FastPathInputEvent::MouseEvent(MousePdu {
-                flags: PointerFlags::MOVE,
-                number_of_wheel_rotation_units: 0,
-                x_position: x,
-                y_position: y,
-            })]
+            vec![RemoteInput::Move { x, y }]
         }
         // `clicks` goes nowhere: RDP carries button state alone, and Windows
         // counts the clicks itself from the events it receives.
         ClientMsg::MouseButton { button, pressed, .. } => {
-            let flags = match button {
-                MouseButton::Left => PointerFlags::LEFT_BUTTON,
-                MouseButton::Right => PointerFlags::RIGHT_BUTTON,
-                MouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+            let button = match button {
+                MouseButton::Left => RdpButton::Left,
+                MouseButton::Right => RdpButton::Right,
+                MouseButton::Middle => RdpButton::Middle,
                 // The side buttons travel in RDP's *extended* pointer PDU, which
-                // this fast-path event cannot carry. Dropped rather than sent as
-                // some other button, which would be worse than doing nothing.
-                MouseButton::Back | MouseButton::Forward => return Vec::new(),
+                // the engine crate sends for these two. They used to be dropped,
+                // because the fast-path event the old engine built could not
+                // carry them.
+                MouseButton::Back => RdpButton::X1,
+                MouseButton::Forward => RdpButton::X2,
             };
-            let mut flags = flags;
-            if pressed {
-                flags |= PointerFlags::DOWN;
-            }
-            vec![FastPathInputEvent::MouseEvent(MousePdu {
-                flags,
-                number_of_wheel_rotation_units: 0,
-                x_position: last_pos.0,
-                y_position: last_pos.1,
-            })]
+            vec![RemoteInput::Button {
+                button,
+                down: pressed,
+                x: last_pos.0,
+                y: last_pos.1,
+            }]
         }
         // The unit is dropped: RDP spends a notch as 120 rotation units whatever
         // the delta was measured in, and the guest applies its own scrolling.
         ClientMsg::Wheel { dx, dy, .. } => {
             let mut events = Vec::new();
             // RDP: positive rotation is up/forward. The DOM deltaY is positive
-            // when scrolling down, so invert it. One notch ≈ 120 units.
+            // when scrolling down, so invert it.
             if dy != 0.0 {
-                events.push(FastPathInputEvent::MouseEvent(MousePdu {
-                    flags: PointerFlags::VERTICAL_WHEEL,
-                    number_of_wheel_rotation_units: if dy > 0.0 { -120 } else { 120 },
-                    x_position: last_pos.0,
-                    y_position: last_pos.1,
-                }));
+                events.push(RemoteInput::Wheel {
+                    delta: if dy > 0.0 { -WHEEL_NOTCH } else { WHEEL_NOTCH },
+                    horizontal: false,
+                    x: last_pos.0,
+                    y: last_pos.1,
+                });
             }
             if dx != 0.0 {
-                events.push(FastPathInputEvent::MouseEvent(MousePdu {
-                    flags: PointerFlags::HORIZONTAL_WHEEL,
-                    number_of_wheel_rotation_units: if dx > 0.0 { 120 } else { -120 },
-                    x_position: last_pos.0,
-                    y_position: last_pos.1,
-                }));
+                events.push(RemoteInput::Wheel {
+                    delta: if dx > 0.0 { WHEEL_NOTCH } else { -WHEEL_NOTCH },
+                    horizontal: true,
+                    x: last_pos.0,
+                    y: last_pos.1,
+                });
             }
             events
         }
@@ -1568,14 +1366,7 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // forwarded scancode.
         ClientMsg::Key { code, pressed, .. } => match keymap::scancode(&code) {
             Some((scancode, extended)) => {
-                let mut flags = KeyboardFlags::empty();
-                if !pressed {
-                    flags |= KeyboardFlags::RELEASE;
-                }
-                if extended {
-                    flags |= KeyboardFlags::EXTENDED;
-                }
-                vec![FastPathInputEvent::KeyboardEvent(flags, scancode)]
+                vec![RemoteInput::Key { scancode, extended, down: pressed }]
             }
             None => {
                 debug!("rdp: unmapped key code {code}");
@@ -1657,48 +1448,53 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
 ///
 /// Comparing against `shadow` earns its keep on this engine in particular: it
 /// repaints regions that did not change, which nothing upstream filters. They come
-/// back as `None` here and cost nothing but a pack and a `memcmp`. (The other
-/// source used to be the pointer, composited into the framebuffer so that every
-/// mouse event over a still desktop produced a damage rectangle. It is the browser
-/// that draws it now — see [`Pointer`] — so those never reach the framebuffer at
-/// all.)
+/// back as `None` here and cost nothing but a pack and a `memcmp`.
 ///
-/// The pack happens either way; what is skipped is the PNG encode, which is far
-/// the more expensive half (~8–10× the hash it replaced, measured in
-/// `protocol::tests::encode_cost_against_hash_cost`). That encode no longer happens
-/// here — [`TileSink`] runs it elsewhere — so what this loop costs is the pack, the
-/// `memcmp` and an allocation per band.
+/// The framebuffer lock is held for the pack and released before the await, which
+/// is what keeps a slow encoder from stalling FreeRDP's next paint: the engine
+/// crate hands out its frame under a mutex the RDP thread also takes on every
+/// `EndPaint`.
 async fn send_tiles(
-    image: &DecodedImage,
+    framebuffer: &Framebuffer,
     rect: Rect,
     shadow: &mut Shadow,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
-    let (fb_w, fb_h) = shadow.size();
-    if rect.left >= fb_w || rect.top >= fb_h {
-        return Ok(());
-    }
-    let rect = Rect {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right.min(fb_w - 1),
-        bottom: rect.bottom.min(fb_h - 1),
-    };
-    if rect.right < rect.left || rect.bottom < rect.top {
-        return Ok(());
-    }
-
     let mut buf = Vec::new();
-    pack_rgb(image, rect, &mut buf);
+    let Some(rect) = framebuffer.with(|frame| {
+        // Clamped to *both* sizes, because they can disagree for one turn of the
+        // loop: the RDP thread resizes the framebuffer from inside its own
+        // callback, and the shadow follows when `Event::Resize` is processed.
+        let (fb_w, fb_h) = shadow.size();
+        let w = narrow(frame.width).min(fb_w);
+        let h = narrow(frame.height).min(fb_h);
+        if rect.left >= w || rect.top >= h {
+            return None;
+        }
+        let rect = Rect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right.min(w - 1),
+            bottom: rect.bottom.min(h - 1),
+        };
+        if rect.right < rect.left || rect.bottom < rect.top {
+            return None;
+        }
+        pack_rgb(frame, rect, &mut buf);
+        Some(rect)
+    }) else {
+        return Ok(());
+    };
+
     let Some(changed) = shadow.accept(rect, &buf) else {
         return Ok(());
     };
 
     // Its own buffer per piece, not the one above: the encoder reads those pixels
-    // after this call has returned, and `image` is overwritten by the next PDU.
-    // Cropped out of the pack already made rather than repacked from the image —
-    // a piece's rows are not contiguous in `buf`, but they are row copies, where a
-    // repack is another per-pixel swizzle over the same pixels.
+    // after this call has returned, and the framebuffer is overwritten by the next
+    // paint. Cropped out of the pack already made rather than repacked from the
+    // frame — a piece's rows are not contiguous in `buf`, but they are row copies,
+    // where a repack is another per-pixel swizzle over the same pixels.
     sink.damage(&changed, |piece| {
         let mut pixels = Vec::new();
         tiles::crop(&buf, rect, piece, &mut pixels);
@@ -1709,112 +1505,31 @@ async fn send_tiles(
 
 /// Pack `rect` out of the framebuffer into `buf` as RGB888.
 ///
-/// The framebuffer alpha is meaningless for a screen (and IronRDP may leave it 0),
-/// so it is dropped rather than shipped.
-fn pack_rgb(image: &DecodedImage, rect: Rect, buf: &mut Vec<u8>) {
-    let bpp = image.bytes_per_pixel();
-    let stride = image.stride();
-    let data = image.data();
+/// The frame is `RGBX32` — the engine crate's own choice, made at `gdi_init` time
+/// precisely so that a consumer which encodes finds R,G,B in memory order — so
+/// this drops every fourth byte and copies the rest. The fourth byte is not alpha
+/// and carries nothing.
+///
+/// Through [`Frame::rows`] rather than stride arithmetic here: getting a stride
+/// wrong by hand produces a picture that is *nearly* right, sheared by a few
+/// pixels a row, which is a bug people stare at for an hour.
+fn pack_rgb(frame: &Frame, rect: Rect, buf: &mut Vec<u8>) {
     let w = usize::from(rect.w());
     let h = usize::from(rect.h());
-
     buf.clear();
     buf.resize(w * h * 3, 0);
-    for r in 0..h {
-        let start = (usize::from(rect.top) + r) * stride + usize::from(rect.left) * bpp;
-        let dst = &mut buf[r * w * 3..(r + 1) * w * 3];
-        if bpp == 4 {
-            // The literal stride is what lets the compiler vectorize the 4-in/3-out
-            // shuffle; sized writes rather than per-pixel `extend` for the same reason.
-            for (out, px) in dst.chunks_exact_mut(3).zip(data[start..start + w * 4].chunks_exact(4)) {
-                out.copy_from_slice(&px[..3]);
-            }
-        } else {
-            for (out, px) in dst.chunks_exact_mut(3).zip(data[start..start + w * bpp].chunks_exact(bpp)) {
-                out.copy_from_slice(&px[..3]);
-            }
+    let rows = frame.rows(freerdp::Rect {
+        x: u32::from(rect.left),
+        y: u32::from(rect.top),
+        width: rect.w().into(),
+        height: rect.h().into(),
+    });
+    for (dst, src) in buf.chunks_exact_mut(w * 3).zip(rows) {
+        // The literal strides are what let the compiler vectorize the 4-in/3-out
+        // shuffle; sized writes rather than per-pixel `extend` for the same reason.
+        for (out, px) in dst.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
+            out.copy_from_slice(&px[..3]);
         }
-    }
-}
-
-/// Render an error together with its full `source()` chain, so wrappers like
-/// IronRDP's `ConnectorError` reveal the underlying cause (e.g. the CredSSP /
-/// SSPI reason) instead of just a top-level label.
-fn describe(err: &(dyn std::error::Error + 'static)) -> String {
-    let mut out = err.to_string();
-    let mut source = err.source();
-    while let Some(e) = source {
-        out.push_str(" -> ");
-        out.push_str(&e.to_string());
-        source = e.source();
-    }
-    out
-}
-
-/// Build the IronRDP connector config from our runtime config.
-///
-/// Enables both TLS and CredSSP/NLA so the server can negotiate the strongest
-/// security it supports. Modeled on the IronRDP `screenshot` example.
-fn build_connector_config(config: &TargetConfig) -> Config {
-    let (enable_tls, enable_credssp) = config.security.flags();
-    Config {
-        credentials: Credentials::UsernamePassword {
-            username: config.username.clone(),
-            password: config.password.clone(),
-        },
-        domain: config.domain.clone(),
-        enable_tls,
-        enable_credssp,
-        keyboard_type: KeyboardType::IbmEnhanced,
-        keyboard_subtype: 0,
-        keyboard_layout: 0,
-        keyboard_functional_keys_count: 12,
-        ime_file_name: String::new(),
-        dig_product_id: String::new(),
-        connection_type: ConnectionType::Lan,
-        desktop_size: DesktopSize {
-            width: config.width,
-            height: config.height,
-        },
-        bitmap: None,
-        client_build: 0,
-        client_name: "remotex".to_owned(),
-        client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
-
-        #[cfg(windows)]
-        platform: MajorPlatformType::WINDOWS,
-        #[cfg(target_os = "macos")]
-        platform: MajorPlatformType::MACINTOSH,
-        #[cfg(target_os = "linux")]
-        platform: MajorPlatformType::UNIX,
-        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-        platform: MajorPlatformType::UNIX,
-
-        // Take the server's pointer updates, and take them as *updates*: with
-        // software rendering off IronRDP decodes each shape and hands it over
-        // instead of drawing it into the framebuffer, which is what lets the
-        // browser wear it on its own hardware pointer — see [`Pointer`].
-        enable_server_pointer: true,
-        pointer_software_rendering: false,
-        request_data: None,
-        // INFO_AUTOLOGON in the Client Info PDU. Without it xrdp treats the
-        // credentials sent in that same PDU as pre-fill and still shows its own
-        // login screen; a target always carries credentials, so always ask the
-        // server to use them.
-        autologon: true,
-        // Load-bearing beyond the channel registration: left false, IronRDP puts
-        // NO_AUDIO_PLAYBACK in the Client Info PDU, and the server then redirects
-        // nothing however carefully RDPSND was negotiated.
-        enable_audio_playback: config.audio,
-        compression_type: None,
-        multitransport_flags: None,
-        desktop_scale_factor: 0,
-        hardware_id: None,
-        license_cache: None,
-        timezone_info: TimezoneInfo::default(),
-        performance_flags: PerformanceFlags::default(),
-        alternate_shell: String::new(),
-        work_dir: String::new(),
     }
 }
 
@@ -1827,14 +1542,14 @@ mod tests {
         Rect { left, top, right, bottom }
     }
 
-    /// A decoded pointer of `w`x`h` opaque red, as IronRDP hands one over.
-    fn decoded(w: u16, h: u16) -> Arc<DecodedPointer> {
-        Arc::new(DecodedPointer {
+    /// A cursor image of `w`x`h` opaque red, as the engine crate hands one over.
+    fn cursor(w: u32, h: u32) -> freerdp::Cursor {
+        freerdp::Cursor::Image(freerdp::CursorImage {
             width: w,
             height: h,
             hotspot_x: 1,
             hotspot_y: 2,
-            bitmap_data: [255, 0, 0, 255].repeat(usize::from(w) * usize::from(h)),
+            rgba: [255, 0, 0, 255].repeat((w * h) as usize),
         })
     }
 
@@ -1850,587 +1565,469 @@ mod tests {
     #[test]
     fn a_shape_travels_once_and_carries_its_hotspot() {
         let mut pointer = Pointer::default();
-        pointer.set(&decoded(32, 32));
+        pointer.set(cursor(32, 32));
         let msg = pointer.change().expect("the first shape is a change");
         let shape = shape(&msg).expect("a shape, not the client's own arrow");
         assert_eq!((shape.w, shape.h, shape.hx, shape.hy), (32, 32, 1, 2));
         assert!(pointer.change().is_none(), "nothing changed since");
     }
 
-    /// A pointer the server re-selects out of its cache arrives as the same
-    /// `Arc`, and re-sending its pixels every time the mouse crosses a window
-    /// edge is exactly the traffic this change exists to remove.
+    /// A pointer the server re-selects out of its own cache arrives again with
+    /// identical pixels, and re-sending them every time the mouse crosses a
+    /// window edge is exactly the traffic this design exists to remove.
     #[test]
     fn reselecting_the_same_pointer_says_nothing() {
         let mut pointer = Pointer::default();
-        let arrow = decoded(32, 32);
-        pointer.set(&arrow);
+        pointer.set(cursor(32, 32));
         assert!(pointer.change().is_some());
-        pointer.set(&arrow);
+        pointer.set(cursor(32, 32));
         assert!(pointer.change().is_none());
-        // A different pointer with identical pixels is still a different
-        // selection, and cheap enough to send.
-        pointer.set(&decoded(32, 32));
+        // A different shape is a real change.
+        pointer.set(cursor(48, 48));
         assert!(pointer.change().is_some());
     }
 
-    /// Selecting a cached pointer produces a hide *and* a shape in one batch of
-    /// outputs. The browser should see the shape, not flicker through its own
-    /// arrow on the way to it.
+    /// Selecting a cached pointer produces a hide *and* a shape in one batch. The
+    /// browser should see the shape, not flicker through its own arrow on the way
+    /// to it.
     #[test]
     fn a_hide_followed_by_a_shape_is_one_message() {
         let mut pointer = Pointer::default();
-        pointer.set(&decoded(32, 32));
+        pointer.set(cursor(32, 32));
         assert!(pointer.change().is_some());
-        pointer.cleared();
-        pointer.set(&decoded(48, 48));
+        pointer.set(freerdp::Cursor::Hidden);
+        pointer.set(cursor(48, 48));
         let msg = pointer.change().expect("the batch ended on a new shape");
-        assert_eq!(shape(&msg).expect("a shape").w, 48);
-        assert!(pointer.change().is_none());
+        let shape = shape(&msg).expect("the shape, not the hide before it");
+        assert_eq!((shape.w, shape.h), (48, 48));
     }
 
-    /// Hiding is a change the browser has to hear — it draws its own arrow for
-    /// it — but only the first time.
     #[test]
     fn hiding_an_already_hidden_pointer_says_nothing() {
         let mut pointer = Pointer::default();
-        pointer.set(&decoded(32, 32));
+        pointer.set(freerdp::Cursor::Hidden);
+        assert!(pointer.change().is_none(), "it was already the client's arrow");
+        pointer.set(cursor(16, 16));
         assert!(pointer.change().is_some());
-        pointer.cleared();
-        assert!(shape(&pointer.change().expect("the hide is a change")).is_none());
-        pointer.cleared();
-        assert!(pointer.change().is_none());
+        pointer.set(freerdp::Cursor::Default);
+        let msg = pointer.change().expect("back to the client's own arrow");
+        assert!(shape(&msg).is_none());
     }
 
-    /// A shape this client will not draw still hands pointer ownership over: the
-    /// browser draws its own arrow rather than nothing, which is what it would
-    /// draw if the message never came.
+    /// A pointer too large to draw becomes the client's own rather than being
+    /// forwarded — and the browser is *told*, so it stops drawing the last one.
     #[test]
     fn a_pointer_too_large_to_draw_becomes_the_clients_own() {
         let mut pointer = Pointer::default();
-        pointer.set(&decoded(MAX_CURSOR_DIM + 1, 1));
-        assert!(shape(&pointer.change().expect("a change")).is_none());
-        // And the server's invisible pointer reads the same way.
-        let mut pointer = Pointer::default();
-        pointer.set(&Arc::new(DecodedPointer::new_invisible()));
-        assert!(shape(&pointer.change().expect("a change")).is_none());
+        pointer.set(cursor(16, 16));
+        assert!(pointer.change().is_some());
+        pointer.set(cursor(u32::from(MAX_CURSOR_DIM) + 1, 16));
+        let msg = pointer.change().expect("the oversized shape is still a change");
+        assert!(shape(&msg).is_none(), "and it is the client's own arrow");
     }
 
-    /// A browser that attaches mid-session is told the pointer state whether or
-    /// not it has moved: the server names a shape only when it changes, and a
-    /// client with no message hides its own pointer and draws nothing.
     #[test]
     fn an_attaching_browser_is_told_the_pointer_either_way() {
         let mut pointer = Pointer::default();
-        assert!(shape(&pointer.attached()).is_none(), "before any pointer PDU");
-        pointer.set(&decoded(32, 32));
-        // The replay covers the pending change rather than doubling it.
+        // Nothing has arrived yet, and the browser is still told it owns the
+        // pointer.
+        assert!(shape(&pointer.attached()).is_none());
+        pointer.set(cursor(24, 24));
+        // `attached` also settles the pending change, so the shape is not sent
+        // twice.
         assert!(shape(&pointer.attached()).is_some());
         assert!(pointer.change().is_none());
     }
 
-    /// The reason the interval coalesces rather than defers: the same region
-    /// re-reported many times inside one interval is one rectangle at the flush.
+    /// The edge convention flips here, and getting it wrong is a one-pixel seam
+    /// down the right and bottom of every tile — visible, and easy to stare past.
+    #[test]
+    fn a_damage_rectangle_becomes_inclusive_on_every_edge() {
+        let r = damaged(freerdp::Rect { x: 10, y: 20, width: 4, height: 2 });
+        assert_eq!(r, rect(10, 20, 13, 21));
+        // The whole of a 1280x800 desktop, which is the repaint case.
+        assert_eq!(
+            damaged(freerdp::Rect { x: 0, y: 0, width: 1280, height: 800 }),
+            rect(0, 0, 1279, 799)
+        );
+        // One pixel is one pixel, not zero and not two.
+        assert_eq!(damaged(freerdp::Rect { x: 5, y: 5, width: 1, height: 1 }), rect(5, 5, 5, 5));
+    }
+
+    /// Nothing real reaches these, which is exactly why they are worth pinning: an
+    /// `as u16` here would wrap a 70000-pixel desktop to 4464 and paint a plausible
+    /// picture of the wrong size.
+    #[test]
+    fn an_impossible_size_saturates_rather_than_wrapping() {
+        assert_eq!(narrow(0), 0);
+        assert_eq!(narrow(1280), 1280);
+        assert_eq!(narrow(65_535), u16::MAX);
+        assert_eq!(narrow(70_000), u16::MAX);
+        assert_eq!(narrow(u32::MAX), u16::MAX);
+        // And a rectangle whose corner would overflow the addition.
+        let r = damaged(freerdp::Rect { x: u32::MAX, y: 0, width: u32::MAX, height: 1 });
+        assert_eq!((r.left, r.right), (u16::MAX, u16::MAX - 1));
+    }
+
     #[test]
     fn overlapping_damage_folds_into_one_rectangle() {
         let mut pending = Vec::new();
-        stage_damage(&mut pending, rect(0, 0, 15, 15));
-        stage_damage(&mut pending, rect(8, 8, 31, 31));
-        assert_eq!(pending, vec![rect(0, 0, 31, 31)]);
-        // A repeat of a region already inside changes nothing.
-        stage_damage(&mut pending, rect(4, 4, 12, 12));
-        assert_eq!(pending, vec![rect(0, 0, 31, 31)]);
+        stage_damage(&mut pending, rect(0, 0, 10, 10));
+        stage_damage(&mut pending, rect(5, 5, 20, 20));
+        assert_eq!(pending, vec![rect(0, 0, 20, 20)]);
     }
 
-    /// Two corners of the screen must not conspire into one desktop-sized repack.
     #[test]
     fn disjoint_damage_stays_apart() {
         let mut pending = Vec::new();
-        stage_damage(&mut pending, rect(0, 0, 15, 15));
-        stage_damage(&mut pending, rect(1000, 800, 1030, 830));
-        assert_eq!(pending.len(), 2);
+        stage_damage(&mut pending, rect(0, 0, 10, 10));
+        stage_damage(&mut pending, rect(100, 100, 110, 110));
+        assert_eq!(pending, vec![rect(0, 0, 10, 10), rect(100, 100, 110, 110)]);
     }
 
-    /// The cap bounds the list, not the coverage: past it everything collapses to
-    /// one bounding box, whose slop the shadow absorbs.
     #[test]
     fn past_the_cap_the_list_collapses_to_a_bounding_box() {
         let mut pending = Vec::new();
         for i in 0..DAMAGE_RECTS_CAP as u16 {
-            stage_damage(&mut pending, rect(i * 100, 0, i * 100 + 10, 10));
+            stage_damage(&mut pending, rect(i * 20, 0, i * 20 + 5, 5));
         }
         assert_eq!(pending.len(), DAMAGE_RECTS_CAP);
-        stage_damage(&mut pending, rect(0, 500, 10, 510));
-        assert_eq!(pending, vec![rect(0, 0, (DAMAGE_RECTS_CAP as u16 - 1) * 100 + 10, 510)]);
-    }
-
-    fn one(input: ClientMsg, last_pos: &mut (u16, u16)) -> FastPathInputEvent {
-        let mut events = translate_input(input, last_pos);
-        assert_eq!(events.len(), 1, "expected exactly one event");
-        events.remove(0)
+        stage_damage(&mut pending, rect(0, 100, 5, 105));
+        assert_eq!(pending.len(), 1, "the cap collapses the list");
+        assert_eq!(pending[0].top, 0);
+        assert_eq!(pending[0].bottom, 105);
     }
 
     #[test]
     fn mouse_move_sets_flags_and_updates_last_pos() {
-        let mut pos = (0, 0);
-        let event = one(ClientMsg::MouseMove { x: 40, y: 50 }, &mut pos);
-        match event {
-            FastPathInputEvent::MouseEvent(pdu) => {
-                assert_eq!(pdu.flags, PointerFlags::MOVE);
-                assert_eq!((pdu.x_position, pdu.y_position), (40, 50));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        assert_eq!(pos, (40, 50));
+        let mut last = (0, 0);
+        let events = translate_input(ClientMsg::MouseMove { x: 100, y: 200 }, &mut last);
+        assert_eq!(events, vec![RemoteInput::Move { x: 100, y: 200 }]);
+        assert_eq!(last, (100, 200));
     }
 
     #[test]
     fn negative_and_huge_coords_are_clamped() {
-        let mut pos = (0, 0);
-        let event = one(ClientMsg::MouseMove { x: -3, y: 100_000 }, &mut pos);
-        match event {
-            FastPathInputEvent::MouseEvent(pdu) => {
-                assert_eq!((pdu.x_position, pdu.y_position), (0, u16::MAX));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let mut last = (0, 0);
+        let events = translate_input(ClientMsg::MouseMove { x: -5, y: 70000 }, &mut last);
+        assert_eq!(events, vec![RemoteInput::Move { x: 0, y: u16::MAX }]);
+        assert_eq!(last, (0, u16::MAX));
     }
 
     #[test]
     fn button_press_uses_last_pos_and_down_flag() {
-        let mut pos = (12, 34);
-        let event = one(
-            ClientMsg::MouseButton {
-                button: MouseButton::Left,
-                pressed: true,
-                clicks: 1,
-            },
-            &mut pos,
+        let mut last = (7, 9);
+        let events = translate_input(
+            ClientMsg::MouseButton { button: MouseButton::Right, pressed: true, clicks: 1 },
+            &mut last,
         );
-        match event {
-            FastPathInputEvent::MouseEvent(pdu) => {
-                assert!(pdu.flags.contains(PointerFlags::LEFT_BUTTON));
-                assert!(pdu.flags.contains(PointerFlags::DOWN));
-                assert_eq!((pdu.x_position, pdu.y_position), (12, 34));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        assert_eq!(
+            events,
+            vec![RemoteInput::Button { button: RdpButton::Right, down: true, x: 7, y: 9 }]
+        );
 
-        // Release drops the DOWN flag.
-        let event = one(
-            ClientMsg::MouseButton {
-                button: MouseButton::Right,
-                pressed: false,
-                clicks: 1,
-            },
-            &mut pos,
+        let events = translate_input(
+            ClientMsg::MouseButton { button: MouseButton::Right, pressed: false, clicks: 1 },
+            &mut last,
         );
-        match event {
-            FastPathInputEvent::MouseEvent(pdu) => {
-                assert!(pdu.flags.contains(PointerFlags::RIGHT_BUTTON));
-                assert!(!pdu.flags.contains(PointerFlags::DOWN));
-            }
-            other => panic!("unexpected: {other:?}"),
+        assert_eq!(
+            events,
+            vec![RemoteInput::Button { button: RdpButton::Right, down: false, x: 7, y: 9 }]
+        );
+    }
+
+    /// The side buttons used to be dropped here, because the fast-path event the
+    /// old engine built had nowhere to put them. They travel now, on RDP's
+    /// extended pointer PDU.
+    #[test]
+    fn the_side_buttons_reach_the_remote() {
+        let mut last = (3, 4);
+        for (button, expected) in
+            [(MouseButton::Back, RdpButton::X1), (MouseButton::Forward, RdpButton::X2)]
+        {
+            let events = translate_input(
+                ClientMsg::MouseButton { button, pressed: true, clicks: 1 },
+                &mut last,
+            );
+            assert_eq!(
+                events,
+                vec![RemoteInput::Button { button: expected, down: true, x: 3, y: 4 }],
+                "{button:?}"
+            );
         }
     }
 
+    /// The sign convention, which is the easiest thing here to get backwards: the
+    /// DOM's deltaY is positive downward and RDP's rotation is positive upward.
     #[test]
     fn wheel_down_is_negative_vertical() {
-        let mut pos = (0, 0);
-        let event = one(
-            ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Pixel },
-            &mut pos,
+        let mut last = (1, 2);
+        let events =
+            translate_input(ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Pixel }, &mut last);
+        assert_eq!(
+            events,
+            vec![RemoteInput::Wheel { delta: -WHEEL_NOTCH, horizontal: false, x: 1, y: 2 }]
         );
-        match event {
-            FastPathInputEvent::MouseEvent(pdu) => {
-                assert!(pdu.flags.contains(PointerFlags::VERTICAL_WHEEL));
-                assert_eq!(pdu.number_of_wheel_rotation_units, -120);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+
+        let events = translate_input(
+            ClientMsg::Wheel { dx: 0.0, dy: -3.0, unit: WheelUnit::Pixel },
+            &mut last,
+        );
+        assert_eq!(
+            events,
+            vec![RemoteInput::Wheel { delta: WHEEL_NOTCH, horizontal: false, x: 1, y: 2 }]
+        );
+
+        // Horizontal is its own event, and both axes at once are two.
+        let events = translate_input(
+            ClientMsg::Wheel { dx: 2.0, dy: 2.0, unit: WheelUnit::Pixel },
+            &mut last,
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], RemoteInput::Wheel { horizontal: false, .. }));
+        assert!(matches!(
+            events[1],
+            RemoteInput::Wheel { delta: WHEEL_NOTCH, horizontal: true, .. }
+        ));
+
+        // No movement, no event.
+        assert!(
+            translate_input(ClientMsg::Wheel { dx: 0.0, dy: 0.0, unit: WheelUnit::Pixel }, &mut last)
+                .is_empty()
+        );
     }
 
     #[test]
     fn key_maps_scancode_release_and_extended() {
-        let mut pos = (0, 0);
+        let mut last = (0, 0);
+        let events = translate_input(
+            ClientMsg::Key { code: "KeyA".into(), pressed: true, caps: false },
+            &mut last,
+        );
+        assert_eq!(
+            events,
+            vec![RemoteInput::Key { scancode: 0x1E, extended: false, down: true }]
+        );
 
-        match one(
-            ClientMsg::Key {
-                code: "KeyA".to_owned(),
-                pressed: true,
-                caps: false,
-            },
-            &mut pos,
-        ) {
-            FastPathInputEvent::KeyboardEvent(flags, code) => {
-                assert_eq!(code, 0x1E);
-                assert!(flags.is_empty());
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let events = translate_input(
+            ClientMsg::Key { code: "KeyA".into(), pressed: false, caps: false },
+            &mut last,
+        );
+        assert_eq!(
+            events,
+            vec![RemoteInput::Key { scancode: 0x1E, extended: false, down: false }]
+        );
 
-        match one(
-            ClientMsg::Key {
-                code: "ArrowUp".to_owned(),
-                pressed: false,
-                caps: false,
-            },
-            &mut pos,
-        ) {
-            FastPathInputEvent::KeyboardEvent(flags, code) => {
-                assert_eq!(code, 0x48);
-                assert!(flags.contains(KeyboardFlags::RELEASE));
-                assert!(flags.contains(KeyboardFlags::EXTENDED));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        // An extended key carries the E0 prefix, which the engine crate turns
+        // into the KBDEXT bit.
+        let events = translate_input(
+            ClientMsg::Key { code: "ArrowUp".into(), pressed: true, caps: false },
+            &mut last,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], RemoteInput::Key { extended: true, .. }));
     }
 
     #[test]
     fn unmapped_key_produces_no_events() {
-        let mut pos = (0, 0);
+        let mut last = (0, 0);
         assert!(
             translate_input(
-                ClientMsg::Key {
-                    code: "Nonexistent".to_owned(),
-                    pressed: true,
-                    caps: false,
-                },
-                &mut pos,
+                ClientMsg::Key { code: "NoSuchKey".into(), pressed: true, caps: false },
+                &mut last,
             )
             .is_empty()
         );
     }
 
-    /// Pinned because the failure it guards against is silent and total: with
-    /// `enable_audio_playback` false, IronRDP puts `NO_AUDIO_PLAYBACK` in the
-    /// Client Info PDU and the server redirects nothing — a registered RDPSND
-    /// channel that simply never carries a byte, which looks exactly like a
-    /// server that has no audio to offer.
-    #[test]
-    fn audio_playback_is_requested_exactly_for_an_audio_target() {
-        let mut target = TargetConfig {
-            name: "win".to_owned(),
-            protocol: crate::config::Protocol::Rdp,
-            subtype: None,
-            host: "127.0.0.1".to_owned(),
-            port: 3389,
-            username: "tester".to_owned(),
-            password: String::new(),
-            vnc_password: String::new(),
-            domain: None,
-            width: 1280,
-            height: 800,
-            security: crate::config::Security::Auto,
-            resize: false,
-            clipboard: false,
-            audio: false,
-            audio_codec: None,
-            render_type: crate::config::RenderType::Full,
-            render_subtype: crate::config::RenderSubtype::Png,
-            render_quality: None,
-            render_motion_subtype: None,
-            render_motion_quality: None,
-            render_motion_debug: false,
-            video_codec: None,
-        };
-        assert!(!build_connector_config(&target).enable_audio_playback);
-        target.audio = true;
-        assert!(build_connector_config(&target).enable_audio_playback);
-    }
-
-    /// The other half of the same silent failure, and the more surprising one.
-    ///
-    /// Windows redirects no audio unless **device** redirection is advertised
-    /// beside it, so an audio target has to put `rdpdr` on the wire even though
-    /// nothing is ever redirected through it. That was worth days to find (see
-    /// the registration in [`register_channels`]) and nothing else in this crate
-    /// would notice its removal: no test fails, no log line changes, and the
-    /// symptom is a session that is merely quiet. Hence pinning the channel names
-    /// themselves.
-    ///
-    /// It is pinned in both directions: a target that did not ask for audio must
-    /// not get device redirection as a side effect.
-    #[test]
-    fn an_audio_target_advertises_rdpdr_beside_the_audio_channels() {
-        use ironrdp::pdu::gcc::ChannelName;
-
-        fn channels_for(audio: bool, resize: bool, clipboard: bool) -> Vec<ChannelName> {
-            let target = TargetConfig {
-                name: "win".to_owned(),
-                protocol: crate::config::Protocol::Rdp,
-                subtype: None,
-                host: "127.0.0.1".to_owned(),
-                port: 3389,
-                username: "tester".to_owned(),
-                password: String::new(),
-                vnc_password: String::new(),
-                domain: None,
-                width: 1280,
-                height: 800,
-                security: crate::config::Security::Auto,
-                resize,
-                clipboard,
-                audio,
-                audio_codec: None,
-                render_type: crate::config::RenderType::Full,
-                render_subtype: crate::config::RenderSubtype::Png,
-                render_quality: None,
-                render_motion_subtype: None,
-                render_motion_quality: None,
-                render_motion_debug: false,
-                video_codec: None,
-            };
-            let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
-            let bridge = audio.then(|| Arc::new(AudioBridge::new()));
-            let connector = register_channels(
-                ClientConnector::new(
-                    build_connector_config(&target),
-                    "127.0.0.1:0".parse().unwrap(),
-                ),
-                &target,
-                clip_tx,
-                bridge,
-            );
-            connector
-                .static_channels
-                .values()
-                .map(|channel| channel.channel_name())
-                .collect()
-        }
-
-        let audio_target = channels_for(true, false, false);
-        assert!(
-            audio_target.contains(&Rdpdr::NAME),
-            "an audio target must advertise rdpdr or the remote redirects nothing: {audio_target:?}"
-        );
-        assert!(audio_target.contains(&Rdpsnd::NAME));
-        assert!(audio_target.contains(&DrdynvcClient::NAME));
-
-        // Everything else on, audio off: no rdpdr, because device redirection is
-        // not a feature this gateway offers on its own.
-        let quiet_target = channels_for(false, true, true);
-        assert!(!quiet_target.contains(&Rdpdr::NAME), "{quiet_target:?}");
-        assert!(!quiet_target.contains(&Rdpsnd::NAME));
-    }
-
     #[test]
     fn refused_remote_clipboard_reads_retry_with_a_bound() {
-        let mut read = PendingClipboardRead::new(ClipboardFormatId::CF_UNICODETEXT);
-        assert_eq!(read.format, ClipboardFormatId::CF_UNICODETEXT);
-        for expected in CLIPBOARD_READ_RETRY_DELAYS {
-            assert_eq!(read.retry_after_failure(), Some(expected));
+        let mut read = PendingClipboardRead::new(CF_UNICODETEXT);
+        let mut delays = Vec::new();
+        while let Some(delay) = read.retry_after_failure() {
+            delays.push(delay);
         }
-        assert_eq!(read.retry_after_failure(), None);
-        assert_eq!(read.retry_after_failure(), None);
+        assert_eq!(delays, CLIPBOARD_READ_RETRY_DELAYS.to_vec());
+        // And it stays exhausted rather than starting over.
+        assert!(read.retry_after_failure().is_none());
     }
 
-    /// The midpoint, and the two ends `scale_ratio` refuses.
-    ///
-    /// 150 is the midpoint between the supported 1x and 2x densities. The
-    /// out-of-range pair matter because a client computes the number from
-    /// `devicePixelRatio`, and a screen that reports nonsense should read as the
-    /// density that asks the remote for least, not as an absurd one.
     #[test]
     fn a_hosts_density_quantizes_at_the_midpoint() {
-        for scale in [0, 1, 99, 100, 125, 149] {
-            assert_eq!(Density::from_host(scale), Density::One, "{scale}");
-        }
-        for scale in [150, 175, 200, 300, 400] {
-            assert_eq!(Density::from_host(scale), Density::Two, "{scale}");
-        }
-        // Past `SCALE_MAX`, so `scale_ratio` reports 1.0 rather than clamping.
-        for scale in [401, 500, u16::MAX] {
-            assert_eq!(Density::from_host(scale), Density::One, "{scale}");
-        }
+        assert_eq!(Density::from_host(100), Density::One);
+        assert_eq!(Density::from_host(125), Density::One);
+        assert_eq!(Density::from_host(149), Density::One);
+        assert_eq!(Density::from_host(150), Density::Two);
+        assert_eq!(Density::from_host(200), Density::Two);
+        assert_eq!(Density::from_host(300), Density::Two);
+        // A value no screen could have is 1x rather than a panic or a huge scale.
+        assert_eq!(Density::from_host(0), Density::One);
     }
 
-    /// Both percentages must sit inside MS-RDPBCGR's legal 100..=500, or the
-    /// server ignores the scale factor entirely and the desktop comes back
-    /// supersampled instead of scaled — a failure that looks like everything
-    /// working at half size.
+    /// Out of range does not mean "the density is dropped" but "the desktop is
+    /// not scaled at all" — a server that finds either scale factor illegal
+    /// ignores both — so this end, which invents the number, must not.
     #[test]
     fn a_density_is_a_legal_scale_factor_and_an_integral_scale() {
-        assert_eq!(Density::One.percent(), 100);
-        assert_eq!(Density::Two.percent(), 200);
         for density in [Density::One, Density::Two] {
             assert!((100..=500).contains(&density.percent()), "{density:?}");
+            // And the engine crate agrees, so nothing is silently adjusted on
+            // the way out.
+            assert_eq!(freerdp::sanitise_scale(density.percent()), density.percent());
+            // The scale and the percent are exact inverses, which is what keeps
+            // a client's points and the remote's pixels from rounding apart.
+            assert_eq!(density.scale(), density.percent() as f32 / 100.0);
         }
-        assert_eq!(Density::One.scale(), UNSCALED);
-        assert_eq!(Density::Two.scale(), 2.0);
     }
 
-    /// `DefaultSize` is the one size here that is configured rather than measured,
-    /// so it is the one that has to be read as points.
     #[test]
     fn the_configured_size_is_points_once_a_density_is_in_play() {
         assert_eq!(Density::One.pixels((1280, 800)), (1280, 800));
         assert_eq!(Density::Two.pixels((1280, 800)), (2560, 1600));
     }
 
-    /// Two layouts of the same size but different densities are not the same
-    /// request. Without this, a client dragged between a 1x and a 2x screen of the
-    /// same size — or one whose window has not moved at all when the resolution
-    /// clamps both requests to the same pixels — would have its density dropped as
-    /// a repeat, and the browser never restates it.
     #[test]
     fn a_layouts_density_is_part_of_what_makes_it_a_new_request() {
-        let one = Layout {
-            w: 1280,
-            h: 800,
-            density: Density::One,
-        };
-        assert_eq!(one.adjusted(), one);
-        assert_ne!(one, Layout { density: Density::Two, ..one });
+        let one = Layout { w: 1280, h: 800, density: Density::One };
+        let two = Layout { w: 1280, h: 800, density: Density::Two };
+        assert_ne!(one, two, "the same pixels at another density is a new request");
 
-        // The protocol's own limits, applied where the comparison happens: an odd
-        // width lands on the even one beside it and both axes clamp to 200..=8192,
-        // so a request already at the adjusted size is recognised as a repeat.
-        let odd = Layout { w: 1281, ..one }.adjusted();
-        assert_eq!((odd.w, odd.h), (1280, 800));
-        let huge = Layout {
-            w: 10000,
-            h: 100,
-            ..one
-        }
-        .adjusted();
-        assert_eq!((huge.w, huge.h), (8192, 200));
+        let mut pending = None;
+        let mut retry_at = None;
+        install_layout(two, one, &mut pending, &mut retry_at);
+        assert!(pending.is_some(), "a density change alone is worth asking for");
+        assert!(retry_at.is_some());
     }
 
-    /// A layout is asked for more than once, and a bounded number of times.
-    ///
-    /// Both halves matter and they pull against each other. More than once, because
-    /// the Display Control channel may not have its capabilities yet — a resize
-    /// reported from `connected` hits exactly that — and because Windows discards a
-    /// layout sent while the session it is starting has not settled, even after the
-    /// channel is ready; nothing asks again from the other end, since a client
-    /// states a size or a density once per attach and dedupes it. Bounded, because
-    /// a server that will never honour one must not be asked forever.
+    /// The whole reason a layout is scheduled rather than sent once: the remote
+    /// may ignore it in silence, so it is asked again — and not forever.
     #[test]
     fn a_layout_is_asked_for_more_than_once_and_not_forever() {
-        let wanted = Layout { w: 2560, h: 1600, density: Density::Two };
-        let mut pending = PendingLayout::new(wanted);
-        assert_eq!(pending.layout, wanted);
-        for expected in LAYOUT_RETRY_DELAYS {
-            assert_eq!(pending.wait_again(), Some(expected));
+        let mut pending = PendingLayout::new(Layout { w: 1280, h: 800, density: Density::One });
+        let mut delays = Vec::new();
+        while let Some(delay) = pending.wait_again() {
+            delays.push(delay);
         }
-        assert_eq!(pending.wait_again(), None);
-        assert_eq!(pending.wait_again(), None);
-        // Long enough to outlast a logon, which is one of the things being waited out.
-        let total: Duration = LAYOUT_RETRY_DELAYS.iter().sum();
-        assert!(total >= Duration::from_secs(10), "{total:?}");
+        assert_eq!(delays, LAYOUT_RETRY_DELAYS.to_vec());
+        assert!(pending.wait_again().is_none(), "the schedule is exhausted, not restarted");
     }
 
-    /// Re-expressing a size at another density keeps the *points* and scales the
-    /// *pixels* — which is what lets a viewport reported at one density and a
-    /// screen change to another merge into a single layout instead of two.
     #[test]
     fn a_size_carried_to_another_density_keeps_its_points() {
         let one = Layout { w: 1280, h: 800, density: Density::One };
-        // 1x → 2x doubles the pixels; the same window, twice as sharp.
-        assert_eq!(one.at_density(Density::Two), Layout { w: 2560, h: 1600, density: Density::Two });
-        // The same density is a no-op, down to the struct.
+        let two = one.at_density(Density::Two);
+        assert_eq!(two, Layout { w: 2560, h: 1600, density: Density::Two });
+        // And back again, exactly — the two densities are integral multiples.
+        assert_eq!(two.at_density(Density::One), one);
+        // A no-op conversion is the identity, not a rounding of itself.
         assert_eq!(one.at_density(Density::One), one);
-        // And it round-trips.
-        assert_eq!(one.at_density(Density::Two).at_density(Density::One), one);
     }
 
-    /// `install_layout` schedules a genuinely new want, leaves the desktop alone
-    /// when it is already there, and does not restart the clock on a repeat — the
-    /// three cases that keep a deduped, retrying client from either stalling or
-    /// spinning.
     #[test]
     fn a_layout_is_scheduled_only_when_it_is_new() {
         let current = Layout { w: 1280, h: 800, density: Density::One };
         let mut pending = None;
         let mut retry_at = None;
 
-        // A different size schedules, with its first attempt due immediately.
-        let bigger = Layout { w: 1920, h: 1080, density: Density::One };
-        install_layout(bigger, current, &mut pending, &mut retry_at);
-        assert_eq!(pending.as_ref().map(|p| p.layout), Some(bigger));
-        assert!(retry_at.is_some());
+        // The desktop already agrees — including after the size adjustment, which
+        // is what stops an odd viewport width asking forever.
+        install_layout(Layout { w: 1281, h: 800, density: Density::One }, current, &mut pending, &mut retry_at);
+        assert!(pending.is_none(), "1281 adjusts to the 1280 already on screen");
 
-        // A repeat of the same want does not reset the attempt count: burn one
-        // attempt, then re-install the identical layout and confirm the count held.
+        // A real change schedules.
+        let wanted = Layout { w: 1600, h: 900, density: Density::One };
+        install_layout(wanted, current, &mut pending, &mut retry_at);
+        assert_eq!(pending.as_ref().map(|p| p.layout), Some(wanted));
+
+        // Repeating it does not restart the schedule.
         pending.as_mut().unwrap().wait_again();
         let attempts = pending.as_ref().unwrap().attempts;
-        install_layout(bigger, current, &mut pending, &mut retry_at);
-        assert_eq!(pending.as_ref().unwrap().attempts, attempts);
+        install_layout(wanted, current, &mut pending, &mut retry_at);
+        assert_eq!(pending.as_ref().unwrap().attempts, attempts, "the count survives a repeat");
 
-        // Asking for exactly what is already on screen clears the schedule — down
-        // to an odd width the protocol would round to the desktop's even one.
-        install_layout(Layout { w: 1281, ..current }, current, &mut pending, &mut retry_at);
+        // And a request that matches the desktop again clears it.
+        install_layout(current, current, &mut pending, &mut retry_at);
         assert!(pending.is_none());
         assert!(retry_at.is_none());
     }
 
-    /// The distinction the retry depends on: a channel that is not ready yet is
-    /// worth asking again, a layout the encoder refused is not. Collapsing them
-    /// would either abandon a density over a channel that was merely still opening,
-    /// or re-encode a broken layout on every tick and warn each time.
+    /// The engine crate's size rule is the one this end compares against. If they
+    /// ever disagree, a viewport whose width the crate adjusts would look like a
+    /// change on every report and ask forever.
+    #[test]
+    fn the_adjusted_layout_is_what_the_engine_crate_would_send() {
+        for (w, h) in [(1281u32, 800u32), (1u32, 1u32), (10_000, 10_000), (1280, 800)] {
+            let layout = Layout { w, h, density: Density::Two }.adjusted();
+            assert_eq!((layout.w, layout.h), freerdp::sanitise_size(w, h));
+            assert_eq!(layout.w % 2, 0, "the width must be even");
+            assert!((200..=8192).contains(&layout.w) && (200..=8192).contains(&layout.h));
+            // The density rides along untouched.
+            assert_eq!(layout.density, Density::Two);
+        }
+    }
+
+    /// Only one of the three outcomes is worth repeating, and telling them apart
+    /// is the whole reason [`Asked`] is not a bool.
     #[test]
     fn only_a_transient_outcome_is_worth_repeating() {
-        let again = [Asked::Sent, Asked::NotReady];
-        let done = [Asked::Redundant, Asked::Refused];
-        for outcome in again {
-            assert!(!done.contains(&outcome), "{outcome:?}");
-        }
-        // `Sent` is in the retry set deliberately: this protocol acknowledges
-        // nothing, so a written layout the server silently dropped is
-        // indistinguishable from one it is about to act on.
-        assert!(again.contains(&Asked::Sent));
-    }
+        let session = || {
+            // A session that never connects, purely for its `Input` handle: the
+            // queue takes commands whether or not anything is draining it, which
+            // is exactly the "a call after the session ended is dropped" contract.
+            Session::start(Connect {
+                host: "127.0.0.1".into(),
+                port: 1,
+                connect_timeout: Duration::from_millis(1),
+                ..Connect::default()
+            })
+        };
+        let (session, _events) = session();
+        let input = session.input();
+        let current = Layout { w: 1280, h: 800, density: Density::One };
 
-    /// Why [`display_control_ready`] has to exist: IronRDP will happily encode a
-    /// monitor layout for a channel that has not had the server's capabilities,
-    /// and the server discards such a layout without answering.
-    ///
-    /// Pinned in both halves, so this fails if IronRDP ever grows the check
-    /// itself — at which point the gate is redundant rather than load-bearing, and
-    /// someone should know before deleting it. A Retina client sends its density
-    /// on connect and so lands in that window every single time; the bug it caused
-    /// was a desktop stuck at 1x while this end declared 2x on every later resize,
-    /// which reads as "resize to window gives half the size I asked for".
-    #[test]
-    fn ironrdp_encodes_a_layout_for_a_channel_that_is_not_ready_yet() {
-        let client = DisplayControlClient::new(|_caps| Ok(Vec::new()));
-        assert!(
-            !client.ready(),
-            "a fresh Display Control channel must not claim to be usable"
-        );
-        assert!(
-            client
-                .encode_single_primary_monitor(1, 2560, 1600, Some(Density::Two.percent()), None)
-                .is_ok(),
-            "IronRDP encodes regardless, so nothing below this gate will refuse the write"
-        );
-    }
-
-    /// The one thing here that is IronRDP's rather than ours, pinned because a
-    /// version bump could remap it silently and the symptom would be a desktop
-    /// that resizes but never sharpens.
-    ///
-    /// `DeviceScaleFactor` is forced to 100% beside the desktop factor, which is
-    /// also what FreeRDP's SDL clients send for a Retina display — the field only
-    /// admits 100/140/180, so it cannot carry 200 anyway.
-    #[test]
-    fn a_layout_reaches_the_monitor_layout_as_both_scale_factors() {
-        use ironrdp::displaycontrol::pdu::{DeviceScaleFactor, DisplayControlMonitorLayout};
-
-        let layout = DisplayControlMonitorLayout::new_single_primary_monitor(
-            2560,
-            1600,
-            Some(Density::Two.percent()),
-            None,
-        )
-        .expect("2560x1600 at 200% is a legal single-monitor layout");
-        let monitor = &layout.monitors()[0];
-        assert_eq!(monitor.dimensions(), (2560, 1600));
-        assert_eq!(monitor.desktop_scale_factor(), Some(200));
+        // Before the remote offers the channel, nothing can go out — and this is
+        // the one outcome worth asking again on.
         assert_eq!(
-            monitor.device_scale_factor(),
-            Some(DeviceScaleFactor::Scale100Percent)
+            request_layout(input, false, current, Layout { w: 1600, h: 900, density: Density::One }),
+            Asked::NotReady
         );
+        // With the channel up, a real change is sent.
+        assert_eq!(
+            request_layout(input, true, current, Layout { w: 1600, h: 900, density: Density::One }),
+            Asked::Sent
+        );
+        // And the desktop it already has is not asked for at all, because the
+        // answer would be a full renegotiation of the session.
+        assert_eq!(request_layout(input, true, current, current), Asked::Redundant);
+        // Including through the size adjustment.
+        assert_eq!(
+            request_layout(input, true, current, Layout { w: 1281, h: 800, density: Density::One }),
+            Asked::Redundant
+        );
+    }
+
+    /// The pack drops the fourth byte and keeps the order. Its own test because
+    /// the framebuffer's format is a decision made in the engine crate — RGBX32,
+    /// chosen so a consumer that encodes finds R,G,B in memory order — and a
+    /// change to it would otherwise show up as wrong colours on a screen.
+    #[test]
+    fn packing_drops_the_fourth_byte_and_keeps_rgb_order() {
+        let frame = Frame {
+            width: 2,
+            height: 2,
+            stride: 8,
+            pixels: vec![
+                1, 2, 3, 0xFF, 4, 5, 6, 0xFF, // row 0
+                7, 8, 9, 0xFF, 10, 11, 12, 0xFF, // row 1
+            ],
+        };
+        let mut buf = Vec::new();
+        pack_rgb(&frame, rect(0, 0, 1, 1), &mut buf);
+        assert_eq!(buf, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+        // And a sub-rectangle takes the right columns of the right rows, which is
+        // where a stride mistake would shear the picture.
+        pack_rgb(&frame, rect(1, 1, 1, 1), &mut buf);
+        assert_eq!(buf, vec![10, 11, 12]);
     }
 }

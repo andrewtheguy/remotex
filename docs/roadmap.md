@@ -73,6 +73,27 @@ It would not bring the probe back either. The client-side codec negotiation was 
 and removed (see [`architecture.md`](architecture.md)); a third codec is a third value
 for a key, not a reason to ask the browser again.
 
+### RDP audio, over FreeRDP's `rdpsnd`
+
+`audio` is refused at config parse time on every target while this is missing —
+a key that silently does nothing is worse than a parse error naming why, and that
+error is this entry.
+
+Nothing about it is speculative. The channel is compiled into the archives the
+gateway already links, and everything downstream of it is protocol-agnostic and
+untouched: `/ws/audio`, `AudioBridge`, `SessionManager::arm_audio`/`evict_audio`,
+`opus_stream`, `pcm_stream` and `pcm48` all still work and are all still tested.
+What is missing is the piece between them — a custom `rdpsndDevicePlugin` that
+hands each wave buffer to the bridge, in place of the hand-written MS-RDPEA state
+machine that went with IronRDP. That machine was 803 lines because IronRDP had no
+DVC audio client; FreeRDP has one, so this should be much smaller.
+
+The static and dynamic halves are both in the archives, and which one a server
+picks is the server's choice — the old engine implemented both for that reason.
+Note also `rdpdr`: a Windows host gates audio redirection on device redirection
+being advertised, which is why it is in the channel set even though nothing is
+ever redirected through it.
+
 ### Source payloads the gateway decodes instead of forwarding
 
 Three places where a remote could hand this gateway something closer to what the
@@ -80,12 +101,27 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **IronRDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics` and use its real
+- **RDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics` and use its real
   frame boundaries, acknowledgments and surface compositor, then separately assess
-  AVC420 pass-through. The tested Windows server offers the channel and the pinned
-  IronRDP revision contains a client, so the parts exist; what makes this large is
-  that it is a second graphics pipeline beside the one every engine shares, not an
-  option on it.
+  AVC420 pass-through. The tested Windows server offers the channel and FreeRDP
+  contains a full client for it — it is compiled into the archives — so the parts
+  exist; what makes this large is that it is a second graphics pipeline beside the
+  one every engine shares, not an option on it.
+
+  **And it does not currently work against the host it matters for**, which has to
+  come first. With `SupportGraphicsPipeline` advertised, FreeRDP decoded 21 surface
+  commands against a Windows 11 host with no errors or warnings and produced a
+  framebuffer that summed to *exactly* black; with it off, the same host, the same
+  build and the same second painted a real desktop. Ruled out by measurement: the
+  host being blank (IronRDP painted it), a decode failure (ClearCodec and
+  Progressive both logged clean), missing H.264, `suppressOutput`, an unbound
+  pipeline, and `DeactivateClientDecoding` ordering. The next observation to make
+  is instrumenting `gdi_OutputUpdate` (`libfreerdp/gdi/gfx.c`) to print
+  `surface->outputMapped` and `nbRects` per call — its early return when
+  `nbRects == 0` is the only path that decodes a surface command and produces no
+  `EndPaint`, which is the observed signature. `gdi->graphicsReset`, which
+  `gfx.c` initialises to TRUE with a comment calling it a workaround "for now", is
+  worth checking before anything else.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to

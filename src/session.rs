@@ -544,7 +544,7 @@ impl SessionManager {
         // The negotiated format when the remote's channel is up, and otherwise the
         // only format this gateway ever advertises — which is not a guess: with one
         // advertised format that is the only format a wave buffer can be in (see
-        // [`crate::rdp_audio`]), so the decoder can be configured before any
+        // the RDP audio channel), so the decoder can be configured before any
         // negotiation has happened.
         //
         // Whether it *has* is worth a line, because it is the only place the
@@ -909,13 +909,16 @@ impl SessionManager {
 
 /// Spawn the protocol engine for `target` on its own thread.
 ///
-/// The engine runs on a dedicated thread with a current-thread runtime:
-/// IronRDP's `read_pdu` future is not `Send`-general (it holds a
-/// `&dyn PduHint` across await), so it can't live on the shared multi-thread
-/// runtime via `tokio::spawn`; a current-thread runtime imposes no `Send`
-/// bound. The VNC engine doesn't need this, but sharing the one spawn path
-/// keeps the seam uniform. The engine ends when the remote host disconnects
-/// (the session outlives any one browser — see [`SessionManager`]).
+/// The engine runs on a dedicated thread with a current-thread runtime. The
+/// reason has changed and the arrangement has not: it used to be that IronRDP's
+/// `read_pdu` future was not `Send`-general, so it could not live on the shared
+/// multi-thread runtime. The RDP engine is FreeRDP now, which owns *its own* OS
+/// thread and a blocking event loop — so what this isolates is a session's whole
+/// lifetime from the runtime serving HTTP, which matters more rather than less
+/// now that a C library is in there. The VNC engine doesn't need either
+/// property, but sharing the one spawn path keeps the seam uniform. The engine
+/// ends when the remote host disconnects (the session outlives any one browser —
+/// see [`SessionManager`]).
 ///
 /// Scalability: this costs one OS thread + one current-thread runtime per
 /// engine — fine here, since multi session is permanently out of scope

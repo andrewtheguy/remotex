@@ -60,7 +60,7 @@ impl PcmFormat {
 /// the only one a wave buffer can be in.
 ///
 /// One format rather than a list, and that is load-bearing beyond simplicity —
-/// see [`crate::rdp_audio`]: RDPSND identifies a buffer's format by an index,
+/// see MS-RDPEA: RDPSND identifies a buffer's format by an index,
 /// and with one advertised format the index can only mean this.
 pub const PCM_CD_QUALITY: PcmFormat = PcmFormat {
     channels: 2,
@@ -98,7 +98,7 @@ impl AudioBridge {
     ///
     /// MS-RDPEA carries audio over *either* the static `rdpsnd` channel or the
     /// dynamic `AUDIO_PLAYBACK_DVC`, and remotex registers both because which one
-    /// a server uses is the server's choice (see [`crate::rdp_audio`]). Nothing in
+    /// a server uses is the server's choice. Nothing in
     /// the protocol says a server may drive both at once, and none does — but if
     /// one ever did, both would push buffers into this one queue and the result
     /// would be interleaved noise with no error anywhere to explain it. First
@@ -201,7 +201,7 @@ impl AudioListener {
     ///
     /// Read, never waited for: nothing about the response depends on the answer,
     /// because the gateway advertises exactly one format and so the header is
-    /// writable before any negotiation (see [`crate::rdp_audio`]). It is worth a log
+    /// writable before any negotiation. It is worth a log
     /// line, and it is where a future "the remote is quiet" indicator would come
     /// from.
     pub fn negotiated_format(&self) -> Option<PcmFormat> {

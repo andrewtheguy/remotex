@@ -14,7 +14,7 @@ browser SPA over loopback or the network
    │  /ws/audio: the audio format, then binary audio frames
    ▼
 axum server ── single session slot ── protocol engine
-                                         ├─ RDP through IronRDP
+                                         ├─ RDP through FreeRDP
                                          └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
@@ -23,8 +23,10 @@ or as VP9/H.264 streams, according to the target's render plan. Tiles are lossle
 PNG by default, with JPEG and WebP available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the experimental
-`ard-high-performance` RFB 003.889 path. RDP audio is either encoded as Opus or
-passed through as PCM and sent on `/ws/audio`, never on the picture queue.
+`ard-high-performance` RFB 003.889 path. Redirected audio is either encoded as Opus
+or passed through as PCM and sent on `/ws/audio`, never on the picture queue —
+though nothing currently feeds it, since the RDP engine's `rdpsnd` is unbound and
+`audio` is refused at parse time.
 
 ## Constraints
 
@@ -43,12 +45,12 @@ passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 | `server.rs`, `auth.rs` | HTTP routes, SPA serving, login sessions |
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
-| `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
+| `rdp.rs` | RDP session over FreeRDP: framebuffer, input, cursor, clipboard, resize |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
 | `vp9.rs`, `h264.rs` | libvpx and openh264 — the default video codec and the other one |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding or PCM passthrough, resampling, MS-RDPEA |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling. The MS-RDPEA client that fed them went with IronRDP — see docs/roadmap.md |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -735,19 +737,31 @@ RDP and RFB have no portable application ping.
 
 ### RDP
 
-IronRDP handles TLS and optional NLA/CredSSP. The engine maintains a decoded
-framebuffer, compares dirty rectangles with a shadow of pixels already sent,
-splits remaining damage into bands, and encodes PNG off the protocol read loop.
-Input uses fast-path PDUs after DOM-code-to-scancode mapping.
+A statically prebuilt **FreeRDP 3** does the protocol, behind the safe wrapper in
+the `freerdp` crate (`github.com/andrewtheguy/libfreerdp-prebuilt`) — the same
+prebuilt-archive bargain libvpx and libopus already strike here, so this build
+needs no cmake, no pkg-config, no OpenSSL and no libclang. FreeRDP owns the socket
+and does TCP, TLS and optional NLA/CredSSP on a thread of its own, keeping a
+complete framebuffer in Rust-owned memory and posting an event per damaged
+rectangle. The engine compares those rectangles with a shadow of pixels already
+sent, splits the remainder into bands, and encodes off the event loop. Input is
+mapped from DOM codes to scancodes and queued to FreeRDP's thread.
 
-The pointer is not part of that framebuffer. IronRDP is asked for the server's
-pointer updates rather than for compositing them
-(`pointer_software_rendering: false`), and each decoded shape goes to the client
-as `cursor`, which draws it on its own hardware pointer. A mouse move therefore
-costs the session nothing at all, where a composited pointer put every one of
-them through damage, the flush interval, an encode, the socket, a decode and a
-paint. The server's own pointer *positions* are dropped: the browser's pointer is
-already where the mouse is, and nothing here can move a hardware pointer.
+It replaced IronRDP, which was not stable enough against real Windows hosts. One
+protocol decision came with the swap and is worth knowing: the engine does **not**
+advertise the Graphics Pipeline (EGFX). Against a Windows 11 host with it
+advertised, FreeRDP decoded 21 surface commands with no errors and produced a
+framebuffer that summed to exactly black; without it, the same host and the same
+build painted a real desktop. The legacy bitmap path is also what IronRDP used, so
+this is like-for-like rather than a second simultaneous change.
+
+The pointer is not part of that framebuffer. RDP servers send the cursor's shape
+rather than drawing it, and each shape goes to the client as `cursor`, which draws
+it on its own hardware pointer. A mouse move therefore costs the session nothing
+at all, where compositing the pointer into the framebuffer put every one of them
+through damage, the flush interval, an encode, the socket, a decode and a paint.
+The server's own pointer *positions* are dropped: the browser's pointer is already
+where the mouse is, and nothing here can move a hardware pointer.
 
 With `resize = true`, the Display Control Virtual Channel applies explicit
 desktop-size requests, and also matches the client's display density: a monitor
@@ -757,12 +771,20 @@ stretched. The connect itself is always 1x — the density belongs to whichever
 client attaches, which has not spoken yet — so a Retina client costs one
 reactivation. RDP reports no scale factor back, so the density here is declared
 rather than measured. With `clipboard = true`, MS-RDPECLIP carries
-`CF_UNICODETEXT` with CRLF/LF conversion. With `audio = true`, the engine
-negotiates the static and dynamic MS-RDPEA transports described above.
+`CF_UNICODETEXT` with CRLF/LF conversion.
 
-A size change that is *real* costs a Deactivation-Reactivation Sequence; asking
-twice for the same size triggers it once, and a request equal to the current size
-never triggers it. That sequence can fail and end the session — see
+**`audio` is refused at parse time on every target** while the FreeRDP engine's
+`rdpsnd` channel is unbound. The channel is compiled into the archives and
+everything downstream of it — the audio socket, the bridge, the encoders — is
+protocol-agnostic and untouched, so this is a "not yet" rather than a "never".
+See [`docs/roadmap.md`](roadmap.md).
+
+A size change that is *real* costs a Deactivation-Reactivation Sequence, which
+FreeRDP runs internally and reports as a new desktop size; asking twice for the
+same size triggers it once, and a request equal to the current size never
+triggers it. A layout is asked for on a bounded schedule rather than once,
+because a Windows host discards one sent before the session it is starting has
+settled and acknowledges nothing either way — measured through both engines. See
 [`docs/known-issues.md`](known-issues.md).
 
 ### VNC

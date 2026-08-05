@@ -57,12 +57,6 @@ const QUIET: Duration = Duration::from_millis(300);
 /// Only the target profile is taken from it: the site password is the tests' own, so
 /// that `common::login` works, and the listener is ephemeral on localhost.
 async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-    });
-
     let path = std::env::var("REMOTEX_PROBE_CONFIG")
         .expect("set REMOTEX_PROBE_CONFIG to a config file holding a real RDP target");
     let target = std::env::var("REMOTEX_PROBE_TARGET")

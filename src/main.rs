@@ -9,13 +9,6 @@ use remotex::server;
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Install the ring crypto provider as the process default. ironrdp-tls builds
-    // its rustls ClientConfig with `ClientConfig::builder()`, which requires a
-    // process-wide default provider to be installed first.
-    tokio_rustls::rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let cli = Cli::parse();
 
     match cli.command {

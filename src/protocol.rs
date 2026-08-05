@@ -652,7 +652,7 @@ pub const MAX_CURSOR_DIM: u16 = 256;
 /// The remote pointer shape, for engines whose server does **not** composite
 /// the cursor into the framebuffer and hands the shape over instead (the VNC
 /// Cursor pseudo-encoding — see [`crate::vnc`] — and RDP's pointer updates,
-/// which [`crate::rdp`] forwards rather than letting IronRDP draw them). The
+/// which [`crate::rdp`] forwards rather than compositing into the framebuffer). The
 /// browser draws it locally, anchoring the image so that `(hx, hy)` — the
 /// hotspot — lands on the pointer position, which is what lets the pointer move
 /// with the mouse instead of with the framebuffer.
