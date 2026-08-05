@@ -14,7 +14,10 @@ resize you ask for: only plain `vnc` lets the window drive the remote's size
 continuously — see [`docs/known-issues.md`](docs/known-issues.md) for what RDP and
 Apple Screen Sharing do with a stream of them.
 
-- RDP uses [IronRDP](https://crates.io/crates/ironrdp).
+- RDP uses **FreeRDP 3**, linked from static archives that
+  [libfreerdp-prebuilt](https://github.com/andrewtheguy/libfreerdp-prebuilt) builds
+  once per target — so this project still builds with `cargo build` alone: no cmake,
+  no pkg-config, no OpenSSL to install and no libclang.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
