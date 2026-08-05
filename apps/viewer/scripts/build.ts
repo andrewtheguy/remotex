@@ -1,6 +1,6 @@
-// Bundle the shell: one main process, two preloads, two documents.
+// Bundle the shell: one main process, one preload, two documents.
 //
-// CommonJS for the first three, and not a preference: a sandboxed preload is loaded
+// CommonJS for the first two, and not a preference: a sandboxed preload is loaded
 // as a single CommonJS file, and Electron's own entry point is `require`d. The two
 // shell documents are ordinary modules in a browser, because that is what they are.
 
@@ -44,18 +44,15 @@ export async function build(): Promise<string> {
   });
   throwOnFailure(main, "main");
 
-  const preloads = await Bun.build({
-    entrypoints: [
-      join(root, "src/preload/client.ts"),
-      join(root, "src/preload/shell.ts"),
-    ],
+  const preload = await Bun.build({
+    entrypoints: [join(root, "src/preload/bridge.ts")],
     outdir: dist,
     target: "node",
     format: "cjs",
     external: ["electron"],
     naming: "[dir]/[name].cjs",
   });
-  throwOnFailure(preloads, "preload");
+  throwOnFailure(preload, "preload");
 
   const pages = await Bun.build({
     entrypoints: [

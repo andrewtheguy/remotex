@@ -358,7 +358,7 @@ async function openConfiguration(): Promise<void> {
     show: false,
     backgroundColor: "#101014",
     webPreferences: {
-      preload: join(distDir, "shell.cjs"),
+      preload: join(distDir, "bridge.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
