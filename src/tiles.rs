@@ -7,7 +7,7 @@ use crate::protocol::{CELL_H, CELL_W};
 
 /// A rectangle of the framebuffer, in pixels, with **inclusive** edges.
 ///
-/// Inclusive because that is how IronRDP reports a region, and converting once at
+/// Inclusive because that is how RFB reports a rectangle, and converting once at
 /// the boundary beats converting at every use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {

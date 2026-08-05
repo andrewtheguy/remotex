@@ -26,7 +26,8 @@ pub enum Security {
 }
 
 impl Security {
-    /// `(enable_tls, enable_credssp)` for the IronRDP connector config.
+    /// `(enable_tls, enable_credssp)`, which is the shape both the config file
+    /// and the RDP engine's own security selection are written in.
     pub fn flags(self) -> (bool, bool) {
         match self {
             Security::Auto => (true, true),
@@ -37,7 +38,7 @@ impl Security {
 }
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
-/// the same browser protocol (docs/architecture.md): `rdp` via IronRDP
+/// the same browser protocol (docs/architecture.md): `rdp` via FreeRDP
 /// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
 /// with `subtype = "ard"`, Apple Screen Sharing Standard mode over RFB 3.8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -625,24 +626,39 @@ impl TargetConfig {
     /// the "auto resize" both clients offer — as opposed to resizing when the user
     /// asks for it, which is [`Self::resize`] and nothing more.
     ///
-    /// Plain `vnc` only, and deliberately not a config key: it is a statement about
-    /// which engines survive a stream of resizes, which the operator has no way to
-    /// know and no way to change. DesktopSize/ExtendedDesktopSize renegotiation is
-    /// the one resize path here that costs nothing but a new framebuffer.
+    /// Plain `vnc` and `rdp`, and deliberately not a config key: it is a statement
+    /// about which engines survive a stream of resizes, which the operator has no
+    /// way to know and no way to change. DesktopSize/ExtendedDesktopSize
+    /// renegotiation is the one resize path here that costs nothing but a new
+    /// framebuffer.
     ///
-    /// The two that are excluded each have a fault in
-    /// [`docs/known-issues.md`](../docs/known-issues.md), and both are reached far
-    /// more often by a window that reports continuously than by a person pressing a
-    /// button: RDP answers a real size change with a Deactivation-Reactivation
-    /// Sequence that sometimes ends the session, and `ard-high-performance`
-    /// renegotiates a virtual display that can be left wrong for the rest of the
+    /// **RDP holds this back, and it is on trial.** It was withheld for the
+    /// reactivation fault in [`docs/known-issues.md`](../docs/known-issues.md) — a
+    /// real size change answered by a Deactivation-Reactivation Sequence that
+    /// sometimes ended the session — and that fault was measured entirely against
+    /// IronRDP, which no longer drives this path. FreeRDP runs the sequence inside
+    /// `freerdp_check_event_handles`, so the failure cannot occur as it was written
+    /// down, and whether anything underneath it survived the engine swap is
+    /// unmeasured. Withholding the permission is what stops it being measured: the
+    /// fault is reached far more often by a window reporting continuously than by a
+    /// person pressing a button, so the containment and the experiment are the same
+    /// switch. If sessions start ending on a drag, this line is the first thing to
+    /// put back.
+    ///
+    /// `ard-high-performance` keeps the exclusion, and for a reason the engine swap
+    /// did not touch: a viewport report replaces its virtual display's mode, and
+    /// doing that on every drag is how the desktop is left wrong for the rest of the
     /// session. Standard `ard` refuses `resize` outright and so never reaches here
     /// with it set.
     ///
     /// Manual resize stays available on all of them. A fault the user provoked, once,
     /// with a visible cause is a different thing from one a window drag walks into.
     pub fn auto_resize(&self) -> bool {
-        self.resize && self.protocol == Protocol::Vnc && self.subtype.is_none()
+        self.resize
+            && match self.protocol {
+                Protocol::Rdp => true,
+                Protocol::Vnc => self.subtype.is_none(),
+            }
     }
 
     /// The tile encoders to use for this target. This is the whole of the render
@@ -919,16 +935,29 @@ impl ConfigFile {
             );
         }
         for target in &config.targets {
-            // Audio is the mirror image of `resize`: refused outright rather than
-            // accepted and left inert, because there is nothing on the other side
-            // of the protocol to be uncertain about. This gateway implements audio
-            // only through MS-RDPEA, so the key can never do anything on VNC.
+            // **Audio is refused on every target for now**, and this is a wider
+            // rule than the one it replaced. Until the RDP engine moved to
+            // FreeRDP it was refused only on VNC, because MS-RDPEA was the one
+            // audio channel this gateway spoke and RDP was the only protocol
+            // carrying it. That engine's hand-written RDPEA client went with
+            // IronRDP; FreeRDP's `rdpsnd` is compiled into the archives the
+            // gateway links and nothing binds it yet, so RDP has temporarily
+            // joined VNC in having nowhere to put the key.
+            //
+            // Refused rather than accepted and left inert, for the same reason
+            // as before: a key that silently does nothing is worse than a parse
+            // error that names why, and this error is also the roadmap entry.
+            // Everything downstream of the channel — the audio socket, the
+            // bridge, the encoders — is protocol-agnostic and untouched, so
+            // rebuilding this is `rdpsnd` and nothing else.
             anyhow::ensure!(
-                !target.audio || target.protocol == Protocol::Rdp,
-                "target {:?} is protocol {:?} but sets audio, which only \"rdp\" targets \
-                 support — MS-RDPEA is the one audio channel the gateway speaks",
-                target.name,
-                target.protocol.name()
+                !target.audio,
+                "target {:?} sets audio, which no target supports at the moment: the RDP \
+                 engine now runs on FreeRDP and its rdpsnd channel is not bound yet. The \
+                 channel is in the archives and everything downstream of it still works, so \
+                 this is a \"not yet\" rather than a \"never\" — see docs/roadmap.md. Remove \
+                 the key to start the session without sound.",
+                target.name
             );
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
@@ -2787,11 +2816,11 @@ mod tests {
     }
 
     /// `resize` is permission to resize when asked; letting the window drive it is
-    /// a second permission the gateway decides, and only plain `vnc` has it. Each
-    /// engine that is refused it is named here, so removing one from the rule has
-    /// to be a deliberate edit to this list.
+    /// a second permission the gateway decides. Each engine that is refused it is
+    /// named here, so removing one from the rule has to be a deliberate edit to
+    /// this list.
     #[test]
-    fn only_plain_vnc_may_be_resized_by_the_window() {
+    fn only_ard_high_performance_is_kept_from_being_resized_by_the_window() {
         let plain = &ConfigFile::parse(&vnc_toml("resize = true")).unwrap().targets[0];
         assert!(plain.resize && plain.auto_resize());
 
@@ -2806,7 +2835,9 @@ mod tests {
         .targets[0];
         assert!(hp.resize && !hp.auto_resize());
 
-        // RDP the same, for the reactivation a real size change costs.
+        // RDP has it back. The reactivation fault that withheld it was measured
+        // against IronRDP, which no longer drives this path, and withholding the
+        // permission is exactly what stops that being re-measured.
         let rdp = &ConfigFile::parse(&format!(
             r#"
             [server]
@@ -2822,7 +2853,7 @@ mod tests {
         ))
         .unwrap()
         .targets[0];
-        assert!(rdp.resize && !rdp.auto_resize());
+        assert!(rdp.resize && rdp.auto_resize());
 
         // And neither permission without the operator's, which is what keeps this
         // from becoming "plain vnc always follows the window".
@@ -2904,10 +2935,39 @@ mod tests {
         assert!(config.targets[0].clipboard);
     }
 
-    /// Unlike `clipboard`, which both engines support: there is no audio channel
-    /// behind RFB at all, so the key is refused where it could never do anything.
+    /// **Audio is refused on every protocol at the moment**, which is wider than
+    /// the rule this replaced: it used to be refused only on VNC, where there is
+    /// no audio channel behind RFB at all. RDP joined it when the engine moved to
+    /// FreeRDP, whose `rdpsnd` is compiled into the archives and not yet bound.
+    ///
+    /// The error has to say "not yet" and name the channel, because that is the
+    /// difference between a user waiting for a feature and a user editing a
+    /// config that will never work.
     #[test]
-    fn audio_is_accepted_for_rdp_and_refused_for_vnc() {
+    fn audio_is_refused_on_every_protocol_for_now() {
+        for protocol in ["rdp", "vnc"] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "nope"
+                protocol = "{protocol}"
+                host = "10.0.0.5"
+                audio = true
+                "#,
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("audio"), "{rendered}");
+            assert!(rendered.contains("rdpsnd"), "the channel is named: {rendered}");
+            assert!(rendered.contains("not yet"), "and it is a not-yet: {rendered}");
+        }
+
+        // The key being absent is not the same as it being false, and neither is
+        // an error — this is what every working config now looks like.
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -2917,69 +2977,33 @@ mod tests {
             name = "win"
             protocol = "rdp"
             host = "10.0.0.5"
-            audio = true
+            audio = false
             "#,
             site_passwd_line()
         ))
         .unwrap()
         .resolve()
         .unwrap();
-        assert!(config.targets[0].audio);
-
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "nope"
-            protocol = "vnc"
-            host = "10.0.0.6"
-            audio = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("audio"), "{rendered}");
-        assert!(rendered.contains("vnc"), "{rendered}");
+        assert!(!config.targets[0].audio);
     }
 
-    /// An audio target that says nothing about the codec gets Opus, and one that
-    /// asks for passthrough gets it. The default is the load-bearing half: it is
-    /// what keeps every existing config encoding exactly what it encoded before.
+    /// An unset codec reads as Opus, and passthrough can be asked for by name.
+    ///
+    /// Asserted on the type rather than through a parsed config, because a target
+    /// carrying `audio = true` no longer parses at all — see
+    /// [`audio_is_refused_on_every_protocol_for_now`]. The default is the
+    /// load-bearing half and outlives that refusal: it is what will keep every
+    /// existing config encoding exactly what it encoded before, once `rdpsnd` is
+    /// bound and the key comes back.
     #[test]
-    fn the_audio_codec_defaults_to_opus_and_can_be_asked_for() {
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            audio = true
-
-            [[targets]]
-            name = "on-the-lan"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            audio = true
-            audio_codec = "pcm"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert_eq!(config.targets[0].audio_codec, None);
-        assert_eq!(
-            config.targets[0].audio_codec.unwrap_or_default(),
-            AudioCodec::Opus,
-            "an unset codec reads as Opus"
-        );
-        assert_eq!(config.targets[1].audio_codec, Some(AudioCodec::Pcm));
+    fn the_audio_codec_defaults_to_opus() {
+        // Through `unwrap_or_default` because that is how every reader of the field
+        // spells it — an unset codec becomes Opus at the call site, not at the parse.
+        fn resolved(codec: Option<AudioCodec>) -> AudioCodec {
+            codec.unwrap_or_default()
+        }
+        assert_eq!(resolved(None), AudioCodec::Opus);
+        assert_eq!(resolved(Some(AudioCodec::Pcm)), AudioCodec::Pcm);
     }
 
     /// A codec without the audio it would encode is refused rather than ignored:

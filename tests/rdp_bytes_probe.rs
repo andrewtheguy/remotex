@@ -56,11 +56,6 @@ async fn wait_for_rdp_port(port: u16) {
 }
 
 async fn spawn_app(rdp_port: u16) -> SocketAddr {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-    });
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,

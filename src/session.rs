@@ -544,7 +544,7 @@ impl SessionManager {
         // The negotiated format when the remote's channel is up, and otherwise the
         // only format this gateway ever advertises — which is not a guess: with one
         // advertised format that is the only format a wave buffer can be in (see
-        // [`crate::rdp_audio`]), so the decoder can be configured before any
+        // the RDP audio channel), so the decoder can be configured before any
         // negotiation has happened.
         //
         // Whether it *has* is worth a line, because it is the only place the
@@ -909,13 +909,16 @@ impl SessionManager {
 
 /// Spawn the protocol engine for `target` on its own thread.
 ///
-/// The engine runs on a dedicated thread with a current-thread runtime:
-/// IronRDP's `read_pdu` future is not `Send`-general (it holds a
-/// `&dyn PduHint` across await), so it can't live on the shared multi-thread
-/// runtime via `tokio::spawn`; a current-thread runtime imposes no `Send`
-/// bound. The VNC engine doesn't need this, but sharing the one spawn path
-/// keeps the seam uniform. The engine ends when the remote host disconnects
-/// (the session outlives any one browser — see [`SessionManager`]).
+/// The engine runs on a dedicated thread with a current-thread runtime. The
+/// reason has changed and the arrangement has not: it used to be that IronRDP's
+/// `read_pdu` future was not `Send`-general, so it could not live on the shared
+/// multi-thread runtime. The RDP engine is FreeRDP now, which owns *its own* OS
+/// thread and a blocking event loop — so what this isolates is a session's whole
+/// lifetime from the runtime serving HTTP, which matters more rather than less
+/// now that a C library is in there. The VNC engine doesn't need either
+/// property, but sharing the one spawn path keeps the seam uniform. The engine
+/// ends when the remote host disconnects (the session outlives any one browser —
+/// see [`SessionManager`]).
 ///
 /// Scalability: this costs one OS thread + one current-thread runtime per
 /// engine — fine here, since multi session is permanently out of scope
@@ -1147,13 +1150,10 @@ mod tests {
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
                 // The second permission, and the fake targets are all subtype-less,
-                // so here it is exactly "resize, and plain VNC". What the whole rule
-                // is — including the Apple subtypes — belongs to config.rs.
-                assert_eq!(
-                    got_auto_resize,
-                    meta.resize && meta.protocol == Protocol::Vnc,
-                    "auto resize metadata for {name}"
-                );
+                // so here it follows the first exactly — the one target held back
+                // from it is `ard-high-performance`, which has a subtype. What the
+                // whole rule is belongs to config.rs.
+                assert_eq!(got_auto_resize, meta.resize, "auto resize metadata for {name}");
                 assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
             }
@@ -1259,14 +1259,12 @@ mod tests {
     }
 
     /// The two resize permissions are separate on the wire, and a target that has
-    /// one need not have the other: both RDP and VNC may be resized when the user
-    /// asks, and only VNC may be handed to the window. Spelled out rather than left
-    /// to the helper above, because this is the whole point of the second flag.
+    /// one need not have the other — `ard-high-performance` is resized when the
+    /// user asks and never by the window. Spelled out rather than left to the
+    /// helper above, because this is the whole point of the second flag.
     #[tokio::test]
-    async fn only_plain_vnc_may_let_the_window_drive_the_size() {
-        for (name, protocol, auto) in
-            [("vnc-resize", "vnc", true), ("rdp-resize", "rdp", false)]
-        {
+    async fn both_engines_carry_their_own_second_resize_permission() {
+        for (name, protocol, auto) in [("vnc-resize", "vnc", true), ("rdp-resize", "rdp", true)] {
             let (mgr, _hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();

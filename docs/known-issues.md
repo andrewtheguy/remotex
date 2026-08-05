@@ -9,18 +9,29 @@ An issue leaves this file in one of two ways: it is fixed, or it turns out to be
 something remotex is doing wrong, in which case it becomes work rather than a
 note.
 
-## RDP: the reactivation a size change triggers can fail
+## RDP: the reactivation a size change triggers can fail *(engine replaced; re-measure)*
 
-When a resize actually changes the desktop size, the server answers
-`DeactivateAll` and `reactivate` runs the Deactivation-Reactivation Sequence.
-That sequence sometimes fails at the first PDU it reads, ending the session with
+**This was measured against IronRDP, which no longer drives this path.** The RDP
+engine now runs on FreeRDP, whose Deactivation-Reactivation Sequence is inside
+`freerdp_check_event_handles` rather than in this repository — so the specific
+failure below cannot occur as written, and whether the *underlying* fault survives
+the change is unmeasured. It is kept because the containment it describes is still
+in force and because "we changed the engine and stopped seeing it" is worth
+distinguishing from "we fixed it". Forcing a real size change against the two hosts
+in the table is what would settle it.
+
+The fault as it was: when a resize actually changed the desktop size, the server
+answered `DeactivateAll` and the engine ran the Deactivation-Reactivation Sequence
+itself. That sequence sometimes failed at the first PDU it read, ending the session
+with
 
 ```text
 RDP session ended: reactivation: … invalid `pdu_type`: invalid pdu type
 ```
 
 decoding a `ShareControlHeader`, or occasionally `read frame: cannot decrypt peer's
-message`. Both are stream-level: what arrives is not the PDU the sequence expects.
+message`. Both are stream-level: what arrived was not the PDU the sequence
+expected.
 
 **It is not tied to one machine.** Old and current hosts both fail it; what
 differs is how often. Forcing a real size change:
@@ -42,11 +53,15 @@ One thing that makes it look intermittent from a browser: only a size change tha
 is *real* reactivates at all. Asking twice for the same size triggers it once, and
 a request equal to the current size never triggers it.
 
-**How often it can be reached is bounded.** Clients may resize an RDP target only
-when the user asks; the window is never allowed to drive the size continuously,
-which is a permission the gateway withholds (`TargetConfig::auto_resize`). That is
-containment, not a fix — one "Resize to window" can still land on this — but a
-drag that used to walk into it repeatedly now cannot.
+**The containment has been lifted, deliberately.** An RDP target used to be
+resizable only when the user asked, the window never being allowed to drive the
+size continuously — a permission the gateway withheld
+(`TargetConfig::auto_resize`). It now grants it, because the containment and the
+experiment are the same switch: the fault is reached far more often by a window
+reporting on every drag than by a person pressing a button, so withholding the
+permission is precisely what kept "does this survive FreeRDP" unanswered. If
+sessions start ending on a drag, that line is the first thing to put back — and
+this entry stops being one about an engine that was replaced.
 
 What would move it: a packet capture of a failing sequence, to say what actually
 arrived where the expected PDU should have been.

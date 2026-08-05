@@ -652,7 +652,7 @@ pub const MAX_CURSOR_DIM: u16 = 256;
 /// The remote pointer shape, for engines whose server does **not** composite
 /// the cursor into the framebuffer and hands the shape over instead (the VNC
 /// Cursor pseudo-encoding — see [`crate::vnc`] — and RDP's pointer updates,
-/// which [`crate::rdp`] forwards rather than letting IronRDP draw them). The
+/// which [`crate::rdp`] forwards rather than compositing into the framebuffer). The
 /// browser draws it locally, anchoring the image so that `(hx, hy)` — the
 /// hotspot — lands on the pointer position, which is what lets the pointer move
 /// with the mouse instead of with the framebuffer.
@@ -825,7 +825,8 @@ pub enum ServerMsg {
     /// `resize` and `auto_resize` are two permissions, not one with a shortcut:
     /// the first is whether a client may resize the remote when the user asks, the
     /// second whether it may hand the size to its window and let every drag report.
-    /// Only plain `vnc` gets the second — see [`crate::config::TargetConfig::auto_resize`].
+    /// `ard-high-performance` is the one target that has the first without the
+    /// second — see [`crate::config::TargetConfig::auto_resize`].
     /// `video` is the codec family this session's streams are being encoded with,
     /// or `None` for a target that streams nothing. The target config chooses it;
     /// carrying it here lets a browser that takes over a running session identify

@@ -1,15 +1,15 @@
-//! The MS-RDPECLIP half of the clipboard bridge: a [`CliprdrBackend`] that does
-//! nothing but forward, plus the text conversions either direction needs.
+//! The MS-RDPECLIP half of the clipboard bridge: the format this gateway
+//! carries, and the conversions either direction needs.
 //!
-//! ## Why the backend is inert
+//! ## What the engine crate does and does not do
 //!
-//! IronRDP calls [`CliprdrBackend`] synchronously from inside
-//! `ActiveStage::process`, and the methods cannot return PDUs — a backend that
-//! wants to answer has to call back into `Cliprdr` afterwards, which it does not
-//! own. So every callback here just drops a [`ClipboardEvent`] into a channel
-//! and `src/rdp.rs` acts on it from the session loop, where the `ActiveStage`
-//! actually lives. That also keeps all the clipboard *state* in one task
-//! instead of behind a mutex shared with a channel processor.
+//! [`freerdp`] carries the clipboard *negotiation* — format lists, requests,
+//! responses — and nothing else: what crosses that boundary is a format id and a
+//! `Vec<u8>`. That is the right seam, and it is why the UTF-16 lives here.
+//! Choosing a text format, deciding what a line ending is, and deciding what
+//! happens to a format nobody understands are three decisions that belong to
+//! whoever is bridging a real clipboard, and this gateway's answer to all three
+//! is shaped by the browser protocol carrying a single `text` string.
 //!
 //! ## Delayed rendering
 //!
@@ -32,132 +32,16 @@
 //! HTML, bitmaps and file lists have nowhere to go, and nothing is planned for
 //! them.
 
-use ironrdp::cliprdr::backend::CliprdrBackend;
-use ironrdp::cliprdr::pdu::{
-    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest,
-    FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
-};
-use ironrdp::core::impl_as_any;
-use log::{debug, warn};
-use tokio::sync::mpsc;
+use freerdp::ClipboardFormat;
 
 use crate::protocol::clipboard_fits;
 
-/// What the channel processor noticed, for the session loop to act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClipboardEvent {
-    /// Capability exchange finished; the channel can carry data now.
-    Ready,
-    /// The channel wants our clipboard advertised. Load-bearing during startup:
-    /// the first `initiate_copy` is what carries the Capabilities and
-    /// TemporaryDirectory PDUs, so ignoring this stalls the handshake.
-    FormatListRequested,
-    /// The remote's clipboard changed and now holds these formats.
-    RemoteFormats(Vec<ClipboardFormat>),
-    /// Decoded text returned for the format we requested.
-    RemoteData(String),
-    /// The remote returned CB_RESPONSE_FAIL. This can be retried.
-    RemoteDataRefused,
-    /// The remote returned data that was not valid Unicode clipboard text.
-    RemoteDataMalformed,
-    /// The remote is pasting and wants our text in this format.
-    DataRequested(ClipboardFormatId),
-}
-
-/// The [`CliprdrBackend`] IronRDP drives. Holds no clipboard state of its own.
-#[derive(Debug)]
-pub struct Backend {
-    tx: mpsc::UnboundedSender<ClipboardEvent>,
-}
-
-impl_as_any!(Backend);
-
-impl Backend {
-    pub fn new(tx: mpsc::UnboundedSender<ClipboardEvent>) -> Self {
-        Self { tx }
-    }
-
-    /// A closed channel means the session loop is gone and this connection is
-    /// being torn down, so it is not worth more than a debug line.
-    fn emit(&self, event: ClipboardEvent) {
-        if self.tx.send(event).is_err() {
-            debug!("rdp: clipboard event dropped, the session loop has ended");
-        }
-    }
-}
-
-impl CliprdrBackend for Backend {
-    /// Never used: file transfer is not negotiated (see
-    /// [`Self::client_capabilities`]), so nothing is ever written to disk.
-    fn temporary_directory(&self) -> &str {
-        "."
-    }
-
-    /// Deliberately empty. Every flag here is about file transfer — streamed
-    /// file clips, long format names for them, and the clipboard locking that
-    /// keeps a file list alive across a copy. Advertising none of it keeps the
-    /// remote from ever sending a file-contents request.
-    fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
-        ClipboardGeneralCapabilityFlags::empty()
-    }
-
-    fn on_ready(&mut self) {
-        self.emit(ClipboardEvent::Ready);
-    }
-
-    fn on_request_format_list(&mut self) {
-        self.emit(ClipboardEvent::FormatListRequested);
-    }
-
-    fn on_process_negotiated_capabilities(
-        &mut self,
-        capabilities: ClipboardGeneralCapabilityFlags,
-    ) {
-        debug!("rdp: clipboard capabilities negotiated: {capabilities:?}");
-    }
-
-    fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
-        self.emit(ClipboardEvent::RemoteFormats(available_formats.to_vec()));
-    }
-
-    fn on_format_data_request(&mut self, request: FormatDataRequest) {
-        self.emit(ClipboardEvent::DataRequested(request.format));
-    }
-
-    fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
-        let event = if response.is_error() {
-            // CB_RESPONSE_FAIL says only that the format-data request was not
-            // processed successfully; the wire response carries no cause.
-            debug!("rdp: the remote failed the clipboard format-data request");
-            ClipboardEvent::RemoteDataRefused
-        } else {
-            match response.to_unicode_string() {
-                Ok(text) => ClipboardEvent::RemoteData(text),
-                Err(e) => {
-                    warn!("rdp: undecodable clipboard text from the remote: {e}");
-                    ClipboardEvent::RemoteDataMalformed
-                }
-            }
-        };
-        self.emit(event);
-    }
-
-    /// Unreachable: [`Self::client_capabilities`] advertises no file support,
-    /// so the remote has no reason to ask. Logged rather than ignored, because
-    /// arriving here means the remote disregarded the negotiated capabilities.
-    fn on_file_contents_request(&mut self, _request: FileContentsRequest) {
-        warn!("rdp: ignoring a clipboard file-contents request; file transfer is not supported");
-    }
-
-    fn on_file_contents_response(&mut self, _response: FileContentsResponse<'_>) {
-        warn!("rdp: ignoring a clipboard file-contents response; file transfer is not supported");
-    }
-
-    // Locking exists to hold a file list still while it is being read. With no
-    // file transfer there is nothing to hold, so both are no-ops.
-    fn on_lock(&mut self, _data_id: LockDataId) {}
-    fn on_unlock(&mut self, _data_id: LockDataId) {}
-}
+/// `CF_UNICODETEXT`, the one Windows clipboard format id this gateway speaks.
+///
+/// A bare constant rather than an import: the engine crate deliberately carries
+/// format ids as plain `u32` (they are Windows' numbers, not FreeRDP's), and 13
+/// is fixed by the platform rather than by any library here.
+pub const CF_UNICODETEXT: u32 = 13;
 
 /// The one format worth asking for out of what the remote advertised.
 ///
@@ -165,11 +49,44 @@ impl CliprdrBackend for Backend {
 /// that format is ANSI in the remote's code page, which we would have to guess
 /// at, and a server offering text at all offers the Unicode flavour beside it.
 /// An image or file-list copy simply produces no browser-visible clipboard.
-pub fn pick_text_format(formats: &[ClipboardFormat]) -> Option<ClipboardFormatId> {
-    formats
-        .iter()
-        .map(ClipboardFormat::id)
-        .find(|&id| id == ClipboardFormatId::CF_UNICODETEXT)
+pub fn pick_text_format(formats: &[ClipboardFormat]) -> Option<u32> {
+    formats.iter().map(|format| format.id).find(|&id| id == CF_UNICODETEXT)
+}
+
+/// `CF_UNICODETEXT` bytes → a Rust string.
+///
+/// The wire format is UTF-16 **little-endian** with a NUL terminator, and every
+/// part of that sentence is load-bearing. An odd byte count is not a
+/// half-character to be salvaged — it means the payload is not what it claimed
+/// to be — and the terminator is included in the length by some peers and not
+/// by others, so it is stripped here rather than trusted either way.
+///
+/// `None` for anything that is not decodable UTF-16, which the caller reports as
+/// a malformed clipboard rather than retrying: the same bytes will not become
+/// valid on a second request.
+pub fn decode_unicode(bytes: &[u8]) -> Option<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> =
+        bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    // Trailing NULs only. One is the terminator; a peer that pads with several
+    // is padding, and a NUL in the middle is the remote's own data.
+    let end = units.iter().rposition(|unit| *unit != 0).map_or(0, |last| last + 1);
+    String::from_utf16(&units[..end]).ok()
+}
+
+/// A Rust string → `CF_UNICODETEXT` bytes.
+///
+/// Terminated, because MS-RDPECLIP says the payload for this format is a
+/// null-terminated string and a Windows peer pasting an unterminated one gets
+/// whatever followed it in its own buffer.
+pub fn encode_unicode(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len() * 2 + 2);
+    for unit in text.encode_utf16().chain(std::iter::once(0)) {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
 }
 
 /// Remote → browser: CRLF to LF.
@@ -182,8 +99,8 @@ pub fn pick_text_format(formats: &[ClipboardFormat]) -> Option<ClipboardFormatId
 /// it was: the caller reports that instead, because a truncated paste is
 /// indistinguishable from a whole one.
 pub fn from_remote(text: &str) -> Result<String, u64> {
-    // Some servers pad the response past the terminator IronRDP already
-    // stripped; a trailing NUL renders as a replacement glyph in the panel.
+    // Some servers pad the response past the terminator [`decode_unicode`]
+    // already stripped; a trailing NUL renders as a replacement glyph in the panel.
     let text = text.trim_end_matches('\0');
     if !clipboard_fits(text) {
         return Err(text.len() as u64);
@@ -282,18 +199,15 @@ mod tests {
 
     #[test]
     fn unicode_text_is_the_only_format_taken() {
-        let unicode = ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT);
-        let ansi = ClipboardFormat::new(ClipboardFormatId::CF_TEXT);
-        let bitmap = ClipboardFormat::new(ClipboardFormatId::CF_BITMAP);
+        let unicode = ClipboardFormat::new(CF_UNICODETEXT);
+        let ansi = ClipboardFormat::new(1); // CF_TEXT
+        let bitmap = ClipboardFormat::new(2); // CF_BITMAP
 
         assert_eq!(
             pick_text_format(&[ansi.clone(), unicode.clone(), bitmap.clone()]),
-            Some(ClipboardFormatId::CF_UNICODETEXT)
+            Some(CF_UNICODETEXT)
         );
-        assert_eq!(
-            pick_text_format(&[unicode]),
-            Some(ClipboardFormatId::CF_UNICODETEXT)
-        );
+        assert_eq!(pick_text_format(&[unicode]), Some(CF_UNICODETEXT));
 
         // ANSI alone is refused rather than guessed at: CF_TEXT is in the
         // remote's code page, which nothing here knows.
@@ -302,60 +216,32 @@ mod tests {
         assert_eq!(pick_text_format(&[]), None);
     }
 
-    // The UTF-16LE encoding and its NUL terminator belong to IronRDP, not to
-    // this module. This pins that assumption: if the library ever stops
-    // round-tripping, the engine would silently ship mojibake.
+    /// The encoding is this module's own now — it used to be IronRDP's — so the
+    /// round trip is a real test rather than a pin on somebody else's library.
     #[test]
-    fn ironrdp_owns_the_utf16_encoding() {
-        for original in ["plain", "画面 ☕", "emoji 🚀 non-BMP", "", "line\r\nbreak"] {
-            let response = FormatDataResponse::new_unicode_string(original);
-            assert!(!response.is_error());
-            assert_eq!(response.to_unicode_string().unwrap(), original, "{original:?}");
+    fn utf16_survives_a_round_trip_including_the_hard_cases() {
+        for original in ["plain", "画面 ☕", "emoji 🚀 non-BMP", "", "line\r\nbreak", "a\0b"] {
+            let encoded = encode_unicode(original);
+            assert_eq!(encoded.len() % 2, 0, "UTF-16 is whole code units");
+            assert_eq!(decode_unicode(&encoded).unwrap(), original, "{original:?}");
         }
+        // The terminator is really there, and it is what a Windows peer reads to
+        // know where the string stops.
+        assert_eq!(encode_unicode("hi"), vec![b'h', 0, b'i', 0, 0, 0]);
     }
 
+    /// Every one of these is a payload a peer really can send, and none of them
+    /// may panic — this decode runs on bytes from the far end.
     #[test]
-    fn the_backend_forwards_every_callback_it_is_given() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut backend = Backend::new(tx);
-
-        backend.on_ready();
-        backend.on_request_format_list();
-        backend.on_remote_copy(&[ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]);
-        backend.on_format_data_request(FormatDataRequest {
-            format: ClipboardFormatId::CF_UNICODETEXT,
-        });
-        backend.on_format_data_response(FormatDataResponse::new_unicode_string("画面"));
-        backend.on_format_data_response(FormatDataResponse::new_error());
-        backend.on_format_data_response(FormatDataResponse::new_data(vec![0x00, 0xd8]));
-
-        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::Ready);
-        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::FormatListRequested);
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            ClipboardEvent::RemoteFormats(vec![ClipboardFormat::new(
-                ClipboardFormatId::CF_UNICODETEXT
-            )])
-        );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            ClipboardEvent::DataRequested(ClipboardFormatId::CF_UNICODETEXT)
-        );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            ClipboardEvent::RemoteData("画面".to_owned())
-        );
-        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::RemoteDataRefused);
-        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::RemoteDataMalformed);
-        assert!(rx.try_recv().is_err(), "no extra events");
-    }
-
-    // A backend whose session loop has gone must not panic — the connection is
-    // being torn down and IronRDP may still drive a callback or two.
-    #[test]
-    fn a_dead_session_loop_does_not_panic_the_backend() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        Backend::new(tx).on_ready();
+    fn a_payload_that_is_not_utf16_is_refused_rather_than_salvaged() {
+        // An odd length cannot be UTF-16 at all.
+        assert_eq!(decode_unicode(&[0x41]), None);
+        assert_eq!(decode_unicode(&[0x41, 0x00, 0x42]), None);
+        // A lone surrogate is well-formed UTF-16 code units and not a string.
+        assert_eq!(decode_unicode(&[0x00, 0xD8]), None);
+        // Empty, and terminator-only, are both the empty string rather than an error.
+        assert_eq!(decode_unicode(&[]).unwrap(), "");
+        assert_eq!(decode_unicode(&[0, 0]).unwrap(), "");
+        assert_eq!(decode_unicode(&[0, 0, 0, 0]).unwrap(), "");
     }
 }

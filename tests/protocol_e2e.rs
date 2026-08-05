@@ -885,20 +885,9 @@ async fn serve_fake_mac(
     }
 }
 
-/// Install the ring crypto provider once (the binary does this in `main`; tests
-/// don't run `main`, so a code path that reaches TLS would otherwise panic).
-fn ensure_crypto_provider() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
 /// Start the server on an ephemeral port against the given target. Returns
 /// the bound address.
 async fn spawn_app(target: TargetConfig) -> SocketAddr {
-    ensure_crypto_provider();
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,

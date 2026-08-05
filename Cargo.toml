@@ -21,7 +21,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.113"
+version = "0.0.114"
 
 [package]
 name = "remotex"
@@ -127,9 +127,10 @@ rubato = "4"
 # — but it is 64-bit rather than 32, because a collision here means permanently
 # wrong pixels rather than a retry. xxh3 over blake2/sha2 because this runs on
 # every tile of every frame. Pure Rust, which is a nice property but not the
-# reason it was chosen: `ring` (via rustls and snow) and `libz-sys` (via flate2
-# and png) already compile C on every runner, so a C dependency here would have
-# cost nothing new either.
+# reason it was chosen: the prebuilt FreeRDP and OpenSSL archives mean C is linked
+# on every runner anyway, so a C dependency here would have cost nothing new
+# either. (It used to say `libz-sys` too, which was true while ironrdp was in the
+# tree and is not any more — see `flate2` below.)
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cursor shapes ride the JSON control channel as base64 PNG (see
 # src/protocol.rs) — small and rare enough not to warrant a binary frame kind.
@@ -147,23 +148,34 @@ des = "0.8"
 # Apple's DH authentication for VNC (src/vnc.rs), which is what names the user
 # to a Mac: modular exponentiation over the server's prime, MD5 of the shared
 # secret as an AES-128 key, and random bytes for the private key and the
-# credential blob's filler. All four are already in the tree behind ironrdp and
-# rustls, so this costs no new dependency.
+# credential blob's filler. Four direct dependencies for one authentication
+# scheme, and they used to be free — ironrdp and rustls pulled all four in. That
+# stopped being true when the RDP engine became FreeRDP, whose crypto is the
+# OpenSSL compiled into its archives; they are the VNC path's own cost now.
 num-bigint = "0.4"
 md-5 = "0.11"
 aes = "0.9"
 rand = "0.10"
 # Integrity trailer on Apple's record layer (src/vnc_record.rs), which the
 # `ard-high-performance` subtype speaks: plain SHA-1 over the record's sequence
-# number and plaintext, not HMAC. Already in the tree behind ironrdp, so this
-# costs no new dependency. CBC is *not* a dependency: the `cbc` crate in the tree
+# number and plaintext, not HMAC. Also no longer free behind ironrdp, and also
+# the VNC path's own. CBC is *not* a dependency: the `cbc` crate in the tree
 # is on `cipher` 0.4 while `aes` above is on 0.5, and chaining eight lines by hand
 # keeps "one context per direction, never reset" a visible field rather than a
 # library invariant.
 sha1 = "0.11"
 # zlib for RFB's Extended Clipboard, whose Provide payload is deflated
-# (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no
-# new dependency.
+# (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no new
+# dependency.
+#
+# **Pure Rust now, and that was not a choice made here.** ironrdp enabled flate2's
+# C backend, so `libz-sys` was in the tree; dropping it for FreeRDP left flate2 on
+# its default `miniz_oxide` and took `libz-sys` out entirely. Good news for the
+# build — one fewer C library — but not a silent swap: a sync flush against an
+# already-flushed stream emits an empty stored block on miniz_oxide where the C
+# zlib suppresses it, which hung a test helper written to loop until a flush
+# produced nothing. See `deflate_chunk` in src/vnc_encodings.rs. The production
+# deflate loop was already written correctly and is unaffected.
 flate2 = "1"
 # Tuned TCP keepalive on every engine socket (src/engine.rs), so a remote host
 # that is switched off — no FIN, no RST, just silence — is noticed in seconds
@@ -173,24 +185,33 @@ flate2 = "1"
 # and Linux's `TCP_USER_TIMEOUT` all live behind it.
 socket2 = { version = "0.6", features = ["all"] }
 
-# Server-side RDP engine (see docs/architecture.md). `dvc`/`displaycontrol`/`svc`
-# expose the Display Control Virtual Channel used for client-driven resize;
-# `cliprdr` is the MS-RDPECLIP static channel behind the clipboard bridge
-# (see src/rdp_clipboard.rs), and `rdpsnd` is MS-RDPEA behind remote audio
-# (see src/rdp_audio.rs). `rdpdr` is MS-RDPEFS, which
-# remote audio needs registered even though nothing is ever redirected through
-# it — see the Rdpdr registration in src/rdp.rs for why.
-# Keep all IronRDP crates on the same workspace revision. This includes the
-# unreleased source-stride fix for bitmap updates whose encoded row width is
-# wider than their destination rectangle (IronRDP #1486) and the follow-up that
-# made bottom-up RDP6 scanline order the default again (IronRDP #1524), so the
-# old opt-in call is gone.
-ironrdp = { git = "https://github.com/Devolutions/IronRDP.git", rev = "c31e43f755dbf24a302c86ca1ef8ba186d51216e", features = ["cliprdr", "connector", "session", "graphics", "dvc", "displaycontrol", "svc", "rdpsnd", "rdpdr"] }
-ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP.git", rev = "c31e43f755dbf24a302c86ca1ef8ba186d51216e", features = ["reqwest-rustls-ring"] }
-ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP.git", rev = "c31e43f755dbf24a302c86ca1ef8ba186d51216e", features = ["rustls-ring"] }
-# Direct dep so we can install the ring CryptoProvider as the process default
-# before any TLS handshake (ironrdp-tls uses rustls with no bundled provider).
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# Server-side RDP engine (see docs/architecture.md): a safe, headless RDP client
+# over a **statically prebuilt FreeRDP 3**, in the same bargain `opus-prebuilt`
+# and `libvpx-prebuilt` above already strike. Its `build.rs` downloads the
+# archives for this target from that repository's latest release, verifies them
+# and emits the link flags — so this build needs no cmake, no pkg-config, no
+# OpenSSL installed and no libclang, and `packaging/build-tarball.sh` sets
+# nothing for it.
+#
+# The tag pins the wrapper and its committed bindings; the *archives* come from
+# whatever that repository's newest release is. Not a hole: the asset filename
+# carries the FreeRDP version, so a release that moved to a different FreeRDP
+# 404s naming it rather than handing back a library those bindings do not
+# describe, and a rebuild of the same version is how a build fix arrives here.
+#
+# It replaced IronRDP, which was not stable enough against real Windows hosts.
+# Two things came off the tree with it and are worth naming, because their
+# absence changes what other dependencies are here for: `ironrdp-tls` brought
+# rustls, whose `ring` is why `src/main.rs` had to install a CryptoProvider
+# before any handshake — FreeRDP does its own TLS against the OpenSSL inside
+# those archives, so that install is gone. And the RDP path no longer opens its
+# own socket at all: FreeRDP owns it, and `src/engine.rs`'s keepalive policy is
+# restated to it as settings rather than applied to a `TcpStream`.
+#
+# `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
+# comments there say they came free behind ironrdp, which is no longer true, but
+# every one of them is a direct dependency of the VNC path in its own right.
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260805153834-d54dea0" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

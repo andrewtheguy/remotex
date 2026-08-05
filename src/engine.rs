@@ -2,13 +2,18 @@
 //!
 //! Deliberately *not* a `trait Engine`: the engines have very little in common
 //! beyond their `run(config, input_rx, frame_tx)` signature — which is the seam
-//! (see [`crate::session`]) — and IronRDP's non-`Send` futures could not
-//! implement a trait object cleanly anyway. This module holds only the few
-//! functions all three engines genuinely duplicate.
+//! (see [`crate::session`]). This module holds only the few things they genuinely
+//! share.
 //!
-//! It also owns the socket policy, which is not just formatting: [`tcp_connect`]
-//! is the one place a remote host that has *gone away* is made noticeable. See
-//! its comments for what the kernel can and cannot tell us.
+//! It also owns the socket policy, which is not just formatting: it is where a
+//! remote host that has *gone away* is made noticeable. See [`tcp_connect`]'s
+//! comments for what the kernel can and cannot tell us.
+//!
+//! **Only VNC opens its own socket now.** The RDP engine hands these same numbers
+//! to FreeRDP, which applies them itself in `libfreerdp/core/tcp.c` — see
+//! [`keepalive`]. The policy is stated once here either way, so a silent host is
+//! noticed on the same schedule whichever protocol is carrying it and the number
+//! [`keepalive_budget`] quotes to the user cannot drift from one of them.
 
 use std::future::Future;
 use std::time::Duration;
@@ -26,7 +31,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// Unanswered probes before the socket fails.
 const KEEPALIVE_RETRIES: u32 = 3;
 
-/// Linux only, and the half that is easy to leave out.
+/// Linux only in effect, and the half that is easy to leave out.
 ///
 /// Keepalive probes are sent on an *idle* connection: with unacknowledged data
 /// outstanding, the retransmission timer owns the socket instead, and its budget
@@ -40,7 +45,10 @@ const KEEPALIVE_RETRIES: u32 = 3;
 /// keepalive timeout. macOS has no equivalent option; a gateway running there
 /// keeps the retransmission budget for a busy socket, which runs to about fifteen
 /// minutes.
-#[cfg(target_os = "linux")]
+///
+/// No longer behind a `cfg`: the RDP engine hands it to FreeRDP on every platform
+/// and FreeRDP applies it only where the option exists, so a `cfg` here would
+/// move the same decision into [`keepalive`] and duplicate it.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the TCP connect itself may take.
@@ -48,7 +56,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A host that is switched off swallows SYNs, and the kernel's own retry budget
 /// runs to about two minutes with the client showing "Connecting…" for all of
 /// it — no client has a timeout of its own. Generous enough to cross a slow VPN.
-const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+///
+/// Public because the RDP engine does not make this connection itself: it passes
+/// the number to FreeRDP as `TcpConnectTimeout`, so a switched-off host is still
+/// reported as a connect failure there rather than as a stalled handshake.
+pub const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long a protocol handshake may take once the TCP connect has succeeded.
 ///
@@ -64,6 +76,26 @@ pub fn keepalive_budget() -> Duration {
     KEEPALIVE_IDLE + KEEPALIVE_INTERVAL * KEEPALIVE_RETRIES
 }
 
+/// The same policy, restated for an engine that does not own its socket.
+///
+/// FreeRDP applies `TCP_KEEPIDLE`, `TCP_KEEPINTVL`, `TCP_KEEPCNT` and — on Linux
+/// — `TCP_USER_TIMEOUT` in `libfreerdp/core/tcp.c`, from settings rather than
+/// from a `TcpStream` this process configured. So the RDP path cannot call
+/// [`tcp_connect`]; it asks for the same thing in the other vocabulary, and
+/// building that here is what keeps the two from drifting apart.
+///
+/// `WRITE_TIMEOUT` is passed on every platform rather than behind a `cfg`,
+/// because FreeRDP ignores it where the option does not exist — the same place
+/// [`arm_liveness_probes`] would have had to `cfg` it out.
+pub fn keepalive() -> freerdp::KeepAlive {
+    freerdp::KeepAlive {
+        idle: KEEPALIVE_IDLE,
+        interval: KEEPALIVE_INTERVAL,
+        retries: KEEPALIVE_RETRIES,
+        ack_timeout: WRITE_TIMEOUT,
+    }
+}
+
 /// Connect to a remote, with the socket settings every engine wants.
 ///
 /// `dest` arrives already formatted by [`host_port`] because each caller keeps it
@@ -74,8 +106,8 @@ pub fn keepalive_budget() -> Duration {
 /// blocked on a read forever, and the client holds a frozen desktop with nothing
 /// to say. What it proves is narrow but real: that the peer's *kernel* is still
 /// answering. For RDP and VNC that is the whole of it — a server process that
-/// wedges behind a kernel which still answers reads as an idle desktop, and
-/// neither RFB nor IronRDP offers a probe to close that gap.
+/// wedges behind a kernel which still answers reads as an idle desktop, and RFB
+/// offers no probe to close that gap.
 pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
     let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(dest))
         .await
@@ -168,25 +200,33 @@ where
 /// message that would otherwise send the reader to check a network that is fine.
 ///
 /// Empty everywhere else, where an unreachable address is simply unreachable.
+/// The sentence itself, empty off macOS — where an unreachable address is simply
+/// unreachable and no permission stands between the two.
+///
+/// A constant rather than a second function because there are two callers now
+/// that decide differently: [`tcp_connect`] has an `io::Error` to read a kind
+/// off, and the RDP engine has FreeRDP's own error, which knows the same thing
+/// through [`freerdp::Error::is_unreachable`]. What must not be duplicated is the
+/// sentence.
 #[cfg(target_os = "macos")]
+pub const LOCAL_NETWORK_HINT: &str = ". If this is the app's own gateway, check that remotex is \
+     allowed under System Settings > Privacy & Security > Local Network — until it is, every \
+     connection off this Mac fails exactly like this";
+
+/// See the macOS half. No other platform gates a connection on a user decision.
+#[cfg(not(target_os = "macos"))]
+pub const LOCAL_NETWORK_HINT: &str = "";
+
 fn local_network_hint(e: &std::io::Error) -> &'static str {
     use std::io::ErrorKind;
     if matches!(
         e.kind(),
         ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable | ErrorKind::NetworkDown
     ) {
-        ". If this is the app's own gateway, check that remotex is allowed under \
-         System Settings > Privacy & Security > Local Network — until it is, every \
-         connection off this Mac fails exactly like this"
+        LOCAL_NETWORK_HINT
     } else {
         ""
     }
-}
-
-/// See the macOS half. No other platform gates a connection on a user decision.
-#[cfg(not(target_os = "macos"))]
-fn local_network_hint(_: &std::io::Error) -> &'static str {
-    ""
 }
 
 /// Ask the kernel to notice a peer that has stopped answering.

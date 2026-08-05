@@ -58,12 +58,6 @@ async fn wait_for_rdp_port(port: u16) {
 /// Start the real server pointed at the dummy RDP target (the autologon the
 /// gateway always requests fails there, leaving the login screen on show).
 async fn spawn_app(rdp_port: u16) -> SocketAddr {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-    });
-
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,

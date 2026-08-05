@@ -818,8 +818,18 @@ impl Inflater {
 ///
 /// Consuming the input is not the end of it: the sync flush that closes the
 /// rectangle has bytes of its own, and stopping at the last input byte truncates
-/// them into a chunk no decoder should accept. So this runs until a call produces
-/// nothing new.
+/// them into a chunk no decoder should accept. So this runs until the input is
+/// consumed *and* the compressor had room it did not use, which is how
+/// `compress_vec` says it has emitted everything it was holding.
+///
+/// **The obvious condition — "loop until a call produces nothing new" — does not
+/// terminate**, and which zlib is linked decides whether anyone finds out. A sync
+/// flush emits an empty stored block; the C zlib suppresses a second one against
+/// an already-flushed stream and `miniz_oxide` emits it every time, so the same
+/// loop returned on a Mac with `libz-sys` in the tree and spun forever without it.
+/// This gateway lost `libz-sys` when the RDP engine moved off IronRDP, and this
+/// test hung. The production deflate in `vnc_apple_clipboard.rs` was already
+/// written the right way round, which is why nothing user-visible was affected.
 ///
 /// Shared with [`crate::vnc`]'s tests rather than copied — a second copy of this
 /// loop is a second chance to write the truncated version and call the decoder
@@ -829,13 +839,14 @@ pub(crate) fn deflate_chunk(deflate: &mut flate2::Compress, raw: &[u8]) -> Vec<u
     let mut out = Vec::new();
     let mut fed = 0;
     loop {
-        let before = (deflate.total_in(), deflate.total_out());
         out.reserve(raw.len() + 64);
+        let available = out.spare_capacity_mut().len();
+        let before = (deflate.total_in(), deflate.total_out());
         deflate
             .compress_vec(&raw[fed..], &mut out, flate2::FlushCompress::Sync)
             .unwrap();
         fed += (deflate.total_in() - before.0) as usize;
-        if fed == raw.len() && deflate.total_out() == before.1 {
+        if fed == raw.len() && deflate.total_out() - before.1 < available as u64 {
             return out;
         }
     }
