@@ -193,6 +193,12 @@ socket2 = { version = "0.6", features = ["all"] }
 # OpenSSL installed and no libclang, and `packaging/build-tarball.sh` sets
 # nothing for it.
 #
+# The tag pins the wrapper and its committed bindings; the *archives* come from
+# whatever that repository's newest release is. Not a hole: the asset filename
+# carries the FreeRDP version, so a release that moved to a different FreeRDP
+# 404s naming it rather than handing back a library those bindings do not
+# describe, and a rebuild of the same version is how a build fix arrives here.
+#
 # It replaced IronRDP, which was not stable enough against real Windows hosts.
 # Two things came off the tree with it and are worth naming, because their
 # absence changes what other dependencies are here for: `ironrdp-tls` brought
@@ -205,7 +211,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", rev = "09efbaa" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260805143314-3716f17" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
