@@ -65,7 +65,7 @@ uint32 guacd also sets guards older FreeRDPs this build does not link.
 path remain untaken; glyph caching it forces off regardless of settings, for
 upstream instability (GUACAMOLE-1191).
 
-### Adaptive quality, per update rather than per session
+### Adaptive quality, per update rather than per session — taken, as an option
 
 guacd re-decides codec and quality for every update. Quality tracks the measured
 client lag linearly — `quality = clamp(90 − (lag − 20), 30, 90)`
@@ -76,11 +76,18 @@ proxy for DEFLATE-compressibility — keeps text and flat UI lossless
 (`display-worker.c:171-221`). Its PNG encoder palettizes ≤ 256-colour regions down
 to 1/2/4-bit indexed.
 
-This gateway's still-tile paths take one codec and one quality from config for the
-session, default lossless PNG, and only the video paths have the congestion dial.
-The lag signal the quality curve needs is already collected — the paint window's
-`behind()` is exactly guacd's `processing_lag` — it just gates the send window
-instead of moving quality.
+**The quality half is now `render_adaptive`**, per target and off by default where
+guacd's is always on. The lag signal is the one this table predicted: the paint
+window's `behind()`, published through `src/feedback.rs` minus a windowed-min
+baseline (RustDesk's move, so distance never reads as queueing). Lossy tiles take
+guacd's exact curve per encode — one point per ms past 20 ms, floored at
+`render_adaptive_min` instead of a hardcoded 30 — and the video/stream paths feed
+the same lag into their existing congestion walk as a second down-trigger beside
+push-blocking, with the same configurable floor. The audio counterpart
+(`audio_adaptive`: an Opus bitrate walk on the audio socket's own backpressure,
+plus shedding silent wave buffers while behind) has no guacd analogue at all —
+guacd carries only raw PCM. The codec-tracks-content half (the PNG-optimality
+estimator, item 6) remains untaken.
 
 ### Copy detection — taken
 
@@ -156,8 +163,10 @@ bound-at-sink — is worth remembering when a new symptom appears.
    behind it~~ — **done**, in the wrapper, as guacd's defaults.
 3. ~~Frame markers as the flush signal, with the coalescer kept as the fallback~~ —
    **done**: `Event::Frame` from the wrapper, marker-or-net flush in `src/rdp.rs`.
-4. Lag-adaptive quality on the still-tile paths, from the paint window's existing
-   `behind()`.
+4. ~~Lag-adaptive quality on the still-tile paths, from the paint window's existing
+   `behind()`~~ — **done**, `render_adaptive` in `src/config.rs`: guacd's curve on
+   the still tiles, the lag signal into the streaming walk, and an Opus walk beside
+   them that guacd never had.
 5. ~~Copy detection over the shadow for the RDP path~~ — **done**, `src/copies.rs`;
    125 records moving 3.5M pixels in the first live scroll it saw.
 6. Per-tile content-aware codec choice (the PNG-optimality estimator).

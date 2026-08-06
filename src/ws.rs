@@ -46,6 +46,7 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
+    feedback::LinkFeedback,
     protocol::{ClientMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager},
@@ -168,9 +169,24 @@ enum Admission {
     PastWindow,
 }
 
+/// Acknowledgments whose end-to-end times the baseline is the minimum of.
+///
+/// The baseline is what [`LinkFeedback::lag`] subtracts so distance does not read
+/// as queueing. A window rather than an all-time minimum so a route change is
+/// eventually believed; at the paint window's ordinary cadence this is a few
+/// seconds of history, the same order as RustDesk's 60-sample RTT window.
+const BASELINE_WINDOW: usize = 32;
+
 #[derive(Default)]
 struct PaintTracker {
     pending: VecDeque<PendingPaint>,
+    /// Where this attachment's verdict about the link is published for the
+    /// encoders — see [`LinkFeedback`]. `None` in tests that only assert the
+    /// tracker's own arithmetic.
+    feedback: Option<Arc<LinkFeedback>>,
+    /// End-to-end times (ms) of the last [`BASELINE_WINDOW`] acknowledgments,
+    /// whose minimum is the published baseline.
+    recent_end_to_end: VecDeque<u32>,
     sent: u64,
     acknowledgments: u64,
     completed: u64,
@@ -188,6 +204,18 @@ struct PaintTracker {
 }
 
 impl PaintTracker {
+    /// A tracker that publishes what it learns through `feedback`.
+    fn publishing(feedback: Arc<LinkFeedback>) -> Self {
+        Self { feedback: Some(feedback), ..Self::default() }
+    }
+
+    /// Tell the encoders how long the oldest owed batch has been owed — called
+    /// after every change to the front of `pending`.
+    fn publish_owed(&self) {
+        if let Some(feedback) = &self.feedback {
+            feedback.owed_since(self.pending.front().map(|paint| paint.sent));
+        }
+    }
     /// Batches the painter has not acknowledged yet — what [`PAINT_WINDOW`]
     /// bounds.
     fn in_flight(&self) -> usize {
@@ -226,6 +254,7 @@ impl PaintTracker {
         });
         self.sent += 1;
         self.max_in_flight = self.max_in_flight.max(self.pending.len() as u64);
+        self.publish_owed();
     }
 
     /// Record what a batch's admission cost, once that batch is on the socket.
@@ -249,6 +278,7 @@ impl PaintTracker {
         if self.pending.back().is_some_and(|paint| paint.sequence == sequence) {
             self.pending.pop_back();
             self.sent -= 1;
+            self.publish_owed();
         }
     }
 
@@ -273,6 +303,16 @@ impl PaintTracker {
         self.max_draw_ms = self.max_draw_ms.max(draw_ms);
         self.end_to_end_ms = self.end_to_end_ms.saturating_add(elapsed);
         self.max_end_to_end_ms = self.max_end_to_end_ms.max(elapsed);
+        if self.recent_end_to_end.len() == BASELINE_WINDOW {
+            self.recent_end_to_end.pop_front();
+        }
+        self.recent_end_to_end.push_back(u32::try_from(elapsed).unwrap_or(u32::MAX));
+        if let Some(feedback) = &self.feedback
+            && let Some(baseline) = self.recent_end_to_end.iter().min()
+        {
+            feedback.baseline(*baseline);
+        }
+        self.publish_owed();
     }
 }
 
@@ -552,7 +592,7 @@ async fn session(
     // numbers needs no lock and cannot deadlock against the send path.
     let cache_epoch = Arc::new(AtomicU64::new(0));
     let inbound_epoch = Arc::clone(&cache_epoch);
-    let paint = Arc::new(Mutex::new(PaintTracker::default()));
+    let paint = Arc::new(Mutex::new(PaintTracker::publishing(attachment.feedback)));
     let outbound_paint = Arc::clone(&paint);
     // Woken by the inbound half whenever an acknowledgment advances the window,
     // so a parked batch leaves as soon as there is room rather than on a timer.
@@ -824,6 +864,36 @@ mod tests {
         assert_eq!(paint.pending.len(), 1);
     }
 
+    /// What the tracker learns reaches the encoders: sending marks the link
+    /// owed, the first acknowledgment measures the baseline, and settling the
+    /// debt settles the lag. Asked about *later* instants rather than waited
+    /// for, so nothing here depends on the machine's speed.
+    #[test]
+    fn the_tracker_publishes_owed_age_and_baseline_through_the_feedback() {
+        let feedback = Arc::new(LinkFeedback::new());
+        let mut paint = PaintTracker::publishing(Arc::clone(&feedback));
+        let later = |ms: u64| Instant::now() + Duration::from_millis(ms);
+
+        // Nothing owed: no lag, however much later it is asked.
+        assert_eq!(feedback.lag(later(500)), Duration::ZERO);
+
+        // A batch owed but never acknowledged: still none — with no baseline,
+        // queueing cannot be told from distance, and the safe answer is clear.
+        paint.sent(1);
+        assert_eq!(feedback.lag(later(500)), Duration::ZERO);
+
+        // The first acknowledgment measures the floor; the age of the next owed
+        // batch beyond that floor is lag.
+        paint.acknowledge(1, 0, 0);
+        paint.sent(2);
+        let lag = feedback.lag(later(500));
+        assert!(lag > Duration::from_millis(400), "expected ~500ms of lag, got {lag:?}");
+
+        // Settling the debt settles the lag.
+        paint.acknowledge(2, 0, 0);
+        assert_eq!(feedback.lag(later(500)), Duration::ZERO);
+    }
+
     #[test]
     fn paint_tracking_is_bounded_and_a_failed_write_is_not_counted() {
         let mut paint = PaintTracker::default();
@@ -1064,6 +1134,11 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            render_adaptive: false,
+            render_adaptive_min: None,
+            audio_bitrate: None,
+            audio_adaptive: false,
+            audio_bitrate_min: None,
         }
     }
 

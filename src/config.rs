@@ -191,10 +191,11 @@ pub enum RenderType {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AudioCodec {
-    /// Opus at 96 kbps in 20 ms packets ([`crate::opus_stream`]). The default,
-    /// and the right answer for any link that leaves the building: it is well
-    /// clear of where stereo Opus starts to be audibly lossy, and 96 kbps is a
-    /// fifteenth of what the alternative costs.
+    /// Opus in 20 ms packets ([`crate::opus_stream`]), at
+    /// [`TargetConfig::audio_bitrate`] (default 96 kbit/s). The default codec,
+    /// and the right answer for any link that leaves the building: the default
+    /// rate is well clear of where stereo Opus starts to be audibly lossy, and
+    /// a fifteenth of what the alternative costs.
     #[default]
     Opus,
     /// The remote's own PCM, unencoded and unresampled ([`crate::pcm_stream`]):
@@ -213,6 +214,44 @@ impl AudioCodec {
         match self {
             Self::Opus => "opus",
             Self::Pcm => "pcm",
+        }
+    }
+}
+
+/// A target's audio keys as the encoder consumes them, resolved by
+/// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
+/// unit; the config speaks kbit/s because a person does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioPlan {
+    pub codec: AudioCodec,
+    /// The Opus bitrate — the ceiling, when the plan is adaptive. Carried but
+    /// unread for [`AudioCodec::Pcm`], whose whole point is that no encoder
+    /// exists to give it to.
+    pub bitrate_bps: i32,
+    /// `Some(floor)` exactly when the bitrate should track the audio socket's
+    /// backpressure, walking between the floor and [`Self::bitrate_bps`] — and
+    /// silence should be shed while the link is behind. See
+    /// [`TargetConfig::audio_adaptive`].
+    pub adaptive_floor_bps: Option<i32>,
+}
+
+impl AudioPlan {
+    /// `codec` at the default rate, fixed — the plan a bare `audio_codec` key
+    /// resolves to.
+    pub fn fixed(codec: AudioCodec) -> Self {
+        Self { codec, ..Self::default() }
+    }
+}
+
+impl Default for AudioPlan {
+    /// What an unset dial means: Opus at the default rate, fixed. The fallback
+    /// [`crate::session`] uses when no target is selected, where there is no
+    /// config to read.
+    fn default() -> Self {
+        Self {
+            codec: AudioCodec::Opus,
+            bitrate_bps: DEFAULT_AUDIO_BITRATE_KBPS as i32 * 1000,
+            adaptive_floor_bps: None,
         }
     }
 }
@@ -332,13 +371,26 @@ pub enum RenderPlan {
         /// Draw the motion strategy's decisions into the pixels. QA only, and only
         /// meaningful when `motion` is `Some`.
         debug: bool,
+        /// The floor of the adaptive quality walk, when
+        /// [`TargetConfig::render_adaptive`] asked for one; `None` keeps every
+        /// quality exactly where the config put it. Applies to whatever lossy
+        /// dials this plan has — a lossy base or motion tile codec takes a
+        /// per-encode quality scaled with the link's lag, and a motion `stream`
+        /// hands it to the same congestion walk `Video` uses.
+        adaptive: Option<u8>,
     },
     /// The whole framebuffer as one video stream at a fixed quantizer.
     ///
     /// The quality is the 1–100 dial rather than a quantizer: turning that into one is
     /// [`crate::vp9`]'s business, and it is the only module that should know what a
     /// quantizer is.
-    Video { quality: u8 },
+    Video {
+        quality: u8,
+        /// The floor of the adaptive quality walk — see [`RenderPlan::Tiles`]'s
+        /// field of the same name. `None` keeps the congestion walk's historical
+        /// shape: pressure-only, floored at 1.
+        adaptive: Option<u8>,
+    },
 }
 
 impl RenderPlan {
@@ -363,17 +415,23 @@ impl RenderPlan {
                 TileCodec::Webp(q) => format!("webp q{q}"),
             }
         }
+        // The floor as a suffix, because it modifies the whole plan rather than
+        // one dial: every quality named before it is a ceiling the link may fall
+        // below, and this is how far.
+        fn floor(adaptive: Option<u8>) -> String {
+            adaptive.map_or_else(String::new, |floor| format!(" · adaptive ≥{floor}"))
+        }
         match self {
-            RenderPlan::Video { quality } => {
-                format!("video q{quality}")
+            RenderPlan::Video { quality, adaptive } => {
+                format!("video q{quality}{}", floor(*adaptive))
             }
-            RenderPlan::Tiles { base, motion: None, .. } => {
+            RenderPlan::Tiles { base, motion: None, adaptive, .. } => {
                 // No motion arm at all, which is `full` and `fixed-quality` alike: the
                 // difference between them is only whether the base is lossless, and that is
                 // what the base already says.
-                format!("tiles · {}", tile(*base))
+                format!("tiles · {}{}", tile(*base), floor(*adaptive))
             }
-            RenderPlan::Tiles { base, motion: Some(motion), debug } => {
+            RenderPlan::Tiles { base, motion: Some(motion), debug, adaptive } => {
                 let moving = match motion {
                     MotionEncode::Tile(codec) => tile(*codec),
                     MotionEncode::Stream { quality } => {
@@ -381,7 +439,11 @@ impl RenderPlan {
                     }
                 };
                 let debug = if *debug { " (debug outlines)" } else { "" };
-                format!("motion · base {}, moving {moving}{debug}", tile(*base))
+                format!(
+                    "motion · base {}, moving {moving}{debug}{}",
+                    tile(*base),
+                    floor(*adaptive)
+                )
             }
         }
     }
@@ -505,6 +567,32 @@ pub struct TargetConfig {
     /// of accepted and left inert.
     #[serde(default)]
     pub audio_codec: Option<AudioCodec>,
+    /// Opus bitrate in kbit/s (6–510); `None` reads as
+    /// [`DEFAULT_AUDIO_BITRATE_KBPS`]. Opus only — passthrough PCM has no
+    /// encoder to give a rate to, so the key is refused beside
+    /// `audio_codec = "pcm"`.
+    ///
+    /// When [`Self::audio_adaptive`] is set this is the *ceiling*: the rate a
+    /// link that keeps up gets, and the one the walk climbs back to.
+    #[serde(default)]
+    pub audio_bitrate: Option<u32>,
+    /// Let the Opus bitrate track the audio socket's own backpressure: a send
+    /// that blocks means the previous packets are still unwritten, and sustained
+    /// blocking walks the bitrate down toward [`Self::audio_bitrate_min`]; a
+    /// clear stretch walks it back up to the ceiling. While behind, wave buffers
+    /// that are pure silence are shed instead of queued — silence is the one
+    /// content whose loss is free, and dropping it is how the client catches up
+    /// without a trimmed or resampled note anywhere (see [`crate::audio`]).
+    ///
+    /// Opus only, for the same reason as [`Self::audio_bitrate`].
+    #[serde(default)]
+    pub audio_adaptive: bool,
+    /// Floor in kbit/s for [`Self::audio_adaptive`] (6–510, below the
+    /// bitrate ceiling); `None` reads as [`DEFAULT_AUDIO_BITRATE_MIN_KBPS`].
+    /// Requires `audio_adaptive` — a floor for a walk that never moves is a key
+    /// that could not do anything.
+    #[serde(default)]
+    pub audio_bitrate_min: Option<u32>,
     /// Quality *strategy* for this target's tiles. Defaults to [`RenderType::Full`]
     /// (lossless PNG), so an unset target is byte-identical to before the dial
     /// existed. Validated against [`Self::render_subtype`] and [`Self::render_quality`]
@@ -550,7 +638,47 @@ pub struct TargetConfig {
     /// keep the true pixels, and a cleanup erases the outline it replaces.
     #[serde(default)]
     pub render_motion_debug: bool,
+    /// Let quality track the measured link, on every lossy dial this target has.
+    ///
+    /// The configured qualities stay the *ceiling* — a link with room to spare
+    /// never earns a better picture than the one asked for — and the walk's floor
+    /// is [`Self::render_adaptive_min`]. What moves underneath:
+    ///
+    /// - A video stream (`render_type = "video"` or `render_motion_subtype =
+    ///   "stream"`) already gives quality up when queueing a frame blocks; this
+    ///   adds the client's own lag — how long the oldest unacknowledged paint
+    ///   batch has been owed, beyond the link's measured floor — as a second
+    ///   reason to, and moves the walk's floor up from 1.
+    /// - A lossy tile codec (JPEG/WebP, base or motion) gets a quality per
+    ///   *encode* instead of per session, scaled down linearly with that same
+    ///   lag — Guacamole's curve, on this gateway's own signal.
+    ///
+    /// Refused for `render_type = "full"`, which is lossless everywhere and has
+    /// no dial for this to move.
+    #[serde(default)]
+    pub render_adaptive: bool,
+    /// Floor (1–100) for [`Self::render_adaptive`]; `None` reads as
+    /// [`DEFAULT_RENDER_ADAPTIVE_MIN`]. Must not exceed any quality this target
+    /// configures — a floor above the ceiling is a contradiction better refused
+    /// than resolved. Requires `render_adaptive`.
+    #[serde(default)]
+    pub render_adaptive_min: Option<u8>,
 }
+
+/// The quality floor [`TargetConfig::render_adaptive`] falls back to when
+/// [`TargetConfig::render_adaptive_min`] is unset. Low enough to matter on a
+/// struggling link, high enough that text stays legible.
+pub const DEFAULT_RENDER_ADAPTIVE_MIN: u8 = 20;
+
+/// The Opus bitrate (kbit/s) when [`TargetConfig::audio_bitrate`] is unset —
+/// [`crate::opus_stream`]'s long-standing default, well clear of where stereo
+/// Opus starts to be audibly lossy.
+pub const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 96;
+
+/// The adaptive floor (kbit/s) when [`TargetConfig::audio_bitrate_min`] is
+/// unset. 32 kbit/s stereo Opus is degraded but continuous — and continuity is
+/// the whole point of giving bitrate up.
+pub const DEFAULT_AUDIO_BITRATE_MIN_KBPS: u32 = 32;
 
 impl TargetConfig {
     /// Whether a client may let its window drive this target's size *unasked* —
@@ -601,8 +729,11 @@ impl TargetConfig {
     /// the safe answer — lossless PNG for the base, no motion encode at all —
     /// rather than trusting that here.
     pub fn render_plan(&self) -> RenderPlan {
+        let adaptive = self
+            .render_adaptive
+            .then(|| self.render_adaptive_min.unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN));
         if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_quality) {
-            return RenderPlan::Video { quality };
+            return RenderPlan::Video { quality, adaptive };
         }
         let base = match (self.render_subtype, self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
@@ -618,7 +749,21 @@ impl TargetConfig {
             },
             _ => None,
         };
-        RenderPlan::Tiles { base, motion, debug: self.render_motion_debug }
+        RenderPlan::Tiles { base, motion, debug: self.render_motion_debug, adaptive }
+    }
+
+    /// The audio keys collapsed to what the encoder is built from, the same way
+    /// [`Self::render_plan`] collapses the render dial: defaults resolved,
+    /// kilobits turned into the bits libopus speaks, and the adaptive floor
+    /// present exactly when the walk was asked for. Callers gate on
+    /// [`Self::audio`] — a target without audio has no plan to resolve.
+    pub fn audio_plan(&self) -> AudioPlan {
+        let codec = self.audio_codec.unwrap_or_default();
+        let bitrate_bps = self.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS) as i32 * 1000;
+        let adaptive_floor_bps = (codec == AudioCodec::Opus && self.audio_adaptive).then(|| {
+            self.audio_bitrate_min.unwrap_or(DEFAULT_AUDIO_BITRATE_MIN_KBPS) as i32 * 1000
+        });
+        AudioPlan { codec, bitrate_bps, adaptive_floor_bps }
     }
 
     /// Whether this target puts moving pixels on the wire as a video stream — either the whole
@@ -887,6 +1032,53 @@ impl ConfigFile {
                 "target {:?} sets audio_codec but not audio, so nothing would encode",
                 target.name
             );
+            // The bitrate keys and the adaptive switch are Opus's alone: passthrough
+            // PCM has no encoder, so a rate beside it is a key that could not do
+            // anything — same rule as audio_codec without audio, one step down again.
+            let opus = target.audio && target.audio_codec.unwrap_or_default() == AudioCodec::Opus;
+            anyhow::ensure!(
+                target.audio_bitrate.is_none() || opus,
+                "target {:?} sets audio_bitrate, which only an opus audio target uses — it \
+                 is the encoder's rate, and this target has no opus encoder",
+                target.name
+            );
+            anyhow::ensure!(
+                !target.audio_adaptive || opus,
+                "target {:?} sets audio_adaptive, which only an opus audio target uses — \
+                 adapting means moving the encoder's bitrate, and this target has no opus \
+                 encoder",
+                target.name
+            );
+            anyhow::ensure!(
+                target.audio_bitrate_min.is_none() || target.audio_adaptive,
+                "target {:?} sets audio_bitrate_min but not audio_adaptive — the floor \
+                 belongs to the adaptive walk, and without the walk nothing would read it",
+                target.name
+            );
+            let bitrate = target.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
+            if let Some(kbps) = target.audio_bitrate {
+                anyhow::ensure!(
+                    (6..=510).contains(&kbps),
+                    "target {:?} sets audio_bitrate = {kbps}, which is out of range — it is \
+                     in kbit/s and must be 6–510",
+                    target.name
+                );
+            }
+            if let Some(kbps) = target.audio_bitrate_min {
+                anyhow::ensure!(
+                    (6..=510).contains(&kbps),
+                    "target {:?} sets audio_bitrate_min = {kbps}, which is out of range — it \
+                     is in kbit/s and must be 6–510",
+                    target.name
+                );
+                anyhow::ensure!(
+                    kbps < bitrate,
+                    "target {:?} sets audio_bitrate_min = {kbps} at or above the bitrate \
+                     ceiling of {bitrate} kbit/s, which leaves the adaptive walk nowhere \
+                     to go",
+                    target.name
+                );
+            }
             // Which credentials a VNC target may carry is the subtype's to say,
             // and the two sets do not overlap: an Apple subtype authenticates an
             // account to a Mac, plain VncAuth proves a secret the machine holds.
@@ -1126,6 +1318,43 @@ impl ConfigFile {
                      it must be 1–100",
                     target.name
                 );
+            }
+            // The adaptive switch needs a dial to move. Every strategy has one
+            // except `full`, which is lossless everywhere — and a `motion` plan
+            // always has at least the motion quality, so only `full` can be empty.
+            anyhow::ensure!(
+                !target.render_adaptive || target.render_type != RenderType::Full,
+                "target {:?} sets render_adaptive with render_type \"full\", which is \
+                 lossless everywhere and has no quality for the link to move. Pick a \
+                 strategy with a lossy dial — \"fixed-quality\", \"motion\" or \"video\"",
+                target.name
+            );
+            anyhow::ensure!(
+                target.render_adaptive_min.is_none() || target.render_adaptive,
+                "target {:?} sets render_adaptive_min but not render_adaptive — the floor \
+                 belongs to the adaptive walk, and without the walk nothing would read it",
+                target.name
+            );
+            if let Some(floor) = target.render_adaptive_min {
+                anyhow::ensure!(
+                    (1..=100).contains(&floor),
+                    "target {:?} sets render_adaptive_min = {floor}, which is out of range — \
+                     it must be 1–100",
+                    target.name
+                );
+                // A floor above a ceiling is a contradiction, and every configured
+                // quality is a ceiling the walk must fit under.
+                let ceiling = target.render_quality.into_iter()
+                    .chain(target.render_motion_quality)
+                    .min();
+                if let Some(ceiling) = ceiling {
+                    anyhow::ensure!(
+                        floor <= ceiling,
+                        "target {:?} sets render_adaptive_min = {floor} above a configured \
+                         quality of {ceiling}, which leaves the adaptive walk nowhere to go",
+                        target.name
+                    );
+                }
             }
         }
         Ok(config)
@@ -1680,7 +1909,7 @@ mod tests {
         assert_eq!(t.render_quality, None);
         assert_eq!(
             t.render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false, adaptive: None }
         );
     }
 
@@ -1704,7 +1933,7 @@ mod tests {
         assert_eq!(t.render_quality, Some(60));
         assert_eq!(
             t.render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None }
         );
     }
 
@@ -1726,7 +1955,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Webp);
         assert_eq!(
             t.render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Webp(50), motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Webp(50), motion: None, debug: false, adaptive: None }
         );
     }
 
@@ -1793,7 +2022,7 @@ mod tests {
             "#,
         )
         .expect("video with a quality");
-        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60 });
+        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60, adaptive: None });
     }
 
     #[test]
@@ -1970,7 +2199,8 @@ mod tests {
             RenderPlan::Tiles {
                 base: TileCodec::Png,
                 motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
-                debug: false
+                debug: false,
+                adaptive: None
             }
         );
     }
@@ -1998,7 +2228,8 @@ mod tests {
             RenderPlan::Tiles {
                 base: TileCodec::Webp(60),
                 motion: Some(MotionEncode::Tile(TileCodec::Webp(10))),
-                debug: false
+                debug: false,
+                adaptive: None
             }
         );
     }
@@ -2027,7 +2258,8 @@ mod tests {
             RenderPlan::Tiles {
                 base: TileCodec::Webp(60),
                 motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
-                debug: false
+                debug: false,
+                adaptive: None
             }
         );
     }
@@ -2128,7 +2360,8 @@ mod tests {
             RenderPlan::Tiles {
                 base: TileCodec::Png,
                 motion: Some(MotionEncode::Stream { quality: 30 }),
-                debug: false
+                debug: false,
+                adaptive: None
             }
         );
     }
@@ -2423,7 +2656,7 @@ mod tests {
         .expect("only the motion pairing is refused");
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: None, debug: false, adaptive: None }
         );
     }
 
@@ -2872,5 +3105,213 @@ mod tests {
         .unwrap_err();
         let rendered = format!("{err:#}");
         assert!(rendered.contains("audio_codec"), "{rendered}");
+    }
+
+    // ---- the adaptive dials --------------------------------------------------
+
+    /// One valid target body per test below, parameterized by the keys under test.
+    fn parse_target(body: &str) -> anyhow::Result<AppConfig> {
+        ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "t"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            {body}
+            "#,
+            site_passwd_line()
+        ))?
+        .resolve()
+    }
+
+    /// The switch resolves into the plan with its default floor, on every
+    /// strategy with a dial — and the plan says so.
+    #[test]
+    fn render_adaptive_resolves_a_floor_into_the_plan() {
+        let cfg = parse_target(
+            "render_type = \"video\"\nrender_quality = 80\nrender_adaptive = true",
+        )
+        .expect("adaptive video");
+        let plan = cfg.targets[0].render_plan();
+        assert_eq!(
+            plan,
+            RenderPlan::Video { quality: 80, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN) }
+        );
+        assert_eq!(plan.describe(), "video q80 · adaptive ≥20");
+
+        let cfg = parse_target(
+            "render_type = \"fixed-quality\"\nrender_subtype = \"jpeg\"\n\
+             render_quality = 70\nrender_adaptive = true\nrender_adaptive_min = 35",
+        )
+        .expect("adaptive tiles");
+        let plan = cfg.targets[0].render_plan();
+        assert_eq!(
+            plan,
+            RenderPlan::Tiles {
+                base: TileCodec::Jpeg(70),
+                motion: None,
+                debug: false,
+                adaptive: Some(35)
+            }
+        );
+        assert_eq!(plan.describe(), "tiles · jpeg q70 · adaptive ≥35");
+
+        let cfg = parse_target(
+            "render_type = \"motion\"\nrender_motion_subtype = \"stream\"\n\
+             render_motion_quality = 60\nrender_adaptive = true",
+        )
+        .expect("adaptive motion stream");
+        assert_eq!(
+            cfg.targets[0].render_plan().describe(),
+            "motion · base lossless png, moving stream q60 · adaptive ≥20"
+        );
+    }
+
+    /// A target that never asked stays exactly on its dial: no floor in the plan.
+    #[test]
+    fn without_render_adaptive_the_plan_has_no_floor() {
+        let cfg = parse_target("render_type = \"video\"\nrender_quality = 80")
+            .expect("plain video");
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Video { quality: 80, adaptive: None }
+        );
+    }
+
+    /// `full` is lossless everywhere: there is no dial for the link to move.
+    #[test]
+    fn render_adaptive_on_full_is_refused() {
+        let err = parse_target("render_adaptive = true").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("render_adaptive"), "{rendered}");
+        assert!(rendered.contains("full"), "{rendered}");
+    }
+
+    /// The floor belongs to the walk; without the walk nothing reads it.
+    #[test]
+    fn render_adaptive_min_without_the_walk_is_refused() {
+        let err = parse_target(
+            "render_type = \"video\"\nrender_quality = 80\nrender_adaptive_min = 30",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_adaptive_min"));
+    }
+
+    /// A floor above a configured quality leaves the walk nowhere to go —
+    /// including above the *motion* quality, the smallest dial a motion plan has.
+    #[test]
+    fn a_floor_above_a_ceiling_is_refused() {
+        let err = parse_target(
+            "render_type = \"video\"\nrender_quality = 50\n\
+             render_adaptive = true\nrender_adaptive_min = 60",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("nowhere to go"));
+
+        let err = parse_target(
+            "render_type = \"motion\"\nrender_motion_subtype = \"jpeg\"\n\
+             render_motion_quality = 10\nrender_adaptive = true\nrender_adaptive_min = 30",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("nowhere to go"));
+
+        // The *default* floor over the same low dial is no contradiction — the
+        // operator never wrote it. It parses, and the walk clamps it to the
+        // dial (`Congestion::new`) instead.
+        parse_target(
+            "render_type = \"motion\"\nrender_motion_subtype = \"jpeg\"\n\
+             render_motion_quality = 10\nrender_adaptive = true",
+        )
+        .expect("a default floor clamps instead of refusing");
+    }
+
+    /// The audio keys resolve the same way the render dial does: defaults
+    /// filled, kilobits become bits, and the floor is present exactly when the
+    /// walk was asked for.
+    #[test]
+    fn the_audio_plan_resolves_defaults_and_the_adaptive_floor() {
+        let cfg = parse_target("audio = true").expect("bare audio");
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
+        assert_eq!(cfg.targets[0].audio_plan().bitrate_bps, 96_000);
+
+        let cfg = parse_target("audio = true\naudio_bitrate = 128").expect("a rate");
+        assert_eq!(
+            cfg.targets[0].audio_plan(),
+            AudioPlan { codec: AudioCodec::Opus, bitrate_bps: 128_000, adaptive_floor_bps: None }
+        );
+
+        let cfg = parse_target("audio = true\naudio_adaptive = true").expect("adaptive");
+        assert_eq!(
+            cfg.targets[0].audio_plan(),
+            AudioPlan {
+                codec: AudioCodec::Opus,
+                bitrate_bps: 96_000,
+                adaptive_floor_bps: Some(32_000)
+            }
+        );
+
+        let cfg = parse_target(
+            "audio = true\naudio_bitrate = 64\naudio_adaptive = true\naudio_bitrate_min = 24",
+        )
+        .expect("adaptive with both rates");
+        assert_eq!(
+            cfg.targets[0].audio_plan(),
+            AudioPlan {
+                codec: AudioCodec::Opus,
+                bitrate_bps: 64_000,
+                adaptive_floor_bps: Some(24_000)
+            }
+        );
+    }
+
+    /// Passthrough has no encoder: every key that tunes one is refused beside it.
+    #[test]
+    fn the_bitrate_keys_are_opus_only() {
+        let err = parse_target(
+            "audio = true\naudio_codec = \"pcm\"\naudio_bitrate = 96",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("audio_bitrate"));
+
+        let err = parse_target(
+            "audio = true\naudio_codec = \"pcm\"\naudio_adaptive = true",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("audio_adaptive"));
+
+        // And without audio at all, same rule one step up.
+        let err = parse_target("audio_bitrate = 96").unwrap_err();
+        assert!(format!("{err:#}").contains("audio_bitrate"));
+    }
+
+    /// The floor needs the walk, has a range, and must sit under the ceiling.
+    #[test]
+    fn the_audio_floor_is_validated_against_the_walk_and_the_ceiling() {
+        let err = parse_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
+        assert!(format!("{err:#}").contains("audio_adaptive"));
+
+        let err = parse_target(
+            "audio = true\naudio_adaptive = true\naudio_bitrate_min = 4",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("6–510"));
+
+        let err = parse_target(
+            "audio = true\naudio_bitrate = 48\naudio_adaptive = true\naudio_bitrate_min = 48",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("nowhere to go"));
+
+        // The *default* floor above a low ceiling is no contradiction — the
+        // operator never wrote it. It parses, and the walk clamps it to the
+        // ceiling (`AudioCongestion::new`) instead.
+        parse_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
+            .expect("a default floor clamps instead of refusing");
+
+        let err = parse_target("audio = true\naudio_bitrate = 999").unwrap_err();
+        assert!(format!("{err:#}").contains("6–510"));
     }
 }

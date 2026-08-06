@@ -171,7 +171,7 @@ mod tests {
         sink.negotiated(1);
 
         let encoded = listener
-            .into_packets(PCM_CD_QUALITY, crate::config::AudioCodec::Pcm)
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioPlan::fixed(crate::config::AudioCodec::Pcm))
             .expect("the negotiated format must be carryable as passthrough PCM");
         let mut packets = Box::pin(encoded.packets);
 
