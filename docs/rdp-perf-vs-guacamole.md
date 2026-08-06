@@ -27,7 +27,7 @@ per animation frame; guacd does none at all and sends every move.
 
 ## The gaps
 
-### Frame boundaries: markers versus a timer
+### Frame boundaries — taken
 
 guacd asks the server to say where frames end — `FreeRDP_FrameMarkerCommandEnabled`
 and `FreeRDP_SurfaceFrameMarkerEnabled` (`settings.c:1578`) — and flushes on the
@@ -35,23 +35,35 @@ FRAME_END event (`gdi.c:38-71`), acknowledging each frame back when the server
 negotiated `FrameAcknowledge` so its flow-control window stays open. The render
 thread only falls back to a timer (100 ms) when no marker arrives.
 
-This gateway sets neither and reconstructs boundaries with the 16 ms damage
-coalescer (`DAMAGE_INTERVAL`, `src/rdp.rs`) under the 33 ms video cap. That is a
-guess where a fact is available: the guess adds up to 16 ms to every update and can
-cut a multi-rect frame in half. The wrapper would surface FRAME_END as an event
-beside `Paint`.
+This gateway used to set neither and reconstruct boundaries with the 16 ms damage
+coalescer (`DAMAGE_INTERVAL`, `src/rdp.rs`) — a guess where a fact was available,
+adding up to 16 ms to every update and able to cut a multi-rect frame in half.
+**Now the wrapper requests both markers and surfaces the END as `Event::Frame`**,
+acknowledging the surface flavour the way guacd does; EGFX sessions need no marker
+because the pipeline flushes its surfaces once per frame PDU, and the wrapper marks
+that flush. On the first `Frame` a server ever sends, `src/rdp.rs` switches
+regimes: the marker becomes the flush signal and the timer demotes to a 100 ms
+safety net (`FRAME_NET`, guacd's own fallback number). A server that never marks —
+none has been seen; the Windows 11 host and xrdp both mark — keeps the original
+coalescer. Measured with `freerdp-e2e`: both kinds of server marked 4 boundaries
+across 5 paints, the expected shape.
 
-### Performance flags: damage that never has to exist
+### Performance flags — taken
 
 `guac_rdp_get_performance_flags` (`settings.c:1489-1519`) disables wallpaper,
 theming, full-window drag and menu animations by default, and sets the individual
 `Disable*` booleans redundantly because some FreeRDP versions overwrite the flags.
-This gateway sets only `DisableMenuAnims`, and keeps full-window drag **on** — which
-prices every window drag at a full window repaint per position, through damage,
-encode, socket, decode and paint. Turning drag off is the single cheapest
-damage-volume lever the comparison found. `BitmapCacheEnabled` and
-`OffscreenSupportLevel` guacd also enables on the legacy path; glyph caching it
-forces off regardless of settings, for upstream instability (GUACAMOLE-1191).
+This gateway set only `DisableMenuAnims` and kept full-window drag **on** — pricing
+every window drag at a full window repaint per position, through damage, encode,
+socket, decode and paint. **The wrapper now ships guacd's defaults**: wallpaper,
+theming, drag and menu animations all off, reversing the recorded drag-stays-on
+decision (the reversal and its price are in the wrapper's comment). Only the
+booleans are set, because the pinned FreeRDP derives the wire value from them
+(`freerdp_performance_flags_make`) as the info packet is written — the redundant
+uint32 guacd also sets guards older FreeRDPs this build does not link.
+`BitmapCacheEnabled` and `OffscreenSupportLevel` guacd also enables on the legacy
+path remain untaken; glyph caching it forces off regardless of settings, for
+upstream instability (GUACAMOLE-1191).
 
 ### Adaptive quality, per update rather than per session
 
@@ -101,9 +113,11 @@ graphics reset instead — see [`rdp-audio-prior-art.md`](rdp-audio-prior-art.md
 ### Transport details
 
 - guacd sets `TCP_NODELAY` on every accepted connection (`guacd/daemon.c:563`),
-  naming Nagle as the reason. This gateway sets it on the VNC-to-host socket only;
-  the axum listener's browser-facing sockets are left at the OS default, in front
-  of an ack-gated window where a delayed segment is a stalled window.
+  naming Nagle as the reason. **Taken**: `NodelayListener` (`src/server.rs`) sets
+  it on every socket the gateway accepts, in both the served and embedded shapes;
+  it was previously only on the VNC-to-host socket, leaving the browser-facing
+  side — in front of an ack-gated window where a delayed segment is a stalled
+  window — at the OS default.
 - guacd buffers writes 8 KB deep and flushes exactly at frame boundaries; its
   WebSocket tunnel batches until it is about to block, never on a timer. The same
   shape as `wire.rs`'s drain-don't-wait batching — parity, recorded because the
@@ -127,11 +141,12 @@ bound-at-sink — is worth remembering when a new symptom appears.
 
 ## In order of expected value against effort
 
-1. `TCP_NODELAY` on the browser socket — a line in the accept path, measurable with
-   the paintAck lag numbers already recorded.
-2. Performance flags: full-window drag off above all, wallpaper and theming behind
-   it. Damage that is never created needs no other optimization.
-3. Frame markers as the flush signal, with the coalescer kept as the fallback.
+1. ~~`TCP_NODELAY` on the browser socket~~ — **done**, `NodelayListener` in
+   `src/server.rs`.
+2. ~~Performance flags: full-window drag off above all, wallpaper and theming
+   behind it~~ — **done**, in the wrapper, as guacd's defaults.
+3. ~~Frame markers as the flush signal, with the coalescer kept as the fallback~~ —
+   **done**: `Event::Frame` from the wrapper, marker-or-net flush in `src/rdp.rs`.
 4. Lag-adaptive quality on the still-tile paths, from the paint window's existing
    `behind()`.
 5. Copy detection over the shadow for the RDP path — the scrolling win.

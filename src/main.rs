@@ -164,7 +164,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             .context("cannot make a listening socket non-blocking")?;
         let listener = tokio::net::TcpListener::from_std(listener)
             .context("cannot hand a listening socket to the runtime")?;
-        servers.spawn(axum::serve(listener, app.clone()).into_future());
+        servers.spawn(
+            axum::serve(server::NodelayListener(listener), app.clone()).into_future(),
+        );
     }
 
     // Race the servers against an explicit shutdown signal. Relying on the OS

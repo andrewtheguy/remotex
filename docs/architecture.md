@@ -740,6 +740,11 @@ handshake budget, and TCP keepalive. Linux also uses `TCP_USER_TIMEOUT` to bound
 unacknowledged writes. These checks prove only that the peer's kernel responds.
 RDP and RFB have no portable application ping.
 
+Browser-facing sockets get `TCP_NODELAY` too — `NodelayListener` in
+`src/server.rs` sets it on every accepted connection, in both the served and
+embedded shapes. Those sockets feed an ack-gated paint window, and a segment
+Nagle holds back is that window stalled for a round trip.
+
 ## Engines
 
 ### RDP
@@ -753,6 +758,14 @@ complete framebuffer in Rust-owned memory and posting an event per damaged
 rectangle. The engine compares those rectangles with a shadow of pixels already
 sent, splits the remainder into bands, and encodes off the event loop. Input is
 mapped from DOM codes to scancodes and queued to FreeRDP's thread.
+
+Damage is flushed at the server's own frame boundaries where the server marks
+them, which every server measured so far does: the wrapper requests both legacy
+frame-marker capabilities and surfaces the END — and EGFX's once-per-frame surface
+flush — as a `Frame` event. On the first one, the engine stops guessing: the
+16 ms coalescer (`DAMAGE_INTERVAL`) that reconstructed boundaries by timing
+demotes to a 100 ms safety net under the marker, so a frame is presented when the
+server says it is whole, not up to 16 ms later and never cut in half.
 
 It replaced IronRDP, which was not stable enough against real Windows hosts. The
 engine advertises the Graphics Pipeline (EGFX) with RemoteFX beside it, and the

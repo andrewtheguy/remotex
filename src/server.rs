@@ -35,6 +35,39 @@ pub struct AppState {
     pub auth: Arc<AuthSessions>,
 }
 
+/// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
+///
+/// Every socket accepted here feeds an ack-gated window — tiles wait on `paintAck`, and a
+/// segment Nagle holds back is that window stalled for a round trip on a link that was never
+/// the problem. guacd sets the same flag on every accepted connection (`guacd/daemon.c`),
+/// naming Nagle as the reason; the VNC-to-host socket here already does, and FreeRDP sets it
+/// on its own transport. This closes the one hop that was left at the OS default.
+///
+/// A newtype rather than a `set_nodelay` at each accept site because there is no accept site
+/// in this codebase: `axum::serve` owns the loop, and this is the seam it offers. The inner
+/// listener's own [`axum::serve::Listener`] impl is what is delegated to, so its handling of
+/// transient accept errors is kept rather than reimplemented.
+pub struct NodelayListener(pub tokio::net::TcpListener);
+
+impl axum::serve::Listener for NodelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, addr) = axum::serve::Listener::accept(&mut self.0).await;
+        // Refused only by a socket that is already dying, whose next read will say
+        // something better than a setsockopt errno — so noted, not fatal.
+        if let Err(e) = stream.set_nodelay(true) {
+            warn!("cannot set TCP_NODELAY for {addr}: {e}");
+        }
+        (stream, addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
 /// Build the axum router.
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the

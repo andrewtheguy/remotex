@@ -182,7 +182,9 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
         .context("cannot make the listening socket non-blocking")?;
     let listener = tokio::net::TcpListener::from_std(listener)
         .context("cannot hand the listening socket to the runtime")?;
-    axum::serve(listener, app).await.context("server error")?;
+    axum::serve(crate::server::NodelayListener(listener), app)
+        .await
+        .context("server error")?;
     Ok(())
 }
 
