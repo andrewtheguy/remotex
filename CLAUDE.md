@@ -71,11 +71,11 @@ key, since the operator cannot know which engines survive a stream of resizes.
 
 `ard-high-performance` offers the manual control only, for the fault in
 [`docs/known-issues.md`](docs/known-issues.md); standard `ard` refuses `resize`
-outright. **RDP's is on trial**: it was withheld for that file's reactivation
-entry, which was measured entirely against IronRDP and so says nothing about the
-engine now driving the path — and withholding the permission is what stopped it
-being re-measured. If a drag starts ending sessions, `TargetConfig::auto_resize`
-is the line to put back.
+outright. RDP's trial concluded in its favour: the re-measure found and fixed the
+one real fault (the wrapper never resized FreeRDP's decoder contexts, so growing
+an xorgxrdp desktop killed the session), and on EGFX hosts a resize is a graphics
+reset rather than a reactivation at all. If a drag ever starts ending sessions
+again, `TargetConfig::auto_resize` is still the line to put back.
 
 Apple display modes:
 

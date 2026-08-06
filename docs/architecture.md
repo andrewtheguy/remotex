@@ -754,13 +754,17 @@ rectangle. The engine compares those rectangles with a shadow of pixels already
 sent, splits the remainder into bands, and encodes off the event loop. Input is
 mapped from DOM codes to scancodes and queued to FreeRDP's thread.
 
-It replaced IronRDP, which was not stable enough against real Windows hosts. One
-protocol decision came with the swap and is worth knowing: the engine does **not**
-advertise the Graphics Pipeline (EGFX). Against a Windows 11 host with it
-advertised, FreeRDP decoded 21 surface commands with no errors and produced a
-framebuffer that summed to exactly black; without it, the same host and the same
-build painted a real desktop. The legacy bitmap path is also what IronRDP used, so
-this is like-for-like rather than a second simultaneous change.
+It replaced IronRDP, which was not stable enough against real Windows hosts. The
+engine advertises the Graphics Pipeline (EGFX) with RemoteFX beside it, and the
+pairing is load-bearing: the pipeline advertised *alone* was measured broken —
+against a Windows 11 host, FreeRDP decoded 21 surface commands with no errors into
+a framebuffer that summed to exactly black — and the codec next to the flag is
+what guacamole-server ships against the same Windows generation. With the pair,
+the same measurement is a painted desktop. Servers without the pipeline (xrdp
+among them here) fall back to the legacy bitmap path, which the wrapper keeps
+working through resizes by resizing FreeRDP's decoder contexts alongside the
+framebuffer — FreeRDP itself sizes them once, at connect, which is an upstream
+bug this repository stops carrying at its own layer.
 
 The pointer is not part of that framebuffer. RDP servers send the cursor's shape
 rather than drawing it, and each shape goes to the client as `cursor`, which draws
@@ -789,13 +793,17 @@ Declining the answer is not enough on its own — the message channel those PDUs
 arrive on has to be closed too, or the session dies when one is asked. That is
 the wrapper's business, and it is measured there.
 
-A size change that is *real* costs a Deactivation-Reactivation Sequence, which
-FreeRDP runs internally and reports as a new desktop size; asking twice for the
-same size triggers it once, and a request equal to the current size never
-triggers it. A layout is asked for on a bounded schedule rather than once,
-because a Windows host discards one sent before the session it is starting has
-settled and acknowledges nothing either way — measured through both engines. See
-[`docs/known-issues.md`](known-issues.md).
+A size change that is *real* costs a graphics reset on an EGFX host, and a full
+Deactivation-Reactivation Sequence on a legacy-path one; FreeRDP runs either
+internally and reports a new desktop size. The difference is not cosmetic: a
+Windows host's audio redirector does not survive its own reactivation — the last
+wave arrives within a second of one and the channel then stays open and mute,
+with no close, no re-announce, and no fallback — which is why the pipeline being
+on is part of how sound survives a resize there. Asking twice for the same size
+triggers one change, and a request equal to the current size never triggers one.
+A layout is asked for on a bounded schedule rather than once, because a Windows
+host discards one sent before the session it is starting has settled and
+acknowledges nothing either way — measured through both engines.
 
 ### VNC
 

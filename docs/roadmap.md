@@ -80,27 +80,17 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **RDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics` and use its real
-  frame boundaries, acknowledgments and surface compositor, then separately assess
-  AVC420 pass-through. The tested Windows server offers the channel and FreeRDP
-  contains a full client for it — it is compiled into the archives — so the parts
-  exist; what makes this large is that it is a second graphics pipeline beside the
-  one every engine shares, not an option on it.
-
-  **And it does not currently work against the host it matters for**, which has to
-  come first. With `SupportGraphicsPipeline` advertised, FreeRDP decoded 21 surface
-  commands against a Windows 11 host with no errors or warnings and produced a
-  framebuffer that summed to *exactly* black; with it off, the same host, the same
-  build and the same second painted a real desktop. Ruled out by measurement: the
-  host being blank (IronRDP painted it), a decode failure (ClearCodec and
-  Progressive both logged clean), missing H.264, `suppressOutput`, an unbound
-  pipeline, and `DeactivateClientDecoding` ordering. The next observation to make
-  is instrumenting `gdi_OutputUpdate` (`libfreerdp/gdi/gfx.c`) to print
-  `surface->outputMapped` and `nbRects` per call — its early return when
-  `nbRects == 0` is the only path that decodes a surface command and produces no
-  `EndPaint`, which is the observed signature. `gdi->graphicsReset`, which
-  `gfx.c` initialises to TRUE with a comment calling it a workaround "for now", is
-  worth checking before anything else.
+- **RDP EGFX, past what FreeRDP's GDI already gives.** The pipeline itself is
+  **on**: `SupportGraphicsPipeline` with `RemoteFxCodec` beside it, which is the
+  pair guacamole-server ships and the resolution of the black-framebuffer fault
+  this entry used to open with — the pipeline advertised *without a codec next to
+  it* was the whole of that bug, and the e2e that measured exactly black now
+  measures a painted desktop. What remains planned is using more of the channel
+  than FreeRDP's software GDI surfaces: its real frame boundaries and
+  acknowledgments as the flush signal, the surface compositor, and a separate
+  assessment of AVC420 pass-through. The parts exist in the archives; what makes
+  the rest large is that it is a second graphics pipeline beside the one every
+  engine shares, not an option on it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
