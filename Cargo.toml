@@ -211,7 +211,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260805185142-1373f5e" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260806034027-d85f6b8" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
