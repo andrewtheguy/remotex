@@ -253,10 +253,7 @@ launch screen, and `distDirFor` carries the story of how it happened once alread
 12. Turn a preference off, quit, **relaunch** → it survived. The stable origin and
     the persistent profile each look like they work alone; only a relaunch tells
     you.
-13. A `render_type = "video"` H.264 target plays. Electron ships proprietary
-    codecs, so the codec a stock Chromium refuses is not a problem here — a browser
-    may still refuse it, which is the client's own banner and not the shell's
-    concern.
+13. A `render_type = "video"` target plays.
 
 ## Signing
 

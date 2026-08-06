@@ -15,7 +15,6 @@ import type {
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 import { densityLabel, type RemoteSize } from "./useRemoteDesktop.ts";
-import { videoLabel } from "./videoLabel.ts";
 
 // The floating chrome — a draggable ☰ button that toggles a toolbar drawer. The
 // drawer carries this project's controls (browser-swallowed keys, modifier taps,
@@ -152,8 +151,8 @@ export interface PanelControls {
    *
    * The one route to it in a chromeless host: the ☰ button that opens it is the
    * chrome such a host replaces, so without this the card — the remote's size and
-   * density against this window's, the connection, the render dial, the video
-   * codec — is unreachable in `remotex.app`. Reported by the page rather than
+   * density against this window's, the connection, the render dial — is
+   * unreachable in `remotex.app`. Reported by the page rather than
    * rebuilt natively, because every line of it is derived from state this page
    * already holds and a second copy is a second copy to keep in step.
    */
@@ -288,15 +287,11 @@ function ScreenHelp({
   hostScale,
   connection,
   renderPlan,
-  videoCodec,
-  videoDecodeStrings,
 }: {
   size: RemoteSize | null;
   hostScale: number;
   connection: string;
   renderPlan: string;
-  videoCodec: string | null;
-  videoDecodeStrings: string[];
 }) {
   return (
     <>
@@ -335,10 +330,6 @@ function ScreenHelp({
               lives in the operator's config file, which whoever is looking at the screen
               usually does not have. Empty only before `connected`. */}
           <dd>{renderPlan || "Waiting for the target"}</dd>
-        </div>
-        <div className="help-item">
-          <dt>Video</dt>
-          <dd>{videoLabel(videoCodec, videoDecodeStrings)}</dd>
         </div>
       </dl>
     </>
@@ -518,8 +509,6 @@ export default function FloatingMenu({
   hostScale,
   connection,
   renderPlan,
-  videoCodec,
-  videoDecodeStrings,
   canAudio,
   audioEnabled,
   audioError,
@@ -586,10 +575,6 @@ export default function FloatingMenu({
   connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
-  // What this session's video is: the target's codec family, and the exact
-  // configuration string each stream's decoder was built from. See `videoLabel`.
-  videoCodec: string | null;
-  videoDecodeStrings: string[];
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
@@ -1105,8 +1090,6 @@ export default function FloatingMenu({
               hostScale={hostScale}
               connection={connection}
               renderPlan={renderPlan}
-              videoCodec={videoCodec}
-              videoDecodeStrings={videoDecodeStrings}
             />
             {/* Only where there is a menu to hide. A chromeless host has no ☰ and
                 does not take the chord (the listener returns early there), so this

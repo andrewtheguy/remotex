@@ -12,7 +12,6 @@ pub mod embedded;
 pub mod encode;
 pub mod engine;
 pub mod error;
-pub mod h264;
 pub mod keymap;
 pub mod opus_stream;
 pub mod pcm48;

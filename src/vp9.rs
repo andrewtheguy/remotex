@@ -1,19 +1,16 @@
 //! VP9 encoding: one stream over a rectangle of a [`crate::video::Mirror`].
 //!
-//! The default codec, and the reason there is a choice at all. H.264 is the one a browser is not
-//! guaranteed to have — a Chromium built without proprietary codecs refuses it, and so does a
-//! Firefox on a system with no system decoder — and VP9 is BSD-licensed with a patent grant,
-//! which is exactly the property that gets it into every browser build. Which of the two a
-//! session uses is [`crate::config::TargetConfig::video_codec`]'s; nothing here knows it was
-//! chosen.
+//! The video codec — this gateway streams VP9 only. It is BSD-licensed with a patent grant,
+//! which is exactly the property that gets it into every browser build: a Chromium built
+//! without proprietary codecs still decodes it.
 //!
-//! What the two modules share — the mirror, the coded rectangle, the RGB→I420 conversion, the
+//! What is not libvpx's — the mirror, the coded rectangle, the RGB→I420 conversion, the
 //! 1–100 dial — is [`crate::video`]'s. This module is only libvpx.
 //!
 //! Two things about libvpx's shape are worth knowing before reading:
 //!
-//! - **It returns error codes rather than asserting**, unlike openh264. So this module needs no
-//!   containment argument of the kind [`crate::h264`] carries: every call goes through [`vpx!`],
+//! - **It returns error codes rather than asserting**, so under this binary's
+//!   `panic = "abort"` no containment argument is needed: every call goes through [`vpx!`],
 //!   which turns a bad code into an `anyhow::Error` carrying libvpx's own explanation, and a
 //!   failure ends one session instead of the process.
 //! - **Its C API is entirely `unsafe` and largely out-parameters.** The invariants are stated at
@@ -60,8 +57,8 @@ fn detail(err: vpx::vpx_codec_err_t) -> String {
     detail.to_string_lossy().into_owned()
 }
 
-/// The quantizer the dial spans. VP9's range is 0–63, coarsest last — the opposite way round
-/// from H.264's, which is one reason the congestion loop speaks the dial and not a quantizer.
+/// The quantizer the dial spans. VP9's range is 0–63, coarsest last — a scale of libvpx's own,
+/// which is why the congestion loop speaks the dial and not a quantizer.
 ///
 /// The fine end is 8 rather than 0 because VP9 below about 8 is visually lossless on screen
 /// content and costs several times the bytes to be so: a dial that mapped past it would have a
@@ -176,9 +173,9 @@ pub struct Stream {
     quality: u8,
     /// Whether the next frame must be one a decoder can start from.
     keyframe_owed: bool,
-    /// The WebCodecs codec string for this stream's picture, computed once at construction —
-    /// unlike H.264's, which has to be read out of a keyframe, because VP9 carries no parameter
-    /// sets and the picture size is fixed for the stream's life.
+    /// The WebCodecs codec string for this stream's picture, computed once at construction:
+    /// VP9 carries no parameter sets, so the string follows from the picture size, which is
+    /// fixed for the stream's life.
     decode: Option<String>,
     /// Where this stream's timestamps are measured from. Real elapsed time rather than a frame
     /// counter, so a pts is a millisecond on the `g_timebase` set below.
@@ -210,9 +207,9 @@ impl Stream {
 
         cfg.g_w = u32::from(coded.w());
         cfg.g_h = u32::from(coded.h());
-        // Milliseconds, so a pts is elapsed wall-clock rather than a frame index — the same
-        // choice `crate::h264` makes, and for the same reason: the remote decides when a frame
-        // happens and a counter would tell the encoder they all arrived on schedule.
+        // Milliseconds, so a pts is elapsed wall-clock rather than a frame index: the remote
+        // decides when a frame happens, and a counter would tell the encoder they all arrived
+        // on schedule.
         cfg.g_timebase.num = 1;
         cfg.g_timebase.den = 1000;
         // **0, not libvpx's default of 25.** The default holds 25 frames inside the encoder
@@ -308,7 +305,7 @@ impl Stream {
             )?;
             stream.control(vpx::vp8e_enc_control_id_VP8E_SET_CPUUSED, CPU_USED, "cpuused")?;
             // Off: adaptive quantization would move the quantizer off the dial that was just
-            // pinned, which is the same reason `crate::h264` turns openh264's off.
+            // pinned.
             stream.control(vpx::vp8e_enc_control_id_VP9E_SET_AQ_MODE, 0, "aq_mode")?;
             if threads > 1 {
                 // Both are what turns `g_threads` into actual parallelism on one picture:
@@ -353,7 +350,7 @@ impl Stream {
         self.quality
     }
 
-    /// The WebCodecs codec string for this stream. Known from construction, unlike H.264's.
+    /// The WebCodecs codec string for this stream, known from construction.
     pub fn decode_string(&self) -> Option<&str> {
         self.decode.as_deref()
     }
@@ -515,9 +512,8 @@ impl Stream {
 
 // SAFETY: a `Stream` owns its encoder exclusively — it is not `Clone`, `encode` and `set_quality`
 // take `&mut self`, and libvpx keeps no thread-local state for an encoder instance, so moving one
-// between threads is sound. This is the same claim openh264's crate makes for its own `Encoder`,
-// and it is needed for the same reason: [`crate::regions::Round`] carries every live stream onto a
-// `spawn_blocking` worker for the encode and back afterwards.
+// between threads is sound. It is needed because [`crate::regions::Round`] carries every live
+// stream onto a `spawn_blocking` worker for the encode and back afterwards.
 //
 // Deliberately **not** `Sync`. Two threads calling `vpx_codec_encode` on one context concurrently
 // is undefined behaviour, and nothing here needs to: the round holds the streams exclusively for

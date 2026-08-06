@@ -35,10 +35,10 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::config::VideoCodec;
 use crate::protocol::{CELL_H, CELL_W, VideoUnit, batch};
 use crate::tiles::Rect;
-use crate::video::{AccessUnit, Mark, Mirror, Stream};
+use crate::video::{AccessUnit, Mark, Mirror};
+use crate::vp9::Stream;
 
 /// The most streams one session runs at once.
 ///
@@ -105,8 +105,8 @@ struct Live {
     cells: Vec<(u16, u16)>,
     stream: Stream,
     /// The dial this stream's encoder is *known* to be running at — recorded only on
-    /// a successful `set_quality`, unlike the stream's own notion, which the VP9 arm
-    /// updates before the calls that can fail. What [`Regions::put_back`] compares
+    /// a successful `set_quality`, unlike the stream's own notion, which is updated
+    /// before the calls that can fail. What [`Regions::put_back`] compares
     /// against, so an unchanged dial costs a returned stream nothing and a failed
     /// retune is retried instead of believed.
     quality: u8,
@@ -299,9 +299,6 @@ fn free_id(taken: &[u8]) -> Option<u8> {
 /// The mirror, the live streams, and the cells they owe.
 pub struct Regions {
     policy: Policy,
-    /// The configured codec every stream here is built with. One per session: it was decided
-    /// before the target was connected, and nothing changes it afterwards.
-    codec: VideoCodec,
     /// The 1–100 dial a new stream starts at — the config's, unless the congestion loop
     /// has moved it. Without that a region appearing on a struggling link would start at
     /// full quality and make the struggle worse.
@@ -340,10 +337,9 @@ pub struct Regions {
 }
 
 impl Regions {
-    pub fn new(policy: Policy, codec: VideoCodec, quality: u8, mark: Option<Mark>) -> Self {
+    pub fn new(policy: Policy, quality: u8, mark: Option<Mark>) -> Self {
         Self {
             policy,
-            codec,
             quality,
             size: None,
             mirror: None,
@@ -629,7 +625,7 @@ impl Regions {
         let mirror = self.mirror_mut()?.coded();
         // At `self.quality` rather than the config's: a region that appears while the
         // link is behind starts where the link left off.
-        let stream = Stream::new(self.codec, rect, mirror, self.quality)?;
+        let stream = Stream::new(rect, mirror, self.quality)?;
         let cells: Vec<(u16, u16)> = rect.cells().map(|cell| cell.cell_key()).collect();
         // Every cell of the region is owed from the moment it is streamed, including
         // the ones that are not moving: the stream codes them lossily whether they
@@ -1001,17 +997,14 @@ impl Round {
             live.dirty = false;
             live.keyframe_owed = false;
             live.carried = true;
-            // Collected after the encode rather than before it, because H.264 has nothing to say
-            // until a keyframe has carried its SPS — and the first unit of a stream is one. VP9
-            // knew from construction. Either way the announcement goes out ahead of every unit in
-            // this round, which is the contract `ServerMsg::VideoFormat` states.
+            // The announcement goes out ahead of every unit in this round, which is the
+            // contract `ServerMsg::VideoFormat` states.
             if let Some(decode) = live.stream.decode_string()
                 && live.announced.as_deref() != Some(decode)
             {
                 live.announced = Some(decode.to_owned());
                 produced.formats.push(Format {
                     stream: live.id,
-                    codec: live.stream.codec().name(),
                     decode: decode.to_owned(),
                 });
             }
@@ -1069,7 +1062,6 @@ pub struct Produced {
 /// string changed.
 pub struct Format {
     pub stream: u8,
-    pub codec: &'static str,
     pub decode: String,
 }
 
@@ -1203,7 +1195,7 @@ mod tests {
     /// test about two *separate* regions needs a desktop at least three cells wide:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Moving, VideoCodec::Vp9, 60, None);
+        let mut regions = Regions::new(Policy::Moving, 60, None);
         regions.want(w, h);
         let bytes = usize::from(w) * usize::from(h) * 3;
         regions
@@ -1407,7 +1399,7 @@ mod tests {
 
     /// A whole-desktop target with pixels in it, the pipelined shape.
     fn whole_regions(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Whole, VideoCodec::Vp9, 60, None);
+        let mut regions = Regions::new(Policy::Whole, 60, None);
         regions.want(w, h);
         regions
     }

@@ -176,7 +176,7 @@ const context = {
 
 // The WebCodecs decoder, which this runtime has none of. Only its shape matters
 // here: what the painter does with the frames, not what a real decoder makes of
-// the bitstream — that is browser QA, as `h264.test.ts` says at its top.
+// the bitstream — that is browser QA.
 let videoClosed = false;
 let chunkTypes: string[] = [];
 /** How many decoders were built — one per live stream, replaced on a resize. */
@@ -694,7 +694,7 @@ test("a truncated access unit drops the batch rather than decoding half of it", 
 function announced(streams: number[] = [0]): TilePainter {
   const p = painter();
   for (const stream of streams) {
-    p.setVideoFormat(stream, { codec: "vp9", decode: "vp09.00.40.08" });
+    p.setVideoFormat(stream, { decode: "vp09.00.40.08" });
   }
   return p;
 }
@@ -808,7 +808,7 @@ test("units that arrive before their format are dropped, not reported", async ()
 
   // And the recovery is the ordinary path: the format lands, the keyframe after it
   // decodes, and nothing had to be reset by hand.
-  p.setVideoFormat(0, { codec: "vp9", decode: "vp09.00.40.08" });
+  p.setVideoFormat(0, { decode: "vp09.00.40.08" });
   await p.draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
@@ -851,7 +851,7 @@ test("each stream id gets its own decoder", async () => {
 });
 
 test("a region that restarts on a new size replaces its decoder", async () => {
-  // Neither codec's configuration string carries a resolution, so an in-band size
+  // The configuration string carries no resolution, so an in-band size
   // change is not something to bet two browsers on. A region that grew is a new
   // picture — and the gateway re-announces its format, which is the other half of the
   // same statement and has its own test below.
