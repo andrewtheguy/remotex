@@ -688,6 +688,11 @@ async fn active_loop(
     let mut pending_damage: Vec<Rect> = Vec::new();
     let mut damage_flushed = Instant::now() - DAMAGE_INTERVAL;
     let mut damage_due: Option<Instant> = None;
+    // Whether this server has ever marked a frame boundary (`Event::Frame`). Once it
+    // has, the marker is the flush signal and the interval above demotes to a safety
+    // net — see the flush scheduling at the bottom of the loop. A property of the
+    // server, so it survives resizes and never unlearns.
+    let mut frame_marks = false;
 
     loop {
         let clipboard_retry = async {
@@ -734,6 +739,18 @@ async fn active_loop(
                         // Staged rather than sent: whether this goes out now or at
                         // the deadline is decided once, at the end of the loop.
                         stage_damage(&mut pending_damage, damaged(rect));
+                    }
+                    // The server says this is where its frame ends, which is the fact
+                    // the damage interval was built to guess at: everything staged
+                    // since the last one of these is one coherent picture, so it goes
+                    // out now — not in up-to-16ms, and never cut in half.
+                    Event::Frame => {
+                        frame_marks = true;
+                        for rect in pending_damage.drain(..) {
+                            send_tiles(framebuffer, rect, &mut shadow, sink).await?;
+                        }
+                        damage_flushed = Instant::now();
+                        damage_due = None;
                     }
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_monitors, max_area } => {
@@ -1071,12 +1088,25 @@ async fn active_loop(
         if let Some(msg) = pointer.change() {
             sink.msg(msg).await?;
         }
-        // A quiet screen's damage leaves on the spot — the first batch after an idle
-        // interval pays no added latency — and everything after it within one
-        // interval waits for the deadline, coalesced. Leading edge, trailing edge:
-        // the same shape the client's own motion coalescing has.
+        // Two flush regimes, chosen by whether the server marks its frames.
+        //
+        // Marking server: the marker is the flush signal, and the only deadline is a
+        // safety net hung well past any real frame — never the leading-edge flush,
+        // whose whole point was to guess that a lone report *was* the frame. Guessing
+        // on top of a server that says would reintroduce the cut-in-half frames the
+        // marker exists to end.
+        //
+        // Otherwise, the original guess: a quiet screen's damage leaves on the spot —
+        // the first batch after an idle interval pays no added latency — and
+        // everything after it within one interval waits for the deadline, coalesced.
+        // Leading edge, trailing edge: the same shape the client's own motion
+        // coalescing has.
         if !pending_damage.is_empty() {
-            if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
+            if frame_marks {
+                if damage_due.is_none() {
+                    damage_due = Some(Instant::now() + FRAME_NET);
+                }
+            } else if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
                 for rect in pending_damage.drain(..) {
                     send_tiles(framebuffer, rect, &mut shadow, sink).await?;
                 }
@@ -1476,6 +1506,14 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
 /// already waiting, so the deadline packs and compares each region once instead of
 /// per report.
 const DAMAGE_INTERVAL: Duration = Duration::from_millis(16);
+
+/// The safety net under a frame-marking server: how long staged damage may wait for
+/// the marker that normally flushes it. Anchored to when the damage was staged, not
+/// to the last flush — a frame beginning after a long idle must not fire it on
+/// arrival. The value is guacamole-server's render-thread fallback for the same
+/// signal going missing; it is a net, so it should never decide latency on a healthy
+/// session, only bound the damage an unmarked tail can strand.
+const FRAME_NET: Duration = Duration::from_millis(100);
 
 /// Most rectangles the pending-damage list holds before collapsing to one bounding
 /// box. Slop from a collapse costs a pack and a `memcmp` on pixels that did not
