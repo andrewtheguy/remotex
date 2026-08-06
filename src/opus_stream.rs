@@ -19,14 +19,8 @@ pub const OPUS_CODEC: &str = "opus";
 /// of the bitrate on packet overhead, longer ones add latency for nothing here.
 pub const FRAME_FRAMES: usize = 960;
 
-/// Target bitrate. Stereo desktop audio including music, so this is well clear of
-/// the ~64 kbps where stereo Opus starts to be audibly lossy, and still ~1/15th
-/// of the PCM it replaces — which is the whole of what the other option
-/// (`src/pcm_stream.rs`) gives back to avoid encoding at all.
-pub const OPUS_BITRATE_BPS: i32 = 96_000;
-
 /// Ceiling for one encoded packet. libopus documents 4000 bytes as the largest
-/// worth allowing for; at this bitrate a packet is nearer 240.
+/// worth allowing for; at the default 96 kbit/s a packet is nearer 240.
 const MAX_PACKET_BYTES: usize = 4000;
 
 /// Turns PCM buffers into Opus packets.
@@ -45,12 +39,14 @@ pub struct OpusStream {
 }
 
 impl OpusStream {
-    /// Starts a stream for `format`, returning the encoder and the `OpusHead` bytes
-    /// a decoder has to be configured with before the first packet.
+    /// Starts a stream for `format` at `bitrate_bps`
+    /// ([`crate::config::TargetConfig::audio_bitrate`], already resolved to bits
+    /// per second), returning the encoder and the `OpusHead` bytes a decoder has
+    /// to be configured with before the first packet.
     ///
     /// Fails if libopus will not encode this shape — in practice only a channel
     /// count other than 1 or 2, which the single advertised format rules out.
-    pub fn new(format: PcmFormat) -> Result<(Self, Vec<u8>), anyhow::Error> {
+    pub fn new(format: PcmFormat, bitrate_bps: i32) -> Result<(Self, Vec<u8>), anyhow::Error> {
         let channels = match format.channels {
             1 => Channels::Mono,
             2 => Channels::Stereo,
@@ -61,7 +57,7 @@ impl OpusStream {
         let mut encoder = Encoder::new(SAMPLE_RATE, channels, Application::Audio)
             .map_err(|e| anyhow::anyhow!("create the opus encoder: {e}"))?;
         encoder
-            .set_bitrate(Bitrate::Bits(OPUS_BITRATE_BPS))
+            .set_bitrate(Bitrate::Bits(bitrate_bps))
             .map_err(|e| anyhow::anyhow!("set the opus bitrate: {e}"))?;
         // libopus defaults to complexity 9; 5 costs a fraction of the encoder CPU
         // for no audible difference at this bitrate on desktop audio.
@@ -110,6 +106,19 @@ impl OpusStream {
         FRAME_FRAMES as u32
     }
 
+    /// Move the encoder's bitrate mid-stream — the adaptive walk's one knob
+    /// (see [`crate::config::TargetConfig::audio_adaptive`]).
+    ///
+    /// Nothing else changes: packets stay 20 ms, `OpusHead` stays true, and every
+    /// packet is independently decodable, so the decoder needs no announcement —
+    /// an Opus packet carries its own coding parameters. libopus applies the new
+    /// rate from the next `opus_encode` call.
+    pub fn set_bitrate(&mut self, bitrate_bps: i32) -> Result<(), anyhow::Error> {
+        self.encoder
+            .set_bitrate(Bitrate::Bits(bitrate_bps))
+            .map_err(|e| anyhow::anyhow!("move the opus bitrate: {e}"))
+    }
+
     /// Frames encoded so far.
     pub fn frames_encoded(&self) -> u64 {
         self.frames_encoded
@@ -152,7 +161,7 @@ mod tests {
 
     #[test]
     fn the_stream_hands_back_a_usable_opus_head() {
-        let (_stream, head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        let (_stream, head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
         assert_eq!(head.len(), 19, "the fixed part, with no mapping table");
         assert_eq!(&head[0..8], b"OpusHead");
         assert_eq!(head[8], 1, "version");
@@ -172,7 +181,7 @@ mod tests {
     /// nothing padded and nothing dropped.
     #[test]
     fn only_whole_frames_are_encoded_and_the_remainder_is_carried() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
 
         // One frame needs 882 input frames at 44.1 kHz.
         assert!(
@@ -196,7 +205,7 @@ mod tests {
     /// to do with it, and an empty `Vec` is what a mis-sliced encode would produce.
     #[test]
     fn every_packet_carries_bytes() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
         let packets = stream.push(&silence(882 * 3)).expect("push");
         assert_eq!(packets.len(), 3);
         assert!(packets.iter().all(|packet| !packet.is_empty()));
@@ -212,7 +221,7 @@ mod tests {
     /// the browser's own (`server::tests::serve_a_test_tone`).
     #[test]
     fn a_tone_survives_the_round_trip() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
 
         // 441 Hz at 44.1 kHz: exactly 100 samples a cycle, and a whole number of
         // cycles per packet, so there is no discontinuity to blame a failure on.
@@ -252,7 +261,7 @@ mod tests {
     /// the only input that tells the two apart.
     #[test]
     fn a_hard_panned_signal_still_has_two_channels_after_a_round_trip() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
 
         // Left carries a tone, right is silent.
         let mut pcm = Vec::new();
@@ -282,6 +291,44 @@ mod tests {
         );
     }
 
+    /// The adaptive walk's one knob really turns: the same tone costs far fewer
+    /// bytes after `set_bitrate`, on the same live encoder, with no keyframe-like
+    /// break anywhere — the decoder reads straight across the change.
+    #[test]
+    fn the_bitrate_moves_on_a_live_encoder() {
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
+
+        let tone = |packets: usize| -> Vec<u8> {
+            let mut pcm = Vec::new();
+            for frame in 0..882 * packets {
+                let phase = (frame % 100) as f32 / 100.0 * std::f32::consts::TAU;
+                let sample = (phase.sin() * 12_000.0) as i16;
+                pcm.extend_from_slice(&sample.to_le_bytes());
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+            pcm
+        };
+        let average = |packets: &[Bytes]| -> usize {
+            packets.iter().map(|p| p.len()).sum::<usize>() / packets.len()
+        };
+
+        let before = stream.push(&tone(10)).expect("push");
+        stream.set_bitrate(16_000).expect("move the bitrate");
+        let after = stream.push(&tone(10)).expect("push");
+
+        let mut decoder = opus::Decoder::new(SAMPLE_RATE, Channels::Stereo).expect("decoder");
+        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        for packet in before.iter().chain(&after) {
+            decoder.decode(packet, &mut decoded, false).expect("decode across the change");
+        }
+        assert!(
+            average(&after) * 2 < average(&before),
+            "16 kbit/s packets should be well under half the 96 kbit/s ones, got {} against {}",
+            average(&after),
+            average(&before)
+        );
+    }
+
     #[test]
     fn an_impossible_channel_count_is_refused_rather_than_encoded() {
         let format = PcmFormat {
@@ -289,6 +336,6 @@ mod tests {
             sample_rate: 48_000,
             bits_per_sample: 16,
         };
-        assert!(OpusStream::new(format).is_err());
+        assert!(OpusStream::new(format, 96_000).is_err());
     }
 }

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::audio::AudioBridge;
 use crate::config::{Protocol, Subtype, TargetConfig};
+use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::{rdp, vnc};
 
@@ -121,6 +122,10 @@ pub struct Attachment {
     /// Session output: engine frames, the picker/connected status messages, and
     /// the eviction signal. Ends when the slot drops this client.
     pub events: mpsc::Receiver<AttachEvent>,
+    /// Where this attachment's paint tracker publishes the link's lag for the
+    /// encoders. The slot's one handle, freshly [`LinkFeedback::reset`]; the ws
+    /// bridge writes through it for as long as the attachment lives.
+    pub feedback: Arc<LinkFeedback>,
 }
 
 /// One audio WebSocket's live handle on the session, returned by
@@ -157,6 +162,7 @@ type EngineSpawner = Box<
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
             Option<Arc<AudioBridge>>,
+            Arc<LinkFeedback>,
         ) + Send
         + Sync,
 >;
@@ -302,6 +308,13 @@ pub struct SessionManager {
     /// Every target profile the browser may pick from the picker.
     targets: Vec<TargetConfig>,
     spawn_engine: EngineSpawner,
+    /// The slot's one link-feedback handle, shared between whichever ws bridge is
+    /// attached (writer) and whichever engine is running (reader). One rather than
+    /// one per attachment because the engine outlives attachments: the handle's
+    /// identity has to survive a reattach for the running [`crate::encode::TileSink`]
+    /// to keep reading it, and [`LinkFeedback::reset`] on every attachment change is
+    /// what keeps its *contents* from outliving the browser they measured.
+    feedback: Arc<LinkFeedback>,
     // std Mutex: every critical section is short and never held across an await.
     state: Mutex<State>,
 }
@@ -316,6 +329,7 @@ impl SessionManager {
         Self {
             targets,
             spawn_engine,
+            feedback: Arc::new(LinkFeedback::new()),
             state: Mutex::new(State::default()),
         }
     }
@@ -332,7 +346,14 @@ impl SessionManager {
         + Sync
         + 'static,
     ) -> Self {
-        Self::with_spawner(targets, Box::new(spawn_engine))
+        // The scripted engines play the browser-facing role directly and never
+        // read the link, so the seam hides the feedback handle from them.
+        Self::with_spawner(
+            targets,
+            Box::new(move |target, input_rx, frame_tx, audio, _feedback| {
+                spawn_engine(target, input_rx, frame_tx, audio);
+            }),
+        )
     }
 
     /// Claim the session slot, returning the new token: a live attachment
@@ -444,7 +465,10 @@ impl SessionManager {
         let _ = event_tx.try_send(AttachEvent::Msg(status));
 
         st.client = Some(ClientSlot { attach_id: id, event_tx });
-        Ok(Attachment { id, events })
+        // A fresh browser starts unmeasured: whatever the last one's link looked
+        // like, this one has not shown its own yet.
+        self.feedback.reset();
+        Ok(Attachment { id, events, feedback: Arc::clone(&self.feedback) })
     }
 
     /// Attach the audio WebSocket holding `token`. Opening the socket *is* the
@@ -505,7 +529,7 @@ impl SessionManager {
         // goes through (`forward_input`), so the rule this module states for itself is
         // that critical sections stay short. `audio_epoch` is what makes letting go
         // safe.
-        let (bridge, out, audio_id, epoch, codec) = {
+        let (bridge, out, audio_id, epoch, plan) = {
             let mut st = self.state.lock().unwrap();
             // Unconditional, and first: this is also how "replace the previous pump" is
             // expressed, and it is what tells a build already in flight to stand down.
@@ -521,14 +545,15 @@ impl SessionManager {
                 debug!("session: an audio socket is open, but this session has no audio source");
                 return;
             };
-            // The target's, not a session setting: the codec is a property of the
-            // link to this desktop, which is what the operator configured it from.
-            let codec = st
+            // The target's, not a session setting: the codec and its rate are a
+            // property of the link to this desktop, which is what the operator
+            // configured them from.
+            let plan = st
                 .selected
                 .as_ref()
-                .and_then(|target| target.audio_codec)
+                .map(|target| target.audio_plan())
                 .unwrap_or_default();
-            (bridge, out, audio_id, st.audio_epoch, codec)
+            (bridge, out, audio_id, st.audio_epoch, plan)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -547,12 +572,21 @@ impl SessionManager {
         );
         let format = negotiated.unwrap_or(crate::audio::PCM_CD_QUALITY);
 
-        let encoded = match bridge.take_listener().into_packets(format, codec) {
+        let encoded = match bridge.take_listener().into_packets(format, plan) {
             Ok(encoded) => encoded,
             Err(e) => {
                 warn!("session: no audio will be sent: {e:#}");
                 return;
             }
+        };
+        // The adaptive walk, when the plan asked for one. It lives in the pump —
+        // the side whose sends block — and publishes through the signals the
+        // encoder reads; see [`crate::audio::AudioCongestion`].
+        let mut congestion = match (encoded.signals.clone(), plan.adaptive_floor_bps) {
+            (Some(signals), Some(floor)) => {
+                Some(crate::audio::AudioCongestion::new(plan.bitrate_bps, floor, signals))
+            }
+            _ => None,
         };
 
         let mut st = self.state.lock().unwrap();
@@ -586,8 +620,19 @@ impl SessionManager {
                 // the queue then drops its *oldest* buffers rather than growing a
                 // delay (see [`crate::audio`]). What it no longer waits behind is a
                 // video frame.
+                //
+                // How long the await took is also the adaptive walk's whole
+                // signal: the queue is two deep, so blocking at all means the
+                // socket is not draining sound as fast as the remote produces it.
+                let queued = tokio::time::Instant::now();
                 if out.send(ServerMsg::Audio(packets)).await.is_err() {
                     break;
+                }
+                if let Some(congestion) = &mut congestion {
+                    let now = tokio::time::Instant::now();
+                    if let Some(bps) = congestion.observe(now - queued, now) {
+                        debug!("session: the audio walk asks for {} kbit/s", bps / 1000);
+                    }
                 }
             }
         }));
@@ -666,7 +711,13 @@ impl SessionManager {
             render: render.clone(),
             audio: audio.clone(),
         });
-        (self.spawn_engine)(target.clone(), input_rx, frame_tx, audio);
+        (self.spawn_engine)(
+            target.clone(),
+            input_rx,
+            frame_tx,
+            audio,
+            Arc::clone(&self.feedback),
+        );
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
         let name = target.name.clone();
@@ -751,6 +802,9 @@ impl SessionManager {
             st.client = None;
             st.bump_epoch_for_detach()
         };
+        // No browser, no lag: an engine surviving the grace period must not spend
+        // it coarsening quality against the measurements of a socket that is gone.
+        self.feedback.reset();
         if let Some((generation, attachment_epoch)) = expiry {
             info!(
                 "session: browser detached; engine available for {}s reattach grace",
@@ -912,6 +966,7 @@ fn spawn_engine(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
+    feedback: Arc<LinkFeedback>,
 ) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -922,8 +977,8 @@ fn spawn_engine(
             }
         };
         match target.protocol {
-            Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx, audio)),
-            Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx)),
+            Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx, audio, feedback)),
+            Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx, feedback)),
         }
     });
 }
@@ -1026,6 +1081,11 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            render_adaptive: false,
+            render_adaptive_min: None,
+            audio_bitrate: None,
+            audio_adaptive: false,
+            audio_bitrate_min: None,
         }
     }
 
@@ -1042,9 +1102,10 @@ mod tests {
     /// ends to the test (which plays the engine role directly).
     fn manager_with_fake_engine() -> (Arc<SessionManager>, std_mpsc::Receiver<EngineEnds>) {
         let (hook_tx, hook_rx) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(move |_target: TargetConfig, input_rx, frame_tx, audio| {
-            hook_tx.send((input_rx, frame_tx, audio)).unwrap();
-        });
+        let spawner: EngineSpawner =
+            Box::new(move |_target: TargetConfig, input_rx, frame_tx, audio, _feedback| {
+                hook_tx.send((input_rx, frame_tx, audio)).unwrap();
+            });
         let targets = vec![
             fake_target("fake"),
             fake_target("other"),

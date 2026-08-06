@@ -6,12 +6,16 @@
 //! is the target's ([`AudioCodec`]) — Opus packets, or the same bytes back out
 //! again — and everything else here is the same either way.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::Duration;
+
 use bytes::Bytes;
 use futures_util::Stream;
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, watch};
 
-use crate::config::AudioCodec;
+use crate::config::{AudioCodec, AudioPlan};
 use crate::opus_stream::{OpusStream, OPUS_CODEC};
 use crate::pcm_stream::{PcmStream, PCM_CODEC};
 
@@ -24,6 +28,34 @@ use crate::pcm_stream::{PcmStream, PCM_CODEC};
 /// margin above the ceiling is for a remote that sends smaller buffers, where
 /// sixteen of them absorb a shorter stall.
 pub const AUDIO_QUEUE_DEPTH: usize = 16;
+
+/// How long sending one packet batch to the audio socket may block before it
+/// counts as one the link could not keep up with — the audio walk's analogue of
+/// [`crate::encode`]'s `BEHIND_BLOCK`, and the same reasoning: the socket's queue
+/// is deliberately two deep ([`crate::session::AUDIO_SOCKET_BUFFER`]), so this
+/// stays at zero while the link has room and becomes obvious the moment it does
+/// not.
+const BEHIND_SEND: Duration = Duration::from_millis(20);
+
+/// Consecutive slow sends before bitrate is given up. Two rather than one, so a
+/// single unlucky send — a scheduler hiccup, a heartbeat mid-write — is not a
+/// verdict about the link.
+const BEHIND_SENDS: u32 = 2;
+
+/// Consecutive clear sends before bitrate is taken back. Sends arrive at the
+/// remote's wave-buffer cadence — roughly five a second on the tested Windows
+/// host — so this is seconds of proven headroom, deliberately far more than
+/// [`BEHIND_SENDS`]: quick to give up, slow to reclaim, like the video walk.
+const CLEAR_SENDS: u32 = 25;
+
+/// Consecutive clear sends before the link stops counting as *behind* — the
+/// state that sheds silence. Much shorter than [`CLEAR_SENDS`]: shedding exists
+/// to drain a backlog, and a second of clear sends means it has drained.
+const RELIEF_SENDS: u32 = 5;
+
+/// The least time between two bitrate moves, so a burst of slow sends is one
+/// decision rather than one per wave buffer.
+const AUDIO_ADJUST_COOLDOWN: Duration = Duration::from_secs(2);
 
 /// Linear PCM parameters: the only kind of audio this path carries.
 ///
@@ -177,26 +209,39 @@ impl AudioListener {
     pub fn into_packets(
         self,
         format: PcmFormat,
-        codec: AudioCodec,
+        plan: AudioPlan,
     ) -> Result<EncodedAudio<impl Stream<Item = Vec<Bytes>>>, anyhow::Error> {
         struct State {
             encoder: PacketEncoder,
             waves: broadcast::Receiver<Bytes>,
+            /// The adaptive walk's verdict, written by whoever sends the packets;
+            /// `None` on a fixed-rate plan. Read here because this is the side
+            /// holding the encoder.
+            signals: Option<Arc<AudioSignals>>,
+            /// The bitrate the encoder is actually at, so the desired rate is
+            /// applied once per change rather than re-set per buffer.
+            applied_bps: i32,
             /// When this listener attached, which only the diagnostic line below
             /// reads: frames encoded against time elapsed is how a stream that is
             /// drifting from real time shows itself.
             started: tokio::time::Instant,
         }
 
-        let (encoder, head) = PacketEncoder::new(format, codec)
+        let codec = plan.codec;
+        let (encoder, head) = PacketEncoder::new(format, plan)
             .map_err(|e| anyhow::anyhow!("cannot carry {format:?} as {}: {e}", codec.name()))?;
         let name = encoder.codec_name();
         let sample_rate = encoder.sample_rate();
         let packet_frames = encoder.packet_frames();
+        let signals = plan
+            .adaptive_floor_bps
+            .map(|_| Arc::new(AudioSignals::new(plan.bitrate_bps)));
 
         let state = State {
             encoder,
             waves: self.waves,
+            signals: signals.clone(),
+            applied_bps: plan.bitrate_bps,
             started: tokio::time::Instant::now(),
         };
         let stream = futures_util::stream::unfold(state, |mut state| async move {
@@ -210,10 +255,48 @@ impl AudioListener {
                     // sound rather than a broken stream.
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
+                        // The queue only laggs when the sender stopped draining it,
+                        // which is the link behind by the whole queue's depth — no
+                        // send measurement needed to know shedding should be on.
+                        if let Some(signals) = &state.signals {
+                            signals.set_behind(true);
+                        }
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 };
+                if let Some(signals) = &state.signals {
+                    let desired = signals.desired_bps();
+                    if desired != state.applied_bps {
+                        match state.encoder.set_bitrate(desired) {
+                            Ok(()) => {
+                                info!(
+                                    "audio: opus bitrate moved to {} kbit/s (from {})",
+                                    desired / 1000,
+                                    state.applied_bps / 1000
+                                );
+                                state.applied_bps = desired;
+                            }
+                            // The stream is still perfectly good at the rate it
+                            // already had; losing the ability to adapt is not a
+                            // reason to stop the sound.
+                            Err(e) => warn!("audio: could not move the opus bitrate: {e:#}"),
+                        }
+                    }
+                    // The catch-up the operator asked for: while the link is
+                    // behind, silence is the one content whose loss cannot be
+                    // heard, so it is shed *before* the encoder instead of
+                    // queued behind everything else. The client simply receives
+                    // no packets for a while — exactly what a quiet remote
+                    // already produces — and the backlog drains by that much.
+                    if signals.behind() && is_silence(&samples) {
+                        debug!(
+                            "audio: shed {} bytes of silence so the link can catch up",
+                            samples.len()
+                        );
+                        continue;
+                    }
+                }
                 // Four numbers, and between them they say whether this gateway is
                 // adding delay: the buffer size and the queue depth locate a backlog,
                 // and encoded frames against elapsed time say whether the stream is
@@ -247,9 +330,21 @@ impl AudioListener {
             channels: format.channels,
             packet_frames,
             head,
+            signals,
             packets: stream,
         })
     }
+}
+
+/// Whether a wave buffer is silence: every 16-bit sample within one dither step
+/// of zero. Exact zeros are what a paused player and an idle desktop actually
+/// produce; the ±2 margin is for a remote that dithers its output.
+///
+/// The samples are read as the little-endian 16-bit PCM the rest of this path
+/// already assumes ([`PCM_CD_QUALITY`], [`crate::pcm48`]).
+fn is_silence(pcm: &[u8]) -> bool {
+    pcm.chunks_exact(2)
+        .all(|pair| i16::from_le_bytes([pair[0], pair[1]]).unsigned_abs() <= 2)
 }
 
 /// A configured stream, and everything the client needs to play it.
@@ -270,7 +365,138 @@ pub struct EncodedAudio<S> {
     pub packet_frames: u32,
     /// `OpusHead`, or empty when there is no decoder to configure.
     pub head: Vec<u8>,
+    /// `Some` exactly when the plan is adaptive: the sender's handle for
+    /// reporting how its sends went ([`AudioCongestion`] writes through it) and
+    /// the encoder's source of truth for the rate it should be at.
+    pub signals: Option<Arc<AudioSignals>>,
     pub packets: S,
+}
+
+/// The adaptive audio walk's shared state — written on the sending side, where
+/// blocking is measurable, and read on the encoding side, which owns the
+/// encoder. Two atomics rather than a channel because neither side may wait on
+/// the other: the encoder reads whatever verdict is current when a wave buffer
+/// arrives.
+#[derive(Debug)]
+pub struct AudioSignals {
+    /// The bitrate the walk wants the encoder at, in bits per second.
+    desired_bps: AtomicI32,
+    /// Whether the link is currently behind — the state that sheds silence.
+    behind: AtomicBool,
+}
+
+impl AudioSignals {
+    fn new(bitrate_bps: i32) -> Self {
+        Self {
+            desired_bps: AtomicI32::new(bitrate_bps),
+            behind: AtomicBool::new(false),
+        }
+    }
+
+    pub fn desired_bps(&self) -> i32 {
+        self.desired_bps.load(Ordering::Relaxed)
+    }
+
+    fn set_desired_bps(&self, bps: i32) {
+        self.desired_bps.store(bps, Ordering::Relaxed);
+    }
+
+    pub fn behind(&self) -> bool {
+        self.behind.load(Ordering::Relaxed)
+    }
+
+    fn set_behind(&self, behind: bool) {
+        self.behind.store(behind, Ordering::Relaxed);
+    }
+}
+
+/// What the audio link will bear — [`crate::encode`]'s `Congestion` for sound,
+/// owned by whatever task sends the packets, with the verdicts published
+/// through [`AudioSignals`].
+///
+/// One-directional by construction for the same reason as the video walk:
+/// `ceiling` is the configured bitrate, so this only ever sends *less* than the
+/// operator asked for and climbs back no higher. The signal is how long the
+/// send blocked — the audio socket's queue is two deep, so a block means the
+/// browser is not draining sound as fast as the remote produces it.
+///
+/// Pure in the same way too: it takes `now` rather than reading a clock, so
+/// every decision is testable without waiting for one.
+pub struct AudioCongestion {
+    /// The configured bitrate: the finest this will ever ask for.
+    ceiling: i32,
+    /// The configured floor ([`crate::config::TargetConfig::audio_bitrate_min`]).
+    floor: i32,
+    /// The bitrate in force.
+    bitrate: i32,
+    /// Consecutive sends that blocked, and consecutive sends that did not. Only
+    /// one is ever non-zero.
+    behind_sends: u32,
+    clear_sends: u32,
+    /// When the bitrate last moved, for [`AUDIO_ADJUST_COOLDOWN`].
+    changed_at: Option<tokio::time::Instant>,
+    signals: Arc<AudioSignals>,
+}
+
+impl AudioCongestion {
+    /// `ceiling` and `floor` in bits per second, already resolved and validated
+    /// by [`crate::config`]; `signals` is the [`EncodedAudio`]'s.
+    pub fn new(ceiling: i32, floor: i32, signals: Arc<AudioSignals>) -> Self {
+        Self {
+            ceiling,
+            floor: floor.min(ceiling),
+            bitrate: ceiling,
+            behind_sends: 0,
+            clear_sends: 0,
+            changed_at: None,
+            signals,
+        }
+    }
+
+    /// Record how long one send blocked, publish the verdicts, and return the
+    /// new bitrate when it moved (for the caller's log line).
+    ///
+    /// Down by a third per step and up by an eighth: 96 kbit/s reaches the
+    /// default 32 floor in three steps (seconds, under sustained blocking) and
+    /// takes half a minute of proven headroom to climb back — quick to give up,
+    /// slow to reclaim, like every other walk in this gateway.
+    pub fn observe(&mut self, blocked: Duration, now: tokio::time::Instant) -> Option<i32> {
+        if blocked >= BEHIND_SEND {
+            self.behind_sends += 1;
+            self.clear_sends = 0;
+            self.signals.set_behind(true);
+        } else {
+            self.clear_sends += 1;
+            self.behind_sends = 0;
+            if self.clear_sends >= RELIEF_SENDS {
+                self.signals.set_behind(false);
+            }
+        }
+        if self
+            .changed_at
+            .is_some_and(|at| now.saturating_duration_since(at) < AUDIO_ADJUST_COOLDOWN)
+        {
+            return None;
+        }
+        let wanted = if self.behind_sends >= BEHIND_SENDS {
+            (self.bitrate * 2 / 3).max(self.floor)
+        } else if self.clear_sends >= CLEAR_SENDS {
+            // Stops at the ceiling, never above it: headroom does not earn a
+            // better rate than the one that was configured.
+            (self.bitrate + self.bitrate / 8).min(self.ceiling)
+        } else {
+            return None;
+        };
+        if wanted == self.bitrate {
+            return None;
+        }
+        self.bitrate = wanted;
+        self.behind_sends = 0;
+        self.clear_sends = 0;
+        self.changed_at = Some(now);
+        self.signals.set_desired_bps(wanted);
+        Some(wanted)
+    }
 }
 
 /// The two ways a wave buffer reaches the wire, as one thing the pump can hold.
@@ -287,10 +513,10 @@ enum PacketEncoder {
 }
 
 impl PacketEncoder {
-    fn new(format: PcmFormat, codec: AudioCodec) -> Result<(Self, Vec<u8>), anyhow::Error> {
-        Ok(match codec {
+    fn new(format: PcmFormat, plan: AudioPlan) -> Result<(Self, Vec<u8>), anyhow::Error> {
+        Ok(match plan.codec {
             AudioCodec::Opus => {
-                let (stream, head) = OpusStream::new(format)?;
+                let (stream, head) = OpusStream::new(format, plan.bitrate_bps)?;
                 (Self::Opus(Box::new(stream)), head)
             }
             AudioCodec::Pcm => {
@@ -298,6 +524,16 @@ impl PacketEncoder {
                 (Self::Pcm(stream), head)
             }
         })
+    }
+
+    /// Forwarded to the Opus encoder. Passthrough has no rate to move, and no
+    /// caller: [`AudioSignals`] exists only on a plan the config has already
+    /// guaranteed is Opus.
+    fn set_bitrate(&mut self, bitrate_bps: i32) -> Result<(), anyhow::Error> {
+        match self {
+            Self::Opus(stream) => stream.set_bitrate(bitrate_bps),
+            Self::Pcm(_) => Ok(()),
+        }
     }
 
     fn codec_name(&self) -> &'static str {
@@ -381,7 +617,7 @@ mod tests {
     /// pass if a listener came back without a way to decode it.
     fn packets_of(listener: AudioListener) -> impl Stream<Item = Vec<Bytes>> {
         let encoded = listener
-            .into_packets(PCM_CD_QUALITY, AudioCodec::default())
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioPlan::default())
             .expect("the negotiated format must be encodable");
         assert_eq!(&encoded.head[0..8], b"OpusHead");
         encoded.packets
@@ -514,7 +750,7 @@ mod tests {
         let bridge = AudioBridge::new();
         let opus = bridge
             .take_listener()
-            .into_packets(PCM_CD_QUALITY, AudioCodec::Opus)
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioPlan::fixed(AudioCodec::Opus))
             .expect("opus");
         assert_eq!(opus.codec, "opus");
         assert_eq!(opus.sample_rate, crate::pcm48::SAMPLE_RATE);
@@ -523,7 +759,7 @@ mod tests {
 
         let pcm = bridge
             .take_listener()
-            .into_packets(PCM_CD_QUALITY, AudioCodec::Pcm)
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioPlan::fixed(AudioCodec::Pcm))
             .expect("passthrough");
         assert_eq!(pcm.codec, "pcm-s16le");
         assert_eq!(pcm.sample_rate, PCM_CD_QUALITY.sample_rate, "not resampled");
@@ -579,6 +815,157 @@ mod tests {
             survived[0],
             vec![AUDIO_QUEUE_DEPTH as u8],
             "it resumes at the oldest buffer still held, not the first one sent"
+        );
+    }
+
+    // ---- the adaptive walk ---------------------------------------------------
+
+    /// One Opus packet's worth of a full-scale tone, for tests that must not
+    /// look like silence.
+    fn one_frame_of_tone() -> Vec<u8> {
+        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate)
+            .expect("the negotiated rate makes whole groups");
+        let mut pcm = Vec::with_capacity(frames * usize::from(PCM_CD_QUALITY.block_align()));
+        for frame in 0..frames {
+            let phase = (frame % 100) as f32 / 100.0 * std::f32::consts::TAU;
+            let sample = (phase.sin() * 12_000.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+        pcm
+    }
+
+    /// The adaptive plan every walk test runs on: default Opus rate, default floor.
+    fn adaptive_plan() -> AudioPlan {
+        AudioPlan {
+            codec: AudioCodec::Opus,
+            bitrate_bps: 96_000,
+            adaptive_floor_bps: Some(32_000),
+        }
+    }
+
+    #[test]
+    fn silence_is_recognized_and_a_tone_is_not() {
+        assert!(is_silence(&one_frame_of_pcm()));
+        // A dithered silence still reads as one.
+        let mut dithered = one_frame_of_pcm();
+        dithered[0] = 2;
+        dithered[1] = 0;
+        assert!(is_silence(&dithered));
+        assert!(!is_silence(&one_frame_of_tone()));
+    }
+
+    /// The walk's whole arithmetic: quick to give up, slow to reclaim, bounded
+    /// on both ends, and the behind flag rises with the first block and clears
+    /// after [`RELIEF_SENDS`] clean sends.
+    #[test]
+    fn the_audio_walk_gives_up_bitrate_and_takes_it_back() {
+        let signals = Arc::new(AudioSignals::new(96_000));
+        let mut walk = AudioCongestion::new(96_000, 32_000, Arc::clone(&signals));
+        let start = tokio::time::Instant::now();
+
+        // One slow send is not a verdict — but it does mark the link behind.
+        assert_eq!(walk.observe(BEHIND_SEND, start), None);
+        assert!(signals.behind());
+        assert_eq!(walk.observe(BEHIND_SEND, start), Some(64_000));
+        assert_eq!(signals.desired_bps(), 64_000);
+
+        // Sustained blocking bottoms out on the floor, never below.
+        let mut at = start;
+        for _ in 0..20 {
+            at += AUDIO_ADJUST_COOLDOWN;
+            for _ in 0..BEHIND_SENDS {
+                walk.observe(BEHIND_SEND, at);
+            }
+        }
+        assert_eq!(signals.desired_bps(), 32_000);
+        assert!(signals.behind());
+
+        // A few clean sends clear the behind flag well before any rate returns.
+        for _ in 0..RELIEF_SENDS {
+            walk.observe(Duration::ZERO, at);
+        }
+        assert!(!signals.behind());
+
+        // And a long clear stretch climbs back exactly to the ceiling.
+        for _ in 0..100 {
+            at += AUDIO_ADJUST_COOLDOWN;
+            for _ in 0..CLEAR_SENDS {
+                walk.observe(Duration::ZERO, at);
+            }
+        }
+        assert_eq!(signals.desired_bps(), 96_000);
+    }
+
+    /// While the link is behind, silent buffers are shed before the encoder —
+    /// the stream yields nothing for them — and sound resumes the moment the
+    /// source stops being silent. A fixed-rate plan sheds nothing.
+    #[tokio::test]
+    async fn silence_is_shed_only_while_behind() {
+        let bridge = AudioBridge::new();
+        let encoded = bridge
+            .take_listener()
+            .into_packets(PCM_CD_QUALITY, adaptive_plan())
+            .expect("an adaptive opus stream");
+        let signals = encoded.signals.clone().expect("an adaptive plan has signals");
+        let mut stream = Box::pin(encoded.packets);
+
+        // Not behind: silence is content like any other.
+        bridge.wave(one_frame_of_pcm());
+        assert_eq!(next(&mut stream).await.expect("packets").len(), 1);
+
+        // Behind: the silent buffer is shed — nothing may reach the stream, so
+        // the *next* thing it yields is the tone that follows.
+        signals.set_behind(true);
+        bridge.wave(one_frame_of_pcm());
+        bridge.wave(one_frame_of_tone());
+        let packets = next(&mut stream).await.expect("packets");
+        assert_eq!(packets.len(), 1, "the shed silence must not add a packet");
+        let mut decoder =
+            opus::Decoder::new(crate::pcm48::SAMPLE_RATE, opus::Channels::Stereo).expect("decoder");
+        let mut decoded = vec![0i16; crate::opus_stream::FRAME_FRAMES * 2];
+        decoder.decode(&packets[0], &mut decoded, false).expect("decode");
+        // The packet that came through is the tone, not the silence: with the
+        // silent frame shed, the encoder's first packet carries signal.
+        let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
+        assert!(peak > 1_000, "the surviving packet should carry the tone, peak {peak}");
+    }
+
+    /// The desired rate published on the signals reaches the live encoder: the
+    /// same tone costs visibly fewer bytes per packet after the walk turns the
+    /// rate down.
+    #[tokio::test]
+    async fn a_moved_bitrate_is_applied_to_the_live_encoder() {
+        let bridge = AudioBridge::new();
+        let encoded = bridge
+            .take_listener()
+            .into_packets(PCM_CD_QUALITY, adaptive_plan())
+            .expect("an adaptive opus stream");
+        let signals = encoded.signals.clone().expect("signals");
+        let mut stream = Box::pin(encoded.packets);
+
+        let bytes_of = |packets: &[Bytes]| -> usize {
+            packets.iter().map(|p| p.len()).sum::<usize>() / packets.len()
+        };
+
+        // A few packets at the ceiling to get past the encoder settling.
+        let mut at_ceiling = 0;
+        for _ in 0..5 {
+            bridge.wave(one_frame_of_tone());
+            at_ceiling = bytes_of(&next(&mut stream).await.expect("packets"));
+        }
+
+        signals.set_desired_bps(16_000);
+        // The new rate applies from the buffer after the change is seen.
+        let mut at_floor = usize::MAX;
+        for _ in 0..5 {
+            bridge.wave(one_frame_of_tone());
+            at_floor = at_floor.min(bytes_of(&next(&mut stream).await.expect("packets")));
+        }
+        assert!(
+            at_floor * 2 < at_ceiling,
+            "16 kbit/s packets should be well under half the 96 kbit/s ones, \
+             got {at_floor} against {at_ceiling}"
         );
     }
 }

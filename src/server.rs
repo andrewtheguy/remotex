@@ -648,6 +648,11 @@ mod tests {
                 render_motion_subtype: None,
                 render_motion_quality: None,
                 render_motion_debug: false,
+                render_adaptive: false,
+                render_adaptive_min: None,
+                audio_bitrate: None,
+                audio_adaptive: false,
+                audio_bitrate_min: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1059,6 +1064,11 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            render_adaptive: false,
+            render_adaptive_min: None,
+            audio_bitrate: None,
+            audio_adaptive: false,
+            audio_bitrate_min: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its

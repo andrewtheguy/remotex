@@ -94,6 +94,14 @@ JPEG, so flat UI and text soften along with photographic content. That is the
 honest trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer
 bytes for the same visible result.
 
+Two more keys sit across the whole dial rather than on either axis.
+`render_adaptive = true` lets every lossy quality the target configures track the
+measured link between `render_adaptive_min` (default 20) and its configured value,
+which stays the ceiling — see [what the link will bear](#the-codec) for the signal
+and the walks. It is refused on `full`, which has no quality to move. The floor is
+one number for the whole plan: whichever dials exist — `render_quality`,
+`render_motion_quality`, a stream's — all stop at it.
+
 The still dial costs no wire change. A tile record's first byte is already its format
 (`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and the client decodes all
 three through `createImageBitmap` from a MIME type. What streams costs one: a
@@ -102,7 +110,8 @@ three through `createImageBitmap` from a MIME type. What streams costs one: a
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug }` and `Video { quality }` —
+one arm per transport — `Tiles { base, motion, debug, adaptive }` and
+`Video { quality, adaptive }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. `motion` is itself
 a `MotionEncode`, `Tile(codec)` or `Stream { quality }`, for the same reason one
@@ -377,6 +386,23 @@ answers it. Quality moves through `Stream::set_quality`, which re-tunes the runn
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
+`render_adaptive = true` gives the same walk a second signal and an operator's
+floor. The signal is the client's own lag: the paint window already tracks how
+long the oldest unacknowledged batch has been owed, and `LinkFeedback`
+(`src/feedback.rs`) publishes that age minus a baseline — the smallest recent
+end-to-end time, so distance never reads as queueing; RustDesk and Guacamole
+both make the same subtraction. Sixty milliseconds of queueing lag counts as
+a behind frame even when nothing local blocked, which is exactly the case the
+paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
+flight while every queue stayed shallow. The walk's floor moves from 1 to
+`render_adaptive_min`, and the same key puts a *per-encode* quality on the lossy
+tile paths: Guacamole's curve — one quality point per millisecond of lag past
+20 ms, clamped at the floor — applied at `Shared::adapted` wherever a JPEG or
+WebP tile is about to be encoded, cleanups included. PNG passes through
+untouched; which cells deserve losslessness was the operator's call, not the
+link's. Without the key, nothing changes: pressure-only walk for streams, fixed
+quality for tiles.
+
 That signal only works because those queues are shallow. `FRAME_BUFFER` is 64, sized
 for tiles — a 1080p repaint is ~17 bands — but under `video` one message is a whole
 frame, and 64 of them in each of two queues in series is seconds of buffered
@@ -508,8 +534,12 @@ worker queue and draw times. `ws.rs` consumes this transport feedback rather tha
 forwarding it to the remote engine, and logs those measurements with the
 attachment totals. A socket generation travels through the worker so a late
 completion from a dead attachment cannot acknowledge a new one. This is the
-measurement contract for application-level backpressure; the gateway does not
-yet delay or drop a batch based on it.
+measurement contract for application-level backpressure, and the gateway acts on
+it twice: the paint window in `ws.rs` holds the next batch when too many are owed
+or the oldest is owed too long, and on a `render_adaptive` target the same
+measurement — published through `LinkFeedback` — moves quality before the window
+ever parks. Nothing is dropped either way; an access unit's dependency order is
+untouched.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache
 slot. `TILE_REF` redraws the encoded payload already stored in that slot.
@@ -580,8 +610,22 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
-| `opus` (default) | `opus` | 96 kbps | 48 000 | 960 (20 ms) | `OpusHead` |
+| `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s | 48 000 | 960 (20 ms) | `OpusHead` |
 | `pcm` | `pcm-s16le` | 1.41 Mbps | 44 100 | 0 (self-describing) | empty |
+
+Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
+the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
+pump's send — the audio socket's queue is deliberately two deep, so a send that
+blocks at all means the browser is not draining sound — and walks the encoder's
+bitrate down by a third per verdict toward `audio_bitrate_min` (default
+32 kbit/s), back up by an eighth once the link has proven clear for seconds. The
+change reaches the live encoder through `OPUS_SET_BITRATE`; packets stay 20 ms
+and independently decodable, so nothing is re-announced. While the link is
+*behind*, wave buffers that are pure silence are shed before the encoder instead
+of queued — silence is the one content whose loss cannot be heard, the client
+just receives no packets for a while (what a quiet remote already produces), and
+the backlog drains by exactly that much. Both keys are Opus-only and refused
+beside `pcm`, which has no encoder to tune.
 
 `pcm` is passthrough: the remote's wave buffer becomes one packet, byte for
 byte, with no encoder in the gateway and no decoder in the client. `pcm-s16le`

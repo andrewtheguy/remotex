@@ -461,8 +461,9 @@ pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+    feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("vnc", frame_tx, config.render_plan());
+    let sink = TileSink::new("vnc", frame_tx, config.render_plan(), feedback);
     session(config, input_rx, &sink).await;
     sink.finish().await;
 }
@@ -4170,8 +4171,10 @@ mod tests {
             base: crate::config::TileCodec::Png,
             motion: None,
             debug: false,
+            adaptive: None,
         };
-        (TileSink::new("vnc", frame_tx, plan), frame_rx)
+        let feedback = Arc::new(crate::feedback::LinkFeedback::new());
+        (TileSink::new("vnc", frame_tx, plan, feedback), frame_rx)
     }
 
     /// What the sink has forwarded so far, or `None` for nothing.
@@ -4827,7 +4830,9 @@ mod tests {
                     crate::config::TileCodec::Jpeg(60),
                 )),
                 debug: false,
+                adaptive: None,
             },
+            Arc::new(crate::feedback::LinkFeedback::new()),
         );
         assert!(!sink.copies(), "a motion plan must not be offered copies");
         let shared = test_shared(

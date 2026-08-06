@@ -187,8 +187,9 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
+    feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, config.render_plan());
+    let sink = TileSink::new("rdp", frame_tx, config.render_plan(), feedback);
     session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }
