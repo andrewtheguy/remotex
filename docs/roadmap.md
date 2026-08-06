@@ -85,12 +85,13 @@ has an answer rather than being rediscovered.
   pair guacamole-server ships and the resolution of the black-framebuffer fault
   this entry used to open with — the pipeline advertised *without a codec next to
   it* was the whole of that bug, and the e2e that measured exactly black now
-  measures a painted desktop. What remains planned is using more of the channel
-  than FreeRDP's software GDI surfaces: its real frame boundaries and
-  acknowledgments as the flush signal, the surface compositor, and a separate
-  assessment of AVC420 pass-through. The parts exist in the archives; what makes
-  the rest large is that it is a second graphics pipeline beside the one every
-  engine shares, not an option on it.
+  measures a painted desktop. Its frame boundaries are taken too — the wrapper
+  marks the pipeline's once-per-frame surface flush (and the legacy markers
+  besides) as `Event::Frame`, and the engine flushes on it. What remains planned
+  is using more of the channel than FreeRDP's software GDI surfaces: the surface
+  compositor, and a separate assessment of AVC420 pass-through. The parts exist
+  in the archives; what makes the rest large is that it is a second graphics
+  pipeline beside the one every engine shares, not an option on it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
