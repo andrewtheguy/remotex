@@ -82,16 +82,25 @@ The lag signal the quality curve needs is already collected — the paint window
 `behind()` is exactly guacd's `processing_lag` — it just gates the send window
 instead of moving quality.
 
-### Copy detection: scrolling without image bytes
+### Copy detection — taken
 
 guacd hashes every dirty 64×64 cell of the pending frame into a 65 536-bucket index,
 scans the previous frame across the damaged region, byte-verifies hash hits, and
 rewrites matches as `copy` instructions from the client's own canvas
 (`display-plan-search.c`). A scrolled page becomes copy ops and near-zero image
-bytes. This gateway has `OP_COPY` on the wire, a client that executes it, and
-supersede rules that already respect it — but only VNC CopyRect ever emits one; the
-RDP path re-encodes every scroll. The shadow already holds the previous frame, so
-the search has its two operands in hand.
+bytes. This gateway had `OP_COPY` on the wire, a client that executes it, and
+supersede rules that already respect it — but only VNC CopyRect ever emitted one.
+
+**`src/copies.rs` now runs the same search over the shadow** on every RDP damage
+flush whose plan takes copies, with one structural improvement over the original:
+because `Shadow::copy_within` applies each copy exactly as the client does and the
+tile pass that follows repaints whatever diverged, a wrong copy can only waste,
+never corrupt — so the byte-verification is an economy, not a safety. Matched cells
+merge per displacement into few records, ordered so overlapping copies read their
+sources first. Measured: a worst-case full-HD single-frame scroll plans in 16.5 ms
+release; live against the Windows 11 host, thirty wheel steps over an Explorer
+window sent 125 copy records moving 3,497,984 pixels that previously traveled as
+PNG.
 
 ### The graphics pipeline — taken, and the black screen explained
 
@@ -149,7 +158,8 @@ bound-at-sink — is worth remembering when a new symptom appears.
    **done**: `Event::Frame` from the wrapper, marker-or-net flush in `src/rdp.rs`.
 4. Lag-adaptive quality on the still-tile paths, from the paint window's existing
    `behind()`.
-5. Copy detection over the shadow for the RDP path — the scrolling win.
+5. ~~Copy detection over the shadow for the RDP path~~ — **done**, `src/copies.rs`;
+   125 records moving 3.5M pixels in the first live scroll it saw.
 6. Per-tile content-aware codec choice (the PNG-optimality estimator).
 7. ~~The EGFX retry with guacd's exact settings~~ — **done**; it was the black
    screen's cause and the fix for Windows resize audio besides.

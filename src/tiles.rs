@@ -359,6 +359,21 @@ impl Shadow {
         Some(Changed { rect: changed, cells })
     }
 
+    /// Whether every pixel is known — the steady state of a live session, and the
+    /// gate the copy search runs behind: a copy may only read what the client
+    /// verifiably holds, and checking knownness per window would put a scan inside
+    /// a scan.
+    pub fn all_known(&self) -> bool {
+        self.unknown == 0
+    }
+
+    /// The whole shadow as packed RGB888, `w * 3` bytes per row — the copy
+    /// search's read side. Only meaningful under [`Self::all_known`]; bytes under
+    /// an unknown pixel are stale history.
+    pub(crate) fn rgb(&self) -> &[u8] {
+        &self.pixels
+    }
+
     /// The pixels of `rect` as packed RGB888, or `None` when any of them is
     /// unknown.
     ///

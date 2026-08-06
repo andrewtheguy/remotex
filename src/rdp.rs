@@ -44,11 +44,13 @@ use tokio::time::{Duration, Instant};
 
 use crate::audio::AudioBridge;
 use crate::config::{Security, TargetConfig};
+use crate::copies;
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED,
+    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, MAX_CURSOR_DIM, MouseButton, ServerMsg,
+    UNSCALED,
 };
 use crate::rdp_audio;
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
@@ -746,9 +748,8 @@ async fn active_loop(
                     // out now — not in up-to-16ms, and never cut in half.
                     Event::Frame => {
                         frame_marks = true;
-                        for rect in pending_damage.drain(..) {
-                            send_tiles(framebuffer, rect, &mut shadow, sink).await?;
-                        }
+                        flush_damage(framebuffer, &mut pending_damage, &mut shadow, sink)
+                            .await?;
                         damage_flushed = Instant::now();
                         damage_due = None;
                     }
@@ -1072,9 +1073,7 @@ async fn active_loop(
                 continue;
             }
             _ = damage_flush => {
-                for rect in pending_damage.drain(..) {
-                    send_tiles(framebuffer, rect, &mut shadow, sink).await?;
-                }
+                flush_damage(framebuffer, &mut pending_damage, &mut shadow, sink).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
                 // The flush is a frame boundary of its own: under a video plan those
@@ -1107,9 +1106,7 @@ async fn active_loop(
                     damage_due = Some(Instant::now() + FRAME_NET);
                 }
             } else if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
-                for rect in pending_damage.drain(..) {
-                    send_tiles(framebuffer, rect, &mut shadow, sink).await?;
-                }
+                flush_damage(framebuffer, &mut pending_damage, &mut shadow, sink).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
             } else if damage_due.is_none() {
@@ -1559,6 +1556,57 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
 /// is what keeps a slow encoder from stalling FreeRDP's next paint: the engine
 /// crate hands out its frame under a mutex the RDP thread also takes on every
 /// `EndPaint`.
+/// Drain the staged damage: copies first, tiles for the rest.
+///
+/// Under a plan that takes copies, the flush's damage is searched for regions the
+/// client already holds elsewhere on its canvas — a scroll, mostly — and each find
+/// goes out as a `COPY` record instead of image bytes ([`crate::copies`]). The
+/// shadow applies every copy exactly as the client will, so the tile pass that
+/// follows sees the copied pixels as delivered and pays nothing for them; whatever
+/// a copy did not carry — the newly revealed strip of a scroll — travels as tiles
+/// like any other damage. The copy records go through `msg`, as VNC's CopyRect
+/// does, because that queue's order against the tiles is the contract a copy reads
+/// the canvas under.
+async fn flush_damage(
+    framebuffer: &Framebuffer,
+    pending: &mut Vec<Rect>,
+    shadow: &mut Shadow,
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+    if sink.copies() && !pending.is_empty() {
+        let plans = framebuffer.with(|frame| {
+            copies::plan(
+                &frame.pixels,
+                frame.stride,
+                narrow(frame.width),
+                narrow(frame.height),
+                pending,
+                shadow,
+            )
+        });
+        for copy in plans {
+            // `Some(true)` is the only answer that owes the client a record: `None`
+            // means the shadow cannot make the move (drop it — the tiles carry those
+            // pixels instead), `Some(false)` that the destination already held them.
+            if shadow.copy_within(copy.src, copy.dst) == Some(true) {
+                sink.msg(ServerMsg::Copy(CopyRect {
+                    sx: copy.src.left,
+                    sy: copy.src.top,
+                    x: copy.dst.left,
+                    y: copy.dst.top,
+                    w: copy.dst.w(),
+                    h: copy.dst.h(),
+                }))
+                .await?;
+            }
+        }
+    }
+    for rect in pending.drain(..) {
+        send_tiles(framebuffer, rect, shadow, sink).await?;
+    }
+    Ok(())
+}
+
 async fn send_tiles(
     framebuffer: &Framebuffer,
     rect: Rect,

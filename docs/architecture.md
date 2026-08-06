@@ -767,6 +767,13 @@ flush — as a `Frame` event. On the first one, the engine stops guessing: the
 demotes to a 100 ms safety net under the marker, so a frame is presented when the
 server says it is whole, not up to 16 ms later and never cut in half.
 
+Under a plan that takes copies, each flush first searches the damage for regions
+the client already holds elsewhere on its canvas (`src/copies.rs`, guacamole-
+server's cell-hash search over this gateway's shadow): a scroll goes out as a few
+`COPY` records instead of image bytes, and the tile pass carries only what the
+copies did not — including repainting anything a copy got wrong, which is what
+makes a wrong copy waste rather than corruption.
+
 It replaced IronRDP, which was not stable enough against real Windows hosts. The
 engine advertises the Graphics Pipeline (EGFX) with RemoteFX beside it, and the
 pairing is load-bearing: the pipeline advertised *alone* was measured broken —
