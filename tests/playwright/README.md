@@ -27,17 +27,11 @@ agree with their own fixtures and disagree with each other. Its frame parser is
 deliberately a second implementation rather than an import of the SPA's, because a
 wrong parser would otherwise agree with itself.
 
-`video-stream.spec.ts` is the video dial read from the same socket, and it exists
-because the codec is now a **config key** rather than a negotiation: what a target
-streams is decided in the operator's file, so both ends of that decision are
-assertable without asking the browser anything. It parses VIDEO records itself —
-op, keyframe flags byte, the coded rectangle's even sides — checks that no stream's
-first access unit outran the `videoFormat` that says how to decode it, and reads the
-codec back off the session card's Video row. The one browser-dependent claim, whether
-this runtime decodes the H.264 a target may be configured for, is put to the runtime
-with `VideoDecoder.isConfigSupported` and then asserted both ways: a decoder that
-refuses must produce the banner naming the codec, and one that accepts must produce no
-banner at all.
+`video-stream.spec.ts` is the video dial read from the same socket. Video is VP9
+only, so everything it asserts is decidable without asking the browser anything. It
+parses VIDEO records itself —
+op, keyframe flags byte, the coded rectangle's even sides — and checks that no
+stream's first access unit outran the `videoFormat` that says how to decode it.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, and that opening and closing
@@ -116,7 +110,6 @@ REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
 REMOTEX_PLAYWRIGHT_USERNAME='admin' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_VIDEO_TARGET='video' \
-REMOTEX_PLAYWRIGHT_VIDEO_H264_TARGET='video-h264' \
 npm run test:video
 ```
 

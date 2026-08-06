@@ -180,14 +180,10 @@ browser onto the new holder's desktop.
 
 ## Video codec
 
-`render_type = "video"` is carried by **VP9 by default** — BSD-licensed with a
-patent grant, and in every browser build, which H.264 is not. A target may name the
-other with `video_codec = "h264"`, which is the operator saying something about
-which browsers reach that target; it is refused on a target that streams nothing,
-the same shape `audio_codec` already has.
-
-The gateway holds no codec logic past that key — no probe, no gate, no fallback
-path. `ServerMsg::VideoFormat` announces the codec and the exact WebCodecs
-configuration string before a stream's first unit, and a client that cannot decode
-what arrives says so from its own `VideoDecoder`, naming the codec. See
+Video — `render_type = "video"` and `render_motion_subtype = "stream"` alike — is
+**VP9 only** (`src/vp9.rs`): BSD-licensed with a patent grant, and in every browser
+build. There is no codec key, no probe, no gate, and no fallback path.
+`ServerMsg::VideoFormat` announces the exact WebCodecs configuration string before a
+stream's first unit, and a client that cannot decode what arrives says so from its
+own `VideoDecoder`, naming the configuration. See
 [`docs/architecture.md`](docs/architecture.md).

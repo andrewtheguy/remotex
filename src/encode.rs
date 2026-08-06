@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 
-use crate::config::{MotionEncode, RenderPlan, TileCodec, VideoCodec};
+use crate::config::{MotionEncode, RenderPlan, TileCodec};
 use crate::protocol::{ServerMsg, Tile};
 use crate::regions::{Policy, Produced, Regions, Round};
 use crate::tiles::{Changed, Rect};
@@ -138,12 +138,10 @@ const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
 /// reclaims. Bigger down than up, for the same reason [`CLEAR_FRAMES`] is bigger than
 /// [`BEHIND_FRAMES`].
 ///
-/// These are the H.264 steps this loop used to take, converted once: it walked the
-/// quantizer by 4 down and 1 up, and H.264's dial spans 39 quantizer values over 99
-/// points of quality, so one quantizer step is about 2.54 points. The loop speaks
-/// quality rather than a quantizer because there are two codecs now and their
-/// quantizers are different scales — 0–63 for VP9 — while the dial is the gateway's own
-/// and means the same thing on both.
+/// The loop speaks quality rather than a quantizer because a quantizer is the codec's
+/// own scale — VP9's is 0–63 — while the dial is the gateway's; the mapping is
+/// [`crate::vp9`]'s. Ten points down and three back is roughly four quantizer steps
+/// against one, on the dial's scale.
 const QUALITY_STEP_DOWN: u8 = 10;
 /// See [`QUALITY_STEP_DOWN`].
 const QUALITY_STEP_UP: u8 = 3;
@@ -155,11 +153,6 @@ const QUALITY_STEP_UP: u8 = 3;
 /// used, because a quality *is* a meaningful number everywhere else in this module
 /// and a reader should not have to work out that this one is not.
 const NO_STREAM_QUALITY: u8 = 1;
-
-/// The codec a plan that produces no access units is given. Never read, for the same reason
-/// [`NO_STREAM_QUALITY`] is not, and named for the same reason: a codec *is* a meaningful choice
-/// everywhere else, and a reader should not have to work out that this one is not.
-const NO_STREAM_CODEC: VideoCodec = VideoCodec::Vp9;
 
 /// The shortest gap between two access units.
 ///
@@ -189,9 +182,8 @@ const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 /// to know, because exceeding the configured quality was never a goal. The worst it can
 /// do is coarsen a link that was already struggling.
 ///
-/// In dial units rather than a quantizer, which is what lets one loop serve both codecs:
-/// H.264's quantizer runs 12–51 and VP9's 0–63, and each module maps the dial onto its
-/// own. Nothing here knows which is running.
+/// In dial units rather than a quantizer: a quantizer is the codec module's own scale
+/// (VP9's runs 0–63), and the mapping lives there, so nothing here knows one.
 ///
 /// Pure, and takes `now` rather than reading a clock, so every one of its decisions is
 /// testable without waiting for one.
@@ -262,9 +254,9 @@ struct Video {
 }
 
 impl Video {
-    fn new(policy: Policy, codec: VideoCodec, quality: u8, mark: Option<video::Mark>) -> Self {
+    fn new(policy: Policy, quality: u8, mark: Option<video::Mark>) -> Self {
         Self {
-            regions: Regions::new(policy, codec, quality, mark),
+            regions: Regions::new(policy, quality, mark),
             congestion: Congestion::new(quality),
             due_at: None,
         }
@@ -642,26 +634,23 @@ impl Shared {
         // none still builds a `Video` — never touched, and holding no mirror until
         // something is blitted into it — so that the streaming paths need no
         // unwrapping once they have established which plan they are on.
-        let (policy, codec, quality, mark) = match plan {
-            RenderPlan::Video { quality, codec } => (Policy::Whole, codec, quality, None),
+        let (policy, quality, mark) = match plan {
+            RenderPlan::Video { quality } => (Policy::Whole, quality, None),
             RenderPlan::Tiles {
-                motion: Some(MotionEncode::Stream { quality, codec }), debug, ..
+                motion: Some(MotionEncode::Stream { quality }), debug, ..
             } => (
                 Policy::Moving,
-                codec,
                 quality,
                 debug.then_some(video::Mark { colour: MARK_MOTION, px: MARK_PX }),
             ),
-            // The codec is as unread as the quality here: nothing blits into that target's
-            // mirror, so no stream is ever built from either.
-            RenderPlan::Tiles { .. } => {
-                (Policy::Whole, NO_STREAM_CODEC, NO_STREAM_QUALITY, None)
-            }
+            // The quality is unread here: nothing blits into that target's mirror, so
+            // no stream is ever built from it.
+            RenderPlan::Tiles { .. } => (Policy::Whole, NO_STREAM_QUALITY, None),
         };
         Self {
             failure: Mutex::default(),
             motion: Mutex::default(),
-            video: tokio::sync::Mutex::new(Video::new(policy, codec, quality, mark)),
+            video: tokio::sync::Mutex::new(Video::new(policy, quality, mark)),
             round_returned: Notify::new(),
             keyframe_owed: AtomicBool::new(false),
             tiles: AtomicU64::new(0),
@@ -928,7 +917,7 @@ impl TileSink {
                 let rgb = Arc::new(pack(cell));
                 // Only a *split* band is marked, for the reason the still path gives.
                 // A region's own outline is drawn by its encoder, on the crop rather
-                // than on the mirror — see `h264::Mark`.
+                // than on the mirror — see `video::Mark`.
                 let rgb = if debug { marked(&rgb, cell, MARK_CRISP) } else { rgb };
                 crisp.push(cell);
                 self.encode(cell, rgb, base).await?;
@@ -1572,7 +1561,6 @@ async fn order_loop(
                 for format in produced.formats {
                     let msg = ServerMsg::VideoFormat {
                         stream: format.stream,
-                        codec: format.codec,
                         decode: format.decode,
                     };
                     if frame_tx.send(msg).await.is_err() {
@@ -2557,7 +2545,7 @@ mod tests {
 
     // ---- the video transport ------------------------------------------------
 
-    const VIDEO: RenderPlan = RenderPlan::Video { quality: 60, codec: VideoCodec::Vp9 };
+    const VIDEO: RenderPlan = RenderPlan::Video { quality: 60 };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -2581,13 +2569,9 @@ mod tests {
         let mut out = Vec::new();
         while out.len() < units {
             match rx.recv().await.expect("frame channel closed early") {
-                ServerMsg::VideoFormat { codec, decode, .. } => {
+                ServerMsg::VideoFormat { decode, .. } => {
                     assert!(
-                        codec == "vp9" || codec == "h264",
-                        "a format named a codec no client dispatches on: {codec}"
-                    );
-                    assert!(
-                        decode.starts_with("vp09.") || decode.starts_with("avc1."),
+                        decode.starts_with("vp09."),
                         "a format named no WebCodecs configuration: {decode}"
                     );
                 }
@@ -2614,11 +2598,10 @@ mod tests {
         sink.flush().await;
 
         let out = drain(&mut frame_rx, 2).await;
-        let ServerMsg::VideoFormat { stream, codec, decode } = &out[0] else {
+        let ServerMsg::VideoFormat { stream, decode } = &out[0] else {
             panic!("the first thing a stream sends must be its format, got {:?}", out[0]);
         };
         assert_eq!(*stream, 0, "one desktop, one stream");
-        assert_eq!(*codec, VideoCodec::Vp9.name(), "the configured codec, not a fallback");
         assert!(decode.starts_with("vp09.00."), "not a VP9 profile-0 configuration: {decode}");
         let announced = decode.clone();
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
@@ -2731,9 +2714,9 @@ mod tests {
         assert!(frame_rx.try_recv().is_err(), "three rectangles produced more than one frame");
     }
 
-    /// The tile header is the *desktop*, not the picture. H.264 needs even sides and
-    /// a desktop need not have them, so the two differ — and it is the desktop a
-    /// client has a canvas for.
+    /// The tile header is the *desktop*, not the picture. The encoder is held to
+    /// even sides and a desktop need not have them, so the two differ — and it is
+    /// the desktop a client has a canvas for.
     #[tokio::test]
     async fn an_access_unit_covers_the_whole_desktop_at_its_true_size() {
         let (sink, mut frame_rx) = video_sink(1919, 1079).await;
@@ -2928,7 +2911,7 @@ mod tests {
 
     const MOTION_STREAM: RenderPlan = RenderPlan::Tiles {
         base: TileCodec::Png,
-        motion: Some(MotionEncode::Stream { quality: 60, codec: VideoCodec::Vp9 }),
+        motion: Some(MotionEncode::Stream { quality: 60 }),
         debug: false,
     };
 

@@ -1,5 +1,5 @@
 //! Client wire types: tagged JSON for control and input, binary batches for still
-//! tiles and VP9/H.264 access units, and binary frames for Opus or PCM audio.
+//! tiles and VP9 access units, and binary frames for Opus or PCM audio.
 //! WebSocket ordering is required because resize messages change the coordinate
 //! space of following tiles — and because an access unit means nothing out of
 //! sequence. Audio travels on its own WebSocket.
@@ -582,12 +582,10 @@ impl CopyRect {
 /// The contract every client implements:
 ///
 /// - The payload is **one whole access unit** — exactly one frame's worth, never a partial one
-///   and never two. Under H.264 that is every NAL unit of the frame, Annex-B, delimited by start
-///   codes; under VP9 it is the frame as libvpx emitted it.
+///   and never two: the frame as libvpx emitted it.
 /// - **[`ServerMsg::VideoFormat`] arrives first**, before this stream's first record, and names
-///   the codec and the exact WebCodecs configuration string to build the decoder with. Nothing in
-///   the payload has to be parsed to find that out — which H.264 permits, since SPS and PPS
-///   accompany every keyframe, and VP9 does not, since it has no parameter sets at all.
+///   the exact WebCodecs configuration string to build the decoder with. Nothing in
+///   the payload can be parsed to find that out — VP9 has no parameter sets at all.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
 /// - `stream` names which decoder this belongs to. A session may run several at once
 ///   — one per moving region under `render_motion_subtype = "stream"`, exactly one
@@ -783,7 +781,7 @@ pub struct DisplayInfo {
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
     Tile(Tile),
-    /// One VP9 or H.264 access unit for one region. Like a tile this has no text
+    /// One VP9 access unit for one region. Like a tile this has no text
     /// encoding and is not a control message: it is a binary record, and
     /// [`crate::wire`] puts it in a batch in its place among the tiles, which is
     /// load-bearing.
@@ -827,10 +825,6 @@ pub enum ServerMsg {
     /// second whether it may hand the size to its window and let every drag report.
     /// `ard-high-performance` is the one target that has the first without the
     /// second — see [`crate::config::TargetConfig::auto_resize`].
-    /// `video` is the codec family this session's streams are being encoded with,
-    /// or `None` for a target that streams nothing. The target config chooses it;
-    /// carrying it here lets a browser that takes over a running session identify
-    /// the codec even though it sent no [`ClientMsg::Connect`].
     Connected {
         name: String,
         protocol: &'static str,
@@ -848,7 +842,6 @@ pub enum ServerMsg {
         auto_resize: bool,
         clipboard: bool,
         audio: bool,
-        video: Option<&'static str>,
         /// The render dial this session resolved to, as one line — see
         /// [`crate::config::RenderPlan::describe`].
         ///
@@ -929,17 +922,16 @@ pub enum ServerMsg {
     /// ahead of a round's units is enough to guarantee the order.
     ///
     /// **Per stream, not per session.** Under `render_motion_subtype = "stream"` a session runs up
-    /// to four at once over regions of different sizes, and both codecs' configuration strings
-    /// carry a size-derived level — so one string for the session would be wrong for some of them.
-    /// Under `render_type = "video"` there is exactly one stream, and so one of these per session
-    /// plus one per resize.
+    /// to four at once over regions of different sizes, and the configuration string
+    /// carries a size-derived level — so one string for the session would be wrong for some of
+    /// them. Under `render_type = "video"` there is exactly one stream, and so one of these per
+    /// session plus one per resize.
     ///
-    /// `codec` is the family (`vp9` or `h264`), which is what a client dispatches on. `decode` is
-    /// the exact WebCodecs configuration string to hand `VideoDecoder.configure` — `vp09.00.40.08`,
-    /// `avc1.42c01e`. Both come from the encoder rather than from a prediction, which is why this
-    /// is sent when the first unit is produced rather than when the session starts: H.264's
-    /// profile and level are in an SPS, and there is no SPS before there is a keyframe.
-    VideoFormat { stream: u8, codec: &'static str, decode: String },
+    /// `decode` is the exact WebCodecs configuration string to hand `VideoDecoder.configure` —
+    /// `vp09.00.40.08`. It comes from the encoder rather than from a prediction, and it is sent
+    /// with the round that produced the stream's first unit because that is where the encoder's
+    /// answer exists.
+    VideoFormat { stream: u8, decode: String },
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -981,7 +973,6 @@ enum ControlMsg<'a> {
         auto_resize: bool,
         clipboard: bool,
         audio: bool,
-        video: Option<&'a str>,
         render: &'a str,
     },
     RemoteOs { macos: bool },
@@ -1011,7 +1002,6 @@ enum ControlMsg<'a> {
     },
     VideoFormat {
         stream: u8,
-        codec: &'a str,
         decode: &'a str,
     },
 }
@@ -1072,7 +1062,6 @@ impl ServerMsg {
                 auto_resize,
                 clipboard,
                 audio,
-                video,
                 render,
             } => control(&ControlMsg::Connected {
                 name,
@@ -1082,11 +1071,10 @@ impl ServerMsg {
                 auto_resize: *auto_resize,
                 clipboard: *clipboard,
                 audio: *audio,
-                video: *video,
                 render,
             }),
-            ServerMsg::VideoFormat { stream, codec, decode } => {
-                control(&ControlMsg::VideoFormat { stream: *stream, codec, decode })
+            ServerMsg::VideoFormat { stream, decode } => {
+                control(&ControlMsg::VideoFormat { stream: *stream, decode })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::AudioFormat {
@@ -1340,35 +1328,31 @@ mod tests {
             auto_resize: false,
             clipboard: true,
             audio: false,
-            video: None,
             render: "tiles · lossless png".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"autoResize":false,"clipboard":true,"audio":false,"video":null,"render":"tiles · lossless png"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"autoResize":false,"clipboard":true,"audio":false,"render":"tiles · lossless png"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
-        // And a video target's, which is the takeover case: a browser that attached to a
-        // running session learns the codec here rather than from the first keyframe.
+        // A subtype-less target: null rather than absent, because RDP has no subtype
+        // and a key that comes and goes is one a client has to test for two ways.
         match (ServerMsg::Connected {
             name: "desk".to_owned(),
             protocol: "rdp",
-            // Null rather than absent: RDP has no subtype, and a key that comes and
-            // goes is one a client has to test for two ways.
             subtype: None,
             resize: false,
             auto_resize: false,
             clipboard: false,
             audio: false,
-            video: Some("vp9"),
-            render: "video · vp9 q60".to_owned(),
+            render: "video q60".to_owned(),
         })
         .text_frame()
         {
-            Some(json) => assert!(json.contains(r#""video":"vp9""#), "{json}"),
+            Some(json) => assert!(json.contains(r#""subtype":null"#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         // How to decode one stream, which is the message a client cannot work out for
@@ -1376,14 +1360,13 @@ mod tests {
         // answer and a renamed one is a decoder that never gets configured.
         match (ServerMsg::VideoFormat {
             stream: 3,
-            codec: "vp9",
             decode: "vp09.00.40.08".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"videoFormat","stream":3,"codec":"vp9","decode":"vp09.00.40.08"}"#
+                r#"{"type":"videoFormat","stream":3,"decode":"vp09.00.40.08"}"#
             ),
             None => panic!("videoFormat must be a text frame"),
         }

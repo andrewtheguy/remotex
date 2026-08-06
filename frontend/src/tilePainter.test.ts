@@ -102,9 +102,8 @@ function batchFrame(records: Record[]): ArrayBuffer {
 // An access unit's payload. **Opaque here, deliberately**: nothing on this side of the
 // wire parses a bitstream any more — the gateway says how to decode a stream in a
 // `videoFormat` message and marks each unit's keyframe bit in the record — so these
-// bytes only need to be distinguishable from each other. They are still a real H.264
-// keyframe (SPS, PPS, IDR slice behind Annex-B start codes) because a plausible payload
-// reads better in a failure than a run of zeros.
+// bytes only need to be distinguishable from each other. The shape is a plausible
+// bitstream rather than a run of zeros because it reads better in a failure.
 const KEYFRAME = [
   0, 0, 0, 1, 7, 0x42, 0xc0, 0x1e, 0, 0, 0, 1, 8, 0xce, 0, 0, 1, 5, 0x88,
 ];
@@ -176,7 +175,7 @@ const context = {
 
 // The WebCodecs decoder, which this runtime has none of. Only its shape matters
 // here: what the painter does with the frames, not what a real decoder makes of
-// the bitstream — that is browser QA, as `h264.test.ts` says at its top.
+// the bitstream — that is browser QA.
 let videoClosed = false;
 let chunkTypes: string[] = [];
 /** How many decoders were built — one per live stream, replaced on a resize. */
@@ -694,7 +693,7 @@ test("a truncated access unit drops the batch rather than decoding half of it", 
 function announced(streams: number[] = [0]): TilePainter {
   const p = painter();
   for (const stream of streams) {
-    p.setVideoFormat(stream, { codec: "vp9", decode: "vp09.00.40.08" });
+    p.setVideoFormat(stream, { decode: "vp09.00.40.08" });
   }
   return p;
 }
@@ -808,7 +807,7 @@ test("units that arrive before their format are dropped, not reported", async ()
 
   // And the recovery is the ordinary path: the format lands, the keyframe after it
   // decodes, and nothing had to be reset by hand.
-  p.setVideoFormat(0, { codec: "vp9", decode: "vp09.00.40.08" });
+  p.setVideoFormat(0, { decode: "vp09.00.40.08" });
   await p.draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
@@ -851,7 +850,7 @@ test("each stream id gets its own decoder", async () => {
 });
 
 test("a region that restarts on a new size replaces its decoder", async () => {
-  // Neither codec's configuration string carries a resolution, so an in-band size
+  // The configuration string carries no resolution, so an in-band size
   // change is not something to bet two browsers on. A region that grew is a new
   // picture — and the gateway re-announces its format, which is the other half of the
   // same statement and has its own test below.

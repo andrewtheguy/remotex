@@ -21,7 +21,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.120"
+version = "0.0.121"
 
 [package]
 name = "remotex"
@@ -64,28 +64,10 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Binds a statically-linked libwebp built by `cc`
 # (not cmake) with the target's SIMD, so it costs no cmake and no new runtime dep.
 webp = "0.3"
-# H.264 for either streaming mode: the whole framebuffer under `render_type =
-# "video"`, or moving regions under `render_motion_subtype = "stream"` (src/h264.rs).
-# Cisco's encoder, whose sys crate compiles the vendored
-# C with `cc` — no system library, no cmake, and no runtime dependency, which is the
-# same bargain `webp` above strikes. Encoder only; the gateway never decodes H.264,
-# and the client's decoder is not ours either — it is WebCodecs. Note for anyone
-# editing src/h264.rs: this crate asserts on odd dimensions and
-# on an out-of-range QP, and this binary is `panic = "abort"`, so an assertion here
-# takes the process down rather than one session.
-openh264 = "0.9"
-# The same encoder's raw bindings, for the one thing its safe wrapper cannot express:
-# moving the quantizer on a live encoder, which is how a congested link gives up
-# quality (`Stream::set_qp`). The alternative — rebuilding the encoder — would force a
-# keyframe per adjustment, spending a few hundred KB exactly when bytes are scarce.
-# Already compiled as `openh264`'s own dependency, so this costs no build time; it must
-# stay on the same version, since the two share the encoder handle.
-openh264-sys2 = "0.9"
-# libvpx, for VP9 — the *default* video codec, with H.264 above as the alternative. The
-# reason it is the default is a licence: VP9 is BSD-3-Clause with a patent grant, so a
-# browser build carrying no proprietary codecs still decodes it, which H.264 is not.
-# Which of the two a session uses is a target's `video_codec` key (`src/config.rs`),
-# never a negotiation with the browser.
+# libvpx, for VP9 — the video codec, for either streaming mode: the whole framebuffer
+# under `render_type = "video"`, or moving regions under `render_motion_subtype =
+# "stream"` (src/vp9.rs). VP9 is BSD-3-Clause with a patent grant, so every browser
+# build decodes it, proprietary-codec-free ones included.
 #
 # Its sys crate downloads a prebuilt static archive and compiles no C: the same bargain
 # `opus-prebuilt` below strikes, and for the same reason — libvpx's own build is
@@ -93,9 +75,9 @@ openh264-sys2 = "0.9"
 # should have to have. Do not restore a source build, a vcpkg dependency, or bindgen:
 # the bindings are committed in that repository.
 #
-# Encoder and decoder are both in the archive; this gateway only encodes. Unlike
-# openh264 this crate asserts nothing — libvpx returns error codes — which is why
-# `src/vp9.rs` can be a plain `?` path under `panic = "abort"`.
+# Encoder and decoder are both in the archive; this gateway only encodes. libvpx
+# asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
+# plain `?` path under `panic = "abort"`.
 vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260804003457-6bca589" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #

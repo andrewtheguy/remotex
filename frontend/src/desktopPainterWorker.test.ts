@@ -141,7 +141,7 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   h.host.handle({
     type: "videoFormat",
     stream: 2,
-    format: { codec: "vp9", decode: "vp09.00.40.08" },
+    format: { decode: "vp09.00.40.08" },
   });
   await settled();
   // The draw is still out; nothing behind it has run, and the echo the page's

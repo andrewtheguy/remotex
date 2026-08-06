@@ -1064,7 +1064,6 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
-            video_codec: None,
         }
     }
 

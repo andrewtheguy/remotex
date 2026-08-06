@@ -1,7 +1,9 @@
 // What this session is actually speaking, for the "This session" card.
 //
-// A module of its own for the reason `videoLabel.ts` is: a pure function of two
-// strings, where the component that shows it cannot be imported without a browser.
+// A module of its own because it is a pure function of two strings, where the
+// component that shows it cannot be imported without a browser — importing
+// `FloatingMenu.tsx` runs modules that read `window` at load, and a test of this
+// string should not have to stand up a fake browser to reach it.
 //
 // Worth showing because `vnc` is three different things. A plain VNC server, a Mac
 // in Screen Sharing's Standard mode and a Mac in High Performance mode all arrive

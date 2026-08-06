@@ -366,13 +366,6 @@ password = "change-me"
 #render_type = "video"
 #render_quality = 60
 
-# The codec for either streaming mode above. "vp9" is the default: licence-free,
-# broadly decodable, and faster and smaller on the measured screen content. Set
-# "h264" only for a deployment whose browsers support it. This key applies to both
-# render_type = "video" and render_motion_subtype = "stream", and is refused on a
-# target that uses neither.
-#video_codec = "vp9"
-
 # QA aid for "motion", off unless asked for: outline every piece the strategy emits
 # in the pixels themselves, so which cells it put in motion is something you read
 # off the screen rather than infer from how blurry a region looks.

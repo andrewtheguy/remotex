@@ -108,7 +108,7 @@ export interface TilePainter {
    */
   clear(): void;
   /**
-   * Adopt a `videoFormat` for one stream: which codec, and the exact string to configure
+   * Adopt a `videoFormat` for one stream: the exact string to configure
    * its decoder with. Always arrives before that stream's first access unit.
    *
    * Held here rather than passed with each unit because it is announced once and used by

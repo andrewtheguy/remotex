@@ -138,9 +138,9 @@ export function readRemoteClipboard(): string {
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
 // its button starts with — up to the first space, and no further.
 //
-// `\b` was wrong for that: a word boundary sits between "video" and the hyphen in
-// "video-h264" too, so a config holding `video`, `video-h264` and `video-motion`
-// matched three buttons and every click failed on strict mode. Whitespace is the
+// `\b` was wrong for that: a word boundary sits between "video" and a hyphen too,
+// so a config holding `video` and `video-motion`
+// matched two buttons and every click failed on strict mode. Whitespace is the
 // separator the button actually uses, and it is the one a name can never contain.
 export function targetNamePattern(name: string): RegExp {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

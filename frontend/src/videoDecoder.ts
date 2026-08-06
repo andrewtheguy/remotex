@@ -12,10 +12,9 @@
 //
 // **Nothing here parses a bitstream.** The gateway says how to decode a stream in a
 // `videoFormat` control message before its first unit, and marks each unit's keyframe
-// bit on the wire. That is not a convenience: VP9 — the default, because a stock
-// Chromium carries it and H.264 is not guaranteed — has no in-band parameter sets at
+// bit on the wire. That is not a convenience: VP9 has no in-band parameter sets at
 // all, so there is nothing in a VP9 payload for a client to read a codec string out of.
-// One contract for both codecs, decided by the side that did the encoding.
+// The side that did the encoding says how to decode it.
 //
 // The awkward part is the shape of the API rather than the codec. `decode()` is
 // fire-and-forget and frames come back on a callback, while the paint path wants
@@ -29,11 +28,10 @@
 /**
  * How to decode one stream, from the gateway's `videoFormat` message.
  *
- * `codec` is the family — `vp9` or `h264` — and is what an error message names. `decode`
- * is the exact string to hand `VideoDecoder.configure`: `vp09.00.40.08`, `avc1.42c01e`.
+ * `decode` is the exact string to hand `VideoDecoder.configure`: `vp09.00.40.08`. It
+ * is also what an error message names.
  */
 export interface VideoFormat {
-  codec: string;
   decode: string;
 }
 
@@ -83,7 +81,7 @@ export interface VideoStreams {
    *
    * A record whose size differs from the last one on the same id means that region
    * restarted on a different picture: the decoder is replaced rather than reused,
-   * because neither codec's configuration string carries a resolution and an in-band
+   * because the configuration string carries no resolution and an in-band
    * size change is not a thing to bet two browsers on. The gateway sends a keyframe
    * whenever that happens, so a fresh decoder always has somewhere to start.
    */
@@ -154,8 +152,8 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
       return existing;
     }
     if (existing) {
-      // A region that restarted on a different picture. Neither codec's configuration
-      // string carries a resolution, and an in-band size change is not a thing to bet
+      // A region that restarted on a different picture. The configuration
+      // string carries no resolution, and an in-band size change is not a thing to bet
       // two browsers on, so the decoder is replaced rather than reused.
       dropDecoder(id);
     }
@@ -292,7 +290,7 @@ interface Pending {
  *
  * Throws if there is no `VideoDecoder` to be had (see {@link videoUnavailable}); a
  * configuration string this browser refuses is *not* a throw, because WebCodecs
- * reports that asynchronously — it arrives at `onError`, naming the codec.
+ * reports that asynchronously — it arrives at `onError`, naming the configuration.
  */
 export function createVideoStream(
   format: VideoFormat,
@@ -302,8 +300,8 @@ export function createVideoStream(
   if (unavailable) {
     throw new Error(unavailable);
   }
-  // FIFO, and that is the whole ordering argument: neither encoder here produces
-  // frames out of order — no B-frames, no alt-ref frames a decoder would reorder — so
+  // FIFO, and that is the whole ordering argument: the encoder produces no frames
+  // out of order — no alt-ref frames a decoder would reorder — so
   // the nth output belongs to the nth pending entry.
   const pending: Pending[] = [];
   let closed = false;
@@ -334,7 +332,7 @@ export function createVideoStream(
       drain();
       handlers.onError(
         e instanceof Error && e.name === "NotSupportedError"
-          ? `This browser cannot decode the ${format.codec.toUpperCase()} video this target sends. Its video_codec is what chooses; the other option is ${format.codec === "vp9" ? "H.264" : "VP9"}.`
+          ? `This browser cannot decode the video this target sends (${format.decode}).`
           : "This browser's video decoder failed.",
       );
     },

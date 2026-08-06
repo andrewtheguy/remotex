@@ -54,24 +54,24 @@ and one whose value should be argued from `video`'s measurements rather than ass
 
 ### AV1, if it ever measures better than VP9
 
-VP9 shipped and is the default: `render_type = "video"` and
-`render_motion_subtype = "stream"` carry it unless a target's `video_codec` says
-otherwise, and it is licence-free where H.264 is not — a Chromium built without
-proprietary codecs refuses H.264, and so does a Firefox on a system with no system
-decoder. See [`architecture.md`](architecture.md) for the mechanism.
+VP9 shipped and is the codec: `render_type = "video"` and
+`render_motion_subtype = "stream"` carry it, and it is licence-free —
+present in every browser build, the proprietary-codec-free ones included. See
+[`architecture.md`](architecture.md) for the mechanism.
 
 AV1 is the codec that might still be worth adding, and it is a measurement rather than
 a preference. It compresses better and costs more to encode, and this gateway encodes
 in real time on whatever machine it is running on — so the case for it is a number
-from `video::measure_the_encoders` against VP9's, on real content, not an argument
-from the format. Adding one is a variant on `VideoCodec` and an encoder module; it
+from `video::measure_the_encoder` against VP9's, on real content, not an argument
+from the format. Adding it would mean an encoder module and a codec choice threaded
+back through `RenderPlan`; it
 would **not** be a default, because
 AV1 is refused by engines with no hardware path for it and a codec nobody can play is
 a worse default than a codec everybody can.
 
 It would not bring the probe back either. The client-side codec negotiation was built
-and removed (see [`architecture.md`](architecture.md)); a third codec is a third value
-for a key, not a reason to ask the browser again.
+and removed (see [`architecture.md`](architecture.md)); a second codec is a value
+for a config key, not a reason to ask the browser again.
 
 ### Source payloads the gateway decodes instead of forwarding
 

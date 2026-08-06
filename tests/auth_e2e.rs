@@ -46,7 +46,6 @@ async fn spawn_app() -> SocketAddr {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
-            video_codec: None,
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

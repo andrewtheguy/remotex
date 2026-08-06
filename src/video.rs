@@ -1,13 +1,12 @@
-//! What every video codec here shares: the framebuffer copy the streams read, the
-//! rectangle one of them may encode, and the colour conversion in front of it.
+//! What the video path shares with the rest of the gateway: the framebuffer copy the
+//! streams read, the rectangle one of them may encode, and the colour conversion in
+//! front of it.
 //!
 //! Two render dials arrive at a stream and they differ only in how many rectangles
 //! they ask for. `render_type = "video"` asks for one covering the whole desktop.
 //! `render_motion_subtype` asks for one per coalesced moving region, with the still
 //! codecs carrying everything else. Which rectangles, and when they start and stop, is
-//! [`crate::regions`]' business; which codec carries them is
-//! [`crate::config::TargetConfig::video_codec`]'s, and a codec module
-//! ([`crate::vp9`] or [`crate::h264`]) knows only how to encode one.
+//! [`crate::regions`]' business; [`crate::vp9`] knows only how to encode one.
 //!
 //! Three things about the shape follow from the rest of the gateway rather than from
 //! any codec:
@@ -32,17 +31,14 @@
 //! because every attach injects a repaint, which is one of the moments a stream's
 //! keyframe is forced.
 
-use openh264::formats::{RgbSliceU8, YUVBuffer, YUVSource};
-
-use crate::config::VideoCodec;
 use crate::tiles::Rect;
 
 /// The 1–100 quality dial, coarsest first.
 ///
-/// The dial is the gateway's own scale and the same for every codec: a codec module
-/// maps it onto whatever quantizer it has, which is the only place the two numbers
-/// meet. The congestion loop in [`crate::encode`] walks *this* scale, so it never has
-/// to know which codec is running.
+/// The dial is the gateway's own scale rather than a quantizer: [`crate::vp9`] maps it
+/// onto its 0–63, and that mapping is the only place the two numbers meet. The
+/// congestion loop in [`crate::encode`] walks *this* scale, so a future codec is a new
+/// mapping rather than a new loop.
 pub const QUALITY_MIN: u8 = 1;
 /// See [`QUALITY_MIN`].
 pub const QUALITY_MAX: u8 = 100;
@@ -53,12 +49,11 @@ pub const QUALITY_MAX: u8 = 100;
 /// Checked either way up, because the limit is on the picture and not on width:
 /// 3840×2160 and 2160×3840 are both legal, and 3840×3840 is not. A `w <= 3840 &&
 /// h <= 2160` test would read almost the same and would refuse a portrait desktop the
-/// encoders are perfectly happy with.
+/// encoder is perfectly happy with.
 ///
-/// It is openh264's limit rather than a shared one — libvpx has no comparable ceiling —
-/// and it is applied to both anyway, so a target's picture size does not decide which
-/// codec can carry it. Letting the configured codec change which sizes work would
-/// make target behavior depend on that otherwise independent choice.
+/// libvpx has no ceiling this near — 4K is only VP9 level 5.0 of 6.2 — so this is the
+/// gateway's own line: past 4K a software realtime encode of a desktop stops being
+/// realtime, and the still paths carry such a desktop better.
 const MAX_LONG_SIDE: u16 = 3840;
 /// See [`MAX_LONG_SIDE`].
 const MAX_SHORT_SIDE: u16 = 2160;
@@ -240,7 +235,8 @@ impl Mirror {
 /// The rectangle a stream over `rect` actually encodes: `rect` grown to even sides.
 ///
 /// **The evenness of the coded rectangle is a theorem, not a hope, and this is where it
-/// is checked.** H.264 needs even sides. A region is a union of whole grid cells
+/// is checked.** I420 subsamples chroma 2×2, so [`I420`] needs even sides. A region is
+/// a union of whole grid cells
 /// clipped to the desktop, and `CELL_W`/`CELL_H` are both even, so a region's origin is
 /// always even and its size is odd only where its right or bottom edge is the desktop's
 /// own and the desktop is odd there — in which case the mirror's own padding is exactly
@@ -249,13 +245,13 @@ impl Mirror {
 /// whole-desktop `video` stream is the same statement with the region set to the
 /// desktop.
 ///
-/// VP9 does not need even sides, and it is held to them anyway. The mirror's padding,
-/// the I420 conversion's even assertion and the geometry theorem in [`crate::regions`]
-/// are one argument, and an odd-width chroma plane would be a second path to be wrong
-/// in — for no gain, since the pad column is already there and costs one column of
-/// repeated pixels.
+/// VP9 itself does not need even sides, and it is held to them anyway. The mirror's
+/// padding, the conversion's whole-pixel chroma groups and the geometry theorem in
+/// [`crate::regions`] are one argument, and an odd-width chroma plane would be a second
+/// path to be wrong in — for no gain, since the pad column is already there and costs
+/// one column of repeated pixels.
 ///
-/// Fails for a picture an encoder will not take. That cannot be a config-time refusal —
+/// Fails for a picture the encoder will not take. That cannot be a config-time refusal —
 /// only the remote knows its own size, and it may change mid-session — so the message
 /// has to carry the whole explanation to wherever it surfaces.
 pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
@@ -295,7 +291,7 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
     let (long, short) = (coded.w().max(coded.h()), coded.w().min(coded.h()));
     anyhow::ensure!(
         long <= MAX_LONG_SIDE && short <= MAX_SHORT_SIDE,
-        "no video codec here can encode a {}x{} picture: one is refused with a long \
+        "a video stream will not encode a {}x{} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
          target a still render_type (\"fixed-quality\" with render_subtype = \
@@ -312,10 +308,10 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
 /// Region streams are disjoint and encode in parallel with each other on the same
 /// round, which is where the cores go — a second level of threading inside each
 /// would oversubscribe them. `Policy::Whole` has exactly one stream and nothing to
-/// overlap with, so its parallelism has to come from inside the picture: row-based
-/// multithreading for VP9 (set by the caller alongside this count), slices for
-/// H.264. Half the machine, capped: the engine's read loop, the socket and the tile
-/// workers still need somewhere to run.
+/// overlap with, so its parallelism has to come from inside the picture: VP9's
+/// row-based multithreading, set by the caller alongside this count. Half the
+/// machine, capped: the engine's read loop, the socket and the tile workers still
+/// need somewhere to run.
 pub fn threads_for(coded: Rect, mirror: (u16, u16)) -> usize {
     let whole = coded.left == 0
         && coded.top == 0
@@ -326,15 +322,17 @@ pub fn threads_for(coded: Rect, mirror: (u16, u16)) -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
 
-/// One picture as I420, and the RGB→YUV conversion both codecs go through.
+/// One picture as I420, and the RGB→YUV conversion in front of the encoder.
 ///
-/// Wraps openh264's converter rather than adding libyuv for the second codec. It is
-/// already in the tree, its buffer is exactly the tight `(w, w/2, w/2)` I420 layout
-/// libvpx wraps without copying, and one conversion means the two codecs are being
-/// measured on the same pixels. Its cost is measured separately in the encoder bench,
-/// because if it ever dominates, *that* is the number that would justify libyuv.
+/// Scalar integer BT.601 studio-swing arithmetic with 2×2-averaged chroma, owned here
+/// rather than a library's. The planes are the tight `(w, w/2, w/2)` I420
+/// layout libvpx wraps without copying. The conversion's cost is measured separately in
+/// the encoder bench, because if it ever dominates a release encode, *that* is the
+/// number that would justify libyuv.
 pub struct I420 {
-    buf: YUVBuffer,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
     size: (usize, usize),
 }
 
@@ -342,151 +340,63 @@ impl I420 {
     /// A buffer for a `w`×`h` picture, both even.
     ///
     /// Reused across frames so a 1080p conversion is not a 3 MB allocation apiece.
-    /// Evenness is [`coded_rect`]'s theorem, and it is what keeps `YUVBuffer` from
-    /// asserting — an assertion here aborts the process.
+    /// Evenness is [`coded_rect`]'s theorem, and it is what keeps the chroma rows
+    /// below made of whole 2×2 groups.
     pub fn new(w: u16, h: u16) -> Self {
         let size = (usize::from(w), usize::from(h));
-        Self { buf: YUVBuffer::new(size.0, size.1), size }
+        Self {
+            y: vec![0; size.0 * size.1],
+            u: vec![0; size.0 * size.1 / 4],
+            v: vec![0; size.0 * size.1 / 4],
+            size,
+        }
     }
 
     /// Convert `rgb` — packed RGB888 for exactly this buffer's picture — in place.
     ///
-    /// The length is checked rather than trusted: `RgbSliceU8::new` and `YUVBuffer`
-    /// both assert on a mis-sized slice, and this binary aborts on an assertion.
+    /// The length is checked rather than trusted, because everything after the check
+    /// indexes by the picture size and this binary aborts on an out-of-bounds panic.
     pub fn read_rgb(&mut self, rgb: &[u8]) -> anyhow::Result<()> {
+        let (w, h) = self.size;
         anyhow::ensure!(
-            rgb.len() == self.size.0 * self.size.1 * 3,
-            "a video crop came back {} bytes for a {}x{} picture",
+            rgb.len() == w * h * 3,
+            "a video crop came back {} bytes for a {w}x{h} picture",
             rgb.len(),
-            self.size.0,
-            self.size.1
         );
-        self.buf.read_rgb8(RgbSliceU8::new(rgb, self.size));
+        for (pix, y) in rgb.chunks_exact(3).zip(self.y.iter_mut()) {
+            *y = (((66 * u32::from(pix[0]) + 129 * u32::from(pix[1]) + 25 * u32::from(pix[2]))
+                >> 8)
+                + 16) as u8;
+        }
+        // Chroma is one sample per 2×2 pixel group, from the group's average — the
+        // arithmetic never leaves i16: the largest coefficient sum is 112 × 255.
+        let half = w / 2;
+        let rows0 = rgb.chunks_exact(w * 3).step_by(2);
+        let rows1 = rgb.chunks_exact(w * 3).skip(1).step_by(2);
+        let u_rows = self.u.chunks_exact_mut(half);
+        let v_rows = self.v.chunks_exact_mut(half);
+        for (((row0, row1), u_row), v_row) in rows0.zip(rows1).zip(u_rows).zip(v_rows) {
+            for (((pix0, pix1), u), v) in
+                row0.chunks_exact(6).zip(row1.chunks_exact(6)).zip(u_row).zip(v_row)
+            {
+                let r = (i16::from(pix0[0]) + i16::from(pix0[3]) + i16::from(pix1[0]) + i16::from(pix1[3]) + 2) / 4;
+                let g = (i16::from(pix0[1]) + i16::from(pix0[4]) + i16::from(pix1[1]) + i16::from(pix1[4]) + 2) / 4;
+                let b = (i16::from(pix0[2]) + i16::from(pix0[5]) + i16::from(pix1[2]) + i16::from(pix1[5]) + 2) / 4;
+                *u = (((-38 * r - 74 * g + 112 * b) >> 8) + 128) as u8;
+                *v = (((112 * r - 94 * g - 18 * b) >> 8) + 128) as u8;
+            }
+        }
         Ok(())
     }
 
-    /// The converted picture as openh264 wants it.
-    pub fn source(&self) -> &YUVBuffer {
-        &self.buf
-    }
-
-    /// The three planes, for a codec that takes pointers to them.
+    /// The three planes, for the codec's image to point at.
     pub fn planes(&self) -> (&[u8], &[u8], &[u8]) {
-        (self.buf.y(), self.buf.u(), self.buf.v())
+        (&self.y, &self.u, &self.v)
     }
 
     /// The three planes' strides, in the same order as [`Self::planes`].
     pub fn strides(&self) -> (usize, usize, usize) {
-        self.buf.strides()
-    }
-}
-
-/// One video stream over a fixed rectangle of a [`Mirror`], in whichever codec the target
-/// configured.
-///
-/// An enum rather than a trait object, and rather than a generic on everything above it: there are
-/// exactly two codecs, the choice is one key ([`crate::config::TargetConfig::video_codec`]) read
-/// once per session, and both arms have the same six methods. A `Box<dyn>` would buy a vtable and cost the compiler its knowledge of which encoder
-/// it is calling; a generic would spread a type parameter through [`crate::regions`],
-/// [`crate::encode`] and both engines to say something a `match` says here.
-///
-/// [`crate::regions`] holds one of these per live region and never asks which it has.
-///
-/// Both arms are boxed, which is not a style choice: openh264's safe wrapper holds its encoder
-/// state inline and comes to some 7 KB against libvpx's ~800 bytes, so an unboxed enum would be
-/// 7 KB whichever codec was configured. One allocation per stream — an event that happens when a
-/// region starts moving, not per frame — buys that back and makes the two arms the same size.
-pub enum Stream {
-    H264(Box<crate::h264::Stream>),
-    Vp9(Box<crate::vp9::Stream>),
-}
-
-impl Stream {
-    /// A stream over `rect` of a mirror whose coded size is `mirror`, at `quality` (1–100).
-    pub fn new(
-        codec: VideoCodec,
-        rect: Rect,
-        mirror: (u16, u16),
-        quality: u8,
-    ) -> anyhow::Result<Self> {
-        Ok(match codec {
-            VideoCodec::H264 => {
-                Stream::H264(Box::new(crate::h264::Stream::new(rect, mirror, quality)?))
-            }
-            VideoCodec::Vp9 => {
-                Stream::Vp9(Box::new(crate::vp9::Stream::new(rect, mirror, quality)?))
-            }
-        })
-    }
-
-    /// The region this stream is for — what a record header reports, and what a client crops the
-    /// decoded picture to.
-    pub fn rect(&self) -> Rect {
-        match self {
-            Stream::H264(stream) => stream.rect(),
-            Stream::Vp9(stream) => stream.rect(),
-        }
-    }
-
-    /// The dial this stream is currently encoding at.
-    pub fn quality(&self) -> u8 {
-        match self {
-            Stream::H264(stream) => stream.quality(),
-            Stream::Vp9(stream) => stream.quality(),
-        }
-    }
-
-    /// The codec family this stream is, for `ServerMsg::VideoFormat`.
-    pub fn codec(&self) -> VideoCodec {
-        match self {
-            Stream::H264(_) => VideoCodec::H264,
-            Stream::Vp9(_) => VideoCodec::Vp9,
-        }
-    }
-
-    /// The exact WebCodecs configuration string for this stream, or `None` before it is known.
-    ///
-    /// The two codecs know it at different moments, and that asymmetry is the codecs' rather than
-    /// this gateway's: VP9 carries no parameter sets, so the string follows from the picture size
-    /// and is known at construction, while H.264's profile and level are in an SPS and so are
-    /// known only once a keyframe has been produced. Both are announced the same way — before the
-    /// first unit of the stream reaches the client — because the announcement is pushed from the
-    /// same place the units are.
-    pub fn decode_string(&self) -> Option<&str> {
-        match self {
-            Stream::H264(stream) => stream.decode_string(),
-            Stream::Vp9(stream) => stream.decode_string(),
-        }
-    }
-
-    /// Make the next access unit one a decoder can start from.
-    pub fn force_keyframe(&mut self) {
-        match self {
-            Stream::H264(stream) => stream.force_keyframe(),
-            Stream::Vp9(stream) => stream.force_keyframe(),
-        }
-    }
-
-    /// Move the dial on the live encoder, without a keyframe. See `Congestion` in
-    /// [`crate::encode`].
-    pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
-        match self {
-            Stream::H264(stream) => stream.set_quality(quality),
-            Stream::Vp9(stream) => stream.set_quality(quality),
-        }
-    }
-
-    /// Encode this stream's rectangle of `mirror` as it stands. `None` means the encoder produced
-    /// no bitstream, and the caller must leave its dirty flag set.
-    pub fn encode(
-        &mut self,
-        mirror: &Mirror,
-        mark: Option<Mark>,
-    ) -> anyhow::Result<Option<AccessUnit>> {
-        match self {
-            Stream::H264(stream) => stream.encode(mirror, mark),
-            Stream::Vp9(stream) => stream.encode(mirror, mark),
-        }
+        (self.size.0, self.size.0 / 2, self.size.0 / 2)
     }
 }
 
@@ -574,99 +484,94 @@ mod tests {
         rgb
     }
 
-    /// What each codec costs on the same pixels — the measurement the roadmap asked for
-    /// before making one of them the default, and the one that settles VP9's `Q_FINEST`,
-    /// `CPU_USED` and thread count.
+    /// What the encoder costs on desktop pixels — the measurement that settles VP9's
+    /// `Q_FINEST`, `CPU_USED` and thread count.
     ///
     /// `#[ignore]`d because it takes a minute and prints rather than asserts: the numbers
     /// are the output, and a threshold on them would be a test of this machine.
     ///
     /// **`--release`, and that is not the usual boilerplate — a debug run measures the
-    /// wrong thing and says so convincingly.** The two encoders are C and are optimized
+    /// wrong thing and says so convincingly.** The encoder is C and is optimized
     /// whatever this profile is: libvpx is compiled `-O3` once, into the archive
     /// `libvpx-prebuilt` publishes, and nothing a consumer does can touch it. The
-    /// conversion is *Rust* — `write_yuv_scalar`, inside the `openh264` crate, reached
-    /// through [`I420`] — so it is compiled with **this** crate's profile, and at
+    /// conversion is *Rust* — [`I420::read_rgb`] — so it is compiled with **this**
+    /// crate's profile, and at
     /// `opt-level = 0` it is per-pixel arithmetic with bounds checks and no vectorization.
     /// Measured: 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
     /// that makes the conversion look like 90% of the encode and sends the reader off to
     /// replace it with libyuv for nothing.
     ///
     /// ```sh
-    /// cargo test --release --lib video::tests::measure_the_encoders -- --ignored --nocapture
+    /// cargo test --release --lib video::tests::measure_the_encoder -- --ignored --nocapture
     /// ```
     ///
     /// The conversion column is still measured separately, for the case the paragraph
-    /// above rules out today: both codecs go through the *same* conversion, so if it ever
+    /// above rules out today: if it ever
     /// does dominate a release encode, it is the thing to replace — and nothing else here
     /// would say so. Sweeping VP9's speed and thread settings means editing the constants
     /// at the top of `src/vp9.rs` and running this again; they are compile-time on
     /// purpose, since a deployment has no business setting them.
     #[test]
-    #[ignore = "manual: measures both encoders and prints a table"]
-    fn measure_the_encoders() {
+    #[ignore = "manual: measures the encoder and prints a table"]
+    fn measure_the_encoder() {
         const FRAMES: u32 = 60;
         let sizes = [(1280u16, 800u16), (1920, 1080)];
         let qualities = [20u8, 40, 60, 80];
 
         println!(
-            "\n| codec | size      | quality | KB total | KB keyframe | µs/frame encode \
+            "\n| size      | quality | KB total | KB keyframe | µs/frame encode \
              | µs/frame convert | kbit/s at 30fps |"
         );
         println!(
-            "|-------|-----------|---------|----------|-------------|-----------------\
+            "|-----------|---------|----------|-------------|-----------------\
              |------------------|-----------------|"
         );
-        for codec in [VideoCodec::Vp9, VideoCodec::H264] {
-            for (w, h) in sizes {
-                for quality in qualities {
-                    let mut mirror = Mirror::new(w, h).expect("a mirror");
-                    let mut stream =
-                        Stream::new(codec, mirror.rect(), mirror.coded(), quality)
-                            .expect("a stream");
-                    let mut total = 0usize;
-                    let mut keyframe_bytes = 0usize;
-                    let mut encode = std::time::Duration::ZERO;
-                    for frame in 0..FRAMES {
-                        mirror
-                            .blit(mirror.rect(), &screen(w, h, frame))
-                            .expect("a full-screen blit");
-                        let started = std::time::Instant::now();
-                        let unit = stream
-                            .encode(&mirror, None)
-                            .expect("an encode")
-                            .expect("an access unit");
-                        encode += started.elapsed();
-                        total += unit.data.len();
-                        if unit.keyframe {
-                            keyframe_bytes += unit.data.len();
-                        }
-                    }
-
-                    // The conversion on its own, over the same pixels: it is inside the
-                    // encode timing above, and this is what says how much of it it was.
-                    let mut yuv = I420::new(mirror.coded().0, mirror.coded().1);
-                    let mut crop = Vec::new();
-                    mirror.crop_into(mirror.rect(), &mut crop).expect("a crop");
+        for (w, h) in sizes {
+            for quality in qualities {
+                let mut mirror = Mirror::new(w, h).expect("a mirror");
+                let mut stream = crate::vp9::Stream::new(mirror.rect(), mirror.coded(), quality)
+                    .expect("a stream");
+                let mut total = 0usize;
+                let mut keyframe_bytes = 0usize;
+                let mut encode = std::time::Duration::ZERO;
+                for frame in 0..FRAMES {
+                    mirror
+                        .blit(mirror.rect(), &screen(w, h, frame))
+                        .expect("a full-screen blit");
                     let started = std::time::Instant::now();
-                    for _ in 0..FRAMES {
-                        yuv.read_rgb(&crop).expect("its own picture");
+                    let unit = stream
+                        .encode(&mirror, None)
+                        .expect("an encode")
+                        .expect("an access unit");
+                    encode += started.elapsed();
+                    total += unit.data.len();
+                    if unit.keyframe {
+                        keyframe_bytes += unit.data.len();
                     }
-                    let convert = started.elapsed();
-
-                    let bits = total as f64 * 8.0;
-                    println!(
-                        "| {:5} | {:9} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
-                        codec.name(),
-                        format!("{w}x{h}"),
-                        quality,
-                        total / 1024,
-                        keyframe_bytes / 1024,
-                        encode.as_micros() / u128::from(FRAMES),
-                        convert.as_micros() / u128::from(FRAMES),
-                        bits / (f64::from(FRAMES) / 30.0) / 1000.0,
-                    );
                 }
+
+                // The conversion on its own, over the same pixels: it is inside the
+                // encode timing above, and this is what says how much of it it was.
+                let mut yuv = I420::new(mirror.coded().0, mirror.coded().1);
+                let mut crop = Vec::new();
+                mirror.crop_into(mirror.rect(), &mut crop).expect("a crop");
+                let started = std::time::Instant::now();
+                for _ in 0..FRAMES {
+                    yuv.read_rgb(&crop).expect("its own picture");
+                }
+                let convert = started.elapsed();
+
+                let bits = total as f64 * 8.0;
+                println!(
+                    "| {:9} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
+                    format!("{w}x{h}"),
+                    quality,
+                    total / 1024,
+                    keyframe_bytes / 1024,
+                    encode.as_micros() / u128::from(FRAMES),
+                    convert.as_micros() / u128::from(FRAMES),
+                    bits / (f64::from(FRAMES) / 30.0) / 1000.0,
+                );
             }
         }
         println!(
@@ -821,11 +726,45 @@ mod tests {
         i420.read_rgb(&flat(64, 32, [10, 20, 30])).expect("its own picture");
         assert!(
             i420.read_rgb(&flat(64, 31, [10, 20, 30])).is_err(),
-            "a mis-sized crop would have asserted inside the converter"
+            "a mis-sized crop would have indexed out of the planes"
         );
         // I420: full-size luma, quarter-size chroma, both tight.
         let (y, u, v) = i420.planes();
         assert_eq!((y.len(), u.len(), v.len()), (64 * 32, 32 * 16, 32 * 16));
         assert_eq!(i420.strides(), (64, 32, 32));
+    }
+
+    /// The conversion's arithmetic, at the points BT.601 studio swing pins exactly:
+    /// black and white land on 16 and 235, every grey is chroma-neutral at 128, and
+    /// a saturated red is the strongest V a swing this size has. The tolerance is one
+    /// code value, which is the rounding the integer coefficients are allowed.
+    #[test]
+    fn the_conversion_is_bt601_studio_swing() {
+        let mut i420 = I420::new(2, 2);
+        let close = |got: u8, want: u8, what: &str| {
+            assert!(got.abs_diff(want) <= 1, "{what}: got {got}, wanted {want}");
+        };
+        for (colour, y_want, u_want, v_want, name) in [
+            ([0u8, 0, 0], 16u8, 128u8, 128u8, "black"),
+            ([255, 255, 255], 235, 128, 128, "white"),
+            ([128, 128, 128], 126, 128, 128, "mid grey"),
+            ([255, 0, 0], 81, 90, 240, "red"),
+            ([0, 0, 255], 41, 240, 110, "blue"),
+        ] {
+            i420.read_rgb(&flat(2, 2, colour)).expect("a 2x2 picture");
+            let (y, u, v) = i420.planes();
+            close(y[0], y_want, name);
+            close(u[0], u_want, name);
+            close(v[0], v_want, name);
+        }
+        // The chroma sample is the 2×2 average, not the top-left pixel: a checkerboard
+        // of full red and full blue meets in the middle.
+        let mut quad = Vec::new();
+        quad.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
+        quad.extend_from_slice(&[0, 0, 255, 255, 0, 0]);
+        i420.read_rgb(&quad).expect("a 2x2 picture");
+        let (_, u, v) = i420.planes();
+        close(u[0], 165, "checkerboard U");
+        close(v[0], 175, "checkerboard V");
     }
 }

@@ -172,14 +172,8 @@ export type ControlMsg =
       autoResize: boolean;
       clipboard: boolean;
       audio: boolean;
-      // The codec family this session's video is being encoded with — the target's
-      // `video_codec` — or null for a target that streams none. Nothing asks this
-      // browser what it can decode, so this is how a client can name what it is being
-      // sent: in the session card, and in a decoder error that would otherwise be
-      // "something did not decode".
-      video: string | null;
       // The render dial this session resolved to, in one line — `tiles · jpeg q60`,
-      // `motion · base png, moving vp9 q40`, `video · vp9 q60`. The *resolved plan*
+      // `motion · base png, moving stream q40`, `video q60`. The *resolved plan*
       // rather than the config keys, which the reader may not have and which take a
       // pairing matrix to collapse into what the encoder is actually doing.
       render: string;
@@ -208,15 +202,14 @@ export type ControlMsg =
   // frame it was meant to decode. The video counterpart of `audioFormat`.
   //
   // Per `stream`, not per session: under `render_motion_subtype = "stream"` a session
-  // runs up to four at once over regions of different sizes, and both codecs' strings
-  // carry a size-derived level, so one string for the session would be wrong for some
-  // of them.
+  // runs up to four at once over regions of different sizes, and the configuration
+  // string carries a size-derived level, so one string for the session would be wrong
+  // for some of them.
   //
-  // `codec` is the family — `vp9` or `h264` — which is what an error message names.
-  // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08`,
-  // `avc1.42c01e`. Nothing here parses a bitstream to find either out; VP9 has no
-  // parameter sets to parse.
-  | { type: "videoFormat"; stream: number; codec: string; decode: string }
+  // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08`.
+  // Nothing here parses a bitstream to find it out; VP9 has no parameter sets to
+  // parse.
+  | { type: "videoFormat"; stream: number; decode: string }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
@@ -273,9 +266,9 @@ export interface TileRefMsg {
 //
 // `keyframe` comes from the record's flags byte, and so from the encoder rather than
 // from a parse of what it produced. It is on the wire because VP9 carries no parameter
-// sets: there is nothing in a VP9 payload to read it out of, and one contract for both
-// codecs beats two. `videoFormat` says how to configure the decoder, and always arrives
-// first. See `VideoUnit` in src/protocol.rs for the whole contract.
+// sets: there is nothing in a VP9 payload to read it out of. `videoFormat` says how to
+// configure the decoder, and always arrives first. See `VideoUnit` in src/protocol.rs
+// for the whole contract.
 export interface VideoMsg {
   stream: number;
   x: number;

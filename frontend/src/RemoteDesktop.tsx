@@ -44,8 +44,6 @@ export default function RemoteDesktop({
     hostScale,
     renderPlan,
     connection,
-    videoCodec,
-    videoDecodeStrings,
     canResize,
     canAutoResize,
     autoResize,
@@ -243,8 +241,6 @@ export default function RemoteDesktop({
           hostScale={hostScale}
           connection={connection}
           renderPlan={renderPlan}
-          videoCodec={videoCodec}
-          videoDecodeStrings={videoDecodeStrings}
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}

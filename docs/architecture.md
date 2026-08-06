@@ -19,7 +19,7 @@ axum server ── single session slot ── protocol engine
 ```
 
 RDP and VNC frames are decoded in the gateway and sent as independent image tiles
-or as VP9/H.264 streams, according to the target's render plan. Tiles are lossless
+or as VP9 streams, according to the target's render plan. Tiles are lossless
 PNG by default, with JPEG and WebP available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the experimental
@@ -47,7 +47,7 @@ Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queu
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
-| `vp9.rs`, `h264.rs` | libvpx and openh264 — the default video codec and the other one |
+| `vp9.rs` | libvpx — the video codec |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling |
 | `rdp_audio.rs` | the adapter between FreeRDP's `rdpsnd` device and that queue |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
@@ -86,10 +86,8 @@ whole desktop, for the whole session — so there is no per-tile codec left to n
 The `stream` motion row still has one, because the base encode is still a still image:
 only what is moving becomes a stream.
 
-**Neither streaming row names a video codec, because a key of its own does:**
-`video_codec`, `vp9` (the default) or `h264`, shared by both — see [which codec, and
-who chooses](#which-codec-and-who-chooses). It is refused on a target that streams
-nothing, the same way `audio_codec` is refused on one with no audio.
+**Neither streaming row names a video codec, because video is VP9 only** — see
+[the codec](#the-codec).
 
 No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
@@ -104,15 +102,15 @@ three through `createImageBitmap` from a MIME type. What streams costs one: a
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug }` and `Video { quality, codec }` —
+one arm per transport — `Tiles { base, motion, debug }` and `Video { quality }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. `motion` is itself
-a `MotionEncode`, `Tile(codec)` or `Stream { quality, codec }`, for the same reason one
+a `MotionEncode`, `Tile(codec)` or `Stream { quality }`, for the same reason one
 level down: a cheaper still and an inter-frame stream are not two settings of one
 mechanism.
 
 ```text
-render_type / render_subtype / render_quality / render_motion_* / video_codec
+render_type / render_subtype / render_quality / render_motion_*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
@@ -248,8 +246,8 @@ saves in motion shows up as a cleanup byte count rivalling the saving.
 The third thing the motion axis can be, and the only one that is not a still. The
 detection above is unchanged — the same cell grid, the same churn window, the same
 hard switch — but what it hands the moving cells to is an inter-frame video stream
-per coalesced region (`src/regions.rs`, encoding through `src/vp9.rs` or `src/h264.rs`
-as `video_codec` says), with the base codec carrying every cell outside one. A video in a window costs its own pixels;
+per coalesced region (`src/regions.rs`, encoding through `src/vp9.rs`), with the
+base codec carrying every cell outside one. A video in a window costs its own pixels;
 the text beside it stays exactly what `render_subtype` says and is never re-encoded.
 
 `RenderPlan`'s `motion` is a `MotionEncode` rather than a codec, so the compiler is
@@ -294,7 +292,7 @@ One measurement, so that the shape of the trade is on the record rather than ass
 | dial | to the client | encode CPU |
 |---|---|---|
 | `motion` + `webp` 10 | 4.5 MB | 0.17 s |
-| `motion` + `stream` 30, in h264 | 0.70 MB | 1.39 s |
+| `motion` + `stream` 30 | 0.70 MB | 1.39 s |
 | `video` 60 | 0.45 MB | 5.48 s |
 
 So the regions cost about a sixth of the still motion encode's bytes with the still
@@ -352,18 +350,18 @@ for the region streams above too, which is why they run the same code:
   covers the whole framebuffer, so each covers its predecessor exactly. That is not
   enforced by a check but by the record kinds: a `VIDEO` record never reaches the
   cache or the coverage test, so neither has to know about it.
-- **The picture may be a pixel larger than the region.** H.264 needs even sides — VP9
-  does not and is held to them anyway, so one geometry serves both — so the mirror is
+- **The picture may be a pixel larger than the region.** The I420 conversion needs
+  even sides — VP9 itself does not and is held to them anyway — so the mirror is
   padded up with its edge repeated (black would be a seam the encoder paid for every
   frame). The record header carries the *true* rectangle and the
   client crops — reporting the padded size would push a paint past the framebuffer,
   which the renderer drops outright rather than clamps.
 
-`render_quality` maps to a constant quantizer on whichever scale the codec has, and
-the two scales are not the same one: VP9 spans 63 → 8 of its own 0–63, H.264 51 → 12
-of its 0–51 (the floor is openh264's own `GOM_MIN_QP_MODE`, and mapping past it would
-give a dial whose top third did nothing). Neither quantizer leaves its codec module —
-the dial is what everything above them speaks. A constant quantizer *is* variable
+`render_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
+0–63 (the floor is where screen content goes visually lossless — mapping past it
+would give a dial whose top third did nothing but spend bandwidth). The quantizer
+never leaves the codec module —
+the dial is what everything above it speaks. A constant quantizer *is* variable
 bitrate — bits go where the
 picture needs them, so a motionless desktop costs almost nothing.
 
@@ -371,8 +369,8 @@ The dial is a **ceiling**, and that framing is what makes adaptation tractable h
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
 access unit blocked — and walks the 1–100 dial down towards 1 when the link is behind,
 back up towards the configured quality when it is not; never past it. It moves the
-dial rather than a quantizer because the two codecs' quantizers are different scales
-and neither leaves its module. What TCP hides is
+dial rather than a quantizer because a quantizer is the codec module's own scale
+and never leaves it. What TCP hides is
 *headroom*, and this never needs headroom, because exceeding the operator's setting
 was never a goal. "Am I behind?" is the whole question, and the outbound queue
 answers it. Quality moves through `Stream::set_quality`, which re-tunes the running
@@ -396,26 +394,21 @@ binary frame is transferred there, not copied.
 `VideoDecoder` is secure-context only — the same limit remote audio already has, but a
 worse one to hit, since no audio decoder means silence beside a working desktop and no
 video decoder means no desktop. So a failure is *said* rather than logged: a banner
-that stays up, naming the codec the browser would not take.
+that stays up, naming the configuration the browser would not take.
 
-#### Which codec, and who chooses
+#### The codec
 
-`video_codec` chooses, per target, and it defaults to `vp9`.
-
-Both codecs are behind one `video::Stream` enum and one `RenderPlan`, so nothing
-downstream of `TargetConfig::render_plan` knows which is running: `encode.rs`,
-`regions.rs` and the wire carry access units, a keyframe bit and a codec string, and
-neither `vp9.rs` nor `h264.rs` is reachable from anywhere but that enum. Adding a third
-is a variant and a module.
-
-VP9 is the default on measurement rather than principle. On synthetic screen content at
-1080p and quality 60, encoding a frame took **4.7 ms** against H.264's 15.0 ms and
-produced **18 KB** against 34 KB — three times faster for half the bytes, on the content
-this gateway actually sends. It is also BSD-3-Clause with a patent grant and present in
-builds that carry no proprietary codecs, which H.264 is not. Re-measure with
-`cargo test --release measure_the_encoders -- --ignored --nocapture`; a debug build
+Video is **VP9 only** (`src/vp9.rs`), and there is no codec key. VP9 is
+BSD-3-Clause with a patent grant and present in every browser build, the ones that
+carry no proprietary codecs included. On synthetic screen content at 1080p and
+quality 60 it encodes a frame in **4.7 ms** at **18 KB** — measure with
+`cargo test --release measure_the_encoder -- --ignored --nocapture`; a debug build
 reports nonsense, because the RGB→I420 conversion it also times is scalar Rust and runs
 66× slower unoptimised.
+
+Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
+`regions.rs` and the wire carry access units, a keyframe bit and a configuration
+string, and `vp9.rs` is reachable only from `regions.rs`.
 
 **The browser is not asked, and that is a deliberate reversal.** The client used to
 probe: `/api/config` published the gateway's ordered codecs with a WebCodecs string for
@@ -427,13 +420,11 @@ refusal on; and because the refusal was phrased as "this browser accepted neithe
 fault anywhere near the path — a serde field-name mismatch, for one — surfaced as an
 accusation against the browser and sent the reader to the wrong half of the system.
 
-What replaces it is one key and one honest failure. The gateway announces the
+What replaces it is one honest failure. The gateway announces the
 configuration in `ServerMsg::VideoFormat` before the stream's first unit,
 `VideoDecoder.configure` accepts it or refuses it, and a refusal is reported by name —
-"this browser cannot decode the H.264 video this target sends" — with the same codec on
-the session card's **Video** row. `ServerMsg::Connected` carries the codec too, so a
-browser that took over a running session and sent no `connect` can still say what it is
-looking at.
+"this browser cannot decode the video this target sends" — with the configuration
+string beside it.
 
 ## Session lifecycle
 
@@ -525,7 +516,7 @@ slot. `TILE_REF` redraws the encoded payload already stored in that slot.
 `NO_SLOT` means the payload must not be retained. Clients keep a fixed
 `SLOT_COUNT` array and never choose eviction themselves.
 
-`VIDEO` carries one access unit for one region, in whichever codec `video_codec` named,
+`VIDEO` carries one VP9 access unit for one region,
 and is a separate record rather than a fourth tile format because it is not the same
 kind of thing: a tile is a self-contained picture and an access unit is one link in a
 chain. Making it its own record is what keeps the cache and coverage rules above from
