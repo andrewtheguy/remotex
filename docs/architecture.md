@@ -809,17 +809,21 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-It replaced IronRDP, which was not stable enough against real Windows hosts. The
-engine advertises the Graphics Pipeline (EGFX) with RemoteFX beside it, and the
-pairing is load-bearing: the pipeline advertised *alone* was measured broken —
-against a Windows 11 host, FreeRDP decoded 21 surface commands with no errors into
-a framebuffer that summed to exactly black — and the codec next to the flag is
-what guacamole-server ships against the same Windows generation. With the pair,
-the same measurement is a painted desktop. Servers without the pipeline (xrdp
-among them here) fall back to the legacy bitmap path, which the wrapper keeps
-working through resizes by resizing FreeRDP's decoder contexts alongside the
-framebuffer — FreeRDP itself sizes them once, at connect, which is an upstream
-bug this repository stops carrying at its own layer.
+It replaced IronRDP, which was not stable enough against real Windows hosts. A
+target with `resize = false` gets the Graphics Pipeline (EGFX) with RemoteFX
+beside it, and the pairing is load-bearing: the pipeline advertised *alone* was
+measured broken — against a Windows 11 host, FreeRDP decoded 21 surface commands
+with no errors into a framebuffer that summed to exactly black — and the codec
+next to the flag is what guacamole-server ships against the same Windows
+generation. With the pair, the same measurement is a painted desktop. A target
+with `resize = true` declines the pipeline instead, because an EGFX resize is a
+graphics reset that leaves a Windows host's text blurry for the rest of the
+session, where the legacy path's full reactivation has the server render the new
+desktop from scratch, sharp. Servers without the pipeline either way (xrdp among
+them here) use the legacy bitmap path, which the wrapper keeps working through
+resizes by resizing FreeRDP's decoder contexts alongside the framebuffer —
+FreeRDP itself sizes them once, at connect, which is an upstream bug this
+repository stops carrying at its own layer.
 
 The pointer is not part of that framebuffer. RDP servers send the cursor's shape
 rather than drawing it, and each shape goes to the client as `cursor`, which draws
@@ -848,17 +852,24 @@ Declining the answer is not enough on its own — the message channel those PDUs
 arrive on has to be closed too, or the session dies when one is asked. That is
 the wrapper's business, and it is measured there.
 
-A size change that is *real* costs a graphics reset on an EGFX host, and a full
-Deactivation-Reactivation Sequence on a legacy-path one; FreeRDP runs either
-internally and reports a new desktop size. The difference is not cosmetic: a
-Windows host's audio redirector does not survive its own reactivation — the last
-wave arrives within a second of one and the channel then stays open and mute,
-with no close, no re-announce, and no fallback — which is why the pipeline being
-on is part of how sound survives a resize there. Asking twice for the same size
-triggers one change, and a request equal to the current size never triggers one.
-A layout is asked for on a bounded schedule rather than once, because a Windows
-host discards one sent before the session it is starting has settled and
-acknowledges nothing either way — measured through both engines.
+A size change that is *real* costs a full Deactivation-Reactivation Sequence on
+the legacy path a resizable target runs; FreeRDP runs it internally and reports a
+new desktop size. One server cannot carry sound across that: a Windows host's
+audio redirector dies at its own reactivation — measured mid-playback, five
+resizes of six left the channel open and mute, the last wave within a second of
+the reactivation, no close, no re-announce, and nothing in MS-RDPEA for a client
+to restart it with. The wrapper therefore resizes such a session — recognised by
+its sound having negotiated on the dynamic `rdpsnd` transport, which is how
+Windows and only Windows carries it — by *reconnecting* at the new size, the way
+Guacamole's `resize-method: reconnect` does: ~800 ms measured, channels and sound
+renegotiated, surfacing as the same resize it always was, with one line on stderr
+saying a reconnect is what it cost. xrdp's static-channel audio rides out its
+reactivation, so it keeps the plain monitor-layout resize untouched, as does any
+session without sound. Asking twice for the same size triggers one change, and a
+request equal to the current size never triggers one. A layout is asked for on a
+bounded schedule rather than once, because a Windows host discards one sent
+before the session it is starting has settled and acknowledges nothing either way
+— measured through both engines.
 
 ### VNC
 

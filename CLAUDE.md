@@ -73,9 +73,16 @@ key, since the operator cannot know which engines survive a stream of resizes.
 [`docs/known-issues.md`](docs/known-issues.md); standard `ard` refuses `resize`
 outright. RDP's trial concluded in its favour: the re-measure found and fixed the
 one real fault (the wrapper never resized FreeRDP's decoder contexts, so growing
-an xorgxrdp desktop killed the session), and on EGFX hosts a resize is a graphics
-reset rather than a reactivation at all. If a drag ever starts ending sessions
+an xorgxrdp desktop killed the session). If a drag ever starts ending sessions
 again, `TargetConfig::auto_resize` is still the line to put back.
+
+RDP with `resize = true` runs the legacy path, not EGFX — an EGFX resize leaves a
+Windows host's text blurry, a reactivation re-renders it sharp — and a session
+whose sound negotiated on the dynamic `rdpsnd` transport (Windows, and only
+Windows) resizes by *reconnecting*, because that host's audio redirector does not
+survive its own reactivation. The wrapper decides all of this by itself and
+debounces resize requests at 300 ms; the gateway just asks. xrdp keeps the plain
+layout resize with audio intact either way. `resize = false` keeps EGFX.
 
 Apple display modes:
 
