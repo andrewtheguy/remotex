@@ -145,3 +145,40 @@ of [`architecture.md`](architecture.md).
 If a stutter recurs, the useful measurement remains audio seconds delivered ÷
 wall-clock elapsed. Anything below 1.0 means sound is still being discarded before
 it reaches the browser, which would sound identical on every codec.
+
+## The resize that took the sound with it
+
+A second investigation, 2026-08-05: after an RDP resize — manual or window-driven —
+sound stopped and never came back. The gateway side was ruled out first: an RDP
+resize is a Display Control request, not a reconnect, and nothing on that path
+touches `arm_audio`, `evict_audio`, or the `AudioBridge`, which is a broadcast that
+cannot be used up. The kill was in FreeRDP's `rdpsnd` and the wrapper's device
+claim, together.
+
+The chain, confirmed in freerdp-3.30.0 source and fixed in `libfreerdp-prebuilt`:
+
+1. A real size change costs a Deactivation-Reactivation Sequence, and the server
+   closes and reopens the audio channel across it. Observed directly: one
+   `freerdp-e2e` session against the Windows 11 test host logged
+   `[dynamic] Loaded rust backend for rdpsnd` twice, two seconds apart.
+2. `rdpsnd_on_close` frees the device and nulls `rdpsnd->device`, but never resets
+   the plugin's `isOpen` or `wCurrentFormatNo`. Nothing does — the `TRUE` in
+   `rdpsnd_ensure_device_is_open` is the only write that flag has.
+3. The reloaded channel mints a new device, and the first wave finds `isOpen` still
+   true and the format number unchanged — with exactly one advertised format it is
+   always 0 — so `rdpsnd_ensure_device_is_open` skips `Open` entirely and calls
+   `Play` on a device that owns nothing.
+4. The wrapper's `play` refused any device that had not claimed the bridge through
+   `Open`. `Play`'s return value is a latency, not a status, so rdpsnd logged
+   nothing, and every wave buffer was discarded for the rest of the session. The
+   log signature is exact: `audio: the remote closed its audio channel`, a
+   re-negotiated format, and then never again `audio: rdpsnd playing`.
+
+The fix is in the wrapper, where the claim lives: `play` adopts a *vacant* claim,
+because a vacant claim now means a device rdpsnd will never open. Only a vacant
+one — a device that lost the claim to a live winner is refused exactly as before,
+which is what keeps two transports from interleaving into one sink. The format is
+not in doubt on adoption: a wave's format number indexes the client format list
+that same device built through `FormatSupported`, which accepts nothing but the
+format it was asked for. Upstream's half of the bug — `rdpsnd_on_close` leaving
+`isOpen` set — belongs in a FreeRDP issue.
