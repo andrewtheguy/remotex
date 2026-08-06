@@ -102,9 +102,8 @@ function batchFrame(records: Record[]): ArrayBuffer {
 // An access unit's payload. **Opaque here, deliberately**: nothing on this side of the
 // wire parses a bitstream any more — the gateway says how to decode a stream in a
 // `videoFormat` message and marks each unit's keyframe bit in the record — so these
-// bytes only need to be distinguishable from each other. They are still a real H.264
-// keyframe (SPS, PPS, IDR slice behind Annex-B start codes) because a plausible payload
-// reads better in a failure than a run of zeros.
+// bytes only need to be distinguishable from each other. The shape is a plausible
+// bitstream rather than a run of zeros because it reads better in a failure.
 const KEYFRAME = [
   0, 0, 0, 1, 7, 0x42, 0xc0, 0x1e, 0, 0, 0, 1, 8, 0xce, 0, 0, 1, 5, 0x88,
 ];

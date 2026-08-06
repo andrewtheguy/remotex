@@ -1,5 +1,5 @@
 //! Client wire types: tagged JSON for control and input, binary batches for still
-//! tiles and VP9/H.264 access units, and binary frames for Opus or PCM audio.
+//! tiles and VP9 access units, and binary frames for Opus or PCM audio.
 //! WebSocket ordering is required because resize messages change the coordinate
 //! space of following tiles — and because an access unit means nothing out of
 //! sequence. Audio travels on its own WebSocket.
@@ -582,12 +582,10 @@ impl CopyRect {
 /// The contract every client implements:
 ///
 /// - The payload is **one whole access unit** — exactly one frame's worth, never a partial one
-///   and never two. Under H.264 that is every NAL unit of the frame, Annex-B, delimited by start
-///   codes; under VP9 it is the frame as libvpx emitted it.
+///   and never two: the frame as libvpx emitted it.
 /// - **[`ServerMsg::VideoFormat`] arrives first**, before this stream's first record, and names
-///   the codec and the exact WebCodecs configuration string to build the decoder with. Nothing in
-///   the payload has to be parsed to find that out — which H.264 permits, since SPS and PPS
-///   accompany every keyframe, and VP9 does not, since it has no parameter sets at all.
+///   the exact WebCodecs configuration string to build the decoder with. Nothing in
+///   the payload can be parsed to find that out — VP9 has no parameter sets at all.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
 /// - `stream` names which decoder this belongs to. A session may run several at once
 ///   — one per moving region under `render_motion_subtype = "stream"`, exactly one
@@ -783,7 +781,7 @@ pub struct DisplayInfo {
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
     Tile(Tile),
-    /// One VP9 or H.264 access unit for one region. Like a tile this has no text
+    /// One VP9 access unit for one region. Like a tile this has no text
     /// encoding and is not a control message: it is a binary record, and
     /// [`crate::wire`] puts it in a batch in its place among the tiles, which is
     /// load-bearing.

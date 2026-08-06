@@ -2714,9 +2714,9 @@ mod tests {
         assert!(frame_rx.try_recv().is_err(), "three rectangles produced more than one frame");
     }
 
-    /// The tile header is the *desktop*, not the picture. H.264 needs even sides and
-    /// a desktop need not have them, so the two differ — and it is the desktop a
-    /// client has a canvas for.
+    /// The tile header is the *desktop*, not the picture. The encoder is held to
+    /// even sides and a desktop need not have them, so the two differ — and it is
+    /// the desktop a client has a canvas for.
     #[tokio::test]
     async fn an_access_unit_covers_the_whole_desktop_at_its_true_size() {
         let (sink, mut frame_rx) = video_sink(1919, 1079).await;
