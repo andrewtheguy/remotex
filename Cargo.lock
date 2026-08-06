@@ -579,7 +579,7 @@ dependencies = [
 [[package]]
 name = "freerdp"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260805185142-1373f5e#1373f5e21af0d5a9f555a39ccab737c14793134c"
+source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260806034027-d85f6b8#d85f6b8291a9a23e3a025d3f2511c2d6b1980e37"
 dependencies = [
  "freerdp-prebuilt-sys",
 ]
@@ -587,7 +587,7 @@ dependencies = [
 [[package]]
 name = "freerdp-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260805185142-1373f5e#1373f5e21af0d5a9f555a39ccab737c14793134c"
+source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260806034027-d85f6b8#d85f6b8291a9a23e3a025d3f2511c2d6b1980e37"
 
 [[package]]
 name = "futures-channel"
@@ -1277,7 +1277,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.116"
+version = "0.0.117"
 dependencies = [
  "aes",
  "anyhow",
