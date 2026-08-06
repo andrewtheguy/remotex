@@ -81,7 +81,7 @@ supersede rules that already respect it — but only VNC CopyRect ever emits one
 RDP path re-encodes every scroll. The shadow already holds the previous frame, so
 the search has its two operands in hand.
 
-### The graphics pipeline, and what guacd's working EGFX says about the black screen
+### The graphics pipeline — taken, and the black screen explained
 
 guacd runs EGFX by default: `SupportGraphicsPipeline` TRUE with `RemoteFxCodec` TRUE
 beside it and `ColorDepth` forced to 32 (`settings.c:1588-1598`) — and *only* those;
@@ -89,12 +89,14 @@ H.264, AVC444 and progressive are never touched and default off. Decoding still 
 in FreeRDP's software GDI and the same primary buffer this gateway reads, so guacd's
 Windows 11 sessions are the same consumption model with the pipeline on.
 
-That sharpens the black-framebuffer finding recorded in [`roadmap.md`](roadmap.md):
-an implementation with near-identical GDI setup has the pipeline working against the
-same Windows generation, so the failure is likely a small settings delta — the
-codec set advertised beside the pipeline, or frame acknowledgement — rather than
-anything structural. Worth one retry with guacd's exact combination before the
-`gdi_OutputUpdate` instrumentation the roadmap already plans.
+**This one was retried and it was the fix.** The black-framebuffer fault that kept
+the pipeline off here was the pipeline advertised *without a codec beside it*; with
+guacd's exact pair, the e2e that had measured a framebuffer summing to exactly black
+measured 3,090,403 non-zero bytes of 3,145,728 against the same host. The wrapper
+now ships the pair. It also turned out to be the resolution of a second fault the
+comparison never predicted: a Windows host's audio redirector does not survive the
+Deactivation-Reactivation a legacy-path resize costs, and an EGFX resize is a
+graphics reset instead — see [`rdp-audio-prior-art.md`](rdp-audio-prior-art.md).
 
 ### Transport details
 
@@ -134,8 +136,8 @@ bound-at-sink — is worth remembering when a new symptom appears.
    `behind()`.
 5. Copy detection over the shadow for the RDP path — the scrolling win.
 6. Per-tile content-aware codec choice (the PNG-optimality estimator).
-7. The EGFX retry with guacd's exact settings, ahead of the roadmap's
-   instrumentation plan.
+7. ~~The EGFX retry with guacd's exact settings~~ — **done**; it was the black
+   screen's cause and the fix for Windows resize audio besides.
 8. Explicit bitmap/offscreen cache flags on the legacy path.
 
 The audio half of what this comparison session found — RDP sound dying after a

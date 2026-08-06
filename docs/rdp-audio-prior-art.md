@@ -175,10 +175,39 @@ The chain, confirmed in freerdp-3.30.0 source and fixed in `libfreerdp-prebuilt`
    re-negotiated format, and then never again `audio: rdpsnd playing`.
 
 The fix is in the wrapper, where the claim lives: `play` adopts a *vacant* claim,
-because a vacant claim now means a device rdpsnd will never open. Only a vacant
-one — a device that lost the claim to a live winner is refused exactly as before,
-which is what keeps two transports from interleaving into one sink. The format is
+because a vacant claim now means a device rdpsnd will never open. The format is
 not in doubt on adoption: a wave's format number indexes the client format list
 that same device built through `FormatSupported`, which accepts nothing but the
 format it was asked for. Upstream's half of the bug — `rdpsnd_on_close` leaving
 `isOpen` set — belongs in a FreeRDP issue.
+
+That was necessary and not sufficient, and the rest of the investigation is worth
+its own record because every step was measured:
+
+- **A refused `Open` is not one dropped wave.** `rdpsnd_ensure_device_is_open`
+  failing makes the wave handler return an error, which the plugin's play thread
+  — the default on both transports — returns and dies on, ending audio delivery
+  for the session; on a synchronous channel it is `setChannelError` and the
+  session itself. The wrapper's `Open` therefore never fails now: a format
+  mismatch opens unclaimed and silent, and a matching open takes the claim from
+  whichever device held it. Last open wins, because an `Open` is the server
+  actively driving that transport, and the holder it displaces is by the same
+  evidence idle.
+- **A Windows host's audio redirector does not survive a Deactivation-
+  Reactivation.** With wave-level logging, the last wave lands within a second of
+  a legacy-path resize and then nothing — the channel stays open, mute, with no
+  close, no re-announced formats, not even the periodic training a healthy
+  channel gets, for as long as anyone watched. Nothing client-side refused
+  anything; the server went quiet and MS-RDPEA gives a client no message to
+  restart it.
+- **Windows never falls back to the static channel.** Withholding
+  `AUDIO_PLAYBACK_DVC` to force sound onto the reactivation-surviving static
+  transport produced no audio at all: the server's dynamic create was refused and
+  it never drove the static channel it had also joined.
+- **The resolution is EGFX.** With the graphics pipeline on (see
+  [`rdp-perf-vs-guacamole.md`](rdp-perf-vs-guacamole.md) for the black-screen
+  fault that had kept it off), a resize is a graphics reset rather than a
+  reactivation, the redirector never sees the event it cannot survive, and sound
+  rides through a resize — which is also how Microsoft's own client, always on
+  EGFX, never showed the fault. xrdp's audio survives either way because its
+  PipeWire stack is decoupled from its display reactivation.
