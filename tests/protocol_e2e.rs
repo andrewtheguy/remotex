@@ -538,6 +538,8 @@ fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
     assert_eq!(usize::from(be16(D)), DESCRIPTOR_HEAD + MODE_ENTRY);
     assert_eq!(be32(D + 0x7a), 1, "display_flags");
     assert_eq!(be32(D + 0x7e), 4, "virtual display_type");
+    assert_eq!(be32(D + 0x8a), 3840, "fixed dynamic maximum width");
+    assert_eq!(be32(D + 0x8e), 2160, "fixed dynamic maximum height");
     assert_eq!(be16(D + 0x92), 0, "current mode");
     assert_eq!(be16(D + 0x94), 0, "preferred mode");
     assert_eq!(be32(D + 0x96), 7, "native dynamic rotations value");

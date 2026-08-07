@@ -701,18 +701,11 @@ every `viewport` it is sent and an engine without it drops them all.
 on the `connected` message. The client offers two ways to drive a size: a manual
 "Resize to Window", and a mode that hands the size to the window so every change
 reports one. The manual control follows `resize`. The mode follows `autoResize`,
-which the gateway grants to plain `vnc` and to `rdp` and withholds from
-`ard-high-performance`, whose resize replaces a virtual display that can be left
-wrong for the rest of the session — a fault in
-[`known-issues.md`](known-issues.md) that a window drag reaches far more often
-than a button press does. RDP was withheld it for that file's reactivation entry
-and now has it back on trial: the entry was measured against IronRDP, which no
-longer drives the path, and withholding the permission is what stopped that being
-re-measured. Where the
-mode is refused the client greys it and labels it inapplicable rather than hiding
-it, since the manual control beside it plainly works. The client does not decide
-any of this: `TargetConfig::auto_resize` does, and it is not a config key — the
-operator has no way to know which engines survive a stream of resizes.
+which the gateway grants to every engine that accepts resize: plain `vnc`,
+`ard-high-performance`, and RDP. Standard `ard` refuses resize because it shares
+physical displays. The client does not decide any of this:
+`TargetConfig::auto_resize` does, and it is not a config key — the operator has no
+way to know which engines survive a stream of resizes.
 
 Within the mode, the client's own choice is remembered across connections and
 applied "if compatible" — which covers both a target that refuses resize and one
@@ -724,8 +717,8 @@ What is engine-specific is the shape of the permission:
 |---|---|---|
 | Generic VNC | applies a requested size, on servers accepting SetDesktopSize | yes |
 | Apple Standard VNC | refuses `resize`: it shares physical displays | — |
-| Apple High Performance VNC | supports Resize to Window through Apple dynamic resolution | no |
-| RDP | applies a requested size, and the client's reported display density | no |
+| Apple High Performance VNC | applies arbitrary sizes through Apple dynamic resolution | yes |
+| RDP | applies a requested size, and the client's reported display density | yes |
 
 `hostScale` reports the density of the screen the client's window is on. RDP with
 resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting
@@ -933,9 +926,8 @@ High Performance does — the upgrade waits on a display layout, not on a dialec
 revision, and is **experimental**: none of it is documented by Apple, so every
 claim in this section is measurement rather than specification, holding for the
 Macs in [apple-vnc-889.md](apple-vnc-889.md) rather than for the protocol. The
-dynamic-resolution path behind `resize = true` is the least settled part, and can
-leave the desktop wrong until the session is reconnected — see
-[`known-issues.md`](known-issues.md). It authenticates identically — the same security type 30 — and then
+dynamic-resolution path behind `resize = true` remains reverse engineered. It
+authenticates identically — the same security type 30 — and then
 differs in three places and nowhere else: the version banner, the `0xC1` ClientInit
 byte, and a cleartext `SetEncryption` prelude after which every byte in both
 directions rides inside an AES-128-CBC record layer keyed by a rekey message the
@@ -945,7 +937,8 @@ a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it
 
 **High Performance mode is a virtual-display mode.** The gateway sends
 `SetDisplayConfiguration` (`0x1d`) during setup, with one 1x mode built from the
-target's `width` and `height`. Once connected, the remote Mac's physical displays
+target's `width` and `height`, under the native descriptor's fixed 3840×2160
+backing ceiling. Once connected, the remote Mac's physical displays
 are disabled and all of its windows are placed on that virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, while
 Remotex always requests one. The full descriptor enables dynamic resolution on

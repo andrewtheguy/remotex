@@ -66,13 +66,13 @@ never permits client scaling.
 
 `resize` is permission to resize **when the user asks**. Letting the window drive
 the size unasked is a second permission — `TargetConfig::auto_resize`, carried as
-`autoResize` on `connected` — held by plain `vnc` and by `rdp`. It is not a config
-key, since the operator cannot know which engines survive a stream of resizes.
-
-`ard-high-performance` offers the manual control only, for the fault in
-[`docs/known-issues.md`](docs/known-issues.md); standard `ard` refuses `resize`
-outright. RDP's trial concluded in its favour: the re-measure found and fixed the
-one real fault (the wrapper never resized FreeRDP's decoder contexts, so growing
+`autoResize` on `connected` — held by plain `vnc`, `ard-high-performance` and
+`rdp`. It is not a config key, since the operator cannot know which engines
+survive a stream of resizes. High Performance's descriptor must keep the native
+fixed 3840×2160 backing ceiling: using its current mode as the maximum makes the
+Mac decline any later request beyond the initial size. Standard `ard` refuses
+`resize` outright. RDP's trial concluded in its favour: the re-measure found and
+fixed the one real fault (the wrapper never resized FreeRDP's decoder contexts, so growing
 an xorgxrdp desktop killed the session). If a drag ever starts ending sessions
 again, `TargetConfig::auto_resize` is still the line to put back.
 
@@ -93,7 +93,8 @@ Apple display modes:
 - `ard-high-performance` is **experimental** and the one path built with no
   specification at all — the revision, record layer, control messages and virtual
   display handling are reverse engineered, so treat `docs/apple-vnc-889.md` as
-  measurement, not contract. Its dynamic-resolution path is the least settled part.
+  measurement, not contract. Its dynamic-resolution path remains reverse
+  engineered.
   Prefer widening `ard` over deepening this. It is Apple Screen Sharing's
   **High Performance mode** over
   RFB 003.889. It requests one virtual display at configured `width` and `height`,

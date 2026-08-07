@@ -1177,10 +1177,9 @@ mod tests {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
-                // The second permission, and the fake targets are all subtype-less,
-                // so here it follows the first exactly — the one target held back
-                // from it is `ard-high-performance`, which has a subtype. What the
-                // whole rule is belongs to config.rs.
+                // The second permission, and these fake targets are all the
+                // resizable engine forms, so here it follows the first exactly.
+                // The whole engine rule belongs to config.rs.
                 assert_eq!(got_auto_resize, meta.resize, "auto resize metadata for {name}");
                 assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
@@ -1286,12 +1285,11 @@ mod tests {
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
     }
 
-    /// The two resize permissions are separate on the wire, and a target that has
-    /// one need not have the other — `ard-high-performance` is resized when the
-    /// user asks and never by the window. Spelled out rather than left to the
-    /// helper above, because this is the whole point of the second flag.
+    /// The two resize permissions are separate on the wire even though every
+    /// current resizable engine grants both. Spelled out rather than left to the
+    /// helper above so each engine's second flag stays pinned independently.
     #[tokio::test]
-    async fn both_engines_carry_their_own_second_resize_permission() {
+    async fn resize_engines_carry_their_own_auto_resize_permission() {
         for (name, protocol, auto) in [("vnc-resize", "vnc", true), ("rdp-resize", "rdp", true)] {
             let (mgr, _hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();

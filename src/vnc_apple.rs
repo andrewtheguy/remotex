@@ -172,6 +172,12 @@ const CONFIG_HEAD: usize = 0x0c;
 /// Dots per inch used to derive the descriptor's physical dimensions. This is the
 /// value that reproduces the dimensions in the reverse-engineered reference.
 const NOMINAL_DPI: f32 = 132.0;
+/// Native Screen Sharing's fixed dynamic-display backing ceiling. These are the
+/// descriptor's bounds, not its current mode: macOS fixes them when it creates the
+/// virtual display, so deriving them from the initial mode silently caps every
+/// later resize to that initial width and height.
+const DYNAMIC_MAX_WIDTH: u32 = 3840;
+const DYNAMIC_MAX_HEIGHT: u32 = 2160;
 /// Bytes of one display record in a layout payload.
 const LAYOUT_RECORD: usize = 0x38;
 /// Bytes of a display record this parser actually reads. The rest is a pixel format
@@ -298,8 +304,8 @@ pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
     let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
     display.extend_from_slice(&mm(w));
     display.extend_from_slice(&mm(h));
-    display.extend_from_slice(&u32::from(w).to_be_bytes()); // max_width
-    display.extend_from_slice(&u32::from(h).to_be_bytes()); // max_height
+    display.extend_from_slice(&DYNAMIC_MAX_WIDTH.to_be_bytes());
+    display.extend_from_slice(&DYNAMIC_MAX_HEIGHT.to_be_bytes());
     display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
     display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
     // Native Screen Sharing's full dynamic descriptor sends 7 here. The field is
@@ -769,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn a_virtual_display_configuration_has_one_configured_mode() {
+    fn a_virtual_display_configuration_has_one_mode_under_the_fixed_dynamic_ceiling() {
         let msg = set_display_configuration((1600, 1000));
         assert_eq!(msg[0], 0x1d);
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
@@ -781,8 +787,8 @@ mod tests {
         assert_eq!(usize::from(be16(display, 0)), DESCRIPTOR_HEAD + MODE_ENTRY);
         assert_eq!(be32(display, 0x7a), 1, "display_flags");
         assert_eq!(be32(display, 0x7e), 4, "virtual display_type");
-        assert_eq!(be32(display, 0x8a), 1600, "maximum width");
-        assert_eq!(be32(display, 0x8e), 1000, "maximum height");
+        assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH, "maximum width");
+        assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT, "maximum height");
         assert_eq!(be16(display, 0x92), 0, "current mode");
         assert_eq!(be16(display, 0x94), 0, "preferred mode");
         assert_eq!(be32(display, 0x96), 7, "native dynamic rotations value");
@@ -793,6 +799,15 @@ mod tests {
         assert_eq!(be32(display, 0xa8), 1000, "1x scaled height");
         assert_eq!(&display[0xac..0xb4], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
         assert_eq!(be32(display, 0xb4), 0, "mode flags");
+
+        // The ceiling is a capability of the virtual display, not another copy of
+        // its mode. If the initial 1280x800 request put 1280x800 here, the live Mac
+        // would reject an otherwise valid 1281x600 steady-state configuration and
+        // answer with the old layout.
+        let smaller = set_display_configuration((1280, 800));
+        let display = &smaller[CONFIG_HEAD..];
+        assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH);
+        assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT);
     }
 
     #[test]

@@ -151,10 +151,9 @@ export type ControlMsg =
   | { type: "picker" }
   // `resize` is the operator's permission to change the remote's size when the
   // user asks for it. `autoResize` is the separate permission to hand the size to
-  // this window and let every drag report one, which the gateway grants to plain
-  // `vnc` alone — RDP and Apple Screen Sharing renegotiate in ways that a stream
-  // of reports walks into (docs/known-issues.md), so on those the client offers
-  // the manual control and not the mode. Never true without `resize`.
+  // this window and let every drag report one. The gateway grants it only when an
+  // engine has proved it survives that stream; every current resizable engine
+  // does. Never true without `resize`.
   // `protocol` ("rdp"/"vnc") is carried for the status line. `clipboard` is
   // whether this target opted into the clipboard bridge. `audio` advertises
   // capability, not current activity.
