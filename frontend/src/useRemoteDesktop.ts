@@ -88,13 +88,11 @@ export const SESSION_KEY = "remotex.sessionId";
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
 const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
-// The two "by default" session preferences, both off unless set — remembered
-// like the Mac-keys one, and for the same reason: they are lasting choices, not
-// per-tab session state. Each is applied to a new connection only where the
-// target can honour it (the picker's "… if compatible"), and toggling the live
-// control in the desktop menu writes the same value back, so there is one setting
-// with two places to set it.
-const AUTO_RESIZE_KEY = "remotex.autoResizeByDefault";
+// The "sound by default" preference, off unless set — remembered like the
+// Mac-keys one, and for the same reason: a lasting choice, not per-tab session
+// state. Applied to a new connection only where the target carries audio, and
+// toggling the live control in the desktop menu writes the same value back, so
+// there is one setting with two places to set it.
 const AUDIO_KEY = "remotex.audioByDefault";
 // Evaluated once: the host OS cannot change under a running tab, and the input
 // effect must not pay for it per keystroke.
@@ -355,6 +353,20 @@ export function densityLabel(hundredths: number): string {
   return `${Number((hundredths / 100).toFixed(2))}x`;
 }
 
+// The screen this window is on, as the wire carries it: full resolution in CSS
+// pixels and density in hundredths. `window.screen` follows the window between
+// displays, so reading it fresh is what keeps a re-send honest. Clamped to the
+// wire's u16 like a viewport; a screen that big does not exist.
+function hostDisplayMsg(): Extract<ClientMsg, { type: "hostDisplay" }> {
+  const dim = (px: number) => Math.min(65535, Math.max(1, Math.round(px) || 1));
+  return {
+    type: "hostDisplay",
+    w: dim(screen.width),
+    h: dim(screen.height),
+    scale: hostScaleHundredths(),
+  };
+}
+
 // Requested CSS viewport converted to remote pixels and clamped to wire `u16`.
 function viewportMsg(
   size: { w: number; h: number },
@@ -389,27 +401,6 @@ export function useRemoteDesktop(
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
-  // True when this session may ask the remote to change size at all: the
-  // operator's `resize` on the target. False on a pinch-zoom device whatever the
-  // target allows, where the window this would resize to is not one to hand a
-  // remote desktop (see CAN_PINCH_ZOOM).
-  //
-  // Permission only, and it is what puts the Resize section on the menu at all —
-  // "Resize to window" is offered exactly here. Whether the *mode* beside it is
-  // offered is a second permission, `canAutoResize` below.
-  const [canResize, setCanResize] = useState(false);
-  // Whether this session may hand the size to the window at all — the gateway's
-  // `autoResize`, and a second permission rather than a shade of the first. Every
-  // engine that accepts resize currently has it; Standard Apple Screen Sharing
-  // refuses resize because it shares physical displays.
-  //
-  // Never true where `canResize` is false, so the controls stay one decision.
-  const [canAutoResize, setCanAutoResize] = useState(false);
-  // Whether the remote follows this window continuously, or only when asked. The
-  // client's choice, within what the above allows, and not remembered — every
-  // `connected` starts manual, so connecting to a target never reshapes its
-  // desktop on the strength of something chosen for another one.
-  const [autoResize, setAutoResizeState] = useState(false);
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
@@ -459,17 +450,13 @@ export function useRemoteDesktop(
   const [macKeyOverridesEnabled, setMacKeyOverridesEnabled] = useState(
     readMacKeyOverridesPreference,
   );
-  // The two remembered "by default" preferences, edited from the picker and from
-  // the desktop menu alike (see AUTO_RESIZE_KEY). Applied to a compatible
-  // connection in `handleConnected`/`handleDisplays`, and read there through refs
-  // so the connection effect never re-subscribes when either changes.
-  const [autoResizeByDefault, setAutoResizeByDefault] = useState(() =>
-    readOnByKey(AUTO_RESIZE_KEY),
-  );
+  // The remembered "sound by default" preference, edited from the picker and
+  // from the desktop menu alike (see AUDIO_KEY). Applied to a compatible
+  // connection in `handleConnected`, and read there through a ref so the
+  // connection effect never re-subscribes when it changes.
   const [audioByDefault, setAudioByDefault] = useState(() =>
     readOnByKey(AUDIO_KEY),
   );
-  const autoResizeByDefaultRef = useRef(autoResizeByDefault);
   const audioByDefaultRef = useRef(audioByDefault);
   // All three conditions, which the toolbar shows and the input effect obeys: a
   // Mac keyboard to translate from, a guest that is not a Mac to translate for,
@@ -517,17 +504,9 @@ export function useRemoteDesktop(
     }
   }, [macKeyOverridesEnabled]);
 
-  // Mirror each "by default" preference into its ref (the connection effect reads
+  // Mirror the "by default" preference into its ref (the connection effect reads
   // it there) and persist it, whatever set it — the picker's toggle or the
   // desktop menu's live control.
-  useEffect(() => {
-    autoResizeByDefaultRef.current = autoResizeByDefault;
-    try {
-      localStorage.setItem(AUTO_RESIZE_KEY, autoResizeByDefault ? "on" : "off");
-    } catch {
-      // Storage blocked: the preference still holds for this tab.
-    }
-  }, [autoResizeByDefault]);
   useEffect(() => {
     audioByDefaultRef.current = audioByDefault;
     try {
@@ -585,17 +564,12 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
-  // The resize decision as the viewport sender reads it: whether this session may
-  // resize the remote at all (`canResize` above), whether it may be handed to the
-  // window (`canAutoResize`), and whether it currently is (`autoResize`). Refs
-  // because the sender lives inside the connection effect and must not
-  // re-subscribe when any of them changes.
-  const resizeAllowedRef = useRef(false);
-  const autoAllowedRef = useRef(false);
-  const autoResizeRef = useRef(false);
-  // Set by the connection effect so a report the user asked for — the menu's
-  // "Resize to window", and switching auto on — can push the current viewport.
-  const resizeToWindowRef = useRef<(() => void) | null>(null);
+  // Whether this window drives the remote's size — the target's `resize`, off
+  // on a pinch-zoom device whatever the target allows (see CAN_PINCH_ZOOM).
+  // There is no client-side mode beside it: the gateway names the policy on
+  // `connected` and this client obeys. A ref because the viewport sender lives
+  // inside the connection effect and must not re-subscribe when it changes.
+  const followWindowRef = useRef(false);
 
   // Open and close the audio socket from outside the connection effect, which is
   // where the toggle lives. A ref rather than state for the same reason `startRef` is
@@ -604,51 +578,6 @@ export function useRemoteDesktop(
     open: () => void;
     close: () => void;
   } | null>(null);
-
-  // Switch between the two modes. Both the toolbar's toggle and every `connected`
-  // come through here, so the ref the sender reads can never disagree with the
-  // label the user is looking at.
-  //
-  // Switching *on* reports at once rather than waiting for the next window
-  // resize: "the remote follows this window" that starts by not matching it would
-  // read as a control that did nothing. The dedupe makes it free when it already
-  // matches, and this deliberately reuses the manual path — turning auto on is a
-  // resize the user asked for.
-  // The session-only half: set the mode this connection runs in. The internal
-  // resets (a fresh `connected`, a return to the picker) and the connect-time seed
-  // all come through here, so none of them touches the remembered default.
-  //
-  // Switching *on* takes the target's permission, and this is the one gate: the
-  // toolbar's toggle, the remembered default and the connect-time seed all arrive
-  // here, so a target that may not follow the window cannot be put in that mode by
-  // any of them. Switching off is never refused — a session left following one
-  // must be able to stop.
-  const applyAutoResize = useCallback((enabled: boolean) => {
-    if (enabled && !autoAllowedRef.current) {
-      return false;
-    }
-    autoResizeRef.current = enabled;
-    setAutoResizeState(enabled);
-    if (enabled) {
-      resizeToWindowRef.current?.();
-    }
-    return true;
-  }, []);
-
-  // The desktop menu's "Auto resize" toggle: the same live effect, and it also
-  // writes the remembered default, so a value set mid-session is the one the next
-  // connection starts from. Only the user's toggle persists — never a reset, and
-  // never a change the target refused: that button is greyed on a target that
-  // resizes only when asked, and a click that got through anyway must not rewrite
-  // a preference it could not act on.
-  const setAutoResize = useCallback(
-    (enabled: boolean) => {
-      if (applyAutoResize(enabled)) {
-        setAutoResizeByDefault(enabled);
-      }
-    },
-    [applyAutoResize],
-  );
 
   // The engine's latest pointer state, and where the touch gesture layer's
   // virtual pointer sits (null while a hardware mouse is driving). Both are
@@ -919,21 +848,15 @@ export function useRemoteDesktop(
     };
 
     // Viewport reports (dynamic resize), deduped per connection: a resize that
-    // settles on the same size sends nothing.
-    //
-    // Two gates, and they are different questions. Nothing goes out at all unless
-    // this session may resize the remote — an engine drops the request otherwise,
-    // and the controls that would ask for one are not offered either. Past that,
-    // `manual: true` is a report the user asked for and always goes; an automatic
-    // one goes only while auto resize is on.
+    // settles on the same size sends nothing. One gate: nothing goes out unless
+    // the target handed its size to this window — an engine drops the request
+    // otherwise, and there is no manual control that could ask for one.
     let lastViewport: { w: number; h: number } | null = null;
-    const mayReport = (manual: boolean) =>
-      resizeAllowedRef.current && (manual || autoResizeRef.current);
-    const sendViewport = (opts?: { manual?: boolean }) => {
+    const sendViewport = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (!mayReport(opts?.manual === true)) {
+      if (!followWindowRef.current) {
         return;
       }
       const el = document.documentElement;
@@ -965,31 +888,30 @@ export function useRemoteDesktop(
           : { type: "defaultSize" },
       );
     };
-    // A report the user asked for, whatever the mode. Dedup still applies, so
-    // re-clicking at the same window size won't fire a redundant resize.
-    resizeToWindowRef.current = () => sendViewport({ manual: true });
-
-    // This screen's density, deduped the same way. An RDP target that allows
-    // resize acts on it by matching it; re-sending an unchanged value would be a
-    // full RDP reactivation for nothing.
-    let lastHostScale: number | null = null;
+    // The screen this window is on, deduped the same way. Mid-session only its
+    // density is acted on — an RDP target that allows resize matches it, and
+    // re-sending an unchanged value would be a full RDP reactivation for
+    // nothing. The full resolution rides along so the message stays the shape
+    // `connect` carries, where the size is what the session opens at.
+    let lastHostDisplay: string | null = null;
     // Which display the remote is sharing, as its last `displays` reported it.
     // Only so a switch can be told from the first list of a session.
     let sharedDisplay: number | null = null;
-    const sendHostScale = () => {
-      const scale = hostScaleHundredths();
+    const sendHostDisplay = () => {
+      const msg = hostDisplayMsg();
       // Recorded before either guard below, and whether or not it is sent: the
       // menu shows this number, and a density this screen has that the remote
       // does not is exactly what someone reading it is trying to see.
-      setHostScale(scale);
+      setHostScale(msg.scale);
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (lastHostScale === scale) {
+      const key = `${msg.w}x${msg.h}@${msg.scale}`;
+      if (lastHostDisplay === key) {
         return;
       }
-      lastHostScale = scale;
-      sendRef.current({ type: "hostScale", scale });
+      lastHostDisplay = key;
+      sendRef.current(msg);
     };
 
     const open = (sessionId: string) => {
@@ -1264,8 +1186,8 @@ export function useRemoteDesktop(
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
       if (switched) {
-        lastHostScale = null;
-        sendHostScale();
+        lastHostDisplay = null;
+        sendHostDisplay();
       }
     };
 
@@ -1305,49 +1227,32 @@ export function useRemoteDesktop(
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
-      // Manual on every connect, before either branch: a reattach, a target switch
-      // and a takeover all arrive with the remote's own size left alone. The
-      // remembered default is then applied below, once permission is known — and it
-      // reuses this session-only setter, so seeding a mode never rewrites the
-      // preference it came from.
-      applyAutoResize(false);
       lastViewport = null;
-      const wantAutoResize = autoResizeByDefaultRef.current;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
-        // and never let this window's shape reach the remote again. So neither
-        // control is offered and nothing else sends — the window they would resize
-        // to is the one this client deliberately does not ask the remote to be.
+        // and never let this window's shape reach the remote again — the window
+        // it would resize to is the one this client deliberately does not ask
+        // the remote to be.
         //
         // The one-shot is still gated on the target's `resize`, because there is
         // nothing to say otherwise: an engine drops the request without it.
-        resizeAllowedRef.current = false;
-        autoAllowedRef.current = false;
-        setCanResize(false);
-        setCanAutoResize(false);
+        followWindowRef.current = false;
         mobileSizePending = msg.resize;
       } else {
-        // Two permissions, both the gateway's: whether this session may resize the
-        // remote when asked, and whether it may hand the size to this window. The
-        // second is the narrower one — plain VNC — so the menu can offer "Resize to
-        // window" on a target where the mode is not on offer at all.
-        const allowed = msg.resize;
-        resizeAllowedRef.current = allowed;
-        autoAllowedRef.current = msg.autoResize;
-        setCanResize(allowed);
-        setCanAutoResize(msg.autoResize);
-        // Apply the remembered default now. Where the target does not take the
-        // mode — no resize at all, or resize only when asked — it silently does
-        // nothing, which is the "… if compatible" the picker's toggle promises.
-        if (wantAutoResize) {
-          applyAutoResize(true);
-        }
+        // The gateway's one switch: `resize` means this window drives the
+        // remote's size, and there is nothing to toggle beside it. Report at
+        // once rather than waiting for the next window resize — the remote
+        // opened at this screen's full resolution, and "follows this window"
+        // that starts by not matching it would read as broken. The dedupe makes
+        // it free when it already matches.
+        followWindowRef.current = msg.resize;
+        sendViewport();
       }
-      // And this screen's density, so a resizable remote uses the browser's
+      // And this window's screen, so a resizable remote uses the browser's
       // backing/logical ratio rather than whatever density it last used.
-      lastHostScale = null;
+      lastHostDisplay = null;
       sharedDisplay = null;
-      sendHostScale();
+      sendHostDisplay();
     };
 
     const mirrorRemoteClipboard = (text: string) => {
@@ -1466,15 +1371,8 @@ export function useRemoteDesktop(
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setMode("picker");
-          // No engine to resize, and the mode goes with the session: the next
-          // target is asked about separately.
-          resizeAllowedRef.current = false;
-          autoAllowedRef.current = false;
-          // Session-only, not the persisting setter: returning to the picker must
-          // not wipe the remembered default the next connect will apply.
-          applyAutoResize(false);
-          setCanResize(false);
-          setCanAutoResize(false);
+          // No engine to resize: the next target states its own policy.
+          followWindowRef.current = false;
           setCanClipboard(false);
           // No engine, so no queue to subscribe to: the row goes away rather than
           // offering a control that would be answered with a warning in the log.
@@ -1544,6 +1442,9 @@ export function useRemoteDesktop(
         );
         syncCursor();
         sendViewport();
+        // A window that just resized may have been dragged to another display;
+        // `window.screen` follows it and the dedupe makes an unchanged one free.
+        sendHostDisplay();
       }, 250);
     };
     window.addEventListener("resize", onViewportChange);
@@ -1563,7 +1464,7 @@ export function useRemoteDesktop(
       dprQuery.addEventListener("change", onDprChange);
     };
     function onDprChange() {
-      sendHostScale();
+      sendHostDisplay();
       watchDpr();
     }
     watchDpr();
@@ -1573,7 +1474,6 @@ export function useRemoteDesktop(
       advancePaintGeneration(paintGenerationRef);
       paintSocket = null;
       startRef.current = null;
-      resizeToWindowRef.current = null;
       audioSocketRef.current = null;
       audioWs?.close();
       // The socket is going away, so nothing will answer a pending fetch.
@@ -1599,7 +1499,6 @@ export function useRemoteDesktop(
     syncCursor,
     settleClipboardWaiters,
     releaseAudio,
-    applyAutoResize,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -1628,7 +1527,11 @@ export function useRemoteDesktop(
         releaseAudio();
         audioContextRef.current = createAudioContext();
       }
-      sendRef.current({ type: "connect", target });
+      // The connect names this window's screen, so a target with no pinned
+      // config size opens at its full resolution — before any message this
+      // client could send after the fact.
+      const { w, h, scale } = hostDisplayMsg();
+      sendRef.current({ type: "connect", target, display: { w, h, scale } });
     },
     [releaseAudio],
   );
@@ -1637,13 +1540,6 @@ export function useRemoteDesktop(
   // server answers `picker`, which flips `mode` back.
   const switchTarget = useCallback(() => {
     sendRef.current({ type: "disconnect" });
-  }, []);
-
-  // Resize the remote desktop to the current browser window (the floating
-  // menu's "Resize to window", offered only when `canResize`). A no-op while the
-  // socket is down. The engine answers with a `resize` control message.
-  const resizeToWindow = useCallback(() => {
-    resizeToWindowRef.current?.();
   }, []);
 
   // Share a different one of the remote's displays (the Display panel). Fire
@@ -2090,21 +1986,14 @@ export function useRemoteDesktop(
     hostScale,
     renderPlan,
     connection,
-    // The two permissions, and the client's per-session choice of how to use
-    // them.
-    canResize,
-    canAutoResize,
-    autoResize,
     canClipboard,
     canAudio,
     audioEnabled,
     audioError,
     videoError,
-    // The two remembered "by default" preferences and their setters, for the
-    // picker's "… if compatible" toggles.
-    autoResizeByDefault,
+    // The remembered "by default" preference and its setter, for the picker's
+    // toggle.
     audioByDefault,
-    setAutoResizeByDefault,
     setAudioByDefault,
     displays,
     activeDisplayId,
@@ -2122,8 +2011,6 @@ export function useRemoteDesktop(
     retry,
     connect,
     switchTarget,
-    resizeToWindow,
-    setAutoResize,
     selectDisplay,
     refresh,
     setAudio,

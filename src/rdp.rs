@@ -49,8 +49,8 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, MAX_CURSOR_DIM, MouseButton, ServerMsg,
-    UNSCALED,
+    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, HostDisplay, MAX_CURSOR_DIM, MouseButton,
+    ServerMsg, UNSCALED,
 };
 use crate::rdp_audio;
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
@@ -184,13 +184,14 @@ fn connect_budget() -> Duration {
 /// separation — see [`crate::rdp_audio`].
 pub async fn run(
     config: TargetConfig,
+    display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, config.render_plan(), feedback);
-    session(config, input_rx, &sink, audio).await;
+    session(config, display, input_rx, &sink, audio).await;
     sink.finish().await;
 }
 
@@ -231,11 +232,12 @@ fn bridge_events(events: std::sync::mpsc::Receiver<Event>) -> mpsc::UnboundedRec
 
 async fn session(
     config: TargetConfig,
+    display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
     audio: Option<Arc<AudioBridge>>,
 ) {
-    let (session, events) = Session::start(connect_config(&config, audio));
+    let (session, events) = Session::start(connect_config(&config, display, audio));
     let mut events = bridge_events(events);
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
@@ -266,7 +268,7 @@ async fn session(
         Flags {
             resize: config.resize,
             clipboard: config.clipboard,
-            default_size: (config.width, config.height),
+            default_size: config.default_size(),
         },
         (width, height),
         input_rx,
@@ -361,15 +363,24 @@ async fn await_desktop(
 /// whichever protocol is carrying it, and so
 /// [`engine::keepalive_budget`](crate::engine::keepalive_budget) — which an error
 /// message quotes — cannot drift from what the RDP path actually asks for.
-fn connect_config(config: &TargetConfig, audio: Option<Arc<AudioBridge>>) -> Connect {
+fn connect_config(
+    config: &TargetConfig,
+    display: Option<HostDisplay>,
+    audio: Option<Arc<AudioBridge>>,
+) -> Connect {
+    // The opening size, in points at 1x: the pinned config size, else the full
+    // resolution of the client's own screen — the same rule every engine
+    // resolves. The density this session ends up at remains the client's to
+    // state mid-session; see `Density`.
+    let (width, height) = config.opening_size(display);
     Connect {
         host: config.host.clone(),
         port: config.port,
         username: config.username.clone(),
         password: config.password.clone(),
         domain: config.domain.clone(),
-        width: u32::from(config.width),
-        height: u32::from(config.height),
+        width: u32::from(width),
+        height: u32::from(height),
         security: match config.security {
             Security::Auto => freerdp::Security::Auto,
             Security::Nla => freerdp::Security::Nla,
@@ -378,6 +389,7 @@ fn connect_config(config: &TargetConfig, audio: Option<Arc<AudioBridge>>) -> Con
         clipboard: config.clipboard,
         audio: rdp_audio::connect(audio),
         resize: config.resize,
+        egfx: config.egfx,
         connect_timeout: engine::TCP_CONNECT_TIMEOUT,
         keepalive: engine::keepalive(),
     }
@@ -389,10 +401,10 @@ fn connect_config(config: &TargetConfig, audio: Option<Arc<AudioBridge>>) -> Con
 struct Flags {
     resize: bool,
     clipboard: bool,
-    /// The target's configured `width`/`height`, in *points*: the size this
-    /// session asked the server for at connect, and so what
-    /// [`ClientMsg::DefaultSize`] means here. Points rather than pixels because
-    /// the density can move underneath it — see [`Density::pixels`].
+    /// What [`ClientMsg::DefaultSize`] means here —
+    /// [`TargetConfig::default_size`], in *points*: the pinned config size or
+    /// the built-in default. Points rather than pixels because the density can
+    /// move underneath it — see [`Density::pixels`].
     default_size: (u16, u16),
 }
 
@@ -413,7 +425,7 @@ enum Density {
 }
 
 impl Density {
-    /// What a [`ClientMsg::HostScale`] means here.
+    /// What a [`ClientMsg::HostDisplay`]'s density means here.
     ///
     /// Through `scale_ratio` rather than dividing by hand: that is the guard which
     /// turns a value no screen could have into 1x and centralizes the 1.5 midpoint
@@ -674,7 +686,7 @@ async fn active_loop(
     let mut resize_ready = false;
     // The layout in flight — a size, a density, or both — and when to repeat it.
     // The client states each *once per attach* and then dedupes it (a viewport,
-    // and `sendHostScale` in frontend/src/useRemoteDesktop.ts), so nothing will ask
+    // and `sendHostDisplay` in frontend/src/useRemoteDesktop.ts), so nothing will ask
     // again from the other end: every attempt after the first has to come from
     // here. One slot, not one per kind, so a size
     // and a density can only ever be pending as a single merged layout — see
@@ -899,21 +911,23 @@ async fn active_loop(
                     sink.frame().await?;
                     continue;
                 }
-                // The density of the screen this client's window is on. Ignored
-                // outright without `resize`, whose Display Control channel is the
-                // only way to restate a density on a live session.
+                // The screen this client's window is on — a density report
+                // mid-session (its size mattered at connect, where
+                // `connect_config` spent it). Ignored outright without `resize`,
+                // whose Display Control channel is the only way to restate a
+                // density on a live session.
                 //
                 // Recorded and scheduled rather than asked for here, so the retry
                 // branch is the single place a layout is requested from — one
                 // attempt and five look the same to this arm.
-                if let ClientMsg::HostScale { scale } = msg {
+                if let ClientMsg::HostDisplay(screen) = msg {
                     if resize {
                         // Only the density changes; the size the desktop should be
                         // stays what it is. Re-express whatever size is already
                         // pending at the new density, or the live desktop when
                         // nothing is — so a size still waiting for the channel is
                         // carried along by a screen change rather than dropped.
-                        let want = Density::from_host(scale);
+                        let want = Density::from_host(screen.scale);
                         let base = pending_layout
                             .as_ref()
                             .map_or_else(|| Layout::current(desktop, applied), |p| p.layout);
@@ -1473,7 +1487,7 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
         // Handled by the active loop (client-initiated resize, and the density
         // that is a resize here) before translation, so these arms are
         // unreachable in practice.
-        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize | ClientMsg::HostScale { .. } => {
+        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize | ClientMsg::HostDisplay { .. } => {
             Vec::new()
         }
         // Handled by the active loop (full repaint) before translation.

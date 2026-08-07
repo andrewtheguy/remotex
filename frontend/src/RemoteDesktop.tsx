@@ -44,17 +44,12 @@ export default function RemoteDesktop({
     hostScale,
     renderPlan,
     connection,
-    canResize,
-    canAutoResize,
-    autoResize,
     canClipboard,
     canAudio,
     audioEnabled,
     audioError,
     videoError,
-    autoResizeByDefault,
     audioByDefault,
-    setAutoResizeByDefault,
     setAudioByDefault,
     displays,
     activeDisplayId,
@@ -69,8 +64,6 @@ export default function RemoteDesktop({
     retry,
     connect,
     switchTarget,
-    resizeToWindow,
-    setAutoResize,
     selectDisplay,
     refresh,
     setAudio,
@@ -126,9 +119,6 @@ export default function RemoteDesktop({
     ready: size !== null,
     editing,
     size,
-    canResize,
-    canAutoResize,
-    autoResize,
     canClipboard,
     canAudio,
     audioEnabled,
@@ -149,8 +139,6 @@ export default function RemoteDesktop({
       openSessionInfo: () => panelControlsRef.current?.openHelp(),
       openDisplays: () => panelControlsRef.current?.toggleDisplays(),
       closePanel: () => panelControlsRef.current?.closePanel(),
-      resizeToWindow: () => resizeToWindow(),
-      setAutoResize: ({ enabled }) => setAutoResize(enabled),
       selectDisplay: ({ id }) => selectDisplay(id),
       setAudio: ({ enabled }) => setAudio(enabled),
       setMacKeyOverrides: ({ enabled }) => setMacKeyOverridesEnabled(enabled),
@@ -161,8 +149,6 @@ export default function RemoteDesktop({
     }),
     [
       pushLocalClipboard,
-      resizeToWindow,
-      setAutoResize,
       selectDisplay,
       setAudio,
       setMacKeyOverridesEnabled,
@@ -223,11 +209,6 @@ export default function RemoteDesktop({
         <FloatingMenu
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
-          canResize={canResize}
-          canAutoResize={canAutoResize}
-          autoResize={autoResize}
-          onAutoResizeChange={setAutoResize}
-          onResizeToWindow={resizeToWindow}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
           canClipboard={canClipboard}
@@ -264,9 +245,7 @@ export default function RemoteDesktop({
           connect={connect}
           pendingTarget={pendingTarget}
           connectError={connectError}
-          autoResizeByDefault={autoResizeByDefault}
           audioByDefault={audioByDefault}
-          onAutoResizeByDefaultChange={setAutoResizeByDefault}
           onAudioByDefaultChange={setAudioByDefault}
           onLogout={onLogout}
           onUnauthorized={onUnauthorized}

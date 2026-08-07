@@ -38,8 +38,9 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    self, ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES,
-    MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
+    self, ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, HostDisplay,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
+    clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
@@ -294,7 +295,7 @@ struct DesktopState {
     /// thinks it is.
     scale: f32,
     /// The density of the screen the client's window is on, from
-    /// [`ClientMsg::HostScale`]. 1.0 until the client says otherwise.
+    /// [`ClientMsg::HostDisplay`], seeded from the session-open's screen.
     ///
     /// Only High Performance resize spends it: a virtual display renders `points ×
     /// host_density` pixels, so a Retina client gets a Retina desktop. `scale` is
@@ -467,17 +468,19 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 /// function, and the sink forwards from a task of its own.
 pub async fn run(
     config: TargetConfig,
+    display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("vnc", frame_tx, config.render_plan(), feedback);
-    session(config, input_rx, &sink).await;
+    session(config, display, input_rx, &sink).await;
     sink.finish().await;
 }
 
 async fn session(
     config: TargetConfig,
+    display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) {
@@ -491,7 +494,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, stream),
+        |stream| connect(&config, display, stream),
     )
     .await
     else {
@@ -523,9 +526,10 @@ async fn session(
             macos,
             resize: config.resize,
             clipboard: config.clipboard,
-            default_size: (config.width, config.height),
+            default_size: config.default_size(),
             apple,
             high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
+            host_density: display.map_or(1.0, |d| crate::protocol::scale_ratio(d.scale)),
             poll,
         },
         input_rx,
@@ -549,14 +553,11 @@ struct Flags {
     macos: bool,
     resize: bool,
     clipboard: bool,
-    /// The target's configured `width`/`height`, which is what
-    /// [`ClientMsg::DefaultSize`] resolves to here. Carried rather than read from
-    /// the config at the point of use because [`active_loop`] is given the
-    /// handshaken link and these switches, not the profile behind them.
-    ///
-    /// Generic VNC and Standard `ard` consult it only when a client asks.
-    /// High Performance mode also uses it during setup for its virtual display;
-    /// retaining it here keeps `DefaultSize` consistent with that configured mode.
+    /// What [`ClientMsg::DefaultSize`] resolves to here —
+    /// [`TargetConfig::default_size`], the pinned size or the built-in default.
+    /// Carried rather than read from the config at the point of use because
+    /// [`active_loop`] is given the handshaken link and these switches, not the
+    /// profile behind them.
     default_size: (u16, u16),
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
@@ -566,6 +567,11 @@ struct Flags {
     /// during setup and asks for zlib after the first layout; plain `ard` does
     /// neither.
     high_performance: bool,
+    /// The density the virtual display opened at, from the session-open's
+    /// screen. Seeding [`DesktopState::host_density`] with it keeps the
+    /// client's first `hostDisplay` — an echo of the same screen — from
+    /// reading as a density change against a desktop already rendered at it.
+    host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
 }
@@ -626,7 +632,11 @@ impl ServerInit {
 /// 003.889 preface waits for the server's rekey, which puts *that* wait inside the
 /// same budget — a Mac that authenticates and then says nothing is reported as a
 /// handshake that ran long, not as a live session with a blank canvas.
-async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow::Result<Connected> {
+async fn connect(
+    config: &TargetConfig,
+    display: Option<HostDisplay>,
+    stream: tokio::net::TcpStream,
+) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
     let (read_half, mut sock) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -657,7 +667,9 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
 
     match dialect {
         Dialect::Rfb38 => rfb38_preface(reader, sock, server, macos, config).await,
-        Dialect::Apple889 => apple_preface(reader, sock, server, macos, wrap_key, config).await,
+        Dialect::Apple889 => {
+            apple_preface(reader, sock, server, macos, wrap_key, config, display).await
+        }
     }
 }
 
@@ -879,19 +891,19 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
 
 /// The virtual display a High Performance session opens with.
 ///
-/// A resizable target ignores its configured `width`/`height` here and opens at
-/// the dynamic backing ceiling, the way Apple's own client does: the size the
-/// session should be is the client window's, which arrives as a viewport report
-/// moments later, and shrinking a large display keeps the window layout that
-/// opening small destroys. The configured size is the opening mode only where no
-/// window will ever report one — `resize = false`, the fixed-size and mobile
-/// profile.
-fn opening_mode(config: &TargetConfig) -> vnc_apple::VirtualMode {
-    if config.resize {
-        vnc_apple::maximum_mode()
-    } else {
-        vnc_apple::virtual_display_mode((config.width, config.height), 1.0)
-    }
+/// The points come from [`TargetConfig::opening_size`] — the pinned config
+/// size, else the full resolution of the client's own screen, which is how
+/// Apple's client opens: at the display it is on, never at a smaller target
+/// size. The opening size matters more than any later one, because macOS lays
+/// every remote window out on the virtual display at that size and windows
+/// squeezed together onto a small opening display do not spread back out when
+/// it grows. The density is the client screen's whatever named the points, so
+/// a Retina client gets a sharp desktop even at a pinned size.
+fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_apple::VirtualMode {
+    vnc_apple::virtual_display_mode(
+        config.opening_size(display),
+        display.map_or(1.0, |d| crate::protocol::scale_ratio(d.scale)),
+    )
 }
 
 /// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
@@ -912,6 +924,7 @@ async fn apple_preface(
     macos: bool,
     wrap_key: Option<[u8; 16]>,
     config: &TargetConfig,
+    display: Option<HostDisplay>,
 ) -> anyhow::Result<Connected> {
     let wrap_key = wrap_key.ok_or_else(|| {
         anyhow::anyhow!(
@@ -942,13 +955,11 @@ async fn apple_preface(
 
     let mut uplink = Uplink::records(sock, keys);
     // High Performance mode is a virtual-display session. Request its mode before
-    // the pixel format and encoding list. The same message is resent for viewport
-    // reports when resize is permitted; its dynamic-resolution flag is set here
+    // the pixel format and encoding list. The same message is resent for later
+    // viewport reports and screen changes; its dynamic-resolution flag is set here
     // regardless, so every fresh session restores the Mac's checkbox to on.
-    // At 1x always: no client has attached to say what its screen's density is —
-    // that arrives as the first `hostScale` and re-requests the mode if it differs.
     uplink
-        .send(&vnc_apple::set_display_configuration(opening_mode(config)))
+        .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
         .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
@@ -1041,6 +1052,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         default_size,
         apple,
         high_performance,
+        host_density,
         poll,
     } = flags;
     // The uplink is shared: the read loop answers the server (update requests,
@@ -1049,7 +1061,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
-        host_density: 1.0,
+        host_density,
         screen: None,
         pending: None,
     }));
@@ -1110,20 +1122,23 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     break Ok(());
                 };
                 // Viewport reports drive dynamic resize, not an input event;
-                // dropped entirely unless the target opted in. `DefaultSize` is
-                // the same request with the size supplied from here instead of by
-                // the client — see [`ClientMsg::DefaultSize`] — so the two resolve
-                // to a size first and share the one call, which is also how the
-                // second inherits the stash-until-supported and drop-the-no-op
-                // behaviour `request_resize` already has. `HostScale` is that
-                // request with no size at all: only a High Performance virtual
-                // display can render the same points at a new density, so only it
-                // listens, and like RDP it listens only where `resize` is granted.
+                // `DefaultSize` is the same request with the size supplied from
+                // here instead of by the client — see [`ClientMsg::DefaultSize`]
+                // — so the two resolve to a size first and share the one call,
+                // which is also how the second inherits the stash-until-supported
+                // and drop-the-no-op behaviour `request_resize` already has.
+                //
+                // `HostDisplay` is that request with no size of its own:
+                // mid-session it is a *density* report, and only a High
+                // Performance virtual display can render the same points at a
+                // new density, so only it listens — and like RDP it listens only
+                // where `resize` is granted. The size it carries mattered at
+                // session-open, where `opening_mode` already spent it.
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
-                    ClientMsg::HostScale { scale } if high_performance && resize => {
-                        let density = crate::protocol::scale_ratio(scale);
+                    ClientMsg::HostDisplay(screen) if high_performance && resize => {
+                        let density = crate::protocol::scale_ratio(screen.scale);
                         let mut d = desktop.lock().unwrap();
                         let changed = (d.host_density - density).abs() > 0.005;
                         d.host_density = density;
@@ -2965,12 +2980,13 @@ fn translate_input(
         // transport.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
         // Intercepted by the input loop where it means something — a High
-        // Performance virtual display with resize granted re-renders at the new
-        // density. Everywhere else there is nothing to act on: RFB has no backing
-        // scale, and a VNC server's framebuffer is already the pixels it has.
-        // Clients send this unconditionally rather than asking what the engine
-        // is, so it is ignored here rather than treated as a client error.
-        ClientMsg::HostScale { .. } => Vec::new(),
+        // Performance virtual display follows the client's screen, by density
+        // or by full resolution depending on `resize`. Everywhere else there is
+        // nothing to act on: RFB has no backing scale, and a VNC server's
+        // framebuffer is already the pixels it has. Clients send this
+        // unconditionally rather than asking what the engine is, so it is
+        // ignored here rather than treated as a client error.
+        ClientMsg::HostDisplay { .. } => Vec::new(),
     }
 }
 
@@ -4438,24 +4454,33 @@ mod tests {
     }
 
     #[test]
-    fn a_resizable_session_opens_at_the_ceiling_not_the_configured_size() {
-        let target = |resize: bool| -> TargetConfig {
+    fn a_session_opens_at_the_pinned_size_or_the_clients_own_screen() {
+        let target = |size: &str| -> TargetConfig {
             toml::from_str(&format!(
                 "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
-                 host = \"h\"\nwidth = 1600\nheight = 1000\nresize = {resize}"
+                 host = \"h\"\n{size}"
             ))
             .unwrap()
         };
+        let screen = crate::protocol::HostDisplay { w: 1728, h: 1117, scale: 200 };
 
-        // The window's size arrives as a viewport report; opening small first
-        // squeezes every remote window together, so open at the maximum.
-        assert_eq!(opening_mode(&target(true)), vnc_apple::maximum_mode());
-        assert_eq!(opening_mode(&target(true)).pixels, (3840, 2160));
-
-        // No window will ever report a size: the configured one is the mode.
+        // No pinned size: the client's screen, at the client's density — how
+        // Apple's own client opens, and the layout every remote window gets.
         assert_eq!(
-            opening_mode(&target(false)),
-            vnc_apple::virtual_display_mode((1600, 1000), 1.0)
+            opening_mode(&target(""), Some(screen)),
+            vnc_apple::virtual_display_mode((1728, 1117), 2.0)
+        );
+
+        // A pinned size wins, but the density is still the client screen's.
+        assert_eq!(
+            opening_mode(&target("width = 1600\nheight = 1000"), Some(screen)),
+            vnc_apple::virtual_display_mode((1600, 1000), 2.0)
+        );
+
+        // No screen named at all (a probe): the pinned size or the default, at 1x.
+        assert_eq!(
+            opening_mode(&target(""), None),
+            vnc_apple::virtual_display_mode(crate::config::DEFAULT_SIZE, 1.0)
         );
     }
 

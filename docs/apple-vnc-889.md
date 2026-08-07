@@ -37,13 +37,14 @@ Sharing's High Performance mode over RFB 003.889 and uses virtual displays.
 
 High Performance disables physical displays and moves all remote windows to the
 virtual display. Apple's client supports up to two, arbitrary dynamic sizes, and
-fixed presets when dynamic resolution is off. Remotex requests one. With
-`resize = false` it opens at the configured `width` and `height`; with
-`resize = true` the configured size is ignored and it opens at the 3840×2160
-dynamic ceiling, as Apple's client does — the window layout macOS produces
-depends on the opening size, and windows squeezed onto a small opening display
-do not spread back out when it grows. A viewport report then sends a replacement
-full display configuration; the next `AppleDisplayLayout` confirms its size.
+fixed presets when dynamic resolution is off. Remotex requests one, opening at
+the pinned `width`/`height` when the config sets both and otherwise at the full
+resolution of the client's own screen (named in the client's `connect`), at that
+screen's density — which is how Apple's client opens, and it matters: the window
+layout macOS produces depends on the opening size, and windows squeezed onto a
+small opening display do not spread back out when it grows. With `resize = true`
+a viewport report then sends a replacement full display configuration; the next
+`AppleDisplayLayout` confirms its size.
 
 ```toml
 [[targets]]

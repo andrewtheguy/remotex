@@ -391,12 +391,10 @@ const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
 const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
 /// ServerInit's size, before the display configuration is applied.
 const MAC_DESKTOP: u16 = 32;
-const MAC_VIRTUAL_WIDTH: u16 = 40;
-const MAC_VIRTUAL_HEIGHT: u16 = 30;
-/// What a `resize = true` session opens its virtual display at: the dynamic
-/// backing ceiling, the configured size deliberately ignored.
-const MAC_OPENING_WIDTH: u16 = 3840;
-const MAC_OPENING_HEIGHT: u16 = 2160;
+/// The fake client's screen, named in its `connect`. With no pinned config
+/// size, this is what the virtual display opens at — the unified opening rule.
+const MAC_SCREEN_WIDTH: u16 = 64;
+const MAC_SCREEN_HEIGHT: u16 = 48;
 const MAC_CLIPBOARD_SESSION: u32 = 0x1234_5678;
 const MAC_REMOTE_CLIPBOARD: &str = "copied on virtual Mac ✓";
 const MAC_BROWSER_CLIPBOARD: &str = "sent from browser ☕";
@@ -938,9 +936,10 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         password: "s3cr3t-should-not-leak".to_owned(),
         vnc_password: String::new(),
         domain: None,
-        width: 1280,
-        height: 800,
+        width: Some(1280),
+        height: Some(800),
         security: Security::Auto,
+        egfx: true,
         resize: false,
         clipboard,
         audio: false,
@@ -966,8 +965,9 @@ fn mac_target(port: u16) -> TargetConfig {
         subtype: Some(remotex::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
-        width: MAC_VIRTUAL_WIDTH,
-        height: MAC_VIRTUAL_HEIGHT,
+        // Unpinned: the virtual display opens at the screen the connect names.
+        width: None,
+        height: None,
         resize: true,
         clipboard: true,
         ..target(Protocol::Vnc, port)
@@ -1731,25 +1731,29 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
+    // The connect names the client's screen, the way the SPA does. With no
+    // pinned config size, that screen's full resolution is the opening mode.
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
 
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true)
     );
-    // A resizable target opens at the ceiling, not its configured 40×30: the
-    // size the session should be is the client window's, reported below.
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((MAC_OPENING_WIDTH, MAC_OPENING_HEIGHT))
+        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
     );
 
     // ServerInit precedes the encrypted display request, then the answering layout
     // replaces that provisional geometry with the opening virtual mode.
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], MAC_OPENING_WIDTH, "{resize}");
-    assert_eq!(resize["h"], MAC_OPENING_HEIGHT, "{resize}");
+    assert_eq!(resize["w"], MAC_SCREEN_WIDTH, "{resize}");
+    assert_eq!(resize["h"], MAC_SCREEN_HEIGHT, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
 
     let msg = expect_displays(&mut ws).await;
@@ -1831,7 +1835,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![(MAC_OPENING_WIDTH, MAC_OPENING_HEIGHT), (24, 18)],
+        vec![(MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), (24, 18)],
         "unexpected display configurations"
     );
 }

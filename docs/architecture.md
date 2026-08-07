@@ -490,8 +490,8 @@ the same build, and no second client is supported.
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message includes `resize`,
-`autoResize`, `clipboard`, and `audio` capability flags so clients expose only
-supported controls.
+`clipboard`, and `audio` capability flags so clients expose only supported
+controls.
 
 It also carries three things a client cannot work out and nothing else reveals:
 `render`, the resolved render dial; `video`, the codec family or null; and
@@ -694,36 +694,36 @@ selection, viewport size, refresh, cache reset, and session control. Pointer
 motion is coalesced while the socket has queued bytes; any non-motion input
 flushes the latest held position first.
 
-A target's `resize` is permission, not behavior: an engine that has it applies
-every `viewport` it is sent and an engine without it drops them all.
+A target's `resize` means the window drives the remote's size, continuously and
+on every engine alike: an engine that has it applies every `viewport` it is
+sent, an engine without it drops them all, and the client sends them exactly
+when `connected` said `resize` — on every window change, with no toggle, no
+manual button and no remembered preference beside it. Standard `ard` rejects
+`resize` at config parse because it shares physical displays. On RDP the `egfx`
+key (default true) keeps the graphics pipeline on, making each resize a graphics
+reset instead of a reactivation; that trade is the operator's, not the client's.
 
-*How often* a client sends one is governed by a second permission, `autoResize`
-on the `connected` message. The client offers two ways to drive a size: a manual
-"Resize to Window", and a mode that hands the size to the window so every change
-reports one. The manual control follows `resize`. The mode follows `autoResize`,
-which the gateway grants to every engine that accepts resize: plain `vnc`,
-`ard-high-performance`, and RDP. Standard `ard` refuses resize because it shares
-physical displays. The client does not decide any of this:
-`TargetConfig::auto_resize` does, and it is not a config key — the operator has no
-way to know which engines survive a stream of resizes.
+The opening size is one rule for every engine that can ask for one: the pinned
+`width`/`height` when the config sets both, else the full resolution of the
+client's own screen — carried in the `connect` message so it exists before the
+engine's handshake — else the built-in default. See
+`TargetConfig::opening_size`.
 
-Within the mode, the client's own choice is remembered across connections and
-applied "if compatible" — which covers both a target that refuses resize and one
-that resizes only when asked. See `useRemoteDesktop.ts`.
+What is engine-specific is the mechanism:
 
-What is engine-specific is the shape of the permission:
+| Engine | With `resize` |
+|---|---|
+| Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
+| Apple Standard VNC | rejects `resize`: it shares physical displays |
+| Apple High Performance VNC | applies arbitrary sizes through Apple dynamic resolution |
+| RDP | applies a requested size, and the client's reported display density |
 
-| Engine | With `resize` | Window may drive it |
-|---|---|---|
-| Generic VNC | applies a requested size, on servers accepting SetDesktopSize | yes |
-| Apple Standard VNC | refuses `resize`: it shares physical displays | — |
-| Apple High Performance VNC | applies arbitrary sizes through Apple dynamic resolution | yes |
-| RDP | applies a requested size, and the client's reported display density | yes |
-
-`hostScale` reports the density of the screen the client's window is on. RDP with
-resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting
-density travels back as the `scale` on `resize`, and clients present the
-framebuffer at `pixels / scale`. Other engines ignore the message.
+`hostDisplay` reports the screen the client's window is on — its full resolution
+and its density. Mid-session only the density is acted on, and only with
+`resize`: RDP quantizes it to 1x or 2x at a midpoint, a High Performance virtual
+display re-renders the same points at it; the resulting density travels back as
+the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
+Other engines ignore the message.
 
 A client shows the display picker exactly when the target sends it a
 `ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one for both

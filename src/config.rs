@@ -11,6 +11,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use crate::auth::{EmbeddedToken, GatewayAuth, SitePasswd};
+use crate::protocol::HostDisplay;
 
 /// RDP security negotiation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -505,35 +506,33 @@ pub struct TargetConfig {
     /// Optional domain.
     #[serde(default)]
     pub domain: Option<String>,
-    /// Initial desktop width requested from the server.
+    /// Pinned desktop width, in points. Optional, and *specified* means
+    /// something: a target with a pinned size opens at it, while one without
+    /// opens at the full resolution of the client's own screen — see
+    /// [`Self::opening_size`]. Both keys come as a pair or not at all
+    /// ([`ConfigFile::parse`]). Also the answer to
+    /// [`crate::protocol::ClientMsg::DefaultSize`], a client with no
+    /// desktop-shaped window of its own asking for whatever size this end
+    /// considers right. A generic or Standard-mode VNC server keeps its own
+    /// size at connect and is never asked.
     ///
-    /// Read by RDP at connect, where it is genuinely the size asked for, and by
-    /// both RDP and VNC as the answer to [`crate::protocol::ClientMsg::DefaultSize`]
-    /// — a client with no desktop-shaped window of its own asking for whatever
-    /// size this end considers right. A generic or Standard-mode VNC server keeps
-    /// its own size at connect and this is only ever consulted for a client that
-    /// asks. For `ard-high-performance` without [`Self::resize`], it is the
-    /// virtual display's requested mode; with it, the session opens at the
-    /// dynamic ceiling the way Apple's own client does — see
-    /// `opening_mode` in src/vnc.rs — and this size only answers `DefaultSize`.
-    ///
-    /// On an RDP target with [`Self::resize`] this is a size in *points*: the
-    /// connect happens at 1x, but a Retina client then asks for twice the pixels,
-    /// and `DefaultSize` has to keep meaning the same desktop rather than half of
-    /// one. See `Density` in src/rdp.rs.
-    #[serde(default = "default_width")]
-    pub width: u16,
-    /// Initial desktop height requested from the server. See [`Self::width`].
-    #[serde(default = "default_height")]
-    pub height: u16,
+    /// Points rather than pixels, because the density can move underneath it:
+    /// an RDP connect happens at 1x and a Retina client then asks for twice
+    /// the pixels, and `DefaultSize` has to keep meaning the same desktop
+    /// rather than half of one. See `Density` in src/rdp.rs.
+    #[serde(default)]
+    pub width: Option<u16>,
+    /// Pinned desktop height, in points. See [`Self::width`].
+    #[serde(default)]
+    pub height: Option<u16>,
     /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`. RDP only —
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Allow client-driven resize: permission for a client to set this target's
-    /// desktop size when the user asks for one. Whether the window may *also* drive
-    /// it unasked is a second question, and not this one: see
-    /// [`Self::auto_resize`].
+    /// Allow client-driven resize: permission for a client's *window* to shape
+    /// this target's desktop. How that permission is spent per engine — every
+    /// drag, or only when the user asks — is [`Self::resize_policy`], not a
+    /// second config key.
     ///
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell
@@ -541,13 +540,23 @@ pub struct TargetConfig {
     /// and a UI drawn twice as large. Off, an RDP target ignores the client's
     /// density entirely.
     ///
-    /// On `ard-high-performance`, this lets viewport reports replace the virtual
-    /// display's one-mode dynamic configuration. The setup descriptor itself
-    /// always enables the Mac's dynamic geometry; this flag remains the operator's
-    /// permission for clients to change it after connect. Standard `ard` refuses
-    /// the option because it exposes physical displays.
+    /// On `ard-high-performance` the setup descriptor always enables the Mac's
+    /// dynamic geometry; this flag decides only whether the window keeps
+    /// driving it after the open. Standard `ard` refuses the option because it
+    /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
+    /// RDP's graphics pipeline (EGFX), on by default and decoupled from
+    /// [`Self::resize`]. With both on, a resize is a Display Control monitor
+    /// layout under the pipeline — a graphics reset, no reactivation and no
+    /// reconnect — which is what makes handing the size to the window cheap
+    /// enough to do on every drag. The trade is a Windows host's text staying
+    /// soft after an EGFX resize, where the legacy path's reactivation
+    /// re-renders it sharp: set `egfx = false` to buy sharp text at the price
+    /// of a reactivation per resize (and a reconnect where sound negotiated on
+    /// the dynamic `rdpsnd` transport). RDP only; ignored for VNC targets.
+    #[serde(default = "default_egfx")]
+    pub egfx: bool,
     /// Clipboard bridge: let the browser read and write this target's
     /// clipboard, through the floating menu's Clipboard panel. Off by default —
     /// a remote desktop's clipboard often holds whatever was last copied there,
@@ -683,33 +692,28 @@ pub const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 96;
 pub const DEFAULT_AUDIO_BITRATE_MIN_KBPS: u32 = 32;
 
 impl TargetConfig {
-    /// Whether a client may let its window drive this target's size *unasked* —
-    /// the "auto resize" both clients offer — as opposed to resizing when the user
-    /// asks for it, which is [`Self::resize`] and nothing more.
-    ///
-    /// Plain `vnc`, High Performance Apple VNC and `rdp`; deliberately not a
-    /// config key, this states which engines survive a stream of resizes. The
-    /// operator has no way to know or change that. DesktopSize/ExtendedDesktopSize
-    /// renegotiation is the one resize path here that costs nothing but a new
-    /// framebuffer.
-    ///
-    /// RDP was withheld for a reactivation fault. Re-measuring against FreeRDP
-    /// found the wrapper's decoder contexts were never resized with the
-    /// framebuffer; that is fixed, so RDP grants the permission again.
-    ///
-    /// High Performance used to be withheld for a different measured fault. Its
-    /// descriptor put the requested mode in `max_width`/`max_height`, so the Mac
-    /// fixed the virtual display's dynamic ceiling at the initial 1280x800 and
-    /// declined larger viewport reports. The native fixed 3840x2160 ceiling fixes
-    /// that boundary; a live Mac then accepted both successive arbitrary sizes and
-    /// a ten-report drag burst, ending at the final size. Standard `ard` still
-    /// refuses `resize` outright because it shares physical displays.
-    pub fn auto_resize(&self) -> bool {
-        self.resize
-            && match self.protocol {
-                Protocol::Rdp => true,
-                Protocol::Vnc => self.subtype != Some(Subtype::Ard),
-            }
+    /// The size a session opens at, in points: the explicitly configured
+    /// `width`/`height` when the operator pinned one, else the full resolution
+    /// of the client's own screen (named in
+    /// [`crate::protocol::ClientMsg::Connect`]), else [`DEFAULT_SIZE`]. One
+    /// rule for every engine that can ask for an opening size, so none of them
+    /// branches on its own.
+    pub fn opening_size(&self, display: Option<HostDisplay>) -> (u16, u16) {
+        self.pinned_size()
+            .or(display.map(|d| (d.w, d.h)))
+            .unwrap_or(DEFAULT_SIZE)
+    }
+
+    /// The explicitly configured size, when the operator pinned one. Parse
+    /// guarantees the keys come as a pair.
+    pub fn pinned_size(&self) -> Option<(u16, u16)> {
+        self.width.zip(self.height)
+    }
+
+    /// What [`crate::protocol::ClientMsg::DefaultSize`] restores: the pinned
+    /// size, or the same default a sizeless session would have opened at.
+    pub fn default_size(&self) -> (u16, u16) {
+        self.pinned_size().unwrap_or(DEFAULT_SIZE)
     }
 
     /// The tile encoders to use for this target. This is the whole of the render
@@ -785,11 +789,13 @@ impl TargetConfig {
     }
 }
 
-fn default_width() -> u16 {
-    1280
-}
-fn default_height() -> u16 {
-    800
+/// What a session opens at when neither the config nor the connecting client
+/// named a size: no screen to measure, no operator to ask, one laptop-shaped
+/// answer.
+pub const DEFAULT_SIZE: (u16, u16) = (1280, 800);
+
+fn default_egfx() -> bool {
+    true
 }
 
 /// The optional `[server]` block: web-server bind and frontend location.
@@ -998,6 +1004,16 @@ impl ConfigFile {
             );
         }
         for target in &config.targets {
+            // A pinned size is a pair. One key alone is not half a pin — it is a
+            // config that would silently open at a size the operator half-chose.
+            anyhow::ensure!(
+                target.width.is_some() == target.height.is_some(),
+                "target {:?} sets {} without {} — a pinned size needs both, and leaving both \
+                 out opens the session at the client screen's own resolution",
+                target.name,
+                if target.width.is_some() { "width" } else { "height" },
+                if target.width.is_some() { "height" } else { "width" }
+            );
             // Audio is RDP's alone, and refused elsewhere rather than ignored.
             // MS-RDPEA is the one audio channel this gateway speaks; RFB has no
             // equivalent at all, so `audio = true` on a VNC target could only
@@ -1094,9 +1110,9 @@ impl ConfigFile {
                     );
                     anyhow::ensure!(
                         subtype != Subtype::ArdHighPerformance
-                            || (target.width != 0 && target.height != 0),
-                        "target {:?} is subtype {name:?} and requests a virtual display at \
-                         {}×{}, but width and height must both be greater than zero",
+                            || target.pinned_size().is_none_or(|(w, h)| w != 0 && h != 0),
+                        "target {:?} is subtype {name:?} and pins a virtual display at \
+                         {:?}×{:?}, but width and height must both be greater than zero",
                         target.name,
                         target.width,
                         target.height
@@ -1606,10 +1622,12 @@ mod tests {
         assert_eq!(t.name, "one");
         assert_eq!(t.protocol, Protocol::Rdp);
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
-        assert_eq!((t.width, t.height), (1280, 800));
+        assert_eq!(t.pinned_size(), None, "an unpinned size follows the client's screen");
+        assert_eq!(t.default_size(), DEFAULT_SIZE);
         assert_eq!(t.security, Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
+        assert!(t.egfx, "the graphics pipeline is on unless the operator trades it away");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.audio, "remote audio is opt-in");
     }
@@ -1768,7 +1786,7 @@ mod tests {
         assert_eq!(win.name, "win");
         assert_eq!(win.security, Security::Nla);
         assert_eq!(win.domain.as_deref(), Some("CORP"));
-        assert_eq!((win.width, win.height), (1920, 1080));
+        assert_eq!(win.pinned_size(), Some((1920, 1080)));
         let other = &config.targets[1];
         assert_eq!(other.name, "other");
         assert_eq!(other.protocol, Protocol::Vnc);
@@ -2843,7 +2861,7 @@ mod tests {
             .unwrap()
             .targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
-        assert_eq!((target.width, target.height), (1600, 1000));
+        assert_eq!(target.pinned_size(), Some((1600, 1000)));
         assert!(target.resize);
         assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
@@ -2858,47 +2876,27 @@ mod tests {
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 
-    /// `resize` is permission to resize when asked; letting the window drive it is
-    /// a second permission the gateway decides. Pin every current resizable engine
-    /// here so a future exclusion has to be deliberate.
+    /// The opening size resolves the same way for every engine: a pinned size
+    /// beats the client's screen, the screen beats the built-in default, and a
+    /// single width without its height is refused rather than half-obeyed.
     #[test]
-    fn every_resizable_engine_may_be_driven_by_the_window() {
-        let plain = &ConfigFile::parse(&vnc_toml("resize = true")).unwrap().targets[0];
-        assert!(plain.resize && plain.auto_resize());
+    fn the_opening_size_prefers_pinned_then_screen_then_default() {
+        let screen = HostDisplay { w: 1728, h: 1117, scale: 200 };
 
-        // High Performance's fixed native maximum keeps later arbitrary viewport
-        // sizes inside the same virtual display's dynamic bounds.
-        let hp = &ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n\
-             width = 1600\nheight = 1000\nresize = true",
-        ))
-        .unwrap()
-        .targets[0];
-        assert!(hp.resize && hp.auto_resize());
+        let pinned = &ConfigFile::parse(&vnc_toml("width = 1600\nheight = 1000")).unwrap().targets[0];
+        assert_eq!(pinned.opening_size(Some(screen)), (1600, 1000));
+        assert_eq!(pinned.default_size(), (1600, 1000));
 
-        // RDP has it back. Re-measuring the old reactivation fault found and fixed
-        // the FreeRDP wrapper's decoder-context resize.
-        let rdp = &ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
+        let free = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        assert_eq!(free.opening_size(Some(screen)), (1728, 1117));
+        assert_eq!(free.opening_size(None), DEFAULT_SIZE);
+        assert_eq!(free.default_size(), DEFAULT_SIZE);
 
-            [[targets]]
-            name = "pc"
-            protocol = "rdp"
-            host = "192.0.2.10"
-            resize = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .targets[0];
-        assert!(rdp.resize && rdp.auto_resize());
-
-        // And neither permission without the operator's, which is what keeps this
-        // from becoming "plain vnc always follows the window".
-        let off = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
-        assert!(!off.resize && !off.auto_resize());
+        let err = ConfigFile::parse(&vnc_toml("width = 1600")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("sets width without height"),
+            "{err:#}"
+        );
     }
 
     #[test]

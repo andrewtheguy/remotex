@@ -39,9 +39,6 @@ export function blankState(): NativeState {
     ready: false,
     editing: false,
     size: null,
-    canResize: false,
-    canAutoResize: false,
-    autoResize: false,
     canClipboard: false,
     canAudio: false,
     audioEnabled: false,
@@ -109,9 +106,6 @@ export function acceptState(reported: unknown): NativeState {
         size((v as { h?: unknown }).h) &&
         size((v as { scale?: unknown }).scale),
     ),
-    canResize: take("canResize", bool),
-    canAutoResize: take("canAutoResize", bool),
-    autoResize: take("autoResize", bool),
     canClipboard: take("canClipboard", bool),
     canAudio: take("canAudio", bool),
     audioEnabled: take("audioEnabled", bool),
@@ -187,48 +181,12 @@ export function canOverrideMacKeys(viewer: ViewerState): boolean {
 }
 
 /**
- * Whether the window may drive the remote's size — the gateway's second permission,
- * and plain `vnc` alone has it.
- */
-export function canAutoResize(viewer: ViewerState): boolean {
-  return (
-    isOnDesktop(viewer) && viewer.state.canResize && viewer.state.canAutoResize
-  );
-}
-
-/**
- * Greying alone would read as "this session cannot resize", which the item below it
- * disproves; so where the mode is refused but resizing is not, the item says which.
- */
-export function autoResizeLabel(viewer: ViewerState): string {
-  return isOnDesktop(viewer) &&
-    viewer.state.canResize &&
-    !viewer.state.canAutoResize
-    ? "Auto Resize (Not Applicable)"
-    : "Auto Resize";
-}
-
-/**
- * One resize now. Disabled while the window is driving the size continuously: that
- * is what the mode does every frame.
- */
-export function canResizeNow(viewer: ViewerState): boolean {
-  return (
-    isOnDesktop(viewer) && viewer.state.canResize && !viewer.state.autoResize
-  );
-}
-
-/**
  * Fit the *window* to the remote. Nothing is sent for it, so it needs no permission
- * — only a desktop with a known size, and a size that is not about to follow the
- * window back.
+ * — only a desktop with a known size. On a `resize = true` target the remote then
+ * follows the fitted window, which is exactly what fitting means there.
  */
 export function canResizeToDisplay(viewer: ViewerState): boolean {
-  return (
-    isOnDesktop(viewer) &&
-    viewer.state.size !== null &&
-    !(viewer.state.canResize && viewer.state.autoResize)
-  );
+  return isOnDesktop(viewer) && viewer.state.size !== null;
 }
 
 export function canClipboard(viewer: ViewerState): boolean {

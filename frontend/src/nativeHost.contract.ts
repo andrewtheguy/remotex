@@ -48,12 +48,8 @@ export interface NativeState {
    * instead of being forwarded to a remote that cannot see the field.
    */
   editing: boolean;
-  /** The remote framebuffer and its density, for **Resize to Display**. */
+  /** The remote framebuffer and its density, for the window-size menu math. */
   size: HostRemoteSize | null;
-  /** The two resize permissions and the client's per-session choice. */
-  canResize: boolean;
-  canAutoResize: boolean;
-  autoResize: boolean;
   canClipboard: boolean;
   canAudio: boolean;
   audioEnabled: boolean;
@@ -101,8 +97,6 @@ export type NativeCommand =
   | { type: "openSessionInfo" }
   | { type: "openDisplays" }
   | { type: "closePanel" }
-  | { type: "resizeToWindow" }
-  | { type: "setAutoResize"; enabled: boolean }
   | { type: "selectDisplay"; id: number }
   | { type: "setAudio"; enabled: boolean }
   | { type: "setMacKeyOverrides"; enabled: boolean }

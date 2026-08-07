@@ -52,6 +52,16 @@ pub fn scale_ratio(scale: u16) -> f32 {
     }
 }
 
+/// The client's screen, as [`ClientMsg::HostDisplay`] and
+/// [`ClientMsg::Connect`] name it: full resolution in points and density in
+/// hundredths (see [`SCALE_ONE`]). Pixels are `points × scale / 100`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDisplay {
+    pub w: u16,
+    pub h: u16,
+    pub scale: u16,
+}
+
 /// Wall-clock milliseconds for clipboard activity timestamps. Saturation only
 /// matters after the year 584,554,051 or if the system clock predates Unix.
 pub fn unix_time_ms() -> u64 {
@@ -190,17 +200,21 @@ pub enum ClientMsg {
     /// Restore the engine's configured or created default size. This carries no
     /// dimensions so a pinch-zoom client need not invent a desktop shape.
     DefaultSize,
-    /// The density of the screen this client's window is on, in hundredths —
-    /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
-    /// whenever the window moves to a screen of a different density.
+    /// The screen this client's window is on: its full resolution in points
+    /// (`w`/`h`, CSS pixels) and its density in hundredths — 100 for a 1x
+    /// screen, 200 for a Retina one. Sent on connect and again whenever the
+    /// window lands on a different screen; clients send it unconditionally
+    /// rather than asking what the engine is, so being ignored is not a client
+    /// error.
     ///
-    /// A request that the remote render at this density, which one engine can
-    /// answer: RDP with `resize` asks the host for twice the pixels at 200% UI
-    /// scaling. It quantizes to 1x or 2x at a midpoint and reports what it got
-    /// back through [`ServerMsg::Resize`]. RDP without `resize` and VNC ignore
-    /// it — clients send it unconditionally rather than asking what the engine
-    /// is, so being ignored is not a client error.
-    HostScale { scale: u16 },
+    /// Mid-session it is a *density* report, and only targets with `resize`
+    /// act on it — a density is a resize. RDP asks the host for twice the
+    /// pixels at 200% UI scaling, quantized at a midpoint; a High Performance
+    /// Apple virtual display re-renders the same points at the new density.
+    /// Both report what they got back through [`ServerMsg::Resize`]. The
+    /// size fields matter at session-open, where [`ClientMsg::Connect`]
+    /// carries the same shape.
+    HostDisplay(HostDisplay),
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone
@@ -229,7 +243,18 @@ pub enum ClientMsg {
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
     ///
-    Connect { target: String },
+    /// `display` is the client's screen as [`ClientMsg::HostDisplay`] would
+    /// report it, carried here so it exists *before* the engine's handshake:
+    /// a target with no configured `width`/`height` opens at this screen's
+    /// full resolution, and by the time a `hostDisplay` message could arrive
+    /// the opening size has already been asked of the remote (for a High
+    /// Performance Mac it has already shaped the window layout). Optional so
+    /// a probe with no screen can still connect.
+    Connect {
+        target: String,
+        #[serde(default)]
+        display: Option<HostDisplay>,
+    },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -837,11 +862,10 @@ pub enum ServerMsg {
     /// A live target and its client-visible capabilities. `audio` reports
     /// capability, not whether sound is arriving.
     ///
-    /// `resize` and `auto_resize` are two permissions, not one field serialized
-    /// twice: the first is whether a client may resize the remote when the user
-    /// asks, the second whether it may hand the size to its window and let every
-    /// drag report. [`crate::config::TargetConfig::auto_resize`] owns the latter
-    /// engine decision.
+    /// `resize` means the window drives the remote's size, continuously and on
+    /// every engine alike — the operator's one switch. The client carries no
+    /// mode of its own: true is auto-follow (and the mobile one-shot), false is
+    /// a session whose size was settled at open.
     Connected {
         name: String,
         protocol: &'static str,
@@ -856,7 +880,6 @@ pub enum ServerMsg {
         /// "VNC" for all three cannot tell somebody which of them they are on.
         subtype: Option<&'static str>,
         resize: bool,
-        auto_resize: bool,
         clipboard: bool,
         audio: bool,
         /// The render dial this session resolved to, as one line — see
@@ -986,10 +1009,6 @@ enum ControlMsg<'a> {
         protocol: &'a str,
         subtype: Option<&'a str>,
         resize: bool,
-        // `rename_all` on this enum renames the variants, not their fields, so
-        // every camelCase key on the wire is spelled here — see `changedAtMs`.
-        #[serde(rename = "autoResize")]
-        auto_resize: bool,
         clipboard: bool,
         audio: bool,
         render: &'a str,
@@ -1080,7 +1099,6 @@ impl ServerMsg {
                 protocol,
                 subtype,
                 resize,
-                auto_resize,
                 clipboard,
                 audio,
                 render,
@@ -1089,7 +1107,6 @@ impl ServerMsg {
                 protocol,
                 subtype: *subtype,
                 resize: *resize,
-                auto_resize: *auto_resize,
                 clipboard: *clipboard,
                 audio: *audio,
                 render,
@@ -1224,6 +1241,31 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
         ));
+        // The client's screen: the tag rides beside the struct's own fields.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"hostDisplay","w":1728,"h":1117,"scale":200}"#
+            )
+            .unwrap(),
+            ClientMsg::HostDisplay(HostDisplay { w: 1728, h: 1117, scale: 200 })
+        ));
+        // A connect names the screen it is made from, and a probe without one
+        // still connects.
+        match serde_json::from_str::<ClientMsg>(
+            r#"{"type":"connect","target":"mac","display":{"w":2560,"h":1440,"scale":100}}"#,
+        )
+        .unwrap()
+        {
+            ClientMsg::Connect { target, display } => {
+                assert_eq!(target, "mac");
+                assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100 }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"connect","target":"mac"}"#).unwrap(),
+            ClientMsg::Connect { display: None, .. }
+        ));
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
                 r#"{"type":"paintAck","sequence":41,"queuedMs":7,"drawMs":13}"#
@@ -1346,7 +1388,6 @@ mod tests {
             protocol: "vnc",
             subtype: Some("ard"),
             resize: false,
-            auto_resize: false,
             clipboard: true,
             audio: false,
             render: "tiles · lossless png".to_owned(),
@@ -1355,7 +1396,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"autoResize":false,"clipboard":true,"audio":false,"render":"tiles · lossless png"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"render":"tiles · lossless png"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1365,8 +1406,7 @@ mod tests {
             name: "desk".to_owned(),
             protocol: "rdp",
             subtype: None,
-            resize: false,
-            auto_resize: false,
+            resize: true,
             clipboard: false,
             audio: false,
             render: "video q60".to_owned(),

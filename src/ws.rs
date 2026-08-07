@@ -760,8 +760,8 @@ async fn session(
                 // Session-control messages act on the slot, not an engine: pick a
                 // target from the picker, or tear the session down and go back to
                 // it ("switch target").
-                Ok(ClientMsg::Connect { target }) => {
-                    if let Err(e) = sessions.connect(attach_id, &target) {
+                Ok(ClientMsg::Connect { target, display }) => {
+                    if let Err(e) = sessions.connect(attach_id, &target, display) {
                         warn!("ws: connect to {target:?} refused: {e}");
                     }
                 }
@@ -1121,9 +1121,10 @@ mod tests {
             password: String::new(),
             vnc_password: String::new(),
             domain: None,
-            width: 1,
-            height: 1,
+            width: Some(1),
+            height: Some(1),
             security: Security::Auto,
+            egfx: true,
             resize: false,
             clipboard: false,
             audio,
@@ -1298,7 +1299,7 @@ mod tests {
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
         ));
-        sessions.connect(att.id, "fake").unwrap();
+        sessions.connect(att.id, "fake", None).unwrap();
         let (input_rx, _frame_tx, bridge) = engine_rx.recv().await.unwrap();
         let bridge = bridge.expect("an audio target's engine is given a bridge");
 
