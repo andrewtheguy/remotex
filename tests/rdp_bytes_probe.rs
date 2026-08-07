@@ -77,7 +77,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             width: Some(1280),
             height: Some(800),
             security: Security::Auto,
-            egfx: true,
+            egfx: None,
             resize: false,
             clipboard: false,
             audio: false,

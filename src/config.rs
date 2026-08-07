@@ -554,9 +554,12 @@ pub struct TargetConfig {
     /// soft after an EGFX resize, where the legacy path's reactivation
     /// re-renders it sharp: set `egfx = false` to buy sharp text at the price
     /// of a reactivation per resize (and a reconnect where sound negotiated on
-    /// the dynamic `rdpsnd` transport). RDP only; ignored for VNC targets.
-    #[serde(default = "default_egfx")]
-    pub egfx: bool,
+    /// the dynamic `rdpsnd` transport). `Option` rather than a bare default so
+    /// that setting it on a VNC target, which has no graphics pipeline to
+    /// switch, is refused at parse time instead of accepted and left inert;
+    /// `None` reads as on ([`TargetConfig::egfx`]).
+    #[serde(default)]
+    pub egfx: Option<bool>,
     /// Clipboard bridge: let the browser read and write this target's
     /// clipboard, through the floating menu's Clipboard panel. Off by default —
     /// a remote desktop's clipboard often holds whatever was last copied there,
@@ -716,6 +719,11 @@ impl TargetConfig {
         self.pinned_size().unwrap_or(DEFAULT_SIZE)
     }
 
+    /// RDP's graphics pipeline switch, on unless the operator traded it away.
+    pub fn egfx(&self) -> bool {
+        self.egfx.unwrap_or(true)
+    }
+
     /// The tile encoders to use for this target. This is the whole of the render
     /// dial as the engines see it: the axes and the qualities collapse to one
     /// [`RenderPlan`], so `rdp::run` / `vnc::run` need not know the config enums.
@@ -793,10 +801,6 @@ impl TargetConfig {
 /// named a size: no screen to measure, no operator to ask, one laptop-shaped
 /// answer.
 pub const DEFAULT_SIZE: (u16, u16) = (1280, 800);
-
-fn default_egfx() -> bool {
-    true
-}
 
 /// The optional `[server]` block: web-server bind and frontend location.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1024,6 +1028,16 @@ impl ConfigFile {
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about
             // the *engine* and not about any of them.
+            // The graphics pipeline is RDP's alone, the same way: EGFX is an RDP
+            // channel, so on a VNC target the key could only be a belief about
+            // the wrong protocol, and either value would be silently inert.
+            anyhow::ensure!(
+                target.egfx.is_none() || target.protocol == Protocol::Rdp,
+                "target {:?} sets egfx on a {} target, and only rdp has a graphics pipeline \
+                 to switch. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
             anyhow::ensure!(
                 !target.audio || target.protocol == Protocol::Rdp,
                 "target {:?} sets audio on a {} target, and only rdp carries it: MS-RDPEA is \
@@ -1627,7 +1641,7 @@ mod tests {
         assert_eq!(t.security, Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
-        assert!(t.egfx, "the graphics pipeline is on unless the operator trades it away");
+        assert!(t.egfx(), "the graphics pipeline is on unless the operator trades it away");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.audio, "remote audio is opt-in");
     }
@@ -2971,6 +2985,31 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].clipboard);
+    }
+
+    /// EGFX is RDP's, and refused on VNC by name — either value, since a key
+    /// that could not do anything is a config error, not a preference.
+    #[test]
+    fn egfx_belongs_to_rdp_and_is_refused_on_vnc() {
+        for value in ["true", "false"] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "nope"
+                protocol = "vnc"
+                host = "10.0.0.5"
+                egfx = {value}
+                "#,
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("egfx"), "{rendered}");
+            assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
+        }
     }
 
     /// Audio is RDP's, and refused on VNC by name.

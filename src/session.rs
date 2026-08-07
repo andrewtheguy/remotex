@@ -1077,7 +1077,7 @@ mod tests {
             width: Some(1),
             height: Some(1),
             security: Security::Auto,
-            egfx: true,
+            egfx: None,
             resize: meta.resize,
             clipboard: meta.clipboard,
             audio: meta.audio,
@@ -1244,6 +1244,32 @@ mod tests {
             mgr.connect(att.id, "other", None),
             Err(ConnectError::AlreadyConnected)
         ));
+    }
+
+    /// The client screen named on connect reaches the engine spawn intact:
+    /// [`TargetConfig::opening_size`] reads it before any handshake, so a
+    /// screen dropped on this path would open every unpinned session at the
+    /// built-in default with nothing anywhere saying why.
+    #[tokio::test]
+    async fn connect_hands_the_spawner_the_clients_screen() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner =
+            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _feedback| {
+                hook_tx.send(display).unwrap();
+            });
+        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+
+        let screen = HostDisplay { w: 1512, h: 982, scale: 200 };
+        mgr.connect(att.id, "fake", Some(screen)).unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        assert_eq!(
+            hook_rx.try_recv().expect("connect spawns the engine"),
+            Some(screen),
+            "the engine must be handed the screen the connect named"
+        );
     }
 
     #[tokio::test]

@@ -38,7 +38,7 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    self, ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, HostDisplay,
+    self, ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, DisplayInfo, HostDisplay,
     MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
     clipboard_fits,
 };
@@ -529,7 +529,7 @@ async fn session(
             default_size: config.default_size(),
             apple,
             high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
-            host_density: display.map_or(1.0, |d| crate::protocol::scale_ratio(d.scale)),
+            host_density: display.map_or(UNSCALED, |d| crate::protocol::scale_ratio(d.scale)),
             poll,
         },
         input_rx,
@@ -902,7 +902,7 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
 fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_apple::VirtualMode {
     vnc_apple::virtual_display_mode(
         config.opening_size(display),
-        display.map_or(1.0, |d| crate::protocol::scale_ratio(d.scale)),
+        display.map_or(UNSCALED, |d| crate::protocol::scale_ratio(d.scale)),
     )
 }
 
@@ -1414,7 +1414,7 @@ async fn request_resize(
             if high_performance { "Apple virtual-display" } else { "desktop" },
             want.0,
             want.1,
-            if high_performance { d.host_density } else { 1.0 },
+            if high_performance { d.host_density } else { UNSCALED },
         );
         msg
     };
@@ -2428,8 +2428,14 @@ async fn read_cursor<R: AsyncRead + Unpin>(
             let mut mask = vec![0u8; mask_len];
             reader.read_exact(&mut mask).await?;
             // Framebuffer pixels, per the pseudo-encoding's own convention.
-            let shape =
-                CursorShape::from_rgba(w, h, hx, hy, false, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
+            let shape = CursorShape::from_rgba(
+                w,
+                h,
+                hx,
+                hy,
+                CursorUnit::Pixels,
+                &masked_bgrx_to_rgba(&pixels, &mask, w),
+            )?;
             debug!("vnc: cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
             (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
         }

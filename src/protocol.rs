@@ -703,6 +703,17 @@ pub struct CursorShape {
     pub png: Vec<u8>,
 }
 
+/// The unit a cursor image is measured in, named by the engine that read the
+/// shape off its own wire. It resolves to [`CursorShape::point_sized`], which
+/// says what each unit means for drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorUnit {
+    /// Desktop points: Apple's density-independent cursor pixmaps.
+    Points,
+    /// Framebuffer pixels: cursors cut from the desktop's own pixels.
+    Pixels,
+}
+
 impl CursorShape {
     /// Build from packed RGBA8888 pixels.
     pub fn from_rgba(
@@ -710,7 +721,7 @@ impl CursorShape {
         h: u16,
         hx: u16,
         hy: u16,
-        point_sized: bool,
+        unit: CursorUnit,
         rgba: &[u8],
     ) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 4;
@@ -720,7 +731,7 @@ impl CursorShape {
             rgba.len()
         );
         let png = encode_png(w, h, png::ColorType::Rgba, rgba)?;
-        Ok(Self { w, h, hx, hy, point_sized, png })
+        Ok(Self { w, h, hx, hy, point_sized: unit == CursorUnit::Points, png })
     }
 }
 
@@ -1595,7 +1606,7 @@ mod tests {
     // null image for "the remote hid the pointer".
     #[test]
     fn cursor_control_message_carries_a_base64_png_or_null() {
-        let shape = CursorShape::from_rgba(1, 1, 3, 4, true, &[255, 0, 0, 255]).unwrap();
+        let shape = CursorShape::from_rgba(1, 1, 3, 4, CursorUnit::Points, &[255, 0, 0, 255]).unwrap();
         let expected = base64::engine::general_purpose::STANDARD.encode(&shape.png);
         match (ServerMsg::Cursor(Some(shape))).text_frame() {
             Some(json) => assert_eq!(
@@ -1617,7 +1628,7 @@ mod tests {
 
     #[test]
     fn cursor_with_wrong_payload_length_is_rejected() {
-        assert!(CursorShape::from_rgba(2, 2, 0, 0, false, &[0u8; 12]).is_err());
+        assert!(CursorShape::from_rgba(2, 2, 0, 0, CursorUnit::Pixels, &[0u8; 12]).is_err());
     }
 
     // A tile has no standalone frame any more, only a record inside a batch. The

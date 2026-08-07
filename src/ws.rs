@@ -1124,7 +1124,7 @@ mod tests {
             width: Some(1),
             height: Some(1),
             security: Security::Auto,
-            egfx: true,
+            egfx: None,
             resize: false,
             clipboard: false,
             audio,

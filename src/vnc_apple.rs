@@ -57,7 +57,7 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
-use crate::protocol::{CursorShape, DisplayInfo, MAX_CURSOR_DIM};
+use crate::protocol::{CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM};
 use crate::vnc::ENCODING_ZLIB;
 use crate::vnc_encodings::inflate_independent;
 
@@ -711,7 +711,7 @@ impl CursorCache {
         }
         // Point-sized: the Mac ships the same pixmap whatever density the display
         // renders at, and re-selects it from this cache across density changes.
-        let shape = CursorShape::from_rgba(w, h, hx, hy, true, &rgba)?;
+        let shape = CursorShape::from_rgba(w, h, hx, hy, CursorUnit::Points, &rgba)?;
         debug!("vnc: cursor {w}x{h} stored as {id}, {} bytes", shape.png.len());
         self.shapes.insert(id, shape.clone());
         Ok(Cursor::Shape(shape))

@@ -49,8 +49,8 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, HostDisplay, MAX_CURSOR_DIM, MouseButton,
-    ServerMsg, UNSCALED,
+    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay, MAX_CURSOR_DIM,
+    MouseButton, ServerMsg, UNSCALED,
 };
 use crate::rdp_audio;
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
@@ -389,7 +389,7 @@ fn connect_config(
         clipboard: config.clipboard,
         audio: rdp_audio::connect(audio),
         resize: config.resize,
-        egfx: config.egfx,
+        egfx: config.egfx(),
         connect_timeout: engine::TCP_CONNECT_TIMEOUT,
         keepalive: engine::keepalive(),
     }
@@ -622,7 +622,7 @@ fn shape_of(image: &freerdp::CursorImage) -> Option<CursorShape> {
     let (hx, hy) = (narrow(image.hotspot_x), narrow(image.hotspot_y));
     // Cut from the desktop's own pixels: at a matched 2x density Windows sends
     // density-sized pointer bitmaps, so the framebuffer unit is already right.
-    match CursorShape::from_rgba(w, h, hx, hy, false, &image.rgba) {
+    match CursorShape::from_rgba(w, h, hx, hy, CursorUnit::Pixels, &image.rgba) {
         Ok(shape) => Some(shape),
         Err(e) => {
             warn!("rdp: ignoring a {w}x{h} pointer: {e}");
