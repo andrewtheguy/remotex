@@ -79,8 +79,15 @@ The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
 ```
 
 The `0x1c`-byte mode is `u32 width`, `u32 height`, `u32 scaled_width`, `u32
-scaled_height`, `f64 refresh_rate_hz = 60`, and `u32 flags = 0`. Width equals
-scaled width; height equals scaled height. `display_flags` bit 0 enables dynamic
+scaled_height`, `f64 refresh_rate_hz = 60`, and `u32 flags = 0`. `width`/`height`
+are the render (backing) resolution and the scaled pair the logical one: a HiDPI
+mode with `width = 2 × scaled_width` is honored — the measured 26.6 host created a
+2x virtual display for a 1728×902-point mode (3456×1804 backing) and dropped back
+to 1x when a later mode sent the pairs equal, matching what native Screen Sharing
+requests from a Retina client. The answering layout reports the granted density in
+its display record and under the combined `0xffffffff` `current_display` sentinel,
+so a single-display layout's density is that display's, not the mixed-mosaic "no
+single scale". `display_flags` bit 0 enables dynamic
 geometry. Each viewport change resends the full descriptor with a replacement
 mode, but the maximum fields stay at the native fixed 3840×2160 backing ceiling.
 They are bounds on the virtual display, not another copy of the current mode:
