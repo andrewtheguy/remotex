@@ -482,6 +482,15 @@ export function createVideoStream(
     // smaller by up to a pixel in each axis and is not what a decoder should be told.
     codec: format.decode,
     optimizeForLatency: true,
+    // The decoder that goes quiet is the hardware one. The signature of every stall —
+    // silence where a decode error belongs, then a failed end-of-stream flush (see
+    // `stalled`) — is how a GPU-process decoder fails, and only how a GPU-process
+    // decoder fails: software libvpx answers every chunk on the calling thread, error
+    // and all. These streams are also the shape hardware decode is worst at — several
+    // small short-lived regions, built and torn down as motion comes and goes — and
+    // the shape software eats: VP9 under ~2 megapixels at 30 Hz. A hint, by
+    // specification: a browser with nothing to prefer decodes as it was going to.
+    hardwareAcceleration: "prefer-software",
   });
 
   return {
