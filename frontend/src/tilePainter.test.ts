@@ -140,6 +140,8 @@ let blitted: {
 let decoded: FakeBitmap[] = [];
 let resets = 0;
 let videoErrors: (string | null)[] = [];
+/** Streams whose decoder went quiet — none here; the stub always answers. */
+let videoStalls: string[] = [];
 /** Payload first bytes the stubbed decoder refuses. */
 let undecodable = new Set<number>();
 /** Dimensions the stub reports, so a test can spend the decoded byte budget. */
@@ -249,6 +251,7 @@ beforeEach(() => {
   decoded = [];
   resets = 0;
   videoErrors = [];
+  videoStalls = [];
   videoClosed = false;
   chunkTypes = [];
   decoders = 0;
@@ -314,6 +317,9 @@ function painter(ctx: CanvasRenderingContext2D | null = context) {
     },
     onVideoError: (error) => {
       videoErrors.push(error);
+    },
+    onVideoStall: (reason) => {
+      videoStalls.push(reason);
     },
   });
 }
@@ -910,6 +916,11 @@ test("one region's decoder giving up does not take the others down", async () =>
     closes,
     0,
     "a working decoder was closed because another failed",
+  );
+  assert.deepEqual(
+    videoStalls,
+    [],
+    "a decoder that said it failed is an error, not a silence to wait out",
   );
 
   // The surviving region keeps decoding on the decoder it already had.

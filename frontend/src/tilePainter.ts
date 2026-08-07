@@ -138,6 +138,12 @@ export function createTilePainter(options: {
    * desktop that never paints and never explains itself.
    */
   onVideoError: (reason: string | null) => void;
+  /**
+   * A stream's decoder went quiet and was reset, so that region needs a keyframe
+   * only the gateway can send. Separate from `onVideoError` because nothing here is
+   * wrong for a person to read about: the recovery is a repaint, and it is automatic.
+   */
+  onVideoStall: (reason: string) => void;
 }): TilePainter {
   const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
@@ -352,6 +358,7 @@ export function createTilePainter(options: {
       // sends a keyframe, which a repaint, a resize or a region restarting does.
       video = createVideoStreams({
         onError: (reason) => options.onVideoError(reason),
+        onStalled: (reason) => options.onVideoStall(reason),
       });
     } catch (e) {
       videoUnusable = true;

@@ -22,8 +22,18 @@
 // pending entry that its output resolves, and `decode` hands back the promise.
 //
 // Every pending entry must be settled on *every* path, including error and close.
-// One that is never settled hangs `useRemoteDesktop`'s per-connection promise chain
-// forever, which stops the whole session — not just the picture.
+// One that is never settled hangs the paint worker's one command chain forever, which
+// stops the whole session — not just the picture, and not just this attachment: the
+// `clear` and the `resize` a target switch posts sit in that same chain behind it, so
+// the next target comes up connected and waiting for a desktop that cannot arrive.
+//
+// **The pairing is a decoder's courtesy, not its contract.** WebCodecs nowhere promises
+// one output per `decode()`, and a decoder that quietly produces nothing for a chunk —
+// a frame whose references it does not have is the ordinary way — settles nothing and
+// says nothing. One such chunk is enough on its own: the worker draws one batch at a
+// time and a batch carries at most one unit per stream, so there is never a later frame
+// to shake the FIFO loose. Hence the backstop below, which is what makes the promise
+// this file hands out a promise rather than a hope.
 
 /**
  * How to decode one stream, from the gateway's `videoFormat` message.
@@ -104,7 +114,10 @@ export interface VideoStreams {
  * id, because most targets send none at all and a target on the region dial may never
  * use more than one.
  */
-export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
+export function createVideoStreams(
+  handlers: VideoHandlers,
+  stallMs: number = STALL_MS,
+): VideoStreams {
   const unavailable = videoUnavailable();
   if (unavailable) {
     throw new Error(unavailable);
@@ -174,7 +187,17 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
     };
     let stream: VideoStream;
     try {
-      stream = createVideoStream(format, { onError: failed });
+      stream = createVideoStream(
+        format,
+        {
+          onError: failed,
+          // Named, because the one thing worth knowing about a stall is which region
+          // it was: under `render_motion_subtype = "stream"` there are several of
+          // these and they stop for their own reasons.
+          onStalled: (reason) => handlers.onStalled(`stream ${id}: ${reason}`),
+        },
+        stallMs,
+      );
     } catch (e) {
       // Unreachable once the table exists — it refused to be built without a decoder —
       // but a throw from here would escape into the paint loop and drop a whole batch of
@@ -249,6 +272,15 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
 // `VIDEO_FRAME_INTERVAL` in src/encode.rs actually paces rounds at.
 const VIDEO_FRAME_US = 33_333;
 
+// How long a decoder may owe a frame before the stream is treated as stalled.
+//
+// Generous on purpose, because this is a liveness backstop and not a deadline: a
+// decoder holds at most one access unit per stream at a time — the worker draws one
+// batch at a time, and a batch carries at most one unit per stream — so this is sixty
+// frames' grace at the 30 Hz `VIDEO_FRAME_INTERVAL` in src/encode.rs paces rounds at.
+// A decode that has not landed by now is not slow, it is not coming.
+const STALL_MS = 2_000;
+
 export interface VideoHandlers {
   /**
    * A decoder gave up, and the stream it was decoding is over: every frame after
@@ -262,6 +294,18 @@ export interface VideoHandlers {
    * decide how loudly to say it.
    */
   onError: (reason: string) => void;
+  /**
+   * A decoder owed a frame and never produced one, so the units it was holding were
+   * abandoned and it was reset.
+   *
+   * Not an error and not shown to anyone: nothing is broken that a keyframe does not
+   * fix, and the decoder is ready for one. But only the gateway can send it — this
+   * stream is a chain and the client has just cut it — so this has to reach something
+   * that can ask. Left unasked under `render_type = "video"` it would be a desktop
+   * that never paints again, since that dial's one stream is never restarted by a
+   * region coming and going.
+   */
+  onStalled: (reason: string) => void;
 }
 
 export interface VideoStream {
@@ -295,6 +339,7 @@ interface Pending {
 export function createVideoStream(
   format: VideoFormat,
   handlers: VideoHandlers,
+  stallMs: number = STALL_MS,
 ): VideoStream {
   const unavailable = videoUnavailable();
   if (unavailable) {
@@ -302,9 +347,34 @@ export function createVideoStream(
   }
   // FIFO, and that is the whole ordering argument: the encoder produces no frames
   // out of order — no alt-ref frames a decoder would reorder — so
-  // the nth output belongs to the nth pending entry.
+  // the nth output belongs to the nth pending entry. What it is *not* is a guarantee
+  // that an nth output happens at all; see `stalled`.
   const pending: Pending[] = [];
   let closed = false;
+  // Set when a stall reset the decoder. It has no history left, so every frame until
+  // the keyframe that was asked for is expressed against pictures it does not have:
+  // they are dropped here rather than handed over to raise one error each.
+  let keyNeeded = false;
+  // Armed whenever the decoder owes a frame, which is the only state a stall can be
+  // seen from — a decoder that has stopped producing raises no event to notice.
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+
+  const disarm = () => {
+    if (watchdog !== undefined) {
+      clearTimeout(watchdog);
+      watchdog = undefined;
+    }
+  };
+
+  // The clock runs from the last thing that happened rather than from the oldest
+  // unsettled unit: what is being asked is "has this decoder gone quiet", and an
+  // output means it has not.
+  const rearm = () => {
+    disarm();
+    if (!closed && pending.length > 0) {
+      watchdog = setTimeout(stalled, stallMs);
+    }
+  };
 
   const settle = (frame: VideoFrame | null) => {
     const next = pending.shift();
@@ -315,6 +385,7 @@ export function createVideoStream(
       // decoder memory until it is closed.
       frame?.close();
     }
+    rearm();
   };
 
   const drain = () => {
@@ -323,12 +394,38 @@ export function createVideoStream(
     }
   };
 
+  // The decoder owes frames it is not going to produce. Everything it owes is settled
+  // to null — one unpainted region for as long as it takes a keyframe to arrive, where
+  // leaving them pending is the whole session, permanently.
+  //
+  // `reset()` is what makes abandoning them safe rather than merely quick: it
+  // guarantees no output from before it, so a frame that arrives late cannot resolve a
+  // *later* unit's promise and slide every frame after it one place out of position.
+  // Unlike `configure()` it keeps the configuration, and unlike `flush()` it cannot
+  // itself be the thing that never completes.
+  const stalled = () => {
+    watchdog = undefined;
+    if (closed || pending.length === 0) {
+      return;
+    }
+    const owed = pending.length;
+    keyNeeded = true;
+    drain();
+    if (decoder.state === "configured") {
+      decoder.reset();
+    }
+    handlers.onStalled(
+      `the decoder produced nothing for ${owed} access unit(s) in ${stallMs} ms`,
+    );
+  };
+
   const decoder = new VideoDecoder({
     output: (frame) => settle(frame),
     error: (e) => {
       // Terminal: a decoder that has errored decodes nothing further, and every
       // frame after this one depends on frames it did not produce.
       closed = true;
+      disarm();
       drain();
       handlers.onError(
         e instanceof Error && e.name === "NotSupportedError"
@@ -349,9 +446,14 @@ export function createVideoStream(
       if (closed || decoder.state !== "configured") {
         return Promise.resolve(null);
       }
+      if (keyNeeded && !keyframe) {
+        return Promise.resolve(null);
+      }
+      keyNeeded = false;
       const frame = new Promise<VideoFrame | null>((resolve) => {
         pending.push({ resolve });
       });
+      rearm();
       try {
         decoder.decode(
           new EncodedVideoChunk({
@@ -369,6 +471,7 @@ export function createVideoStream(
     },
     close() {
       closed = true;
+      disarm();
       drain();
       if (decoder.state !== "closed") {
         decoder.close();

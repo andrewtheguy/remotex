@@ -24,6 +24,12 @@ export interface PainterHandlers {
   onCacheReset: () => void;
   /** Why a video target shows nothing, or null once it shows something. */
   onVideoError: (reason: string | null) => void;
+  /**
+   * A stream's decoder was reset out of a stall. The region it was carrying is
+   * frozen until a keyframe arrives, and asking for one is the page's job because
+   * only it holds the socket.
+   */
+  onVideoStall: (reason: string) => void;
   /** One ordered screen batch finished in the worker. */
   onPainted: (
     sequence: number,
@@ -89,6 +95,8 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
       handlers?.onCacheReset();
     } else if (event.type === "videoError") {
       handlers?.onVideoError(event.reason);
+    } else if (event.type === "videoStall") {
+      handlers?.onVideoStall(event.reason);
     } else if (event.type === "resized") {
       handlers?.onResized(event.seq);
     } else {
