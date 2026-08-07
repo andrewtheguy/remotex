@@ -263,9 +263,14 @@ function paintCursor(
   // The desktop's on-screen scale, framebuffer pixels to CSS pixels: both
   // pointers are sized through it. 1:1 until the first resize names a size.
   const view = rect && size && size.w > 0 ? rect.width / size.w : 1;
+  // What one cursor-image pixel covers on screen. A point-sized image (Apple's
+  // density-independent pixmaps) follows the desktop's points, so it keeps its
+  // size when the framebuffer goes Retina; a framebuffer-pixel image follows
+  // the pixels it was cut from.
+  const imageView = image?.pointSized ? view * (size?.scale ?? 1) : view;
   if (els.overlay) {
     if (image) {
-      applyCursorCss(els.overlay, image, view);
+      applyCursorCss(els.overlay, image, imageView);
     } else {
       els.overlay.style.cursor = "none";
     }
@@ -286,7 +291,8 @@ function paintCursor(
   // a 2x shape to 1:1 drew a pointer several times the size of everything
   // around it on a phone.
   const extent = Math.max(image.w, image.h);
-  const draw = extent > 0 ? Math.max(view, MIN_POINTER_CSS_PX / extent) : view;
+  const draw =
+    extent > 0 ? Math.max(imageView, MIN_POINTER_CSS_PX / extent) : imageView;
   if (pointer.src !== image.url) {
     pointer.src = image.url;
   }
@@ -1386,6 +1392,7 @@ export function useRemoteDesktop(
                   hy: msg.hy,
                   w: msg.w,
                   h: msg.h,
+                  pointSized: msg.pointSized,
                 }
               : null,
           };

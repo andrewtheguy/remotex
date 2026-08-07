@@ -661,6 +661,16 @@ pub struct CursorShape {
     /// Hotspot within the image, in cursor pixels.
     pub hx: u16,
     pub hy: u16,
+    /// Whether the image is sized in desktop *points* rather than framebuffer
+    /// pixels — the unit decides how large the browser draws it. RDP and RFB
+    /// cursors are cut from the desktop's own pixels, so they scale with the
+    /// framebuffer. Apple's cursor pixmaps are density-independent point-sized
+    /// assets: the measured Mac ships the same 28x40 arrow whatever the display
+    /// renders at, and re-selects it from cache across density changes, so the
+    /// client must size it against the desktop's points at draw time — dividing
+    /// it by the scale like a pixel cursor is what drew it at half size on a 2x
+    /// virtual display.
+    pub point_sized: bool,
     /// PNG-encoded RGBA image (the alpha channel carries the cursor mask).
     ///
     /// PNG rather than the tile codec because [`CursorShape::png`] rides the JSON
@@ -670,7 +680,14 @@ pub struct CursorShape {
 
 impl CursorShape {
     /// Build from packed RGBA8888 pixels.
-    pub fn from_rgba(w: u16, h: u16, hx: u16, hy: u16, rgba: &[u8]) -> anyhow::Result<Self> {
+    pub fn from_rgba(
+        w: u16,
+        h: u16,
+        hx: u16,
+        hy: u16,
+        point_sized: bool,
+        rgba: &[u8],
+    ) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 4;
         anyhow::ensure!(
             rgba.len() == expected,
@@ -678,7 +695,7 @@ impl CursorShape {
             rgba.len()
         );
         let png = encode_png(w, h, png::ColorType::Rgba, rgba)?;
-        Ok(Self { w, h, hx, hy, png })
+        Ok(Self { w, h, hx, hy, point_sized, png })
     }
 }
 
@@ -959,6 +976,8 @@ enum ControlMsg<'a> {
         h: u16,
         hx: u16,
         hy: u16,
+        #[serde(rename = "pointSized")]
+        point_sized: bool,
     },
     Error { message: &'a str },
     Picker,
@@ -1043,6 +1062,7 @@ impl ServerMsg {
                     h: c.h,
                     hx: c.hx,
                     hy: c.hy,
+                    point_sized: c.point_sized,
                 },
                 None => ControlMsg::Cursor {
                     image: None,
@@ -1050,6 +1070,7 @@ impl ServerMsg {
                     h: 0,
                     hx: 0,
                     hy: 0,
+                    point_sized: false,
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
@@ -1534,19 +1555,21 @@ mod tests {
     // null image for "the remote hid the pointer".
     #[test]
     fn cursor_control_message_carries_a_base64_png_or_null() {
-        let shape = CursorShape::from_rgba(1, 1, 3, 4, &[255, 0, 0, 255]).unwrap();
+        let shape = CursorShape::from_rgba(1, 1, 3, 4, true, &[255, 0, 0, 255]).unwrap();
         let expected = base64::engine::general_purpose::STANDARD.encode(&shape.png);
         match (ServerMsg::Cursor(Some(shape))).text_frame() {
             Some(json) => assert_eq!(
                 json,
-                format!(r#"{{"type":"cursor","image":"{expected}","w":1,"h":1,"hx":3,"hy":4}}"#)
+                format!(
+                    r#"{{"type":"cursor","image":"{expected}","w":1,"h":1,"hx":3,"hy":4,"pointSized":true}}"#
+                )
             ),
             None => panic!("cursor must be a text frame"),
         }
         match (ServerMsg::Cursor(None)).text_frame() {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"cursor","image":null,"w":0,"h":0,"hx":0,"hy":0}"#
+                r#"{"type":"cursor","image":null,"w":0,"h":0,"hx":0,"hy":0,"pointSized":false}"#
             ),
             None => panic!("cursor must be a text frame"),
         }
@@ -1554,7 +1577,7 @@ mod tests {
 
     #[test]
     fn cursor_with_wrong_payload_length_is_rejected() {
-        assert!(CursorShape::from_rgba(2, 2, 0, 0, &[0u8; 12]).is_err());
+        assert!(CursorShape::from_rgba(2, 2, 0, 0, false, &[0u8; 12]).is_err());
     }
 
     // A tile has no standalone frame any more, only a record inside a batch. The

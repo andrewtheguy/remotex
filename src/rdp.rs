@@ -608,7 +608,9 @@ fn shape_of(image: &freerdp::CursorImage) -> Option<CursorShape> {
         return None;
     }
     let (hx, hy) = (narrow(image.hotspot_x), narrow(image.hotspot_y));
-    match CursorShape::from_rgba(w, h, hx, hy, &image.rgba) {
+    // Cut from the desktop's own pixels: at a matched 2x density Windows sends
+    // density-sized pointer bitmaps, so the framebuffer unit is already right.
+    match CursorShape::from_rgba(w, h, hx, hy, false, &image.rgba) {
         Ok(shape) => Some(shape),
         Err(e) => {
             warn!("rdp: ignoring a {w}x{h} pointer: {e}");

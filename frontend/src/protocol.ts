@@ -138,7 +138,10 @@ export type ControlMsg =
   // cursor over instead of drawing it into the framebuffer (the VNC Cursor
   // pseudo-encoding). Receiving one at all means the browser owns pointer
   // rendering from then on; `image` is a base64 PNG, null when the remote hid
-  // the pointer. `hx`/`hy` are the hotspot within the image.
+  // the pointer. `hx`/`hy` are the hotspot within the image. `pointSized`
+  // names the image's unit: true for Apple's density-independent point-sized
+  // pixmaps, which are drawn against the desktop's points; false for RDP/RFB
+  // cursors cut from the desktop's own pixels, drawn against the framebuffer.
   | {
       type: "cursor";
       image: string | null;
@@ -146,6 +149,7 @@ export type ControlMsg =
       h: number;
       hx: number;
       hy: number;
+      pointSized: boolean;
     }
   | { type: "error"; message: string }
   | { type: "picker" }

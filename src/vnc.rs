@@ -2398,8 +2398,9 @@ async fn read_cursor<R: AsyncRead + Unpin>(
             reader.read_exact(&mut pixels).await?;
             let mut mask = vec![0u8; mask_len];
             reader.read_exact(&mut mask).await?;
+            // Framebuffer pixels, per the pseudo-encoding's own convention.
             let shape =
-                CursorShape::from_rgba(w, h, hx, hy, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
+                CursorShape::from_rgba(w, h, hx, hy, false, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
             debug!("vnc: cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
             (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
         }

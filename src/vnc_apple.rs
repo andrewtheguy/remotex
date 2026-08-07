@@ -709,7 +709,9 @@ impl CursorCache {
         for (px, &a) in bgrx.chunks_exact(4).zip(alpha) {
             rgba.extend_from_slice(&[px[2], px[1], px[0], a]);
         }
-        let shape = CursorShape::from_rgba(w, h, hx, hy, &rgba)?;
+        // Point-sized: the Mac ships the same pixmap whatever density the display
+        // renders at, and re-selects it from this cache across density changes.
+        let shape = CursorShape::from_rgba(w, h, hx, hy, true, &rgba)?;
         debug!("vnc: cursor {w}x{h} stored as {id}, {} bytes", shape.png.len());
         self.shapes.insert(id, shape.clone());
         Ok(Cursor::Shape(shape))
