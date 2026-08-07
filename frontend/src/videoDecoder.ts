@@ -459,10 +459,14 @@ export function createVideoStream(
       disarm();
       drain();
       const refused = e instanceof Error && e.name === "NotSupportedError";
+      // The exception's name and message travel with the sentence. The decoder that
+      // knew what went wrong is gone by the time anyone reads it, and which name it
+      // was is the whole diagnosis: `EncodingError` indicts the bytes the gateway
+      // sent, where a platform name indicts the decoder they were fed to.
       handlers.onError(
         refused
           ? `This browser cannot decode the video this target sends (${format.decode}).`
-          : "This browser's video decoder failed.",
+          : `This browser's video decoder failed (${e.name}: ${e.message}).`,
         !refused,
       );
     },
