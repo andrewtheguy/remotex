@@ -100,9 +100,11 @@ The launch screen and the configuration editor are served from the same origin a
 
 Order matters, and most of it is not obvious:
 
-1. Read `--instance-dir` out of argv, or take Electron's default `userData` —
-   which already *is* `~/Library/Application Support/<CFBundleName>`. Read the
-   default **before** overriding it.
+1. Read `--instance-dir` out of argv; failing that, `RemotexInstanceDir` out of
+   the bundle's own `Info.plist` (how an instance app names its directory, since
+   LaunchServices passes no arguments); failing that, Electron's default
+   `userData` — which already *is* `~/Library/Application Support/<CFBundleName>`.
+   Read the default **before** overriding it.
 2. Point the profile at `<instance>/electron`, then take the single-instance lock,
    so the lock lives in the instance's own profile and two instance directories
    coexist.
@@ -183,9 +185,35 @@ open -n dist/mac-arm64/remotex.app --args --instance-dir "$PWD/tmp/app-qa"
 ```
 
 The real instance is `~/Library/Application Support/remotex`. A second *installed*
-instance is a second `productName` build from the same config — there is no
-bundle-renaming script, because under Electron a renamed copy is a quarter of a
-gigabyte and a re-sign of a framework and five helpers.
+instance is an instance app.
+
+## Instance apps
+
+**Remote ▸ New Instance App…** is Chrome's "Create shortcut…", for instances: pick
+a folder, and `~/Applications/remotex Apps.localized/<Name>.app` opens that folder
+as its instance — under its own Dock icon, because the bundle carries its own
+`CFBundleIdentifier` (`dev.remotex.viewer.instance.<hash of the folder>`) and its
+own executable. That is the part that cannot be delegated: macOS tells running
+apps apart by the bundle the running executable sits in, so the stub is the shim's
+own file, never a symlink to the main app's and never a wrapper that would exec
+it. Everything else about the bundle is written by `src/main/shim.ts`, and the
+whole plist is *derived* from the main app's — re-identified, plus
+`RemotexInstanceDir` and `RemotexMainBundlePath`, Chrome's `CrAppModeUserDataDir`
+and `CrBundlePath` in local dress. `CFBundleDisplayName` becomes the folder's
+name; `CFBundleName` deliberately does not, because Electron finds its helpers by
+`<CFBundleName> Helper.app` and dies at launch otherwise.
+
+The stub, `Contents/Frameworks` and `app.asar` are APFS clones — block-sharing
+copies, so a shim costs about as much disk as Chrome's despite appearing to weigh
+what the app does. Clones rather than symlinks by measurement: a symlinked
+framework path SIGTRAPs the browser process at launch, wordlessly, sandbox on or
+off. `web` and `remotex-gateway` stay symlinks, so every shim serves the current
+client and gateway across upgrades of `/Applications/remotex.app`; the cloned
+shell goes stale instead, and recreating the app from the same folder — same
+name, same bundle id, a refresh, not a duplicate — is the cure. The icon is
+`instance-icon.icns`, the amber variant of the app's own, unless the chosen
+folder holds an `icon.icns` to wear instead — Chrome's per-site favicon, done by
+hand.
 
 ## Build and QA
 

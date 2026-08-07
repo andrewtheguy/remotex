@@ -33,6 +33,10 @@ extraResources:
   # artifact rather than building a second one that could differ.
   - from: ../../target/release/remotex
     to: remotex-gateway
+  # The default face of an instance app — the amber variant New Instance App…
+  # copies into each shim whose folder brings no icon.icns of its own.
+  - from: build/instance-icon.icns
+    to: instance-icon.icns
 
 mac:
   category: public.app-category.utilities

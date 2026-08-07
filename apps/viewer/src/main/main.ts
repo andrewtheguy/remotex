@@ -15,9 +15,17 @@
 // gateway, take the token it prints, put it in the cookie jar, and only then load
 // the page.
 
-import { mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, screen } from "electron";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  screen,
+  shell,
+} from "electron";
 import {
   CHANNEL,
   type ConfigSaveResult,
@@ -39,6 +47,12 @@ import { installMenu } from "./menu-install.ts";
 import { distDirFor, resourceLayout } from "./paths.ts";
 import { declareShellScheme, serveShellScheme } from "./scheme.ts";
 import { shellPageUrl } from "./scheme-routes.ts";
+import {
+  createShimBundle,
+  instanceDirFromBundle,
+  mainBundleFor,
+  type PlistReader,
+} from "./shim.ts";
 import {
   acceptState,
   blankState,
@@ -76,10 +90,27 @@ const layout = resourceLayout(app.isPackaged, appRoot, distDir);
 // `~/Library/Application Support/<CFBundleName>`, which is the instance directory a
 // double-clicked app should use — so it is read *before* being overridden, and both
 // happen before anything asks where the profile is.
+//
+// Between the flag and that default sits the bundle's own Info.plist: an instance
+// app made by **New Instance App…** is launched by LaunchServices with no arguments
+// at all, and the directory it exists to open rides in its plist the way Chrome's
+// shims carry `CrAppModeUserDataDir`. The flag still wins, so a shim can be QA'd
+// like anything else.
+const readPlist: PlistReader = (path) => {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+};
 const instanceDir =
   instanceDirFromArgv(process.argv, process.cwd(), undefined, (message) =>
     console.warn(message),
-  ) ?? app.getPath("userData");
+  ) ??
+  (app.isPackaged
+    ? instanceDirFromBundle(process.execPath, readPlist)
+    : null) ??
+  app.getPath("userData");
 const instance: InstanceDirectory = instanceAt(instanceDir);
 // `0700` because `remotex.toml` holds the credentials of every machine this app can
 // reach: the file is written `0600`, but a directory anyone can list is a directory
@@ -206,6 +237,7 @@ function refresh(): void {
         : 1,
       hasGateway: true,
       idle: !restarting,
+      canMakeInstanceApps: app.isPackaged,
     },
     { send: sendCommand, local: runLocalAction },
   );
@@ -245,6 +277,9 @@ function runLocalAction(action: LocalAction): void {
       break;
     case "configure":
       void openConfiguration();
+      break;
+    case "createInstanceApp":
+      void createInstanceApp();
       break;
     case "restartGateway":
       void relaunch();
@@ -369,6 +404,69 @@ async function openConfiguration(): Promise<void> {
     configWindow = null;
   });
   await configWindow.loadURL(shellPageUrl("config.html"));
+}
+
+// --- Instance apps ----------------------------------------------------------
+
+/**
+ * Chrome's "Create shortcut…", for instances.
+ *
+ * One question — which folder is the instance — and the rest is derived: the app is
+ * named after the folder, lands in `~/Applications/remotex Apps.localized`, and
+ * wears `instance-icon.icns` unless the folder holds an `icon.icns` of its own.
+ * The shim borrows from the *main* bundle even when this launch is itself a shim,
+ * so shims never chain through each other.
+ */
+async function createInstanceApp(): Promise<void> {
+  const owner = window ?? getWindow();
+  const picked = await dialog.showOpenDialog(owner, {
+    title: "New Instance App",
+    message:
+      "Choose the folder that holds the new instance — its configuration, log " +
+      "and profile live there. An icon.icns inside it becomes the app's icon.",
+    buttonLabel: "Create App",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (picked.canceled || picked.filePaths.length === 0) {
+    return;
+  }
+  const dir = resolve(picked.filePaths[0]);
+  if (dir === resolve(instance.dir)) {
+    await dialog.showMessageBox(owner, {
+      type: "error",
+      message: "That folder is this launch's own instance.",
+      detail:
+        "An instance app exists to open a different instance beside this one. " +
+        "Choose or create another folder.",
+    });
+    return;
+  }
+  try {
+    const mainBundle = mainBundleFor(process.execPath, readPlist);
+    const ownIcon = join(dir, "icon.icns");
+    const bundle = await createShimBundle({
+      instanceDir: dir,
+      name: basename(dir),
+      appsDir: join(
+        app.getPath("home"),
+        "Applications",
+        "remotex Apps.localized",
+      ),
+      mainBundle,
+      icon: existsSync(ownIcon)
+        ? ownIcon
+        : join(mainBundle, "Contents", "Resources", "instance-icon.icns"),
+    });
+    // Revealed rather than announced, which is also what registers the new bundle
+    // with LaunchServices before anyone goes looking for it in Spotlight.
+    shell.showItemInFolder(bundle);
+  } catch (error) {
+    await dialog.showMessageBox(owner, {
+      type: "error",
+      message: "The instance app could not be created.",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 // --- Wiring ---------------------------------------------------------------

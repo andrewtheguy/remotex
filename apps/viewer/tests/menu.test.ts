@@ -25,7 +25,14 @@ function context(
       ...overrides,
     },
   };
-  return { viewer, hostScale: 2, hasGateway: true, idle: true, ...rest };
+  return {
+    viewer,
+    hostScale: 2,
+    hasGateway: true,
+    idle: true,
+    canMakeInstanceApps: true,
+    ...rest,
+  };
 }
 
 function launching(): MenuContext {
@@ -34,6 +41,7 @@ function launching(): MenuContext {
     hostScale: 1,
     hasGateway: true,
     idle: true,
+    canMakeInstanceApps: true,
   };
 }
 
@@ -139,6 +147,22 @@ describe("what the menus claim", () => {
       find(buildMenuSpec(context({ mode: "picker" })), "Session Info…")
         ?.enabled,
     ).toBe(false);
+  });
+
+  test("instance apps can be minted from anywhere, except where there is no bundle", () => {
+    // The action needs nothing from the session — it copies and links files out of
+    // the bundle — so it stays available on every screen. A development run has no
+    // bundle to lend a shim, and the item is greyed rather than gone, like
+    // everything else here that is sometimes impossible.
+    expect(find(buildMenuSpec(launching()), "New Instance App…")?.enabled).toBe(
+      true,
+    );
+    const dev = find(
+      buildMenuSpec(context({}, { canMakeInstanceApps: false })),
+      "New Instance App…",
+    );
+    expect(dev?.enabled).toBe(false);
+    expect(dev?.action).toBe("createInstanceApp");
   });
 
   test("a restart in progress disables the item that would start another", () => {

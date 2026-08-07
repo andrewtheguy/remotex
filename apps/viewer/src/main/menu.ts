@@ -36,6 +36,7 @@ export type LocalAction =
   | "about"
   | "quit"
   | "configure"
+  | "createInstanceApp"
   | "restartGateway"
   | "devTools"
   | "resizeToDisplay";
@@ -93,6 +94,13 @@ export interface MenuContext {
   hasGateway: boolean;
   /** False while a restart is already under way. */
   idle: boolean;
+  /**
+   * Whether this launch can mint instance apps — the Chrome-style shims in
+   * `~/Applications/remotex Apps.localized`. Only a packaged bundle can: a shim
+   * borrows its frameworks and gateway from the bundle that made it, and a
+   * development run has no bundle to lend.
+   */
+  canMakeInstanceApps: boolean;
 }
 
 /** The whole menu bar, derived. */
@@ -152,7 +160,7 @@ function editMenu(): MenuSpec {
 }
 
 function remoteMenu(context: MenuContext): MenuSpec {
-  const { viewer, hasGateway, idle } = context;
+  const { viewer, hasGateway, idle, canMakeInstanceApps } = context;
   const onDesktop = isOnDesktop(viewer);
   const items: MenuItemSpec[] = [
     {
@@ -232,6 +240,15 @@ function remoteMenu(context: MenuContext): MenuSpec {
     // failure — a config the gateway refused is the likeliest reason to be looking
     // for this item at all.
     { label: "Configuration…", enabled: hasGateway, action: "configure" },
+    // Chrome's "Create shortcut…", for instances: a shim app in
+    // `~/Applications/remotex Apps.localized` that opens a chosen instance
+    // directory under its own Dock icon. Greyed rather than hidden in a
+    // development run, like everything else here that is sometimes impossible.
+    {
+      label: "New Instance App…",
+      enabled: canMakeInstanceApps,
+      action: "createInstanceApp",
+    },
     // Everything below the app is rebuilt from the config on disk, the token
     // included, which is why the page is reloaded rather than left holding the old
     // one.
