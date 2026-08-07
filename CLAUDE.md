@@ -134,6 +134,7 @@ For counts, assert invariant relationships such as `records > frames`.
   opts in separately with `REMOTEX_PLAYWRIGHT_AUDIO_TARGET=<target>`. The tone harness
   supplies one with no remote at all: `cargo test --lib serve_a_test_tone -- --ignored
   --nocapture`, then point `REMOTEX_PLAYWRIGHT_BASE_URL` at the address it prints.
+- use `tests/ws_probe.py` to drive a local gateway WebSocket and print the control messages a browser sees.
 
 ## Remote audio
 
