@@ -200,9 +200,16 @@ export function createVideoStreams(
           onError: failed,
           // Named, because the one thing worth knowing about a stall is which region
           // it was: under `render_motion_subtype = "stream"` there are several of
-          // these and they stop for their own reasons.
-          onNeedsKeyframe: (reason) =>
-            handlers.onNeedsKeyframe(`stream ${id}: ${reason}`),
+          // these and they stop for their own reasons. A stall is as terminal for
+          // the decoder as an error (see `stalled` in `createVideoStream`), so the
+          // entry goes the same way — the next unit on this id builds afresh, with
+          // the same guard as `failed` for the same reason.
+          onNeedsKeyframe: (reason) => {
+            if (live.get(id) === entry) {
+              live.delete(id);
+            }
+            handlers.onNeedsKeyframe(`stream ${id}: ${reason}`);
+          },
         },
         stallMs,
       );
@@ -311,8 +318,9 @@ export interface VideoHandlers {
   onError: (reason: string, recoverable: boolean) => void;
   /**
    * This stream's chain has been cut and it cannot pick up again until a keyframe
-   * arrives. Both ways of cutting it come here: a decoder that went quiet and was
-   * reset, and one that failed and was thrown away.
+   * arrives. Both ways of cutting it come here — a decoder that went quiet and one
+   * that failed — and both throw the decoder away: the next unit on the id builds a
+   * fresh one, which can start at nothing but the keyframe this asks for.
    *
    * Only the gateway can send that keyframe, so this has to reach something that can
    * ask. Left unasked it is a region that never paints again — and under
@@ -365,12 +373,12 @@ export function createVideoStream(
   // that an nth output happens at all; see `stalled`.
   const pending: Pending[] = [];
   let closed = false;
-  // Whether this decoder has no history to decode against — true from birth, and again
-  // after a stall reset it. Until the keyframe arrives every unit is expressed against
-  // pictures it does not have, and they are dropped here rather than handed over to
-  // raise one error each. Dropping is also simply what a delta to a fresh decoder
-  // deserves: the alternative is a decoder that fails, is thrown away, is rebuilt by
-  // the next unit, and fails again on that one too.
+  // Whether this decoder has no history to decode against — true from birth, until
+  // its keyframe arrives. Every unit before it is expressed against pictures it does
+  // not have, and they are dropped here rather than handed over to raise one error
+  // each. Dropping is also simply what a delta to a fresh decoder deserves: the
+  // alternative is a decoder that fails, is thrown away, is rebuilt by the next unit,
+  // and fails again on that one too.
   let keyNeeded = true;
   // Armed whenever the decoder owes a frame, which is the only state a stall can be
   // seen from — a decoder that has stopped producing raises no event to notice.
@@ -411,39 +419,34 @@ export function createVideoStream(
     }
   };
 
-  // What the decoder is configured with, kept because a stall has to hand it back.
-  const config: VideoDecoderConfig = {
-    // `codedWidth` and `codedHeight` are deliberately left out: the bitstream carries
-    // the coded size, and the record header carries the *desktop* size, which is
-    // smaller by up to a pixel in each axis and is not what a decoder should be told.
-    codec: format.decode,
-    optimizeForLatency: true,
-  };
-
   // The decoder owes frames it is not going to produce. Everything it owes is settled
   // to null — one unpainted region for as long as it takes a keyframe to arrive, where
-  // leaving them pending is the whole session, permanently.
-  //
-  // `reset()` is what makes abandoning them safe rather than merely quick: it
-  // guarantees no output from before it, so a frame that arrives late cannot resolve a
+  // leaving them pending is the whole session, permanently — and the decoder goes with
+  // them. `close()` is what makes abandoning them safe rather than merely quick: it
+  // guarantees no output after it, so a frame that arrives late cannot resolve a
   // *later* unit's promise and slide every frame after it one place out of position.
-  // Unlike `flush()` it also cannot itself be the thing that never completes.
   //
-  // It resets *all* state though, the configuration included, which is why the config
-  // goes straight back. Without that the decoder is left "unconfigured", `decode`'s
-  // own guard refuses every unit after the stall, and the region never paints again —
-  // the same freeze this exists to end, wearing a quieter face.
+  // Discarded rather than reset and reconfigured, which is what this recovery used to
+  // do and what was measured to manufacture a second failure. Chromium answers a
+  // `configure()` on a live decoder by first flushing the old pipeline
+  // (`DecoderTemplate::ProcessConfigureRequest` decodes an end-of-stream buffer), and
+  // a decoder that has gone quiet is one whose pipeline has already failed off-thread
+  // — a GPU-process decoder surfaces errors on the next flush, not on the chunk it
+  // choked on, which is also why the watchdog and not an error callback saw the fault.
+  // So the flush comes back failed, `OnFlushDone` shuts the decoder down, and the
+  // session gets `EncodingError: Error during flush.`: a second error, a second
+  // repaint request and a banner, every one describing the recovery rather than the
+  // fault. Closing asks the wedged pipeline for nothing.
   const stalled = () => {
     watchdog = undefined;
     if (closed || pending.length === 0) {
       return;
     }
     const owed = pending.length;
-    keyNeeded = true;
+    closed = true;
     drain();
     if (decoder.state !== "closed") {
-      decoder.reset();
-      decoder.configure(config);
+      decoder.close();
     }
     handlers.onNeedsKeyframe(
       `the decoder produced nothing for ${owed} access unit(s) in ${stallMs} ms`,
@@ -473,7 +476,13 @@ export function createVideoStream(
   });
   // Configured here rather than on the first keyframe, because the gateway has already
   // said what this stream is.
-  decoder.configure(config);
+  decoder.configure({
+    // `codedWidth` and `codedHeight` are deliberately left out: the bitstream carries
+    // the coded size, and the record header carries the *desktop* size, which is
+    // smaller by up to a pixel in each axis and is not what a decoder should be told.
+    codec: format.decode,
+    optimizeForLatency: true,
+  });
 
   return {
     decode(data, timestamp, keyframe) {

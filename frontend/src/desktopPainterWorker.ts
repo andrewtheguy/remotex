@@ -60,7 +60,7 @@ export type PainterCommand =
 export type PainterEvent =
   | { type: "cacheReset" }
   | { type: "videoError"; reason: string | null }
-  /** A stream's decoder was reset or thrown away, and needs a keyframe to resume. */
+  /** A stream's decoder was thrown away, and needs a keyframe to resume. */
   | { type: "videoNeedsKeyframe"; reason: string }
   | {
       type: "painted";

@@ -28,7 +28,6 @@ class FakeDecoder {
   readonly chunks: { type: string }[] = [];
   state = "unconfigured";
   configures = 0;
-  resets = 0;
   closes = 0;
 
   constructor(init: {
@@ -46,13 +45,6 @@ class FakeDecoder {
 
   decode(chunk: { type: string }) {
     this.chunks.push(chunk);
-  }
-
-  // "Resets all states including configuration", which the real one means literally:
-  // a decoder that has been reset and not configured again decodes nothing, silently.
-  reset() {
-    this.resets += 1;
-    this.state = "unconfigured";
   }
 
   close() {
@@ -143,7 +135,7 @@ test("a decoder that answers nothing settles anyway, and asks for a keyframe", a
     "the paint chain must not be left holding this",
   );
   assert.equal(
-    s.decoder().resets,
+    s.decoder().closes,
     1,
     "a late frame could still resolve a later unit",
   );
@@ -156,37 +148,38 @@ test("a decoder that answers nothing settles anyway, and asks for a keyframe", a
   assert.deepEqual(s.errors, [], "nothing here is a decoder error");
 });
 
-test("the reset stream waits for its keyframe rather than erroring per frame", async () => {
+test("the stalled stream waits for its keyframe rather than erroring per frame", async () => {
   const s = streams();
   await s.table.decode(1, size, unit(1), true);
-  const decoder = s.decoder();
-  assert.equal(decoder.chunks.length, 1);
-  // The reset took the configuration with it, so the stall has to hand it back —
-  // an unconfigured decoder refuses the keyframe below and every unit after it.
-  assert.equal(decoder.configures, 2, "the reset stream was left unconfigured");
-  assert.equal(decoder.state, "configured");
+  const wedged = s.decoder();
+  assert.equal(wedged.chunks.length, 1);
+  // The stall threw the decoder away: reconfiguring the one that went quiet flushes
+  // its wedged pipeline, and Chromium answers that flush with a second failure.
+  assert.equal(wedged.closes, 1, "the quiet decoder was kept");
 
   // The frames still arriving for a region whose chain was just cut. They are
-  // expressed against pictures the decoder no longer has.
+  // expressed against pictures no decoder here has, so the fresh decoder they build
+  // is handed nothing until the keyframe.
   assert.equal(await s.table.decode(1, size, unit(2), false), null);
   assert.equal(await s.table.decode(1, size, unit(3), false), null);
+  const fresh = s.decoder();
+  assert.notEqual(fresh, wedged, "the stalled decoder was reused");
   assert.equal(
-    decoder.chunks.length,
-    1,
+    fresh.chunks.length,
+    0,
     "deltas were handed to a decoder with no history",
   );
 
-  // The repaint the stall asked for. The same decoder takes it — a stall keeps the
-  // configuration, so the stream picks up where the keyframe puts it.
+  // The repaint the stall asked for, and where the fresh decoder starts.
   const frame = s.table.decode(1, size, unit(4), true);
-  assert.equal(decoder.chunks.length, 2);
-  assert.equal(decoder.chunks[1].type, "key");
-  decoder.emit(0xb2);
+  assert.equal(fresh.chunks.length, 1);
+  assert.equal(fresh.chunks[0].type, "key");
+  fresh.emit(0xb2);
   assert.equal(tagOf(await frame), 0xb2);
   assert.equal(s.stalls.length, 1, "one stall, asked about once");
 });
 
-test("only the silent stream is reset; a sibling keeps decoding", async () => {
+test("only the silent stream is discarded; a sibling keeps decoding", async () => {
   const s = streams();
   s.table.setFormat(2, { decode: "vp09.00.40.08" });
   const quiet = s.table.decode(1, size, unit(1), true);
@@ -197,11 +190,11 @@ test("only the silent stream is reset; a sibling keeps decoding", async () => {
 
   assert.equal(tagOf(await busy), 0xc3);
   assert.equal(await quiet, null);
-  assert.equal(one.resets, 1);
+  assert.equal(one.closes, 1);
   assert.equal(
-    two.resets,
+    two.closes,
     0,
-    "a region that answered was reset with the one that did not",
+    "a region that answered was discarded with the one that did not",
   );
   assert.equal(s.stalls.length, 1);
 });
