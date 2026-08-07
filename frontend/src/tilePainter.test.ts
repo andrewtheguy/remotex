@@ -977,7 +977,10 @@ test("the video complaint goes when video paints again", async () => {
       },
     ]),
   );
-  assert.equal(videoErrors.at(-1), "This browser's video decoder failed.");
+  assert.equal(
+    videoErrors.at(-1),
+    "This browser's video decoder failed (Error: this decoder gave up).",
+  );
 
   poison = null;
   await p.draw(
