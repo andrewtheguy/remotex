@@ -186,6 +186,8 @@ let decoders = 0;
 let closes = 0;
 /** A payload whose first byte is this makes its decoder give up. */
 let poison: number | null = null;
+/** Like `poison`, but the browser refusing the configuration rather than failing. */
+let refused: number | null = null;
 
 class FakeVideoDecoder {
   private readonly output: (frame: unknown) => void;
@@ -208,6 +210,14 @@ class FakeVideoDecoder {
   decode(chunk: { type: string; data?: Uint8Array }) {
     if (poison !== null && chunk.data?.[chunk.data.length - 1] === poison) {
       this.fail(new Error("this decoder gave up"));
+      return;
+    }
+    if (refused !== null && chunk.data?.[chunk.data.length - 1] === refused) {
+      // The name is the whole signal: it is how WebCodecs says "not this
+      // configuration", which no later keyframe and no other region changes.
+      const no = new Error("this configuration is not supported");
+      no.name = "NotSupportedError";
+      this.fail(no);
       return;
     }
     chunkTypes.push(chunk.type);
@@ -257,6 +267,7 @@ beforeEach(() => {
   decoders = 0;
   closes = 0;
   poison = null;
+  refused = null;
   undecodable = new Set();
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
@@ -979,6 +990,83 @@ test("the video complaint goes when video paints again", async () => {
     null,
     "the banner outlived what it described",
   );
+});
+
+test("a refused configuration stays up while another region paints", async () => {
+  // Two regions, two codec strings: the level a stream announces follows its picture
+  // size (`codec_string` in src/vp9.rs), so a browser can refuse one region's and
+  // decode its neighbour's happily. The neighbour's frames say nothing about the
+  // refused region, which is still showing nothing and still owes the explanation.
+  refused = 0xbd;
+  const p = announced([0, 1]);
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
+      {
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: KEYFRAME,
+      },
+    ]),
+  );
+  const said = videoErrors.at(-1);
+  assert.match(
+    String(said),
+    /cannot decode/,
+    "the refusal was not what the banner ended up saying",
+  );
+  assert.deepEqual(
+    videoKeyframeAsks,
+    [],
+    "a keyframe was asked for on a configuration no keyframe repairs",
+  );
+
+  // And it keeps painting, which must not be read as the refused region recovering.
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: KEYFRAME,
+      },
+    ]),
+  );
+  assert.equal(
+    videoErrors.at(-1),
+    said,
+    "one region painting took down another region's standing refusal",
+  );
+});
+
+test("clear() retracts the complaint as well as the decoders", async () => {
+  // The attachment boundary. The page clears its own copy on the way back to the
+  // picker only, so a reattach or a takeover would otherwise inherit this sentence.
+  globals.VideoDecoder = undefined;
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.notEqual(videoErrors.at(-1), null);
+  p.clear();
+  assert.equal(videoErrors.at(-1), null);
 });
 
 test("what a browser cannot decode at all stays on screen", async () => {

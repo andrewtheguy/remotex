@@ -221,17 +221,30 @@ export function createTilePainter(options: {
   // the same page could have been reached over HTTPS the second time.
   let videoUnusable = false;
 
-  // Whether a complaint about video is on screen. What that banner says is that this
-  // client is showing nothing, so a frame that paints is it ceasing to be true — and a
-  // painted frame is the only thing that can say so, since a decoder that failed says
-  // nothing further either way. It is also the whole of the distinction between a
-  // warning and a verdict: a browser with no decoder, an insecure origin and a
-  // configuration this browser refuses never paint anything, so those stay up, while
-  // one region's decoder giving up clears itself the moment that region comes back.
+  // What is on screen about video, and whether a painted frame may take it down.
+  //
+  // A complaint that a frame *can* answer is one region's decoder giving up: what the
+  // banner says is that this client is showing nothing, so that region coming back is
+  // it ceasing to be true, and a painted frame is the only thing that can say so —
+  // a decoder that failed says nothing further either way.
+  //
+  // A refusal cannot be answered that way and is tracked apart from it. The browser
+  // will not take that configuration, and since a stream's codec string carries the
+  // *level* its picture size implies (`codec_string` in src/vp9.rs), the region next
+  // to it may be a level this browser is perfectly happy with. Its frames say nothing
+  // whatever about the refused one, which is still showing nothing and still owes the
+  // sentence explaining why.
   let videoComplained = false;
+  let videoRefused = false;
 
-  const complainAboutVideo = (reason: string) => {
-    videoComplained = true;
+  const complainAboutVideo = (reason: string, recoverable = false) => {
+    if (videoRefused && recoverable) {
+      // A region that failed beside one that was refused outright. The standing fact
+      // is the more useful sentence and it is already up.
+      return;
+    }
+    videoRefused = videoRefused || !recoverable;
+    videoComplained = recoverable;
     options.onVideoError(reason);
   };
 
@@ -240,6 +253,12 @@ export function createTilePainter(options: {
     video = null;
     videoUnusable = false;
     videoComplained = false;
+    videoRefused = false;
+    // Retracted, and not merely forgotten. This is the attachment boundary: the
+    // decoders that said it are gone, the next attachment may be a different target
+    // through a different origin, and the page clears its own copy on the way back to
+    // the picker only — a reattach or a takeover would otherwise inherit the sentence.
+    options.onVideoError(null);
   };
 
   // Whether this batch has already asked for a reset. One per batch rather than
