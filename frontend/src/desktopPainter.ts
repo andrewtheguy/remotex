@@ -1,8 +1,10 @@
 // The page's handle on the desktop paint worker.
 //
 // The parse→decode→paint path runs in a worker (desktopPainterWorker.ts)
-// drawing on an `OffscreenCanvas`, so a decode backlog costs the worker's
-// thread rather than React's and input's. This module is the main-thread side:
+// drawing on an `OffscreenCanvas`, which keeps painting and its presentation off
+// the thread input and React are on — that module says what the boundary does and
+// does not buy, since it is less than the word "decode" suggests. This module is
+// the main-thread side:
 // it transfers each binary frame over — `postMessage` with a transfer list
 // moves the buffer, it does not copy it — and carries the painter's callbacks
 // and ordered completion feedback back as messages.
@@ -24,6 +26,12 @@ export interface PainterHandlers {
   onCacheReset: () => void;
   /** Why a video target shows nothing, or null once it shows something. */
   onVideoError: (reason: string | null) => void;
+  /**
+   * A stream's decoder was reset out of a stall, or failed and was thrown away.
+   * Either way the region it was carrying is frozen until a keyframe arrives, and
+   * asking for one is the page's job because only it holds the socket.
+   */
+  onVideoNeedsKeyframe: (reason: string) => void;
   /** One ordered screen batch finished in the worker. */
   onPainted: (
     sequence: number,
@@ -89,6 +97,8 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
       handlers?.onCacheReset();
     } else if (event.type === "videoError") {
       handlers?.onVideoError(event.reason);
+    } else if (event.type === "videoNeedsKeyframe") {
+      handlers?.onVideoNeedsKeyframe(event.reason);
     } else if (event.type === "resized") {
       handlers?.onResized(event.seq);
     } else {

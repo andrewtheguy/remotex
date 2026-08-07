@@ -138,6 +138,14 @@ export function createTilePainter(options: {
    * desktop that never paints and never explains itself.
    */
   onVideoError: (reason: string | null) => void;
+  /**
+   * A stream's chain has been cut — its decoder went quiet and was reset, or it
+   * failed and was thrown away — so that region cannot paint again until a keyframe
+   * only the gateway can send. Separate from `onVideoError` because it asks for
+   * something rather than saying something: it is the recovery, where the banner is
+   * the report, and the two are answered in different places.
+   */
+  onVideoNeedsKeyframe: (reason: string) => void;
 }): TilePainter {
   const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
@@ -213,10 +221,44 @@ export function createTilePainter(options: {
   // the same page could have been reached over HTTPS the second time.
   let videoUnusable = false;
 
+  // What is on screen about video, and whether a painted frame may take it down.
+  //
+  // A complaint that a frame *can* answer is one region's decoder giving up: what the
+  // banner says is that this client is showing nothing, so that region coming back is
+  // it ceasing to be true, and a painted frame is the only thing that can say so —
+  // a decoder that failed says nothing further either way.
+  //
+  // A refusal cannot be answered that way and is tracked apart from it. The browser
+  // will not take that configuration, and since a stream's codec string carries the
+  // *level* its picture size implies (`codec_string` in src/vp9.rs), the region next
+  // to it may be a level this browser is perfectly happy with. Its frames say nothing
+  // whatever about the refused one, which is still showing nothing and still owes the
+  // sentence explaining why.
+  let videoComplained = false;
+  let videoRefused = false;
+
+  const complainAboutVideo = (reason: string, recoverable = false) => {
+    if (videoRefused && recoverable) {
+      // A region that failed beside one that was refused outright. The standing fact
+      // is the more useful sentence and it is already up.
+      return;
+    }
+    videoRefused = videoRefused || !recoverable;
+    videoComplained = recoverable;
+    options.onVideoError(reason);
+  };
+
   const releaseVideo = () => {
     video?.close();
     video = null;
     videoUnusable = false;
+    videoComplained = false;
+    videoRefused = false;
+    // Retracted, and not merely forgotten. This is the attachment boundary: the
+    // decoders that said it are gone, the next attachment may be a different target
+    // through a different origin, and the page clears its own copy on the way back to
+    // the picker only — a reattach or a takeover would otherwise inherit the sentence.
+    options.onVideoError(null);
   };
 
   // Whether this batch has already asked for a reset. One per batch rather than
@@ -351,15 +393,17 @@ export function createTilePainter(options: {
       // client's decision either way — a stream begins again when the gateway
       // sends a keyframe, which a repaint, a resize or a region restarting does.
       video = createVideoStreams({
-        onError: (reason) => options.onVideoError(reason),
+        onError: complainAboutVideo,
+        onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
       });
     } catch (e) {
       videoUnusable = true;
-      options.onVideoError(
+      complainAboutVideo(
         e instanceof Error ? e.message : "This browser cannot decode video.",
       );
       return null;
     }
+    videoComplained = false;
     options.onVideoError(null);
     return video;
   };
@@ -400,6 +444,14 @@ export function createTilePainter(options: {
       // this a crop rather than a codec's requirement, so it holds for VP9 too.
       ctx?.drawImage(image, 0, 0, job.w, job.h, job.x, job.y, job.w, job.h);
       image.close();
+      if (videoComplained) {
+        // Video is painting again, so whatever was said about it has stopped being
+        // true. Said here rather than on a timer or behind a dismiss button: the
+        // banner is a statement about the present, and this is the moment the present
+        // changed.
+        videoComplained = false;
+        options.onVideoError(null);
+      }
       return;
     }
     ctx?.drawImage(image, job.x, job.y);

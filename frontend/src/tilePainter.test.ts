@@ -140,6 +140,8 @@ let blitted: {
 let decoded: FakeBitmap[] = [];
 let resets = 0;
 let videoErrors: (string | null)[] = [];
+/** Streams whose chain was cut. The stub never goes quiet, so these are failures. */
+let videoKeyframeAsks: string[] = [];
 /** Payload first bytes the stubbed decoder refuses. */
 let undecodable = new Set<number>();
 /** Dimensions the stub reports, so a test can spend the decoded byte budget. */
@@ -184,6 +186,8 @@ let decoders = 0;
 let closes = 0;
 /** A payload whose first byte is this makes its decoder give up. */
 let poison: number | null = null;
+/** Like `poison`, but the browser refusing the configuration rather than failing. */
+let refused: number | null = null;
 
 class FakeVideoDecoder {
   private readonly output: (frame: unknown) => void;
@@ -206,6 +210,14 @@ class FakeVideoDecoder {
   decode(chunk: { type: string; data?: Uint8Array }) {
     if (poison !== null && chunk.data?.[chunk.data.length - 1] === poison) {
       this.fail(new Error("this decoder gave up"));
+      return;
+    }
+    if (refused !== null && chunk.data?.[chunk.data.length - 1] === refused) {
+      // The name is the whole signal: it is how WebCodecs says "not this
+      // configuration", which no later keyframe and no other region changes.
+      const no = new Error("this configuration is not supported");
+      no.name = "NotSupportedError";
+      this.fail(no);
       return;
     }
     chunkTypes.push(chunk.type);
@@ -249,11 +261,13 @@ beforeEach(() => {
   decoded = [];
   resets = 0;
   videoErrors = [];
+  videoKeyframeAsks = [];
   videoClosed = false;
   chunkTypes = [];
   decoders = 0;
   closes = 0;
   poison = null;
+  refused = null;
   undecodable = new Set();
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
@@ -314,6 +328,9 @@ function painter(ctx: CanvasRenderingContext2D | null = context) {
     },
     onVideoError: (error) => {
       videoErrors.push(error);
+    },
+    onVideoNeedsKeyframe: (reason) => {
+      videoKeyframeAsks.push(reason);
     },
   });
 }
@@ -911,6 +928,11 @@ test("one region's decoder giving up does not take the others down", async () =>
     0,
     "a working decoder was closed because another failed",
   );
+  assert.equal(
+    videoKeyframeAsks.length,
+    1,
+    "a failed decoder is thrown away, and only a keyframe starts another",
+  );
 
   // The surviving region keeps decoding on the decoder it already had.
   const before = decoders;
@@ -933,6 +955,132 @@ test("one region's decoder giving up does not take the others down", async () =>
     "the surviving region was handed a new decoder",
   );
   assert.equal(cropped.length, 2, "the surviving region stopped painting");
+});
+
+test("the video complaint goes when video paints again", async () => {
+  // A decoder giving up is a warning, not a verdict: the region comes back on the
+  // next keyframe. Leaving the banner up would be a permanent notice about something
+  // that stopped being true — and it has no dismiss button, because a statement
+  // about the present should not need one.
+  poison = 0xbd;
+  const p = announced();
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
+    ]),
+  );
+  assert.equal(videoErrors.at(-1), "This browser's video decoder failed.");
+
+  poison = null;
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 320, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.equal(
+    videoErrors.at(-1),
+    null,
+    "the banner outlived what it described",
+  );
+});
+
+test("a refused configuration stays up while another region paints", async () => {
+  // Two regions, two codec strings: the level a stream announces follows its picture
+  // size (`codec_string` in src/vp9.rs), so a browser can refuse one region's and
+  // decode its neighbour's happily. The neighbour's frames say nothing about the
+  // refused region, which is still showing nothing and still owes the explanation.
+  refused = 0xbd;
+  const p = announced([0, 1]);
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
+      {
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: KEYFRAME,
+      },
+    ]),
+  );
+  const said = videoErrors.at(-1);
+  assert.match(
+    String(said),
+    /cannot decode/,
+    "the refusal was not what the banner ended up saying",
+  );
+  assert.deepEqual(
+    videoKeyframeAsks,
+    [],
+    "a keyframe was asked for on a configuration no keyframe repairs",
+  );
+
+  // And it keeps painting, which must not be read as the refused region recovering.
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: KEYFRAME,
+      },
+    ]),
+  );
+  assert.equal(
+    videoErrors.at(-1),
+    said,
+    "one region painting took down another region's standing refusal",
+  );
+});
+
+test("clear() retracts the complaint as well as the decoders", async () => {
+  // The attachment boundary. The page clears its own copy on the way back to the
+  // picker only, so a reattach or a takeover would otherwise inherit this sentence.
+  globals.VideoDecoder = undefined;
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.notEqual(videoErrors.at(-1), null);
+  p.clear();
+  assert.equal(videoErrors.at(-1), null);
+});
+
+test("what a browser cannot decode at all stays on screen", async () => {
+  // The other side of the rule above, and the reason it needs no flag to tell the
+  // two apart: this one never paints, so nothing ever clears it.
+  globals.VideoDecoder = undefined;
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.equal(videoErrors.filter(Boolean).length, 1);
+  assert.notEqual(videoErrors.at(-1), null);
 });
 
 test("clear() ends the video decoders, not only the slot table", async () => {
