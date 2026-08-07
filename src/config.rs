@@ -546,6 +546,21 @@ pub struct TargetConfig {
     /// the option because it exposes physical displays.
     #[serde(default)]
     pub resize: bool,
+    /// **Experimental.** Advertise RDP's graphics pipeline (MS-RDPEGFX, with
+    /// RemoteFX riding beside it) instead of the legacy update path. RDP only,
+    /// and refused beside [`Self::resize`] — over EGFX a resize is a graphics
+    /// reset, after which a Windows host's text stays blurry for the rest of
+    /// the session, where the legacy path's full reactivation re-renders it
+    /// sharp.
+    ///
+    /// Opt-in, not the fixed-size default it used to be, since 2026-08-06: an
+    /// EGFX session against a Windows 11 host was observed with its graphics
+    /// stream halted outright — audio, input and pointer all still flowing,
+    /// no error surfaced on either side, a frozen screen the only symptom.
+    /// Until that has a cause, the pipeline is asked for by name or not at
+    /// all.
+    #[serde(default)]
+    pub egfx: bool,
     /// Clipboard bridge: let the browser read and write this target's
     /// clipboard, through the floating menu's Clipboard panel. Off by default —
     /// a remote desktop's clipboard often holds whatever was last copied there,
@@ -1023,6 +1038,25 @@ impl ConfigFile {
                  session without sound.",
                 target.name,
                 target.protocol.name()
+            );
+            // The graphics pipeline is RDP's alone, and it is refused beside
+            // resize rather than merely discouraged: the failure is not one a
+            // person recovers from by looking at the screen. An EGFX resize is a
+            // graphics reset, and a Windows host's text stays blurry from then
+            // on — only the legacy path's full reactivation re-renders it sharp.
+            anyhow::ensure!(
+                !target.egfx || target.protocol == Protocol::Rdp,
+                "target {:?} sets egfx on a {} target, and only rdp has a graphics pipeline \
+                 to advertise",
+                target.name,
+                target.protocol.name()
+            );
+            anyhow::ensure!(
+                !(target.egfx && target.resize),
+                "target {:?} sets egfx beside resize, which this gateway refuses: an EGFX \
+                 resize leaves a Windows host's text blurry for the rest of the session. \
+                 Drop resize to keep the pipeline, or egfx to keep resizing.",
+                target.name
             );
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
@@ -3029,6 +3063,88 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].audio);
+    }
+
+    /// EGFX is experimental and opt-in — never negotiated because a session
+    /// happened to be fixed-size — and only RDP has a pipeline to advertise.
+    #[test]
+    fn egfx_is_opt_in_and_belongs_to_rdp() {
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(!config.targets[0].egfx, "the pipeline must be asked for by name");
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            egfx = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].egfx);
+
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "nope"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            egfx = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("egfx"), "{rendered}");
+        assert!(rendered.contains("rdp"), "the protocol that has one is named: {rendered}");
+    }
+
+    /// The pairing that leaves a Windows host blurry is refused at parse time,
+    /// and the message says which key to drop for which outcome.
+    #[test]
+    fn egfx_beside_resize_is_refused() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            egfx = true
+            resize = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("egfx"), "{rendered}");
+        assert!(rendered.contains("blurry"), "the cost is named: {rendered}");
     }
 
     /// An unset codec reads as Opus, and passthrough can be asked for by name.

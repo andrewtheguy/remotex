@@ -121,13 +121,15 @@ Windows 11 sessions are the same consumption model with the pipeline on.
 the pipeline off here was the pipeline advertised *without a codec beside it*; with
 guacd's exact pair, the e2e that had measured a framebuffer summing to exactly black
 measured 3,090,403 non-zero bytes of 3,145,728 against the same host. The wrapper
-ships the pair for fixed-size targets. Resizable ones decline it — an EGFX resize
-leaves a Windows host's text blurry where a legacy reactivation re-renders it sharp
-— and take the *other* of guacd's resize methods for the fault the comparison never
-predicted: a Windows host's audio redirector does not survive the
-Deactivation-Reactivation a legacy-path resize costs, so a session whose sound
-negotiated on the dynamic `rdpsnd` transport resizes the way guacamole's
-`resize-method: reconnect` does. The whole story is in
+shipped the pair for every fixed-size target until 2026-08-06, when an EGFX session
+froze its graphics stream with audio, input and pointer alive and nothing logged on
+either side; the pipeline is opt-in per target now (`egfx = true`, experimental) and
+refused beside `resize` — an EGFX resize leaves a Windows host's text blurry where a
+legacy reactivation re-renders it sharp. Resizable targets take the *other* of
+guacd's resize methods for the fault the comparison never predicted: a Windows
+host's audio redirector does not survive the Deactivation-Reactivation a legacy-path
+resize costs, so a session whose sound negotiated on the dynamic `rdpsnd` transport
+resizes the way guacamole's `resize-method: reconnect` does. The whole story is in
 [`architecture.md`](architecture.md)'s RDP section.
 
 ### Transport details

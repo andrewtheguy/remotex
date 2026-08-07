@@ -933,6 +933,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         height: 800,
         security: Security::Auto,
         resize: false,
+        egfx: false,
         clipboard,
         audio: false,
         audio_codec: None,

@@ -80,8 +80,11 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **RDP EGFX, past what FreeRDP's GDI already gives.** The pipeline itself is
-  **on**: `SupportGraphicsPipeline` with `RemoteFxCodec` beside it, which is the
+- **RDP EGFX, past what FreeRDP's GDI already gives.** The pipeline is
+  **experimental, opt-in per target** (`egfx = true`): it was the fixed-size
+  default until a session froze its graphics stream with audio, input and
+  pointer alive and nothing logged on either side (2026-08-06). Where asked for,
+  it is `SupportGraphicsPipeline` with `RemoteFxCodec` beside it, which is the
   pair guacamole-server ships and the resolution of the black-framebuffer fault
   this entry used to open with — the pipeline advertised *without a codec next to
   it* was the whole of that bug, and the e2e that measured exactly black now

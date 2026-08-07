@@ -378,6 +378,7 @@ fn connect_config(config: &TargetConfig, audio: Option<Arc<AudioBridge>>) -> Con
         clipboard: config.clipboard,
         audio: rdp_audio::connect(audio),
         resize: config.resize,
+        egfx: config.egfx,
         connect_timeout: engine::TCP_CONNECT_TIMEOUT,
         keepalive: engine::keepalive(),
     }
