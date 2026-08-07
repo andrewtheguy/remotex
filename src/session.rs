@@ -1072,6 +1072,7 @@ mod tests {
             height: 1,
             security: Security::Auto,
             resize: meta.resize,
+            egfx: false,
             clipboard: meta.clipboard,
             audio: meta.audio,
             audio_codec: meta.audio_codec,

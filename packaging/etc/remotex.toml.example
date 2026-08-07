@@ -126,6 +126,18 @@ password = "change-me"
 # offers either control, and the ones that ask anyway are ignored.
 #resize = false
 
+# EXPERIMENTAL. Advertise RDP's Graphics Pipeline (MS-RDPEGFX, with RemoteFX
+# beside it) instead of the legacy update path. RDP only, and refused beside
+# `resize`: an EGFX resize is a graphics reset that leaves a Windows host's text
+# blurry for the rest of the session, where the legacy path's reactivation
+# re-renders it sharp.
+#
+# Opt-in — not the fixed-size default it used to be — because an EGFX session
+# was observed with its graphics stream halted outright while audio, input and
+# the pointer stayed alive: a frozen screen with no error logged on either side.
+# Off, and by default, RDP uses the legacy bitmap path everywhere.
+#egfx = false
+
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

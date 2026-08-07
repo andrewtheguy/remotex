@@ -809,17 +809,22 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-It replaced IronRDP, which was not stable enough against real Windows hosts. A
-target with `resize = false` gets the Graphics Pipeline (EGFX) with RemoteFX
-beside it, and the pairing is load-bearing: the pipeline advertised *alone* was
-measured broken — against a Windows 11 host, FreeRDP decoded 21 surface commands
-with no errors into a framebuffer that summed to exactly black — and the codec
-next to the flag is what guacamole-server ships against the same Windows
-generation. With the pair, the same measurement is a painted desktop. A target
-with `resize = true` declines the pipeline instead, because an EGFX resize is a
-graphics reset that leaves a Windows host's text blurry for the rest of the
-session, where the legacy path's full reactivation has the server render the new
-desktop from scratch, sharp. Servers without the pipeline either way (xrdp among
+It replaced IronRDP, which was not stable enough against real Windows hosts. The
+Graphics Pipeline (EGFX) is **experimental and opt-in** — `egfx = true` on the
+target, refused beside `resize` — never negotiated just because a session is
+fixed-size. It was that default until 2026-08-06, when a session against a
+Windows 11 host was observed with its graphics stream halted outright: audio,
+input and pointer updates all still flowing, no error logged on either side, a
+frozen screen the only symptom. Where it is asked for, RemoteFX rides beside it
+and the pairing is load-bearing: the pipeline advertised *alone* was measured
+broken — against a Windows 11 host, FreeRDP decoded 21 surface commands with no
+errors into a framebuffer that summed to exactly black — and the codec next to
+the flag is what guacamole-server ships against the same Windows generation.
+With the pair, the same measurement is a painted desktop. `resize` refuses the
+pipeline because an EGFX resize is a graphics reset that leaves a Windows host's
+text blurry for the rest of the session, where the legacy path's full
+reactivation has the server render the new desktop from scratch, sharp. Servers
+without the pipeline (xrdp among
 them here) use the legacy bitmap path, which the wrapper keeps working through
 resizes by resizing FreeRDP's decoder contexts alongside the framebuffer —
 FreeRDP itself sizes them once, at connect, which is an upstream bug this

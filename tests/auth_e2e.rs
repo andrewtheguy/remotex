@@ -37,6 +37,7 @@ async fn spawn_app() -> SocketAddr {
             height: 800,
             security: Security::Auto,
             resize: false,
+            egfx: false,
             clipboard: false,
             audio: false,
             audio_codec: None,
