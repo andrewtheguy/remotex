@@ -394,6 +394,15 @@ export function createVideoStream(
     }
   };
 
+  // What the decoder is configured with, kept because a stall has to hand it back.
+  const config: VideoDecoderConfig = {
+    // `codedWidth` and `codedHeight` are deliberately left out: the bitstream carries
+    // the coded size, and the record header carries the *desktop* size, which is
+    // smaller by up to a pixel in each axis and is not what a decoder should be told.
+    codec: format.decode,
+    optimizeForLatency: true,
+  };
+
   // The decoder owes frames it is not going to produce. Everything it owes is settled
   // to null — one unpainted region for as long as it takes a keyframe to arrive, where
   // leaving them pending is the whole session, permanently.
@@ -401,8 +410,12 @@ export function createVideoStream(
   // `reset()` is what makes abandoning them safe rather than merely quick: it
   // guarantees no output from before it, so a frame that arrives late cannot resolve a
   // *later* unit's promise and slide every frame after it one place out of position.
-  // Unlike `configure()` it keeps the configuration, and unlike `flush()` it cannot
-  // itself be the thing that never completes.
+  // Unlike `flush()` it also cannot itself be the thing that never completes.
+  //
+  // It resets *all* state though, the configuration included, which is why the config
+  // goes straight back. Without that the decoder is left "unconfigured", `decode`'s
+  // own guard refuses every unit after the stall, and the region never paints again —
+  // the same freeze this exists to end, wearing a quieter face.
   const stalled = () => {
     watchdog = undefined;
     if (closed || pending.length === 0) {
@@ -411,8 +424,9 @@ export function createVideoStream(
     const owed = pending.length;
     keyNeeded = true;
     drain();
-    if (decoder.state === "configured") {
+    if (decoder.state !== "closed") {
       decoder.reset();
+      decoder.configure(config);
     }
     handlers.onStalled(
       `the decoder produced nothing for ${owed} access unit(s) in ${stallMs} ms`,
@@ -435,11 +449,8 @@ export function createVideoStream(
     },
   });
   // Configured here rather than on the first keyframe, because the gateway has already
-  // said what this stream is. `codedWidth` and `codedHeight` are deliberately left
-  // out: the bitstream carries the coded size, and the record header carries the
-  // *desktop* size, which is smaller by up to a pixel in each axis and is not what a
-  // decoder should be told.
-  decoder.configure({ codec: format.decode, optimizeForLatency: true });
+  // said what this stream is.
+  decoder.configure(config);
 
   return {
     decode(data, timestamp, keyframe) {

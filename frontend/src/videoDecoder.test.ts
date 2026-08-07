@@ -27,6 +27,7 @@ class FakeDecoder {
   readonly output: (frame: unknown) => void;
   readonly chunks: { type: string }[] = [];
   state = "unconfigured";
+  configures = 0;
   resets = 0;
   closes = 0;
 
@@ -39,6 +40,7 @@ class FakeDecoder {
   }
 
   configure() {
+    this.configures += 1;
     this.state = "configured";
   }
 
@@ -46,8 +48,11 @@ class FakeDecoder {
     this.chunks.push(chunk);
   }
 
+  // "Resets all states including configuration", which the real one means literally:
+  // a decoder that has been reset and not configured again decodes nothing, silently.
   reset() {
     this.resets += 1;
+    this.state = "unconfigured";
   }
 
   close() {
@@ -156,6 +161,10 @@ test("the reset stream waits for its keyframe rather than erroring per frame", a
   await s.table.decode(1, size, unit(1), true);
   const decoder = s.decoder();
   assert.equal(decoder.chunks.length, 1);
+  // The reset took the configuration with it, so the stall has to hand it back —
+  // an unconfigured decoder refuses the keyframe below and every unit after it.
+  assert.equal(decoder.configures, 2, "the reset stream was left unconfigured");
+  assert.equal(decoder.state, "configured");
 
   // The frames still arriving for a region whose chain was just cut. They are
   // expressed against pictures the decoder no longer has.

@@ -94,6 +94,11 @@ function harness() {
       stallDraws = false;
       releaseDraw();
     },
+    // Stop stalling the draws to come without letting go of the one already out —
+    // which is the state a clear has to work in, rather than after.
+    unstall: () => {
+      stallDraws = false;
+    },
     advance: (milliseconds: number) => {
       clock += milliseconds;
     },
@@ -239,9 +244,11 @@ test("the next attachment paints without waiting for the stuck one", async () =>
   });
   await settled();
   h.host.handle({ type: "clear" });
-  // The new target: the echo the page's "Waiting for the remote desktop…"
-  // overlay is held up by, and then its own first batch.
-  h.release();
+  // The stuck draw is *still* stuck — that is the whole point, and releasing it
+  // here would test the recovery rather than the escape. The new target: the echo
+  // the page's "Waiting for the remote desktop…" overlay is held up by, and then
+  // its own first batch.
+  h.unstall();
   h.host.handle({ type: "resize", w: 800, h: 600, seq: 2 });
   h.host.handle({
     type: "frame",
