@@ -97,11 +97,7 @@ describe("the shape of the bar", () => {
     // It inserts *Enter Full Screen* into any menu titled "View", so an item here
     // is the second copy of it — which is what shipped, and what this stops.
     const view = menu(buildMenuSpec(context()), "View");
-    expect(view.items.map((item) => item.role)).toEqual([
-      undefined,
-      undefined,
-      undefined,
-    ]);
+    expect(view.items.map((item) => item.role)).toEqual([undefined]);
     expect(
       find(buildMenuSpec(context()), "Toggle Full Screen"),
     ).toBeUndefined();
@@ -117,7 +113,6 @@ describe("what the menus claim", () => {
       "Refresh",
       "Switch Target",
       "Send Keys",
-      "Resize to Window",
       "Resize to Display",
     ]) {
       expect(find(menus, label)?.enabled).toBe(false);

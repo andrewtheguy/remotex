@@ -7,8 +7,9 @@
 // `h / scale` CSS pixels. Fitting the window means making room for exactly that.
 //
 // Note what is *not* here: no fit-to-window, no zoom-to-fit, no viewport-derived
-// scaling. Desktops are shown at 100% and an oversized one scrolls. Asking the
-// remote to render smaller is `resizeToWindow`, which is a message, not arithmetic.
+// scaling. Desktops are shown at 100% and an oversized one scrolls. Whether the
+// remote renders at this window's size is the gateway's per-target `resize`
+// policy, carried by the page's own viewport reports — a message, not arithmetic.
 
 export interface Size {
   width: number;

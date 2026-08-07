@@ -69,7 +69,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
         .first()
         .unwrap_or_else(|| panic!("no target named {target} in {path}"))
         .clone();
-    let size = (profile.width, profile.height);
+    let size = profile.default_size();
 
     config.host = "127.0.0.1".to_owned();
     config.port = 0;

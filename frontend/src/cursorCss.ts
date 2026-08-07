@@ -16,6 +16,13 @@ export interface CursorImage {
   hy: number;
   w: number;
   h: number;
+  /**
+   * The image's unit, as the gateway names it: true for a density-independent
+   * point-sized pixmap (Apple's cursors), sized against the desktop's points;
+   * false for one cut from the desktop's own pixels (RDP, generic RFB), sized
+   * against the framebuffer. See paintCursor in useRemoteDesktop.
+   */
+  pointSized: boolean;
 }
 
 // The engine's pointer state. `image` is null when the remote hid the pointer;
@@ -66,7 +73,16 @@ export function fallbackCursor(): CursorImage {
     ctx.lineWidth = 1;
     ctx.stroke();
   }
-  arrow = { url: canvas.toDataURL("image/png"), hx: 0, hy: 0, w, h };
+  // Point-sized: the stand-in should read as a normal cursor on the desktop it
+  // sits on, not shrink with the density of a Retina framebuffer.
+  arrow = {
+    url: canvas.toDataURL("image/png"),
+    hx: 0,
+    hy: 0,
+    w,
+    h,
+    pointSized: true,
+  };
   return arrow;
 }
 

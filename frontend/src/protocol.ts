@@ -41,17 +41,26 @@ export type ClientMsg =
   | { type: "viewport"; w: number; h: number }
   // Restore the target-defined default size; distinct from sending no request.
   | { type: "defaultSize" }
-  // The density of the screen this browser window is on, in hundredths:
-  // `devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina one.
-  // Sent on connect and again whenever the window moves to a screen of a
-  // different density.
-  //
-  // RDP density matching acts on this; it does not affect canvas layout.
-  | { type: "hostScale"; scale: number }
+  // The screen this browser window is on: its full resolution in CSS pixels
+  // (`screen.width`/`screen.height`) and its density in hundredths
+  // (`devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina
+  // one). Sent on connect and again whenever the window lands on a different
+  // screen. Mid-session only the density is acted on (RDP density matching,
+  // a High Performance Mac re-rendering at the new density); the size fields
+  // matter at session-open, where `connect` carries the same shape.
+  // It does not affect canvas layout.
+  | { type: "hostDisplay"; w: number; h: number; scale: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
-  // switch back to it.
-  | { type: "connect"; target: string }
+  // switch back to it. The connect names this window's screen so a target
+  // with no pinned config size opens at its full resolution — by the time a
+  // hostDisplay message could arrive, the opening size has already been
+  // asked of the remote.
+  | {
+      type: "connect";
+      target: string;
+      display: { w: number; h: number; scale: number };
+    }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
   // text on the remote's clipboard, "clipboardRequest" asks for the remote's
@@ -138,7 +147,10 @@ export type ControlMsg =
   // cursor over instead of drawing it into the framebuffer (the VNC Cursor
   // pseudo-encoding). Receiving one at all means the browser owns pointer
   // rendering from then on; `image` is a base64 PNG, null when the remote hid
-  // the pointer. `hx`/`hy` are the hotspot within the image.
+  // the pointer. `hx`/`hy` are the hotspot within the image. `pointSized`
+  // names the image's unit: true for Apple's density-independent point-sized
+  // pixmaps, which are drawn against the desktop's points; false for RDP/RFB
+  // cursors cut from the desktop's own pixels, drawn against the framebuffer.
   | {
       type: "cursor";
       image: string | null;
@@ -146,14 +158,14 @@ export type ControlMsg =
       h: number;
       hx: number;
       hy: number;
+      pointSized: boolean;
     }
   | { type: "error"; message: string }
   | { type: "picker" }
-  // `resize` is the operator's permission to change the remote's size when the
-  // user asks for it. `autoResize` is the separate permission to hand the size to
-  // this window and let every drag report one. The gateway grants it only when an
-  // engine has proved it survives that stream; every current resizable engine
-  // does. Never true without `resize`.
+  // `resize` means this window drives the remote's size, continuously and on
+  // every engine alike — the operator's one switch, with no client-side mode.
+  // True is auto-follow (and the mobile one-shot); false is a session whose
+  // size was settled at open.
   // `protocol` ("rdp"/"vnc") is carried for the status line. `clipboard` is
   // whether this target opted into the clipboard bridge. `audio` advertises
   // capability, not current activity.
@@ -168,7 +180,6 @@ export type ControlMsg =
       // path under it is the reverse-engineered one. See connectionLabel.ts.
       subtype: string | null;
       resize: boolean;
-      autoResize: boolean;
       clipboard: boolean;
       audio: boolean;
       // The render dial this session resolved to, in one line — `tiles · jpeg q60`,

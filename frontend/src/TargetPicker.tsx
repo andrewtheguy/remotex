@@ -32,9 +32,7 @@ export default function TargetPicker({
   connect,
   pendingTarget,
   connectError,
-  autoResizeByDefault,
   audioByDefault,
-  onAutoResizeByDefaultChange,
   onAudioByDefaultChange,
   onLogout,
   onUnauthorized,
@@ -43,15 +41,13 @@ export default function TargetPicker({
   connect: (name: string) => void;
   pendingTarget: string | null;
   connectError: string | null;
-  // The two remembered defaults, shown here as the one place they can be set
-  // before a target is picked — and the same values the desktop menu's live
-  // controls edit. "… if compatible" is deliberately not a per-target check: the
+  // The remembered default, shown here as the one place it can be set before a
+  // target is picked — and the same value the desktop menu's live control
+  // edits. "… if compatible" is deliberately not a per-target check: the
   // picker never learns a target's capabilities (GET /api/targets carries none),
   // so this is an intent, applied on connect only where `connected` reports the
   // target can honour it.
-  autoResizeByDefault: boolean;
   audioByDefault: boolean;
-  onAutoResizeByDefaultChange: (enabled: boolean) => void;
   onAudioByDefaultChange: (enabled: boolean) => void;
   onLogout: () => void;
   onUnauthorized: () => void;
@@ -122,18 +118,10 @@ export default function TargetPicker({
             );
           })}
         </ul>
-        {/* The two remembered defaults, applied to whatever is picked above only
+        {/* The remembered default, applied to whatever is picked above only
             where the target supports it — hence "if compatible", a fixed caption
             rather than a per-target check the picker has no way to make. */}
         <div className="picker-defaults">
-          <label className="picker-default">
-            <input
-              type="checkbox"
-              checked={autoResizeByDefault}
-              onChange={(e) => onAutoResizeByDefaultChange(e.target.checked)}
-            />
-            <span>Auto-resize the remote to the window, if compatible</span>
-          </label>
           <label className="picker-default">
             <input
               type="checkbox"

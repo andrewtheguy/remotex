@@ -57,7 +57,7 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
-use crate::protocol::{CursorShape, DisplayInfo, MAX_CURSOR_DIM};
+use crate::protocol::{CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM};
 use crate::vnc::ENCODING_ZLIB;
 use crate::vnc_encodings::inflate_independent;
 
@@ -274,8 +274,39 @@ pub fn set_display_message(id: Option<u32>) -> Vec<u8> {
     msg
 }
 
+/// One virtual-display mode: the pixels the Mac renders and the points a window
+/// occupies. Equal on a 1x screen; a Retina client earns `pixels = 2 × scaled`,
+/// which is the shape native Screen Sharing requests from a Retina Mac.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualMode {
+    pub pixels: (u16, u16),
+    pub scaled: (u16, u16),
+}
+
+/// The mode `points` at `density` resolves to, held under the fixed dynamic
+/// backing ceiling.
+///
+/// The ceiling bounds *pixels*, so a Retina density halves the points it can
+/// cover. A request past it is shrunk rather than sent as asked: the live Mac
+/// answers an out-of-bounds configuration with its old layout, which reads as a
+/// resize that silently never took. Shrinking keeps the density — sharp and
+/// smaller wins over large and declined — and re-derives the points from the
+/// clamped pixels so the two still state the same ratio.
+pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
+    let axis = |points: u16, max: u32| {
+        let pixels = (f32::from(points) * density)
+            .round()
+            .clamp(1.0, max as f32);
+        let scaled = (pixels / density).round().max(1.0);
+        (pixels as u16, scaled as u16)
+    };
+    let (wp, ws) = axis(w, DYNAMIC_MAX_WIDTH);
+    let (hp, hs) = axis(h, DYNAMIC_MAX_HEIGHT);
+    VirtualMode { pixels: (wp, hp), scaled: (ws, hs) }
+}
+
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
-/// mode is `(w, h)`.
+/// mode is `mode`.
 ///
 /// This is sent while establishing an `ard-high-performance` session and again for
 /// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
@@ -283,9 +314,12 @@ pub fn set_display_message(id: Option<u32>) -> Vec<u8> {
 /// restores the Mac's Dynamic resolution checkbox to on if it was changed there.
 /// The native one/two-virtual-display control is not implemented.
 ///
-/// The descriptor layout follows the reverse-engineered wire specification. The
-/// mode and scaled-mode dimensions are equal, so the requested mode is 1x.
-pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
+/// The descriptor layout follows the reverse-engineered wire specification: the
+/// mode's leading dimensions are the render (pixel) resolution, the scaled pair
+/// the logical resolution, and the physical millimetres follow the logical size —
+/// a denser screen has more pixels, not more glass.
+pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
+    let VirtualMode { pixels, scaled } = mode;
     let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
     let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor);
     body.extend_from_slice(&1u16.to_be_bytes()); // version
@@ -302,8 +336,8 @@ pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
     display.extend_from_slice(&1u32.to_be_bytes()); // display_flags: dynamic resolution
     display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
     let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
-    display.extend_from_slice(&mm(w));
-    display.extend_from_slice(&mm(h));
+    display.extend_from_slice(&mm(scaled.0));
+    display.extend_from_slice(&mm(scaled.1));
     display.extend_from_slice(&DYNAMIC_MAX_WIDTH.to_be_bytes());
     display.extend_from_slice(&DYNAMIC_MAX_HEIGHT.to_be_bytes());
     display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
@@ -315,7 +349,7 @@ pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
     display.extend_from_slice(&7u32.to_be_bytes());
     display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
     debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
-    for value in [w, h, w, h] {
+    for value in [pixels.0, pixels.1, scaled.0, scaled.1] {
         display.extend_from_slice(&u32::from(value).to_be_bytes());
     }
     display.extend_from_slice(&60.0f64.to_be_bytes()); // refresh_rate_hz
@@ -381,10 +415,20 @@ impl Layout {
     /// framebuffer at its pixel size: too large on the Retina half, but nothing
     /// is misrepresented, and picking a screen is what makes it exact.
     ///
+    /// A combined view of *one* screen is that screen, so its density holds for
+    /// the whole framebuffer. This is not a corner: a High Performance layout
+    /// always reports the combined sentinel over its single virtual display, so
+    /// the sentinel path is the one a granted Retina mode comes back on — reading
+    /// it as 1x told the client to show 3456x1804 backing pixels at full size,
+    /// and poisoned the point arithmetic every later resize starts from.
+    ///
     /// [`UNSCALED`]: crate::protocol::UNSCALED
     pub fn scale(&self) -> f32 {
         let Some(id) = self.current else {
-            return crate::protocol::UNSCALED;
+            return match self.displays.as_slice() {
+                [only] => only.density,
+                _ => crate::protocol::UNSCALED,
+            };
         };
         self.displays
             .iter()
@@ -555,8 +599,15 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         // "1600×900 at 2x" — the points a window occupies, which is the size a
         // person recognises, and then the density that earns it more pixels.
         // `f32`'s own Display gives "2" for 2.0 and "1.5" for 1.5, which is exactly
-        // the two shapes wanted and neither of them "2.0x".
-        let suffix = if density > 1.005 { format!(" at {density}x") } else { String::new() };
+        // the two shapes wanted and neither of them "2.0x". A physical screen at 1x
+        // stays bare — the suffix flags the Retina screens in a list of them — but a
+        // virtual display's density is a negotiated outcome, so it is always stated:
+        // "at 1x" on a display that should be Retina is the whole finding.
+        let suffix = if density > 1.005 || virtual_display {
+            format!(" at {density}x")
+        } else {
+            String::new()
+        };
         displays.push(Display {
             info: DisplayInfo {
                 id: be32(record, 0x12),
@@ -658,7 +709,9 @@ impl CursorCache {
         for (px, &a) in bgrx.chunks_exact(4).zip(alpha) {
             rgba.extend_from_slice(&[px[2], px[1], px[0], a]);
         }
-        let shape = CursorShape::from_rgba(w, h, hx, hy, &rgba)?;
+        // Point-sized: the Mac ships the same pixmap whatever density the display
+        // renders at, and re-selects it from this cache across density changes.
+        let shape = CursorShape::from_rgba(w, h, hx, hy, CursorUnit::Points, &rgba)?;
         debug!("vnc: cursor {w}x{h} stored as {id}, {} bytes", shape.png.len());
         self.shapes.insert(id, shape.clone());
         Ok(Cursor::Shape(shape))
@@ -776,7 +829,7 @@ mod tests {
 
     #[test]
     fn a_virtual_display_configuration_has_one_mode_under_the_fixed_dynamic_ceiling() {
-        let msg = set_display_configuration((1600, 1000));
+        let msg = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
         assert_eq!(msg[0], 0x1d);
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
         assert_eq!(msg.len(), CONFIG_HEAD + DESCRIPTOR_HEAD + MODE_ENTRY);
@@ -804,10 +857,42 @@ mod tests {
         // its mode. If the initial 1280x800 request put 1280x800 here, the live Mac
         // would reject an otherwise valid 1281x600 steady-state configuration and
         // answer with the old layout.
-        let smaller = set_display_configuration((1280, 800));
+        let smaller = set_display_configuration(virtual_display_mode((1280, 800), 1.0));
         let display = &smaller[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH);
         assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn a_retina_mode_doubles_the_pixels_and_keeps_the_points() {
+        let mode = virtual_display_mode((1600, 1000), 2.0);
+        assert_eq!(mode, VirtualMode { pixels: (3200, 2000), scaled: (1600, 1000) });
+
+        let msg = set_display_configuration(mode);
+        let display = &msg[CONFIG_HEAD..];
+        assert_eq!(be32(display, 0x9c), 3200, "render width");
+        assert_eq!(be32(display, 0xa0), 2000, "render height");
+        assert_eq!(be32(display, 0xa4), 1600, "scaled width");
+        assert_eq!(be32(display, 0xa8), 1000, "scaled height");
+        // The glass does not grow with the density: physical millimetres follow
+        // the logical size, so 1x and 2x modes of the same points agree here.
+        let one_x = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
+        assert_eq!(display[0x82..0x8a], one_x[CONFIG_HEAD..][0x82..0x8a]);
+    }
+
+    #[test]
+    fn the_backing_ceiling_shrinks_an_oversized_retina_mode_instead_of_sending_it() {
+        // 2560×1440 points at 2x would be 5120×2880 pixels — past the fixed
+        // 3840×2160 backing ceiling the Mac holds a virtual display to. The pixels
+        // are clamped and the points re-derived, keeping the density exact.
+        let mode = virtual_display_mode((2560, 1440), 2.0);
+        assert_eq!(mode, VirtualMode { pixels: (3840, 2160), scaled: (1920, 1080) });
+
+        // At 1x the same points fit untouched.
+        assert_eq!(
+            virtual_display_mode((2560, 1440), 1.0),
+            VirtualMode { pixels: (2560, 1440), scaled: (2560, 1440) }
+        );
     }
 
     #[test]
@@ -968,11 +1053,27 @@ mod tests {
 
     #[test]
     fn a_high_performance_layout_is_reported_as_virtual() {
-        let payload = layout(Some(9), &[(9, (1600, 1000), (1600, 1000), 0x01)]);
+        // The measured Mac reports a virtual display under the combined
+        // (`0xffffffff`) sentinel, not by its id.
+        let payload = layout(None, &[(9, (1600, 1000), (1600, 1000), 0x01)]);
         let parsed = parse_virtual_display_layout(&payload).unwrap();
         assert_eq!(parsed.displays.len(), 1);
         assert_eq!(parsed.displays[0].info.label, "Virtual display");
         assert!(parsed.displays[0].info.virtual_display);
+        // A virtual display states its density even at 1x: whether the negotiated
+        // density took is exactly what a person opening the list wants to read.
+        assert_eq!(parsed.displays[0].info.detail, "1600×1000 at 1x");
+        assert_eq!(parsed.scale(), 1.0);
+
+        // A granted Retina mode comes back on the same sentinel, and the one
+        // display's density is the framebuffer's. Reading it as the mixed-mosaic
+        // 1x here is what stranded the desktop at 2x: the client showed backing
+        // pixels at full size, and the next density change computed its points
+        // from the wrong scale and skipped itself as a no-op.
+        let retina = layout(None, &[(9, (1600, 1000), (3200, 2000), 0x01)]);
+        let parsed = parse_virtual_display_layout(&retina).unwrap();
+        assert_eq!(parsed.displays[0].info.detail, "1600×1000 at 2x");
+        assert_eq!(parsed.scale(), 2.0);
     }
 
     #[test]

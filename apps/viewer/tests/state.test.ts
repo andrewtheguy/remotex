@@ -3,13 +3,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   acceptState,
-  autoResizeLabel,
   blankState,
   canAudio,
-  canAutoResize,
   canClipboard,
   canOverrideMacKeys,
-  canResizeNow,
   canResizeToDisplay,
   clipboardShouldFollow,
   displaySummaryLine,
@@ -155,40 +152,11 @@ describe("what is on the desktop", () => {
 });
 
 describe("resizing", () => {
-  test("auto resize needs both permissions", () => {
-    expect(canAutoResize(live({ canResize: true }))).toBe(false);
-    expect(canAutoResize(live({ canResize: true, canAutoResize: true }))).toBe(
-      true,
-    );
-  });
-
-  test("a target that may resize but not follow the window says so", () => {
-    // Greying alone would read as "this session cannot resize", which the item
-    // below it disproves.
-    expect(autoResizeLabel(live({ canResize: true }))).toBe(
-      "Auto Resize (Not Applicable)",
-    );
-    expect(
-      autoResizeLabel(live({ canResize: true, canAutoResize: true })),
-    ).toBe("Auto Resize");
-  });
-
-  test("one resize now is refused while the window is driving the size", () => {
-    expect(canResizeNow(live({ canResize: true }))).toBe(true);
-    expect(canResizeNow(live({ canResize: true, autoResize: true }))).toBe(
-      false,
-    );
-  });
-
-  test("fitting the window needs a size, not a permission", () => {
+  test("fitting the window needs a size, nothing more", () => {
+    // Nothing is sent for it: the shell resizes its own window, and whether the
+    // remote then follows is the gateway's per-target policy, not this menu's.
     const size = { w: 1920, h: 1080, scale: 1 };
     expect(canResizeToDisplay(live({ size }))).toBe(true);
-    // Nothing is sent for it, so a target that refuses resizing still gets it…
-    expect(canResizeToDisplay(live({ size, canResize: false }))).toBe(true);
-    // …but not while the size is about to follow the window back.
-    expect(
-      canResizeToDisplay(live({ size, canResize: true, autoResize: true })),
-    ).toBe(false);
     expect(canResizeToDisplay(live())).toBe(false);
   });
 });

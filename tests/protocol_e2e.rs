@@ -391,15 +391,18 @@ const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
 const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
 /// ServerInit's size, before the display configuration is applied.
 const MAC_DESKTOP: u16 = 32;
-const MAC_VIRTUAL_WIDTH: u16 = 40;
-const MAC_VIRTUAL_HEIGHT: u16 = 30;
+/// The fake client's screen, named in its `connect`. With no pinned config
+/// size, this is what the virtual display opens at — the unified opening rule.
+const MAC_SCREEN_WIDTH: u16 = 64;
+const MAC_SCREEN_HEIGHT: u16 = 48;
 const MAC_CLIPBOARD_SESSION: u32 = 0x1234_5678;
 const MAC_REMOTE_CLIPBOARD: &str = "copied on virtual Mac ✓";
 const MAC_BROWSER_CLIPBOARD: &str = "sent from browser ☕";
 
 #[derive(Debug, PartialEq, Eq)]
 enum MacRequest {
-    Configuration((u16, u16)),
+    /// A virtual-display mode: its points, and the density its pixels state.
+    Configuration((u16, u16), u16),
     Display(u32),
     AutoPasteboard(bool),
     ClipboardFetch(u32),
@@ -412,7 +415,7 @@ enum MacRequest {
 async fn spawn_fake_mac() -> (
     u16,
     mpsc::UnboundedReceiver<MacRequest>,
-    tokio::task::JoinHandle<std::io::Result<Vec<(u16, u16)>>>,
+    tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -488,27 +491,30 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
 /// offsets: every record field two bytes later than the reference document says, a
 /// scale factor as a big-endian `f64`, and both bounds rects as
 /// `(top, left, bottom, right)` rather than `(x, y, w, h)`.
-fn fake_mac_layout((w, h): (u16, u16)) -> Vec<u8> {
+fn fake_mac_layout((w, h): (u16, u16), density: u16) -> Vec<u8> {
     const RECORD: usize = 0x38;
     const HEAD: usize = 0x14;
+    // The Mac states the density twice — as a double and as the backing rect's
+    // ratio to the logical one — and the gateway cross-checks the two.
+    let (bw, bh) = (w * density, h * density);
 
     let mut p = vec![0u8; HEAD];
     p[..2].copy_from_slice(&((HEAD + RECORD) as u16).to_be_bytes());
     p[2..4].copy_from_slice(&5u16.to_be_bytes()); // version
-    for at in [4, 8] {
-        p[at..at + 2].copy_from_slice(&w.to_be_bytes());
-        p[at + 2..at + 4].copy_from_slice(&h.to_be_bytes());
-    }
+    p[4..6].copy_from_slice(&w.to_be_bytes());
+    p[6..8].copy_from_slice(&h.to_be_bytes());
+    p[8..10].copy_from_slice(&bw.to_be_bytes());
+    p[10..12].copy_from_slice(&bh.to_be_bytes());
     p[12..16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
 
     let mut record = vec![0u8; RECORD];
-    record[0x02..0x0a].copy_from_slice(&1.0f64.to_be_bytes());
+    record[0x02..0x0a].copy_from_slice(&f64::from(density).to_be_bytes());
     record[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes());
     record[0x12..0x16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
-    for at in [0x16, 0x1e] {
-        record[at + 4..at + 6].copy_from_slice(&h.to_be_bytes());
-        record[at + 6..at + 8].copy_from_slice(&w.to_be_bytes());
-    }
+    record[0x1a..0x1c].copy_from_slice(&h.to_be_bytes()); // logical rect
+    record[0x1c..0x1e].copy_from_slice(&w.to_be_bytes());
+    record[0x22..0x24].copy_from_slice(&bh.to_be_bytes()); // backing rect
+    record[0x24..0x26].copy_from_slice(&bw.to_be_bytes());
     record[0x26..0x2a].copy_from_slice(&1u32.to_be_bytes()); // main
     p.extend_from_slice(&record);
     // A live Mac omits the final record's two trailing padding bytes while counting
@@ -519,7 +525,9 @@ fn fake_mac_layout((w, h): (u16, u16)) -> Vec<u8> {
 
 /// Parse `SetDisplayConfiguration` independently of the implementation that wrote
 /// it, asserting the descriptor and mode-table fields consumed by the server.
-fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
+/// Returns the mode's points and the density its pixels state — the pixel pair
+/// must be a whole multiple of the scaled pair, or the mode contradicts itself.
+fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16) {
     const D: usize = 8;
     const DESCRIPTOR_HEAD: usize = 0x9c;
     const MODE_ENTRY: usize = 0x1c;
@@ -545,15 +553,25 @@ fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
     assert_eq!(be32(D + 0x96), 7, "native dynamic rotations value");
 
     let mode = D + DESCRIPTOR_HEAD;
-    let size = (
-        u16::try_from(be32(mode)).expect("width within u16"),
-        u16::try_from(be32(mode + 4)).expect("height within u16"),
+    let pixels = (be32(mode), be32(mode + 4));
+    let points = (
+        u16::try_from(be32(mode + 8)).expect("scaled width within u16"),
+        u16::try_from(be32(mode + 12)).expect("scaled height within u16"),
     );
-    assert_eq!(be32(mode + 8), u32::from(size.0), "scaled width");
-    assert_eq!(be32(mode + 12), u32::from(size.1), "scaled height");
+    let density = u16::try_from(pixels.0 / u32::from(points.0)).expect("density within u16");
+    assert_eq!(
+        pixels.0,
+        u32::from(points.0) * u32::from(density),
+        "pixel width is a whole multiple of the scaled width"
+    );
+    assert_eq!(
+        pixels.1,
+        u32::from(points.1) * u32::from(density),
+        "pixel height states the same density as the width"
+    );
     assert_eq!(&body[mode + 16..mode + 24], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
     assert_eq!(be32(mode + 24), 0, "mode flags");
-    size
+    (points, density)
 }
 
 /// Build the server-to-client Apple pasteboard message independently of the
@@ -620,9 +638,12 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
     (session_id, text)
 }
 
-/// One raw framebuffer update covering the whole desktop, in a colour derived from
-/// `shade` so two of them are never mistaken for one repeat.
+/// One raw framebuffer update in a colour derived from `shade` so two of them are
+/// never mistaken for one repeat. Capped to a corner of the desktop: a dirty rect
+/// need not cover it, and the raw pixels of the 3840×2160 opening display a
+/// resizable session now asks for would not fit one record.
 fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
+    let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
     update.extend_from_slice(&1u16.to_be_bytes()); // one rect
     update.extend_from_slice(&0u16.to_be_bytes()); // x
@@ -640,7 +661,7 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
 async fn serve_fake_mac(
     mut stream: TcpStream,
     requests: mpsc::UnboundedSender<MacRequest>,
-) -> std::io::Result<Vec<(u16, u16)>> {
+) -> std::io::Result<Vec<((u16, u16), u16)>> {
     use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
 
@@ -738,20 +759,50 @@ async fn serve_fake_mac(
         stream.write_all(&rekey).await?;
     }
 
-    let (read_half, mut write_half) = stream.into_split();
-    let mut records = RecordReader::new(read_half, keys);
-    let mut writer = RecordWriter::new(keys);
+    let (read_half, write_half) = stream.into_split();
+    let records = RecordReader::new(read_half, keys);
+    let writer = RecordWriter::new(keys);
+    let mut configurations = Vec::new();
+    // The gateway ends the session by closing the stream, and the close may land
+    // while a reply is mid-write: a client is free to vanish between a request
+    // and its answer, so a broken pipe reads as the EOF it is about to become
+    // rather than as a fault — with the recorded configurations kept either way.
+    match serve_fake_mac_records(records, write_half, writer, requests, &mut configurations)
+        .await
+    {
+        Ok(()) => Ok(configurations),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Ok(configurations)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// The record-layer half of [`serve_fake_mac`]: everything after the rekey.
+async fn serve_fake_mac_records(
+    mut records: remotex::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
+    mut write_half: tokio::net::tcp::OwnedWriteHalf,
+    mut writer: remotex::vnc_record::RecordWriter,
+    requests: mpsc::UnboundedSender<MacRequest>,
+    configurations: &mut Vec<((u16, u16), u16)>,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt as _;
+
     let mut shade = 0x40u8;
     let mut sent_layout = false;
     let mut sent_clipboard_status = false;
-    let mut configurations = Vec::new();
 
     loop {
         let mut kind = [0u8; 1];
         match records.read_exact(&mut kind).await {
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(configurations);
+                return Ok(());
             }
             Err(err) => return Err(err),
         }
@@ -776,7 +827,7 @@ async fn serve_fake_mac(
                 if req[0] != 0 {
                     continue;
                 }
-                let size = configurations
+                let (points, density) = configurations
                     .last()
                     .copied()
                     .expect("the display configuration precedes updates");
@@ -785,12 +836,13 @@ async fn serve_fake_mac(
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(size));
+                    rect.extend_from_slice(&fake_mac_layout(points, density));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
                 shade = shade.wrapping_add(0x10);
+                let pixels = (points.0 * density, points.1 * density);
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, size)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels)).unwrap())
                     .await?;
             }
             // KeyEvent
@@ -855,9 +907,9 @@ async fn serve_fake_mac(
                 let size = usize::from(u16::from_be_bytes([head[1], head[2]]));
                 let mut body = vec![0u8; size];
                 records.read_exact(&mut body).await?;
-                let requested = fake_mac_read_configuration(&body);
-                let _ = requests.send(MacRequest::Configuration(requested));
-                configurations.push(requested);
+                let (points, density) = fake_mac_read_configuration(&body);
+                let _ = requests.send(MacRequest::Configuration(points, density));
+                configurations.push((points, density));
                 // Setup is answered by the first non-incremental request below.
                 // A steady-state dynamic configuration is answered immediately by
                 // a fresh authoritative layout, as the real Mac does.
@@ -866,7 +918,7 @@ async fn serve_fake_mac(
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(requested));
+                    rect.extend_from_slice(&fake_mac_layout(points, density));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
             }
@@ -931,9 +983,10 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         password: "s3cr3t-should-not-leak".to_owned(),
         vnc_password: String::new(),
         domain: None,
-        width: 1280,
-        height: 800,
+        width: Some(1280),
+        height: Some(800),
         security: Security::Auto,
+        egfx: None,
         resize: false,
         clipboard,
         audio: false,
@@ -959,8 +1012,9 @@ fn mac_target(port: u16) -> TargetConfig {
         subtype: Some(remotex::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
-        width: MAC_VIRTUAL_WIDTH,
-        height: MAC_VIRTUAL_HEIGHT,
+        // Unpinned: the virtual display opens at the screen the connect names.
+        width: None,
+        height: None,
         resize: true,
         clipboard: true,
         ..target(Protocol::Vnc, port)
@@ -1724,7 +1778,13 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
+    // The connect names the client's screen, the way the SPA does. With no
+    // pinned config size, that screen's full resolution is the opening mode.
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
 
     assert_eq!(
         next_mac_request(&mut requests).await,
@@ -1732,15 +1792,15 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT))
+        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1)
     );
 
     // ServerInit precedes the encrypted display request, then the answering layout
-    // replaces that provisional geometry with the configured virtual mode.
+    // replaces that provisional geometry with the opening virtual mode.
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], MAC_VIRTUAL_WIDTH, "{resize}");
-    assert_eq!(resize["h"], MAC_VIRTUAL_HEIGHT, "{resize}");
+    assert_eq!(resize["w"], MAC_SCREEN_WIDTH, "{resize}");
+    assert_eq!(resize["h"], MAC_SCREEN_HEIGHT, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
 
     let msg = expect_displays(&mut ws).await;
@@ -1801,7 +1861,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .unwrap();
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((24, 18))
+        MacRequest::Configuration((24, 18), 1)
     );
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], 24, "{resize}");
@@ -1822,7 +1882,65 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![(MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT), (24, 18)],
+        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), ((24, 18), 1)],
+        "unexpected display configurations"
+    );
+}
+
+/// The other opening density: a Retina client's screen is points at 2x, and the
+/// virtual display it earns is `points × 2` backing pixels announced at `scale:
+/// 2.0` — remote pixel density on the wire, never a fit factor. A regression
+/// that treated the scale as one would open this desktop at half its size.
+#[tokio::test]
+async fn high_performance_opens_a_retina_client_at_its_screens_density() {
+    let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":200}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoPasteboard(true)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)
+    );
+
+    // ServerInit's provisional geometry first, then the answering layout: the
+    // backing pixels doubled and the density that earned them, which presents
+    // the desktop at its screen-point size.
+    expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_SCREEN_WIDTH * 2, "{resize}");
+    assert_eq!(resize["h"], MAC_SCREEN_HEIGHT * 2, "{resize}");
+    assert_eq!(resize["scale"], 2.0, "{resize}");
+    expect_tile(&mut ws).await;
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoPasteboard(true),
+        "the answering layout re-arms its pasteboard"
+    );
+    // The re-arm rides with one more update request; consume its repaint so the
+    // fake Mac is back at its read loop — and sees a clean end of stream rather
+    // than a mid-write break — when the disconnect closes the session.
+    expect_tile(&mut ws).await;
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert_eq!(
+        configurations,
+        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)],
         "unexpected display configurations"
     );
 }

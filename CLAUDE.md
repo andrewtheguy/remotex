@@ -64,25 +64,31 @@ To fit the window, ask the remote to render at that size via `resize = true`,
 `ClientMsg::Viewport`, and the engine's resize mechanism. Lack of resize support
 never permits client scaling.
 
-`resize` is permission to resize **when the user asks**. Letting the window drive
-the size unasked is a second permission — `TargetConfig::auto_resize`, carried as
-`autoResize` on `connected` — held by plain `vnc`, `ard-high-performance` and
-`rdp`. It is not a config key, since the operator cannot know which engines
-survive a stream of resizes. High Performance's descriptor must keep the native
-fixed 3840×2160 backing ceiling: using its current mode as the maximum makes the
-Mac decline any later request beyond the initial size. Standard `ard` refuses
-`resize` outright. RDP's trial concluded in its favour: the re-measure found and
-fixed the one real fault (the wrapper never resized FreeRDP's decoder contexts, so growing
-an xorgxrdp desktop killed the session). If a drag ever starts ending sessions
-again, `TargetConfig::auto_resize` is still the line to put back.
+`resize = true` means the window drives the remote's size, continuously, on every
+engine alike. There is **no client-side resize control**: no auto-resize toggle,
+no "Resize to window" button, no remembered preference — the gateway states the
+one policy on `connected` and the client obeys. Standard `ard` refuses `resize`
+outright (config parse rejects it). High Performance's descriptor must keep the
+native fixed 3840×2160 backing ceiling: using its current mode as the maximum
+makes the Mac decline any later request beyond the initial size.
 
-RDP with `resize = true` runs the legacy path, not EGFX — an EGFX resize leaves a
-Windows host's text blurry, a reactivation re-renders it sharp — and a session
-whose sound negotiated on the dynamic `rdpsnd` transport (Windows, and only
-Windows) resizes by *reconnecting*, because that host's audio redirector does not
-survive its own reactivation. The wrapper decides all of this by itself and
-debounces resize requests at 300 ms; the gateway just asks. xrdp keeps the plain
-layout resize with audio intact either way. `resize = false` keeps EGFX.
+**Opening size is one rule for every engine** (`TargetConfig::opening_size`):
+the pinned `width`/`height` when the operator set both, else the full resolution
+of the client's own screen — carried in `ClientMsg::Connect` so it exists before
+the engine's handshake — else `DEFAULT_SIZE`. `width`/`height` are `Option`s;
+*specified* is meaningful. Mid-session, `ClientMsg::HostDisplay` is a density
+report and only `resize = true` targets act on it.
+
+RDP's graphics pipeline is the `egfx` config key (default true), decoupled from
+`resize`. With both on, a resize is a Display Control layout under the pipeline —
+a graphics reset, no reactivation, no reconnect — which is what makes auto-resize
+affordable there; the trade is a Windows host's text staying soft after it. With
+`egfx = false` the legacy path re-renders sharp at the price of a reactivation
+per resize, and a session whose sound negotiated on the dynamic `rdpsnd`
+transport (Windows, and only Windows) then resizes by *reconnecting*, because
+that host's audio redirector does not survive its own reactivation. The wrapper
+decides by reading its live settings and debounces reconnect-resizes at 300 ms;
+the gateway just asks. xrdp keeps the plain layout resize with audio intact.
 
 Apple display modes:
 
@@ -97,10 +103,14 @@ Apple display modes:
   engineered.
   Prefer widening `ard` over deepening this. It is Apple Screen Sharing's
   **High Performance mode** over
-  RFB 003.889. It requests one virtual display at configured `width` and `height`,
-  disables physical displays, and moves all remote windows onto it.
-  Its setup descriptor always enables dynamic resolution. With `resize = true`,
-  viewport reports replace the virtual display configuration. Apple's client can
+  RFB 003.889. It requests one virtual display, disables physical displays, and
+  moves all remote windows onto it. It opens at `opening_size` at the client
+  screen's density — the client's own screen resolution unless a size is pinned,
+  which is how Apple's client opens, and it matters more than any later size:
+  windows squeezed onto a small opening display never spread back out. With
+  `resize = true`, viewport reports then replace the virtual display
+  configuration.
+  Its setup descriptor always enables dynamic resolution. Apple's client can
   choose up to two virtual displays and fixed resolution presets; remotex
   implements neither control.
 

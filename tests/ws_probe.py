@@ -203,10 +203,7 @@ async def main() -> int:
                         print(f"  !! error: {data['message']}")
                         return 1
                     elif kind == "connected":
-                        print(
-                            f"  connected  resize={data['resize']} "
-                            f"autoResize={data['autoResize']}"
-                        )
+                        print(f"  connected  resize={data['resize']}")
                     elif kind not in ("cursor", "picker"):
                         print(f"  {kind}: {json.dumps(data)[:120]}")
         except TimeoutError:

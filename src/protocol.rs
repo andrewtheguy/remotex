@@ -52,6 +52,26 @@ pub fn scale_ratio(scale: u16) -> f32 {
     }
 }
 
+/// The client's screen, as [`ClientMsg::HostDisplay`] and
+/// [`ClientMsg::Connect`] name it: full resolution in points and density in
+/// hundredths (see [`SCALE_ONE`]). Pixels are `points × scale / 100`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDisplay {
+    pub w: u16,
+    pub h: u16,
+    pub scale: u16,
+}
+
+impl HostDisplay {
+    /// The report, unless it is degenerate: a zero dimension comes from a
+    /// client that could not read its own screen, and reads as no report at
+    /// all — the same answer [`scale_ratio`] gives a scale no panel has —
+    /// rather than as a request to open a desktop that cannot exist.
+    pub fn checked(self) -> Option<Self> {
+        (self.w > 0 && self.h > 0).then_some(self)
+    }
+}
+
 /// Wall-clock milliseconds for clipboard activity timestamps. Saturation only
 /// matters after the year 584,554,051 or if the system clock predates Unix.
 pub fn unix_time_ms() -> u64 {
@@ -190,17 +210,21 @@ pub enum ClientMsg {
     /// Restore the engine's configured or created default size. This carries no
     /// dimensions so a pinch-zoom client need not invent a desktop shape.
     DefaultSize,
-    /// The density of the screen this client's window is on, in hundredths —
-    /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
-    /// whenever the window moves to a screen of a different density.
+    /// The screen this client's window is on: its full resolution in points
+    /// (`w`/`h`, CSS pixels) and its density in hundredths — 100 for a 1x
+    /// screen, 200 for a Retina one. Sent on connect and again whenever the
+    /// window lands on a different screen; clients send it unconditionally
+    /// rather than asking what the engine is, so being ignored is not a client
+    /// error.
     ///
-    /// A request that the remote render at this density, which one engine can
-    /// answer: RDP with `resize` asks the host for twice the pixels at 200% UI
-    /// scaling. It quantizes to 1x or 2x at a midpoint and reports what it got
-    /// back through [`ServerMsg::Resize`]. RDP without `resize` and VNC ignore
-    /// it — clients send it unconditionally rather than asking what the engine
-    /// is, so being ignored is not a client error.
-    HostScale { scale: u16 },
+    /// Mid-session it is a *density* report, and only targets with `resize`
+    /// act on it — a density is a resize. RDP asks the host for twice the
+    /// pixels at 200% UI scaling, quantized at a midpoint; a High Performance
+    /// Apple virtual display re-renders the same points at the new density.
+    /// Both report what they got back through [`ServerMsg::Resize`]. The
+    /// size fields matter at session-open, where [`ClientMsg::Connect`]
+    /// carries the same shape.
+    HostDisplay(HostDisplay),
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone
@@ -229,7 +253,18 @@ pub enum ClientMsg {
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
     ///
-    Connect { target: String },
+    /// `display` is the client's screen as [`ClientMsg::HostDisplay`] would
+    /// report it, carried here so it exists *before* the engine's handshake:
+    /// a target with no configured `width`/`height` opens at this screen's
+    /// full resolution, and by the time a `hostDisplay` message could arrive
+    /// the opening size has already been asked of the remote (for a High
+    /// Performance Mac it has already shaped the window layout). Optional so
+    /// a probe with no screen can still connect.
+    Connect {
+        target: String,
+        #[serde(default)]
+        display: Option<HostDisplay>,
+    },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -661,6 +696,16 @@ pub struct CursorShape {
     /// Hotspot within the image, in cursor pixels.
     pub hx: u16,
     pub hy: u16,
+    /// Whether the image is sized in desktop *points* rather than framebuffer
+    /// pixels — the unit decides how large the browser draws it. RDP and RFB
+    /// cursors are cut from the desktop's own pixels, so they scale with the
+    /// framebuffer. Apple's cursor pixmaps are density-independent point-sized
+    /// assets: the measured Mac ships the same 28x40 arrow whatever the display
+    /// renders at, and re-selects it from cache across density changes, so the
+    /// client must size it against the desktop's points at draw time — dividing
+    /// it by the scale like a pixel cursor is what drew it at half size on a 2x
+    /// virtual display.
+    pub point_sized: bool,
     /// PNG-encoded RGBA image (the alpha channel carries the cursor mask).
     ///
     /// PNG rather than the tile codec because [`CursorShape::png`] rides the JSON
@@ -668,9 +713,27 @@ pub struct CursorShape {
     pub png: Vec<u8>,
 }
 
+/// The unit a cursor image is measured in, named by the engine that read the
+/// shape off its own wire. It resolves to [`CursorShape::point_sized`], which
+/// says what each unit means for drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorUnit {
+    /// Desktop points: Apple's density-independent cursor pixmaps.
+    Points,
+    /// Framebuffer pixels: cursors cut from the desktop's own pixels.
+    Pixels,
+}
+
 impl CursorShape {
     /// Build from packed RGBA8888 pixels.
-    pub fn from_rgba(w: u16, h: u16, hx: u16, hy: u16, rgba: &[u8]) -> anyhow::Result<Self> {
+    pub fn from_rgba(
+        w: u16,
+        h: u16,
+        hx: u16,
+        hy: u16,
+        unit: CursorUnit,
+        rgba: &[u8],
+    ) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 4;
         anyhow::ensure!(
             rgba.len() == expected,
@@ -678,7 +741,7 @@ impl CursorShape {
             rgba.len()
         );
         let png = encode_png(w, h, png::ColorType::Rgba, rgba)?;
-        Ok(Self { w, h, hx, hy, png })
+        Ok(Self { w, h, hx, hy, point_sized: unit == CursorUnit::Points, png })
     }
 }
 
@@ -820,11 +883,10 @@ pub enum ServerMsg {
     /// A live target and its client-visible capabilities. `audio` reports
     /// capability, not whether sound is arriving.
     ///
-    /// `resize` and `auto_resize` are two permissions, not one field serialized
-    /// twice: the first is whether a client may resize the remote when the user
-    /// asks, the second whether it may hand the size to its window and let every
-    /// drag report. [`crate::config::TargetConfig::auto_resize`] owns the latter
-    /// engine decision.
+    /// `resize` means the window drives the remote's size, continuously and on
+    /// every engine alike — the operator's one switch. The client carries no
+    /// mode of its own: true is auto-follow (and the mobile one-shot), false is
+    /// a session whose size was settled at open.
     Connected {
         name: String,
         protocol: &'static str,
@@ -839,7 +901,6 @@ pub enum ServerMsg {
         /// "VNC" for all three cannot tell somebody which of them they are on.
         subtype: Option<&'static str>,
         resize: bool,
-        auto_resize: bool,
         clipboard: bool,
         audio: bool,
         /// The render dial this session resolved to, as one line — see
@@ -959,6 +1020,8 @@ enum ControlMsg<'a> {
         h: u16,
         hx: u16,
         hy: u16,
+        #[serde(rename = "pointSized")]
+        point_sized: bool,
     },
     Error { message: &'a str },
     Picker,
@@ -967,10 +1030,6 @@ enum ControlMsg<'a> {
         protocol: &'a str,
         subtype: Option<&'a str>,
         resize: bool,
-        // `rename_all` on this enum renames the variants, not their fields, so
-        // every camelCase key on the wire is spelled here — see `changedAtMs`.
-        #[serde(rename = "autoResize")]
-        auto_resize: bool,
         clipboard: bool,
         audio: bool,
         render: &'a str,
@@ -1043,6 +1102,7 @@ impl ServerMsg {
                     h: c.h,
                     hx: c.hx,
                     hy: c.hy,
+                    point_sized: c.point_sized,
                 },
                 None => ControlMsg::Cursor {
                     image: None,
@@ -1050,6 +1110,7 @@ impl ServerMsg {
                     h: 0,
                     hx: 0,
                     hy: 0,
+                    point_sized: false,
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
@@ -1059,7 +1120,6 @@ impl ServerMsg {
                 protocol,
                 subtype,
                 resize,
-                auto_resize,
                 clipboard,
                 audio,
                 render,
@@ -1068,7 +1128,6 @@ impl ServerMsg {
                 protocol,
                 subtype: *subtype,
                 resize: *resize,
-                auto_resize: *auto_resize,
                 clipboard: *clipboard,
                 audio: *audio,
                 render,
@@ -1203,6 +1262,37 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
         ));
+        // The client's screen: the tag rides beside the struct's own fields.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"hostDisplay","w":1728,"h":1117,"scale":200}"#
+            )
+            .unwrap(),
+            ClientMsg::HostDisplay(HostDisplay { w: 1728, h: 1117, scale: 200 })
+        ));
+        // A zero dimension still parses — u16 has no floor — and stops at the
+        // boundary that would spend it instead ([`HostDisplay::checked`]).
+        assert_eq!(HostDisplay { w: 0, h: 1117, scale: 200 }.checked(), None);
+        assert_eq!(HostDisplay { w: 1728, h: 0, scale: 200 }.checked(), None);
+        let screen = HostDisplay { w: 1728, h: 1117, scale: 200 };
+        assert_eq!(screen.checked(), Some(screen));
+        // A connect names the screen it is made from, and a probe without one
+        // still connects.
+        match serde_json::from_str::<ClientMsg>(
+            r#"{"type":"connect","target":"mac","display":{"w":2560,"h":1440,"scale":100}}"#,
+        )
+        .unwrap()
+        {
+            ClientMsg::Connect { target, display } => {
+                assert_eq!(target, "mac");
+                assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100 }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"connect","target":"mac"}"#).unwrap(),
+            ClientMsg::Connect { display: None, .. }
+        ));
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
                 r#"{"type":"paintAck","sequence":41,"queuedMs":7,"drawMs":13}"#
@@ -1325,7 +1415,6 @@ mod tests {
             protocol: "vnc",
             subtype: Some("ard"),
             resize: false,
-            auto_resize: false,
             clipboard: true,
             audio: false,
             render: "tiles · lossless png".to_owned(),
@@ -1334,7 +1423,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"autoResize":false,"clipboard":true,"audio":false,"render":"tiles · lossless png"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"render":"tiles · lossless png"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1344,8 +1433,7 @@ mod tests {
             name: "desk".to_owned(),
             protocol: "rdp",
             subtype: None,
-            resize: false,
-            auto_resize: false,
+            resize: true,
             clipboard: false,
             audio: false,
             render: "video q60".to_owned(),
@@ -1530,23 +1618,37 @@ mod tests {
         );
     }
 
+    // The believable densities pass through; a zero from a source that could
+    // not read its display, or a number no panel has, reads as 1x.
+    #[test]
+    fn a_wire_scale_outside_the_believable_range_reads_as_1x() {
+        assert_eq!(scale_ratio(SCALE_ONE), 1.0);
+        assert_eq!(scale_ratio(150), 1.5);
+        assert_eq!(scale_ratio(200), 2.0);
+        for unbelievable in [0, 99, 401, u16::MAX] {
+            assert_eq!(scale_ratio(unbelievable), 1.0, "scale {unbelievable}");
+        }
+    }
+
     // The cursor control message: base64 PNG plus geometry, and an explicit
     // null image for "the remote hid the pointer".
     #[test]
     fn cursor_control_message_carries_a_base64_png_or_null() {
-        let shape = CursorShape::from_rgba(1, 1, 3, 4, &[255, 0, 0, 255]).unwrap();
+        let shape = CursorShape::from_rgba(1, 1, 3, 4, CursorUnit::Points, &[255, 0, 0, 255]).unwrap();
         let expected = base64::engine::general_purpose::STANDARD.encode(&shape.png);
         match (ServerMsg::Cursor(Some(shape))).text_frame() {
             Some(json) => assert_eq!(
                 json,
-                format!(r#"{{"type":"cursor","image":"{expected}","w":1,"h":1,"hx":3,"hy":4}}"#)
+                format!(
+                    r#"{{"type":"cursor","image":"{expected}","w":1,"h":1,"hx":3,"hy":4,"pointSized":true}}"#
+                )
             ),
             None => panic!("cursor must be a text frame"),
         }
         match (ServerMsg::Cursor(None)).text_frame() {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"cursor","image":null,"w":0,"h":0,"hx":0,"hy":0}"#
+                r#"{"type":"cursor","image":null,"w":0,"h":0,"hx":0,"hy":0,"pointSized":false}"#
             ),
             None => panic!("cursor must be a text frame"),
         }
@@ -1554,7 +1656,7 @@ mod tests {
 
     #[test]
     fn cursor_with_wrong_payload_length_is_rejected() {
-        assert!(CursorShape::from_rgba(2, 2, 0, 0, &[0u8; 12]).is_err());
+        assert!(CursorShape::from_rgba(2, 2, 0, 0, CursorUnit::Pixels, &[0u8; 12]).is_err());
     }
 
     // A tile has no standalone frame any more, only a record inside a batch. The

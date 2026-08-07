@@ -94,9 +94,10 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             domain: None,
             // Not the connect-time size for VNC — the server keeps its own — but
             // the size a `defaultSize` request resolves to.
-            width: DEFAULT_W as u16,
-            height: DEFAULT_H as u16,
+            width: Some(DEFAULT_W as u16),
+            height: Some(DEFAULT_H as u16),
             security: Security::Auto, // RDP-only knob, ignored for VNC
+            egfx: None,
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all

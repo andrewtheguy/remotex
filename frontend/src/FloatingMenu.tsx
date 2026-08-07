@@ -370,76 +370,6 @@ function AudioSection({
   );
 }
 
-// How this session drives the remote's size, for a session allowed to drive it at
-// all — the target's `resize`, and for Apple High Performance a virtual display
-// rather than one of the Mac's own screens. Absent otherwise, like Display and
-// Audio and unlike Clipboard: there is no feature here to grey out, only one the
-// operator did not turn on.
-//
-// Both controls in one section because they are one decision. Auto hands the size
-// to the window continuously; manual — the default, and what every connect starts
-// at — sends nothing until the button is pressed.
-//
-// Manual is offered on every protocol that allows resize at all. Auto is not: it
-// is the gateway's second permission (`autoResize`), which Apple High Performance
-// is held back from, and where it is missing the button stays visible and inactive
-// rather than disappearing — the same choice `MacKeyboardSection` makes, because
-// it is the same situation. The feature exists and this remote cannot take it,
-// which is worth saying; an absent control would read as one the operator forgot.
-function ResizeSection({
-  available,
-  autoAvailable,
-  auto,
-  onAutoChange,
-  onResizeToWindow,
-}: {
-  available: boolean;
-  autoAvailable: boolean;
-  auto: boolean;
-  onAutoChange: (auto: boolean) => void;
-  onResizeToWindow: () => void;
-}) {
-  if (!available) {
-    return null;
-  }
-  return (
-    <div className="toolbar-section">
-      <span className="toolbar-label">Resize</span>
-      <button
-        type="button"
-        className="toolbar-btn"
-        onClick={() => onAutoChange(!auto)}
-        aria-pressed={auto}
-        disabled={!autoAvailable}
-        title={
-          autoAvailable
-            ? "Hand the remote's size to this window, so it follows every resize"
-            : "This remote is resized only when you ask. Use Resize to window."
-        }
-      >
-        {autoAvailable
-          ? auto
-            ? "Auto resize: on"
-            : "Auto resize: off"
-          : "Auto resize: n/a"}
-      </button>
-      <button
-        type="button"
-        className="toolbar-btn"
-        onClick={onResizeToWindow}
-        disabled={auto}
-        title={
-          auto
-            ? "The remote is already following this window"
-            : "Resize the remote desktop to the browser window, once"
-        }
-      >
-        Resize to window
-      </button>
-    </div>
-  );
-}
-
 // macOS-only Command-to-Control preference. It remains visible but inactive for
 // a Mac guest, where Command already has native meaning.
 function MacKeyboardSection({
@@ -491,11 +421,6 @@ function MacKeyboardSection({
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
-  canResize,
-  canAutoResize,
-  autoResize,
-  onAutoResizeChange,
-  onResizeToWindow,
   sendKeyCombo,
   onKeyboardInset,
   canClipboard,
@@ -526,24 +451,6 @@ export default function FloatingMenu({
   // Return to the post-login target picker ("switch target"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
-  // Whether this session may resize the remote at all — the target's
-  // `resize = true`. It is the operator's permission and says nothing
-  // about how it is used; that is `autoResize`, and false here hides both.
-  //
-  // Never true on a pinch-zoom device, whatever the target allows: a phone's
-  // window is not a shape to hand a desktop, which is the whole of what mobile
-  // decides differently about size. See useRemoteDesktop.
-  canResize: boolean;
-  // Whether this remote may be handed the window's size unasked — the gateway's
-  // second permission, plain VNC only. False leaves the mode inactive while manual
-  // resize stays on offer. See ResizeSection.
-  canAutoResize: boolean;
-  // Whether the remote is following this window continuously. The client's choice,
-  // per session, and manual is where every connect starts. See ResizeSection.
-  autoResize: boolean;
-  onAutoResizeChange: (auto: boolean) => void;
-  // One resize now, to this window. Offered while `canResize` and manual.
-  onResizeToWindow: () => void;
   sendKeyCombo: (codes: string[]) => void;
   // Reports the open docked panel's height so the touch canvas can inset above
   // it (0 when the panel closes or floats). See useRemoteDesktop. Both panels
@@ -853,13 +760,6 @@ export default function FloatingMenu({
     });
   }, [panel, clipboardPending, onFetchClipboard, closePanel, setPanel]);
 
-  // Resize the remote desktop to the window, then collapse the drawer so the
-  // resized desktop is visible.
-  const onResize = useCallback(() => {
-    onResizeToWindow();
-    setOpen(false);
-  }, [onResizeToWindow]);
-
   // The same three actions the drawer's buttons take, published for a host whose
   // menus replace the drawer. Republished when they change, and withdrawn on
   // unmount so a menu item cannot open a panel belonging to a session that ended.
@@ -955,16 +855,6 @@ export default function FloatingMenu({
               setOpen(false);
               togglePanel("display");
             }}
-          />
-
-          {/* Beside the Display section, which is the other control over what
-              shape the remote is in. */}
-          <ResizeSection
-            available={canResize}
-            autoAvailable={canAutoResize}
-            auto={autoResize}
-            onAutoChange={onAutoResizeChange}
-            onResizeToWindow={onResize}
           />
 
           <div className="toolbar-section">

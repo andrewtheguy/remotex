@@ -38,8 +38,9 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    self, ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES,
-    MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
+    self, ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, DisplayInfo, HostDisplay,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
+    clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
@@ -293,6 +294,14 @@ struct DesktopState {
     /// pixel count there would give the browser a canvas at half the size the Mac
     /// thinks it is.
     scale: f32,
+    /// The density of the screen the client's window is on, from
+    /// [`ClientMsg::HostDisplay`], seeded from the session-open's screen.
+    ///
+    /// Only High Performance resize spends it: a virtual display renders `points ×
+    /// host_density` pixels, so a Retina client gets a Retina desktop. `scale` is
+    /// what the *remote* granted; the two disagree exactly while a density change
+    /// is in flight.
+    host_density: f32,
     /// First screen of the server's layout. `Some` only once the server has
     /// sent an ExtendedDesktopSize rect — its declaration that SetDesktopSize
     /// is supported; nothing is requested before that.
@@ -459,17 +468,19 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 /// function, and the sink forwards from a task of its own.
 pub async fn run(
     config: TargetConfig,
+    display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("vnc", frame_tx, config.render_plan(), feedback);
-    session(config, input_rx, &sink).await;
+    session(config, display, input_rx, &sink).await;
     sink.finish().await;
 }
 
 async fn session(
     config: TargetConfig,
+    display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) {
@@ -483,7 +494,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, stream),
+        |stream| connect(&config, display, stream),
     )
     .await
     else {
@@ -515,9 +526,10 @@ async fn session(
             macos,
             resize: config.resize,
             clipboard: config.clipboard,
-            default_size: (config.width, config.height),
+            default_size: config.default_size(),
             apple,
             high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
+            host_density: display.map_or(UNSCALED, |d| crate::protocol::scale_ratio(d.scale)),
             poll,
         },
         input_rx,
@@ -541,14 +553,11 @@ struct Flags {
     macos: bool,
     resize: bool,
     clipboard: bool,
-    /// The target's configured `width`/`height`, which is what
-    /// [`ClientMsg::DefaultSize`] resolves to here. Carried rather than read from
-    /// the config at the point of use because [`active_loop`] is given the
-    /// handshaken link and these switches, not the profile behind them.
-    ///
-    /// Generic VNC and Standard `ard` consult it only when a client asks.
-    /// High Performance mode also uses it during setup for its virtual display;
-    /// retaining it here keeps `DefaultSize` consistent with that configured mode.
+    /// What [`ClientMsg::DefaultSize`] resolves to here —
+    /// [`TargetConfig::default_size`], the pinned size or the built-in default.
+    /// Carried rather than read from the config at the point of use because
+    /// [`active_loop`] is given the handshaken link and these switches, not the
+    /// profile behind them.
     default_size: (u16, u16),
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
@@ -558,6 +567,11 @@ struct Flags {
     /// during setup and asks for zlib after the first layout; plain `ard` does
     /// neither.
     high_performance: bool,
+    /// The density the virtual display opened at, from the session-open's
+    /// screen. Seeding [`DesktopState::host_density`] with it keeps the
+    /// client's first `hostDisplay` — an echo of the same screen — from
+    /// reading as a density change against a desktop already rendered at it.
+    host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
 }
@@ -618,7 +632,11 @@ impl ServerInit {
 /// 003.889 preface waits for the server's rekey, which puts *that* wait inside the
 /// same budget — a Mac that authenticates and then says nothing is reported as a
 /// handshake that ran long, not as a live session with a blank canvas.
-async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow::Result<Connected> {
+async fn connect(
+    config: &TargetConfig,
+    display: Option<HostDisplay>,
+    stream: tokio::net::TcpStream,
+) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
     let (read_half, mut sock) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -649,7 +667,9 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
 
     match dialect {
         Dialect::Rfb38 => rfb38_preface(reader, sock, server, macos, config).await,
-        Dialect::Apple889 => apple_preface(reader, sock, server, macos, wrap_key, config).await,
+        Dialect::Apple889 => {
+            apple_preface(reader, sock, server, macos, wrap_key, config, display).await
+        }
     }
 }
 
@@ -869,6 +889,23 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
     encodings
 }
 
+/// The virtual display a High Performance session opens with.
+///
+/// The points come from [`TargetConfig::opening_size`] — the pinned config
+/// size, else the full resolution of the client's own screen, which is how
+/// Apple's client opens: at the display it is on, never at a smaller target
+/// size. The opening size matters more than any later one, because macOS lays
+/// every remote window out on the virtual display at that size and windows
+/// squeezed together onto a small opening display do not spread back out when
+/// it grows. The density is the client screen's whatever named the points, so
+/// a Retina client gets a sharp desktop even at a pinned size.
+fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_apple::VirtualMode {
+    vnc_apple::virtual_display_mode(
+        config.opening_size(display),
+        display.map_or(UNSCALED, |d| crate::protocol::scale_ratio(d.scale)),
+    )
+}
+
 /// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
 /// the encrypted preface and the arming that replaces polling.
 ///
@@ -887,6 +924,7 @@ async fn apple_preface(
     macos: bool,
     wrap_key: Option<[u8; 16]>,
     config: &TargetConfig,
+    display: Option<HostDisplay>,
 ) -> anyhow::Result<Connected> {
     let wrap_key = wrap_key.ok_or_else(|| {
         anyhow::anyhow!(
@@ -916,12 +954,12 @@ async fn apple_preface(
     info!("vnc: Apple record layer active");
 
     let mut uplink = Uplink::records(sock, keys);
-    // High Performance mode is a virtual-display session. Request its one configured
-    // mode before the pixel format and encoding list. The same message is resent for
-    // viewport reports when resize is permitted; its dynamic-resolution flag is set
-    // here regardless, so every fresh session restores the Mac's checkbox to on.
+    // High Performance mode is a virtual-display session. Request its mode before
+    // the pixel format and encoding list. The same message is resent for later
+    // viewport reports and screen changes; its dynamic-resolution flag is set here
+    // regardless, so every fresh session restores the Mac's checkbox to on.
     uplink
-        .send(&vnc_apple::set_display_configuration((config.width, config.height)))
+        .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
         .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
@@ -1014,6 +1052,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         default_size,
         apple,
         high_performance,
+        host_density,
         poll,
     } = flags;
     // The uplink is shared: the read loop answers the server (update requests,
@@ -1022,6 +1061,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
+        host_density,
         screen: None,
         pending: None,
     }));
@@ -1069,6 +1109,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // state (see [`ClientMsg::Key`]).
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
     let mut wheel = Wheel::new(apple);
+    let buttons = Buttons::new(high_performance);
 
     let result = loop {
         tokio::select! {
@@ -1081,20 +1122,33 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     break Ok(());
                 };
                 // Viewport reports drive dynamic resize, not an input event;
-                // dropped entirely unless the target opted in. `DefaultSize` is
-                // the same request with the size supplied from here instead of by
-                // the client — see [`ClientMsg::DefaultSize`] — so the two resolve
-                // to a size first and share the one call, which is also how the
-                // second inherits the stash-until-supported and drop-the-no-op
-                // behaviour `request_resize` already has.
-                let wanted_size = match input {
-                    ClientMsg::Viewport { w, h } => Some((w, h)),
-                    ClientMsg::DefaultSize => Some(default_size),
+                // `DefaultSize` is the same request with the size supplied from
+                // here instead of by the client — see [`ClientMsg::DefaultSize`]
+                // — so the two resolve to a size first and share the one call,
+                // which is also how the second inherits the stash-until-supported
+                // and drop-the-no-op behaviour `request_resize` already has.
+                //
+                // `HostDisplay` is that request with no size of its own:
+                // mid-session it is a *density* report, and only a High
+                // Performance virtual display can render the same points at a
+                // new density, so only it listens — and like RDP it listens only
+                // where `resize` is granted. The size it carries mattered at
+                // session-open, where `opening_mode` already spent it.
+                let ask = match input {
+                    ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
+                    ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
+                    ClientMsg::HostDisplay(screen) if high_performance && resize => {
+                        let density = crate::protocol::scale_ratio(screen.scale);
+                        let mut d = desktop.lock().unwrap();
+                        let changed = (d.host_density - density).abs() > 0.005;
+                        d.host_density = density;
+                        changed.then_some(ResizeAsk::Density)
+                    }
                     _ => None,
                 };
-                let sent = if let Some(size) = wanted_size {
+                let sent = if let Some(ask) = ask {
                     if resize {
-                        request_resize(&uplink, &desktop, size, high_performance).await
+                        request_resize(&uplink, &desktop, ask, high_performance).await
                     } else {
                         Ok(())
                     }
@@ -1272,6 +1326,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 } else {
                     let msgs = translate_input(
                         input,
+                        &buttons,
                         &mut button_mask,
                         &mut last_pos,
                         &mut pressed_keys,
@@ -1291,31 +1346,60 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     result
 }
 
+/// The unit a resize request states its size in. Everything resolves to logical
+/// points first, because that is the one unit all three speak: a viewport report
+/// is pixels at the scale this end last announced, the configured default is
+/// points outright, and a density change carries no size at all.
+enum ResizeAsk {
+    /// A browser viewport report: pixels at the announced scale.
+    Viewport((u16, u16)),
+    /// The target's configured size: logical points.
+    Points((u16, u16)),
+    /// No new size — the client's screen changed density, so the current size is
+    /// re-expressed at the new [`DesktopState::host_density`].
+    Density,
+}
+
 /// Handle a browser viewport report (dynamic resize).
 ///
 /// A High Performance Mac owns a virtual display, so replacing its one-mode
-/// `SetDisplayConfiguration` is the resize request. Generic VNC uses
+/// `SetDisplayConfiguration` is the resize request — and the mode it requests is
+/// the resolved points at the client screen's density, which is how moving the
+/// window to a Retina display re-renders the same desktop at 2x. Generic VNC uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
-/// rect; until then, its report is stashed for replay.
+/// rect; until then, its report is stashed for replay. It has no density to
+/// apply, so its points are its pixels.
 async fn request_resize(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
-    want: (u16, u16),
+    ask: ResizeAsk,
     high_performance: bool,
 ) -> anyhow::Result<()> {
     let msg = {
         let mut d = desktop.lock().unwrap();
-        if want.0 == 0 || want.1 == 0 {
-            return Ok(());
-        }
-        if want == d.size {
+        let to_points = |px: (u16, u16)| {
+            let point = |v: u16| (f32::from(v) / d.scale).round().max(1.0) as u16;
+            (point(px.0), point(px.1))
+        };
+        let want = match ask {
+            ResizeAsk::Viewport((0, _) | (_, 0)) => return Ok(()),
+            ResizeAsk::Viewport(px) => to_points(px),
+            ResizeAsk::Points(points) => points,
+            ResizeAsk::Density => to_points(d.size),
+        };
+        let msg = if high_performance {
+            let mode = vnc_apple::virtual_display_mode(want, d.host_density);
+            // A no-op needs the density to agree too: a 3840×2160 desktop moving
+            // from 1x to 2x keeps every pixel and still needs the new mode sent.
+            if mode.pixels == d.size && (d.scale - d.host_density).abs() < 0.005 {
+                return Ok(());
+            }
+            vnc_apple::set_display_configuration(mode)
+        } else if want == d.size {
             // The browser is back at the current size; drop any stale stash
             // so a later support declaration doesn't replay it.
             d.pending = None;
             return Ok(());
-        }
-        if high_performance {
-            vnc_apple::set_display_configuration(want)
         } else {
             match d.screen {
                 Some(screen) => set_desktop_size(want, screen).to_vec(),
@@ -1324,14 +1408,16 @@ async fn request_resize(
                     return Ok(());
                 }
             }
-        }
+        };
+        debug!(
+            "vnc: requesting {} resize to {}x{} points at {}x",
+            if high_performance { "Apple virtual-display" } else { "desktop" },
+            want.0,
+            want.1,
+            if high_performance { d.host_density } else { UNSCALED },
+        );
+        msg
     };
-    debug!(
-        "vnc: requesting {} resize to {}x{}",
-        if high_performance { "Apple virtual-display" } else { "desktop" },
-        want.0,
-        want.1
-    );
     send(uplink, &msg).await
 }
 
@@ -2341,8 +2427,15 @@ async fn read_cursor<R: AsyncRead + Unpin>(
             reader.read_exact(&mut pixels).await?;
             let mut mask = vec![0u8; mask_len];
             reader.read_exact(&mut mask).await?;
-            let shape =
-                CursorShape::from_rgba(w, h, hx, hy, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
+            // Framebuffer pixels, per the pseudo-encoding's own convention.
+            let shape = CursorShape::from_rgba(
+                w,
+                h,
+                hx,
+                hy,
+                CursorUnit::Pixels,
+                &masked_bgrx_to_rgba(&pixels, &mask, w),
+            )?;
             debug!("vnc: cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
             (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
         }
@@ -2717,6 +2810,50 @@ impl Wheel {
     }
 }
 
+/// The pointer-mask bit each mouse button sets, by server dialect.
+///
+/// RFB's convention is bit 1 = left, bit 2 = middle, bit 3 = right, and every
+/// server here honours it — including Apple's Standard mode, measured on macOS
+/// 26.6 by holding each button through a live session and reading
+/// `CGEventSource.buttonState` on the Mac. High Performance mode's agent reads
+/// the same mask positionally instead, as CGMouseButton numbers: bit 2 =
+/// *right*, bit 3 = *middle*. A right-click sent by the book therefore lands on
+/// the virtual display as a middle-click — the button macOS does nothing with —
+/// which is what a dead right button in that mode was. The two bits are swapped
+/// for that subtype alone. See docs/apple-vnc-889.md.
+enum Buttons {
+    /// The RFB convention: bit 2 = middle, bit 3 = right.
+    Rfb,
+    /// Apple High Performance's positional reading: bit 2 = right, bit 3 = middle.
+    HighPerformance,
+}
+
+impl Buttons {
+    fn new(high_performance: bool) -> Self {
+        if high_performance {
+            Self::HighPerformance
+        } else {
+            Self::Rfb
+        }
+    }
+
+    /// The mask bit this button sets, or `None` for a button no server reads.
+    /// RFB's mask has bits for buttons 8 and 9, but no server agrees on what
+    /// they mean and the ones remotex talks to ignore them. `Back` and
+    /// `Forward` are dropped rather than sent as a scroll notch, which is what
+    /// those bits are on every server that does read them.
+    fn bit(&self, button: MouseButton) -> Option<u8> {
+        match (self, button) {
+            (_, MouseButton::Left) => Some(0x01),
+            (Self::Rfb, MouseButton::Middle) => Some(0x02),
+            (Self::Rfb, MouseButton::Right) => Some(0x04),
+            (Self::HighPerformance, MouseButton::Middle) => Some(0x04),
+            (Self::HighPerformance, MouseButton::Right) => Some(0x02),
+            (_, MouseButton::Back | MouseButton::Forward) => None,
+        }
+    }
+}
+
 /// One pulse in the direction of a nonzero delta: the RFB convention, where the
 /// magnitude a client reports is dropped and the server decides how far a scroll
 /// goes.
@@ -2740,6 +2877,7 @@ fn notch(delta: f32) -> i32 {
 /// makes that impossible rather than remembered.
 fn translate_input(
     input: ClientMsg,
+    buttons: &Buttons,
     button_mask: &mut u8,
     last_pos: &mut (u16, u16),
     pressed_keys: &mut HashMap<String, u32>,
@@ -2753,15 +2891,8 @@ fn translate_input(
         // `clicks` goes nowhere: RFB carries a button mask alone, and the guest
         // counts the clicks itself from the events it receives.
         ClientMsg::MouseButton { button, pressed, .. } => {
-            let bit = match button {
-                MouseButton::Left => 0x01,
-                MouseButton::Middle => 0x02,
-                MouseButton::Right => 0x04,
-                // RFB's mask has bits for buttons 8 and 9, but no server agrees
-                // on what they mean and the ones remotex talks to ignore them.
-                // Dropped rather than sent as a scroll notch, which is what
-                // those bits are on every server that does read them.
-                MouseButton::Back | MouseButton::Forward => return Vec::new(),
+            let Some(bit) = buttons.bit(button) else {
+                return Vec::new();
             };
             if pressed {
                 *button_mask |= bit;
@@ -2854,11 +2985,14 @@ fn translate_input(
         // for it; the Apple extension supplies the selectable list on either
         // transport.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
-        // Nothing to act on: RFB has no backing scale, and a VNC server's
+        // Intercepted by the input loop where it means something — a High
+        // Performance virtual display follows the client's screen, by density
+        // or by full resolution depending on `resize`. Everywhere else there is
+        // nothing to act on: RFB has no backing scale, and a VNC server's
         // framebuffer is already the pixels it has. Clients send this
         // unconditionally rather than asking what the engine is, so it is
         // ignored here rather than treated as a client error.
-        ClientMsg::HostScale { .. } => Vec::new(),
+        ClientMsg::HostDisplay { .. } => Vec::new(),
     }
 }
 
@@ -3931,6 +4065,7 @@ mod tests {
                 pressed: true,
                 clicks: 1,
             },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
@@ -3941,6 +4076,7 @@ mod tests {
         // A move while the button is held keeps it in the mask (drag).
         let bytes = translate_input(
             ClientMsg::MouseMove { x: 30, y: 40 },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
@@ -3952,6 +4088,7 @@ mod tests {
         // Three lines of intent is exactly one pulse here.
         let bytes = translate_input(
             ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Line },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
@@ -3974,12 +4111,57 @@ mod tests {
                 pressed: false,
                 clicks: 1,
             },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
             &mut wheel,
         );
         assert_eq!(bytes, vec![pointer_event(0x00, (30, 40)).to_vec()]);
+    }
+
+    /// High Performance mode's agent reads the mask as CGMouseButton numbers,
+    /// so right and middle ride each other's RFB bits there — and only there.
+    /// Measured on macOS 26.6: see [`Buttons`].
+    #[test]
+    fn high_performance_swaps_the_middle_and_right_mask_bits() {
+        for (buttons, right_bit, middle_bit) in [
+            (Buttons::Rfb, 0x04u8, 0x02u8),
+            (Buttons::HighPerformance, 0x02, 0x04),
+        ] {
+            for (button, bit) in [
+                (MouseButton::Right, right_bit),
+                (MouseButton::Middle, middle_bit),
+            ] {
+                let mut mask = 0u8;
+                let mut pos = (10, 20);
+                let bytes = translate_input(
+                    ClientMsg::MouseButton { button, pressed: true, clicks: 1 },
+                    &buttons,
+                    &mut mask,
+                    &mut pos,
+                    &mut HashMap::new(),
+                    &mut Wheel::new(true),
+                );
+                assert_eq!(bytes, vec![pointer_event(bit, (10, 20)).to_vec()]);
+            }
+            // Left is bit 1 in both dialects.
+            let mut mask = 0u8;
+            let mut pos = (10, 20);
+            let bytes = translate_input(
+                ClientMsg::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                    clicks: 1,
+                },
+                &buttons,
+                &mut mask,
+                &mut pos,
+                &mut HashMap::new(),
+                &mut Wheel::new(true),
+            );
+            assert_eq!(bytes, vec![pointer_event(0x01, (10, 20)).to_vec()]);
+        }
     }
 
     /// Pulses for one wheel event, as (horizontal, vertical).
@@ -4137,6 +4319,7 @@ mod tests {
         Arc::new(std::sync::Mutex::new(DesktopState {
             size,
             scale: UNSCALED,
+            host_density: 1.0,
             screen,
             pending,
         }))
@@ -4238,24 +4421,24 @@ mod tests {
         let desktop = shared_desktop((1024, 768), None, None);
 
         // Matching the current size or a zero dimension: no-ops.
-        request_resize(&uplink, &desktop, (1024, 768), false).await.unwrap();
-        request_resize(&uplink, &desktop, (0, 600), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1024, 768)), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((0, 600)), false).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
         assert!(written(&wire).is_empty());
 
         // Support not declared yet: stashed, nothing on the wire.
-        request_resize(&uplink, &desktop, (800, 600), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false).await.unwrap();
         assert_eq!(desktop.lock().unwrap().pending, Some((800, 600)));
         assert!(written(&wire).is_empty());
 
         // Browser back at the current size: the stale stash is dropped.
-        request_resize(&uplink, &desktop, (1024, 768), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1024, 768)), false).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
 
         // Support declared: SetDesktopSize goes out immediately.
         let screen = Screen { id: 7, flags: 0 };
         desktop.lock().unwrap().screen = Some(screen);
-        request_resize(&uplink, &desktop, (800, 600), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false).await.unwrap();
         assert_eq!(written(&wire), set_desktop_size((800, 600), screen));
     }
 
@@ -4264,13 +4447,92 @@ mod tests {
         let (uplink, wire) = test_uplink();
         let desktop = shared_desktop((1024, 768), None, None);
 
-        request_resize(&uplink, &desktop, (800, 600), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
 
         assert_eq!(
             written(&wire),
-            vnc_apple::set_display_configuration((800, 600))
+            vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
+                (800, 600),
+                1.0
+            ))
         );
         assert!(desktop.lock().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn a_session_opens_at_the_pinned_size_or_the_clients_own_screen() {
+        let target = |size: &str| -> TargetConfig {
+            toml::from_str(&format!(
+                "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
+                 host = \"h\"\n{size}"
+            ))
+            .unwrap()
+        };
+        let screen = crate::protocol::HostDisplay { w: 1728, h: 1117, scale: 200 };
+
+        // No pinned size: the client's screen, at the client's density — how
+        // Apple's own client opens, and the layout every remote window gets.
+        assert_eq!(
+            opening_mode(&target(""), Some(screen)),
+            vnc_apple::virtual_display_mode((1728, 1117), 2.0)
+        );
+
+        // A pinned size wins, but the density is still the client screen's.
+        assert_eq!(
+            opening_mode(&target("width = 1600\nheight = 1000"), Some(screen)),
+            vnc_apple::virtual_display_mode((1600, 1000), 2.0)
+        );
+
+        // No screen named at all (a probe): the pinned size or the default, at 1x.
+        assert_eq!(
+            opening_mode(&target(""), None),
+            vnc_apple::virtual_display_mode(crate::config::DEFAULT_SIZE, 1.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_density_change_re_renders_the_same_points_at_the_new_density() {
+        let (uplink, wire) = test_uplink();
+        // A 1600×1000 1x desktop whose client window just moved to a 2x screen.
+        let desktop = shared_desktop((1600, 1000), None, None);
+        desktop.lock().unwrap().host_density = 2.0;
+
+        request_resize(&uplink, &desktop, ResizeAsk::Density, true).await.unwrap();
+        assert_eq!(
+            written(&wire),
+            vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
+                (1600, 1000),
+                2.0
+            )),
+            "current points, twice the pixels"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_viewport_report_is_read_at_the_announced_scale() {
+        let (uplink, wire) = test_uplink();
+        // Steady state on a Retina client: the desktop is 3200×2000 pixels shown
+        // at 2x, and the browser reports its viewport pre-multiplied by that
+        // announced scale. The same size must not re-request anything.
+        let desktop = shared_desktop((3200, 2000), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.scale = 2.0;
+            d.host_density = 2.0;
+        }
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((3200, 2000)), true).await.unwrap();
+        assert!(written(&wire).is_empty(), "the browser is at the current size");
+
+        // A genuinely new window size, still pre-multiplied: 1600×1200 points.
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((3200, 2400)), true).await.unwrap();
+        assert_eq!(
+            written(&wire),
+            vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
+                (1600, 1200),
+                2.0
+            ))
+        );
     }
 
     #[tokio::test]
@@ -4393,6 +4655,7 @@ mod tests {
                 pressed,
                 caps,
             },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             keys,
