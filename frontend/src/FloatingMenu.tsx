@@ -40,6 +40,9 @@ const SPECIAL_KEYS: readonly { label: string; codes: string[] }[] = [
   { label: "Ctrl+W", codes: ["ControlLeft", "KeyW"] },
   { label: "Ctrl+T", codes: ["ControlLeft", "KeyT"] },
   { label: "Alt+F4", codes: ["AltLeft", "F4"] },
+  // The browser owns the real chord unconditionally, same as the soft
+  // keyboard's C+A+Del (softKeyboard.ts); this is the pointer-user's copy.
+  { label: "Ctrl+Alt+Del", codes: ["ControlLeft", "AltLeft", "Delete"] },
 ];
 
 // Bare modifier taps — useful on touch, where there's no physical modifier to
