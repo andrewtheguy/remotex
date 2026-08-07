@@ -34,21 +34,24 @@ pub fn clipboard_fits(text: &str) -> bool {
 /// 200 for a Retina one.
 pub const SCALE_ONE: u16 = 100;
 
-/// The largest scale worth believing. macOS has only ever shipped 1× and 2×
-/// panels; this leaves room for one more doubling and rejects the rest.
-const SCALE_MAX: u16 = 4 * SCALE_ONE;
+/// The densest desktop worth asking for. Client panels go denser — phones ship
+/// 3× — but no remote renders past 2×, and under a fixed pixel budget a higher
+/// density only shrinks the points, which reads as oversized fonts, not as a
+/// sharper desktop.
+const SCALE_MAX: u16 = 2 * SCALE_ONE;
 
 /// A wire `scale` as the ratio clients divide the framebuffer by.
 ///
-/// Anything outside `SCALE_ONE..=SCALE_MAX` — a zero from a source that could
-/// not read the display's mode, a number no panel has — reads as 1×, which is
-/// the answer that leaves the framebuffer alone. A scale below 1 is as wrong as
-/// one above 4: it would blow the desktop up rather than shrink it.
+/// Below `SCALE_ONE` — a zero from a source that could not read the display's
+/// mode, or a fraction that would blow the desktop up rather than shrink it —
+/// reads as 1×, the answer that leaves the framebuffer alone. Above
+/// [`SCALE_MAX`] reads as 2×: those screens are real, and the sharpest desktop
+/// that exists is the right answer for them.
 pub fn scale_ratio(scale: u16) -> f32 {
-    if (SCALE_ONE..=SCALE_MAX).contains(&scale) {
-        f32::from(scale) / f32::from(SCALE_ONE)
-    } else {
+    if scale < SCALE_ONE {
         1.0
+    } else {
+        f32::from(scale.min(SCALE_MAX)) / f32::from(SCALE_ONE)
     }
 }
 
@@ -1618,15 +1621,19 @@ mod tests {
         );
     }
 
-    // The believable densities pass through; a zero from a source that could
-    // not read its display, or a number no panel has, reads as 1x.
+    // The renderable densities pass through; below 1x reads as 1x, and a
+    // denser client panel — a 3x phone — is capped to the 2x a remote can
+    // actually render rather than shrinking the desktop's points.
     #[test]
-    fn a_wire_scale_outside_the_believable_range_reads_as_1x() {
+    fn a_wire_scale_is_clamped_to_the_renderable_range() {
         assert_eq!(scale_ratio(SCALE_ONE), 1.0);
         assert_eq!(scale_ratio(150), 1.5);
         assert_eq!(scale_ratio(200), 2.0);
-        for unbelievable in [0, 99, 401, u16::MAX] {
-            assert_eq!(scale_ratio(unbelievable), 1.0, "scale {unbelievable}");
+        for below in [0, 99] {
+            assert_eq!(scale_ratio(below), 1.0, "scale {below}");
+        }
+        for above in [300, 350, u16::MAX] {
+            assert_eq!(scale_ratio(above), 2.0, "scale {above}");
         }
     }
 
