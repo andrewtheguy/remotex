@@ -749,7 +749,7 @@ export function useRemoteDesktop(
       // wrong, and a repaint is what re-announces every stream's format and arms
       // a keyframe on it (`reset_render` in src/encode.rs). Logged rather than
       // shown — the recovery is a frame away and nothing asked the person for it.
-      onVideoStall: (reason) => {
+      onVideoNeedsKeyframe: (reason) => {
         console.warn(`video: ${reason}; asking for a repaint`);
         sendRef.current({ type: "refresh" });
       },

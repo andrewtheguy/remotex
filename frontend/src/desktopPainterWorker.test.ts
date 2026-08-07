@@ -299,11 +299,11 @@ test("the painter's callbacks travel back as events", () => {
   options.onCacheReset();
   options.onVideoError("no decoder");
   options.onVideoError(null);
-  options.onVideoStall("stream 2: went quiet");
+  options.onVideoNeedsKeyframe("stream 2: went quiet");
   assert.deepEqual(h.events, [
     { type: "cacheReset" },
     { type: "videoError", reason: "no decoder" },
     { type: "videoError", reason: null },
-    { type: "videoStall", reason: "stream 2: went quiet" },
+    { type: "videoNeedsKeyframe", reason: "stream 2: went quiet" },
   ]);
 });

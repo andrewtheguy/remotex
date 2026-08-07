@@ -113,7 +113,7 @@ function streams() {
   const table = createVideoStreams(
     {
       onError: (reason) => errors.push(reason),
-      onStalled: (reason) => stalls.push(reason),
+      onNeedsKeyframe: (reason) => stalls.push(reason),
     },
     STALL_MS,
   );

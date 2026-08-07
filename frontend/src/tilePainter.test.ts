@@ -140,8 +140,8 @@ let blitted: {
 let decoded: FakeBitmap[] = [];
 let resets = 0;
 let videoErrors: (string | null)[] = [];
-/** Streams whose decoder went quiet — none here; the stub always answers. */
-let videoStalls: string[] = [];
+/** Streams whose chain was cut. The stub never goes quiet, so these are failures. */
+let videoKeyframeAsks: string[] = [];
 /** Payload first bytes the stubbed decoder refuses. */
 let undecodable = new Set<number>();
 /** Dimensions the stub reports, so a test can spend the decoded byte budget. */
@@ -251,7 +251,7 @@ beforeEach(() => {
   decoded = [];
   resets = 0;
   videoErrors = [];
-  videoStalls = [];
+  videoKeyframeAsks = [];
   videoClosed = false;
   chunkTypes = [];
   decoders = 0;
@@ -318,8 +318,8 @@ function painter(ctx: CanvasRenderingContext2D | null = context) {
     onVideoError: (error) => {
       videoErrors.push(error);
     },
-    onVideoStall: (reason) => {
-      videoStalls.push(reason);
+    onVideoNeedsKeyframe: (reason) => {
+      videoKeyframeAsks.push(reason);
     },
   });
 }
@@ -917,10 +917,10 @@ test("one region's decoder giving up does not take the others down", async () =>
     0,
     "a working decoder was closed because another failed",
   );
-  assert.deepEqual(
-    videoStalls,
-    [],
-    "a decoder that said it failed is an error, not a silence to wait out",
+  assert.equal(
+    videoKeyframeAsks.length,
+    1,
+    "a failed decoder is thrown away, and only a keyframe starts another",
   );
 
   // The surviving region keeps decoding on the decoder it already had.
@@ -944,6 +944,55 @@ test("one region's decoder giving up does not take the others down", async () =>
     "the surviving region was handed a new decoder",
   );
   assert.equal(cropped.length, 2, "the surviving region stopped painting");
+});
+
+test("the video complaint goes when video paints again", async () => {
+  // A decoder giving up is a warning, not a verdict: the region comes back on the
+  // next keyframe. Leaving the banner up would be a permanent notice about something
+  // that stopped being true — and it has no dismiss button, because a statement
+  // about the present should not need one.
+  poison = 0xbd;
+  const p = announced();
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
+    ]),
+  );
+  assert.equal(videoErrors.at(-1), "This browser's video decoder failed.");
+
+  poison = null;
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 320, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.equal(
+    videoErrors.at(-1),
+    null,
+    "the banner outlived what it described",
+  );
+});
+
+test("what a browser cannot decode at all stays on screen", async () => {
+  // The other side of the rule above, and the reason it needs no flag to tell the
+  // two apart: this one never paints, so nothing ever clears it.
+  globals.VideoDecoder = undefined;
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.equal(videoErrors.filter(Boolean).length, 1);
+  assert.notEqual(videoErrors.at(-1), null);
 });
 
 test("clear() ends the video decoders, not only the slot table", async () => {

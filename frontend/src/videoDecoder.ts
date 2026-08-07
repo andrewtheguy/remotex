@@ -176,14 +176,21 @@ export function createVideoStreams(
     // arriving as still tiles and still painting, and the other regions have chains of
     // their own that this one says nothing about. Under `render_type = "video"` there is
     // only ever one, so it is the same outcome.
-    const failed = (reason: string) => {
+    const failed = (reason: string, recoverable: boolean) => {
       // Only if this entry is still the live one: a region that restarted on a new size
       // has already replaced it, and dropping the newer decoder because the older one
       // errored would lose a chain that is decoding fine.
       if (live.get(id) === entry) {
         live.delete(id);
       }
-      handlers.onError(reason);
+      handlers.onError(reason, recoverable);
+      if (recoverable) {
+        // Asked for, exactly as a stall is. The next unit on this id builds a fresh
+        // decoder, and a fresh decoder can start at nothing but a keyframe — so
+        // without this the region is not "one failed frame" but every frame after
+        // it, and the banner the error just raised would go on telling the truth.
+        handlers.onNeedsKeyframe(`stream ${id}: ${reason}`);
+      }
     };
     let stream: VideoStream;
     try {
@@ -194,7 +201,8 @@ export function createVideoStreams(
           // Named, because the one thing worth knowing about a stall is which region
           // it was: under `render_motion_subtype = "stream"` there are several of
           // these and they stop for their own reasons.
-          onStalled: (reason) => handlers.onStalled(`stream ${id}: ${reason}`),
+          onNeedsKeyframe: (reason) =>
+            handlers.onNeedsKeyframe(`stream ${id}: ${reason}`),
         },
         stallMs,
       );
@@ -204,6 +212,8 @@ export function createVideoStreams(
       // tiles that had nothing to do with video.
       handlers.onError(
         e instanceof Error ? e.message : "This browser cannot decode video.",
+        // A runtime with no decoder at all. No keyframe repairs that either.
+        false,
       );
       return null;
     }
@@ -292,20 +302,24 @@ export interface VideoHandlers {
    * `render_motion_subtype = "stream"` it is one region, with the still codecs
    * carrying everything around it — so this says what happened and lets the caller
    * decide how loudly to say it.
-   */
-  onError: (reason: string) => void;
-  /**
-   * A decoder owed a frame and never produced one, so the units it was holding were
-   * abandoned and it was reset.
    *
-   * Not an error and not shown to anyone: nothing is broken that a keyframe does not
-   * fix, and the decoder is ready for one. But only the gateway can send it — this
-   * stream is a chain and the client has just cut it — so this has to reach something
-   * that can ask. Left unasked under `render_type = "video"` it would be a desktop
-   * that never paints again, since that dial's one stream is never restarted by a
-   * region coming and going.
+   * `recoverable` is false when the browser refused the configuration itself. That
+   * is not a cut chain but a standing fact: the next decoder is refused exactly as
+   * this one was, so nothing is asked for and the banner stays up, which is the one
+   * case it is meant for.
    */
-  onStalled: (reason: string) => void;
+  onError: (reason: string, recoverable: boolean) => void;
+  /**
+   * This stream's chain has been cut and it cannot pick up again until a keyframe
+   * arrives. Both ways of cutting it come here: a decoder that went quiet and was
+   * reset, and one that failed and was thrown away.
+   *
+   * Only the gateway can send that keyframe, so this has to reach something that can
+   * ask. Left unasked it is a region that never paints again — and under
+   * `render_type = "video"` that is the whole desktop, since that dial's one stream
+   * is never restarted by a region coming and going.
+   */
+  onNeedsKeyframe: (reason: string) => void;
 }
 
 export interface VideoStream {
@@ -351,10 +365,13 @@ export function createVideoStream(
   // that an nth output happens at all; see `stalled`.
   const pending: Pending[] = [];
   let closed = false;
-  // Set when a stall reset the decoder. It has no history left, so every frame until
-  // the keyframe that was asked for is expressed against pictures it does not have:
-  // they are dropped here rather than handed over to raise one error each.
-  let keyNeeded = false;
+  // Whether this decoder has no history to decode against — true from birth, and again
+  // after a stall reset it. Until the keyframe arrives every unit is expressed against
+  // pictures it does not have, and they are dropped here rather than handed over to
+  // raise one error each. Dropping is also simply what a delta to a fresh decoder
+  // deserves: the alternative is a decoder that fails, is thrown away, is rebuilt by
+  // the next unit, and fails again on that one too.
+  let keyNeeded = true;
   // Armed whenever the decoder owes a frame, which is the only state a stall can be
   // seen from — a decoder that has stopped producing raises no event to notice.
   let watchdog: ReturnType<typeof setTimeout> | undefined;
@@ -428,7 +445,7 @@ export function createVideoStream(
       decoder.reset();
       decoder.configure(config);
     }
-    handlers.onStalled(
+    handlers.onNeedsKeyframe(
       `the decoder produced nothing for ${owed} access unit(s) in ${stallMs} ms`,
     );
   };
@@ -441,10 +458,12 @@ export function createVideoStream(
       closed = true;
       disarm();
       drain();
+      const refused = e instanceof Error && e.name === "NotSupportedError";
       handlers.onError(
-        e instanceof Error && e.name === "NotSupportedError"
+        refused
           ? `This browser cannot decode the video this target sends (${format.decode}).`
           : "This browser's video decoder failed.",
+        !refused,
       );
     },
   });

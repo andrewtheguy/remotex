@@ -139,11 +139,13 @@ export function createTilePainter(options: {
    */
   onVideoError: (reason: string | null) => void;
   /**
-   * A stream's decoder went quiet and was reset, so that region needs a keyframe
-   * only the gateway can send. Separate from `onVideoError` because nothing here is
-   * wrong for a person to read about: the recovery is a repaint, and it is automatic.
+   * A stream's chain has been cut — its decoder went quiet and was reset, or it
+   * failed and was thrown away — so that region cannot paint again until a keyframe
+   * only the gateway can send. Separate from `onVideoError` because it asks for
+   * something rather than saying something: it is the recovery, where the banner is
+   * the report, and the two are answered in different places.
    */
-  onVideoStall: (reason: string) => void;
+  onVideoNeedsKeyframe: (reason: string) => void;
 }): TilePainter {
   const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
@@ -219,10 +221,25 @@ export function createTilePainter(options: {
   // the same page could have been reached over HTTPS the second time.
   let videoUnusable = false;
 
+  // Whether a complaint about video is on screen. What that banner says is that this
+  // client is showing nothing, so a frame that paints is it ceasing to be true — and a
+  // painted frame is the only thing that can say so, since a decoder that failed says
+  // nothing further either way. It is also the whole of the distinction between a
+  // warning and a verdict: a browser with no decoder, an insecure origin and a
+  // configuration this browser refuses never paint anything, so those stay up, while
+  // one region's decoder giving up clears itself the moment that region comes back.
+  let videoComplained = false;
+
+  const complainAboutVideo = (reason: string) => {
+    videoComplained = true;
+    options.onVideoError(reason);
+  };
+
   const releaseVideo = () => {
     video?.close();
     video = null;
     videoUnusable = false;
+    videoComplained = false;
   };
 
   // Whether this batch has already asked for a reset. One per batch rather than
@@ -357,16 +374,17 @@ export function createTilePainter(options: {
       // client's decision either way — a stream begins again when the gateway
       // sends a keyframe, which a repaint, a resize or a region restarting does.
       video = createVideoStreams({
-        onError: (reason) => options.onVideoError(reason),
-        onStalled: (reason) => options.onVideoStall(reason),
+        onError: complainAboutVideo,
+        onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
       });
     } catch (e) {
       videoUnusable = true;
-      options.onVideoError(
+      complainAboutVideo(
         e instanceof Error ? e.message : "This browser cannot decode video.",
       );
       return null;
     }
+    videoComplained = false;
     options.onVideoError(null);
     return video;
   };
@@ -407,6 +425,14 @@ export function createTilePainter(options: {
       // this a crop rather than a codec's requirement, so it holds for VP9 too.
       ctx?.drawImage(image, 0, 0, job.w, job.h, job.x, job.y, job.w, job.h);
       image.close();
+      if (videoComplained) {
+        // Video is painting again, so whatever was said about it has stopped being
+        // true. Said here rather than on a timer or behind a dismiss button: the
+        // banner is a statement about the present, and this is the moment the present
+        // changed.
+        videoComplained = false;
+        options.onVideoError(null);
+      }
       return;
     }
     ctx?.drawImage(image, job.x, job.y);

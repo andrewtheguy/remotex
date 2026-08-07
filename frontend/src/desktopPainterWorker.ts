@@ -60,8 +60,8 @@ export type PainterCommand =
 export type PainterEvent =
   | { type: "cacheReset" }
   | { type: "videoError"; reason: string | null }
-  /** A stream's decoder was reset out of a stall and needs a keyframe. */
-  | { type: "videoStall"; reason: string }
+  /** A stream's decoder was reset or thrown away, and needs a keyframe to resume. */
+  | { type: "videoNeedsKeyframe"; reason: string }
   | {
       type: "painted";
       sequence: number;
@@ -121,7 +121,8 @@ export function createPainterWorker(
             context: () => ctx,
             onCacheReset: () => post({ type: "cacheReset" }),
             onVideoError: (reason) => post({ type: "videoError", reason }),
-            onVideoStall: (reason) => post({ type: "videoStall", reason }),
+            onVideoNeedsKeyframe: (reason) =>
+              post({ type: "videoNeedsKeyframe", reason }),
           });
           break;
         case "frame": {
