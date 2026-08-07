@@ -130,6 +130,60 @@ negotiated on the dynamic `rdpsnd` transport resizes the way guacamole's
 `resize-method: reconnect` does. The whole story is in
 [`architecture.md`](architecture.md)'s RDP section.
 
+### Network characteristics detection — taken, and it is not a performance gap
+
+The only item here found by looking for a *fault* rather than for a slow path. The
+symptom: a Windows 11 host stops sending graphics outright while audio, input and
+cursor updates all keep flowing, on EGFX and on the legacy path alike, and never
+recovers. `nettop` on the gateway during one showed inbound traffic equal to the PCM
+audio stream and nothing else, so the server had halted its own graphics rather than
+anything downstream dropping them.
+
+guacd leaves MS-RDPBCGR's Network Characteristics Detection **on** and answers every
+probe, so a Windows host paces its graphics from a measurement it actually took. This
+gateway declined it. That is the whole of the divergence, and it is easy to read the
+wrong way round: guacd sets `ConnectionType = CONNECTION_TYPE_LAN` (`settings.c:1575`)
+and it looks like a declaration that replaces the measuring, but
+`freerdp_set_connection_type`'s table (`client/common/cmdline.c:1449-1456`) carries only
+the six performance booleans — `NetworkAutoDetect` is not in it. So guacd, and xfreerdp
+under `/network:lan`, both run with detection on. FreeRDP's client side is complete for
+it: `core/autodetect.c` replies to RTT, bandwidth start/payload/stop, and netchar
+results.
+
+Two measurements argue for declining it, and neither is wrong about what it saw.
+Detection on against a tunnelled IPv6 link lets that host pace itself into a collapse —
+a five-second scripted drag arriving in as few as 12 batches. And declining it does not
+stop the asking: the MCS message channel those PDUs travel on is opened by
+`NetworkAutoDetect`, `SupportMultitransport` or `SupportHeartbeatPdu` alike
+(`gcc_write_client_message_channel_data`, `core/gcc.c:2372`), so with `rdpsnd` loaded
+that host probes anyway and `autodetect_recv_request_packet` answers a request it was
+not configured for with `STATE_RUN_FAILED` — five session deaths out of five.
+
+Neither measures the arrangement everyone else ships: **the channel open and the answers
+given.** The second ran with the answering switched off, which is the one combination
+guaranteed to fail. The first is a server pacing from a true reading of a bad hop —
+sparse, but moving, and recovering. Neither is the freeze. So all three are on, at
+FreeRDP's defaults; the other two are inert on their own, since `multitransport_no_udp`
+declines the server's invitation with `E_ABORT` and a heartbeat with no callback is an
+`IFCALLRESULT(TRUE, …)`.
+
+**Not yet settled.** The e2e against that host — audio loaded, the configuration that
+died 5/5 — connects, paints, resizes by reconnect, plays sound and disconnects cleanly,
+and the core trace shows `RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT` back on the wire. But no
+probe arrived inside a ten-second run, so what is proven is that the client advertises
+and would answer, not that the freeze is gone; that takes a live desktop and tens of
+minutes. If the first measurement's throttling returns instead, it reads as
+sparse-but-moving rather than stopped, and `ConnectionType` is the dial for it. The two
+are told apart by whether the picture recovers on its own.
+
+Beside it, and insurance rather than a fix: the wrapper's event loop waits at most
+1000 ms — guacd's `GUAC_RDP_MESSAGE_CHECK_INTERVAL` (`client.h:33`) — rather than
+infinitely. An infinite wait *should* be sound, because `transport_check_fds` consumes
+one PDU per call and re-arms `transport->rereadEvent` while anything is left, so bytes
+buffered inside TLS signal a handle rather than sitting unseen. The number is taken for
+guacd's property, not for a known bug: a missed edge anywhere in that chain costs guacd
+one second and costs an infinite wait the rest of the session.
+
 ### Transport details
 
 - guacd sets `TCP_NODELAY` on every accepted connection (`guacd/daemon.c:563`),
@@ -177,6 +231,17 @@ bound-at-sink — is worth remembering when a new symptom appears.
 7. ~~The EGFX retry with guacd's exact settings~~ — **done**; it was the black
    screen's cause and the fix for Windows resize audio besides.
 8. Explicit bitmap/offscreen cache flags on the legacy path.
+9. ~~Answer network characteristics detection instead of declining it~~ — **done**, in
+   the wrapper, with the event loop's infinite wait capped at guacd's 1000 ms beside it.
+   Not a performance item: it is the only divergence this comparison found on the
+   graphics path that could stop a Windows host sending graphics outright. Awaiting a
+   long live session to confirm.
+10. `AllowUnanouncedOrdersFromServer`, which guacd sets TRUE (`settings.c:1784`) so a
+    server's use of an unannounced drawing order is not fatal. `check_order_activated`
+    (`core/orders.c:272`) otherwise fails the order, and a failed order fails the PDU and
+    ends the connection; with the flag it logs `SERVER BUG` and carries on. Legacy path
+    only, and it kills a session rather than freezing one, so it is hygiene rather than a
+    candidate for anything currently open.
 
 The audio half of what this comparison session found — RDP sound dying after a
 resize — was a bug, not a gap, and is recorded in
