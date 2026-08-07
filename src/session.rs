@@ -670,6 +670,9 @@ impl SessionManager {
         target_name: &str,
         display: Option<HostDisplay>,
     ) -> Result<(), ConnectError> {
+        // This is where a screen report becomes an opening size, so it is where
+        // a degenerate one stops counting as a report.
+        let display = display.and_then(HostDisplay::checked);
         // Scoped so the lock is released before the re-arm below: every refusal returns
         // from inside it, so only the success path falls through.
         {
@@ -1269,6 +1272,29 @@ mod tests {
             hook_rx.try_recv().expect("connect spawns the engine"),
             Some(screen),
             "the engine must be handed the screen the connect named"
+        );
+    }
+
+    /// And a screen that could not be one reaches the engine as no screen at
+    /// all, so the opening size falls back instead of opening a 0×N desktop.
+    #[tokio::test]
+    async fn a_degenerate_screen_report_reads_as_no_report() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner =
+            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _feedback| {
+                hook_tx.send(display).unwrap();
+            });
+        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+
+        mgr.connect(att.id, "fake", Some(HostDisplay { w: 0, h: 982, scale: 100 })).unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        assert_eq!(
+            hook_rx.try_recv().expect("connect spawns the engine"),
+            None,
+            "a zero-width screen must not become an opening size"
         );
     }
 

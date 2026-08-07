@@ -1018,6 +1018,16 @@ impl ConfigFile {
                 if target.width.is_some() { "width" } else { "height" },
                 if target.width.is_some() { "height" } else { "width" }
             );
+            // And a pin of nothing is not a pin: a zero axis would ask every
+            // engine for a desktop that cannot exist.
+            anyhow::ensure!(
+                target.pinned_size().is_none_or(|(w, h)| w > 0 && h > 0),
+                "target {:?} pins a {:?}×{:?} size, but width and height must both be \
+                 greater than zero",
+                target.name,
+                target.width,
+                target.height
+            );
             // Audio is RDP's alone, and refused elsewhere rather than ignored.
             // MS-RDPEA is the one audio channel this gateway speaks; RFB has no
             // equivalent at all, so `audio = true` on a VNC target could only
@@ -1121,15 +1131,6 @@ impl ConfigFile {
                          plain \"vnc\" target uses — Apple's authentication carries the \
                          account credentials above instead",
                         target.name
-                    );
-                    anyhow::ensure!(
-                        subtype != Subtype::ArdHighPerformance
-                            || target.pinned_size().is_none_or(|(w, h)| w != 0 && h != 0),
-                        "target {:?} is subtype {name:?} and pins a virtual display at \
-                         {:?}×{:?}, but width and height must both be greater than zero",
-                        target.name,
-                        target.width,
-                        target.height
                     );
                     // Standard mode shares the Mac's physical displays and has no
                     // virtual display for a viewport to resize. High Performance
@@ -2913,17 +2914,19 @@ mod tests {
         );
     }
 
+    /// A zero axis is refused on every target alike — a High Performance
+    /// virtual display was merely the first place it was caught misbehaving.
     #[test]
-    fn the_high_performance_virtual_display_requires_nonzero_dimensions() {
+    fn a_pinned_size_requires_nonzero_dimensions() {
         for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
-            let err = ConfigFile::parse(&vnc_toml(&format!(
-                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{dimensions}"
-            )))
-            .unwrap_err();
-            assert!(
-                format!("{err:#}").contains("width and height must both be greater than zero"),
-                "{err:#}"
-            );
+            for subtype in ["", "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
+                let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}{dimensions}")))
+                    .unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("width and height must both be greater than zero"),
+                    "{err:#}"
+                );
+            }
         }
     }
 

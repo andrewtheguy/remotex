@@ -62,6 +62,16 @@ pub struct HostDisplay {
     pub scale: u16,
 }
 
+impl HostDisplay {
+    /// The report, unless it is degenerate: a zero dimension comes from a
+    /// client that could not read its own screen, and reads as no report at
+    /// all — the same answer [`scale_ratio`] gives a scale no panel has —
+    /// rather than as a request to open a desktop that cannot exist.
+    pub fn checked(self) -> Option<Self> {
+        (self.w > 0 && self.h > 0).then_some(self)
+    }
+}
+
 /// Wall-clock milliseconds for clipboard activity timestamps. Saturation only
 /// matters after the year 584,554,051 or if the system clock predates Unix.
 pub fn unix_time_ms() -> u64 {
@@ -1260,6 +1270,12 @@ mod tests {
             .unwrap(),
             ClientMsg::HostDisplay(HostDisplay { w: 1728, h: 1117, scale: 200 })
         ));
+        // A zero dimension still parses — u16 has no floor — and stops at the
+        // boundary that would spend it instead ([`HostDisplay::checked`]).
+        assert_eq!(HostDisplay { w: 0, h: 1117, scale: 200 }.checked(), None);
+        assert_eq!(HostDisplay { w: 1728, h: 0, scale: 200 }.checked(), None);
+        let screen = HostDisplay { w: 1728, h: 1117, scale: 200 };
+        assert_eq!(screen.checked(), Some(screen));
         // A connect names the screen it is made from, and a probe without one
         // still connects.
         match serde_json::from_str::<ClientMsg>(
@@ -1600,6 +1616,18 @@ mod tests {
             second.changed_at_ms > first.changed_at_ms,
             "activity identity comes from its timestamp, not only its text"
         );
+    }
+
+    // The believable densities pass through; a zero from a source that could
+    // not read its display, or a number no panel has, reads as 1x.
+    #[test]
+    fn a_wire_scale_outside_the_believable_range_reads_as_1x() {
+        assert_eq!(scale_ratio(SCALE_ONE), 1.0);
+        assert_eq!(scale_ratio(150), 1.5);
+        assert_eq!(scale_ratio(200), 2.0);
+        for unbelievable in [0, 99, 401, u16::MAX] {
+            assert_eq!(scale_ratio(unbelievable), 1.0, "scale {unbelievable}");
+        }
     }
 
     // The cursor control message: base64 PNG plus geometry, and an explicit
