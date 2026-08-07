@@ -1,8 +1,10 @@
 // The page's handle on the desktop paint worker.
 //
 // The parse→decode→paint path runs in a worker (desktopPainterWorker.ts)
-// drawing on an `OffscreenCanvas`, so a decode backlog costs the worker's
-// thread rather than React's and input's. This module is the main-thread side:
+// drawing on an `OffscreenCanvas`, which keeps painting and its presentation off
+// the thread input and React are on — that module says what the boundary does and
+// does not buy, since it is less than the word "decode" suggests. This module is
+// the main-thread side:
 // it transfers each binary frame over — `postMessage` with a transfer list
 // moves the buffer, it does not copy it — and carries the painter's callbacks
 // and ordered completion feedback back as messages.

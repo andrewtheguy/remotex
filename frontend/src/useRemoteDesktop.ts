@@ -722,7 +722,8 @@ export function useRemoteDesktop(
     let session: string | null = null;
     // The parse→decode→paint path — the slot table, the video decoders and the
     // batch draw loop — runs in a worker that owns this canvas's bitmap, so a
-    // decode backlog never competes with React or input for this thread. This
+    // batch neither draws nor reaches the screen through this thread's input and
+    // React work (desktopPainterWorker.ts says what that is and is not worth). This
     // effect only posts to it; the worker itself outlives the effect (see
     // desktopPainter.ts), and `bind` points its callbacks at this run.
     const painter = canvasRef.current
@@ -1040,7 +1041,7 @@ export function useRemoteDesktop(
       // backlog, which is fine because every mode they switch to hides the
       // canvas behind an overlay until the worker's queue has caught up.
       // Everything else always ran on arrival: a cursor shape or a clipboard
-      // answer gains nothing by queueing behind a decode backlog.
+      // answer gains nothing by queueing behind the worker's draws.
       //
       // `owned` is checked at dispatch — a superseded socket keeps firing
       // `onmessage` until its close lands, and its frames and control messages

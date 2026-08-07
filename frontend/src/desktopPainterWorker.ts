@@ -1,11 +1,18 @@
 // The worker half of the desktop paint path.
 //
-// The page's main thread used to parse, decode and paint every batch itself,
-// sharing that thread with React and input; now it transfers each binary frame
-// here, and this module runs the same `createTilePainter` — slot table, decoded
-// bitmap cache, `VideoDecoder` table, batch draw loop — against an
-// `OffscreenCanvas` the page handed over once. Nothing about the painter
-// changed; what changed is which thread it costs.
+// The page transfers each binary frame here, and this module runs
+// `createTilePainter` — slot table, decoded bitmap cache, `VideoDecoder` table,
+// batch draw loop — against an `OffscreenCanvas` handed over once.
+//
+// **What the boundary buys is not the decoding.** `createImageBitmap` and
+// `VideoDecoder` hand their work to the browser's own threads wherever they are
+// called from, so moving them here makes them no faster and takes nothing off the
+// main thread that was ever really on it. What does move is the batch parse, the
+// ordering glue, and a batch's worth of `drawImage` calls — and, the part that
+// earns the boundary, presentation: a transferred canvas commits from this thread,
+// so a frame reaches the screen without the main thread being scheduled at all.
+// That thread carries input and React, and a remote desktop is largely how quickly
+// those two answer.
 //
 // **Ordering is the contract this file keeps, and it is nearly the whole of it.**
 // On the main thread, draws and the control effects that must hold their place
