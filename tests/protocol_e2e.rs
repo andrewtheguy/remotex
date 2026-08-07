@@ -393,6 +393,10 @@ const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
 const MAC_DESKTOP: u16 = 32;
 const MAC_VIRTUAL_WIDTH: u16 = 40;
 const MAC_VIRTUAL_HEIGHT: u16 = 30;
+/// What a `resize = true` session opens its virtual display at: the dynamic
+/// backing ceiling, the configured size deliberately ignored.
+const MAC_OPENING_WIDTH: u16 = 3840;
+const MAC_OPENING_HEIGHT: u16 = 2160;
 const MAC_CLIPBOARD_SESSION: u32 = 0x1234_5678;
 const MAC_REMOTE_CLIPBOARD: &str = "copied on virtual Mac ✓";
 const MAC_BROWSER_CLIPBOARD: &str = "sent from browser ☕";
@@ -620,9 +624,12 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
     (session_id, text)
 }
 
-/// One raw framebuffer update covering the whole desktop, in a colour derived from
-/// `shade` so two of them are never mistaken for one repeat.
+/// One raw framebuffer update in a colour derived from `shade` so two of them are
+/// never mistaken for one repeat. Capped to a corner of the desktop: a dirty rect
+/// need not cover it, and the raw pixels of the 3840×2160 opening display a
+/// resizable session now asks for would not fit one record.
 fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
+    let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
     update.extend_from_slice(&1u16.to_be_bytes()); // one rect
     update.extend_from_slice(&0u16.to_be_bytes()); // x
@@ -1730,17 +1737,19 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true)
     );
+    // A resizable target opens at the ceiling, not its configured 40×30: the
+    // size the session should be is the client window's, reported below.
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT))
+        MacRequest::Configuration((MAC_OPENING_WIDTH, MAC_OPENING_HEIGHT))
     );
 
     // ServerInit precedes the encrypted display request, then the answering layout
-    // replaces that provisional geometry with the configured virtual mode.
+    // replaces that provisional geometry with the opening virtual mode.
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], MAC_VIRTUAL_WIDTH, "{resize}");
-    assert_eq!(resize["h"], MAC_VIRTUAL_HEIGHT, "{resize}");
+    assert_eq!(resize["w"], MAC_OPENING_WIDTH, "{resize}");
+    assert_eq!(resize["h"], MAC_OPENING_HEIGHT, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
 
     let msg = expect_displays(&mut ws).await;
@@ -1822,7 +1831,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![(MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT), (24, 18)],
+        vec![(MAC_OPENING_WIDTH, MAC_OPENING_HEIGHT), (24, 18)],
         "unexpected display configurations"
     );
 }

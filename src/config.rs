@@ -512,8 +512,10 @@ pub struct TargetConfig {
     /// — a client with no desktop-shaped window of its own asking for whatever
     /// size this end considers right. A generic or Standard-mode VNC server keeps
     /// its own size at connect and this is only ever consulted for a client that
-    /// asks. For `ard-high-performance`, it is the virtual display's requested
-    /// mode.
+    /// asks. For `ard-high-performance` without [`Self::resize`], it is the
+    /// virtual display's requested mode; with it, the session opens at the
+    /// dynamic ceiling the way Apple's own client does — see
+    /// `opening_mode` in src/vnc.rs — and this size only answers `DefaultSize`.
     ///
     /// On an RDP target with [`Self::resize`] this is a size in *points*: the
     /// connect happens at 1x, but a Retina client then asks for twice the pixels,

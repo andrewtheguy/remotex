@@ -877,6 +877,23 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
     encodings
 }
 
+/// The virtual display a High Performance session opens with.
+///
+/// A resizable target ignores its configured `width`/`height` here and opens at
+/// the dynamic backing ceiling, the way Apple's own client does: the size the
+/// session should be is the client window's, which arrives as a viewport report
+/// moments later, and shrinking a large display keeps the window layout that
+/// opening small destroys. The configured size is the opening mode only where no
+/// window will ever report one — `resize = false`, the fixed-size and mobile
+/// profile.
+fn opening_mode(config: &TargetConfig) -> vnc_apple::VirtualMode {
+    if config.resize {
+        vnc_apple::maximum_mode()
+    } else {
+        vnc_apple::virtual_display_mode((config.width, config.height), 1.0)
+    }
+}
+
 /// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
 /// the encrypted preface and the arming that replaces polling.
 ///
@@ -924,17 +941,14 @@ async fn apple_preface(
     info!("vnc: Apple record layer active");
 
     let mut uplink = Uplink::records(sock, keys);
-    // High Performance mode is a virtual-display session. Request its one configured
-    // mode before the pixel format and encoding list. The same message is resent for
-    // viewport reports when resize is permitted; its dynamic-resolution flag is set
-    // here regardless, so every fresh session restores the Mac's checkbox to on.
+    // High Performance mode is a virtual-display session. Request its mode before
+    // the pixel format and encoding list. The same message is resent for viewport
+    // reports when resize is permitted; its dynamic-resolution flag is set here
+    // regardless, so every fresh session restores the Mac's checkbox to on.
     // At 1x always: no client has attached to say what its screen's density is —
     // that arrives as the first `hostScale` and re-requests the mode if it differs.
     uplink
-        .send(&vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
-            (config.width, config.height),
-            1.0,
-        )))
+        .send(&vnc_apple::set_display_configuration(opening_mode(config)))
         .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
@@ -4421,6 +4435,28 @@ mod tests {
             ))
         );
         assert!(desktop.lock().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn a_resizable_session_opens_at_the_ceiling_not_the_configured_size() {
+        let target = |resize: bool| -> TargetConfig {
+            toml::from_str(&format!(
+                "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
+                 host = \"h\"\nwidth = 1600\nheight = 1000\nresize = {resize}"
+            ))
+            .unwrap()
+        };
+
+        // The window's size arrives as a viewport report; opening small first
+        // squeezes every remote window together, so open at the maximum.
+        assert_eq!(opening_mode(&target(true)), vnc_apple::maximum_mode());
+        assert_eq!(opening_mode(&target(true)).pixels, (3840, 2160));
+
+        // No window will ever report a size: the configured one is the mode.
+        assert_eq!(
+            opening_mode(&target(false)),
+            vnc_apple::virtual_display_mode((1600, 1000), 1.0)
+        );
     }
 
     #[tokio::test]

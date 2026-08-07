@@ -97,10 +97,13 @@ Apple display modes:
   engineered.
   Prefer widening `ard` over deepening this. It is Apple Screen Sharing's
   **High Performance mode** over
-  RFB 003.889. It requests one virtual display at configured `width` and `height`,
-  disables physical displays, and moves all remote windows onto it.
-  Its setup descriptor always enables dynamic resolution. With `resize = true`,
-  viewport reports replace the virtual display configuration. Apple's client can
+  RFB 003.889. It requests one virtual display, disables physical displays, and
+  moves all remote windows onto it. Without `resize` it opens at configured
+  `width` and `height`; with `resize = true` that size is ignored and it opens at
+  the 3840×2160 ceiling like Apple's client — windows squeezed onto a small
+  opening display never spread back out — and viewport reports then replace the
+  virtual display configuration.
+  Its setup descriptor always enables dynamic resolution. Apple's client can
   choose up to two virtual displays and fixed resolution presets; remotex
   implements neither control.
 

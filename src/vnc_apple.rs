@@ -305,6 +305,20 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
     VirtualMode { pixels: (wp, hp), scaled: (ws, hs) }
 }
 
+/// The mode a resizable session opens with: the whole dynamic backing ceiling.
+///
+/// Apple's own client never opens at the size it wants. It requests the maximum
+/// and lets dynamic resolution shrink the display to its window, and the order
+/// matters: macOS moves every remote window onto the virtual display at its
+/// opening size, and windows squeezed together onto a small opening display do
+/// not spread back out when it grows.
+pub fn maximum_mode() -> VirtualMode {
+    VirtualMode {
+        pixels: (DYNAMIC_MAX_WIDTH as u16, DYNAMIC_MAX_HEIGHT as u16),
+        scaled: (DYNAMIC_MAX_WIDTH as u16, DYNAMIC_MAX_HEIGHT as u16),
+    }
+}
+
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
 /// mode is `mode`.
 ///
