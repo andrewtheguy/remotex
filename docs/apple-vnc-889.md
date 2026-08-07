@@ -1,9 +1,9 @@
 # Apple RFB 003.889, as measured
 
 Measured corrections and confirmations for the reverse-engineered Apple RFB
-specification, captured against a macOS 26.5.2 Apple Virtualization guest in July
-and August 2026. Read this alongside the source specification: it records live-Mac
-disagreements and confirms its highest-risk inferred fields.
+specification, captured against macOS 26.5.2 and 26.6 Apple Virtualization guests
+in July and August 2026. Read this alongside the source specification: it records
+live-Mac disagreements and confirms its highest-risk inferred fields.
 
 The implementation is `src/vnc_record.rs` (the 003.889 transport),
 `src/vnc_apple.rs` (Apple messages and encodings), and the two Apple paths in
@@ -18,14 +18,15 @@ no conclusions combine state from the two session types.
 measurement, not specification: Apple documents none of RFB 003.889, and the
 confirmations here hold for the Macs and the macOS version named above rather
 than for the protocol. A macOS update is free to invalidate any row. The
-dynamic-resolution path behind `resize = true` is the least settled part, and
-what a resize can leave behind is in [`known-issues.md`](known-issues.md). Prefer
-`subtype = "ard"`, which rides the standard RFB 3.8 wire, where it will do.
+dynamic-resolution descriptor has been exercised against the arbitrary-size
+boundary and a burst of viewport reports, but remains reverse engineered. Prefer
+`subtype = "ard"`, which rides the standard RFB 3.8 wire, where a virtual display
+is not required.
 
 | | |
 |---|---|
 | Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
-| Protocol corrections | `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. |
+| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. |
 | Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
 
 ## Confirmed display modes
@@ -69,8 +70,8 @@ The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
 +0x7e u32      display_type = 4 (virtual display)
 +0x82 f32 BE   physical width in millimetres
 +0x86 f32 BE   physical height in millimetres
-+0x8a u32      maximum width
-+0x8e u32      maximum height
++0x8a u32      maximum backing width = 3840
++0x8e u32      maximum backing height = 2160
 +0x92 u16      current mode index = 0
 +0x94 u16      preferred mode index = 0
 +0x96 u32      native full-dynamic rotations value = 7
@@ -81,8 +82,19 @@ The `0x1c`-byte mode is `u32 width`, `u32 height`, `u32 scaled_width`, `u32
 scaled_height`, `f64 refresh_rate_hz = 60`, and `u32 flags = 0`. Width equals
 scaled width; height equals scaled height. `display_flags` bit 0 enables dynamic
 geometry. Each viewport change resends the full descriptor with a replacement
-mode. The server calls `+0x96` rotations; `7` is Apple's captured full-dynamic
-value, but its private bits remain unknown.
+mode, but the maximum fields stay at the native fixed 3840×2160 backing ceiling.
+They are bounds on the virtual display, not another copy of the current mode:
+putting the configured 1280×800 there made macOS accept arbitrary sizes through
+1279×799 and decline 1281×600 or 1366×768 by answering with the old layout. With
+the fixed ceiling, the same macOS 26.6 host accepted 1366×768, 1600×900 and
+1920×1080 successively, then a ten-request arbitrary-size burst ending at the
+last requested mode. The server calls `+0x96` rotations; `7` is Apple's captured
+full-dynamic value, but its private bits remain unknown.
+
+Apple's client UI may impose an 800×600 floor, but that is not a server protocol
+limit on the measured host: the same 26.6 session accepted 799×599 exactly and
+reported it in the answering layout. Remotex therefore does not clamp a viewport
+that the server itself accepts.
 
 The initial descriptor is always dynamic, even when `resize` is false. A reconnect
 therefore re-enables the Mac's **Dynamic resolution** setting. `resize` controls

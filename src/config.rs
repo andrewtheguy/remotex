@@ -80,7 +80,7 @@ pub enum Subtype {
     /// display handling were all reverse engineered, and are only as correct as the
     /// Macs they have been measured against — docs/apple-vnc-889.md records which,
     /// and what is still inferred. A macOS update is free to change any of it, and
-    /// the dynamic-resolution path is the least settled part.
+    /// the dynamic-resolution path remains reverse engineered.
     ///
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
@@ -685,38 +685,28 @@ impl TargetConfig {
     /// the "auto resize" both clients offer — as opposed to resizing when the user
     /// asks for it, which is [`Self::resize`] and nothing more.
     ///
-    /// Plain `vnc` and `rdp`, and deliberately not a config key: it is a statement
-    /// about which engines survive a stream of resizes, which the operator has no
-    /// way to know and no way to change. DesktopSize/ExtendedDesktopSize
+    /// Plain `vnc`, High Performance Apple VNC and `rdp`; deliberately not a
+    /// config key, this states which engines survive a stream of resizes. The
+    /// operator has no way to know or change that. DesktopSize/ExtendedDesktopSize
     /// renegotiation is the one resize path here that costs nothing but a new
     /// framebuffer.
     ///
-    /// **RDP holds this back, and it is on trial.** It was withheld for the
-    /// reactivation fault in [`docs/known-issues.md`](../docs/known-issues.md) — a
-    /// real size change answered by a Deactivation-Reactivation Sequence that
-    /// sometimes ended the session — and that fault was measured entirely against
-    /// IronRDP, which no longer drives this path. FreeRDP runs the sequence inside
-    /// `freerdp_check_event_handles`, so the failure cannot occur as it was written
-    /// down, and whether anything underneath it survived the engine swap is
-    /// unmeasured. Withholding the permission is what stops it being measured: the
-    /// fault is reached far more often by a window reporting continuously than by a
-    /// person pressing a button, so the containment and the experiment are the same
-    /// switch. If sessions start ending on a drag, this line is the first thing to
-    /// put back.
+    /// RDP was withheld for a reactivation fault. Re-measuring against FreeRDP
+    /// found the wrapper's decoder contexts were never resized with the
+    /// framebuffer; that is fixed, so RDP grants the permission again.
     ///
-    /// `ard-high-performance` keeps the exclusion, and for a reason the engine swap
-    /// did not touch: a viewport report replaces its virtual display's mode, and
-    /// doing that on every drag is how the desktop is left wrong for the rest of the
-    /// session. Standard `ard` refuses `resize` outright and so never reaches here
-    /// with it set.
-    ///
-    /// Manual resize stays available on all of them. A fault the user provoked, once,
-    /// with a visible cause is a different thing from one a window drag walks into.
+    /// High Performance used to be withheld for a different measured fault. Its
+    /// descriptor put the requested mode in `max_width`/`max_height`, so the Mac
+    /// fixed the virtual display's dynamic ceiling at the initial 1280x800 and
+    /// declined larger viewport reports. The native fixed 3840x2160 ceiling fixes
+    /// that boundary; a live Mac then accepted both successive arbitrary sizes and
+    /// a ten-report drag burst, ending at the final size. Standard `ard` still
+    /// refuses `resize` outright because it shares physical displays.
     pub fn auto_resize(&self) -> bool {
         self.resize
             && match self.protocol {
                 Protocol::Rdp => true,
-                Protocol::Vnc => self.subtype.is_none(),
+                Protocol::Vnc => self.subtype != Some(Subtype::Ard),
             }
     }
 
@@ -2867,28 +2857,25 @@ mod tests {
     }
 
     /// `resize` is permission to resize when asked; letting the window drive it is
-    /// a second permission the gateway decides. Each engine that is refused it is
-    /// named here, so removing one from the rule has to be a deliberate edit to
-    /// this list.
+    /// a second permission the gateway decides. Pin every current resizable engine
+    /// here so a future exclusion has to be deliberate.
     #[test]
-    fn only_ard_high_performance_is_kept_from_being_resized_by_the_window() {
+    fn every_resizable_engine_may_be_driven_by_the_window() {
         let plain = &ConfigFile::parse(&vnc_toml("resize = true")).unwrap().targets[0];
         assert!(plain.resize && plain.auto_resize());
 
-        // High Performance may be resized when asked and never by the window: a
-        // viewport report replaces the virtual display's mode, and doing that on
-        // every drag is how the desktop is left wrong (docs/known-issues.md).
+        // High Performance's fixed native maximum keeps later arbitrary viewport
+        // sizes inside the same virtual display's dynamic bounds.
         let hp = &ConfigFile::parse(&vnc_toml(
             "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n\
              width = 1600\nheight = 1000\nresize = true",
         ))
         .unwrap()
         .targets[0];
-        assert!(hp.resize && !hp.auto_resize());
+        assert!(hp.resize && hp.auto_resize());
 
-        // RDP has it back. The reactivation fault that withheld it was measured
-        // against IronRDP, which no longer drives this path, and withholding the
-        // permission is exactly what stops that being re-measured.
+        // RDP has it back. Re-measuring the old reactivation fault found and fixed
+        // the FreeRDP wrapper's decoder-context resize.
         let rdp = &ConfigFile::parse(&format!(
             r#"
             [server]

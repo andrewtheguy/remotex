@@ -393,10 +393,9 @@ export function useRemoteDesktop(
   // offered is a second permission, `canAutoResize` below.
   const [canResize, setCanResize] = useState(false);
   // Whether this session may hand the size to the window at all — the gateway's
-  // `autoResize`, and a second permission rather than a shade of the first. Plain
-  // VNC and RDP have it; Apple High Performance is resized only when the user
-  // asks, because what it does with a size change is what docs/known-issues.md is
-  // about and a window drag reports far more often than a person presses a button.
+  // `autoResize`, and a second permission rather than a shade of the first. Every
+  // engine that accepts resize currently has it; Standard Apple Screen Sharing
+  // refuses resize because it shares physical displays.
   //
   // Never true where `canResize` is false, so the controls stay one decision.
   const [canAutoResize, setCanAutoResize] = useState(false);

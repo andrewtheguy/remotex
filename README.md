@@ -10,10 +10,8 @@ One reason the RDP path exists: Microsoft Remote Desktop on macOS handles
 resize-to-window badly, and fonts can come out blurry after a resize. Here a
 resize renegotiates the desktop with the server, so the framebuffer is the size
 that was asked for rather than a resampling of the size it used to be. It is a
-resize you ask for by default, and `vnc` and `rdp` can also be handed the window
-so every change reports one — see [`docs/known-issues.md`](docs/known-issues.md)
-for why Apple Screen Sharing cannot, and for what RDP's own history with a stream
-of them is.
+resize you ask for by default, and plain `vnc`, Apple High Performance and `rdp`
+can also be handed the window so every change reports one.
 
 - RDP uses **FreeRDP 3**, linked from static archives that
   [libfreerdp-prebuilt](https://github.com/andrewtheguy/libfreerdp-prebuilt) builds
@@ -86,9 +84,9 @@ displays. Both Apple subtypes
 support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
 High Performance supports **Resize to Window** like RDP, using Apple's dynamic
 resolution feature to replace the virtual display's mode from client viewport
-reports — when you ask for one, which is the only way it is offered here: it is
-the one target auto resize is withheld from. Every fresh connection turns the Mac's Dynamic
-resolution setting back on. Standard `ard` still refuses resize, and the
+reports. Its fixed native dynamic ceiling also lets the window drive successive
+arbitrary sizes with **Auto resize**. Every fresh connection turns the Mac's
+Dynamic resolution setting back on. Standard `ard` still refuses resize, and the
 one/two-virtual-display control is not implemented. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
@@ -96,10 +94,10 @@ High Performance mode is **experimental**, and is the one part of remotex built
 entirely without a specification: Apple documents none of the protocol revision,
 its record layer, its control messages or its virtual display handling, so all of
 it is reverse engineered and only as correct as the Macs it has been measured
-against. A macOS update is free to change any of it. The dynamic-resolution path
-behind `resize = true` is the least settled part, and what a resize can leave
-behind is in [`docs/known-issues.md`](docs/known-issues.md). Prefer `ard` unless
-you need a virtual display.
+against. A macOS update is free to change any of it. The dynamic-resolution
+descriptor has been measured across its arbitrary-size boundary and a burst of
+viewport reports, but remains reverse engineered. Prefer `ard` unless you need a
+virtual display.
 
 ## Container
 
