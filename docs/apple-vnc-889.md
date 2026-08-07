@@ -26,7 +26,7 @@ is not required.
 | | |
 |---|---|
 | Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
-| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. |
+| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours. |
 | Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
 
 ## Confirmed display modes
@@ -272,6 +272,30 @@ to a virtual display". No Mac measured here offers it, so it is unimplemented �
 `describe_desktop` in `src/vnc.rs` says so in the log rather than leaving a session
 that stops in silence.
 
+### High Performance reads the pointer mask as CGMouseButton numbers
+
+The RFB convention is mask bit 1 = left, bit 2 = middle, bit 3 = right, and
+Standard mode honours it. High Performance's agent reads the same mask
+positionally instead — bit 2 = *right*, bit 3 = *middle*, matching CGMouseButton
+numbering (left 0, right 1, center 2). Measured on macOS 26.6 by holding each
+button through a live session of each subtype and reading
+`CGEventSource.buttonState(.combinedSessionState)` on the Mac over SSH: mask
+`0x04` lands as button 2 (middle) in High Performance and as button 1 (right) in
+Standard; `0x02` the reverse; `0x01` and pointer motion agree in both. A
+by-the-book right-click therefore arrived on the virtual display as a
+middle-click — the button macOS does nothing visible with — which presented as a
+right button that never opened a menu in High Performance mode, session after
+session, while left click and motion worked. `Buttons` in `src/vnc.rs` swaps the
+two bits for this subtype alone; after the swap, three fresh sessions opened a
+context menu on nine of nine right-clicks, confirmed against the Mac's own
+window list (a context menu is a window at the pop-up-menu layer, 101).
+
+The wheel bits (4–7) were not re-measured: proportional scrolling on them
+predates this correction and works, so whatever the agent reads them as agrees
+with RFB in effect. The native client's own input path is `0x10`
+EncryptedInputEvent, not the plain RFB PointerEvent — presumably why Apple never
+noticed the plain path's ordering.
+
 ### `AutoFrameBufferUpdate` (`0x09`) does not make the server stream — §8.11, R-A16b
 
 The document says it "switches the server to server-driven framebuffer streaming"
@@ -401,6 +425,13 @@ other. It lived at `tmp/apple889_probe.py` (gitignored). The shape is: TCP to po
 5900, `RFB 003.889\n` both ways, security type 30, the DH exchange above, ClientInit
 `0xC1`, ServerInit, `SetEncodings`, `SetPixelFormat`, `SetEncryption(1)` and `(2)`,
 read the rekey, then a record layer as specified above around ordinary RFB.
+
+The pointer-mask measurement used two later probes, gitignored the same way:
+`tmp/input_trace_probe.py` drives the gateway WebSocket and reads
+`CGEventSource.buttonState` on the Mac over SSH while each button is held, and
+`tmp/right_click_probe.py` right-clicks the desktop across fresh sessions and
+asks the Mac's window list whether a pop-up-menu-layer window appeared. Both
+lean on small Swift tools compiled under `~/probe` on the sandbox Mac.
 
 Three instruments did the work, and two of them were outside the protocol:
 

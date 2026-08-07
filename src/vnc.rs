@@ -1069,6 +1069,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // state (see [`ClientMsg::Key`]).
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
     let mut wheel = Wheel::new(apple);
+    let buttons = Buttons::new(high_performance);
 
     let result = loop {
         tokio::select! {
@@ -1272,6 +1273,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 } else {
                     let msgs = translate_input(
                         input,
+                        &buttons,
                         &mut button_mask,
                         &mut last_pos,
                         &mut pressed_keys,
@@ -2717,6 +2719,50 @@ impl Wheel {
     }
 }
 
+/// The pointer-mask bit each mouse button sets, by server dialect.
+///
+/// RFB's convention is bit 1 = left, bit 2 = middle, bit 3 = right, and every
+/// server here honours it — including Apple's Standard mode, measured on macOS
+/// 26.6 by holding each button through a live session and reading
+/// `CGEventSource.buttonState` on the Mac. High Performance mode's agent reads
+/// the same mask positionally instead, as CGMouseButton numbers: bit 2 =
+/// *right*, bit 3 = *middle*. A right-click sent by the book therefore lands on
+/// the virtual display as a middle-click — the button macOS does nothing with —
+/// which is what a dead right button in that mode was. The two bits are swapped
+/// for that subtype alone. See docs/apple-vnc-889.md.
+enum Buttons {
+    /// The RFB convention: bit 2 = middle, bit 3 = right.
+    Rfb,
+    /// Apple High Performance's positional reading: bit 2 = right, bit 3 = middle.
+    HighPerformance,
+}
+
+impl Buttons {
+    fn new(high_performance: bool) -> Self {
+        if high_performance {
+            Self::HighPerformance
+        } else {
+            Self::Rfb
+        }
+    }
+
+    /// The mask bit this button sets, or `None` for a button no server reads.
+    /// RFB's mask has bits for buttons 8 and 9, but no server agrees on what
+    /// they mean and the ones remotex talks to ignore them. `Back` and
+    /// `Forward` are dropped rather than sent as a scroll notch, which is what
+    /// those bits are on every server that does read them.
+    fn bit(&self, button: MouseButton) -> Option<u8> {
+        match (self, button) {
+            (_, MouseButton::Left) => Some(0x01),
+            (Self::Rfb, MouseButton::Middle) => Some(0x02),
+            (Self::Rfb, MouseButton::Right) => Some(0x04),
+            (Self::HighPerformance, MouseButton::Middle) => Some(0x04),
+            (Self::HighPerformance, MouseButton::Right) => Some(0x02),
+            (_, MouseButton::Back | MouseButton::Forward) => None,
+        }
+    }
+}
+
 /// One pulse in the direction of a nonzero delta: the RFB convention, where the
 /// magnitude a client reports is dropped and the server decides how far a scroll
 /// goes.
@@ -2740,6 +2786,7 @@ fn notch(delta: f32) -> i32 {
 /// makes that impossible rather than remembered.
 fn translate_input(
     input: ClientMsg,
+    buttons: &Buttons,
     button_mask: &mut u8,
     last_pos: &mut (u16, u16),
     pressed_keys: &mut HashMap<String, u32>,
@@ -2753,15 +2800,8 @@ fn translate_input(
         // `clicks` goes nowhere: RFB carries a button mask alone, and the guest
         // counts the clicks itself from the events it receives.
         ClientMsg::MouseButton { button, pressed, .. } => {
-            let bit = match button {
-                MouseButton::Left => 0x01,
-                MouseButton::Middle => 0x02,
-                MouseButton::Right => 0x04,
-                // RFB's mask has bits for buttons 8 and 9, but no server agrees
-                // on what they mean and the ones remotex talks to ignore them.
-                // Dropped rather than sent as a scroll notch, which is what
-                // those bits are on every server that does read them.
-                MouseButton::Back | MouseButton::Forward => return Vec::new(),
+            let Some(bit) = buttons.bit(button) else {
+                return Vec::new();
             };
             if pressed {
                 *button_mask |= bit;
@@ -3931,6 +3971,7 @@ mod tests {
                 pressed: true,
                 clicks: 1,
             },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
@@ -3941,6 +3982,7 @@ mod tests {
         // A move while the button is held keeps it in the mask (drag).
         let bytes = translate_input(
             ClientMsg::MouseMove { x: 30, y: 40 },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
@@ -3952,6 +3994,7 @@ mod tests {
         // Three lines of intent is exactly one pulse here.
         let bytes = translate_input(
             ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Line },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
@@ -3974,12 +4017,57 @@ mod tests {
                 pressed: false,
                 clicks: 1,
             },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             &mut keys,
             &mut wheel,
         );
         assert_eq!(bytes, vec![pointer_event(0x00, (30, 40)).to_vec()]);
+    }
+
+    /// High Performance mode's agent reads the mask as CGMouseButton numbers,
+    /// so right and middle ride each other's RFB bits there — and only there.
+    /// Measured on macOS 26.6: see [`Buttons`].
+    #[test]
+    fn high_performance_swaps_the_middle_and_right_mask_bits() {
+        for (buttons, right_bit, middle_bit) in [
+            (Buttons::Rfb, 0x04u8, 0x02u8),
+            (Buttons::HighPerformance, 0x02, 0x04),
+        ] {
+            for (button, bit) in [
+                (MouseButton::Right, right_bit),
+                (MouseButton::Middle, middle_bit),
+            ] {
+                let mut mask = 0u8;
+                let mut pos = (10, 20);
+                let bytes = translate_input(
+                    ClientMsg::MouseButton { button, pressed: true, clicks: 1 },
+                    &buttons,
+                    &mut mask,
+                    &mut pos,
+                    &mut HashMap::new(),
+                    &mut Wheel::new(true),
+                );
+                assert_eq!(bytes, vec![pointer_event(bit, (10, 20)).to_vec()]);
+            }
+            // Left is bit 1 in both dialects.
+            let mut mask = 0u8;
+            let mut pos = (10, 20);
+            let bytes = translate_input(
+                ClientMsg::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                    clicks: 1,
+                },
+                &buttons,
+                &mut mask,
+                &mut pos,
+                &mut HashMap::new(),
+                &mut Wheel::new(true),
+            );
+            assert_eq!(bytes, vec![pointer_event(0x01, (10, 20)).to_vec()]);
+        }
     }
 
     /// Pulses for one wheel event, as (horizontal, vertical).
@@ -4393,6 +4481,7 @@ mod tests {
                 pressed,
                 caps,
             },
+            &Buttons::Rfb,
             &mut mask,
             &mut pos,
             keys,
