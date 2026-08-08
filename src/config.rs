@@ -799,9 +799,14 @@ impl TargetConfig {
 }
 
 /// What a session opens at when neither the config nor the connecting client
-/// named a size: no screen to measure, no operator to ask, one laptop-shaped
+/// named a size: no screen to measure, no operator to ask, one desk-shaped
 /// answer.
-pub const DEFAULT_SIZE: (u16, u16) = (1280, 800);
+///
+/// Points, not backing pixels, and 16:10 because a remote desktop is a working
+/// surface rather than a video. It is also what a phone gets: a touch client
+/// asks for this rather than its own screen, which is portrait and far too
+/// small to be a desktop (`sendMobileSize` in `frontend/src/useRemoteDesktop.ts`).
+pub const DEFAULT_SIZE: (u16, u16) = (1920, 1200);
 
 /// Where a served gateway listens when nothing says otherwise.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:52380";
