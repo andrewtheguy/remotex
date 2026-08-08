@@ -62,12 +62,16 @@ fn start(config: &Path, socket: &Path) -> Gateway {
     )
 }
 
-/// Connect once the gateway is listening, or fail saying it never did.
-fn connect_when_ready(socket: &Path) -> UnixStream {
+/// Wait for a freshly spawned gateway to be listening, or fail saying it never was.
+///
+/// The one place that retries, and only for a gateway that has not started *yet*.
+/// A request that retried would wait out the whole timeout for a gateway that has
+/// died, and then report it as one that never came up.
+fn wait_until_ready(socket: &Path) {
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         match UnixStream::connect(socket) {
-            Ok(stream) => return stream,
+            Ok(_) => return,
             Err(e) if Instant::now() >= deadline => {
                 panic!("nothing was listening on {} after {READY_TIMEOUT:?}: {e}", socket.display())
             }
@@ -79,7 +83,8 @@ fn connect_when_ready(socket: &Path) -> UnixStream {
 /// One HTTP/1.1 request written straight onto the socket — which is exactly what a
 /// reverse proxy does, and the reason nothing here builds a URL.
 fn request(socket: &Path, path: &str) -> String {
-    let mut stream = connect_when_ready(socket);
+    let mut stream = UnixStream::connect(socket)
+        .unwrap_or_else(|e| panic!("cannot reach {}: {e}", socket.display()));
     stream
         .write_all(
             format!("GET {path} HTTP/1.1\r\nHost: gateway\r\nConnection: close\r\n\r\n").as_bytes(),
@@ -103,7 +108,8 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
     let config = dir.write("remotex.toml", &config_text());
     let socket = dir.path().join("gateway.sock");
 
-    let gateway = start(&config, &socket);
+    let mut gateway = start(&config, &socket);
+    wait_until_ready(&socket);
     let response = request(&socket, "/api/health");
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     assert!(response.ends_with("ok"), "the health handler's own answer: {response}");
@@ -129,17 +135,18 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
             .success(),
         "the gateway is signalled"
     );
-    drop(gateway);
 
-    let deadline = Instant::now() + READY_TIMEOUT;
-    while socket.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "a stopped gateway must leave no socket behind: {} is still there",
-            socket.display()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // Waited for here rather than in `Gateway::drop`, which kills what it finds: a
+    // `SIGKILL` racing the handler would take the process away mid-shutdown, and the
+    // socket would then still be there for a reason that is not the one under test.
+    // Once this returns, the guard has run or it never will.
+    let status = gateway.0.wait().expect("the gateway exits");
+    assert!(status.success(), "a signalled gateway stops cleanly: {status}");
+    assert!(
+        !socket.exists(),
+        "a stopped gateway must leave no socket behind: {} is still there",
+        socket.display()
+    );
 }
 
 /// A gateway that was killed leaves its socket file behind, and the next start has
@@ -156,6 +163,7 @@ fn a_leftover_socket_does_not_stop_the_next_start() {
     assert!(socket.exists());
 
     let _gateway = start(&config, &socket);
+    wait_until_ready(&socket);
     let response = request(&socket, "/api/health");
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
 }

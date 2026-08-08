@@ -1561,12 +1561,19 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
     let port: u16 = port
         .parse()
         .with_context(|| format!("{port:?} is not a port number (0-65535)"))?;
-    if host.contains(':') {
+    // Brackets as well as colons: `[localhost]:52380` has no colon in its host and
+    // would otherwise pass here, to fail at `lookup_host` on the way up instead —
+    // which is a config mistake reported as a resolver one. A bracket is only ever
+    // an IPv6 literal's, so anything wearing them has to be one.
+    if host.contains([':', '[', ']']) {
         let literal = host
             .strip_prefix('[')
             .and_then(|h| h.strip_suffix(']'))
             .with_context(|| {
-                format!("an IPv6 address must be bracketed, as in \"[::1]:{port}\"")
+                format!(
+                    "a host with a colon or brackets must be a bracketed IPv6 \
+                     address, as in \"[::1]:{port}\""
+                )
             })?;
         literal
             .parse::<std::net::Ipv6Addr>()
@@ -1850,6 +1857,11 @@ mod tests {
             "::1:52380",
             "[::1:52380",
             "[::zz]:52380",
+            // Brackets are an IPv6 literal's and nothing else's, so a name or an
+            // IPv4 address wearing them is a mistake to catch here rather than at
+            // the resolver.
+            "[localhost]:52380",
+            "[127.0.0.1]:52380",
             ":52380",
             "127.0.0.1:",
             "127.0.0.1:notaport",

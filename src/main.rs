@@ -215,8 +215,13 @@ struct SocketFile(std::path::PathBuf);
 
 impl Drop for SocketFile {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.0) {
-            warn!("cannot remove the socket {}: {e}", self.0.display());
+        // A socket that is already gone is the outcome this wanted, not a failure:
+        // an operator can remove it by hand, and saying so on the way out would be
+        // a warning about nothing.
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!("cannot remove the socket {}: {e}", self.0.display()),
         }
     }
 }
