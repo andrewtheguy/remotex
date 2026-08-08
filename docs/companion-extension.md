@@ -19,7 +19,9 @@ cannot do for itself:
 - **resizing its own window** to the remote's framebuffer. `window.resizeTo` is refused
   for a window the user opened rather than a script.
 
-It is not built yet; this is its design.
+This is its design. The code is [`apps/companion/`](../apps/companion/README.md); what
+has never been done is the manual half of [Testing](#testing), which needs a person and
+a real remote.
 
 ## App windows only
 
@@ -191,7 +193,7 @@ source: "remotex-ext"        drops every other conversation on this bus
 There is no `externally_connectable`: the content script is a mandatory relay, and no
 page can reach the service worker directly.
 
-## What the extension will contain
+## What the extension contains
 
 ```
 apps/companion/
@@ -202,11 +204,13 @@ apps/companion/
     origin.ts                 PURE — a tab URL to the origin pattern to ask for
     geometry.ts               re-exports apps/viewer/src/main/geometry.ts
     resize.ts                 PURE window arithmetic
+    version.ts                PURE — a Cargo version to a Chrome one
   src/worker/                 stateless router, grants, ensureOffscreen, icon, resize
   src/content/                the app-window gate and the page bridge
-  src/offscreen/              the clipboard poller
-  src/popup/                  the state card, the site switch and Resize to display
+  src/offscreen/              the clipboard poller, over the viewer's synchronizer
+  src/popup/                  the site switch, the state card and Resize to display
   scripts/build.ts            Bun.build, mirroring apps/viewer/scripts/build.ts
+  icons/                      two SVGs, committed PNGs, and the script between them
   tests/
 ```
 
@@ -399,11 +403,12 @@ The same directory loads in Edge, Brave, Opera and Vivaldi, all of which have ap
 windows of their own. Not Firefox: no `chrome.offscreen`, no app windows, and no
 Keyboard Lock for the tab path either.
 
-The release job that builds that zip lands with the directory. Its second reason for
-existing is worth more than the asset: it runs `bun run check` over `apps/companion` on
-a runner with no `frontend/node_modules`, which is the exact breakage
-`companion.contract.ts`'s no-React rule exists to prevent and which nothing else
-catches.
+The `companion` job in `.github/workflows/release.yml` builds that zip, and its second
+reason for existing is worth more than the asset: it runs `bun run check` over
+`apps/companion` on a runner with no `frontend/node_modules` and no
+`apps/viewer/node_modules`, which is the exact breakage `companion.contract.ts`'s
+no-React rule and `geometry.ts`'s no-imports rule exist to prevent, and which nothing
+else catches.
 
 ## Costs, stated
 

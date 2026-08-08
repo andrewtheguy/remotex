@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    // No node lib at all in the sources: every context this bundles for is a browser
+    // one — a service worker, a content script, an offscreen document and a popup.
+    // `node` is in `types` only for the build script.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node", "bun", "chrome"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    // Not `erasableSyntaxOnly`, for the same reason as apps/viewer: nothing here is
+    // ever run as TypeScript with its types stripped. Every entry point is bundled.
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  // `src/shared/contract.ts` type-imports the client's wire types and
+  // `src/shared/geometry.ts` re-exports the viewer's arithmetic, so a rename in
+  // either fails here rather than in a popup nobody opened yet.
+  "include": ["src", "scripts", "tests"]
+}

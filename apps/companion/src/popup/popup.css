@@ -1,0 +1,84 @@
+/* The popup, which is the extension's only user interface.
+ *
+ * Deliberately plain, and it follows the browser's own light/dark rather than choosing
+ * one: a popup that is the wrong colour for its toolbar looks broken in a way a page
+ * never does.
+ */
+
+:root {
+  color-scheme: light dark;
+  --edge: light-dark(#d8d8dd, #3a3a40);
+  --muted: light-dark(#5f5f68, #a0a0aa);
+  --bg: light-dark(#ffffff, #202024);
+  --fg: light-dark(#1a1a1e, #ececf0);
+}
+
+body {
+  margin: 0;
+  width: 20rem;
+  font:
+    13px / 1.45 system-ui,
+    sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main {
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  margin: 0;
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.8rem;
+  border-top: 1px solid var(--edge);
+  padding-top: 0.6rem;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.35rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
