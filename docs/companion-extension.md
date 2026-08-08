@@ -131,22 +131,28 @@ already has, and the popup is where it is asked for.
 
 `NATIVE_HOST` is read once at module load: the app's preload runs before any script in
 the document and cannot appear later. The window kind is read once for the same sort of
-reason. The companion can promise neither — its content script has to read its
-whitelist out of `chrome.storage` first, and a site can be added to or removed from
-that whitelist mid-session. So this is a store, not a constant, and every settled
-answer can be unsettled:
+reason. The companion can promise neither. Nothing tells a page synchronously whether a
+content script was injected into it, so the only way to find out is to ask and wait, and
+a bfcache restore makes the question worth asking twice. So this is a store, not a
+constant, and every settled answer can be unsettled:
 
 | from | on | to | |
 |---|---|---|---|
 | `probing` | `hello` | `connected` | |
 | `probing` | the deadline | `absent` | 1.5 s of silence |
-| `connected` | `bye` | `absent` | the site left the whitelist |
-| `absent` | `hello` | `connected` | it was added back |
+| `connected` | `bye` | `absent` | the extension stood the seam down |
+| `absent` | `hello` | `connected` | it came back |
 | `absent` | `pageshow` | `probing` | a bfcache restore, which re-arms the deadline with it |
 | `connected` | `pageshow` | `connected` | a hello goes out, but there is nothing to re-probe |
 
 Only a `pageshow` returns anything to `probing`, and it re-arms the deadline as it
 does — so there is no path to a phase that waits for an answer nothing will settle.
+
+`bye` is the one row without a settled producer. It was there for a site leaving a
+stored whitelist, and the host list is in the manifest instead; disabling the extension
+tears its content script's context down too abruptly to say goodbye first. Whether
+anything sends it is decided when the extension is built, not before — the seam handles
+it either way.
 
 `probing` is not the same answer as `absent`, and the difference is load-bearing. The
 focus-driven clipboard read in `useRemoteDesktop.ts` stands down while `probing`:
@@ -157,8 +163,11 @@ settles the effect re-runs, and its own trailing call covers the delay.
 The phase is not the whole condition, though — `capabilities.clipboard` is the other
 half of it, and both behaviours read both. The page stands its reader down, and hands a
 remote copy over instead of writing it, only under a companion that says it is doing
-the polling. One with that setting off changes nothing about the page at all: it reads
-and writes for itself, exactly as it does with none installed.
+the polling. One that reports `clipboard: false` changes nothing about the page at all:
+it reads and writes for itself, exactly as it does with none installed. Nothing in the
+extension turns that off today — there is no options page to turn it off from — but the
+seam is the wrong place to assume it, because the page's behaviour has to follow what
+the extension says it does rather than the fact that it answered.
 
 A tab never enters `probing` at all. It is `absent` from the first read, so that
 stand-down costs nothing where there is nothing to wait for.
@@ -188,76 +197,76 @@ apps/companion/
   src/manifest.json           MV3; version injected from Cargo.toml at build time
   src/shared/
     contract.ts               type-imports frontend/src/companion.contract.ts
-    whitelist.ts              PURE — the matcher, and the most testable piece here
-    settings.ts               chrome.storage.local
     messages.ts               ToWorker / ToContent / ToOffscreen + type guards
     geometry.ts               re-exports apps/viewer/src/main/geometry.ts
     resize.ts                 PURE window arithmetic
   src/worker/                 stateless router, ensureOffscreen, per-window icon, resize
-  src/content/                the app-window and whitelist gates, and the page bridge
+  src/content/                the app-window gate and the page bridge
   src/offscreen/              the clipboard poller
   src/popup/                  the state card and Resize to display
-  src/options/                the whitelist and the two feature toggles
   scripts/build.ts            Bun.build, mirroring apps/viewer/scripts/build.ts
   tests/
 ```
 
+There is no options page and no `chrome.storage`. The extension holds no settings of
+its own; see below.
+
 Toolchain mirrors `apps/viewer` exactly: TypeScript, `Bun.build`, biome,
 `tsc --noEmit`, `bun test tests`.
 
-### Permissions
+### The host list is the manifest
 
-Static `http://*/*` and `https://*/*` host permissions, gated by a whitelist the user
-maintains. Not `optional_host_permissions` — the trade is stated below.
+The gateways this extension serves are `content_scripts[0].matches` and
+`host_permissions` in `manifest.json`, and nowhere else. Chrome's own match patterns,
+Chrome's own matcher, applied by Chrome before any of this code runs.
 
-`http://` is in the list for `http://localhost` and `http://127.0.0.1`, which are
-secure contexts. It is not a second path for insecure origins: this client refuses to
-start outside a secure context, so the content script does nothing on one either.
+That is not a shortcut around a whitelist; it *is* the whitelist, and it is a strictly
+better one. A stored list would need a grammar, a matcher careful enough to compare
+hosts label-wise rather than as substrings, an options page to edit it, a
+`chrome.storage.onChanged` path to push edits into open windows, and a re-check in the
+worker for a content script still running on a site that had just been removed — every
+line of it reimplementing, at runtime and less well, a decision Chrome makes at load
+time. It would also mean broad `http://*/*` and `https://*/*` host permissions and a
+content script in every renderer on the machine, since a runtime list can only narrow
+what the manifest already granted.
 
-No `tabs` permission (host permissions already grant `tab.url`), no
-`externally_connectable`, no `web_accessible_resources` — the last so the extension's
-presence cannot be probed by URL from an arbitrary page.
+With the list in the manifest the extension has no ambient access at all. It exists in
+the renderers of the hosts named in it and in no others, so there is no page that could
+learn it is installed, and nothing to gate.
 
-### The whitelist
-
+```json
+"host_permissions": ["https://gateway.example.com/*"],
+"content_scripts": [{ "matches": ["https://gateway.example.com/*"], … }]
 ```
-entry   := [ scheme "://" ] hostpat [ ":" port ]
-scheme  := "http" | "https"          absent ⇒ either
-hostpat := labels | "*." labels | ipv4 | "[" ipv6 "]"
-port    := 1..65535                  absent ⇒ any port
-```
 
-- Hosts are compared **label-wise on `split(".")`, never as substrings**, so
-  `example.com` matches neither `notexample.com` nor `example.com.evil.net` nor a URL
-  with the host in its query.
-- `*.corp.example.com` matches subdomains **and** the apex — Chrome's own match-pattern
-  convention, so it behaves the way anyone who has written a manifest expects.
-- A wildcard needs at least two labels after `*.`, so `*.com` and bare `*` are parse
-  errors. Not a public-suffix check; just the cheap rule that stops the whitelist
-  becoming `<all_urls>` by the back door.
-- A path is a parse error rather than a silent truncation: the client is a SPA whose
-  path changes under the content script.
-- Stored in `chrome.storage.local`, not `sync`. A list of internal gateway hostnames
-  is not something to put in a Google account.
+`http://` patterns are allowed for `http://localhost` and `http://127.0.0.1`, which are
+secure contexts. That is not a second path for insecure origins: this client refuses to
+start outside one, so a content script on an insecure origin would find nothing to talk
+to.
 
-The content script's gate is two checks, in this order: **an app window** — the same
+Two properties of Chrome's patterns are worth knowing before writing one. `*.host` is
+the pattern that matches subdomains **and** the apex, so `https://*.corp.example.com/*`
+covers `corp.example.com` too. And **a match pattern cannot express a port**: a gateway
+on `https://gateway.example.com:8443` is written `https://gateway.example.com/*`, which
+covers every port on that host. On a personal gateway that is a host already trusted
+completely; where it is not, one `location.port` check at the top of the content script
+is three lines and needs no grammar.
+
+Editing the list is editing that file in the installed copy and pressing Reload in
+`chrome://extensions`. See [Distribution](#distribution). The one thing Chrome will not
+do is inject into a window that is already open, so a window open across the edit is
+reopened. That is the whole of what the `storage.onChanged` machinery bought.
+
+The content script's remaining gate is one check: **an app window**, using the same
 `display-mode` allow-list the client uses, so both ends of the bus agree by
-construction — and then the whitelist, read straight out of `chrome.storage`. Neither
-needs a service worker, which Chrome may have killed, and together they decide whether
-the page ever learns the extension exists. The worker re-checks `sender.tab.url` on
-every inbound message, so a content script left running in a window whose site was just
-removed cannot still relay.
+construction. It needs no service worker, which Chrome may have killed, and it decides
+whether the page ever learns the extension exists.
 
-A whitelist edit reaches open windows through `chrome.storage.onChanged`, which fires
-in content scripts too. An app window's content script keeps that one listener even
-while un-whitelisted — it is invisible to the page — and flips: off→on posts `hello`
-and installs the page listener, on→off posts `bye` and removes it. No reload, no
-re-injection. That is what makes editing the list from a normal browser window while
-the shim stays open work at all. A tab's content script registers nothing, because
-nothing about a tab can change into a case it serves.
-
-**Nothing is posted before both gates pass.** A `hello` on every page would tell every
-site on the internet that this user runs a remote-desktop extension, and which version.
+The rest of the manifest is three permissions — `offscreen`, `clipboardRead`,
+`clipboardWrite` — and that is the whole list. No `storage`, because there is nothing to
+store. No `tabs`, because host permissions already grant `tab.url` for the hosts that
+matter. No `externally_connectable` and no `web_accessible_resources`, the last so the
+extension cannot be probed by URL even from the gateway's own page.
 
 ### The popup, and Resize to display
 
@@ -268,9 +277,8 @@ reachable from the app window anyway.
 The popup is a state card and one button. The card is `NativeState` as last reported —
 which target, the framebuffer as `1920 × 1080 @2x`, whether the clipboard bridge is on
 — and **Resize to display**, disabled unless a size has been reported and
-`capabilities.resize` is set. The host row shows the whitelist entry covering this
-window, with a switch; where the only thing covering it is a wildcard, that is said
-rather than the broad rule silently deleted.
+`capabilities.resize` is set. There is no host row and no switch: the popup opens on a
+window the extension is already running in, so there is nothing there to decide.
 
 `apps/viewer/src/main/geometry.ts` is already exactly this arithmetic — pure, importing
 nothing, tested, and already carrying the rule that matters most here: the window is
@@ -307,26 +315,27 @@ from the other side and are untouched.
 
 Two variants, on and off, painted per `tabId` from `chrome.tabs.onUpdated` (on
 `loading` *and* whenever `changeInfo.url` is set — that is how a SPA's `pushState` shows
-up), `onActivated`, `windows.onFocusChanged` and `storage.onChanged`. Per-tab icon state
-is reset by Chrome on navigation, so `onUpdated` is required rather than an
-optimisation.
+up), `onActivated` and `windows.onFocusChanged`. Per-tab icon state is reset by Chrome
+on navigation, so `onUpdated` is required rather than an optimisation.
 
-Off is the honest answer for the same window in a tab, which is where most of the icon's
-work is: the difference between "this site is not whitelisted" and "this is not an app
-window" is the whole of what someone needs told, and the title says which.
+The question it answers is now only the app-window one. A `tab.url` the worker cannot
+read is a host the manifest does not name, and the toolbar icon is greyed everywhere by
+default anyway; what is left to say is why the same gateway is quiet in an ordinary tab,
+and the title says it.
 
-The icon is **cosmetic and best-effort**. The gate is the content script's two checks
-and is always right; nobody should make the icon authoritative.
+The icon is **cosmetic and best-effort**. The gate is the content script's own check and
+is always right; nobody should make the icon authoritative.
 
 No badge in the normal case. A badge that is always there says nothing.
 
 ## Testing
 
-Deterministic and worth having: the whitelist matcher (table-driven, and the most
-valuable file in the tree), the app-window gate, the resize arithmetic, the message
+Deterministic and worth having: the app-window gate, the resize arithmetic, the message
 guards, `iconStateFor`, the worker's router over a fake `chrome`, and a
 `manifest.test.ts` asserting the permission array against a literal — a test that goes
-red the day someone adds one.
+red the day someone adds one. It cannot assert the host patterns, which are the
+installation's business rather than the repo's; what it can assert is that the
+repository's copy names an example host and not a wildcard.
 
 Nothing goes in `tests/playwright/`. Every assertion an installed extension offers is
 out of scope by that suite's own rules — a toolbar icon is pixels, key delivery is
@@ -338,10 +347,10 @@ open an app window, which is the only configuration the extension runs in.
 So the irreducible half is manual, and all of it belongs in a shim window: Ctrl+W and
 Ctrl+T reaching the remote with no fullscreen; Alt+F4 raising the leave-site dialog
 instead; copy while minimised; the echo loops in both directions; resize from the popup
-at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; the whitelist edited from a
-normal browser window reaching the open shim with no reload; and killing the service
-worker from `chrome://extensions` mid-session. Plus one negative: open the same gateway
-in an ordinary tab and confirm the icon says off and the seam never wakes.
+at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; a host added to the installed
+manifest and picked up on Reload; and killing the service worker from
+`chrome://extensions` mid-session. Plus one negative: open the same gateway in an
+ordinary tab and confirm the icon says off and the seam never wakes.
 
 ## Distribution
 
@@ -349,10 +358,26 @@ in an ordinary tab and confirm the icon says off and the seam never wakes.
 pinning, no Web Store listing, and nothing in the design that exists to satisfy a
 reviewer.
 
-One thing still has to be done properly. Generate a key once and commit only the derived
-public `"key"` field into the manifest: without it the extension ID changes on every
-unpacked reload, and a new ID is a new `chrome.storage.local`, which is the whitelist
-gone. Keep the `.pem` out of the repo.
+The installation is a **copy of `dist/` living outside this repository**, and that is
+what makes the manifest a reasonable place to keep a host list. The repository holds the
+code and a manifest naming an example host; the copy holds the gateways, which are the
+one part of this that is nobody else's business. `andrewtheguy/remotex` is public, and
+internal hostnames do not belong in it.
+
+```sh
+cd apps/companion && bun run build
+cp -R dist ~/Applications/remotex-companion      # or anywhere outside the repo
+$EDITOR ~/Applications/remotex-companion/manifest.json
+```
+
+Then Load unpacked, once. Adding a gateway later is that same editor and the Reload
+button — no rebuild, no repository change, no options page. Updating the *code* is a
+rebuild and a re-copy, at which point the two host patterns are pasted back in; if that
+ever becomes tiresome, a copy step that preserves them is a few lines, but not before it
+does.
+
+Nothing here needs a stable extension ID. The `"key"` field and its `.pem` exist to keep
+`chrome.storage.local` across reloads, and this extension stores nothing.
 
 The same directory loads in Edge, Brave, Opera and Vivaldi, all of which have app
 windows of their own. Not Firefox: no `chrome.offscreen`, no app windows, and no
@@ -360,22 +385,20 @@ Keyboard Lock for the tab path either.
 
 ## Costs, stated
 
-1. **Static broad host permissions run a content script in every http/https renderer.**
-   Mitigated as far as it can be — it posts nothing and registers no page listener
-   before both gates pass, so it is invisible and non-fingerprintable — but it is still
-   code everywhere. `optional_host_permissions` plus
-   `chrome.scripting.registerContentScripts` gives an identical whitelist UX with no
-   ambient access; because the matcher is a pure module the switch stays cheap. Note
-   that Chrome match patterns cannot express a port, so `https://host:8443` would have
-   to register as `https://host/*` and be narrowed by our own matcher afterwards. The
-   grammar is designed so that remains possible.
-2. **Nothing works in a tab**, and that is deliberate rather than a gap to close later.
+1. **A match pattern cannot express a port**, so a gateway on a non-default port is
+   named by host and every port on that host is covered. On a personal gateway that host
+   is trusted completely already; where it is not, one `location.port` check in the
+   content script narrows it.
+2. **The host list lives in the installed copy, not in the repository**, so it is not
+   backed up by anything that backs up this repository, and a fresh install is two
+   patterns retyped. That is the price of not publishing them.
+3. **Nothing works in a tab**, and that is deliberate rather than a gap to close later.
    The icon is what says so there, and the client's Help card is what says how to fix
    it; neither is load-bearing, so somebody can still end up wondering why a tab is
    quiet.
-3. **Browser zoom** breaks "100%" regardless of window size. The arithmetic corrects
+4. **Browser zoom** breaks "100%" regardless of window size. The arithmetic corrects
    for it and the popup says so; the client never scales anything to compensate.
-4. **The shim's key behaviour is read from Chromium source and measured on macOS.**
+5. **The shim's key behaviour is read from Chromium source and measured on macOS.**
    The reserved-key early return is cross-platform, but the per-key table in
    `PWA_KEYS.md` is not; a pass on Windows is owed.
-5. **The toolbar icon is best-effort**, as above.
+6. **The toolbar icon is best-effort**, as above.
