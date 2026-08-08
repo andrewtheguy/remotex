@@ -20,6 +20,11 @@ can also be handed the window so every change reports one.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
+  `subtype = "ard-high-performance"` selects its High Performance mode over RFB
+  003.889 — one virtual display holding every remote window, and the only Apple
+  path that accepts `resize = true`. It is **experimental** because it has not
+  been widely tested — it is also reverse engineered, having no specification.
+  Prefer `ard` unless you need a virtual display.
 
 There is one client, and it is the page a browser loads. **remotex.app** shows
 that same page in a macOS window with a gateway of its own, and adds the two
@@ -90,7 +95,8 @@ Dynamic resolution setting back on. Standard `ard` still refuses resize, and the
 one/two-virtual-display control is not implemented. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
-High Performance mode is **experimental**, and is the one part of remotex built
+High Performance mode is **experimental** because it has not been widely tested,
+and it is the one part of remotex built
 entirely without a specification: Apple documents none of the protocol revision,
 its record layer, its control messages or its virtual display handling, so all of
 it is reverse engineered and only as correct as the Macs it has been measured
