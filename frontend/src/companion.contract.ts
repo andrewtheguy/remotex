@@ -58,8 +58,9 @@ export type CompanionEvent =
    * be talking to an extension that had stopped listening.
    *
    * Sending our own hello as well as answering theirs is what makes the handshake
-   * order-independent: the content script runs at `document_start` but reads the
-   * whitelist asynchronously, so either side can be first and neither may assume it.
+   * order-independent: the content script runs at `document_start` and this module
+   * runs when the bundle does, and nothing sequences the two, so either side can be
+   * first and neither may assume it.
    */
   | { type: "hello"; client: string }
   /** The whole of what the extension knows about this session. */
@@ -71,12 +72,19 @@ export type CompanionEvent =
    */
   | { type: "clipboardFromRemote"; text: string };
 
+// `bye` covers a revoked site and nothing else. An extension disabled or reloaded from
+// chrome://extensions loses its content script's context without a turn to speak, so a
+// page can still be left believing in a companion that has gone — reloading it is the
+// only cure, and it is the gesture anyone would already reach for.
 /** What the extension tells the page. */
 export type CompanionCommand =
   | { type: "hello"; version: string; capabilities: CompanionCapabilities }
   /**
-   * This site left the whitelist, or the extension is going away. The page goes back
-   * to reading the clipboard on focus; it does not go back to waiting for a hello.
+   * Host access for this site was taken away — from the popup's own switch, or from
+   * Chrome's site-access UI, which the extension hears about the same way. The content
+   * script already injected into this window keeps running until it navigates, so it
+   * has one last thing to say. The page goes back to reading the clipboard on focus;
+   * it does not go back to waiting for a hello.
    */
   | { type: "bye" }
   /** The system clipboard changed, focused or not. Goes to `pushLocalClipboard`. */
@@ -85,10 +93,14 @@ export type CompanionCommand =
 /**
  * What this companion is actually doing, as opposed to what it could do.
  *
- * Both are user settings on the extension's options page. `clipboard` is the one the
- * page acts on: false means the offscreen poller is off and the page must keep
- * reading the clipboard on focus itself. `resize` is here so the popup can grey its
- * own button out with no second round trip to ask.
+ * `clipboard` is the one the page acts on: false means the offscreen poller is off and
+ * the page must keep reading the clipboard on focus itself. `resize` is here so the
+ * popup can grey its own button out with no second round trip to ask.
+ *
+ * Nothing in the extension sets either to false today — it has no options page and no
+ * settings of its own. They are on the wire regardless, because the page has to follow
+ * what a companion says it is doing rather than infer it from the fact that one
+ * answered.
  */
 export interface CompanionCapabilities {
   clipboard: boolean;

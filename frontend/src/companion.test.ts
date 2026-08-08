@@ -68,6 +68,11 @@ function fire(type: string): void {
   }
 }
 
+/** Real time, because the deadline is the thing under test rather than a guess. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function helloFromExtension(clipboard = true) {
   return {
     source: "remotex-ext",
@@ -77,7 +82,9 @@ function helloFromExtension(clipboard = true) {
   };
 }
 
-const { postToCompanion } = await import("./companion.ts");
+const { companionPhase, HANDSHAKE_DEADLINE_MS, postToCompanion } = await import(
+  "./companion.ts"
+);
 const { isExtMessage, isPageMessage, describeRemoteSize } = await import(
   "./companion.contract.ts"
 );
@@ -129,6 +136,63 @@ test("an untagged message is ignored", () => {
   );
 });
 
+// From here the order of these tests is load-bearing. There is one module instance for
+// the whole file and one deadline, armed at load, so everything that needs a seam that
+// has never connected has to run before the hello that connects it.
+
+test("silence settles to absent once the deadline passes", async () => {
+  // A real wait, and the deadline is the thing under test rather than a machine-speed
+  // guess: it was armed at module load, and what is asserted is the far side of it.
+  await delay(HANDSHAKE_DEADLINE_MS + 100);
+  posted.length = 0;
+
+  assert.equal(companionPhase(), "absent");
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    false,
+  );
+});
+
+test("a bfcache restore asks again, from a seam that had stood down", () => {
+  // A restore replays no content-script injection, so `absent` is no longer an answer
+  // this page is entitled to keep: the extension may have come back with the page, or
+  // may have been removed while it was away.
+  posted.length = 0;
+
+  fire("pageshow");
+  assert.deepEqual(
+    posted.map((entry) => entry.data),
+    [{ source: "remotex-page", type: "hello", client: "remotex" }],
+  );
+  // Back to probing, not left at absent, and the deadline goes out with the hello —
+  // which is what stops a restore that nobody answers from waiting for ever.
+  assert.equal(companionPhase(), "probing");
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    false,
+  );
+});
+
+test("a second restore re-arms the deadline instead of adding one", async () => {
+  // Two restores inside one deadline. The older probe's timer comes due first and finds
+  // a `probing` that belongs to the newer one; without the generation check it would
+  // call that absent early, cutting the new question's answer short by exactly the gap
+  // between the two — and a premature `absent` starts the focus-driven clipboard reader,
+  // which is the flap the three phases exist to prevent.
+  const gap = 200;
+  fire("pageshow");
+  await delay(gap);
+  fire("pageshow");
+
+  // Past the first probe's deadline, well short of the second's.
+  await delay(HANDSHAKE_DEADLINE_MS - gap + 100);
+  assert.equal(companionPhase(), "probing");
+
+  // And the newer one still settles on its own schedule, so nothing waits for ever.
+  await delay(gap + 100);
+  assert.equal(companionPhase(), "absent");
+});
+
 test("a well-formed hello connects, and events then go out", () => {
   posted.length = 0;
   deliver({ data: helloFromExtension() });
@@ -145,25 +209,7 @@ test("a well-formed hello connects, and events then go out", () => {
   ]);
 });
 
-test("bye stands the seam down, and a later hello brings it back", () => {
-  deliver({ data: { source: "remotex-ext", type: "bye" } });
-  assert.equal(
-    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
-    false,
-  );
-
-  deliver({ data: helloFromExtension() });
-  assert.equal(
-    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
-    true,
-  );
-});
-
-test("a bfcache restore asks again, from a seam that had stood down", () => {
-  // A restore replays no content-script injection, so `absent` is no longer an answer
-  // this page is entitled to keep: the extension may have come back with the page, or
-  // may have been removed while it was away.
-  deliver({ data: { source: "remotex-ext", type: "bye" } });
+test("a restore of a connected seam says hello without re-opening the question", () => {
   posted.length = 0;
 
   fire("pageshow");
@@ -171,27 +217,54 @@ test("a bfcache restore asks again, from a seam that had stood down", () => {
     posted.map((entry) => entry.data),
     [{ source: "remotex-page", type: "hello", client: "remotex" }],
   );
-  // Back to probing, not back to connected — and the deadline goes out with the hello,
-  // which is what stops a restore that nobody answers from waiting for ever.
+  // Still connected, so the clipboard never stands down for a second and a half over a
+  // question that has already been answered.
+  assert.equal(companionPhase(), "connected");
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    true,
+  );
+});
+
+test("bye stands the seam down, and a later hello brings it back", () => {
+  // Both directions are a site's host access being taken away and given back, which is
+  // a thing that happens mid-session from Chrome's own site-access UI as much as from
+  // the extension's popup.
+  deliver({ data: { source: "remotex-ext", type: "bye" } });
+  assert.equal(companionPhase(), "absent");
   assert.equal(
     postToCompanion({ type: "clipboardFromRemote", text: "x" }),
     false,
+  );
+
+  deliver({ data: helloFromExtension() });
+  assert.equal(companionPhase(), "connected");
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    true,
   );
 });
 
 test("the guards accept what they should and refuse the rest", () => {
   assert.equal(isExtMessage(helloFromExtension()), true);
-  assert.equal(isExtMessage({ source: "remotex-ext", type: "bye" }), true);
+  assert.equal(
+    isExtMessage({ source: "remotex-ext", type: "clipboardLocal", text: "x" }),
+    true,
+  );
 
   assert.equal(isExtMessage(null), false);
   assert.equal(isExtMessage("remotex-ext"), false);
   assert.equal(isExtMessage(undefined), false);
-  assert.equal(isExtMessage({ type: "bye" }), false);
+  assert.equal(isExtMessage({ type: "clipboardLocal" }), false);
   assert.equal(isExtMessage({ source: "remotex-page", type: "hello" }), false);
   assert.equal(isExtMessage({ source: "remotex-ext", type: "evict" }), false);
+  assert.equal(isExtMessage({ source: "remotex-ext", type: "bye" }), true);
   // A tag on a nested object is not a tag on the message.
   assert.equal(
-    isExtMessage({ payload: { source: "remotex-ext" }, type: "bye" }),
+    isExtMessage({
+      payload: { source: "remotex-ext" },
+      type: "clipboardLocal",
+    }),
     false,
   );
 

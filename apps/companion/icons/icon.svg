@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="RemoteX Companion">
+  <!-- A screen with a second, smaller one behind it: the remote desktop and the window
+       beside it. Flat and high-contrast, because most of the time this is 16 pixels
+       wide in a toolbar. -->
+  <rect x="6" y="16" width="96" height="66" rx="8" fill="#3f6ded" opacity="0.35"/>
+  <rect x="26" y="34" width="96" height="66" rx="8" fill="#3f6ded"/>
+  <rect x="38" y="46" width="72" height="42" rx="4" fill="#ffffff"/>
+  <rect x="60" y="100" width="28" height="8" rx="4" fill="#3f6ded"/>
+  <rect x="46" y="112" width="56" height="9" rx="4.5" fill="#3f6ded"/>
+</svg>
