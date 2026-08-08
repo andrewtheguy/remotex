@@ -77,8 +77,8 @@ function noDecoders(missing: readonly string[]): Refusal {
   return {
     heading: "This browser cannot decode a remote desktop",
     detail: [
-      `The desktop and its sound arrive encoded, and this browser has no WebCodecs ${missing.join(" or ")} decoder to play them with.`,
-      "A current Chrome, Edge, Safari or Firefox has one.",
+      `The desktop and its sound arrive encoded, and this browser has no WebCodecs ${missing.join(" or ")} decoder to play them with. Both are needed.`,
+      "Which browsers have them depends on the version and the platform. A recent desktop Chrome or Edge is the safe answer.",
     ],
     origin: false,
   };

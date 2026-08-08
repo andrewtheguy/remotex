@@ -17,9 +17,12 @@
 // "is there a companion?" is a value that arrives late and can change. It is a store,
 // not a constant.
 //
-// The store is monotonic on purpose: `probing → connected | absent`, and `connected →
-// absent` on `bye`, never back to `probing`. Nothing that has settled can un-settle,
-// so no behaviour can flip twice.
+// Every settled answer can be unsettled, because every one of them can stop being
+// true: a `bye` when the site leaves the whitelist, a `hello` when it is added back,
+// and a fresh probe on `pageshow`, where a bfcache restore may or may not have brought
+// the content script back with it. What is *not* allowed is drifting back to `probing`
+// on its own — only a `pageshow` does that, and it re-arms the deadline with it, so
+// there is no path to a phase that waits forever.
 //
 // With no extension installed every export here is inert bar the deadline: `hello`
 // goes out to a bus nobody is reading, the phase settles to `absent`, and the client
@@ -132,22 +135,32 @@ const commandHandlers = new Set<(command: CompanionCommand) => void>();
 // rendering the first frame, and an effect would not be listening yet. It also means
 // StrictMode's double mount re-reads a store that is already settled instead of
 // restarting a probe.
-if (POSSIBLE) {
-  window.addEventListener("message", receive);
+/**
+ * Say hello and give the other side until the deadline to answer.
+ *
+ * The same three lines at load and on every `pageshow`, which is what keeps the second
+ * one honest: a restore that re-opens the question has to re-arm the answer too, or a
+ * page that came back to a companion that has since been removed would sit in
+ * `probing` for the rest of its life with the clipboard reader stood down behind it.
+ */
+function probe(): void {
+  if (snapshot.phase !== "connected") {
+    settle(INITIAL);
+  }
   post({ type: "hello", client: "remotex" });
-  window.addEventListener("pageshow", () => {
-    // A bfcache restore re-runs no content script. Ours may still be there and may
-    // not; saying hello again is how we find out, and it costs one message.
-    if (snapshot.phase !== "connected") {
-      settle(INITIAL);
-    }
-    post({ type: "hello", client: "remotex" });
-  });
   setTimeout(() => {
     if (snapshot.phase === "probing") {
       settle(ABSENT);
     }
   }, HANDSHAKE_DEADLINE_MS);
+}
+
+if (POSSIBLE) {
+  window.addEventListener("message", receive);
+  probe();
+  // A bfcache restore re-runs no content script. Ours may still be there and may not;
+  // saying hello again is how we find out, and it costs one message.
+  window.addEventListener("pageshow", probe);
 }
 
 function subscribe(notify: () => void): () => void {

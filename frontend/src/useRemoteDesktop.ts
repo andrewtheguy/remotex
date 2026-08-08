@@ -6,7 +6,11 @@ import {
   createAudioPlayer,
   decodeAudioHead,
 } from "./audioPlayer.ts";
-import { postToCompanion, useCompanion } from "./companion.ts";
+import {
+  postToCompanion,
+  useCompanion,
+  useCompanionCapabilities,
+} from "./companion.ts";
 import { connectionLabel } from "./connectionLabel.ts";
 import {
   applyCursorCss,
@@ -407,10 +411,22 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
-  // Whether the companion extension has answered. It owns the system clipboard when
-  // it has, which is the one thing about this page's behaviour it changes. See
-  // companion.ts.
+  // Whether the companion extension has answered. See companion.ts.
   const companion = useCompanion();
+  // Whether it owns the system clipboard, which is the one thing about this page's
+  // behaviour it changes — and is *not* the same question as whether it is there.
+  // `clipboard` is a setting on its options page, and a companion that reports it
+  // false is one whose offscreen poller is off: the page has to do the reading and
+  // the writing itself, exactly as with no extension at all.
+  const companionCapabilities = useCompanionCapabilities();
+  const companionClipboard =
+    companion === "connected" && companionCapabilities?.clipboard === true;
+  // Read from inside the connection effect, which must not re-run when a setting on
+  // the extension's options page changes.
+  const companionClipboardRef = useRef(companionClipboard);
+  useEffect(() => {
+    companionClipboardRef.current = companionClipboard;
+  }, [companionClipboard]);
   // Whether this target offers remote audio; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
   // Whether this browser has asked for the sound. Per attachment and never
@@ -1283,12 +1299,17 @@ export function useRemoteDesktop(
       }
       // The companion extension owns the system clipboard for the same reason the
       // app does — its offscreen document can write without a gesture and without
-      // focus, and a page can do neither.
+      // focus, and a page can do neither. Only where it says it is doing so: with its
+      // clipboard setting off there is nothing at the other end of that message, and
+      // handing the text over would be dropping it.
       //
       // *Instead of* the line below, never as well as: two writers race, and the
       // extension would then read the page's own write back off the clipboard as a
       // foreign copy and push it to the remote as though the user had copied it here.
-      if (postToCompanion({ type: "clipboardFromRemote", text })) {
+      if (
+        companionClipboardRef.current &&
+        postToCompanion({ type: "clipboardFromRemote", text })
+      ) {
         return;
       }
       void navigator.clipboard.writeText(text).catch(() => {});
@@ -1708,20 +1729,22 @@ export function useRemoteDesktop(
   // pushes what it finds: reading the pasteboard from a page there would ask macOS
   // for permission a second time, on behalf of a "browser" the user cannot see.
   //
-  // Not under the companion extension either, and for the same reason: its offscreen
-  // document polls the system clipboard whether this window has focus or not, so a
-  // second reader here would push the same text twice and put the browser's clipboard
-  // prompt on screen on top of it.
+  // Not under a companion whose clipboard bridge is on, and for the same reason: its
+  // offscreen document polls the system clipboard whether this window has focus or
+  // not, so a second reader here would push the same text twice and put the browser's
+  // clipboard prompt on screen on top of it. A companion with that setting *off* is
+  // not doing the polling, so this reader is the only one there is and stays.
   //
-  // `!== "absent"` rather than `=== "connected"`. The companion answers
-  // asynchronously, and standing down while the answer is still unknown is what stops
-  // a duplicate push in the first second of a session that turns out to have one.
-  // When it settles to `absent` this effect re-runs and the trailing call below covers
-  // the delay.
+  // `probing` stands down as well, though nothing is known to be reading yet. The
+  // companion answers asynchronously, and waiting out the answer is what stops a
+  // duplicate push in the first second of a session that turns out to have one; when
+  // the phase settles this effect re-runs and the trailing call below covers the
+  // delay.
   useEffect(() => {
     if (
       NATIVE_HOST ||
-      companion !== "absent" ||
+      companion === "probing" ||
+      companionClipboard ||
       mode !== "desktop" ||
       !canClipboard
     ) {
@@ -1762,7 +1785,7 @@ export function useRemoteDesktop(
         pushBrowserClipboardOnFocus,
       );
     };
-  }, [mode, canClipboard, companion]);
+  }, [mode, canClipboard, companion, companionClipboard]);
 
   // A live session is a thing to lose, and ⌘W or Ctrl+W closes a tab before this page
   // sees the key — except under a keyboard lock, or in an app window, where they

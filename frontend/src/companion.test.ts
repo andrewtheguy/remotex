@@ -62,6 +62,12 @@ function deliver(event: {
   }
 }
 
+function fire(type: string): void {
+  for (const listener of listeners.get(type) ?? []) {
+    listener({ type });
+  }
+}
+
 function helloFromExtension(clipboard = true) {
   return {
     source: "remotex-ext",
@@ -150,6 +156,26 @@ test("bye stands the seam down, and a later hello brings it back", () => {
   assert.equal(
     postToCompanion({ type: "clipboardFromRemote", text: "x" }),
     true,
+  );
+});
+
+test("a bfcache restore asks again, from a seam that had stood down", () => {
+  // A restore replays no content-script injection, so `absent` is no longer an answer
+  // this page is entitled to keep: the extension may have come back with the page, or
+  // may have been removed while it was away.
+  deliver({ data: { source: "remotex-ext", type: "bye" } });
+  posted.length = 0;
+
+  fire("pageshow");
+  assert.deepEqual(
+    posted.map((entry) => entry.data),
+    [{ source: "remotex-page", type: "hello", client: "remotex" }],
+  );
+  // Back to probing, not back to connected — and the deadline goes out with the hello,
+  // which is what stops a restore that nobody answers from waiting for ever.
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    false,
   );
 });
 

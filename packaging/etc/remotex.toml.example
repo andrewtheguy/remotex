@@ -188,9 +188,11 @@ password = "change-me"
 #     starts to be audibly lossy. Right for anything that leaves the building, and
 #     the one to leave alone unless the link is a fast local network.
 #   "pcm" — the remote's own samples, unencoded and unresampled, at 1.41 Mbit/s.
-#     Fifteen times the bandwidth, and in exchange nothing between the remote's
-#     mixer and the browser's output touches a sample: no encoder here, no decoder
-#     there, and no resampler on either side.
+#     Fifteen times the bandwidth, and in exchange nothing on the way to the browser
+#     touches a sample: no encoder here, no resampler here, and no decoder there.
+#     What the browser then does with them is its own business — a 44.1 kHz buffer
+#     played through a 48 kHz context is resampled on playback, exactly as any
+#     output device resamples what does not match its rate.
 #
 # "pcm" is not the better-sounding option in any way you are likely to hear; it is
 # the simpler path. Reach for it on a fast LAN. Guacamole carries desktop audio this

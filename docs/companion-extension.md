@@ -127,25 +127,38 @@ Resize is on neither side of the seam. The page reports the framebuffer in
 the window from its own content script — a resize is arithmetic over two things it
 already has, and the popup is where it is asked for.
 
-## Detection is asynchronous, and monotonic
+## Detection is asynchronous, and it can change back
 
 `NATIVE_HOST` is read once at module load: the app's preload runs before any script in
 the document and cannot appear later. The window kind is read once for the same sort of
 reason. The companion can promise neither — its content script has to read its
-whitelist out of `chrome.storage` first, and a site can be added to that whitelist
-mid-session. So this is a store, not a constant:
+whitelist out of `chrome.storage` first, and a site can be added to or removed from
+that whitelist mid-session. So this is a store, not a constant, and every settled
+answer can be unsettled:
 
-```
-probing ──► connected ──► absent        (never back to probing)
-   └──────► absent
-```
+| from | on | to | |
+|---|---|---|---|
+| `probing` | `hello` | `connected` | |
+| `probing` | the deadline | `absent` | 1.5 s of silence |
+| `connected` | `bye` | `absent` | the site left the whitelist |
+| `absent` | `hello` | `connected` | it was added back |
+| `absent` | `pageshow` | `probing` | a bfcache restore, which re-arms the deadline with it |
+| `connected` | `pageshow` | `connected` | a hello goes out, but there is nothing to re-probe |
+
+Only a `pageshow` returns anything to `probing`, and it re-arms the deadline as it
+does — so there is no path to a phase that waits for an answer nothing will settle.
 
 `probing` is not the same answer as `absent`, and the difference is load-bearing. The
-one behaviour that hangs off the phase is the focus-driven clipboard read in
-`useRemoteDesktop.ts`, which stands down while `probing`: starting it and stopping it
-a quarter of a second later would push the same text twice and put the browser's
-clipboard permission prompt on screen for nothing. When the phase settles to `absent`
-the effect re-runs, and its own trailing call covers the delay.
+focus-driven clipboard read in `useRemoteDesktop.ts` stands down while `probing`:
+starting it and stopping it a quarter of a second later would push the same text twice
+and put the browser's clipboard permission prompt on screen for nothing. When the phase
+settles the effect re-runs, and its own trailing call covers the delay.
+
+The phase is not the whole condition, though — `capabilities.clipboard` is the other
+half of it, and both behaviours read both. The page stands its reader down, and hands a
+remote copy over instead of writing it, only under a companion that says it is doing
+the polling. One with that setting off changes nothing about the page at all: it reads
+and writes for itself, exactly as it does with none installed.
 
 A tab never enters `probing` at all. It is `absent` from the first read, so that
 stand-down costs nothing where there is nothing to wait for.
