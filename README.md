@@ -6,12 +6,15 @@ session and streams desktop updates over a WebSocket protocol to the browser
 SPA. Remote audio uses a dedicated second WebSocket so sound never queues behind
 the picture.
 
-One reason the RDP path exists: Microsoft Remote Desktop on macOS handles
-resize-to-window badly, and fonts can come out blurry after a resize. Here a
-resize renegotiates the desktop with the server, so the framebuffer is the size
-that was asked for rather than a resampling of the size it used to be. It is a
-resize you ask for by default, and plain `vnc`, Apple High Performance and `rdp`
-can also be handed the window so every change reports one.
+The main reason this exists is the client: it is a browser, so anything with one
+reaches every target — RDP, VNC and Macs alike — with nothing to install per
+platform and nothing that has to exist for your OS. Resize comes with that: the
+window drives the remote's size, so the desktop is renegotiated at the size asked
+for rather than scaled on the client, and plain `vnc`, Apple High Performance and
+`rdp` can all be handed the window. On RDP the default `egfx` pipeline makes that
+cheap — a display layout, no reactivation — at the cost of a Windows host's text
+staying soft afterwards; `egfx = false` re-renders sharp and pays a reactivation
+per resize.
 
 - RDP uses **FreeRDP 3**, linked from static archives that
   [libfreerdp-prebuilt](https://github.com/andrewtheguy/libfreerdp-prebuilt) builds
