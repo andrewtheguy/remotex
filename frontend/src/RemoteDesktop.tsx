@@ -182,8 +182,9 @@ export default function RemoteDesktop({
   const companionCommands: CompanionCommandHandlers = useMemo(
     () => ({
       // The handshake is recorded by the store in companion.ts; nothing here reacts
-      // to it, and the entry exists so the handler table stays exhaustive.
+      // to it, and the entries exist so the handler table stays exhaustive.
       hello: () => {},
+      bye: () => {},
       clipboardLocal: ({ text }) => pushLocalClipboard(text),
     }),
     [pushLocalClipboard],

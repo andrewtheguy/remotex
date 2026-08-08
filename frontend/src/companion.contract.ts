@@ -72,16 +72,21 @@ export type CompanionEvent =
    */
   | { type: "clipboardFromRemote"; text: string };
 
-// There is no goodbye. The hosts the extension serves are match patterns in its
-// manifest, so a window either has a content script for its whole life or never had
-// one, and the two ways it can go away mid-life — disabled, or reloaded from
-// chrome://extensions — tear the content script's context down without giving it a
-// turn to speak. A message nothing can send is not a courtesy, it is a branch that
-// cannot be tested. Reloading the page is the recovery, and it is the same gesture
-// anyone would already reach for.
+// `bye` covers a revoked site and nothing else. An extension disabled or reloaded from
+// chrome://extensions loses its content script's context without a turn to speak, so a
+// page can still be left believing in a companion that has gone — reloading it is the
+// only cure, and it is the gesture anyone would already reach for.
 /** What the extension tells the page. */
 export type CompanionCommand =
   | { type: "hello"; version: string; capabilities: CompanionCapabilities }
+  /**
+   * Host access for this site was taken away — from the popup's own switch, or from
+   * Chrome's site-access UI, which the extension hears about the same way. The content
+   * script already injected into this window keeps running until it navigates, so it
+   * has one last thing to say. The page goes back to reading the clipboard on focus;
+   * it does not go back to waiting for a hello.
+   */
+  | { type: "bye" }
   /** The system clipboard changed, focused or not. Goes to `pushLocalClipboard`. */
   | { type: "clipboardLocal"; text: string };
 
@@ -92,8 +97,8 @@ export type CompanionCommand =
  * the page must keep reading the clipboard on focus itself. `resize` is here so the
  * popup can grey its own button out with no second round trip to ask.
  *
- * Nothing in the extension sets either to false today — it has no options page and
- * stores no settings. They are on the wire regardless, because the page has to follow
+ * Nothing in the extension sets either to false today — it has no options page and no
+ * settings of its own. They are on the wire regardless, because the page has to follow
  * what a companion says it is doing rather than infer it from the fact that one
  * answered.
  */
@@ -111,7 +116,11 @@ export type CompanionCommandHandlers = {
 export type PageMessage = CompanionEvent & { source: typeof PAGE_SOURCE };
 export type ExtMessage = CompanionCommand & { source: typeof EXT_SOURCE };
 
-const EXT_TYPES: ReadonlySet<string> = new Set(["hello", "clipboardLocal"]);
+const EXT_TYPES: ReadonlySet<string> = new Set([
+  "hello",
+  "bye",
+  "clipboardLocal",
+]);
 
 const PAGE_TYPES: ReadonlySet<string> = new Set([
   "hello",

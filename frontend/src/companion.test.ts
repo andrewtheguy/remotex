@@ -131,10 +131,9 @@ test("an untagged message is ignored", () => {
   );
 });
 
-// From here the order of these tests is load-bearing, because there is one module
-// instance for the whole file and `connected` is where the phase stops: with no
-// goodbye on the wire, nothing takes a connected seam back down. So everything that
-// needs an unconnected one runs first, and the hello that connects it comes last.
+// From here the order of these tests is load-bearing. There is one module instance for
+// the whole file and one deadline, armed at load, so everything that needs a seam that
+// has never connected has to run before the hello that connects it.
 
 test("silence settles to absent once the deadline passes", async () => {
   // The one real wait in this file, and it is the thing under test rather than a
@@ -205,6 +204,25 @@ test("a restore of a connected seam says hello without re-opening the question",
   );
 });
 
+test("bye stands the seam down, and a later hello brings it back", () => {
+  // Both directions are a site's host access being taken away and given back, which is
+  // a thing that happens mid-session from Chrome's own site-access UI as much as from
+  // the extension's popup.
+  deliver({ data: { source: "remotex-ext", type: "bye" } });
+  assert.equal(companionPhase(), "absent");
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    false,
+  );
+
+  deliver({ data: helloFromExtension() });
+  assert.equal(companionPhase(), "connected");
+  assert.equal(
+    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
+    true,
+  );
+});
+
 test("the guards accept what they should and refuse the rest", () => {
   assert.equal(isExtMessage(helloFromExtension()), true);
   assert.equal(
@@ -218,8 +236,7 @@ test("the guards accept what they should and refuse the rest", () => {
   assert.equal(isExtMessage({ type: "clipboardLocal" }), false);
   assert.equal(isExtMessage({ source: "remotex-page", type: "hello" }), false);
   assert.equal(isExtMessage({ source: "remotex-ext", type: "evict" }), false);
-  // The goodbye this seam used to have, and a guard that still knows it is gone.
-  assert.equal(isExtMessage({ source: "remotex-ext", type: "bye" }), false);
+  assert.equal(isExtMessage({ source: "remotex-ext", type: "bye" }), true);
   // A tag on a nested object is not a tag on the message.
   assert.equal(
     isExtMessage({
