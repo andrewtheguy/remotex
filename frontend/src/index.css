@@ -188,6 +188,41 @@ body {
 
 /* Phase 7: the login gate. A plain centered form; the version sits pinned at
   the bottom of the screen. */
+/* The client refusing to start, and the only thing on the page when it does. Built
+   from plain DOM in secureContext.ts, before React, so it deliberately shares nothing
+   with the login screen below it beyond the centring. */
+.boot-refusal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.boot-refusal h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.boot-refusal p {
+  margin: 0;
+  max-width: 34rem;
+  color: #8b949e;
+  line-height: 1.5;
+}
+
+.boot-refusal-origin {
+  margin-top: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: #6e7681;
+}
+
 .login-screen {
   position: fixed;
   inset: 0;

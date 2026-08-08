@@ -5,6 +5,7 @@ import {
   createAudioPlayer,
   decodeAudioHead,
 } from "./audioPlayer.ts";
+import { postToCompanion, useCompanion } from "./companion.ts";
 import { connectionLabel } from "./connectionLabel.ts";
 import {
   applyCursorCss,
@@ -15,6 +16,7 @@ import {
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
+import { keyboardLockHeld, onKeyboardLockChange } from "./immersive.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
@@ -404,6 +406,10 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
+  // Whether the companion extension has answered. It owns the system clipboard when
+  // it has, which is the one thing about this page's behaviour it changes. See
+  // companion.ts.
+  const companion = useCompanion();
   // Whether this target offers remote audio; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
   // Whether this browser has asked for the sound. Per attachment and never
@@ -1273,6 +1279,16 @@ export function useRemoteDesktop(
         postToHost({ type: "clipboardFromRemote", text });
         return;
       }
+      // The companion extension owns the system clipboard for the same reason the
+      // app does — its offscreen document can write without a gesture and without
+      // focus, and a page can do neither.
+      //
+      // *Instead of* the line below, never as well as: two writers race, and the
+      // extension would then read the page's own write back off the clipboard as a
+      // foreign copy and push it to the remote as though the user had copied it here.
+      if (postToCompanion({ type: "clipboardFromRemote", text })) {
+        return;
+      }
       void navigator.clipboard?.writeText?.(text).catch(() => {});
     };
 
@@ -1691,8 +1707,24 @@ export function useRemoteDesktop(
   // Not in the native shell, where the app polls `NSPasteboard.changeCount` and
   // pushes what it finds: reading the pasteboard from a page there would ask macOS
   // for permission a second time, on behalf of a "browser" the user cannot see.
+  //
+  // Not under the companion extension either, and for the same reason: its offscreen
+  // document polls the system clipboard whether this window has focus or not, so a
+  // second reader here would push the same text twice and put the browser's clipboard
+  // prompt on screen on top of it.
+  //
+  // `!== "absent"` rather than `=== "connected"`. The companion answers
+  // asynchronously, and standing down while the answer is still unknown is what stops
+  // a duplicate push in the first second of a session that turns out to have one.
+  // When it settles to `absent` this effect re-runs and the trailing call below covers
+  // the delay.
   useEffect(() => {
-    if (NATIVE_HOST || mode !== "desktop" || !canClipboard) {
+    if (
+      NATIVE_HOST ||
+      companion !== "absent" ||
+      mode !== "desktop" ||
+      !canClipboard
+    ) {
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
@@ -1730,7 +1762,29 @@ export function useRemoteDesktop(
         pushBrowserClipboardOnFocus,
       );
     };
-  }, [mode, canClipboard]);
+  }, [mode, canClipboard, companion]);
+
+  // A live session is a thing to lose, and ⌘W or Ctrl+W closes a tab before this page
+  // sees the key — except under a keyboard lock, where they arrive as ordinary
+  // keydowns and go to the remote instead. So the mitigation is the browser's own
+  // leave-site dialog, which needs sticky activation: a desktop the user has clicked
+  // on always has it.
+  //
+  // `mode`, not `status`: a reconnecting session is still one worth not closing. Not
+  // in `remotex.app`, where closing the window is the app's own quit path and this
+  // would put a web dialog in front of it.
+  useEffect(() => {
+    if (NATIVE_HOST || mode !== "desktop") {
+      return;
+    }
+    const guard = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => {
+      window.removeEventListener("beforeunload", guard);
+    };
+  }, [mode]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
@@ -1772,8 +1826,16 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    // The native shell is given every Command chord, so it gets the fuller table.
-    const macKeys = new MacKeyboardTranslator(NATIVE_HOST);
+    // `remotex.app` is given every Command chord for the whole session, so it gets
+    // the fuller table outright. A browser is given them only while a keyboard lock
+    // is held, and that comes and goes under a running session — a held Esc ends one
+    // without asking — so the table follows the lock rather than being chosen once.
+    const macKeys = new MacKeyboardTranslator(
+      NATIVE_HOST || keyboardLockHeld(),
+    );
+    const stopWatchingLock = onKeyboardLockChange((locked) => {
+      macKeys.setCapturesEveryChord(NATIVE_HOST || locked);
+    });
 
     // Touch gestures, only on pinch-zoom-capable devices — they
     // drive the same view transform applyCanvasCss renders.
@@ -1960,6 +2022,7 @@ export function useRemoteDesktop(
 
     return () => {
       gestures?.detach();
+      stopWatchingLock();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);

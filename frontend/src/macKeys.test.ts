@@ -429,3 +429,67 @@ test("the chords a browser does get mean the same thing on both hosts", () => {
     );
   }
 });
+
+test("widening the table mid-chord releases what was pressed under the narrow one", () => {
+  // A browser's answer to "am I given ⌘W?" changes when a keyboard lock is taken or
+  // dropped, and it can change with a chord half-way through — a held Esc ends a lock
+  // whatever the user's fingers are doing. What must not happen is a key or a
+  // synthetic Control stranded down on the guest because it was pressed under one
+  // table and released under another.
+  const t = new MacKeyboardTranslator(false);
+  t.translate(down("MetaLeft"), true);
+  // Unlocked: ⌘W is not in the table, so Command goes out as itself.
+  assert.deepEqual(t.translate(down("KeyW", true), true), [
+    sent("MetaLeft", true),
+    sent("KeyW", true),
+  ]);
+
+  t.setCapturesEveryChord(true);
+
+  // The release still follows the press: W as itself, and the forwarded Command
+  // lifted with it. Nothing is left held.
+  assert.deepEqual(t.translate(up("KeyW", true), true), [sent("KeyW", false)]);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), [
+    sent("MetaLeft", false),
+  ]);
+});
+
+test("narrowing the table mid-chord still lifts the synthetic Control", () => {
+  const t = new MacKeyboardTranslator(true);
+  t.translate(down("MetaLeft"), true);
+  assert.deepEqual(t.translate(down("KeyW", true), true), [
+    sent("ControlLeft", true),
+    sent("KeyW", true),
+  ]);
+
+  // The lock ends here — Esc held, or fullscreen left by any other route.
+  t.setCapturesEveryChord(false);
+
+  // W was translated, so its release is the translated one and the Control it
+  // brought with it comes back up. A table read on the way out instead of the way in
+  // would leave that Control down on the guest for the rest of the session.
+  assert.deepEqual(t.translate(up("KeyW", true), true), [
+    sent("KeyW", false),
+    sent("ControlLeft", false),
+  ]);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), []);
+});
+
+test("the table in force is the one the next press reads", () => {
+  const t = new MacKeyboardTranslator(false);
+  t.setCapturesEveryChord(true);
+  t.translate(down("MetaLeft"), true);
+  assert.deepEqual(t.translate(down("KeyT", true), true), [
+    sent("ControlLeft", true),
+    sent("KeyT", true),
+  ]);
+  t.translate(up("KeyT", true), true);
+  t.translate(up("MetaLeft"), true);
+
+  t.setCapturesEveryChord(false);
+  t.translate(down("MetaLeft"), true);
+  assert.deepEqual(t.translate(down("KeyT", true), true), [
+    sent("MetaLeft", true),
+    sent("KeyT", true),
+  ]);
+});

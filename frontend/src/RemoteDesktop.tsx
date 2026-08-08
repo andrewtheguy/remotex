@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CompanionCommandHandlers,
+  useCompanionCommands,
+  useCompanionState,
+} from "./companion.ts";
 import FloatingMenu, { type PanelControls } from "./FloatingMenu.tsx";
 import {
   NATIVE_HOST,
   type NativeCommandHandlers,
+  type NativeState,
   useNativeCommands,
   useNativeState,
 } from "./nativeHost.ts";
@@ -110,9 +116,14 @@ export default function RemoteDesktop({
     };
   }, []);
 
-  // Everything the shell's menus render themselves from. In a browser this object
-  // is built and dropped; `useNativeState` posts nothing.
-  useNativeState({
+  // One description of this session, for both hosts. `remotex.app` renders its menu
+  // bar from it; the companion extension's popup renders its status lines and its
+  // Resize to display arithmetic from it. Deliberately not two objects: it is a dozen
+  // values that change together, and a second, smaller one would be a second thing to
+  // keep in step for the sake of fields one host happens not to read yet.
+  //
+  // With neither host present it is built and dropped; both hooks post nothing.
+  const hostState: NativeState = {
     branding,
     mode,
     status,
@@ -128,7 +139,9 @@ export default function RemoteDesktop({
     macKeyOverridesEnabled,
     macKeyOverridesActive,
     remoteIsMac,
-  });
+  };
+  useNativeState(hostState);
+  useCompanionState(hostState);
 
   // The other direction. Every one of these is a control the shell hides: the
   // menu item is the button, and this is the wire between them.
@@ -159,6 +172,24 @@ export default function RemoteDesktop({
     ],
   );
   useNativeCommands(nativeCommands);
+
+  // The companion's whole command surface, and the contrast with the table above is
+  // the design of both seams. The shell hides the floating menu, so every control it
+  // hides has to come back as a menu item and a command. The extension hides nothing —
+  // the menu is on screen under it — so the only thing it sends is the one a page
+  // cannot get for itself, and it goes to the same callback the menu bar's version
+  // calls.
+  const companionCommands: CompanionCommandHandlers = useMemo(
+    () => ({
+      // The handshake is recorded by the store in companion.ts; nothing here reacts
+      // to it, and the entries exist so the handler table stays exhaustive.
+      hello: () => {},
+      bye: () => {},
+      clipboardLocal: ({ text }) => pushLocalClipboard(text),
+    }),
+    [pushLocalClipboard],
+  );
+  useCompanionCommands(companionCommands);
 
   // A speaker on the tab title while sound is playing — the one place the desktop
   // has room to say so, since the toggle lives in the drawer. At the *front*, not
