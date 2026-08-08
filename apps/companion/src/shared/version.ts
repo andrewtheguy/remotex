@@ -15,14 +15,23 @@ export function chromeVersion(cargo: string): {
   version: string;
   version_name: string;
 } {
-  const parts = cargo.split("-")[0].split(".").slice(0, 4);
-  const numbers = parts.map((part) => Number.parseInt(part, 10));
-  if (numbers.length === 0 || numbers.some((n) => !isField(n))) {
+  // Build metadata first, then the pre-release tag: semver orders them
+  // `1.2.3-rc.1+build.5`, so stripping `-` first would leave `+build.5` behind on a
+  // version carrying both.
+  const parts = cargo.split("+")[0].split("-")[0].split(".").slice(0, 4);
+  if (!parts.every(isField)) {
     throw new Error(`cannot turn "${cargo}" into a Chrome version`);
   }
-  return { version: numbers.join("."), version_name: cargo };
+  return { version: parts.map(Number).join("."), version_name: cargo };
 }
 
-function isField(value: number): boolean {
-  return Number.isInteger(value) && value >= 0 && value <= 65_535;
+/**
+ * Digits and nothing else, then the range.
+ *
+ * Tested as a string rather than through `parseInt`, which stops reading at the first
+ * character it dislikes: it turns `1x` into `1`, and would have shipped a manifest
+ * claiming a version nobody wrote.
+ */
+function isField(part: string): boolean {
+  return /^\d+$/.test(part) && Number(part) <= 65_535;
 }

@@ -36,6 +36,65 @@ test("an unknown type is refused even at the right address", () => {
   assert.equal(isToOffscreen({ to: "offscreen", type: "report" }), false);
 });
 
+test("a recognised type without its payload is refused too", () => {
+  // The guards are type predicates, so passing one means the router may read
+  // `message.tabId` as a number. A `describe` with none would reach `chrome.tabs.get`
+  // as `undefined`; a `clipboardLocal` with none would post `undefined` at the page.
+  assert.equal(isToWorker({ to: "worker", type: "describe" }), false);
+  assert.equal(isToWorker({ to: "worker", type: "resize" }), false);
+  assert.equal(isToWorker({ to: "worker", type: "granted" }), false);
+  assert.equal(isToWorker({ to: "worker", type: "clipboardLocal" }), false);
+  assert.equal(
+    isToWorker({ to: "worker", type: "clipboardFromRemote" }),
+    false,
+  );
+  assert.equal(isToWorker({ to: "worker", type: "state" }), false);
+  assert.equal(isToContent({ to: "content", type: "clipboardLocal" }), false);
+  assert.equal(isToOffscreen({ to: "offscreen", type: "enable" }), false);
+  assert.equal(isToOffscreen({ to: "offscreen", type: "fromRemote" }), false);
+});
+
+test("a payload of the wrong type is refused as firmly as a missing one", () => {
+  assert.equal(
+    isToWorker({ to: "worker", type: "describe", tabId: "3" }),
+    false,
+  );
+  assert.equal(isToWorker({ to: "worker", type: "resize", tabId: 1.5 }), false);
+  assert.equal(
+    isToWorker({ to: "worker", type: "granted", tabId: null }),
+    false,
+  );
+  assert.equal(
+    isToWorker({ to: "worker", type: "clipboardLocal", text: 7 }),
+    false,
+  );
+  assert.equal(isToWorker({ to: "worker", type: "state", state: null }), false);
+  assert.equal(
+    isToWorker({ to: "worker", type: "state", state: "desktop" }),
+    false,
+  );
+  assert.equal(
+    isToOffscreen({ to: "offscreen", type: "enable", enabled: "yes" }),
+    false,
+  );
+});
+
+test("the payloads this extension actually sends are accepted", () => {
+  assert.equal(isToWorker({ to: "worker", type: "describe", tabId: 3 }), true);
+  assert.equal(isToWorker({ to: "worker", type: "granted", tabId: 0 }), true);
+  // An empty string is a clipboard that was cleared, which is a value and not an
+  // absence: the synchronizer decides what to do with it, not the guard.
+  assert.equal(
+    isToWorker({ to: "worker", type: "clipboardLocal", text: "" }),
+    true,
+  );
+  assert.equal(isToWorker({ to: "worker", type: "state", state: {} }), true);
+  assert.equal(
+    isToOffscreen({ to: "offscreen", type: "enable", enabled: false }),
+    true,
+  );
+});
+
 test("the guards never throw and refuse everything unrecognised", () => {
   for (const guard of [isToWorker, isToContent, isToOffscreen]) {
     for (const value of [

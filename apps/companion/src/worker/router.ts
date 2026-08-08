@@ -9,6 +9,7 @@
 // grants come from `chrome.permissions`, the tab list from `chrome.tabs.query`, and
 // the page's state from a `report` round trip made at the moment it is needed.
 
+import type { NativeState } from "../shared/contract.ts";
 import type { Rect } from "../shared/geometry.ts";
 import type {
   Description,
@@ -56,15 +57,14 @@ export async function route(
       return;
 
     case "state": {
-      // The enable flag is the one thing pushed unasked, and it is recomputed from the
-      // message rather than remembered: polling the system clipboard while there is
-      // nothing to send it to is exactly what it exists to prevent.
-      const { mode, canClipboard } = message.state;
+      // The enable flag is the one thing pushed unasked, and it is recomputed rather
+      // than remembered: polling the system clipboard while there is nothing to send it
+      // to is exactly what it exists to prevent.
       await surface.ensureOffscreen();
       await surface.toOffscreen({
         to: "offscreen",
         type: "enable",
-        enabled: mode === "desktop" && canClipboard,
+        enabled: await anyoneWantsPolling(message.state, tabId, surface),
       });
       return;
     }
@@ -117,6 +117,37 @@ export async function route(
       return;
     }
   }
+}
+
+/**
+ * Whether *any* granted window wants the clipboard polled.
+ *
+ * There is one offscreen document, so its flag is one answer for the whole browser —
+ * and a second gateway reaching its target picker would otherwise turn the poller off
+ * underneath the first one's live desktop. Silently, since nothing reports it: the
+ * clipboard would simply stop syncing.
+ *
+ * The sender's own state comes out of the message rather than a round trip back to it,
+ * that being the one window whose answer is already in hand. Every other granted window
+ * is asked, and one that does not answer is not a window with a desktop in it.
+ */
+async function anyoneWantsPolling(
+  sender: NativeState,
+  senderTab: number | undefined,
+  surface: Surface,
+): Promise<boolean> {
+  if (polling(sender)) {
+    return true;
+  }
+  const others = (await surface.grantedTabs()).filter((id) => id !== senderTab);
+  const reports = await Promise.all(others.map((id) => surface.report(id)));
+  return reports.some(
+    (report) => report?.state != null && polling(report.state),
+  );
+}
+
+function polling(state: NativeState): boolean {
+  return state.mode === "desktop" && state.canClipboard;
 }
 
 async function describe(tabId: number, surface: Surface): Promise<Description> {

@@ -81,6 +81,18 @@ function fake(over: Partial<Surface> = {}): { surface: Surface; calls: Calls } {
   return { surface, calls };
 }
 
+/** A window with 16 DIPs of chrome across and 100 down. See resize.test.ts. */
+const METRICS = {
+  innerWidth: 800,
+  innerHeight: 600,
+  outerWidth: 816,
+  outerHeight: 700,
+  availLeft: 0,
+  availTop: 0,
+  availWidth: 3000,
+  availHeight: 2000,
+};
+
 function state(over: Partial<NativeState> = {}): NativeState {
   return {
     branding: "remotex",
@@ -125,6 +137,72 @@ test("the picker turns it off, and so does a target without one", async () => {
       { to: "offscreen", type: "enable", enabled: false },
     ]);
   }
+});
+
+test("another window's live desktop keeps the poller on", async () => {
+  // There is one offscreen document, so its flag is one answer for the whole browser.
+  // A second gateway reaching its target picker must not turn the clipboard off
+  // underneath the first one's desktop — which it would, silently, if the flag were
+  // read out of whichever `state` arrived last.
+  const asked: number[] = [];
+  const { surface, calls } = fake({
+    async grantedTabs() {
+      return [1, 2];
+    },
+    async report(tabId) {
+      asked.push(tabId);
+      return tabId === 2 ? { state: state(), metrics: METRICS } : null;
+    },
+  });
+
+  await route(
+    { to: "worker", type: "state", state: state({ mode: "picker" }) },
+    1,
+    surface,
+  );
+
+  assert.deepEqual(calls.offscreen, [
+    { to: "offscreen", type: "enable", enabled: true },
+  ]);
+  // The sender is not asked back: its answer arrived in the message.
+  assert.deepEqual(asked, [2]);
+});
+
+test("with every window on the picker it goes off after all", async () => {
+  const { surface, calls } = fake({
+    async grantedTabs() {
+      return [1, 2];
+    },
+    async report() {
+      return { state: state({ mode: "picker" }), metrics: METRICS };
+    },
+  });
+  await route(
+    { to: "worker", type: "state", state: state({ mode: "picker" }) },
+    1,
+    surface,
+  );
+  assert.deepEqual(calls.offscreen, [
+    { to: "offscreen", type: "enable", enabled: false },
+  ]);
+});
+
+test("a live sender needs nobody else asked", async () => {
+  let asked = 0;
+  const { surface, calls } = fake({
+    async grantedTabs() {
+      return [1, 2, 3];
+    },
+    async report() {
+      asked += 1;
+      return null;
+    },
+  });
+  await route({ to: "worker", type: "state", state: state() }, 1, surface);
+  assert.deepEqual(calls.offscreen, [
+    { to: "offscreen", type: "enable", enabled: true },
+  ]);
+  assert.equal(asked, 0);
 });
 
 test("a local clipboard change is fanned out to every granted window", async () => {

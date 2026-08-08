@@ -1,11 +1,15 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    // No node lib at all in the sources: every context this bundles for is a browser
-    // one — a service worker, a content script, an offscreen document and a popup.
-    // `node` is in `types` only for the build script.
+    // Every context this config covers is a browser one — a service worker, a content
+    // script, an offscreen document and a popup — so `node` and `bun` are deliberately
+    // absent from `types`. That is not tidiness: `Buffer` and `process` resolving here
+    // would type-check code that throws the moment it runs, which is exactly the shape
+    // of the `utf8Bytes` bug this tree had to fix by hand in the viewer.
+    //
+    // `scripts` and `tests` are node, and are checked separately by tsconfig.tools.json.
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["node", "bun", "chrome"],
+    "types": ["chrome"],
     "module": "ESNext",
     "skipLibCheck": true,
 
@@ -26,5 +30,5 @@
   // `src/shared/contract.ts` type-imports the client's wire types and
   // `src/shared/geometry.ts` re-exports the viewer's arithmetic, so a rename in
   // either fails here rather than in a popup nobody opened yet.
-  "include": ["src", "scripts", "tests"]
+  "include": ["src"]
 }
