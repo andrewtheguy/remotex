@@ -943,7 +943,7 @@ async fn serve_fake_mac_records(
 /// the bound address.
 async fn spawn_app(target: TargetConfig) -> SocketAddr {
     let config = AppConfig {
-        listen: "127.0.0.1:0".to_owned(),
+        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         static_dir: "frontend/dist".into(),
         targets: vec![target],
         auth: common::test_auth(),

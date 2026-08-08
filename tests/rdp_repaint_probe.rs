@@ -71,7 +71,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
         .clone();
     let size = profile.default_size();
 
-    config.listen = "127.0.0.1:0".to_owned();
+    config.listen = remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned());
     config.static_dir = "frontend/dist".into();
     config.auth = common::test_auth();
 

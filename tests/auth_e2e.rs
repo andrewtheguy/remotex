@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 /// dialed by these tests.
 async fn spawn_app() -> SocketAddr {
     let config = AppConfig {
-        listen: "127.0.0.1:0".to_owned(),
+        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         static_dir: "frontend/dist".into(),
         auth: common::test_auth(),
         branding: "remotex".to_owned(),

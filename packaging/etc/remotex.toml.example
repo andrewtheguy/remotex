@@ -34,6 +34,22 @@
 # an IPv6 literal, as in "[::1]:52380". A container publishing this port wants
 # "0.0.0.0:52380".
 #listen = "127.0.0.1:52380"
+
+# The other form is a Unix socket, for a gateway that answers a reverse proxy on
+# this machine and nothing else. Everything after "unix:" is the path, so a file
+# name is never parsed for a port:
+#
+#listen = "unix:/run/remotex/gateway.sock"
+#
+# The socket is created 0660 — owner and group, so the proxy's user reaches it by
+# sharing the group and no other local account reaches it at all, which is the
+# only reason to prefer one to a loopback port. Arrange the directory to match.
+# A socket left behind by a gateway that was killed is taken over on the next
+# start; one that something is still serving refuses the start instead.
+#
+# A browser cannot use this form. The client addresses its gateway by URL — one
+# HTTP origin and two WebSockets — so whatever terminates the proxy is what it
+# talks to.
 # Directory of the built frontend. Defaults to share/remotex/web in the active
 # version (or frontend/dist in a checkout). Only set to override.
 #static_dir = ""

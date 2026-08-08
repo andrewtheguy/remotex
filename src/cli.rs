@@ -28,8 +28,10 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Address to listen on, host:port — overrides [server].listen
-        /// (default: 127.0.0.1:52380). Bracket an IPv6 literal: [::1]:52380
+        /// Address to listen on — overrides [server].listen (default:
+        /// 127.0.0.1:52380). Either host:port, bracketing an IPv6 literal
+        /// ([::1]:52380), or unix:<path> for a socket a local reverse proxy
+        /// connects to. A browser needs the host:port form
         #[arg(short, long, env = "REMOTEX_LISTEN")]
         listen: Option<String>,
     },

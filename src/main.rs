@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 use log::{info, warn};
 use remotex::cli::{Cli, Commands};
-use remotex::config::AppConfig;
+use remotex::config::{AppConfig, ListenAddr};
 use remotex::server;
 
 #[tokio::main]
@@ -112,33 +112,72 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
 
     let app = server::router(config.clone());
 
-    // Already `host:port` with any IPv6 literal bracketed: `parse_listen` is where
-    // that is settled, so nothing is assembled here.
-    let addr = config.listen.clone();
+    // One server per listener over the same router — `Router` is `Clone`, and the
+    // session slot behind it is a single `Arc`, so which socket a browser arrived on
+    // is invisible from here. That matters: two listeners are two doors to one
+    // gateway, not two gateways.
+    let mut servers = tokio::task::JoinSet::new();
+    // Lives until this function returns, and taking the socket file away is what it
+    // is for. `None` for TCP, which leaves nothing behind to clean up.
+    let mut socket_file = None;
 
-    // **Every** address the host resolves to, not the first one.
-    //
-    // `host = "localhost"` is the case that made this necessary: it resolves to
-    // both `::1` and `127.0.0.1`, `TcpListener::bind` takes whichever the resolver
-    // returned first (on macOS, `::1`), and the other loopback is then simply
-    // refused. The startup line said `listening on http://localhost:52675`, which
-    // is exactly the wrong thing to print when only half of localhost answers — a
-    // client resolving `localhost` to `127.0.0.1` was refused, and nothing in the
-    // log hinted why.
-    //
-    // Binding each of them is also what makes "both loopbacks" expressible at all.
-    // `::` would do it by accident — a dual-stack wildcard reaches `127.0.0.1` — but
-    // it is `0.0.0.0` and `::/0` together, i.e. every interface on the machine,
-    // which is not what somebody asking for localhost is asking for.
-    //
-    // A literal is unaffected: `127.0.0.1`, `::1` and `0.0.0.0` each resolve to
-    // themselves and bind exactly one socket, as before.
-    let listeners = bind_all(&resolved_addrs(&addr).await?, &addr)?;
-    for listener in &listeners {
-        if let Ok(socket) = listener.local_addr() {
-            info!("listening on http://{socket}");
+    match &config.listen {
+        ListenAddr::Tcp(addr) => {
+            // **Every** address the host resolves to, not the first one.
+            //
+            // `listen = "localhost:52380"` is the case that made this necessary: it
+            // resolves to both `::1` and `127.0.0.1`, `TcpListener::bind` takes
+            // whichever the resolver returned first (on macOS, `::1`), and the other
+            // loopback is then simply refused. The startup line said `listening on
+            // http://localhost:52675`, which is exactly the wrong thing to print when
+            // only half of localhost answers — a client resolving `localhost` to
+            // `127.0.0.1` was refused, and nothing in the log hinted why.
+            //
+            // Binding each of them is also what makes "both loopbacks" expressible at
+            // all. `::` would do it by accident — a dual-stack wildcard reaches
+            // `127.0.0.1` — but it is `0.0.0.0` and `::/0` together, i.e. every
+            // interface on the machine, which is not what somebody asking for
+            // localhost is asking for.
+            //
+            // A literal is unaffected: `127.0.0.1`, `::1` and `0.0.0.0` each resolve
+            // to themselves and bind exactly one socket, as before.
+            let listeners = bind_all(&resolved_addrs(addr).await?, addr)?;
+            for listener in &listeners {
+                if let Ok(socket) = listener.local_addr() {
+                    info!("listening on http://{socket}");
+                }
+            }
+            for listener in listeners {
+                // `bind_all` takes the sockets synchronously so the all-or-nothing
+                // check needs no runtime and is testable on its own; tokio wants them
+                // non-blocking before it will drive them.
+                listener
+                    .set_nonblocking(true)
+                    .context("cannot make a listening socket non-blocking")?;
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .context("cannot hand a listening socket to the runtime")?;
+                servers.spawn(
+                    axum::serve(server::NodelayListener(listener), app.clone()).into_future(),
+                );
+            }
+        }
+        ListenAddr::Unix(path) => {
+            let listener = bind_unix(path)?;
+            // Armed the moment the socket exists, so every way out of this function
+            // takes it away with it.
+            socket_file = Some(SocketFile(path.clone()));
+            info!("listening on unix:{}", path.display());
+            listener
+                .set_nonblocking(true)
+                .context("cannot make the listening socket non-blocking")?;
+            let listener = tokio::net::UnixListener::from_std(listener)
+                .context("cannot hand the listening socket to the runtime")?;
+            // No `NodelayListener`: Nagle is a TCP algorithm, and a Unix socket has
+            // none of it to switch off.
+            servers.spawn(axum::serve(listener, app.clone()).into_future());
         }
     }
+
     info!("{} target(s) available in the post-login picker:", config.targets.len());
     for target in &config.targets {
         info!(
@@ -148,25 +187,6 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     }
     if let remotex::auth::GatewayAuth::Login(site_passwd) = &config.auth {
         info!("web login: user {:?}", site_passwd.username());
-    }
-
-    // One server per listener over the same router — `Router` is `Clone`, and the
-    // session slot behind it is a single `Arc`, so which socket a browser arrived on
-    // is invisible from here. That matters: two listeners are two doors to one
-    // gateway, not two gateways.
-    let mut servers = tokio::task::JoinSet::new();
-    for listener in listeners {
-        // `bind_all` takes the sockets synchronously so the all-or-nothing check
-        // needs no runtime and is testable on its own; tokio wants them
-        // non-blocking before it will drive them.
-        listener
-            .set_nonblocking(true)
-            .context("cannot make a listening socket non-blocking")?;
-        let listener = tokio::net::TcpListener::from_std(listener)
-            .context("cannot hand a listening socket to the runtime")?;
-        servers.spawn(
-            axum::serve(server::NodelayListener(listener), app.clone()).into_future(),
-        );
     }
 
     // Race the servers against an explicit shutdown signal. Relying on the OS
@@ -181,7 +201,85 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
     }
+    drop(socket_file);
     Ok(())
+}
+
+/// The socket file, removed when the gateway stops.
+///
+/// A `Drop` rather than a line at the end of `serve`, because the ways out include
+/// a server that failed and a `?` on the way there. It cannot cover a `SIGKILL` — a
+/// socket file outlives the process that made it — which is why [`bind_unix`] has to
+/// tell a leftover from a live one rather than assume the file is always ours.
+struct SocketFile(std::path::PathBuf);
+
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.0) {
+            warn!("cannot remove the socket {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// Take the Unix socket, replacing a leftover from a gateway that was killed but
+/// never one that is still being served.
+///
+/// The difference is asked of the socket itself: a listener that is gone refuses a
+/// connection, and one that is there accepts it. A bare `remove_file` before binding
+/// would be the same mistake in file form that a preflight port probe is in socket
+/// form — it would quietly evict a running gateway, whose clients then hold sockets
+/// to a path nothing can be reached at again.
+///
+/// The mode is `0o660` rather than whatever the umask leaves: the reason to be on a
+/// socket at all is that the filesystem decides who may connect, and world-writable
+/// is not a decision. Owner and group, so a proxy sharing the group can reach it —
+/// which is what the directory it lives in should be arranged around.
+fn bind_unix(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let listener = match UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            anyhow::ensure!(
+                UnixStream::connect(path).is_err(),
+                "{} is already being served by another process",
+                path.display()
+            );
+            warn!("replacing the leftover socket {}", path.display());
+            std::fs::remove_file(path)
+                .with_context(|| format!("cannot remove the leftover socket {}", path.display()))?;
+            UnixListener::bind(path).map_err(|e| unix_bind_error(path, e))?
+        }
+        Err(e) => return Err(unix_bind_error(path, e)),
+    };
+    // After the bind, because there is no bind that takes a mode. The window is the
+    // few microseconds between the two lines, and what is behind it is a gateway
+    // that still asks for a login.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+        .with_context(|| format!("cannot set the mode of {}", path.display()))?;
+    Ok(listener)
+}
+
+/// Why the socket could not be taken, with the length said out loud when that is
+/// what it was.
+///
+/// A socket address is a fixed-size field in the kernel — 104 bytes on macOS, 108
+/// on Linux — so a path under a long directory fails with `InvalidInput` and, from
+/// the standard library, the words "path must be shorter than SUN_LEN". That is a
+/// limit somebody hits by keeping the socket beside the config in a deep home
+/// directory, and it is worth one sentence rather than a search.
+fn unix_bind_error(path: &std::path::Path, e: std::io::Error) -> anyhow::Error {
+    let hint = if e.kind() == std::io::ErrorKind::InvalidInput {
+        format!(
+            " (this path is {} bytes, and a socket address holds about 100 — \
+             put the socket somewhere shorter, such as /tmp/remotex.sock)",
+            path.as_os_str().len()
+        )
+    } else {
+        String::new()
+    };
+    anyhow::Error::new(e).context(format!("cannot listen on unix:{}{hint}", path.display()))
 }
 
 /// Take a listening socket on every address, or none at all.
@@ -375,5 +473,74 @@ mod tests {
         )];
         let err = bind_all(&addrs, "example:0").expect_err("nothing bound is fatal");
         assert!(format!("{err:#}").contains("can be listened on"), "{err:#}");
+    }
+
+    /// The socket is created with a mode the filesystem can act on, which is the
+    /// only reason to prefer one to a loopback port.
+    #[test]
+    fn a_unix_socket_is_bound_owner_and_group_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.sock");
+        let listener = bind_unix(&path).expect("a fresh path binds");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o660, "owner and group, and nobody else");
+        assert!(
+            std::os::unix::net::UnixStream::connect(&path).is_ok(),
+            "and it is a socket something can reach"
+        );
+        drop(listener);
+    }
+
+    /// A gateway that was killed leaves its socket file behind. The next start
+    /// takes it over — it is the same address, and refusing would need somebody to
+    /// delete a file by hand before the service could come back.
+    #[test]
+    fn a_leftover_socket_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.sock");
+
+        // Bound and dropped without the `SocketFile` guard: exactly what a `SIGKILL`
+        // leaves on disk.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists(), "the file outlives the listener");
+
+        let listener = bind_unix(&path).expect("a leftover is not a reason to refuse");
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+        drop(listener);
+    }
+
+    /// ...but a socket something is still serving is not a leftover, and taking it
+    /// would evict a running gateway whose clients could never reach it again.
+    #[test]
+    fn a_socket_that_is_still_served_refuses_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.sock");
+        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let err = bind_unix(&path).expect_err("something is already serving it");
+        let text = format!("{err:#}");
+        assert!(text.contains("already being served"), "{text}");
+        assert!(text.contains("gateway.sock"), "it must name the socket: {text}");
+
+        // And the live one still answers: the refusal took nothing away.
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+        drop(live);
+    }
+
+    /// The socket file goes when the gateway does, so the next start is an ordinary
+    /// one rather than a takeover.
+    #[test]
+    fn stopping_removes_the_socket_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.sock");
+        let listener = bind_unix(&path).unwrap();
+
+        let guard = SocketFile(path.clone());
+        drop(guard);
+        drop(listener);
+        assert!(!path.exists(), "a stopped gateway leaves no socket behind");
     }
 }

@@ -1031,11 +1031,21 @@ A gateway needs a target to offer and a credential to guard it, and is told wher
 to listen. `remotex check-config` applies those rules to a file — or to text on
 stdin, which is what an unsaved edit is — without starting anything.
 
-Where it listens is one `host:port` key, `[server].listen`, and the one setting a
-deployment can give from outside the file: `--listen`, or `REMOTEX_LISTEN` for a
-container that has an environment but no argv to edit. An override replaces the
-address whole rather than either half of it, so the running address is always the
-one somebody wrote in one place.
+Where it listens is one key, `[server].listen`, and the one setting a deployment
+can give from outside the file: `--listen`, or `REMOTEX_LISTEN` for a container
+that has an environment but no argv to edit. An override replaces the address
+whole rather than either half of it, so the running address is always the one
+somebody wrote in one place.
+
+It takes two forms. `host:port` is the one a browser can reach. `unix:<path>`
+binds a socket instead, for a gateway that only ever answers a reverse proxy on
+the same machine: the socket is created `0660` so the filesystem decides who may
+connect, a leftover from a killed gateway is taken over on the next start, one
+that something is still serving refuses the start, and the file is removed when
+the gateway stops. No client addresses that form directly — the page reaches its
+gateway over one HTTP origin and two WebSockets, all of which need a host and a
+port, so whatever terminates the proxy is what a browser talks to. It is also why
+`remotex.app`'s embedded gateway stays on loopback TCP.
 
 `branding` is top-level rather than a `[server]` key: it names the deployment
 rather than the server, and one value with two spellings is one of them going

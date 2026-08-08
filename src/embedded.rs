@@ -145,8 +145,15 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
     // `serve` binds every address its host name resolves to, for reasons that do not
     // apply here: the client is told a single port on a single address by the line
     // below, so there is no name to resolve and no second family for it to arrive on.
-    let listener = TcpListener::bind(config.listen.as_str())
-        .with_context(|| format!("cannot listen on {}", config.listen))?;
+    // Always TCP here: `resolve_embedded` decides this address, and an embedded
+    // config may not carry a `[server]` block to argue with it. The refusal is for
+    // the day that stops being true, because the app's client cannot address a
+    // socket file.
+    let crate::config::ListenAddr::Tcp(addr) = &config.listen else {
+        anyhow::bail!("the embedded gateway listens on loopback TCP, which its client addresses by URL");
+    };
+    let listener =
+        TcpListener::bind(addr.as_str()).with_context(|| format!("cannot listen on {addr}"))?;
     let local = listener
         .local_addr()
         .context("cannot read the port the kernel gave us")?;

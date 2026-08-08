@@ -621,7 +621,7 @@ mod tests {
     /// differs between them is the field under test.
     fn router_config(dev_hostname: Option<&str>) -> AppConfig {
         AppConfig {
-            listen: "127.0.0.1:52675".to_owned(),
+            listen: crate::config::ListenAddr::Tcp("127.0.0.1:52675".to_owned()),
             static_dir: "frontend/dist".into(),
             // Never dialed: no test here starts a session.
             targets: vec![crate::config::TargetConfig {
@@ -1138,7 +1138,7 @@ mod tests {
         ));
 
         let config = AppConfig {
-            listen: "127.0.0.1:0".to_owned(),
+            listen: crate::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
             static_dir: "frontend/dist".into(),
             targets: vec![target],
             auth: crate::auth::GatewayAuth::Login(
