@@ -162,47 +162,18 @@ export function ClipboardPanel({
       setNotice(emptyCopyNotice);
       return;
     }
-    if (navigator.clipboard?.writeText) {
-      try {
-        await navigator.clipboard.writeText(text);
-        setNotice("Clipboard copied");
-        return;
-      } catch {
-        // Fall through to the selection-based path used by remotex-old.
-      }
-    }
-
-    const existingInput = clipboardInputRef.current;
-    if (existingInput) {
-      const previousStart = existingInput.selectionStart;
-      const previousEnd = existingInput.selectionEnd;
-      selectClipboardText(existingInput);
-      document.execCommand("copy");
-      existingInput.setSelectionRange(previousStart, previousEnd);
-      setNotice("Clipboard copied");
-      return;
-    }
-
-    // Metadata mode has no mounted textarea. Use a short-lived off-screen one
-    // so Copy remains a fallback without revealing the remote value on screen.
-    const input = document.createElement("textarea");
-    input.value = text;
-    input.className = "cb-copy-fallback";
-    document.body.append(input);
+    // One path. `navigator.clipboard` exists here — a secure context is what this
+    // client starts on — and this runs inside the Copy button's own click, which is
+    // the gesture `writeText` asks for. A refusal is the browser or the user saying
+    // no, and the honest answer to that is to say so: an `execCommand` fallback would
+    // be a second implementation of Copy, kept alive for a case that no longer exists.
     try {
-      selectClipboardText(input);
-      document.execCommand("copy");
+      await navigator.clipboard.writeText(text);
       setNotice("Clipboard copied");
-    } finally {
-      input.remove();
+    } catch {
+      setNotice("This browser refused the copy");
     }
-  }, [
-    clipboardInput,
-    emptyCopyNotice,
-    isRemoteMetadataMode,
-    remoteClipboard,
-    selectClipboardText,
-  ]);
+  }, [clipboardInput, emptyCopyNotice, isRemoteMetadataMode, remoteClipboard]);
 
   const inputBytes = encoder.encode(clipboardInput).byteLength;
   const overCap = inputBytes > MAX_CLIPBOARD_BYTES;

@@ -175,9 +175,10 @@ const context = {
   },
 } as unknown as CanvasRenderingContext2D;
 
-// The WebCodecs decoder, which this runtime has none of. Only its shape matters
-// here: what the painter does with the frames, not what a real decoder makes of
-// the bitstream — that is browser QA.
+// The WebCodecs decoder, which this runtime has none of — and which the client
+// refuses to start without, so it is installed for every test here rather than taken
+// away by any of them. Only its shape matters: what the painter does with the frames,
+// not what a real decoder makes of the bitstream — that is browser QA.
 let videoClosed = false;
 let chunkTypes: string[] = [];
 /** How many decoders were built — one per live stream, replaced on a resize. */
@@ -244,15 +245,8 @@ const globals = globalThis as unknown as {
   createImageBitmap: (blob: Blob) => Promise<unknown>;
   VideoDecoder: unknown;
   EncodedVideoChunk: unknown;
-  /** Optional because this runtime has none, which is the point of the test. */
-  window?: unknown;
 };
 const realCreateImageBitmap = globals.createImageBitmap;
-// Usually absent — this runtime is not a browser — but restored rather than
-// deleted, so the one test that needs a `window` cannot leave a half-built
-// global behind for whatever runs next.
-const realWindow = globals.window;
-const hadWindow = "window" in globals;
 
 beforeEach(() => {
   drawn = [];
@@ -313,11 +307,6 @@ afterEach(() => {
   globals.createImageBitmap = realCreateImageBitmap;
   globals.VideoDecoder = undefined;
   globals.EncodedVideoChunk = undefined;
-  if (hadWindow) {
-    globals.window = realWindow;
-  } else {
-    delete globals.window;
-  }
 });
 
 function painter(ctx: CanvasRenderingContext2D | null = context) {
@@ -1059,31 +1048,26 @@ test("a refused configuration stays up while another region paints", async () =>
 
 test("clear() retracts the complaint as well as the decoders", async () => {
   // The attachment boundary. The page clears its own copy on the way back to the
-  // picker only, so a reattach or a takeover would otherwise inherit this sentence.
-  globals.VideoDecoder = undefined;
-  const p = painter();
+  // picker only, so a reattach or a takeover would otherwise inherit this sentence —
+  // and a refusal is the kind that no later frame can retract on its own.
+  refused = 0xbd;
+  const p = announced();
   await p.draw(
     batchFrame([
-      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
     ]),
   );
   assert.notEqual(videoErrors.at(-1), null);
   p.clear();
   assert.equal(videoErrors.at(-1), null);
-});
-
-test("what a browser cannot decode at all stays on screen", async () => {
-  // The other side of the rule above, and the reason it needs no flag to tell the
-  // two apart: this one never paints, so nothing ever clears it.
-  globals.VideoDecoder = undefined;
-  const p = painter();
-  await p.draw(
-    batchFrame([
-      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
-    ]),
-  );
-  assert.equal(videoErrors.filter(Boolean).length, 1);
-  assert.notEqual(videoErrors.at(-1), null);
 });
 
 test("clear() ends the video decoders, not only the slot table", async () => {
@@ -1097,21 +1081,28 @@ test("clear() ends the video decoders, not only the slot table", async () => {
   assert.ok(videoClosed, "the decoders belong to one attachment");
 });
 
-test("a runtime with no video decoder says so rather than showing nothing", async () => {
-  // The whole reason this is reported at all: a video target sends no still
-  // tiles, so the alternative is a desktop that never paints and never explains
-  // itself.
-  globals.VideoDecoder = undefined;
-  // A secure origin with no decoder, which is the honest half of the pair: the
-  // other message is about the origin, and only a browser can be insecure.
-  globals.window = { isSecureContext: true };
+test("a refused stream says so rather than showing nothing", async () => {
+  // The whole reason this is reported at all: a video target sends no still tiles, so
+  // the alternative is a desktop that never paints and never explains itself.
+  refused = 0xbd;
   await announced().draw(
     batchFrame([
-      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
     ]),
   );
-  assert.equal(videoErrors.length, 1);
-  assert.match(String(videoErrors[0]), /video/i);
+  // Filtered because building the table retracts whatever the last attachment said,
+  // which is a null of its own ahead of this one.
+  const said = videoErrors.filter(Boolean);
+  assert.equal(said.length, 1);
+  assert.match(String(said[0]), /decode/i);
   assert.deepEqual(cropped, []);
 });
 

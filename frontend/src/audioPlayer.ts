@@ -4,8 +4,8 @@
 // a passthrough packet is already samples. The scheduling half below is the same
 // either way and is where the interesting behaviour is.
 //
-// AudioContext creation stays in the enabling click. WebCodecs is required only
-// for the encoded path, which is also the only one that needs a secure context.
+// AudioContext creation stays in the enabling click. That WebCodecs exists at all is
+// not a question asked here: it is the client's entry condition (preflight.ts).
 
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
@@ -46,8 +46,10 @@ export interface AudioFormat {
 export const PCM_CODEC = "pcm-s16le";
 
 /**
- * Whether this format has to go through WebCodecs, which is what decides
- * whether {@link audioUnavailable} applies to it at all.
+ * Whether this format has to go through WebCodecs, or is samples already.
+ *
+ * The one branch in this file, and it is about the wire rather than the browser:
+ * `audioFormat` says which of the two the gateway chose for this target.
  */
 export function needsDecoder(format: AudioFormat): boolean {
   return format.codec !== PCM_CODEC;
@@ -112,24 +114,6 @@ function packetDurationUs(format: AudioFormat): number {
 }
 
 /**
- * Why a *decoder* cannot be had here, distinguishing insecure origin from no
- * decoder at all.
- *
- * Only asked about a format that needs one (see {@link needsDecoder}): a
- * passthrough stream plays without WebCodecs, and so plays on origins where
- * WebCodecs does not exist.
- */
-export function audioUnavailable(): string | null {
-  if (typeof AudioDecoder !== "undefined") {
-    return null;
-  }
-  if (!window.isSecureContext) {
-    return "Audio needs a secure context: reach this gateway over HTTPS (or localhost).";
-  }
-  return "This browser has no WebCodecs audio decoder.";
-}
-
-/**
  * The audio context, built **inside the click** that enables audio.
  *
  * Separate from the player because of *when* rather than what: the format needed to
@@ -176,9 +160,10 @@ export interface AudioHandlers {
 /**
  * Start playing on `context`, keeping the schedule under the ceiling.
  *
- * Throws if the format needs an `AudioDecoder` and there is none to be had (see
- * {@link audioUnavailable}); an *unsupported codec* is not a throw, because
- * WebCodecs reports that asynchronously — it arrives at `onError`.
+ * Throws if the format is not one a decoder can be configured from — a `head` that
+ * is not an `OpusHead`, a channel count nothing can play. An *unsupported codec* is
+ * not a throw, because WebCodecs reports that asynchronously: it arrives at
+ * `onError`.
  */
 export function createAudioPlayer(
   format: AudioFormat,
@@ -199,10 +184,6 @@ export function createAudioPlayer(
   const decoder = needsDecoder(format) ? createDecoder() : null;
 
   function createDecoder(): AudioDecoder {
-    const unavailable = audioUnavailable();
-    if (unavailable) {
-      throw new Error(unavailable);
-    }
     const built = new AudioDecoder({
       output: (data) => {
         try {

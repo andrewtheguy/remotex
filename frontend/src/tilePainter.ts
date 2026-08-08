@@ -216,11 +216,6 @@ export function createTilePainter(options: {
   // rather than up front, because most targets send none at all.
   let video: VideoStreams | null = null;
 
-  // Set when `createVideoStreams` refused, which means this runtime has no video
-  // decoder at all. Cleared with the decoders, since a new attachment is a new chance —
-  // the same page could have been reached over HTTPS the second time.
-  let videoUnusable = false;
-
   // What is on screen about video, and whether a painted frame may take it down.
   //
   // A complaint that a frame *can* answer is one region's decoder giving up: what the
@@ -237,7 +232,7 @@ export function createTilePainter(options: {
   let videoComplained = false;
   let videoRefused = false;
 
-  const complainAboutVideo = (reason: string, recoverable = false) => {
+  const complainAboutVideo = (reason: string, recoverable: boolean) => {
     if (videoRefused && recoverable) {
       // A region that failed beside one that was refused outright. The standing fact
       // is the more useful sentence and it is already up.
@@ -251,7 +246,6 @@ export function createTilePainter(options: {
   const releaseVideo = () => {
     video?.close();
     video = null;
-    videoUnusable = false;
     videoComplained = false;
     videoRefused = false;
     // Retracted, and not merely forgotten. This is the attachment boundary: the
@@ -367,53 +361,36 @@ export function createTilePainter(options: {
     }
   };
 
+  // The decoder table, built on demand and shared by the format announcements and the
+  // units that follow them. Always a table: a browser with no `VideoDecoder` never
+  // reaches a session at all (preflight.ts), so what is left to go wrong here is one
+  // stream's configuration, which the table reports for itself.
+  const videoStreams = (): VideoStreams => {
+    if (video) {
+      return video;
+    }
+    // The failed stream has already dropped itself from the table; the others
+    // are chains of their own and keep decoding. Rebuilding one is not this
+    // client's decision either way — a stream begins again when the gateway
+    // sends a keyframe, which a repaint, a resize or a region restarting does.
+    video = createVideoStreams({
+      onError: complainAboutVideo,
+      onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
+    });
+    videoComplained = false;
+    options.onVideoError(null);
+    return video;
+  };
+
   // One access unit, routed to its own stream's decoder.
   //
   // Unlike a still tile this cannot simply be dropped when something goes wrong:
   // every later frame of that stream is expressed relative to this one, and no
   // still is coming to recover with. So a failure here is *said*, and the
   // decoders are torn down rather than left decoding from history they do not
-  // have.
-  // The decoder table, built on demand and shared by the format announcements and the
-  // units that follow them. `null` means this runtime has no video decoder at all and
-  // has already said so.
-  const videoStreams = (): VideoStreams | null => {
-    if (video) {
-      return video;
-    }
-    if (videoUnusable) {
-      // Said once per attachment, not once per announcement and once per unit: a
-      // runtime with no decoder will fail every time it is asked, and repeating it
-      // would put the same sentence on the screen twice for one cause.
-      return null;
-    }
-    try {
-      // The failed stream has already dropped itself from the table; the others
-      // are chains of their own and keep decoding. Rebuilding one is not this
-      // client's decision either way — a stream begins again when the gateway
-      // sends a keyframe, which a repaint, a resize or a region restarting does.
-      video = createVideoStreams({
-        onError: complainAboutVideo,
-        onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
-      });
-    } catch (e) {
-      videoUnusable = true;
-      complainAboutVideo(
-        e instanceof Error ? e.message : "This browser cannot decode video.",
-      );
-      return null;
-    }
-    videoComplained = false;
-    options.onVideoError(null);
-    return video;
-  };
-
-  const decodeAccessUnit = async (job: PaintJob & { kind: "video" }) => {
-    const video = videoStreams();
-    if (!video) {
-      return null;
-    }
-    return video.decode(
+  // have — which is `decode`'s own business, not a catch here.
+  const decodeAccessUnit = (job: PaintJob & { kind: "video" }) => {
+    return videoStreams().decode(
       job.stream,
       { w: job.w, h: job.h },
       job.data,
@@ -554,7 +531,7 @@ export function createTilePainter(options: {
       releaseVideo();
     },
     setVideoFormat(stream, format) {
-      videoStreams()?.setFormat(stream, format);
+      videoStreams().setFormat(stream, format);
     },
   };
 }

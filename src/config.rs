@@ -204,9 +204,9 @@ pub enum AudioCodec {
     /// 1.41 Mbit/s, no encoder in the gateway and no decoder in the client.
     ///
     /// For a fast local network, where those megabits are free and the thing
-    /// worth removing is everything that touches a sample. It is also the only
-    /// option that plays without WebCodecs, and therefore the only one that
-    /// works over plain `http://` to a host that is not `localhost`.
+    /// worth removing is everything that touches a sample: no encoder here, no
+    /// resampler, and packets that reach the browser's output without passing
+    /// through a decoder at all.
     Pcm,
 }
 

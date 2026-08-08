@@ -11,17 +11,23 @@
 //
 // What differs from the viewer, and why:
 //
-//   - **Six chords are only in the table for one host.** Command plus L, N, O,
-//     R, T and W are mapped when this page runs inside `remotex.app`, which drops
-//     its own menu accelerators while the desktop has focus and so is given every
-//     chord, and not when it runs in a browser. A browser does not get them: Command-W closes the tab,
+//   - **Six chords are only in the table for a host that is given them.** Command
+//     plus L, N, O, R, T and W are mapped when this page runs inside `remotex.app`,
+//     which drops its own menu accelerators while the desktop has focus and so is
+//     given every chord; in a Chrome app window, which reserves no keys at all
+//     (`appWindow.ts`); and in a plain tab only while a keyboard lock is held — see
+//     `immersive.ts` and `setCapturesEveryChord`. A lock is the only one of the three
+//     that changes under a running session, which is why there is a setter at all.
+//     In an unlocked tab a browser does not get them: Command-W closes the tab,
 //     Command-T and Command-N open one, Command-L goes to the address bar and
 //     Command-O opens a file dialog, and `preventDefault()` does not reach any of
 //     them in either Chrome or Safari. Mapping them there would not send Control-W
 //     to the guest, it would end the session — strictly worse than leaving them
-//     alone. Command-R is preventable and is still left out of the browser's set:
-//     it would work until some browser version where it doesn't, and the failure
-//     is the SPA reloading out from under a live session. See the constructor.
+//     alone. Command-R is preventable and is still left out of the *unlocked tab's*
+//     set: it would work until some browser version where it doesn't, and the failure
+//     is the SPA reloading out from under a live session. It joins the other five
+//     wherever the window says outright that it will not act on a chord — a keyboard
+//     lock, or an app window. See `setCapturesEveryChord`.
 //   - **Shift, Control and Option are told apart from ordinary keys.** They arrive
 //     as ordinary key events, not as a separate modifier-changed report. Without the
 //     distinction, the Shift in Command-Shift-Z looked like a key outside the
@@ -67,23 +73,34 @@ const COMMAND_MAPS_TO_CONTROL: ReadonlySet<string> = new Set([
   "KeyZ", // undo
 ]);
 
-// The six the header says a browser never receives, added back for the one host
-// that does receive them.
-//
-// `remotex.app` drops its menu accelerators while a live desktop has focus, so ⌘W
-// closes nothing of the app's and ⌘L goes nowhere — the chord arrives in this page
-// as an ordinary `keydown`. That is the whole difference between the two clients'
-// keyboards, and it is why this is one set rather than a second translator: the
-// state machine, the bare-Command tap and the release bookkeeping are all the same
-// code, tested once.
-const COMMAND_MAPS_TO_CONTROL_NATIVE: ReadonlySet<string> = new Set([
-  ...COMMAND_MAPS_TO_CONTROL,
+/// The six the header says a browser keeps for itself, and the whole of what a
+/// host can add.
+///
+/// Exported because two things must agree on exactly this list: the table below,
+/// and the code list `immersive.ts` hands `navigator.keyboard.lock`. A table that
+/// promises a translation the browser eats is a chord that silently closes the tab,
+/// so they are the same six by construction rather than by two people remembering.
+export const BROWSER_RESERVED_CHORD_CODES: readonly string[] = [
   "KeyL", // address bar in a browser; focus/lock in a guest
   "KeyN", // new window
   "KeyO", // open
   "KeyR", // reload
   "KeyT", // new tab
   "KeyW", // close
+];
+
+// The six above, added back for the hosts that do receive them.
+//
+// `remotex.app` drops its menu accelerators while a live desktop has focus, so ⌘W
+// closes nothing of the app's and ⌘L goes nowhere — the chord arrives in this page
+// as an ordinary `keydown`. A browser gets the same thing, but only while a keyboard
+// lock is held, which is why this is a table that can be swapped rather than one
+// chosen for good at construction. Either way it is one set rather than a second
+// translator: the state machine, the bare-Command tap and the release bookkeeping are
+// all the same code, tested once.
+const COMMAND_MAPS_TO_CONTROL_NATIVE: ReadonlySet<string> = new Set([
+  ...COMMAND_MAPS_TO_CONTROL,
+  ...BROWSER_RESERVED_CHORD_CODES,
 ]);
 
 const META_CODES: ReadonlySet<string> = new Set(["MetaLeft", "MetaRight"]);
@@ -134,7 +151,7 @@ export class MacKeyboardTranslator {
   // sent for the same code and the synthetic Control is lifted after the last.
   private translatedCommandKeys = new Set<string>();
   private syntheticControlHeld = false;
-  private readonly mappedChords: ReadonlySet<string>;
+  private mappedChords: ReadonlySet<string> = COMMAND_MAPS_TO_CONTROL;
 
   /// `capturesEveryChord` is the host's answer to "am I given ⌘W?" — false for a
   /// browser, true for `remotex.app`, which takes keys before the menu bar. It
@@ -142,6 +159,22 @@ export class MacKeyboardTranslator {
   /// forwarded as Meta either way, so the two hosts differ in what they can offer
   /// rather than in how they behave.
   constructor(capturesEveryChord = false) {
+    this.setCapturesEveryChord(capturesEveryChord);
+  }
+
+  /// Change that answer mid-session.
+  ///
+  /// `remotex.app` answers once, for the session: it drops its menu accelerators for
+  /// as long as a live desktop has focus. A browser answers per keyboard lock, which
+  /// the user enters and leaves and which a held Esc can end at any moment — so the
+  /// table has to be able to move under a running session.
+  ///
+  /// Safe to call with a chord half-way through, and that is not luck: the table is
+  /// consulted only when a key goes *down* (see `translateKey`). Every release path
+  /// runs off `translatedCommandKeys` and `forwardedCommandCodes`, so a key pressed
+  /// under one table is always released under the rules it was pressed with, and the
+  /// synthetic Control is lifted either way.
+  setCapturesEveryChord(capturesEveryChord: boolean): void {
     this.mappedChords = capturesEveryChord
       ? COMMAND_MAPS_TO_CONTROL_NATIVE
       : COMMAND_MAPS_TO_CONTROL;

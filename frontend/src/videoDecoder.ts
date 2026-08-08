@@ -45,35 +45,6 @@ export interface VideoFormat {
   decode: string;
 }
 
-/**
- * Why video cannot play here, distinguishing an insecure origin from a browser with
- * no decoder — the same two cases, in the same order, as `audioUnavailable`.
- *
- * `VideoDecoder` is secure-context only, exactly like the `AudioDecoder` remote audio
- * already uses. The difference is what it costs: no audio decoder means silence,
- * where no video decoder means a desktop that never paints at all, so this is said
- * plainly rather than logged.
- *
- * Reachable, and by an ordinary route: nothing asks this browser what it can decode
- * before a target is picked. A gateway once probed for that and refused the pick — the
- * probe was removed because it made every video session depend on a round trip that
- * could answer differently on the same browser twice, and its refusals blamed the
- * browser for whatever had actually gone wrong. So the answer arrives here instead,
- * where it is a fact rather than a prediction.
- */
-export function videoUnavailable(): string | null {
-  if (typeof VideoDecoder !== "undefined") {
-    return null;
-  }
-  // `globalThis`, not `window`: this runs inside the paint worker, which has no
-  // `window` — and a worker's secure-context bit is its creator document's, so
-  // the answer is the same one the page would give.
-  if (!globalThis.isSecureContext) {
-    return "This target sends video, which needs a secure context: reach this gateway over HTTPS (or localhost).";
-  }
-  return "This target sends video, and this browser has no WebCodecs video decoder.";
-}
-
 /** One session's decoders, one per `stream` id on the wire. */
 export interface VideoStreams {
   /**
@@ -108,20 +79,15 @@ export interface VideoStreams {
 /**
  * Build the decoder table for one connection.
  *
- * Throws if there is no `VideoDecoder` to be had (see {@link videoUnavailable}), so
- * that a runtime which cannot decode says so once, at the first access unit, rather
- * than once per region. Decoders themselves are created on the first unit for their
- * id, because most targets send none at all and a target on the region dial may never
- * use more than one.
+ * That `VideoDecoder` exists is the client's entry condition and not a question for
+ * this path (preflight.ts). Decoders themselves are created on the first unit for
+ * their id, because most targets send none at all and a target on the region dial may
+ * never use more than one.
  */
 export function createVideoStreams(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
 ): VideoStreams {
-  const unavailable = videoUnavailable();
-  if (unavailable) {
-    throw new Error(unavailable);
-  }
   interface Live {
     stream: VideoStream;
     format: VideoFormat;
@@ -354,8 +320,7 @@ interface Pending {
 /**
  * Build a decoder for one stream, configured from the format the gateway announced.
  *
- * Throws if there is no `VideoDecoder` to be had (see {@link videoUnavailable}); a
- * configuration string this browser refuses is *not* a throw, because WebCodecs
+ * A configuration string this browser refuses is *not* a throw, because WebCodecs
  * reports that asynchronously — it arrives at `onError`, naming the configuration.
  */
 export function createVideoStream(
@@ -363,10 +328,6 @@ export function createVideoStream(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
 ): VideoStream {
-  const unavailable = videoUnavailable();
-  if (unavailable) {
-    throw new Error(unavailable);
-  }
   // FIFO, and that is the whole ordering argument: the encoder produces no frames
   // out of order — no alt-ref frames a decoder would reorder — so
   // the nth output belongs to the nth pending entry. What it is *not* is a guarantee
