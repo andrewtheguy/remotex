@@ -1,6 +1,7 @@
 ## General
 
 - Strict no backward-compatibility or legacy paths since it is a personal project.
+- Require secure contexts for all web features, frontend deny startup for non-secure contexts, and do not add a second path for insecure contexts.
 - Do not run `cargo fmt`.
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
   `cargo test`.
