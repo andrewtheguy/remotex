@@ -997,10 +997,17 @@ otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** 
 ordinary keydowns and `preventDefault` is the whole of it; that is the configuration
 the client is meant to be run in, and the only one the companion extension runs in. A
 plain tab gets the same from full screen plus `navigator.keyboard.lock`
-(`immersive.ts`), which also locks ⌘Q. The Command translation table follows the lock
-rather than being chosen once, because a held Esc ends a lock at any moment and that
-escape hatch is uncapturable by design; the window kind, by contrast, is read once and
-cannot change. A live session also arms the browser's own leave-site dialog, so a close
+(`immersive.ts`), which also locks ⌘Q. **Full screen is the whole trigger**: a lock can
+only be active in full screen, so there is nothing left for an opt-in to decide, and
+`immersive.ts` arms on the way in and disarms on the way out. It watches two signals
+because there are two kinds of full screen — `fullscreenchange` for the Fullscreen API,
+and the `(display-mode: fullscreen)` media query for the ⌃⌘F and F11 the API never
+hears about. The menu's Immersive button is only a way to reach full screen with a
+gesture in hand; it toggles on full screen rather than on the lock, so a browser that
+refuses the lock still leaves a way back out. The Command translation table follows the
+lock rather than being chosen once, because a held Esc ends a lock at any moment and
+that escape hatch is uncapturable by design; the window kind, by contrast, is read once
+and cannot change. A live session also arms the browser's own leave-site dialog, so a close
 chord — or Alt+F4, which no window catches — asks first.
 
 The canvas is presented at the remote's point size, derived from framebuffer

@@ -13,8 +13,10 @@ import DisplayPanel from "./DisplayPanel.tsx";
 import {
   enterImmersive,
   exitImmersive,
+  immersiveActive,
   available as immersiveAvailable,
   keyboardLockHeld,
+  onImmersiveChange,
   onKeyboardLockChange,
 } from "./immersive.ts";
 import type {
@@ -180,16 +182,31 @@ const IMMERSIVE_ENTER_HINT = appWindow()
   ? "Full screen. This window already sends ⌘W, ⌘T and the rest to the remote"
   : "Full screen, and send ⌘W, ⌘T and the rest to the remote instead of this browser";
 
+// The one state the other two hints cannot describe: full screen, and the browser
+// refused the lock. Worth its own sentence rather than a silent "Exit immersive",
+// because the chords the enter hint promised are the thing that did not happen.
+const IMMERSIVE_UNLOCKED_HINT =
+  "Full screen, but this browser kept ⌘W and ⌘T for itself";
+
 /// Full screen plus a keyboard lock, which is how a browser *tab* is given ⌘W, ⌘T and
 /// the four other chords it otherwise keeps for itself. See immersive.ts.
 ///
 /// Absent, not disabled, where the browser has no lock to give: a greyed button here
 /// would be explaining an API Firefox and Safari do not have, which is not this menu's
-/// job. It is its own component because the lock is a browser-wide condition rather
-/// than this menu's state — a held Esc or the platform's own ⌃⌘F ends one without
-/// anything here being clicked — so the subscription belongs next to the label it
-/// keeps honest.
+/// job. It is its own component because both conditions are browser-wide rather than
+/// this menu's state — a held Esc, ⌃⌘F or F11 changes them without anything here being
+/// clicked — so the subscriptions belong next to the label they keep honest.
+///
+/// It toggles on *full screen*, not on the lock, and that is the difference between a
+/// way out and a trap: a browser that refuses the lock leaves a full screen window
+/// whose button would otherwise still be offering to enter one. The lock only picks
+/// the hint, because the lock is only what full screen turned out to buy.
 function ImmersiveButton({ onToggle }: { onToggle: () => void }) {
+  const active = useSyncExternalStore(
+    onImmersiveChange,
+    immersiveActive,
+    () => false,
+  );
   const locked = useSyncExternalStore(
     onKeyboardLockChange,
     keyboardLockHeld,
@@ -198,22 +215,26 @@ function ImmersiveButton({ onToggle }: { onToggle: () => void }) {
   if (!immersiveAvailable()) {
     return null;
   }
+  let hint = IMMERSIVE_ENTER_HINT;
+  if (active) {
+    hint = locked ? IMMERSIVE_EXIT_HINT : IMMERSIVE_UNLOCKED_HINT;
+  }
   return (
     <button
       type="button"
       className="toolbar-btn"
-      aria-pressed={locked}
+      aria-pressed={active}
       onClick={() => {
         onToggle();
-        if (locked) {
+        if (active) {
           void exitImmersive();
         } else {
           void enterImmersive();
         }
       }}
-      title={locked ? IMMERSIVE_EXIT_HINT : IMMERSIVE_ENTER_HINT}
+      title={hint}
     >
-      {locked ? "Exit immersive" : "Immersive"}
+      {active ? "Exit immersive" : "Immersive"}
     </button>
   );
 }
