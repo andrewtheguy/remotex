@@ -281,17 +281,23 @@ body {
   inset: 0;
   z-index: 1500;
   display: flex;
-  align-items: center;
   justify-content: center;
   padding: 1rem;
   background: #0d1117;
   overflow-y: auto;
 }
 
+/* Centred by auto margins rather than by `align-items`, because this box
+   scrolls. A centred flex item that outgrows its line overflows both ends
+   equally, and the end above the scrollport cannot be scrolled to — a long
+   enough target list loses its first entries permanently. Auto margins collapse
+   to zero once the free space goes negative, so the panel drops to the top of
+   the scroll region, inside the padding, with every target reachable. */
 .picker-panel {
   display: flex;
   flex-direction: column;
   width: min(420px, 92vw);
+  margin: auto;
 }
 
 .picker-brand {
