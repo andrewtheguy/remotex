@@ -19,8 +19,16 @@ type Listener = (event: unknown) => void;
 const posted: { data: unknown; targetOrigin: unknown }[] = [];
 const listeners = new Map<string, Listener[]>();
 
+// An app window, because that is the only place the seam exists at all — in a tab the
+// module posts nothing and settles to `absent` at once. That half cannot have a test
+// beside this one: the window mode is read at import, and bun shares one module
+// registry across a run, so the first file to import decides for every other. What is
+// testable of it is the decision, in appWindow.test.ts.
 const fakeWindow = {
   location: { origin: ORIGIN },
+  matchMedia(query: string) {
+    return { matches: query.includes("standalone") };
+  },
   addEventListener(type: string, fn: Listener) {
     const existing = listeners.get(type) ?? [];
     existing.push(fn);
@@ -162,7 +170,16 @@ test("the guards accept what they should and refuse the rest", () => {
   );
 
   assert.equal(isPageMessage({ source: "remotex-page", type: "state" }), true);
+  assert.equal(
+    isPageMessage({ source: "remotex-page", type: "resizeToDisplay" }),
+    true,
+  );
   assert.equal(isPageMessage({ source: "remotex-ext", type: "hello" }), false);
+  // The extension's own commands are not requests it may send itself back.
+  assert.equal(
+    isPageMessage({ source: "remotex-page", type: "clipboardLocal" }),
+    false,
+  );
 });
 
 test("a framebuffer is described in the desktop's own points", () => {

@@ -14,18 +14,20 @@
 //   - **Six chords are only in the table for a host that is given them.** Command
 //     plus L, N, O, R, T and W are mapped when this page runs inside `remotex.app`,
 //     which drops its own menu accelerators while the desktop has focus and so is
-//     given every chord, and in a browser only while a keyboard lock is held — see
-//     `immersive.ts` and `setCapturesEveryChord`, which is the only thing that
-//     changes a browser's answer. Unlocked, a browser does not get them: Command-W closes the tab,
+//     given every chord; in a Chrome app window, which reserves no keys at all
+//     (`appWindow.ts`); and in a plain tab only while a keyboard lock is held — see
+//     `immersive.ts` and `setCapturesEveryChord`. A lock is the only one of the three
+//     that changes under a running session, which is why there is a setter at all.
+//     In an unlocked tab a browser does not get them: Command-W closes the tab,
 //     Command-T and Command-N open one, Command-L goes to the address bar and
 //     Command-O opens a file dialog, and `preventDefault()` does not reach any of
 //     them in either Chrome or Safari. Mapping them there would not send Control-W
 //     to the guest, it would end the session — strictly worse than leaving them
-//     alone. Command-R is preventable and is still left out of the *unlocked*
-//     browser's set: it would work until some browser version where it doesn't, and
-//     the failure is the SPA reloading out from under a live session. Under a lock it
-//     is in the set with the other five, because a lock is the browser saying it will
-//     not act on the chord at all. See `setCapturesEveryChord`.
+//     alone. Command-R is preventable and is still left out of the *unlocked tab's*
+//     set: it would work until some browser version where it doesn't, and the failure
+//     is the SPA reloading out from under a live session. It joins the other five
+//     wherever the window says outright that it will not act on a chord — a keyboard
+//     lock, or an app window. See `setCapturesEveryChord`.
 //   - **Shift, Control and Option are told apart from ordinary keys.** They arrive
 //     as ordinary key events, not as a separate modifier-changed report. Without the
 //     distinction, the Shift in Command-Shift-Z looked like a key outside the

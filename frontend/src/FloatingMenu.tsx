@@ -7,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { appWindow } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
 import {
@@ -167,7 +168,19 @@ export interface PanelControls {
   openHelp: () => void;
 }
 
-/// Full screen plus a keyboard lock, which is how a browser tab is given ⌘W, ⌘T and
+// What Immersive is *for*, which is not the same in both window kinds: a tab is buying
+// the six chords a browser keeps, and an app window — which reserves none of them
+// already — is buying screen area. Saying the second thing in the first window's words
+// would be promising something that is already true.
+const IMMERSIVE_EXIT_HINT = appWindow()
+  ? "Leave full screen"
+  : "Leave full screen and give this browser its shortcuts back";
+
+const IMMERSIVE_ENTER_HINT = appWindow()
+  ? "Full screen. This window already sends ⌘W, ⌘T and the rest to the remote"
+  : "Full screen, and send ⌘W, ⌘T and the rest to the remote instead of this browser";
+
+/// Full screen plus a keyboard lock, which is how a browser *tab* is given ⌘W, ⌘T and
 /// the four other chords it otherwise keeps for itself. See immersive.ts.
 ///
 /// Absent, not disabled, where the browser has no lock to give: a greyed button here
@@ -198,11 +211,7 @@ function ImmersiveButton({ onToggle }: { onToggle: () => void }) {
           void enterImmersive();
         }
       }}
-      title={
-        locked
-          ? "Leave full screen and give this browser its shortcuts back"
-          : "Full screen, and send ⌘W, ⌘T and the rest to the remote instead of this browser"
-      }
+      title={locked ? IMMERSIVE_EXIT_HINT : IMMERSIVE_ENTER_HINT}
     >
       {locked ? "Exit immersive" : "Immersive"}
     </button>
@@ -220,6 +229,28 @@ function ImmersiveHelpRow() {
     <div className="help-item">
       <dt>Leave immersive mode</dt>
       <dd>Hold Esc for a second — always, and uncapturable</dd>
+    </div>
+  );
+}
+
+/// The recommendation, shown only to the window that is not taking it.
+///
+/// A tab is the one configuration where the browser keeps chords back from the remote,
+/// and the fix is a menu item rather than anything this client can do — so saying so is
+/// the whole of what it can offer. It is also the only place the companion extension
+/// runs (see docs/companion-extension.md), which is the second reason a tab is worth
+/// this line and an app window is worth none.
+function AppWindowHelpRow() {
+  if (appWindow()) {
+    return null;
+  }
+  return (
+    <div className="help-item">
+      <dt>Give this window every shortcut</dt>
+      <dd>
+        Chrome menu → Install page as app. ⌘W, Ctrl+W and ⌘T then reach the
+        remote
+      </dd>
     </div>
   );
 }
@@ -1064,6 +1095,7 @@ export default function FloatingMenu({
                     <dd>{hideChromeShortcut(isMacHost)}</dd>
                   </div>
                   <ImmersiveHelpRow />
+                  <AppWindowHelpRow />
                 </dl>
               </>
             )}

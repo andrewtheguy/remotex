@@ -991,12 +991,17 @@ half-working session the gate exists to prevent. What remains reportable mid-ses
 is a *codec* a decoder refuses, which is a different sentence and arrives from the
 decoder itself.
 
-Full screen plus `navigator.keyboard.lock` (`immersive.ts`) is how a tab is given
-the six Command chords a browser otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R — plus ⌘Q,
-which is locked but not translated. The Command translation table follows the lock
+There are two ways for this page to be given the six Command chords a browser
+otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** (`appWindow.ts`:
+*Install page as app…*, or `--app=`) reserves no keys at all, so they arrive as
+ordinary keydowns and `preventDefault` is the whole of it; that is the configuration
+the client is meant to be run in, and the only one the companion extension runs in. A
+plain tab gets the same from full screen plus `navigator.keyboard.lock`
+(`immersive.ts`), which also locks ⌘Q. The Command translation table follows the lock
 rather than being chosen once, because a held Esc ends a lock at any moment and that
-escape hatch is uncapturable by design. A live session also arms the browser's own
-leave-site dialog, so a close chord asks first.
+escape hatch is uncapturable by design; the window kind, by contrast, is read once and
+cannot change. A live session also arms the browser's own leave-site dialog, so a close
+chord — or Alt+F4, which no window catches — asks first.
 
 The canvas is presented at the remote's point size, derived from framebuffer
 pixels and remote scale. Desktop clients scroll when necessary. Touch clients

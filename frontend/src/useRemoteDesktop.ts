@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { appWindow } from "./appWindow.ts";
 import {
   type AudioPlayer,
   createAudioContext,
@@ -1764,10 +1765,11 @@ export function useRemoteDesktop(
   }, [mode, canClipboard, companion]);
 
   // A live session is a thing to lose, and ⌘W or Ctrl+W closes a tab before this page
-  // sees the key — except under a keyboard lock, where they arrive as ordinary
-  // keydowns and go to the remote instead. So the mitigation is the browser's own
-  // leave-site dialog, which needs sticky activation: a desktop the user has clicked
-  // on always has it.
+  // sees the key — except under a keyboard lock, or in an app window, where they
+  // arrive as ordinary keydowns and go to the remote instead. So the mitigation is the
+  // browser's own leave-site dialog, which needs sticky activation: a desktop the user
+  // has clicked on always has it. Kept in an app window too, where the chord is caught
+  // but Alt+F4 and the title bar's close button are not.
   //
   // `mode`, not `status`: a reconnecting session is still one worth not closing. Not
   // in `remotex.app`, where closing the window is the app's own quit path and this
@@ -1825,15 +1827,18 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    // `remotex.app` is given every Command chord for the whole session, so it gets
-    // the fuller table outright. A browser is given them only while a keyboard lock
-    // is held, and that comes and goes under a running session — a held Esc ends one
-    // without asking — so the table follows the lock rather than being chosen once.
+    // Three ways to be given every Command chord, and only one of them changes under
+    // a running session. `remotex.app` drops its menu accelerators for the whole
+    // session, and an app window reserves nothing for the whole session either
+    // (appWindow.ts) — both are settled before this effect runs. A keyboard lock in a
+    // plain tab comes and goes, a held Esc ends one without asking, so the table
+    // follows the lock rather than being chosen once.
+    const chordsGranted = NATIVE_HOST || appWindow();
     const macKeys = new MacKeyboardTranslator(
-      NATIVE_HOST || keyboardLockHeld(),
+      chordsGranted || keyboardLockHeld(),
     );
     const stopWatchingLock = onKeyboardLockChange((locked) => {
-      macKeys.setCapturesEveryChord(NATIVE_HOST || locked);
+      macKeys.setCapturesEveryChord(chordsGranted || locked);
     });
 
     // Touch gestures, only on pinch-zoom-capable devices — they

@@ -1,6 +1,14 @@
-// The seam between this SPA and the RemoteX Companion extension, which is how a
-// browser tab gets the two things `remotex.app` has and a page does not: the system
-// clipboard while the window is unfocused, and a window it can resize.
+// The seam between this SPA and the RemoteX Companion extension, which is how a page
+// gets the two things `remotex.app` has and it does not: the system clipboard while
+// the window is unfocused, and a window it can resize.
+//
+// **Only in an app window.** The extension does nothing in an ordinary tab and this
+// seam settles to `absent` there without posting anything at all, which is not a
+// limitation being worked around but the whole shape of the design: an app window is
+// the configuration the client is meant to be run in, it is the one that keeps the
+// browser's chords (see appWindow.ts), and it is the one with no toolbar — so the page
+// is the only surface the extension has, and a tab is a case with nothing to serve.
+// See docs/companion-extension.md.
 //
 // The difference from `nativeHost.ts` that shapes this whole file is **when the other
 // side turns up**. The app's bridge is exposed by a preload that runs before any
@@ -19,6 +27,7 @@
 // carries on exactly as it did before this file existed.
 
 import { useEffect, useSyncExternalStore } from "react";
+import { appWindow } from "./appWindow.ts";
 import {
   type CompanionCapabilities,
   type CompanionCommand,
@@ -62,9 +71,18 @@ interface Snapshot {
 }
 
 const INITIAL: Snapshot = { phase: "probing", capabilities: null };
-const SERVER: Snapshot = { phase: "absent", capabilities: null };
+const ABSENT: Snapshot = { phase: "absent", capabilities: null };
 
-let snapshot: Snapshot = INITIAL;
+/**
+ * Whether there is any point listening: an app window with a `window` to listen on.
+ *
+ * A tab is `absent` from the first render rather than after the deadline, which is the
+ * one behavioural difference and it is the right way round — the focus-driven clipboard
+ * read has nothing to stand down for there.
+ */
+const POSSIBLE = typeof window !== "undefined" && appWindow();
+
+let snapshot: Snapshot = POSSIBLE ? INITIAL : ABSENT;
 const listeners = new Set<() => void>();
 
 // A new object only when something actually changed. `useSyncExternalStore` compares
@@ -101,7 +119,7 @@ function receive(event: MessageEvent): void {
   if (command.type === "hello") {
     settle({ phase: "connected", capabilities: command.capabilities });
   } else if (command.type === "bye") {
-    settle({ phase: "absent", capabilities: null });
+    settle(ABSENT);
   }
   for (const handler of commandHandlers) {
     handler(command);
@@ -115,7 +133,7 @@ const commandHandlers = new Set<(command: CompanionCommand) => void>();
 // rendering the first frame, and an effect would not be listening yet. It also means
 // StrictMode's double mount re-reads a store that is already settled instead of
 // restarting a probe.
-if (typeof window !== "undefined") {
+if (POSSIBLE) {
   window.addEventListener("message", receive);
   post({ type: "hello", client: "remotex" });
   window.addEventListener("pageshow", () => {
@@ -128,7 +146,7 @@ if (typeof window !== "undefined") {
   });
   setTimeout(() => {
     if (snapshot.phase === "probing") {
-      settle({ phase: "absent", capabilities: null });
+      settle(ABSENT);
     }
   }, HANDSHAKE_DEADLINE_MS);
 }
@@ -145,7 +163,7 @@ function getSnapshot(): Snapshot {
 }
 
 function getServerSnapshot(): Snapshot {
-  return SERVER;
+  return ABSENT;
 }
 
 /** Whether a companion has answered. See {@link CompanionPhase}. */
