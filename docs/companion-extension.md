@@ -399,11 +399,11 @@ The same directory loads in Edge, Brave, Opera and Vivaldi, all of which have ap
 windows of their own. Not Firefox: no `chrome.offscreen`, no app windows, and no
 Keyboard Lock for the tab path either.
 
-The release job that builds that zip earns its place for a second reason: it runs
-`bun run check` over `apps/companion` on a runner with no `frontend/node_modules`, which
-is the exact breakage `companion.contract.ts`'s no-React rule exists to prevent and
-which nothing else catches. It is not in `.github/workflows/release.yml` yet, because a
-job that builds a directory that does not exist fails the release.
+The release job that builds that zip lands with the directory. Its second reason for
+existing is worth more than the asset: it runs `bun run check` over `apps/companion` on
+a runner with no `frontend/node_modules`, which is the exact breakage
+`companion.contract.ts`'s no-React rule exists to prevent and which nothing else
+catches.
 
 ## Costs, stated
 
