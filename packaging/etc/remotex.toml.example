@@ -112,7 +112,7 @@ password = "change-me"
 #
 # RDP connects at the pinned size, and `subtype = "ard-high-performance"` creates
 # its virtual display at it. With neither key, both instead open at the full
-# resolution of the connecting client's own screen, falling back to 1280×800 only
+# resolution of the connecting client's own screen, falling back to 1920×1200 only
 # when the client supplies no screen. A generic VNC server and `subtype = "ard"`
 # keep the remote's own size; for them these keys only answer a later default-size
 # request, which still requires `resize = true` before it can be applied.
@@ -120,8 +120,8 @@ password = "change-me"
 # These are points, not backing pixels. RDP opens at 1x and, with `resize`, a
 # Retina client then asks for twice the pixels. High Performance opens at the
 # connecting client's density even when its point size is pinned.
-#width = 1280
-#height = 800
+#width = 1920
+#height = 1200
 
 # Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
 # RDP only — VNC negotiates VncAuth (password set) or None per the handshake.
