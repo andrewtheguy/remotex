@@ -295,11 +295,22 @@ export async function enterImmersive(): Promise<boolean> {
  *
  * Unlock first, then exit: the other order fires `fullscreenchange` against a lock
  * that is still held, and `sync` would unlock it a second time.
+ *
+ * Then `sync`, because leaving is a request and not a result. `exitFullscreen` can
+ * reject, and a window that got here by ⌃⌘F has no `fullscreenElement` for this to
+ * exit at all — in both cases the window is still full screen once the dust settles,
+ * no event fires to say otherwise, and the unlock above has taken away chords the
+ * window is still entitled to. `sync` gives them back. It is deliberately the same
+ * reconciliation the two listeners run rather than a second opinion about the state:
+ * anything else is how the two come to disagree.
+ *
+ * So this is a no-op against the platform's own full screen, which is the truth —
+ * only ⌃⌘F or a held Esc leaves that, and no page can.
  */
 export async function exitImmersive(): Promise<void> {
   disarm();
   if (document.fullscreenElement) {
     await document.exitFullscreen().catch(() => {});
   }
-  setActive(fullscreenNow());
+  sync();
 }

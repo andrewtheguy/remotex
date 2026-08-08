@@ -269,6 +269,25 @@ test("a lock granted after fullscreen ended is handed straight back", async () =
   assert.equal(unlocks, before + 1);
 });
 
+test("exiting a full screen no page can leave keeps the chords", async () => {
+  // ⌃⌘F leaves nothing for `exitFullscreen` to exit, so the window is still full
+  // screen when the dust settles. Without the reconciliation at the end of
+  // `exitImmersive` the unlock would stand, and the window would keep ⌘W from the
+  // remote for as long as the user stayed full screen — with no event left to fix it.
+  enterFullscreenOutsideThisModule();
+  await settle();
+  assert.equal(keyboardLockHeld(), true);
+
+  await exitImmersive();
+  await settle();
+
+  assert.equal(immersiveActive(), true);
+  assert.equal(keyboardLockHeld(), true);
+
+  leaveFullscreenOutsideThisModule();
+  assert.equal(keyboardLockHeld(), false);
+});
+
 test("exiting deliberately does not unlock twice", async () => {
   await enterImmersive();
   const before = unlocks;
