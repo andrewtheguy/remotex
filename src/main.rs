@@ -12,13 +12,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { config } => {
-            // All configuration comes from the TOML file — no env vars, no .env
-            // (see src/config.rs for why). Every target is served; the browser
-            // picks one after login.
+        Commands::Serve { config, listen } => {
+            // The listen address is the one thing a deployment says outside the
+            // file — `--listen`, or `REMOTEX_LISTEN` for a container that has an
+            // environment but no argv to edit. Everything else comes from the
+            // TOML file, credentials included (see src/config.rs for why). Every
+            // target is served; the browser picks one after login.
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
-            let config = file.resolve()?;
+            let config = file.resolve_with(listen.as_deref())?;
             serve(config).await?;
         }
         Commands::ServeEmbedded {
@@ -110,11 +112,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
 
     let app = server::router(config.clone());
 
-    let addr = if config.host.contains(':') {
-        format!("[{}]:{}", config.host, config.port)
-    } else {
-        format!("{}:{}", config.host, config.port)
-    };
+    // Already `host:port` with any IPv6 literal bracketed: `parse_listen` is where
+    // that is settled, so nothing is assembled here.
+    let addr = config.listen.clone();
 
     // **Every** address the host resolves to, not the first one.
     //

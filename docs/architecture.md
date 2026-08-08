@@ -1031,6 +1031,12 @@ A gateway needs a target to offer and a credential to guard it, and is told wher
 to listen. `remotex check-config` applies those rules to a file — or to text on
 stdin, which is what an unsaved edit is — without starting anything.
 
+Where it listens is one `host:port` key, `[server].listen`, and the one setting a
+deployment can give from outside the file: `--listen`, or `REMOTEX_LISTEN` for a
+container that has an environment but no argv to edit. An override replaces the
+address whole rather than either half of it, so the running address is always the
+one somebody wrote in one place.
+
 `branding` is top-level rather than a `[server]` key: it names the deployment
 rather than the server, and one value with two spellings is one of them going
 stale. There is one place to write it and no second spelling.

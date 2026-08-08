@@ -803,14 +803,20 @@ impl TargetConfig {
 /// answer.
 pub const DEFAULT_SIZE: (u16, u16) = (1280, 800);
 
+/// Where a served gateway listens when nothing says otherwise.
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:52380";
+
 /// The optional `[server]` block: web-server bind and frontend location.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerSection {
-    /// Host/interface the web server binds to (default `127.0.0.1`).
-    pub host: Option<String>,
-    /// Port the web server binds to (default `52380`).
-    pub port: Option<u16>,
+    /// Address the web server binds to, `host:port` (default
+    /// [`DEFAULT_LISTEN`]). One key rather than two because it is one decision:
+    /// a host without a port and a port without a host are each half an answer,
+    /// and `--listen`/`REMOTEX_LISTEN` can only override the whole of it —
+    /// overriding one half from the command line and taking the other from the
+    /// file is how a gateway ends up on an address nobody wrote down.
+    pub listen: Option<String>,
     /// Directory holding the built frontend; overrides [`default_static_dir`].
     pub static_dir: Option<PathBuf>,
     /// Web-login credential: `username:bcrypt_hash`, generated with
@@ -898,12 +904,14 @@ pub struct ConfigFile {
 /// serves (the browser picks one after login).
 #[derive(Clone, Debug)]
 pub struct AppConfig {
-    /// Host/interface the web server binds to.
-    pub host: String,
-    /// Port the web server binds to. `0` asks the kernel for an ephemeral one,
-    /// which is what an embedded gateway does — the port it got is then read off
-    /// the listener and told to its client, never guessed.
-    pub port: u16,
+    /// Address the web server binds to, as `host:port` — validated by
+    /// [`parse_listen`], so it is always something [`std::net::ToSocketAddrs`]
+    /// can resolve, with any IPv6 literal already bracketed.
+    ///
+    /// A port of `0` asks the kernel for an ephemeral one, which is what an
+    /// embedded gateway does — the port it got is then read off the listener and
+    /// told to its client, never guessed.
+    pub listen: String,
     /// Directory holding the built frontend (index.html + assets), served from
     /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
     /// one is told where its bundle keeps it (`--web-root`).
@@ -1403,9 +1411,9 @@ impl ConfigFile {
     ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
             // Not `localhost`: that name resolves to both loopbacks and the client
-            // is told one port on one address. The app connects to 127.0.0.1.
-            host: "127.0.0.1".to_owned(),
-            port: 0,
+            // is told one port on one address. The app connects to 127.0.0.1, on
+            // whatever port the kernel gives us.
+            listen: "127.0.0.1:0".to_owned(),
             static_dir: web_root,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
@@ -1430,10 +1438,25 @@ impl ConfigFile {
             .to_owned()
     }
 
+    /// Resolve the runtime configuration with the file's own listen address.
+    /// See [`Self::resolve_with`] for the overriding form.
+    pub fn resolve(self) -> anyhow::Result<AppConfig> {
+        self.resolve_with(None)
+    }
+
     /// Resolve the runtime configuration: validate the web-login credential and
     /// carry over every target profile (the browser picks one after login).
-    pub fn resolve(self) -> anyhow::Result<AppConfig> {
+    ///
+    /// `listen` is `--listen`/`REMOTEX_LISTEN` when either was given, and it wins
+    /// over `[server].listen`. That is the whole precedence: one address, from the
+    /// command line if it is there and from the file otherwise.
+    pub fn resolve_with(self, listen: Option<&str>) -> anyhow::Result<AppConfig> {
         let server = self.server.unwrap_or_default();
+        let listen = match (listen, server.listen.as_deref()) {
+            (Some(value), _) => parse_listen(value).context("invalid --listen address")?,
+            (None, Some(value)) => parse_listen(value).context("invalid [server].listen")?,
+            (None, None) => DEFAULT_LISTEN.to_owned(),
+        };
         let site_passwd = server
             .site_passwd
             .as_deref()
@@ -1446,8 +1469,7 @@ impl ConfigFile {
         let site_passwd =
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
         Ok(AppConfig {
-            host: server.host.unwrap_or_else(|| "127.0.0.1".to_owned()),
-            port: server.port.unwrap_or(52380),
+            listen,
             static_dir: server.static_dir.unwrap_or_else(default_static_dir),
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
@@ -1465,6 +1487,43 @@ impl ConfigFile {
             allow_shell_origin: false,
         })
     }
+}
+
+/// Validate a listen address and return it in the form the bind path uses.
+///
+/// A port is required rather than defaulted: this value is written in exactly one
+/// place now, so `0.0.0.0` on its own is far more likely to be somebody who thinks
+/// they also said which port than somebody asking for 52380. `0` is a legitimate
+/// port here — it is how the kernel is asked for an ephemeral one.
+///
+/// An IPv6 literal must be bracketed, because without brackets there is nothing to
+/// tell `::1` from `<host>:<port>`: `::1` alone would be read as host `::` on port
+/// 1, which is a plausible address and the wrong one. Rather than guess, the
+/// unbracketed form is refused and the message says so.
+fn parse_listen(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    let (host, port) = value.rsplit_once(':').with_context(|| {
+        format!("{value:?} is not host:port — the port is required, as in \"{DEFAULT_LISTEN}\"")
+    })?;
+    anyhow::ensure!(
+        !host.is_empty(),
+        "{value:?} names no host — write the interface out, as in \"0.0.0.0:{port}\""
+    );
+    let port: u16 = port
+        .parse()
+        .with_context(|| format!("{port:?} is not a port number (0-65535)"))?;
+    if host.contains(':') {
+        let literal = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .with_context(|| {
+                format!("an IPv6 address must be bracketed, as in \"[::1]:{port}\"")
+            })?;
+        literal
+            .parse::<std::net::Ipv6Addr>()
+            .with_context(|| format!("{literal:?} is not an IPv6 address"))?;
+    }
+    Ok(format!("{host}:{port}"))
 }
 
 /// `<label>.localhost`, refusing anything that is not a single DNS label.
@@ -1629,8 +1688,7 @@ mod tests {
     #[test]
     fn minimal_config_gets_defaults() {
         let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
-        assert_eq!(config.host, "127.0.0.1");
-        assert_eq!(config.port, 52380);
+        assert_eq!(config.listen, DEFAULT_LISTEN);
         let GatewayAuth::Login(site_passwd) = &config.auth else {
             panic!("a served gateway logs in");
         };
@@ -1672,6 +1730,81 @@ mod tests {
             .unwrap()
             .resolve()
             .unwrap()
+    }
+
+    /// One key, and it carries both halves — including the shapes the old pair
+    /// could not express as one string, which is what the bracket rule is for.
+    #[test]
+    fn a_listen_address_is_one_key() {
+        assert_eq!(resolved(r#"listen = "0.0.0.0:8080""#).listen, "0.0.0.0:8080");
+        assert_eq!(resolved(r#"listen = "[::1]:52380""#).listen, "[::1]:52380");
+        assert_eq!(resolved(r#"listen = "localhost:52380""#).listen, "localhost:52380");
+        // Trimmed: a stray space cannot become part of an address.
+        assert_eq!(resolved(r#"listen = "  127.0.0.1:1  ""#).listen, "127.0.0.1:1");
+        // Port 0 is how the kernel is asked for an ephemeral one.
+        assert_eq!(resolved(r#"listen = "127.0.0.1:0""#).listen, "127.0.0.1:0");
+        // The pair this replaced is gone, not accepted alongside it.
+        for gone in [r#"host = "0.0.0.0""#, "port = 8080"] {
+            assert!(
+                ConfigFile::parse(&with_server(gone)).is_err(),
+                "{gone} is not half of [server].listen"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listen_address_that_is_not_host_port_is_refused() {
+        for bad in [
+            // Half an address. A defaulted port here would silently serve
+            // something other than what was written.
+            "0.0.0.0",
+            "localhost",
+            // Unbracketed IPv6: `::1` reads as host `::` on port 1, which is a
+            // plausible address and the wrong one, so it is refused rather than
+            // guessed at.
+            "::1",
+            "::1:52380",
+            "[::1:52380",
+            "[::zz]:52380",
+            ":52380",
+            "127.0.0.1:",
+            "127.0.0.1:notaport",
+            "127.0.0.1:65536",
+            "127.0.0.1:-1",
+        ] {
+            let err = ConfigFile::parse(&with_server(&format!("listen = {bad:?}")))
+                .and_then(ConfigFile::resolve)
+                .expect_err("should be refused: {bad:?}");
+            assert!(
+                format!("{err:#}").contains("[server].listen"),
+                "{bad:?} was refused without naming the key: {err:#}"
+            );
+        }
+    }
+
+    /// `--listen`/`REMOTEX_LISTEN` replaces the file's address whole, and is held
+    /// to the same shape — an override nobody validated is the one that turns a
+    /// typo into a gateway on an address nothing reaches.
+    #[test]
+    fn the_command_line_listen_address_wins_and_is_checked() {
+        let file = ConfigFile::parse(&with_server(r#"listen = "127.0.0.1:1""#)).unwrap();
+        assert_eq!(
+            file.clone().resolve_with(Some("0.0.0.0:8080")).unwrap().listen,
+            "0.0.0.0:8080"
+        );
+        // Absent, the file still decides.
+        assert_eq!(file.clone().resolve_with(None).unwrap().listen, "127.0.0.1:1");
+        // And a config with no address at all falls back to the default.
+        assert_eq!(
+            ConfigFile::parse(&minimal()).unwrap().resolve_with(None).unwrap().listen,
+            DEFAULT_LISTEN
+        );
+
+        let err = file.resolve_with(Some("0.0.0.0")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--listen"),
+            "a bad override must name where it came from: {err:#}"
+        );
     }
 
     // The dev-only hostname. Its validation is the reason the redirect target is
@@ -1769,8 +1902,7 @@ mod tests {
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
-            host = "0.0.0.0"
-            port = 8080
+            listen = "0.0.0.0:8080"
             static_dir = "/srv/web"
             {}
 
@@ -1795,8 +1927,7 @@ mod tests {
         ))
         .unwrap();
         let config = config.resolve().unwrap();
-        assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.port, 8080);
+        assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.static_dir, PathBuf::from("/srv/web"));
         // Every profile is carried over, in file order, for the picker.
         assert_eq!(config.targets.len(), 2);

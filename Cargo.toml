@@ -37,7 +37,7 @@ serde_json = "1"
 # embedded in the binary — they ship alongside it under share/remotex/web.
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "2"
 log = "0.4"

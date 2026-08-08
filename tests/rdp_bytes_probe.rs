@@ -57,8 +57,7 @@ async fn wait_for_rdp_port(port: u16) {
 
 async fn spawn_app(rdp_port: u16) -> SocketAddr {
     let config = AppConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 0,
+        listen: "127.0.0.1:0".to_owned(),
         static_dir: "frontend/dist".into(),
         auth: common::test_auth(),
         branding: "remotex".to_owned(),

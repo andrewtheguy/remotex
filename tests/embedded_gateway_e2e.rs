@@ -346,7 +346,7 @@ fn a_server_block_refuses_the_start() {
     let dir = common::ScratchDir::new("embedded-server-block");
     dir.write(
         "remotex.toml",
-        &format!("[server]\nport = 1234\n{}", one_target()),
+        &format!("[server]\nlisten = \"0.0.0.0:1234\"\n{}", one_target()),
     );
 
     let web = web_root(&dir);

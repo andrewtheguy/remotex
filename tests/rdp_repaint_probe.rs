@@ -71,8 +71,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
         .clone();
     let size = profile.default_size();
 
-    config.host = "127.0.0.1".to_owned();
-    config.port = 0;
+    config.listen = "127.0.0.1:0".to_owned();
     config.static_dir = "frontend/dist".into();
     config.auth = common::test_auth();
 

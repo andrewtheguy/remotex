@@ -2,9 +2,11 @@
 #
 # The binary loads this file on startup (see src/config.rs). The config is
 # global-only: --config <path> if given, else the installed
-# <prefix>/etc/remotex.toml — no per-user or working-directory files. There are
-# no environment variables — everything is configured here. Keep this file
-# readable only by the service user — it holds credentials.
+# <prefix>/etc/remotex.toml — no per-user or working-directory files. The listen
+# address below is the one setting that can also come from outside this file
+# (--listen, or REMOTEX_LISTEN); everything else, credentials included, is
+# configured here. Keep this file readable only by the service user — it holds
+# credentials.
 #
 #   chmod 600 remotex.toml
 #
@@ -24,9 +26,14 @@
 #branding = "remotex"
 
 [server]
-# Listen address/port for the web UI (both optional; defaults shown).
-#host = "127.0.0.1"
-#port = 52380
+# Listen address for the web UI, host:port (optional; default shown). One key,
+# because it is one decision — a host without a port is half an answer.
+#
+# --listen (or REMOTEX_LISTEN in the environment) overrides this, whole: the
+# command line cannot supply one half and leave the other to this file. Bracket
+# an IPv6 literal, as in "[::1]:52380". A container publishing this port wants
+# "0.0.0.0:52380".
+#listen = "127.0.0.1:52380"
 # Directory of the built frontend. Defaults to share/remotex/web in the active
 # version (or frontend/dist in a checkout). Only set to override.
 #static_dir = ""

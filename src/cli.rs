@@ -27,6 +27,11 @@ pub enum Commands {
         /// required when running from a checkout)
         #[arg(short, long)]
         config: Option<PathBuf>,
+
+        /// Address to listen on, host:port — overrides [server].listen
+        /// (default: 127.0.0.1:52380). Bracket an IPv6 literal: [::1]:52380
+        #[arg(short, long, env = "REMOTEX_LISTEN")]
+        listen: Option<String>,
     },
 
     /// Start the gateway inside remotex.app: an ephemeral port on 127.0.0.1, the
@@ -80,7 +85,7 @@ mod tests {
     #[test]
     fn serve_parses_config() {
         let cli = Cli::try_parse_from(["remotex", "serve", "-c", "/etc/x.toml"]).unwrap();
-        let Commands::Serve { config } = cli.command else {
+        let Commands::Serve { config, .. } = cli.command else {
             panic!("expected the serve subcommand");
         };
         assert_eq!(config.as_deref(), Some(std::path::Path::new("/etc/x.toml")));
@@ -89,10 +94,33 @@ mod tests {
     #[test]
     fn serve_config_is_optional() {
         let cli = Cli::try_parse_from(["remotex", "serve"]).unwrap();
-        let Commands::Serve { config } = cli.command else {
+        let Commands::Serve { config, listen } = cli.command else {
             panic!("expected the serve subcommand");
         };
         assert!(config.is_none());
+        assert!(listen.is_none(), "unset means the config file decides");
+    }
+
+    /// The listen address is one value on the command line as it is one key in
+    /// the file: there is no `--host`/`--port` pair to disagree with each other.
+    #[test]
+    fn serve_takes_one_listen_address() {
+        for argv in [
+            vec!["remotex", "serve", "--listen", "0.0.0.0:8080"],
+            vec!["remotex", "serve", "-l", "0.0.0.0:8080"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            let Commands::Serve { listen, .. } = cli.command else {
+                panic!("expected the serve subcommand");
+            };
+            assert_eq!(listen.as_deref(), Some("0.0.0.0:8080"));
+        }
+        for gone in ["--host", "--port"] {
+            assert!(
+                Cli::try_parse_from(["remotex", "serve", gone, "x"]).is_err(),
+                "{gone} is half an address: the listen address is one option"
+            );
+        }
     }
 
     #[test]
