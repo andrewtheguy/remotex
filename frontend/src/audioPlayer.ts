@@ -4,8 +4,8 @@
 // a passthrough packet is already samples. The scheduling half below is the same
 // either way and is where the interesting behaviour is.
 //
-// AudioContext creation stays in the enabling click. WebCodecs is required only
-// for the encoded path, which is also the only one that needs a secure context.
+// AudioContext creation stays in the enabling click. WebCodecs is required only for
+// the encoded path.
 
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
@@ -112,19 +112,16 @@ function packetDurationUs(format: AudioFormat): number {
 }
 
 /**
- * Why a *decoder* cannot be had here, distinguishing insecure origin from no
- * decoder at all.
+ * Why a *decoder* cannot be had here.
  *
- * Only asked about a format that needs one (see {@link needsDecoder}): a
- * passthrough stream plays without WebCodecs, and so plays on origins where
- * WebCodecs does not exist.
+ * One reason, because a secure context is the client's entry condition rather than
+ * something to discover here: what is left is a browser without WebCodecs audio at
+ * all, which is Firefox and Safari. Only asked about a format that needs a decoder
+ * (see {@link needsDecoder}) — a passthrough stream never reaches one.
  */
 export function audioUnavailable(): string | null {
   if (typeof AudioDecoder !== "undefined") {
     return null;
-  }
-  if (!window.isSecureContext) {
-    return "Audio needs a secure context: reach this gateway over HTTPS (or localhost).";
   }
   return "This browser has no WebCodecs audio decoder.";
 }

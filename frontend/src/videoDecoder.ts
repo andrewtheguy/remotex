@@ -46,13 +46,12 @@ export interface VideoFormat {
 }
 
 /**
- * Why video cannot play here, distinguishing an insecure origin from a browser with
- * no decoder — the same two cases, in the same order, as `audioUnavailable`.
+ * Why video cannot play here — a browser with no decoder, which is the one case left
+ * once a secure context is the client's entry condition rather than a discovery.
  *
- * `VideoDecoder` is secure-context only, exactly like the `AudioDecoder` remote audio
- * already uses. The difference is what it costs: no audio decoder means silence,
- * where no video decoder means a desktop that never paints at all, so this is said
- * plainly rather than logged.
+ * Said plainly rather than logged, which is the difference from `audioUnavailable`:
+ * no audio decoder means silence, where no video decoder means a desktop that never
+ * paints at all.
  *
  * Reachable, and by an ordinary route: nothing asks this browser what it can decode
  * before a target is picked. A gateway once probed for that and refused the pick — the
@@ -64,12 +63,6 @@ export interface VideoFormat {
 export function videoUnavailable(): string | null {
   if (typeof VideoDecoder !== "undefined") {
     return null;
-  }
-  // `globalThis`, not `window`: this runs inside the paint worker, which has no
-  // `window` — and a worker's secure-context bit is its creator document's, so
-  // the answer is the same one the page would give.
-  if (!globalThis.isSecureContext) {
-    return "This target sends video, which needs a secure context: reach this gateway over HTTPS (or localhost).";
   }
   return "This target sends video, and this browser has no WebCodecs video decoder.";
 }

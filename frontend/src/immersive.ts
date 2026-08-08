@@ -65,7 +65,7 @@ function keyboardApi(): KeyboardLockApi | undefined {
  * Firefox and Safari have no `navigator.keyboard`, which is what this actually asks.
  */
 export function available(): boolean {
-  if (typeof document === "undefined" || typeof window === "undefined") {
+  if (typeof document === "undefined") {
     return false;
   }
   const keyboard = keyboardApi();
@@ -120,9 +120,9 @@ export function onKeyboardLockChange(
 /**
  * Go fullscreen and take the lock. **Must be called from a user gesture.**
  *
- * Resolves to whether the lock was taken. Fullscreen without a lock is a real and
- * useful outcome — it is what a non-secure origin gets — so a rejected `lock()` leaves
- * the page fullscreen rather than undoing it; the caller shows the difference.
+ * Resolves to whether the lock was taken. Fullscreen without a lock is still a real
+ * outcome, so a rejected `lock()` leaves the page fullscreen rather than undoing it;
+ * the caller shows the difference.
  */
 export async function enterImmersive(
   codes: readonly string[] = DEFAULT_LOCK_CODES,

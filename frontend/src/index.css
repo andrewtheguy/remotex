@@ -186,11 +186,9 @@ body {
   background: #30363d;
 }
 
-/* Phase 7: the login gate. A plain centered form; the version sits pinned at
-  the bottom of the screen. */
 /* The client refusing to start, and the only thing on the page when it does. Built
    from plain DOM in secureContext.ts, before React, so it deliberately shares nothing
-   with the login screen below it beyond the centring. */
+   with the login gate below beyond the centring. */
 .boot-refusal {
   position: fixed;
   inset: 0;
@@ -223,6 +221,8 @@ body {
   color: #6e7681;
 }
 
+/* Phase 7: the login gate. A plain centered form; the version sits pinned at
+  the bottom of the screen. */
 .login-screen {
   position: fixed;
   inset: 0;
@@ -1243,15 +1243,6 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #8b949e;
-}
-
-.cb-copy-fallback {
-  position: fixed;
-  top: -10000px;
-  left: -10000px;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
 }
 
 .cb-actions {

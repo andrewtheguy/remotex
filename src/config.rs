@@ -205,8 +205,8 @@ pub enum AudioCodec {
     ///
     /// For a fast local network, where those megabits are free and the thing
     /// worth removing is everything that touches a sample. It is also the only
-    /// option that plays without WebCodecs, and therefore the only one that
-    /// works over plain `http://` to a host that is not `localhost`.
+    /// option that plays without WebCodecs, and therefore the only one a browser
+    /// with no Opus decoder can play at all.
     Pcm,
 }
 

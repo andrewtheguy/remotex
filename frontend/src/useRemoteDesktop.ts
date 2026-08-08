@@ -1289,7 +1289,7 @@ export function useRemoteDesktop(
       if (postToCompanion({ type: "clipboardFromRemote", text })) {
         return;
       }
-      void navigator.clipboard?.writeText?.(text).catch(() => {});
+      void navigator.clipboard.writeText(text).catch(() => {});
     };
 
     const handleControlMsg = (msg: ControlMsg) => {
@@ -1361,12 +1361,12 @@ export function useRemoteDesktop(
             // before the actual response arrives.
             settleClipboardWaiters(snapshot);
           } else {
-            // A copy on the remote is immediately pastable here. Best effort
-            // by design: `writeText` is absent on a non-secure origin and can
-            // reject when the tab is unfocused. Never mirror an empty push,
-            // which would wipe the local clipboard for a non-text remote copy —
-            // a refused oversized copy arrives as one of those, and the panel
-            // is where its size is reported.
+            // A copy on the remote is immediately pastable here. Best effort by
+            // design: `writeText` rejects when the tab is unfocused, which is
+            // exactly when a remote copy is most likely to arrive. Never mirror an
+            // empty push, which would wipe the local clipboard for a non-text
+            // remote copy — a refused oversized copy arrives as one of those, and
+            // the panel is where its size is reported.
             mirrorRemoteClipboard(text);
           }
           break;
@@ -1598,11 +1598,10 @@ export function useRemoteDesktop(
       releaseAudio();
       if (enabled) {
         // Asked for without checking whether this browser can decode it, because
-        // that is not answerable yet: a passthrough target needs no decoder and
-        // plays where WebCodecs does not exist at all, and only the `audioFormat`
-        // that comes back says which kind of target this is. `startAudio` is where
-        // the question can be asked, and its catch reports the same two reasons —
-        // a browser with no decoder, or an insecure origin — a round trip later.
+        // that is not answerable yet: a passthrough target needs no decoder at all,
+        // and only the `audioFormat` that comes back says which kind of target this
+        // is. `startAudio` is where the question can be asked, and its catch reports
+        // the answer a round trip later.
         audioContextRef.current = createAudioContext();
         audioSocketRef.current?.open();
       } else {
@@ -1734,9 +1733,9 @@ export function useRemoteDesktop(
       void (async () => {
         let text: string;
         try {
-          text = (await navigator.clipboard?.readText?.()) ?? "";
+          text = await navigator.clipboard.readText();
         } catch {
-          return; // no permission, no secure context, or the user declined
+          return; // no permission, or the user declined
         }
         if (
           text === "" ||

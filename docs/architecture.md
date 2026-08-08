@@ -420,10 +420,10 @@ on the main thread anyway — and is mostly presentation: a transferred canvas c
 from the worker, so a frame reaches the screen without the thread carrying input and
 React being scheduled for it.
 
-`VideoDecoder` is secure-context only — the same limit remote audio already has, but a
-worse one to hit, since no audio decoder means silence beside a working desktop and no
-video decoder means no desktop. So a failure is *said* rather than logged: a banner
-that stays up, naming the configuration the browser would not take.
+A browser without `VideoDecoder` is a worse case to hit than one without
+`AudioDecoder`: no audio decoder means silence beside a working desktop, and no video
+decoder means no desktop. So a failure is *said* rather than logged: a banner that
+stays up, naming the configuration the browser would not take.
 
 #### The codec
 
@@ -636,8 +636,7 @@ is deliberately not a WebCodecs codec string — the packets are interleaved
 signed 16-bit little-endian samples, which is what an `AudioBuffer` holds
 already, so the client builds one directly and schedules it on the same path an
 Opus packet reaches after decoding. That makes it the only option that plays
-without WebCodecs, and therefore the only one that works over plain `http://` to
-a host that is not `localhost`.
+without WebCodecs, and so the only one a browser with no Opus decoder can play.
 
 It also makes it the only option whose `sampleRate` is not 48 000. An
 `AudioBuffer` carries its own rate, so a context built at 48 kHz before the
@@ -680,10 +679,6 @@ anything itself: an *encoded* stream goes to WebCodecs, so a codec a browser wil
 not take surfaces as a decoder error naming it rather than as silence. A
 `pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
 `AudioBuffer` and schedules it directly.
-
-The secure-context requirement belongs to that first path alone. WebCodecs is
-unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
-localhost, while passthrough plays anywhere.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -757,8 +752,8 @@ remote-to-local synchronization; an explicit fetch fills the UI until the user
 chooses Copy.
 
 Transfers are capped at 64 KiB and refused rather than truncated. Browser
-clipboard integration is best effort because insecure origins and Safari
-permission rules may prevent automatic access.
+clipboard integration is best effort because Safari's permission rules, and an
+unfocused tab, may prevent automatic access.
 
 ### Liveness
 
@@ -976,6 +971,22 @@ data messages inside its encrypted record layer. See
 The React SPA has login, target picker, and remote desktop states. It renders
 tiles to a canvas, applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
+
+**It refuses to start outside a secure context** (`secureContext.ts`, before React
+mounts), and that refusal is what lets the rest of the client be simple: WebCodecs,
+`navigator.clipboard` and `navigator.keyboard` all require one, and nothing
+downstream tests for it again or carries a fallback for its absence. The gateway
+speaks plain HTTP and has no TLS listener, so a secure context comes from how the
+page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`, any `.localhost`
+label), a TLS-terminating reverse proxy, or the shell's own `remotex://app` scheme.
+A LAN address over plain `http://` is the case this refuses, by name.
+
+Full screen plus `navigator.keyboard.lock` (`immersive.ts`) is how a tab is given
+the six Command chords a browser otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R — plus ⌘Q,
+which is locked but not translated. The Command translation table follows the lock
+rather than being chosen once, because a held Esc ends a lock at any moment and that
+escape hatch is uncapturable by design. A live session also arms the browser's own
+leave-site dialog, so a close chord asks first.
 
 The canvas is presented at the remote's point size, derived from framebuffer
 pixels and remote scale. Desktop clients scroll when necessary. Touch clients

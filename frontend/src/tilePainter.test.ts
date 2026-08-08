@@ -245,14 +245,8 @@ const globals = globalThis as unknown as {
   VideoDecoder: unknown;
   EncodedVideoChunk: unknown;
   /** Optional because this runtime has none, which is the point of the test. */
-  window?: unknown;
 };
 const realCreateImageBitmap = globals.createImageBitmap;
-// Usually absent — this runtime is not a browser — but restored rather than
-// deleted, so the one test that needs a `window` cannot leave a half-built
-// global behind for whatever runs next.
-const realWindow = globals.window;
-const hadWindow = "window" in globals;
 
 beforeEach(() => {
   drawn = [];
@@ -313,11 +307,6 @@ afterEach(() => {
   globals.createImageBitmap = realCreateImageBitmap;
   globals.VideoDecoder = undefined;
   globals.EncodedVideoChunk = undefined;
-  if (hadWindow) {
-    globals.window = realWindow;
-  } else {
-    delete globals.window;
-  }
 });
 
 function painter(ctx: CanvasRenderingContext2D | null = context) {
@@ -1102,9 +1091,6 @@ test("a runtime with no video decoder says so rather than showing nothing", asyn
   // tiles, so the alternative is a desktop that never paints and never explains
   // itself.
   globals.VideoDecoder = undefined;
-  // A secure origin with no decoder, which is the honest half of the pair: the
-  // other message is about the origin, and only a browser can be insecure.
-  globals.window = { isSecureContext: true };
   await announced().draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },

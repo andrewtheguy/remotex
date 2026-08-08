@@ -81,7 +81,7 @@ impl PcmStream {
     /// The second half of the pair is the decoder configuration, and it is empty:
     /// there is no decoder to configure. `audioFormat`'s rate and channel count
     /// are the whole description, which is what makes this the one option that
-    /// needs neither WebCodecs nor a secure context to play.
+    /// needs no WebCodecs decoder to play.
     pub fn new(format: PcmFormat) -> Result<(Self, Vec<u8>), anyhow::Error> {
         anyhow::ensure!(
             format.channels > 0,

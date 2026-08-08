@@ -136,7 +136,7 @@ For counts, assert invariant relationships such as `records > frames`.
   are in `tests/playwright/support.ts`.
 - Every spec must call `returnToPicker`; otherwise the live target session can
   leak into the next spec. `logInAndConnect` tolerates either initial landing.
-- After Playwright changes, run `npm run typecheck` in `tests/playwright/`.
+- After Playwright changes, run `bun run typecheck` in `tests/playwright/`.
 - Keep accepted specs there, not in `tmp/`, and run new specs repeatedly.
 - A wire-format spec must use its own parser, not the SPA's. Rust e2e drives a raw
   WebSocket, while TS unit tests parse self-built frames; this is the
@@ -175,9 +175,9 @@ The choice is per target, not per client, and the gateway names it on the wire �
 `ServerMsg::AudioFormat` carries the codec string, the decoder configuration and
 `packetFrames`. The client does not decode anything itself: it hands encoded
 packets to WebCodecs, so a codec a browser refuses surfaces as a named decoder
-error rather than as silence. Passthrough reaches no
-decoder at all, which is why it is the one option that plays on a plain `http://`
-origin — WebCodecs needs a secure context and Web Audio does not.
+error rather than as silence. Passthrough reaches no decoder at all, which is why
+it is the one option a browser with no WebCodecs audio can play — Web Audio alone
+is enough for it.
 
 `src/pcm48.rs` is the *encoded* front half — deinterleave and resample in exact
 882-to-960 groups — and a codec draws its own packet size out of it. Passthrough

@@ -56,11 +56,9 @@ const fakeNavigator = {
 const globals = globalThis as unknown as {
   document: unknown;
   navigator: unknown;
-  window: unknown;
 };
 globals.document = fakeDocument;
 globals.navigator = fakeNavigator;
-globals.window = { isSecureContext: true };
 
 function leaveFullscreenOutsideThisModule(): void {
   fullscreenElement = null;

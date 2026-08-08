@@ -21,10 +21,7 @@ let fetches = 0;
 
 beforeEach(() => {
   fetches = 0;
-  globals.window = {
-    location: { origin: "https://gateway.test" },
-    isSecureContext: true,
-  };
+  globals.window = { location: { origin: "https://gateway.test" } };
 });
 
 afterEach(() => {

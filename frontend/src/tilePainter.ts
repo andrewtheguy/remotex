@@ -217,8 +217,9 @@ export function createTilePainter(options: {
   let video: VideoStreams | null = null;
 
   // Set when `createVideoStreams` refused, which means this runtime has no video
-  // decoder at all. Cleared with the decoders, since a new attachment is a new chance —
-  // the same page could have been reached over HTTPS the second time.
+  // decoder at all. Cleared with the decoders rather than kept for the worker's
+  // lifetime: this is a fact about an attachment's stream, and the next attachment
+  // asks again for itself rather than inheriting a refusal.
   let videoUnusable = false;
 
   // What is on screen about video, and whether a painted frame may take it down.
