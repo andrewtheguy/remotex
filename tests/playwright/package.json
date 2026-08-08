@@ -2,10 +2,16 @@
   "name": "remotex-playwright-e2e",
   "private": true,
   "scripts": {
+    "deps": "test -x node_modules/.bin/tsc || bun install --frozen-lockfile",
+    "pretest": "bun run deps",
     "test": "playwright test",
+    "pretest:clipboard": "bun run deps",
     "test:clipboard": "playwright test '/clipboard\\.spec\\.ts$'",
+    "pretest:oversized": "bun run deps",
     "test:oversized": "playwright test '/oversized-clipboard\\.spec\\.ts$'",
+    "pretest:video": "bun run deps",
     "test:video": "playwright test '/video-stream\\.spec\\.ts$'",
+    "pretypecheck": "bun run deps",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

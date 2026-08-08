@@ -57,13 +57,16 @@ landing, so a run abandoned on the desktop does not break the next one.
 
 ## Run
 
-Install the pinned runner and Chromium once:
+Install Chromium once:
 
 ```sh
 cd tests/playwright
-npm ci
-npx playwright install chromium
+bunx playwright install chromium
 ```
+
+The runner itself needs no separate step: every `bun run` script here installs the
+pinned dependencies first if `node_modules` is missing, which it is in a fresh
+clone.
 
 Start the gateway and Vite proxy from the repository root in separate terminals:
 
@@ -85,11 +88,11 @@ REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_TARGET='mac' \
 REMOTEX_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
 REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING='<mac-host>:5900' \
-npx playwright test
+bun run test
 ```
 
 `REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING` opts into the specs that need a live Mac
-target; without it they skip, so a plain `npx playwright test` never assumes a VM
+target; without it they skip, so a plain `bun run test` never assumes a VM
 is up. The helper checks that the Mac's Screen Sharing service is listening at
 that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
@@ -109,7 +112,7 @@ REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
 REMOTEX_PLAYWRIGHT_USERNAME='admin' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_VIDEO_TARGET='video' \
-npm run test:video
+bun run test:video
 ```
 
 That gateway serves the built SPA from `frontend/dist`, so run `bun run build` in
@@ -129,22 +132,22 @@ REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
 REMOTEX_PLAYWRIGHT_USERNAME='admin' \
 REMOTEX_PLAYWRIGHT_PASSWORD='hunter2' \
 REMOTEX_PLAYWRIGHT_AUDIO_TARGET='test-tone' \
-npx playwright test '/audio-socket\.spec\.ts$'
+bunx playwright test '/audio-socket\.spec\.ts$'
 ```
 
-A bare `npx playwright test` runs all specs. `npm run test:clipboard`,
-`npm run test:oversized` and `npm run test:video` run one each; their filters are
+`bun run test` runs all specs. `bun run test:clipboard`,
+`bun run test:oversized` and `bun run test:video` run one each; their filters are
 anchored (`'/clipboard\.spec\.ts$'`) because a positional argument is a regex matched
 against the whole path, and the bare name `clipboard.spec.ts` also matches
 `oversized-clipboard.spec.ts`.
 
 The specs are TypeScript, which Playwright transpiles itself — and transpiling is
-all it does, so a type error would otherwise never surface. `npm run typecheck`
+all it does, so a type error would otherwise never surface. `bun run typecheck`
 is what actually checks them:
 
 ```sh
 cd tests/playwright
-npm run typecheck
+bun run typecheck
 ```
 
 The defaults are `http://127.0.0.1:5173/` and target `mac`. Override the URL
