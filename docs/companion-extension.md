@@ -32,7 +32,8 @@ kind to serve, no capability that is present in one and missing in the other, an
 state where half of it works.
 
 A tab is not left unserved so much as served by the client itself. Full screen plus
-Keyboard Lock (`frontend/src/immersive.ts`) gives a tab the chords, the close guard in
+Keyboard Lock (`frontend/src/immersive.ts`) gives a tab the chords — automatically, on
+any full screen the page can observe, including the browser's own ⌃⌘F — the close guard in
 `useRemoteDesktop.ts` gives it the leave-site dialog, and the clipboard falls back to
 the page's own focus-driven sync. Nothing there is worse for the extension declining to
 participate; the answer to "I want more" is the app window, which is one menu item away.

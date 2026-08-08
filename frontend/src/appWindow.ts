@@ -27,7 +27,9 @@
 // Read as the three *app* display modes rather than as "not `browser`", because a plain
 // tab reports `display-mode: fullscreen` the moment it goes full screen, and that window
 // is given no chords at all: it is `immersive.ts`'s keyboard lock that changes a tab's
-// answer, not the fullscreen underneath it.
+// answer, not the fullscreen underneath it. `immersive.ts` watches that same `fullscreen`
+// answer live, for the opposite reason — it is the only way to see a ⌃⌘F — which is why
+// the two modules read one media feature and disagree about whether it may move.
 const APP_DISPLAY_MODES = [
   "standalone",
   "minimal-ui",
