@@ -117,7 +117,8 @@ docker run -d --name remotex -p 52380:52380 \
   ghcr.io/andrewtheguy/remotex:latest
 ```
 
-Set `[server].host = "0.0.0.0"` in the mounted config. Images are published for
+Set `[server].listen = "0.0.0.0:52380"` in the mounted config, or pass the same
+address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. Images are published for
 Linux amd64 and arm64 with `latest` and `v<version>` tags.
 
 Generate the required web-login credential with:

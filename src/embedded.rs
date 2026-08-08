@@ -145,15 +145,21 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
     // `serve` binds every address its host name resolves to, for reasons that do not
     // apply here: the client is told a single port on a single address by the line
     // below, so there is no name to resolve and no second family for it to arrive on.
-    let listener = TcpListener::bind((config.host.as_str(), config.port))
-        .with_context(|| format!("cannot listen on {}", config.host))?;
-    let port = listener
+    // Always TCP here: `resolve_embedded` decides this address, and an embedded
+    // config may not carry a `[server]` block to argue with it. The refusal is for
+    // the day that stops being true, because the app's client cannot address a
+    // socket file.
+    let crate::config::ListenAddr::Tcp(addr) = &config.listen else {
+        anyhow::bail!("the embedded gateway listens on loopback TCP, which its client addresses by URL");
+    };
+    let listener =
+        TcpListener::bind(addr.as_str()).with_context(|| format!("cannot listen on {addr}"))?;
+    let local = listener
         .local_addr()
-        .context("cannot read the port the kernel gave us")?
-        .port();
+        .context("cannot read the port the kernel gave us")?;
 
     let handshake = Handshake {
-        port,
+        port: local.port(),
         token: token.as_str().to_owned(),
     };
     // Written and flushed before the runtime is handed the socket: the app is
@@ -165,7 +171,8 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
         .context("cannot write the handshake to stdout")?;
     drop(stdout);
 
-    info!("embedded gateway listening on http://{}:{port}", config.host);
+    // The bound socket rather than the configured address: the port there is 0.
+    info!("embedded gateway listening on http://{local}");
     info!("config: {}", instance.config_path().display());
     info!("web root: {}", config.static_dir.display());
     info!("{} target(s) available in the picker:", config.targets.len());
@@ -319,7 +326,7 @@ mod tests {
     /// message that says which keys belong instead.
     #[test]
     fn the_embedded_audience_refuses_a_server_block() {
-        for text in ["[server]\n", "[server]\nport = 1234\n"] {
+        for text in ["[server]\n", "[server]\nlisten = \"0.0.0.0:1234\"\n"] {
             let error = check(text, Audience::Embedded).expect_err("[server] is the app's");
             let message = format!("{error:#}");
             assert!(message.contains("[server]"), "{message}");

@@ -42,8 +42,10 @@ RUN ln -s "versions/${VERSION}" /opt/remotex/current && mkdir -p /opt/remotex/et
 #
 #   docker run -p 52380:52380 -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro ...
 #
-# It must set [server] host = "0.0.0.0"; the 127.0.0.1 default is unreachable
-# from outside the container. A template ships at
+# It must set [server] listen = "0.0.0.0:52380" — or the run must pass
+# -e REMOTEX_LISTEN=0.0.0.0:52380, which is the same setting from the one place a
+# container has that is not the mounted file; the 127.0.0.1 default is
+# unreachable from outside the container. A template ships at
 # /opt/remotex/current/share/doc/remotex/remotex.toml.example.
 EXPOSE 52380
 
