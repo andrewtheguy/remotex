@@ -19,6 +19,12 @@ export function createViewerWindow(
     minHeight: MINIMUM_SIZE.height,
     show: false,
     backgroundColor: "#101014",
+    // macOS swallows the click that activates a window, but delivers the moves
+    // before it — so an unfocused desktop tracks the cursor and then ignores the
+    // click that follows it, which reads as the remote having missed it. The
+    // surface is a guest's desktop: a click on it is meant for the guest, whether
+    // or not this window happened to be in front.
+    acceptFirstMouse: true,
     webPreferences: {
       preload: join(distDir, "bridge.cjs"),
       contextIsolation: true,
