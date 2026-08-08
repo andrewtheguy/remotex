@@ -25,9 +25,9 @@ It is not built yet; this is its design.
 
 **The extension does nothing in an ordinary tab.** The content script exits, the page
 posts nothing, and `frontend/src/companion.ts` settles to `absent` on the first render
-without a handshake. That is the simplification the whole design rests on: no second
-UI for a windowless popup to drive, no capability that is present in one window kind
-and missing in another, and no state where half of it works.
+without a handshake. That is the simplification the whole design rests on: one window
+kind to serve, no capability that is present in one and missing in the other, and no
+state where half of it works.
 
 A tab is not left unserved so much as served by the client itself. Full screen plus
 Keyboard Lock (`frontend/src/immersive.ts`) gives a tab the chords, the close guard in
@@ -69,8 +69,11 @@ The per-key table in
 macOS, whose Cocoa menu redispatch is its own thing — the ranking of which keys are
 free, which are page-first and which are hopeless still wants one pass on Windows.
 
-**It has no toolbar.** No action icon, no popup. Every control the user needs is
-therefore in the page, which is where the client's floating menu already is.
+**It still has extensions.** An app window shows extension icons beside its three-dot
+menu — 1Password's locked/unlocked state is right there — so the action icon and its
+popup work exactly as they do in a browser window. That is what makes the icon worth
+building at all: it is the enabled indicator in the one configuration this runs in, and
+its popup is where Resize to display lives.
 
 **What no window of any kind gets**: Alt+F4, Alt+Tab, the Windows key, Ctrl+Alt+Del,
 and on a Mac ⌘Tab, ⌘Space and the screenshot chords. Those belong to the OS, and
@@ -119,9 +122,10 @@ What is deliberately absent is every other `NativeCommand` variant — `openClip
 *hides* the floating menu. Here that menu is on screen, and a command for what it
 already does would be a second UI for the same control.
 
-`resizeToDisplay` is the one request that goes the other way, and it carries no
-payload: the extension has the framebuffer from the last `state` and measures the
-window itself, so what it needs is not the numbers but the asking.
+Resize is on neither side of the seam. The page reports the framebuffer in
+`NativeState.size` because the menu bar already needed it, and the extension measures
+the window from its own content script — a resize is arithmetic over two things it
+already has, and the popup is where it is asked for.
 
 ## Detection is asynchronous, and monotonic
 
@@ -176,17 +180,14 @@ apps/companion/
     messages.ts               ToWorker / ToContent / ToOffscreen + type guards
     geometry.ts               re-exports apps/viewer/src/main/geometry.ts
     resize.ts                 PURE window arithmetic
-  src/worker/                 stateless router, ensureOffscreen, resize
+  src/worker/                 stateless router, ensureOffscreen, per-window icon, resize
   src/content/                the app-window and whitelist gates, and the page bridge
   src/offscreen/              the clipboard poller
+  src/popup/                  the state card and Resize to display
   src/options/                the whitelist and the two feature toggles
   scripts/build.ts            Bun.build, mirroring apps/viewer/scripts/build.ts
   tests/
 ```
-
-No popup, because the window it would hang off has no toolbar. Settings live in the
-options page, reachable from `chrome://extensions` in an ordinary browser window —
-setup, done once, and not something the shim window has to carry.
 
 Toolchain mirrors `apps/viewer` exactly: TypeScript, `Bun.build`, biome,
 `tsc --noEmit`, `bun test tests`.
@@ -245,11 +246,18 @@ nothing about a tab can change into a case it serves.
 **Nothing is posted before both gates pass.** A `hello` on every page would tell every
 site on the internet that this user runs a remote-desktop extension, and which version.
 
-### Resize to display
+### The popup, and Resize to display
 
-The floating menu carries it, and renders it only where `useCompanionCapabilities()`
-reports a connected companion with `resize` — present exactly when it works, absent
-rather than dead otherwise. Pressing it posts `resizeToDisplay` over the seam.
+Triggered from the popup only. The page's floating menu gains nothing: it would be a
+control that exists in one browser configuration and not another, and the popup is
+reachable from the app window anyway.
+
+The popup is a state card and one button. The card is `NativeState` as last reported —
+which target, the framebuffer as `1920 × 1080 @2x`, whether the clipboard bridge is on
+— and **Resize to display**, disabled unless a size has been reported and
+`capabilities.resize` is set. The host row shows the whitelist entry covering this
+window, with a switch; where the only thing covering it is a wildcard, that is said
+rather than the broad rule silently deleted.
 
 `apps/viewer/src/main/geometry.ts` is already exactly this arithmetic — pure, importing
 nothing, tested, and already carrying the rule that matters most here: the window is
@@ -282,58 +290,79 @@ does not exist in an offscreen document.
 The page's own guards (`lastFromRemoteRef` / `lastToRemoteRef`) are the same loop seen
 from the other side and are untouched.
 
+### The toolbar icon
+
+Two variants, on and off, painted per `tabId` from `chrome.tabs.onUpdated` (on
+`loading` *and* whenever `changeInfo.url` is set — that is how a SPA's `pushState` shows
+up), `onActivated`, `windows.onFocusChanged` and `storage.onChanged`. Per-tab icon state
+is reset by Chrome on navigation, so `onUpdated` is required rather than an
+optimisation.
+
+Off is the honest answer for the same window in a tab, which is where most of the icon's
+work is: the difference between "this site is not whitelisted" and "this is not an app
+window" is the whole of what someone needs told, and the title says which.
+
+The icon is **cosmetic and best-effort**. The gate is the content script's two checks
+and is always right; nobody should make the icon authoritative.
+
+No badge in the normal case. A badge that is always there says nothing.
+
 ## Testing
 
 Deterministic and worth having: the whitelist matcher (table-driven, and the most
 valuable file in the tree), the app-window gate, the resize arithmetic, the message
-guards, the worker's router over a fake `chrome`, and a `manifest.test.ts` asserting
-the permission array against a literal — a test that goes red the day someone adds one.
+guards, `iconStateFor`, the worker's router over a fake `chrome`, and a
+`manifest.test.ts` asserting the permission array against a literal — a test that goes
+red the day someone adds one.
 
 Nothing goes in `tests/playwright/`. Every assertion an installed extension offers is
-out of scope by that suite's own rules — key delivery is synthetic input, a clipboard
-poll is timing — and loading an unpacked extension needs `launchPersistentContext`,
-which the single-worker `logInAndConnect` / `returnToPicker` harness is not built for
-and which would leak a profile between specs. It also cannot open an app window, which
-is the only configuration the extension runs in.
+out of scope by that suite's own rules — a toolbar icon is pixels, key delivery is
+synthetic input, a clipboard poll is timing — and loading an unpacked extension needs
+`launchPersistentContext`, which the single-worker `logInAndConnect` / `returnToPicker`
+harness is not built for and which would leak a profile between specs. It also cannot
+open an app window, which is the only configuration the extension runs in.
 
 So the irreducible half is manual, and all of it belongs in a shim window: Ctrl+W and
 Ctrl+T reaching the remote with no fullscreen; Alt+F4 raising the leave-site dialog
-instead; copy while minimised; the echo loops in both directions; resize from the
-floating menu at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; the whitelist
-edited from a normal browser window reaching the open shim with no reload; and killing
-the service worker from `chrome://extensions` mid-session. Plus one negative: open the
-same gateway in an ordinary tab and confirm the seam never wakes.
+instead; copy while minimised; the echo loops in both directions; resize from the popup
+at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; the whitelist edited from a
+normal browser window reaching the open shim with no reload; and killing the service
+worker from `chrome://extensions` mid-session. Plus one negative: open the same gateway
+in an ordinary tab and confirm the icon says off and the seam never wakes.
 
 ## Distribution
 
-Load unpacked for personal use. Generate a key once and commit only the derived public
-`"key"` field into the manifest — without it the extension ID changes on every unpacked
-reload, which loses `chrome.storage.local`, which is the whitelist. A `.crx` pinned
-through `ExtensionSettings` policy is the managed path; an unlisted Web Store listing is
-the low-friction one, and the broad host permission is what a reviewer will ask about.
+**Load unpacked, for personal use. That is the whole of it** — no `.crx`, no policy
+pinning, no Web Store listing, and nothing in the design that exists to satisfy a
+reviewer.
 
-The same package loads in Edge, Brave, Opera and Vivaldi, all of which have app windows
-of their own. Not Firefox: no `chrome.offscreen`, no app windows, and no Keyboard Lock
-for the tab path either.
+One thing still has to be done properly. Generate a key once and commit only the derived
+public `"key"` field into the manifest: without it the extension ID changes on every
+unpacked reload, and a new ID is a new `chrome.storage.local`, which is the whitelist
+gone. Keep the `.pem` out of the repo.
+
+The same directory loads in Edge, Brave, Opera and Vivaldi, all of which have app
+windows of their own. Not Firefox: no `chrome.offscreen`, no app windows, and no
+Keyboard Lock for the tab path either.
 
 ## Costs, stated
 
 1. **Static broad host permissions run a content script in every http/https renderer.**
    Mitigated as far as it can be — it posts nothing and registers no page listener
    before both gates pass, so it is invisible and non-fingerprintable — but it is still
-   code everywhere, and it is the reason a Web Store reviewer will ask questions.
-   `optional_host_permissions` plus `chrome.scripting.registerContentScripts` gives an
-   identical whitelist UX with no ambient access; because the matcher is a pure module
-   the switch stays cheap. Note that Chrome match patterns cannot express a port, so
-   `https://host:8443` would have to register as `https://host/*` and be narrowed by
-   our own matcher afterwards. The grammar is designed so that remains possible.
+   code everywhere. `optional_host_permissions` plus
+   `chrome.scripting.registerContentScripts` gives an identical whitelist UX with no
+   ambient access; because the matcher is a pure module the switch stays cheap. Note
+   that Chrome match patterns cannot express a port, so `https://host:8443` would have
+   to register as `https://host/*` and be narrowed by our own matcher afterwards. The
+   grammar is designed so that remains possible.
 2. **Nothing works in a tab**, and that is deliberate rather than a gap to close later.
-   Someone who installs the extension and does not install the page as an app gets no
-   clipboard sync and no resize, with nothing on screen to explain it — the extension
-   has no toolbar presence to explain it *with*, since the case it serves has no
-   toolbar. The client's own Help card is where that sentence belongs.
+   The icon is what says so there, and the client's Help card is what says how to fix
+   it; neither is load-bearing, so somebody can still end up wondering why a tab is
+   quiet.
 3. **Browser zoom** breaks "100%" regardless of window size. The arithmetic corrects
-   for it; the client never scales anything to compensate.
+   for it and the popup says so; the client never scales anything to compensate.
 4. **The shim's key behaviour is read from Chromium source and measured on macOS.**
    The reserved-key early return is cross-platform, but the per-key table in
    `PWA_KEYS.md` is not; a pass on Windows is owed.
+5. **The toolbar icon is best-effort**, as above.

@@ -170,10 +170,6 @@ test("the guards accept what they should and refuse the rest", () => {
   );
 
   assert.equal(isPageMessage({ source: "remotex-page", type: "state" }), true);
-  assert.equal(
-    isPageMessage({ source: "remotex-page", type: "resizeToDisplay" }),
-    true,
-  );
   assert.equal(isPageMessage({ source: "remotex-ext", type: "hello" }), false);
   // The extension's own commands are not requests it may send itself back.
   assert.equal(

@@ -6,9 +6,8 @@
 // seam settles to `absent` there without posting anything at all, which is not a
 // limitation being worked around but the whole shape of the design: an app window is
 // the configuration the client is meant to be run in, it is the one that keeps the
-// browser's chords (see appWindow.ts), and it is the one with no toolbar — so the page
-// is the only surface the extension has, and a tab is a case with nothing to serve.
-// See docs/companion-extension.md.
+// browser's chords (see appWindow.ts), and serving one window kind properly beats
+// serving two of them halfway. See docs/companion-extension.md.
 //
 // The difference from `nativeHost.ts` that shapes this whole file is **when the other
 // side turns up**. The app's bridge is exposed by a preload that runs before any

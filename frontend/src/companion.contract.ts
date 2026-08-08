@@ -6,20 +6,20 @@
 // hides its own floating menu and the seam has to carry every control that menu bar
 // stands in for. The extension owns none of that — under it `NATIVE_HOST` stays false,
 // the floating menu is on screen, and a command here for something that menu already
-// does would be a second UI for the same control. So what crosses is only what a page
-// in a browser genuinely cannot do for itself:
+// does would be a second UI for the same control. So the only things here are the two
+// a page in a browser genuinely cannot do for itself:
 //
 //   page → ext   the remote's clipboard, which a page may not write without a gesture;
-//   page → ext   fit this window to the framebuffer, which a page may not resize;
 //   ext → page   the system clipboard, which a page may not read while unfocused.
 //
-// The resize *request* is on the seam even though the arithmetic is not. The page
-// reports the framebuffer in `NativeState.size` and the extension measures the window
-// from its own content script, so it needs nothing from here to compute the fit — but
-// it does need to be asked, and there is nowhere else to ask from. **The extension runs
-// only in a Chrome app window**, which has no toolbar and therefore no action icon and
-// no popup: the page is the only surface in front of the user. In an ordinary tab
-// nothing here happens at all. See docs/companion-extension.md.
+// Resize to display is not on this seam at all, in either direction. The page reports
+// the framebuffer in `NativeState.size` because the menu bar already needed it, and
+// the extension measures the window from its own content script — a resize is
+// arithmetic over two things it already has, driven from its own popup, which a Chrome
+// app window shows beside the three-dot menu like any other.
+//
+// **The extension runs only in a Chrome app window.** In an ordinary tab nothing here
+// happens at all. See docs/companion-extension.md.
 //
 // Keys are not here at all, and that is the scope rule for the whole extension: it
 // does only what the browser cannot. An app window reserves no chords, so a page in
@@ -69,16 +69,7 @@ export type CompanionEvent =
    * clipboard from an offscreen document, which is the one context that can do it
    * without focus and without a gesture.
    */
-  | { type: "clipboardFromRemote"; text: string }
-  /**
-   * Fit this window to the desktop it is showing, at 100%.
-   *
-   * Carries nothing: the extension has the framebuffer from the last `state` and
-   * measures the window itself, and a request that restated either would be a second
-   * copy of a number to disagree about. Sent only where a connected companion has
-   * said `resize`, so the control that sends it is absent rather than dead.
-   */
-  | { type: "resizeToDisplay" };
+  | { type: "clipboardFromRemote"; text: string };
 
 /** What the extension tells the page. */
 export type CompanionCommand =
@@ -94,11 +85,10 @@ export type CompanionCommand =
 /**
  * What this companion is actually doing, as opposed to what it could do.
  *
- * Both are user settings on the extension's options page, and the page acts on both.
- * `clipboard` false means the offscreen poller is off and the page must keep reading
- * the clipboard on focus itself. `resize` false means there is no window to fit, so
- * the page offers no control for it — the answer is known before the button is drawn
- * rather than after it is pressed.
+ * Both are user settings on the extension's options page. `clipboard` is the one the
+ * page acts on: false means the offscreen poller is off and the page must keep
+ * reading the clipboard on focus itself. `resize` is here so the popup can grey its
+ * own button out with no second round trip to ask.
  */
 export interface CompanionCapabilities {
   clipboard: boolean;
@@ -124,7 +114,6 @@ const PAGE_TYPES: ReadonlySet<string> = new Set([
   "hello",
   "state",
   "clipboardFromRemote",
-  "resizeToDisplay",
 ]);
 
 function tagged(data: unknown, source: string, types: ReadonlySet<string>) {
