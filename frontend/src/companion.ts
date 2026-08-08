@@ -10,19 +10,21 @@
 // serving two of them halfway. See docs/companion-extension.md.
 //
 // The difference from `nativeHost.ts` that shapes this whole file is **when the other
-// side turns up**. The app's bridge is exposed by a preload that runs before any
-// script in the document, so `NATIVE_HOST` is read once and is never wrong. The
-// extension's content script has to read its whitelist out of `chrome.storage` first,
-// which is asynchronous, and its site can be added to that whitelist mid-session — so
-// "is there a companion?" is a value that arrives late and can change. It is a store,
-// not a constant.
+// side turns up**. The app's bridge is exposed by a preload that runs before any script
+// in the document, so `NATIVE_HOST` is read once and is never wrong. Nothing sequences
+// a content script against this bundle, and nothing tells a page synchronously that one
+// was injected into it, so the only way to find out is to ask and wait. "Is there a
+// companion?" arrives late. It is a store, not a constant.
 //
-// Every settled answer can be unsettled, because every one of them can stop being
-// true: a `bye` when the site leaves the whitelist, a `hello` when it is added back,
-// and a fresh probe on `pageshow`, where a bfcache restore may or may not have brought
-// the content script back with it. What is *not* allowed is drifting back to `probing`
-// on its own — only a `pageshow` does that, and it re-arms the deadline with it, so
-// there is no path to a phase that waits forever.
+// It can also be asked again, and `pageshow` is the only thing that asks: a bfcache
+// restore replays no injection, so a page coming back may find the extension there or
+// gone. That is the one path back to `probing`, and it re-arms the deadline as it goes,
+// so there is no phase left waiting for an answer nothing will settle.
+//
+// `connected` is where this stops. There is no goodbye on the wire and nothing to send
+// one — see companion.contract.ts — so a companion disabled mid-session leaves a page
+// that still believes in it until the page is reloaded. That is the cost of a seam with
+// no teardown message, and it is smaller than a branch that can never run.
 //
 // With no extension installed every export here is inert bar the deadline: `hello`
 // goes out to a bus nobody is reading, the phase settles to `absent`, and the client
@@ -62,8 +64,9 @@ export type CompanionPhase = "probing" | "connected" | "absent";
  * How long a silent bus is given before the page concludes there is no extension.
  *
  * Generous, because the cost of being wrong in one direction is a duplicate clipboard
- * push and in the other is a clipboard that never syncs. The content script's own work
- * before it can answer is one `chrome.storage.local` read.
+ * push and in the other is a clipboard that never syncs, and because what is being
+ * waited for is a content script that may not have run yet rather than any work it has
+ * to do first.
  */
 export const HANDSHAKE_DEADLINE_MS = 1_500;
 
@@ -120,8 +123,6 @@ function receive(event: MessageEvent): void {
   const command: CompanionCommand = event.data;
   if (command.type === "hello") {
     settle({ phase: "connected", capabilities: command.capabilities });
-  } else if (command.type === "bye") {
-    settle(ABSENT);
   }
   for (const handler of commandHandlers) {
     handler(command);
@@ -142,6 +143,10 @@ const commandHandlers = new Set<(command: CompanionCommand) => void>();
  * one honest: a restore that re-opens the question has to re-arm the answer too, or a
  * page that came back to a companion that has since been removed would sit in
  * `probing` for the rest of its life with the clipboard reader stood down behind it.
+ *
+ * A seam that is already `connected` is not re-opened — the hello still goes out, so a
+ * content script that came back with the page has its state re-posted, but there is no
+ * answer being waited for and nothing to stand down.
  */
 function probe(): void {
   if (snapshot.phase !== "connected") {
@@ -181,6 +186,19 @@ function getServerSnapshot(): Snapshot {
 /** Whether a companion has answered. See {@link CompanionPhase}. */
 export function useCompanion(): CompanionPhase {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot).phase;
+}
+
+/**
+ * The same answer without React, which is how the phases are told apart at all.
+ *
+ * `probing` and `absent` are both "no" to {@link postToCompanion}, and the difference
+ * between them is the whole reason this is a three-state store rather than a boolean —
+ * so something has to be able to see it. The client reads the phase through the hook;
+ * this is for the tests that assert the transitions, and for reading one outside a
+ * component.
+ */
+export function companionPhase(): CompanionPhase {
+  return snapshot.phase;
 }
 
 /** What the connected companion says it is doing, or null while there is none. */

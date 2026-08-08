@@ -140,19 +140,20 @@ constant, and every settled answer can be unsettled:
 |---|---|---|---|
 | `probing` | `hello` | `connected` | |
 | `probing` | the deadline | `absent` | 1.5 s of silence |
-| `connected` | `bye` | `absent` | the extension stood the seam down |
-| `absent` | `hello` | `connected` | it came back |
+| `absent` | `hello` | `connected` | a late one still counts |
 | `absent` | `pageshow` | `probing` | a bfcache restore, which re-arms the deadline with it |
 | `connected` | `pageshow` | `connected` | a hello goes out, but there is nothing to re-probe |
 
 Only a `pageshow` returns anything to `probing`, and it re-arms the deadline as it
 does — so there is no path to a phase that waits for an answer nothing will settle.
 
-`bye` is the one row without a settled producer. It was there for a site leaving a
-stored whitelist, and the host list is in the manifest instead; disabling the extension
-tears its content script's context down too abruptly to say goodbye first. Whether
-anything sends it is decided when the extension is built, not before — the seam handles
-it either way.
+**`connected` is where it stops, and there is no goodbye.** A window either has a
+content script for its whole life or never had one, since the hosts are match patterns
+in the manifest; and the two ways an extension goes away mid-life — disabled, or
+reloaded from `chrome://extensions` — tear its content script's context down without
+giving it a turn to speak. So a page whose companion is disabled under it goes on
+believing in one until it is reloaded. That is the cost of a seam with no teardown
+message, and it is smaller than carrying a message nothing can ever send.
 
 `probing` is not the same answer as `absent`, and the difference is load-bearing. The
 focus-driven clipboard read in `useRemoteDesktop.ts` stands down while `probing`:
