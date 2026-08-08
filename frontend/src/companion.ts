@@ -154,14 +154,22 @@ const commandHandlers = new Set<(command: CompanionCommand) => void>();
  * A seam that is already `connected` is not re-opened — the hello still goes out, so a
  * content script that came back with the page has its state re-posted, but there is no
  * answer being waited for and nothing to stand down.
+ *
+ * `asked` is what makes "re-arms" true rather than "arms another". Two `pageshow`
+ * events inside one deadline would otherwise leave two timers running, and the first
+ * would find the *second* probe's `probing` and call it absent early — cutting the new
+ * question's answer short by however long ago the old one was asked.
  */
+let asked = 0;
+
 function probe(): void {
   if (snapshot.phase !== "connected") {
     settle(INITIAL);
   }
+  const mine = ++asked;
   post({ type: "hello", client: "remotex" });
   setTimeout(() => {
-    if (snapshot.phase === "probing") {
+    if (mine === asked && snapshot.phase === "probing") {
       settle(ABSENT);
     }
   }, HANDSHAKE_DEADLINE_MS);

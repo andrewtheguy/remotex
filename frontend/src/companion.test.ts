@@ -68,6 +68,11 @@ function fire(type: string): void {
   }
 }
 
+/** Real time, because the deadline is the thing under test rather than a guess. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function helloFromExtension(clipboard = true) {
   return {
     source: "remotex-ext",
@@ -136,12 +141,9 @@ test("an untagged message is ignored", () => {
 // has never connected has to run before the hello that connects it.
 
 test("silence settles to absent once the deadline passes", async () => {
-  // The one real wait in this file, and it is the thing under test rather than a
-  // machine-speed guess: the deadline was armed at module load, and what is asserted
-  // is the state on the far side of it.
-  await new Promise((resolve) =>
-    setTimeout(resolve, HANDSHAKE_DEADLINE_MS + 100),
-  );
+  // A real wait, and the deadline is the thing under test rather than a machine-speed
+  // guess: it was armed at module load, and what is asserted is the far side of it.
+  await delay(HANDSHAKE_DEADLINE_MS + 100);
   posted.length = 0;
 
   assert.equal(companionPhase(), "absent");
@@ -169,6 +171,26 @@ test("a bfcache restore asks again, from a seam that had stood down", () => {
     postToCompanion({ type: "clipboardFromRemote", text: "x" }),
     false,
   );
+});
+
+test("a second restore re-arms the deadline instead of adding one", async () => {
+  // Two restores inside one deadline. The older probe's timer comes due first and finds
+  // a `probing` that belongs to the newer one; without the generation check it would
+  // call that absent early, cutting the new question's answer short by exactly the gap
+  // between the two — and a premature `absent` starts the focus-driven clipboard reader,
+  // which is the flap the three phases exist to prevent.
+  const gap = 200;
+  fire("pageshow");
+  await delay(gap);
+  fire("pageshow");
+
+  // Past the first probe's deadline, well short of the second's.
+  await delay(HANDSHAKE_DEADLINE_MS - gap + 100);
+  assert.equal(companionPhase(), "probing");
+
+  // And the newer one still settles on its own schedule, so nothing waits for ever.
+  await delay(gap + 100);
+  assert.equal(companionPhase(), "absent");
 });
 
 test("a well-formed hello connects, and events then go out", () => {

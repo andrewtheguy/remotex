@@ -149,6 +149,9 @@ constant, and every settled answer can be unsettled:
 
 Only a `pageshow` returns anything to `probing`, and it re-arms the deadline as it
 does — so there is no path to a phase that waits for an answer nothing will settle.
+*Re-arms*, not *arms another*: a second restore inside the first deadline invalidates
+it, or the older one would come due against the newer question and answer `absent` on
+its behalf, early by however long ago it was asked.
 
 Both middle rows are a site's host access changing under a live window, which is a thing
 Chrome lets the user do at any moment from its own site-access UI as much as from this
