@@ -590,8 +590,8 @@ The separation is the point. Sound and pictures used to share the session socket
 the bounded queue behind it, which is four frames deep on `render_type = "video"`; an
 audio pump waiting behind a video backlog stops draining the bridge, and what the
 bridge then drops is wave buffers. A lost tile is replaced by the next repaint, and a
-lost wave buffer is a hole. Every reference client that does not stutter keeps the two
-apart — see [`rdp-audio-prior-art.md`](rdp-audio-prior-art.md).
+lost wave buffer is a hole. The dedicated socket removes that picture-induced loss
+path entirely.
 
 The socket is bound to the *claim*, not to an attachment, so it survives a session
 socket reconnecting and a target switch: the gateway re-announces the format when it
@@ -618,12 +618,12 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 
 Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
 the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
-pump's send — the audio socket's queue is deliberately two deep, so a send that
-blocks at all means the browser is not draining sound — and walks the encoder's
-bitrate down by a third per verdict toward `audio_bitrate_min` (default
-32 kbit/s), back up by an eighth once the link has proven clear for seconds. The
-change reaches the live encoder through `OPUS_SET_BITRATE`; packets stay 20 ms
-and independently decodable, so nothing is re-announced. While the link is
+pump's send. The audio socket's queue is deliberately two deep; two consecutive
+sends that each wait at least 20 ms are a behind verdict. The walk moves the
+encoder's bitrate down by a third toward `audio_bitrate_min` (default 32 kbit/s),
+and back up by an eighth after sustained clear sends. The change reaches the live
+encoder through `OPUS_SET_BITRATE`; packets stay 20 ms and independently
+decodable, so nothing is re-announced. While the link is
 *behind*, wave buffers that are pure silence are shed before the encoder instead
 of queued — silence is the one content whose loss cannot be heard, the client
 just receives no packets for a while (what a quiet remote already produces), and
@@ -649,8 +649,7 @@ is a local-network proposition only. It is not a quality argument — Opus at 96
 kbps is well clear of audible loss on this material. Guacamole carries desktop
 audio this way and only this way (its single encoder emits
 `audio/L16;rate=44100,channels=2`), which is where the option came from — see
-[`rdp-audio-prior-art.md`](rdp-audio-prior-art.md) for that measurement and for
-the other implementations worth comparing against.
+[`rdp-perf-vs-guacamole.md`](rdp-perf-vs-guacamole.md) for the comparison.
 
 An audio-enabled RDP engine negotiates one 44.1 kHz, 16-bit stereo PCM format
 when it connects, and offers no other — MS-RDPEA identifies a buffer's format by
@@ -665,20 +664,22 @@ and the wrapper lets only the first to open fill the queue. Windows also require
 result; under `pcm` it does neither, and the buffer is only cut on a frame
 boundary so a split sample cannot transpose the channels.
 
-The queue never blocks the RDP read loop. A slow consumer loses old buffers
-instead of accumulating latency, and no receiver means audio is discarded. Between the
-bridge and the socket sits a second, shallower queue (`AUDIO_SOCKET_BUFFER`, sixteen
-wave buffers — about three seconds) whose only job is to absorb a socket write in
-flight: losses belong at the bridge, which drops its *oldest* and keeps sound that is
-still live, rather than here, which is FIFO and would deliver stale audio faithfully.
+The queue never blocks the RDP read loop. `AudioBridge` retains sixteen remote
+wave buffers (about three seconds at the measured Windows cadence) and drops the
+oldest when a listener falls behind; no receiver means audio is discarded. Between
+the bridge and the socket sits a second, shallower two-buffer FIFO
+(`AUDIO_SOCKET_BUFFER`) whose only job is to absorb a socket write in flight.
+Losses belong at the bridge, which keeps sound that is still live, rather than in
+that FIFO, which would deliver stale audio faithfully.
 
-The client owns its playback schedule: a 0.5-second cushion, and backlog beyond a 1.5-second ceiling discarded. Those numbers are a jitter
-budget rather than a latency target, and they are deliberately generous — audio trails
-video by roughly the cushion, which is the trade Myrtille and FreeRDP both make. What reaches that
-schedule differs by codec, and only there. The client does not decode anything
-itself: an *encoded* stream goes to WebCodecs, so a codec a browser will not take
-surfaces as a decoder error naming it rather than as silence. A `pcm-s16le` stream reaches no decoder at all; the
-client turns the packet into an `AudioBuffer` and schedules it directly.
+The client owns its playback schedule. It starts at the current audio playhead
+with no added cushion and clamps accumulated lead to 300 ms, trimming the front
+of an incoming buffer instead of turning temporary jitter into lasting latency. What
+reaches that schedule differs by codec, and only there. The client does not decode
+anything itself: an *encoded* stream goes to WebCodecs, so a codec a browser will
+not take surfaces as a decoder error naming it rather than as silence. A
+`pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
+`AudioBuffer` and schedules it directly.
 
 The secure-context requirement belongs to that first path alone. WebCodecs is
 unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
@@ -715,7 +716,7 @@ What is engine-specific is the mechanism:
 |---|---|
 | Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
 | Apple Standard VNC | rejects `resize`: it shares physical displays |
-| Apple High Performance VNC | applies arbitrary sizes through Apple dynamic resolution |
+| Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
 | RDP | applies a requested size, and the client's reported display density |
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
@@ -805,21 +806,21 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-It replaced IronRDP, which was not stable enough against real Windows hosts. A
-target with `resize = false` gets the Graphics Pipeline (EGFX) with RemoteFX
-beside it, and the pairing is load-bearing: the pipeline advertised *alone* was
+It replaced IronRDP, which was not stable enough against real Windows hosts.
+The `egfx` target key controls the Graphics Pipeline and defaults to true,
+independently of `resize`. EGFX is advertised with RemoteFX beside it, and that
+pairing is load-bearing: the pipeline advertised *alone* was
 measured broken — against a Windows 11 host, FreeRDP decoded 21 surface commands
 with no errors into a framebuffer that summed to exactly black — and the codec
 next to the flag is what guacamole-server ships against the same Windows
-generation. With the pair, the same measurement is a painted desktop. A target
-with `resize = true` declines the pipeline instead, because an EGFX resize is a
-graphics reset that leaves a Windows host's text blurry for the rest of the
-session, where the legacy path's full reactivation has the server render the new
-desktop from scratch, sharp. Servers without the pipeline either way (xrdp among
-them here) use the legacy bitmap path, which the wrapper keeps working through
-resizes by resizing FreeRDP's decoder contexts alongside the framebuffer —
-FreeRDP itself sizes them once, at connect, which is an upstream bug this
-repository stops carrying at its own layer.
+generation. With the pair, the same measurement is a painted desktop. Under EGFX,
+a resize is a graphics reset with no reactivation or reconnect; the trade is that
+a Windows host's text stays soft afterward. `egfx = false` selects the legacy
+bitmap path, whose full reactivation re-renders the desktop sharp. Servers without
+the pipeline (xrdp among them here) also use that legacy path, which the wrapper
+keeps working through resizes by resizing FreeRDP's decoder contexts alongside the
+framebuffer — FreeRDP itself sizes them once, at connect, which is an upstream bug
+this repository stops carrying at its own layer.
 
 The pointer is not part of that framebuffer. RDP servers send the cursor's shape
 rather than drawing it, and each shape goes to the client as `cursor`, which draws
@@ -833,11 +834,11 @@ With `resize = true`, the Display Control Virtual Channel applies explicit
 desktop-size requests, and also matches the client's display density: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
-stretched. The connect itself is always 1x — the density belongs to whichever
-client attaches, which has not spoken yet — so a Retina client costs one
-reactivation. RDP reports no scale factor back, so the density here is declared
-rather than measured. With `clipboard = true`, MS-RDPECLIP carries
-`CF_UNICODETEXT` with CRLF/LF conversion.
+stretched. The opening RDP handshake is always 1x; the client applies its screen
+density after `connected`, so a Retina client costs a graphics reset on the default
+EGFX path or a reactivation on the legacy path. RDP reports no scale factor back,
+so the density here is declared rather than measured. With `clipboard = true`,
+MS-RDPECLIP carries `CF_UNICODETEXT` with CRLF/LF conversion.
 
 With `audio = true`, `rdpsnd` carries the remote's sound — see [Audio
 frames](#audio-frames). Enabling it has one side effect worth knowing: a Windows
@@ -848,10 +849,11 @@ Declining the answer is not enough on its own — the message channel those PDUs
 arrive on has to be closed too, or the session dies when one is asked. That is
 the wrapper's business, and it is measured there.
 
-A size change that is *real* costs a full Deactivation-Reactivation Sequence on
-the legacy path a resizable target runs; FreeRDP runs it internally and reports a
-new desktop size. One server cannot carry sound across that: a Windows host's
-audio redirector dies at its own reactivation — measured mid-playback, five
+A size change that is *real* costs a graphics reset on EGFX. On the legacy path it
+costs a full Deactivation-Reactivation Sequence; FreeRDP runs it internally and
+reports a new desktop size. A Windows host cannot carry sound across the legacy
+event: its audio redirector dies at reactivation — measured
+mid-playback, five
 resizes of six left the channel open and mute, the last wave within a second of
 the reactivation, no close, no re-announce, and nothing in MS-RDPEA for a client
 to restart it with. The wrapper therefore resizes such a session — recognised by
@@ -859,13 +861,14 @@ its sound having negotiated on the dynamic `rdpsnd` transport, which is how
 Windows and only Windows carries it — by *reconnecting* at the new size, the way
 Guacamole's `resize-method: reconnect` does: ~800 ms measured, channels and sound
 renegotiated, surfacing as the same resize it always was, with one line on stderr
-saying a reconnect is what it cost. xrdp's static-channel audio rides out its
-reactivation, so it keeps the plain monitor-layout resize untouched, as does any
-session without sound. Asking twice for the same size triggers one change, and a
-request equal to the current size never triggers one. A layout is asked for on a
-bounded schedule rather than once, because a Windows host discards one sent
-before the session it is starting has settled and acknowledges nothing either way
-— measured through both engines.
+saying a reconnect is what it cost. The wrapper debounces reconnect-resizes for
+300 ms. xrdp's static-channel audio rides out its reactivation, so it keeps the
+plain monitor-layout resize untouched, as does any legacy session without sound.
+Asking twice for the same size triggers one change, and a request equal to the
+current size never triggers one. A layout is asked for on a bounded schedule rather
+than once, because a Windows host discards one sent before the session it is
+starting has settled and acknowledges nothing either way — measured through both
+engines.
 
 ### VNC
 
@@ -936,18 +939,21 @@ is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` 
 a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it.
 
 **High Performance mode is a virtual-display mode.** The gateway sends
-`SetDisplayConfiguration` (`0x1d`) during setup, with one 1x mode built from the
-target's `width` and `height`, under the native descriptor's fixed 3840×2160
-backing ceiling. Once connected, the remote Mac's physical displays
-are disabled and all of its windows are placed on that virtual display. Apple's
+`SetDisplayConfiguration` (`0x1d`) during setup, with one mode built from the
+pinned `width` and `height` when both are set, or from the connecting client's
+screen resolution otherwise, at that screen's density. The mode sits under the
+native descriptor's fixed 3840×2160 backing ceiling. Once connected, the remote
+Mac's physical displays are disabled and all of its windows are placed on that
+virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, while
 Remotex always requests one. The full descriptor enables dynamic resolution on
-every fresh session. With `resize = true`, it supports **Resize to Window** like
-RDP, using Apple's dynamic-resolution feature: later viewport reports resend the
-same full descriptor with the requested mode, and the Mac's answering display
-layout sets the actual framebuffer geometry. The Mac supplies that virtual display
-over the 003.889 record transport, with zlib rectangles instead of raw pixels.
-Apple's virtual-display-count and resolution-preset controls remain unimplemented.
+every fresh session. With `resize = true`, the window continuously drives the
+virtual display through Apple's dynamic-resolution feature: later viewport reports
+resend the same full descriptor with the requested mode, and the Mac's answering
+display layout sets the actual framebuffer geometry. There is no client-side
+resize mode or one-shot button. The Mac supplies that virtual display over the
+003.889 record transport, with zlib rectangles instead of raw pixels. Apple's
+virtual-display-count and resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: the *first* `SetEncodings` must be the
 measured exact list, so zlib is requested in a second one after a layout has arrived

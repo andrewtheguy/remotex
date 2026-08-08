@@ -20,7 +20,7 @@
 //!
 //! FreeRDP's event loop is a blocking `WaitForMultipleObjects`, so it owns an OS
 //! thread and hands events out through a `std::sync::mpsc::Receiver` — which
-//! cannot be awaited. [`bridge_events`] is the one-line thread that turns it into
+//! cannot be awaited. `bridge_events` is the one-line thread that turns it into
 //! something `select!` can take. Everything downstream of that is unchanged from
 //! the IronRDP engine this replaced: the same damage coalescing, the same shadow,
 //! the same tiles.
@@ -245,11 +245,12 @@ async fn session(
     };
     info!("rdp: connected, desktop {width}x{height}");
 
-    // 1x, always: the density this session ends up at is the attached client's to
-    // state, and it has not spoken yet — the connect above happens before
-    // `ServerMsg::Connected` reaches it. A Retina client is therefore one
-    // reactivation away from where it wants to be, which is the price of learning
-    // the density from whoever attaches rather than from the config file.
+    // 1x, always: the opening handshake uses the point-sized geometry above, and
+    // the attached client's density is applied through `HostDisplay` after
+    // `ServerMsg::Connected`. A Retina client is therefore one layout change away
+    // from where it wants to be: a graphics reset on the default EGFX path, or a
+    // reactivation on the legacy path. Keeping density mid-session also lets a
+    // later attachment state its own screen instead of inheriting the first one's.
     if sink
         .msg(ServerMsg::Resize { w: width, h: height, scale: Density::One.scale() })
         .await
@@ -940,10 +941,10 @@ async fn active_loop(
                     }
                     continue;
                 }
-                // A viewport report is a client-initiated resize, applied whenever
-                // one arrives. How often that is — on every window change, or only
-                // when the user asks — is the client's own setting and not
-                // something this end tells apart. Ignored unless negotiated.
+                // A viewport report is a client-initiated resize. A desktop client
+                // sends one when this target connects and on every window change;
+                // this end applies each report it receives and ignores them all
+                // unless resize was negotiated.
                 //
                 // The size arrives in remote *pixels*, already multiplied by the
                 // `scale` this end announced, so it needs no conversion — but it
@@ -951,9 +952,8 @@ async fn active_loop(
                 // would tell the server to forget one it is already applying.
                 //
                 // `DefaultSize` is the same request with the size supplied from
-                // here: the target's configured `width`/`height`, read as points,
-                // which is what this session connected at while it was still 1x.
-                // See [`ClientMsg::DefaultSize`].
+                // here: the pinned `width`/`height` in points, or the built-in
+                // default when no size was pinned. See [`ClientMsg::DefaultSize`].
                 let wanted_size = match msg {
                     ClientMsg::Viewport { w, h } => Some((u32::from(w), u32::from(h))),
                     ClientMsg::DefaultSize => Some(applied.pixels(default_size)),
@@ -965,14 +965,14 @@ async fn active_loop(
                         // density is: a size that arrives before the Display Control
                         // channel is up cannot go out, and a client
                         // states its viewport once and dedupes it, so nothing would
-                        // re-send it. This is the start of every session with
-                        // auto-resize on by default — both reports come from
-                        // `connected`, before the channel is up — so without the
-                        // retry the desktop stayed at its connect size until a manual
-                        // resize landed. The size arrives in the announced density's
-                        // pixels; if a denser layout is already pending it is carried
-                        // up to that density, so the two go out as one layout and
-                        // never as two resizes racing to set `applied`.
+                        // re-send it. This is the start of every desktop session
+                        // whose target has resize enabled — the viewport and density
+                        // reports both follow `connected`, before the channel is up —
+                        // so without the retry the desktop stayed at its opening size
+                        // until another window change. The size arrives in the
+                        // announced density's pixels; if a denser layout is already
+                        // pending it is carried up to that density, so the two go out
+                        // as one layout and never as two resizes racing to set `applied`.
                         let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
                         install_layout(
                             Layout { w, h, density: applied }.at_density(density),

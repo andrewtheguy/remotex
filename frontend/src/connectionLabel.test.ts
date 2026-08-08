@@ -2,8 +2,8 @@
 //
 // The case that matters is the one where `protocol` alone is not an answer: three
 // targets say `vnc`, and what a person notices about them — a display list, a
-// resize that is offered or greyed, a path that is reverse engineered — differs by
-// subtype and by nothing else on the wire.
+// target that follows its window or keeps a fixed display, a path that is reverse
+// engineered — differs by subtype and by nothing else on the wire.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

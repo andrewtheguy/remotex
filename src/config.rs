@@ -85,8 +85,9 @@ pub enum Subtype {
     ///
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
-    /// target's [`TargetConfig::width`] and [`TargetConfig::height`], carries zlib
-    /// rectangles, and uses Apple's encrypted record transport.
+    /// pinned [`TargetConfig::width`] and [`TargetConfig::height`] when both are
+    /// set, or at the connecting client's screen resolution otherwise, carries
+    /// zlib rectangles, and uses Apple's encrypted record transport.
     ///
     /// Apple's native pasteboard payloads are carried inside the encrypted record
     /// transport when `clipboard` is enabled. With `resize`, viewport reports
@@ -328,13 +329,6 @@ pub enum TileCodec {
     Webp(u8),
 }
 
-/// The whole render dial as an engine sees it, and the one place the two ways this
-/// gateway can put a desktop on a wire are told apart.
-///
-/// An enum rather than a struct with a flag, because the difference is not a setting:
-/// [`Self::Tiles`] cuts damage into independent images, and [`Self::Video`] feeds one
-/// stateful stream. Nothing sensible is shared between those two paths, and making it
-/// an enum is what stops a consumer from quietly handling only the first.
 /// What the `motion` strategy does with what it finds moving, resolved from
 /// [`MotionSubtype`] and [`TargetConfig::render_motion_quality`].
 ///
@@ -355,6 +349,13 @@ pub enum MotionEncode {
     Stream { quality: u8 },
 }
 
+/// The whole render dial as an engine sees it, and the one place the two ways this
+/// gateway can put a desktop on a wire are told apart.
+///
+/// An enum rather than a struct with a flag, because the difference is not a setting:
+/// [`Self::Tiles`] cuts damage into independent images, and [`Self::Video`] feeds one
+/// stateful stream. Nothing sensible is shared between those two paths, and making it
+/// an enum is what stops a consumer from quietly handling only the first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderPlan {
     /// One encoded image per changed region — every configuration that predates
@@ -529,10 +530,10 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Allow client-driven resize: permission for a client's *window* to shape
-    /// this target's desktop. How that permission is spent per engine — every
-    /// drag, or only when the user asks — is [`Self::resize_policy`], not a
-    /// second config key.
+    /// Allow client-driven resize: hand this target's desktop size to the
+    /// client's window. A desktop client reports every window change while this
+    /// is on; there is no client-side mode, manual resize command, or second
+    /// config key.
     ///
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell
@@ -843,7 +844,7 @@ pub struct ServerSection {
     pub dev_subdomain: Option<String>,
 }
 
-/// The default display name when `[server].branding` is unset.
+/// The default display name when top-level `branding` is unset.
 pub const DEFAULT_BRANDING: &str = "remotex";
 
 /// Who a config file is for, and therefore which rules it is held to.
@@ -860,7 +861,7 @@ pub const DEFAULT_BRANDING: &str = "remotex";
 ///   is what a first launch has and the picker's job is to say so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audience {
-    /// `remotex serve`: a browser's gateway, and the macOS agent's peer.
+    /// `remotex serve`: a browser's gateway.
     Served,
     /// `remotex serve-embedded`: the gateway inside `remotex.app`.
     Embedded,
@@ -907,8 +908,10 @@ pub struct AppConfig {
     /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
     /// one is told where its bundle keeps it (`--web-root`).
     ///
-    /// Every gateway has one, because every client is the same SPA: the browser
-    /// loads it over the network and `remotex.app` loads it from loopback.
+    /// Every gateway has one, because every client is the same SPA: a browser
+    /// loads it over the network, while `remotex.app` maps the same directory to
+    /// `remotex://app` and the embedded gateway serves it over loopback beside
+    /// that custom-scheme view.
     pub static_dir: PathBuf,
     /// Every target profile this process serves; the post-login picker selects
     /// one. Non-empty for [`Audience::Served`]; possibly empty for an embedded

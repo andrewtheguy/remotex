@@ -121,13 +121,13 @@ Windows 11 sessions are the same consumption model with the pipeline on.
 the pipeline off here was the pipeline advertised *without a codec beside it*; with
 guacd's exact pair, the e2e that had measured a framebuffer summing to exactly black
 measured 3,090,403 non-zero bytes of 3,145,728 against the same host. The wrapper
-ships the pair for fixed-size targets. Resizable ones decline it — an EGFX resize
-leaves a Windows host's text blurry where a legacy reactivation re-renders it sharp
-— and take the *other* of guacd's resize methods for the fault the comparison never
-predicted: a Windows host's audio redirector does not survive the
-Deactivation-Reactivation a legacy-path resize costs, so a session whose sound
-negotiated on the dynamic `rdpsnd` transport resizes the way guacamole's
-`resize-method: reconnect` does. The whole story is in
+ships the pair by default, independently of resize. An EGFX resize is a graphics
+reset: no reactivation or reconnect, and sound survives, at the cost of a Windows
+host's text staying soft. The `egfx = false` opt-out takes the sharp legacy path,
+where each resize is a reactivation. A Windows host's audio redirector does not
+survive that event, so a legacy session whose sound negotiated on the dynamic
+`rdpsnd` transport resizes the way guacamole's `resize-method: reconnect` does.
+The whole story is in
 [`architecture.md`](architecture.md)'s RDP section.
 
 ### Transport details
@@ -179,5 +179,5 @@ bound-at-sink — is worth remembering when a new symptom appears.
 8. Explicit bitmap/offscreen cache flags on the legacy path.
 
 The audio half of what this comparison session found — RDP sound dying after a
-resize — was a bug, not a gap, and is recorded in
-[`rdp-audio-prior-art.md`](rdp-audio-prior-art.md).
+legacy-path resize — was a bug, not a gap, and is recorded in
+[`architecture.md`](architecture.md)'s RDP and audio sections.

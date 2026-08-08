@@ -10,11 +10,12 @@
 //! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
 //! record layer ([`crate::vnc_record`]), alongside Apple's control messages
 //! ([`crate::vnc_apple`]). This mode requests one virtual display at the target's
-//! configured `width` and `height`. Its pasteboard is a separate Apple protocol
-//! rather than RFB Extended Clipboard. See docs/apple-vnc-889.md.
+//! pinned `width` and `height`, or at the connecting client's screen resolution
+//! when no size is pinned. Its pasteboard is a separate Apple protocol rather than
+//! RFB Extended Clipboard. See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
-//! [`Dialect`] (which banner and ClientInit byte), the two preface functions after
+//! `Dialect` (which banner and ClientInit byte), the two preface functions after
 //! ServerInit, and the optional record wrapper. One read loop, one input path, one
 //! Apple metadata path and one tile path serve both.
 
@@ -907,7 +908,7 @@ fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_appl
 }
 
 /// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
-/// the encrypted preface and the arming that replaces polling.
+/// the encrypted preface and the arming sent beside the measured polling cycle.
 ///
 /// The one function in this file that knows the record layer is switched on here,
 /// which is deliberate: it runs before [`Connected`] exists, so there is no input
@@ -1353,7 +1354,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
 enum ResizeAsk {
     /// A browser viewport report: pixels at the announced scale.
     Viewport((u16, u16)),
-    /// The target's configured size: logical points.
+    /// The target-defined default size: logical points.
     Points((u16, u16)),
     /// No new size — the client's screen changed density, so the current size is
     /// re-expressed at the new [`DesktopState::host_density`].
@@ -5386,10 +5387,10 @@ mod tests {
         }
     }
 
-    /// Under `AutoFrameBufferUpdate` the server drives, so a request per update
-    /// would race the server's own update schedule.
+    /// When a server drives its own updates, a request per update would race that
+    /// schedule. Apple's measured server leaves `poll` true despite being armed.
     #[tokio::test]
-    async fn an_armed_session_does_not_poll_for_the_next_update() {
+    async fn a_server_driven_session_does_not_poll_for_the_next_update() {
         for poll in [true, false] {
             let wire = framed(&[raw_update()]);
             let (uplink, sent) = test_records_uplink(apple_keys());

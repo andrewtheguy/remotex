@@ -10,10 +10,11 @@
 // as `"protocol":"vnc"`, and they differ in what a person will notice: Standard
 // shares the Mac's physical displays and refuses resize, High Performance replaces
 // them with one virtual display and is reverse engineered from end to end. "Why is
-// there no display list", "why is Resize to Window greyed", "why did the desktop
-// come back wrong after a resize" all have the same first question — which of the
-// three is this — and until this row existed the answer was in the operator's
-// config file, which whoever is looking at the screen generally does not have.
+// there no display list", "why does this target not follow the window", "why did
+// the desktop come back wrong after a resize" all have the same first question —
+// which of the three is this — and until this row existed the answer was in the
+// operator's config file, which whoever is looking at the screen generally does
+// not have.
 //
 // The config spelling is kept in the label rather than translated away. It is what
 // `subtype` is set to in `remotex.toml`, so somebody reading this can find the line

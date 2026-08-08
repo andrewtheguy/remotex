@@ -319,8 +319,9 @@ function ScreenHelp({
           {/* Which of the three `vnc` targets this is, where it is one of them.
               Nothing else on screen distinguishes a plain VNC server from a Mac in
               either Screen Sharing mode, and what a person notices — a display
-              list, a greyed resize, a path with no specification behind it —
-              follows from exactly that. Empty only before `connected`. */}
+              list, whether the desktop follows the window, a path with no
+              specification behind it — follows from exactly that. Empty only
+              before `connected`. */}
           <dd>{connection || "Waiting for the target"}</dd>
         </div>
         <div className="help-item">

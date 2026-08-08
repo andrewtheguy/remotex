@@ -8,9 +8,9 @@ the picture.
 
 The main reason this exists is the client: it is a browser, so anything with one
 reaches every target — RDP, VNC and Macs alike — with nothing to install per
-platform and nothing that has to exist for your OS. Resize comes with that: the
+platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
-for rather than scaled on the client, and plain `vnc`, Apple High Performance and
+for rather than scaled on the client; plain `vnc`, Apple High Performance and
 `rdp` can all be handed the window. On RDP the default `egfx` pipeline makes that
 cheap — a display layout, no reactivation — at the cost of a Windows host's text
 staying soft afterwards; `egfx = false` re-renders sharp and pays a reactivation
@@ -81,22 +81,23 @@ at full fidelity, and supports the native Apple pasteboard. After the initial
 display layout it asks the Mac to switch from raw rectangles to zlib; that second
 encoding request is required in both Apple modes. Apple Screen Sharing High
 Performance mode (`ard-high-performance`, **experimental**) takes the same
-credentials, requests
-one virtual display at the target's configured `width` and `height`, disables the
-remote Mac's physical displays once connected, and puts all of the remote Mac's
-windows on that virtual display. It carries the same zlib rectangles over Apple's
-encrypted record-layer revision (around fifty times fewer bytes than raw on a
-static desktop).
+credentials, requests one virtual display at the pinned `width` and `height` when
+both are set, or at the full resolution and density of the client's screen
+otherwise. Once connected, it disables the remote Mac's physical displays and
+puts all of the remote Mac's windows on that virtual display. It carries the same
+zlib rectangles over Apple's encrypted record-layer revision (around fifty times
+fewer bytes than raw on a static desktop).
 Apple's official macOS Screen Sharing client can instead choose up to two virtual
 displays. Both Apple subtypes
 support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
-High Performance supports **Resize to Window** like RDP, using Apple's dynamic
-resolution feature to replace the virtual display's mode from client viewport
-reports. Its fixed native dynamic ceiling also lets the window drive successive
-arbitrary sizes with **Auto resize**. Every fresh connection turns the Mac's
-Dynamic resolution setting back on. Standard `ard` still refuses resize, and the
-one/two-virtual-display control is not implemented. See
-[`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
+the window continuously drives High Performance's virtual display, using Apple's
+dynamic-resolution feature to replace its mode from client viewport reports.
+There is no client-side resize toggle or one-shot resize button. The descriptor's
+fixed 3840×2160 backing ceiling permits successive arbitrary sizes within that
+bound, and every fresh connection turns the Mac's Dynamic resolution setting back
+on. Standard `ard` still refuses resize, and the one/two-virtual-display control is
+not implemented.
+See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 High Performance mode is **experimental** because it has not been widely tested,
 and it is the one part of remotex built
@@ -179,7 +180,7 @@ password = "change-me"
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
 physical displays, or
-`"ard-high-performance"` (experimental) for one configured virtual display
+`"ard-high-performance"` (experimental) for one virtual display
 containing all of its windows, with its physical displays disabled for the
 connection, and the Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.

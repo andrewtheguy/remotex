@@ -95,10 +95,9 @@ that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
-The video spec needs a local gateway config with video targets. Put that
+The video spec needs a local gateway config with a VP9 video target. Put that
 gitignored config under `tmp/` (for example, `tmp/qa_video.toml`) and name the
-targets through one variable per codec, so a run can cover the VP9 default alone
-or both codecs:
+target with `REMOTEX_PLAYWRIGHT_VIDEO_TARGET`:
 
 ```sh
 cargo run -- serve --config tmp/qa_video.toml

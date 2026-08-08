@@ -45,7 +45,7 @@ const SCALE_MAX: u16 = 2 * SCALE_ONE;
 /// Below `SCALE_ONE` — a zero from a source that could not read the display's
 /// mode, or a fraction that would blow the desktop up rather than shrink it —
 /// reads as 1×, the answer that leaves the framebuffer alone. Above
-/// [`SCALE_MAX`] reads as 2×: those screens are real, and the sharpest desktop
+/// `SCALE_MAX` reads as 2×: those screens are real, and the sharpest desktop
 /// that exists is the right answer for them.
 pub fn scale_ratio(scale: u16) -> f32 {
     if scale < SCALE_ONE {
@@ -206,9 +206,10 @@ pub enum ClientMsg {
     },
     /// Requested desktop size in remote pixels: available client points
     /// multiplied by the scale in [`ServerMsg::Resize`]. Applied by any engine the
-    /// target opted into resize for, and dropped by every other. How often one
-    /// arrives — per window change, or only when the user asks — is the client's
-    /// own choice and nothing this end distinguishes.
+    /// target opted into resize for, and dropped by every other. A desktop client
+    /// sends one when it connects and on every window change after
+    /// [`ServerMsg::Connected`] says `resize`; the backend simply applies each
+    /// valid report it receives.
     Viewport { w: u16, h: u16 },
     /// Restore the engine's configured or created default size. This carries no
     /// dimensions so a pinch-zoom client need not invent a desktop shape.

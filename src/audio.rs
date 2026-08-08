@@ -22,11 +22,11 @@ use crate::pcm_stream::{PcmStream, PCM_CODEC};
 /// Complete PCM wave buffers retained before the oldest one is dropped.
 ///
 /// Sixteen is about three seconds at the tested Windows host's ~186 ms buffers.
-/// The client discards backlog past its own 1.5-second ceiling on arrival, so
-/// retaining much more than that ceiling cannot be heard — it can only be
-/// delivered across a link that is already behind and then thrown away. The
-/// margin above the ceiling is for a remote that sends smaller buffers, where
-/// sixteen of them absorb a shorter stall.
+/// The client clamps scheduled lead to 300 ms, so retaining this much does not
+/// mean it will play this far behind: a listener that catches up receives the
+/// newest sixteen buffers still available, and the client trims any excess lead
+/// that survives to playback. A remote that sends smaller buffers gets a shorter
+/// retained interval from the same fixed depth.
 pub const AUDIO_QUEUE_DEPTH: usize = 16;
 
 /// How long sending one packet batch to the audio socket may block before it
@@ -417,8 +417,9 @@ impl AudioSignals {
 /// One-directional by construction for the same reason as the video walk:
 /// `ceiling` is the configured bitrate, so this only ever sends *less* than the
 /// operator asked for and climbs back no higher. The signal is how long the
-/// send blocked — the audio socket's queue is two deep, so a block means the
-/// browser is not draining sound as fast as the remote produces it.
+/// send waited — the audio socket's queue is two deep, so two consecutive waits
+/// of at least `BEHIND_SEND` mean the browser is not draining sound as fast as
+/// the remote produces it.
 ///
 /// Pure in the same way too: it takes `now` rather than reading a clock, so
 /// every decision is testable without waiting for one.

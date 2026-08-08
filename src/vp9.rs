@@ -10,7 +10,7 @@
 //! Two things about libvpx's shape are worth knowing before reading:
 //!
 //! - **It returns error codes rather than asserting**, so under this binary's
-//!   `panic = "abort"` no containment argument is needed: every call goes through [`vpx!`],
+//!   `panic = "abort"` no containment argument is needed: every call goes through `vpx!`,
 //!   which turns a bad code into an `anyhow::Error` carrying libvpx's own explanation, and a
 //!   failure ends one session instead of the process.
 //! - **Its C API is entirely `unsafe` and largely out-parameters.** The invariants are stated at
@@ -125,7 +125,7 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// The WebCodecs codec string for a `w`×`h` VP9 stream: `vp09.<profile>.<level>.<depth>`.
 ///
 /// Profile 0 and 8-bit, because that is what this encoder produces — I420 chroma at eight bits —
-/// and the level comes from [`LEVELS`]. `None` for a picture no VP9 level covers, which
+/// and the level comes from `LEVELS`. `None` for a picture no VP9 level covers, which
 /// [`crate::video::coded_rect`] has already refused long before this is reached; it is `Option`
 /// rather than a panic because this runs on the session's own path and the whole module's premise
 /// is that nothing here aborts the process.

@@ -1,5 +1,5 @@
-// Pure scheduling policy for decoded remote-audio buffers. It maintains a start
-// cushion and discards excess lead rather than accumulating latency.
+// Pure scheduling policy for decoded remote-audio buffers. It maintains a
+// continuous playhead and discards excess lead rather than accumulating latency.
 //
 // Match Guacamole's browser policy: begin at the audio playhead and clamp any
 // accumulated queue to 300 ms. A late packet produces a gap instead of turning
@@ -8,7 +8,7 @@
 /// Furthest ahead of the audio clock the schedule may run.
 export const MAX_LEAD_S = 0.3;
 
-/// Cushion used for a first buffer or recovery from underrun.
+/// Added lead for a first buffer or recovery from underrun; deliberately zero.
 export const START_LEAD_S = 0;
 
 export interface Scheduled {
@@ -31,8 +31,8 @@ export interface Scheduled {
   clamped: boolean;
 }
 
-/** Place a decoded buffer back-to-back, after an underrun cushion, or at the
- * maximum lead with its excess front trimmed. */
+/** Place a decoded buffer back-to-back, after an underrun, or at the maximum
+ * lead with its excess front trimmed. */
 export function scheduleBuffer(
   nextAt: number,
   now: number,

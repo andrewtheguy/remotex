@@ -72,7 +72,7 @@ impl axum::serve::Listener for NodelayListener {
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
 ///   liveness probe. On an embedded gateway `login` and `logout` answer 403
-///   instead (see [`no_login_handler`]), while `status` stays real — the same SPA
+///   instead (see `no_login_handler`), while `status` stays real — the same SPA
 ///   runs there and asks it first.
 /// - the rest of `/api/*`, `/ws`, and `/ws/audio` — refuse requests that do not
 ///   carry whatever this gateway's [`GatewayAuth`] asks for; unknown `/api/*`

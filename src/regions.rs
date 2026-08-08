@@ -25,7 +25,7 @@
 //!   Two deliveries of one cell in one frame is how a debt gets discharged by pixels
 //!   that did not discharge it.
 //!
-//! Geometry moves at most once per [`RETUNE`], so a stream is not restarted for
+//! Geometry moves at most once per `RETUNE`, so a stream is not restarted for
 //! every twitch: a region that shrinks keeps its stream (the idle margin costs
 //! almost nothing to code), and only a region that grows past its stream's rectangle
 //! pays for a new encoder and a keyframe.
@@ -484,7 +484,7 @@ impl Regions {
 
     /// Choose the regions to stream, given the cells currently in motion.
     ///
-    /// A no-op under [`Policy::Whole`], and at most once per [`RETUNE`] otherwise.
+    /// A no-op under [`Policy::Whole`], and at most once per `RETUNE` otherwise.
     pub fn retune(&mut self, moving: &[(u16, u16)], now: Instant) -> anyhow::Result<()> {
         if self.policy == Policy::Whole {
             return Ok(());

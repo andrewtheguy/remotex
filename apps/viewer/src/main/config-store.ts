@@ -204,9 +204,10 @@ export const TEMPLATE = `# remotex.app's own configuration.
 # This file belongs to the app and to nothing else: it is not the installed
 # server's /opt/remotex/etc/remotex.toml, and the two never read each other.
 #
-# There is no [server] block here. The app decides where its gateway listens
-# (an ephemeral port on 127.0.0.1), serves no web UI, and authenticates itself,
-# so a [server] block would only contradict it and is refused.
+# There is no [server] block here. The app supplies its gateway's ephemeral
+# loopback listener, authentication token and bundled web root. The window loads
+# that same web root as remotex://app, so a [server] block would only contradict
+# decisions the app has already made and is refused.
 #
 # Add one [[targets]] block per machine. Edit this from the app —
 # Remote > Configuration… — which checks it before saving.

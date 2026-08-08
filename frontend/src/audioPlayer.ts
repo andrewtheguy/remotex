@@ -239,7 +239,7 @@ export function createAudioPlayer(
       return;
     }
     // Whether this buffer butts seamlessly onto the one before it. Anything
-    // else — the underrun re-cushion, the ceiling's trim, the first buffer —
+    // else — an underrun restart, the ceiling's trim, the first buffer —
     // starts mid-waveform or after silence, and is faded in over a few
     // milliseconds rather than spliced hard, which is a click.
     const joined = nextAt;

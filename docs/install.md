@@ -56,7 +56,7 @@ Pass a release tag as the first argument to install a specific version:
 
 ```sh
 curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
-  bash -s -- v0.1.0
+  bash -s -- v0.0.130
 ```
 
 ## Installed layout

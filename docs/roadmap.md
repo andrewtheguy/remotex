@@ -46,11 +46,14 @@ queue is sized for its still tiles and so absorbs a backlog before the signal
 appears. Both are sound where they are used — exceeding the operator's setting was
 never a goal — but it means a link with room to spare is never discovered.
 
-Going further needs the receiver's view, which TCP hides: loss and jitter are behind
-retransmission, and the only thing the sending side can observe is how fast its own
-socket drains. So this wants a client-reported measurement — bytes received and
-arrival timing as a new `ClientMsg` — and work in the client. A separate feature,
-and one whose value should be argued from `video`'s measurements rather than assumed.
+The existing `paintAck` feedback supplies the receiver's view of *queueing*: it
+reports when a batch finished the client's ordered decode-and-draw pass, and the
+adaptive loop subtracts the link's recent floor to detect falling behind. An empty
+paint window still says only that the configured quality fits; it does not measure
+how much more would fit. Going further therefore wants richer receiver feedback —
+delivered bytes and arrival timing added to that contract, for example — plus an
+explicit upper-bound policy. It is a separate feature whose value should be argued
+from `video`'s measurements rather than assumed.
 
 ### AV1, if it ever measures better than VP9
 

@@ -18,7 +18,7 @@
 //! submitted pixels.
 //!
 //! This is also where the render dial's `motion` strategy lives, because it is the
-//! one place both engines already funnel their damage through. See [`Motion`].
+//! one place both engines already funnel their damage through. See `Motion`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -829,11 +829,11 @@ impl TileSink {
     /// in the pixels sent, so which cells the detection put in motion is something
     /// QA reads off the screen rather than infers from how blurry a region looks:
     ///
-    /// - [`MARK_MOTION`] (magenta) — sent at the motion encode. Magenta over
+    /// - `MARK_MOTION` (magenta) — sent at the motion encode. Magenta over
     ///   something that is not moving is the detection reaching too far.
-    /// - [`MARK_CRISP`] (cyan) — sent at the base encode from inside a split band:
+    /// - `MARK_CRISP` (cyan) — sent at the base encode from inside a split band:
     ///   a quiet cell beside a moving one. This is the boundary of the split.
-    /// - [`MARK_CLEANUP`] (green), drawn by [`flush_cleanups`] — a settled cell
+    /// - `MARK_CLEANUP` (green), drawn by `flush_cleanups` — a settled cell
     ///   restored to the base encode.
     ///
     /// An unmarked region was sent whole at the base encode, which is the quiet
@@ -1060,7 +1060,7 @@ impl TileSink {
     /// waiting the encode out.
     ///
     /// **Calling it is a proposal, not an instruction.** At most one round is produced
-    /// per [`VIDEO_FRAME_INTERVAL`]; a call inside that window leaves the mirror dirty
+    /// per `VIDEO_FRAME_INTERVAL`; a call inside that window leaves the mirror dirty
     /// and returns. So an engine may call this as often as its boundaries occur, but
     /// must also call it when [`Self::due_at`] says to — see there for why that second
     /// half is not optional.

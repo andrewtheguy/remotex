@@ -106,7 +106,7 @@ impl PcmStream {
 
     /// One wave buffer as one packet, or nothing when it did not complete a frame.
     ///
-    /// More than one only past [`MAX_PACKET_BYTES`], which no tested remote
+    /// More than one only past `MAX_PACKET_BYTES`, which no tested remote
     /// reaches. The common case copies **nothing** and touches no sample: `carry`
     /// is empty, the buffer divides by the frame size, and the packet *is* the
     /// buffer — a refcounted slice of the [`Bytes`] the bridge already holds. The

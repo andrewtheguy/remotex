@@ -86,7 +86,7 @@ pub fn keepalive_budget() -> Duration {
 ///
 /// `WRITE_TIMEOUT` is passed on every platform rather than behind a `cfg`,
 /// because FreeRDP ignores it where the option does not exist — the same place
-/// [`arm_liveness_probes`] would have had to `cfg` it out.
+/// `arm_liveness_probes` would have had to `cfg` it out.
 pub fn keepalive() -> freerdp::KeepAlive {
     freerdp::KeepAlive {
         idle: KEEPALIVE_IDLE,

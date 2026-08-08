@@ -11,7 +11,7 @@
 //!
 //! ## What the extension is for, here
 //!
-//! **Compression**: standard zlib ([`ENCODING_ZLIB`], decoded in
+//! **Compression**: standard zlib (`ENCODING_ZLIB`, decoded in
 //! [`crate::vnc_encodings`]) instead of raw pixels, which is around fifty times
 //! fewer bytes on a static desktop. Apple's own still-image codecs would do better
 //! still, but their payload formats are unresolved in the reference this was
@@ -235,14 +235,13 @@ pub fn set_encryption_stop() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
-/// `AutoFrameBufferUpdate`: hand the update cycle to the server.
+/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates.
 ///
-/// Standard RFB is a poll — one request, one update, repeat. This switches the
-/// server to sending on its own, which is both faster and the *only* way Apple's
-/// server-driven rectangles (cursor shapes above all) keep arriving. It has to be
-/// re-sent whenever the Mac changes its display layout, because a login, a lock
-/// or a fast-user-switch quietly drops the arming and the symptom is a pointer
-/// frozen on its last shape rather than an error.
+/// The measured macOS 26 server does not hand its pixel-update cycle over: armed
+/// or not, it still needs one RFB request per framebuffer update. This message is
+/// sent anyway because Apple's reference says its server-driven rectangles —
+/// cursor shapes above all — depend on it across a login, lock or fast-user-switch.
+/// It is re-sent whenever the Mac changes its display layout for the same reason.
 pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
     let mut msg = Vec::with_capacity(16);
     msg.push(0x09);

@@ -63,7 +63,8 @@ fn frame_buffer(target: &TargetConfig) -> usize {
 /// from stalling the pump — one message being written and one waiting is that, and
 /// nothing more. This queue is FIFO, so every slot past that is stale sound
 /// faithfully delivered on a link that is already behind, spent against the very
-/// pictures that put it behind, and then thrown away by the client's own ceiling.
+/// pictures that put it behind, and then trimmed away at the client's 300 ms
+/// scheduling ceiling.
 /// The bridge behind the pump drops its *oldest* and keeps sound that is still
 /// live — losses on a slow link belong there
 /// ([`crate::audio::AUDIO_QUEUE_DEPTH`]), and a stalled pump is what sends them

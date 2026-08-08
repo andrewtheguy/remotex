@@ -18,8 +18,9 @@
 # is one of them going stale.
 #
 # It is also the one setting this file shares with remotex.app's own config, which
-# has no [server] block at all — the app decides where its gateway listens and
-# serves no web UI. Edit that one from the app, not here.
+# has no [server] block at all. The app supplies its gateway's ephemeral loopback
+# listener, authentication token and bundled web root; its window loads that same
+# web root as remotex://app. Edit that config from the app, not here.
 #branding = "remotex"
 
 [server]
@@ -84,17 +85,18 @@ password = "change-me"
 # Optional domain (leave unset for a local account). RDP only.
 #domain = ""
 
-# Initial desktop size to request.
+# Optional pinned opening size. Set both keys or neither.
 #
-# RDP connects at this size. A generic VNC server and `subtype = "ard"` keep the
-# remote's own size and consult these only to answer a client that has no
-# desktop-shaped window of its own — a phone asking for whatever this end considers
-# right — which needs `resize = true` below before anything can be applied.
-# `subtype = "ard-high-performance"` instead requests its virtual display at this
-# configured mode during setup.
+# RDP connects at the pinned size, and `subtype = "ard-high-performance"` creates
+# its virtual display at it. With neither key, both instead open at the full
+# resolution of the connecting client's own screen, falling back to 1280×800 only
+# when the client supplies no screen. A generic VNC server and `subtype = "ard"`
+# keep the remote's own size; for them these keys only answer a later default-size
+# request, which still requires `resize = true` before it can be applied.
 #
-# On an RDP target with `resize` these are *points*, not pixels: the connect
-# happens at 1x and a Retina client then asks for twice the pixels.
+# These are points, not backing pixels. RDP opens at 1x and, with `resize`, a
+# Retina client then asks for twice the pixels. High Performance opens at the
+# connecting client's density even when its point size is pinned.
 #width = 1280
 #height = 800
 
@@ -102,25 +104,30 @@ password = "change-me"
 # RDP only — VNC negotiates VncAuth (password set) or None per the handshake.
 #security = "auto"
 
-# Dynamic resize (opt-in): let a client drive the remote desktop size from its
-# window. This is permission to resize *when the user asks* — "Resize to window",
-# which every protocol that can resize at all offers once this is on. Which those
-# are is narrowed below: Standard Apple `ard` is not one of them.
-#
-# Whether the window may also drive the size unasked ("Auto resize") is a second
-# permission, and not a key: the gateway grants it to every engine that accepts
-# resize — plain `vnc`, RDP, and `ard-high-performance`. Standard `ard` is the
-# exception because it shares physical displays and refuses resize entirely.
+# Dynamic resize (opt-in): hand the remote desktop's size to the client's window.
+# The client reports every window change while connected. There is no client-side
+# resize toggle, one-shot "Resize to window" button or remembered preference: this
+# one target setting is the policy.
 #
 # One narrowing that is not the client's to make either: generic VNC needs a
 # server that accepts SetDesktopSize — the TigerVNC family — and Standard Apple
 # `ard` refuses resize outright because it shares physical displays. Apple
 # `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
-# one virtual display's configuration with arbitrary viewport sizes.
+# one virtual display's configuration with arbitrary viewport sizes within its
+# fixed 3840×2160 backing ceiling.
 #
-# Without it — and by default — the desktop keeps its connect-time size, no client
-# offers either control, and the ones that ask anyway are ignored.
+# Without it — and by default — the desktop keeps its opening size, and resize
+# messages are ignored.
 #resize = false
+
+# RDP graphics pipeline, on by default and independent of `resize`. With both on,
+# each resize is an EGFX graphics reset: no reactivation or reconnect, so it is
+# cheap enough for the window to drive continuously. The trade is that a Windows
+# host's text stays soft after the resize. Set this false for the sharp legacy
+# path, whose reactivation re-renders the desktop at each size; a Windows session
+# carrying sound on dynamic rdpsnd then reconnects so audio survives. RDP only,
+# and refused on VNC even when set to false.
+#egfx = true
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
@@ -153,8 +160,8 @@ password = "change-me"
 # decoder at all.
 #audio = false
 
-# How that audio is carried. Ignored unless `audio = true` above, and refused
-# rather than ignored if it is set without it.
+# How that audio is carried. Valid only with `audio = true` above; setting it
+# without audio is refused rather than ignored.
 #
 #   "opus" (the default) — 96 kbps, 20 ms packets. Well clear of where stereo Opus
 #     starts to be audibly lossy. Right for anything that leaves the building, and
@@ -170,6 +177,21 @@ password = "change-me"
 # above is in the way. Guacamole carries desktop audio this way and only this way,
 # which is where it came from.
 #audio_codec = "opus"
+
+# Opus bitrate in kbit/s, 6–510. The default is 96. Valid only for Opus audio;
+# PCM has no encoder to tune.
+#audio_bitrate = 96
+
+# Let Opus adapt to the audio socket's own backpressure. The configured bitrate
+# stays the ceiling: sustained slow sends walk it down, sustained clear sends
+# walk it back up, and silence is shed while the link is behind so old sound does
+# not accumulate. Off by default, and valid only for Opus audio.
+#audio_adaptive = false
+
+# Floor for that adaptive walk in kbit/s, default 32. Valid only with
+# `audio_adaptive = true`; an explicit floor must be 6–510 and below the bitrate
+# ceiling.
+#audio_bitrate_min = 32
 
 # A VNC target needs host and, usually, one of the two passwords; domain and
 # security are ignored, and width/height only ever answer a default-size request
@@ -214,14 +236,14 @@ password = "change-me"
 # "ard" unless you need a virtual display.
 #
 # `subtype = "ard-high-performance"` requests one virtual display instead of the
-# Mac's physical displays. `width` and `height` select the mode requested during
-# setup. Once connected, the Mac's physical displays are disabled and all of its
-# windows are placed on this virtual display. The same zlib rectangles are
-# carried over Apple's encrypted protocol revision. Apple's official macOS Screen
-# Sharing client can choose up to two virtual displays; remotex requests one. With
-# `resize = true` it uses Apple's dynamic-resolution feature to replace that
-# virtual display's mode from client viewport reports, both on demand and while
-# Auto resize follows the window. Apple's display-count and fixed-resolution-
+# Mac's physical displays. It opens at the pinned `width` and `height` when both
+# are set, or at the full resolution of the client's screen otherwise, at that
+# screen's density. Once connected, the Mac's physical displays are disabled and
+# all of its windows are placed on this virtual display. The same zlib rectangles
+# are carried over Apple's encrypted protocol revision. Apple's official macOS
+# Screen Sharing client can choose up to two virtual displays; remotex requests
+# one. With `resize = true`, viewport reports continuously replace the virtual
+# display's mode as the window changes. Apple's display-count and fixed-resolution-
 # preset controls are not implemented.
 #
 # It is also the one target that cannot use `render_type = "motion"`, in any of
@@ -360,6 +382,17 @@ password = "change-me"
 # changing. The `encode totals` log line is what settles it for a given target.
 #render_type = "video"
 #render_quality = 60
+
+# Let every lossy quality in this target's render plan track measured client
+# queueing. The configured qualities remain ceilings. JPEG/WebP tiles lower their
+# quality per encode; video streams add the client's paint lag to their existing
+# send-pressure signal. Refused with `render_type = "full"`, which has no lossy
+# dial to move.
+#render_adaptive = false
+
+# Floor for that adaptive walk, 1–100 and defaulting to 20. Valid only with
+# `render_adaptive = true`, and it may not exceed any configured render quality.
+#render_adaptive_min = 20
 
 # QA aid for "motion", off unless asked for: outline every piece the strategy emits
 # in the pixels themselves, so which cells it put in motion is something you read
