@@ -12,7 +12,7 @@ import { MAX_LEAD_S, START_LEAD_S, scheduleBuffer } from "./audioSchedule.ts";
 /** One wave buffer from the tested Windows host: 32 KiB of CD-quality stereo. */
 const BUFFER_S = 0.186;
 
-test("a first buffer starts with a cushion rather than at the playhead", () => {
+test("a first buffer starts at the playhead", () => {
   // `nextAt` of 0 is "nothing has played yet", and the clock is well past it.
   const at = scheduleBuffer(0, 12.5, BUFFER_S);
   assert.equal(at.startAt, 12.5 + START_LEAD_S);
@@ -41,12 +41,12 @@ test("consecutive buffers are back to back, with no gap and no overlap", () => {
   }
 });
 
-test("a gap in the audio restarts the cushion instead of scheduling in the past", () => {
+test("a gap in the audio restarts at the playhead instead of scheduling in the past", () => {
   const first = scheduleBuffer(0, 1, BUFFER_S);
   // The remote went quiet for ten seconds, so the timeline is far behind the clock.
   const resumed = scheduleBuffer(first.nextAt, 11, BUFFER_S);
   assert.equal(resumed.startAt, 11 + START_LEAD_S);
-  assert.ok(resumed.startAt > 11, "nothing can be scheduled before now");
+  assert.ok(resumed.startAt >= 11, "nothing can be scheduled before now");
   assert.equal(
     resumed.trim,
     0,
@@ -109,24 +109,11 @@ test("no schedule is ever in the past, and none is ever past the ceiling", () =>
   }
 });
 
-test("the cushion sits under the ceiling", () => {
-  // Or a fresh start would be clamped the moment it was scheduled, and every stream
-  // would begin with a trim.
-  assert.ok(START_LEAD_S < MAX_LEAD_S);
+test("a fresh start does not add scheduling latency", () => {
+  assert.equal(START_LEAD_S, 0);
 });
 
-test("the budget absorbs whole wave buffers, not fractions of one", () => {
-  // The unit the gateway actually delivers in is a wave buffer, so a cushion smaller
-  // than a couple of them cannot absorb one late arrival — which is what the old
-  // 0.1s did, and why this comparison is written against BUFFER_S rather than as a
-  // bare number. The ceiling is sized to survive a stall of several, in the same
-  // spirit as Myrtille's ~1s of deliberate buffering.
-  assert.ok(
-    START_LEAD_S >= 2 * BUFFER_S,
-    "the start cushion should hold at least two wave buffers",
-  );
-  assert.ok(
-    MAX_LEAD_S >= 5 * BUFFER_S,
-    "the ceiling should tolerate a stall of several wave buffers",
-  );
+test("the budget matches Guacamole's 300 ms queue ceiling", () => {
+  assert.equal(MAX_LEAD_S, 0.3);
+  assert.ok(MAX_LEAD_S > BUFFER_S, "the ceiling holds one source wave buffer");
 });
