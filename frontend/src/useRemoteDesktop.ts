@@ -417,10 +417,11 @@ export function useRemoteDesktop(
   // has to happen inside a click — that is what makes an AudioContext playable
   // without an autoplay policy's permission.
   const [audioEnabled, setAudioEnabled] = useState(false);
-  // Why there is no sound, when there should be. One string with one real cause
-  // behind it today: a browser with no WebCodecs Opus decoder, which is a plain
-  // refusal rather than something to work around — there is no second
-  // representation to fall back to (see audioPlayer.ts).
+  // Why there is no sound, when there should be. One string, and what is behind it is
+  // a decoder that refused or failed — this browser having no WebCodecs at all is not
+  // among the possibilities, because such a browser never got past preflight.ts. A
+  // refusal is reported rather than worked around: the codec is the gateway's to
+  // choose and there is no second representation to fall back to (audioPlayer.ts).
   const [audioError, setAudioError] = useState<string | null>(null);
   // Why this browser is showing nothing for a video target, or null.
   //
@@ -1597,11 +1598,10 @@ export function useRemoteDesktop(
       setAudioEnabled(enabled);
       releaseAudio();
       if (enabled) {
-        // Asked for without checking whether this browser can decode it, because
-        // that is not answerable yet: a passthrough target needs no decoder at all,
-        // and only the `audioFormat` that comes back says which kind of target this
-        // is. `startAudio` is where the question can be asked, and its catch reports
-        // the answer a round trip later.
+        // Asked for without checking whether this browser can decode this target's
+        // codec, because that is not answerable yet: only the `audioFormat` that
+        // comes back names one. `startAudio` is where the question can be asked, and
+        // the decoder's own `onError` reports the answer a round trip later.
         audioContextRef.current = createAudioContext();
         audioSocketRef.current?.open();
       } else {

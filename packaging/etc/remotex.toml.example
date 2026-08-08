@@ -176,11 +176,9 @@ password = "change-me"
 # accepted; a server that offers no matching format sends nothing, and the log
 # says so.
 #
-# One thing worth knowing before switching this on, and it is the browser's alone:
-# it decodes Opus with WebCodecs, which is **secure-context only** — so a gateway
-# reached over plain HTTP on a LAN address has no audio until it is behind TLS
-# (localhost is exempt). `audio_codec = "pcm"` below is the exception and needs no
-# decoder at all.
+# Nothing here depends on how the page is reached: the client refuses to start at
+# all without a secure context and a pair of WebCodecs decoders, so by the time a
+# target is picked, sound is simply one of the things that work.
 #audio = false
 
 # How that audio is carried. Valid only with `audio = true` above; setting it
@@ -192,13 +190,11 @@ password = "change-me"
 #   "pcm" — the remote's own samples, unencoded and unresampled, at 1.41 Mbit/s.
 #     Fifteen times the bandwidth, and in exchange nothing between the remote's
 #     mixer and the browser's output touches a sample: no encoder here, no decoder
-#     there. It is also the only option that plays without WebCodecs, so it is the
-#     one that works over plain HTTP to a LAN address.
+#     there, and no resampler on either side.
 #
 # "pcm" is not the better-sounding option in any way you are likely to hear; it is
-# the simpler path. Reach for it on a fast LAN, or where the secure-context rule
-# above is in the way. Guacamole carries desktop audio this way and only this way,
-# which is where it came from.
+# the simpler path. Reach for it on a fast LAN. Guacamole carries desktop audio this
+# way and only this way, which is where it came from.
 #audio_codec = "opus"
 
 # Opus bitrate in kbit/s, 6–510. The default is 96. Valid only for Opus audio;

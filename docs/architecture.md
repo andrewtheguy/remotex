@@ -420,10 +420,13 @@ on the main thread anyway — and is mostly presentation: a transferred canvas c
 from the worker, so a frame reaches the screen without the thread carrying input and
 React being scheduled for it.
 
-A browser without `VideoDecoder` is a worse case to hit than one without
-`AudioDecoder`: no audio decoder means silence beside a working desktop, and no video
-decoder means no desktop. So a failure is *said* rather than logged: a banner that
-stays up, naming the configuration the browser would not take.
+A browser without `VideoDecoder` never reaches this code — the preflight gate turns
+it away before React mounts (`preflight.ts`). What survives is the narrower failure:
+a decoder that exists and refuses this *configuration*, which no keyframe and no
+neighbouring region repairs. That is *said* rather than logged, because a video
+target sends no still tiles and the alternative is a desktop that never paints and
+never explains itself: a banner that stays up, naming the configuration the browser
+would not take.
 
 #### The codec
 
@@ -635,8 +638,9 @@ byte, with no encoder in the gateway and no decoder in the client. `pcm-s16le`
 is deliberately not a WebCodecs codec string — the packets are interleaved
 signed 16-bit little-endian samples, which is what an `AudioBuffer` holds
 already, so the client builds one directly and schedules it on the same path an
-Opus packet reaches after decoding. That makes it the only option that plays
-without WebCodecs, and so the only one a browser with no Opus decoder can play.
+Opus packet reaches after decoding. That makes it the only option whose packets
+reach no decoder at all — which is a property of the path, not a compatibility
+escape hatch: the client refuses to start without WebCodecs either way.
 
 It also makes it the only option whose `sampleRate` is not 48 000. An
 `AudioBuffer` carries its own rate, so a context built at 48 kHz before the
@@ -972,14 +976,20 @@ The React SPA has login, target picker, and remote desktop states. It renders
 tiles to a canvas, applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
 
-**It refuses to start outside a secure context** (`secureContext.ts`, before React
-mounts), and that refusal is what lets the rest of the client be simple: WebCodecs,
-`navigator.clipboard` and `navigator.keyboard` all require one, and nothing
-downstream tests for it again or carries a fallback for its absence. The gateway
-speaks plain HTTP and has no TLS listener, so a secure context comes from how the
-page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`, any `.localhost`
-label), a TLS-terminating reverse proxy, or the shell's own `remotex://app` scheme.
-A LAN address over plain `http://` is the case this refuses, by name.
+**It refuses to start without a secure context and both WebCodecs decoders**
+(`preflight.ts`, before React mounts), and that refusal is what lets the rest of the
+client be simple: nothing downstream tests for either again or carries a fallback for
+its absence. `navigator.clipboard`, `navigator.keyboard` and WebCodecs itself all
+require a secure context; the gateway speaks plain HTTP and has no TLS listener, so
+one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`,
+any `.localhost` label), a TLS-terminating reverse proxy, or the shell's own
+`remotex://app` scheme. A LAN address over plain `http://` is the case this refuses,
+by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
+alone, because audio is a target's choice and video is a render dial's: a browser
+with one and not the other would play some targets and not others, which is the
+half-working session the gate exists to prevent. What remains reportable mid-session
+is a *codec* a decoder refuses, which is a different sentence and arrives from the
+decoder itself.
 
 Full screen plus `navigator.keyboard.lock` (`immersive.ts`) is how a tab is given
 the six Command chords a browser otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R — plus ⌘Q,

@@ -1,7 +1,7 @@
 ## General
 
 - Strict no backward-compatibility or legacy paths since it is a personal project.
-- Require secure contexts for all web features, frontend deny startup for non-secure contexts, and do not add a second path for insecure contexts.
+- Require secure contexts and WebCodecs (`VideoDecoder` and `AudioDecoder`) for all web features. The frontend denies startup when either is missing (`frontend/src/preflight.ts`); do not add a second path for a browser without them.
 - Do not run `cargo fmt`.
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
   `cargo test`.
@@ -175,9 +175,10 @@ The choice is per target, not per client, and the gateway names it on the wire �
 `ServerMsg::AudioFormat` carries the codec string, the decoder configuration and
 `packetFrames`. The client does not decode anything itself: it hands encoded
 packets to WebCodecs, so a codec a browser refuses surfaces as a named decoder
-error rather than as silence. Passthrough reaches no decoder at all, which is why
-it is the one option a browser with no WebCodecs audio can play — Web Audio alone
-is enough for it.
+error rather than as silence. Passthrough reaches no decoder at all — Web Audio
+alone plays it — but that is a property of the path and not a compatibility escape
+hatch: WebCodecs is the client's entry condition (`frontend/src/preflight.ts`), so a
+browser without it never reaches a target of either kind.
 
 `src/pcm48.rs` is the *encoded* front half — deinterleave and resample in exact
 882-to-960 groups — and a codec draws its own packet size out of it. Passthrough
