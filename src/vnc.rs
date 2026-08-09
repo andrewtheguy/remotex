@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aes::Aes128;
 use des::Des;
@@ -76,6 +77,10 @@ const MIN_ARD_KEY_BYTES: usize = 128;
 /// null-terminated, the remainder random.
 const ARD_CREDENTIALS_LEN: usize = 128;
 const ARD_FIELD_LEN: usize = 64;
+/// Once Apple's automatic pixel region has been emptied, this much silence means
+/// a pasteboard fetch is not going to answer. Resume one-at-a-time screen polling;
+/// the browser request was already answered from the cache.
+const APPLE_CLIPBOARD_IDLE_GAP: Duration = Duration::from_secs(1);
 const ENCODING_RAW: i32 = 0;
 /// CopyRect: two `u16`s naming where in the framebuffer this rectangle's pixels
 /// already are, and no pixels at all.
@@ -455,6 +460,49 @@ struct ClipboardState {
     /// The panel issues only one at a time, but count them so the wire remains
     /// correct if another client does not make that UI guarantee.
     apple_requests: usize,
+    /// A native Apple pasteboard fetch has been sent and has not answered yet.
+    /// While this is set, the read loop leaves a gap in the framebuffer polling
+    /// cycle so the reply cannot remain queued forever behind pixel updates.
+    apple_fetch_pending: bool,
+    /// Another remote change arrived while the current native fetch was in
+    /// flight. One reply cannot prove it includes that later change, so it earns
+    /// exactly one follow-up fetch.
+    apple_fetch_again: bool,
+    /// The automatic framebuffer subscription has been narrowed to an empty
+    /// pixel region. Normal RFB polling still carries the desktop; the empty
+    /// subscription keeps Apple's metadata armed without letting unsolicited
+    /// pixels queue in front of pasteboard traffic again.
+    apple_auto_quiet: bool,
+}
+
+impl ClipboardState {
+    /// Start one Apple pasteboard fetch, or coalesce with the one already in
+    /// flight. A server change observed after that fetch began is remembered so
+    /// its reply earns one final refresh.
+    fn begin_apple_fetch(&mut self, remote_changed: bool) -> Option<u32> {
+        self.apple_auto_quiet = true;
+        if self.apple_fetch_pending {
+            self.apple_fetch_again |= remote_changed;
+            return None;
+        }
+        self.apple_fetch_pending = true;
+        Some(self.apple_session_id)
+    }
+
+    /// Complete one Apple pasteboard fetch. Browser reads were already answered
+    /// from the cache, so one native reply refreshes every read coalesced behind
+    /// it. A remote change that raced the fetch starts one more fetch with the
+    /// newly learned session id.
+    fn finish_apple_fetch(&mut self) -> (bool, Option<u32>) {
+        let requested = self.apple_requests > 0;
+        self.apple_requests = 0;
+        if std::mem::take(&mut self.apple_fetch_again) {
+            (requested, Some(self.apple_session_id))
+        } else {
+            self.apple_fetch_pending = false;
+            (requested, None)
+        }
+    }
 }
 
 type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
@@ -599,13 +647,10 @@ struct Connected {
     apple: bool,
     /// Whether the client drives the update cycle: one request, one update, repeat.
     ///
-    /// True on both dialects, and on the 003.889 one that is a measurement rather
-    /// than a default. The reference says `AutoFrameBufferUpdate` switches the
-    /// server to sending on its own and that a client should then stop asking;
-    /// macOS 26 does not — armed or not, it answers a non-incremental request and
-    /// is otherwise silent, even while the screen is changing under a moving
-    /// pointer. A client that took the reference at its word would paint one frame
-    /// and then freeze.
+    /// True on both Apple dialects too. Their automatic channel is load-bearing
+    /// for metadata, but its pixel region is deliberately narrowed to empty once
+    /// pasteboard traffic starts; these one-at-a-time requests then remain the
+    /// pixel transport without building a queue ahead of control messages.
     poll: bool,
 }
 
@@ -964,12 +1009,11 @@ async fn apple_preface(
         .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
-    // Arm the server's sender. On this Mac it does *not* take over the update
-    // cycle — see [`Connected::poll`] — so what it is still sent for is the
-    // server-driven cursor shapes, which the reference says stop flowing across a
-    // login or lock without it. Cheap, and re-sent on every layout for the same
-    // reason. The non-incremental request that pairs with it is [`active_loop`]'s
-    // opening kick, which is the next thing on the wire.
+    // Arm the server's sender for pixels and metadata. The latter — cursor shapes
+    // above all — is why this is re-sent on every layout. Once pasteboard traffic
+    // starts the region is narrowed to empty and the ordinary polling cycle becomes
+    // the sole pixel producer, so this initial full-region arm cannot queue pixels
+    // ahead of clipboard control messages for the rest of the session.
     uplink
         .send(&vnc_apple::auto_framebuffer_update(server.size()))
         .await?;
@@ -1087,7 +1131,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // 003.889 wire this is also the second half of the arming pair the preface
     // began, which is why it is unconditional.
     send(&uplink, &update_request(false, size)).await?;
-
     let mut read_task = tokio::spawn(read_loop(
         downlink,
         shared,
@@ -1249,10 +1292,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let session_id = {
                             let mut state = clipboard.lock().unwrap();
                             state.local = Some(text.to_owned());
+                            state.apple_auto_quiet = true;
                             state.apple_session_id
                         };
                         match vnc_apple_clipboard::send(session_id, text) {
-                            Ok(msg) => send(&uplink, &msg).await,
+                            Ok(msg) => {
+                                send_all(
+                                    &uplink,
+                                    &[vnc_apple::auto_framebuffer_update((0, 0)), msg],
+                                )
+                                .await
+                            }
                             Err(e) => Err(e),
                         }
                     } else if clipboard_enabled {
@@ -1448,6 +1498,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared { uplink, desktop, clipboard, display, .. } = &shared;
     let mut full_repaint: Option<FullRepaint> = None;
+    let mut apple_poll_paused = false;
+    let mut apple_poll_deadline: Option<tokio::time::Instant> = None;
     // The connection's decoder state: the deflate streams and whatever else an
     // encoding carries from one rectangle to the next.
     let mut decoders = Decoders::default();
@@ -1481,10 +1533,29 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 None => sink.round_returned().await,
             }
         };
+        let clipboard_idle = async {
+            match apple_poll_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
         let read = tokio::select! {
             byte = reader.read_u8() => byte,
             () = video_flush => {
                 sink.frame().await?;
+                continue;
+            }
+            () = clipboard_idle => {
+                {
+                    let mut state = clipboard.lock().unwrap();
+                    state.apple_fetch_pending = false;
+                    state.apple_fetch_again = false;
+                }
+                apple_poll_paused = false;
+                apple_poll_deadline = None;
+                let size = desktop.lock().unwrap().size;
+                debug!("vnc: Apple pasteboard fetch left unanswered; resuming framebuffer polling");
+                send(uplink, &update_request(true, size)).await?;
                 continue;
             }
         };
@@ -1518,6 +1589,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
             Err(e) => return Err(anyhow::anyhow!("read server message: {e}")),
         };
+        if apple_poll_paused {
+            // Every complete server message proves the automatic stream is still
+            // draining. Only a genuinely idle gap declares the native fetch
+            // unanswered; a busy pixel queue may take arbitrarily long to empty.
+            apple_poll_deadline = Some(tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP);
+        }
         match msg_type {
             // FramebufferUpdate
             0 => {
@@ -1586,12 +1663,32 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     if full_repaint.as_ref().is_some_and(FullRepaint::complete) {
                         full_repaint = None;
                         if poll {
-                            send(uplink, &update_request(true, size)).await?;
+                            if apple.is_some()
+                                && clipboard.lock().unwrap().apple_fetch_pending
+                            {
+                                apple_poll_paused = true;
+                                apple_poll_deadline = Some(
+                                    tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
+                                );
+                            } else {
+                                send(uplink, &update_request(true, size)).await?;
+                            }
                         }
                     } else if full_repaint.is_some() {
                         send(uplink, &update_request(false, size)).await?;
                     } else if poll || resized {
-                        send(uplink, &update_request(poll && !resized, size)).await?;
+                        if poll
+                            && !resized
+                            && apple.is_some()
+                            && clipboard.lock().unwrap().apple_fetch_pending
+                        {
+                            apple_poll_paused = true;
+                            apple_poll_deadline = Some(
+                                tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
+                            );
+                        } else {
+                            send(uplink, &update_request(poll && !resized, size)).await?;
+                        }
                     }
                 }
             }
@@ -1748,23 +1845,52 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let command = u16::from_be_bytes([body[2], body[3]]);
                 match command {
                     2 if clipboard_enabled => {
-                        let session_id = clipboard.lock().unwrap().apple_session_id;
-                        send(uplink, &vnc_apple_clipboard::fetch(session_id)).await?;
+                        let session_id = clipboard.lock().unwrap().begin_apple_fetch(true);
+                        if let Some(session_id) = session_id {
+                            send_all(
+                                uplink,
+                                &[
+                                    vnc_apple::auto_framebuffer_update((0, 0)),
+                                    vnc_apple_clipboard::fetch(session_id).to_vec(),
+                                ],
+                            )
+                            .await?;
+                        }
                     }
                     3 if clipboard_enabled => {
                         let local = {
-                            let state = clipboard.lock().unwrap();
-                            state
+                            let mut state = clipboard.lock().unwrap();
+                            let local = state
                                 .local
                                 .as_ref()
-                                .map(|text| (state.apple_session_id, text.clone()))
+                                .map(|text| (state.apple_session_id, text.clone()));
+                            state.apple_auto_quiet |= local.is_some();
+                            local
                         };
                         if let Some((session_id, text)) = local {
                             match vnc_apple_clipboard::send(session_id, &text) {
-                                Ok(msg) => send(uplink, &msg).await?,
+                                Ok(msg) => {
+                                    send_all(
+                                        uplink,
+                                        &[vnc_apple::auto_framebuffer_update((0, 0)), msg],
+                                    )
+                                    .await?
+                                }
                                 Err(e) => warn!("vnc: could not answer Apple pasteboard request: {e:#}"),
                             }
                         }
+                    }
+                    // Tickle: re-arm exactly the region this session currently
+                    // uses. After its first clipboard transaction that region is
+                    // deliberately empty and pixels arrive through the normal,
+                    // one-request-at-a-time polling path instead.
+                    4 => {
+                        let size = if clipboard.lock().unwrap().apple_auto_quiet {
+                            (0, 0)
+                        } else {
+                            desktop.lock().unwrap().size
+                        };
+                        send(uplink, &vnc_apple::auto_framebuffer_update(size)).await?;
                     }
                     _ => debug!("vnc: Apple status command {command}"),
                 }
@@ -1783,12 +1909,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     if !clipboard_enabled {
                         continue;
                     }
-                    let requested = {
-                        let mut state = clipboard.lock().unwrap();
-                        let requested = state.apple_requests > 0;
-                        state.apple_requests = state.apple_requests.saturating_sub(1);
-                        requested
-                    };
+                    let requested = finish_apple_clipboard_fetch(
+                        clipboard,
+                        desktop,
+                        uplink,
+                        &mut apple_poll_paused,
+                        &mut apple_poll_deadline,
+                    )
+                    .await?;
                     let snapshot = {
                         let mut state = clipboard.lock().unwrap();
                         let snapshot = ClipboardSnapshot::oversized(
@@ -1808,12 +1936,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if !clipboard_enabled {
                     continue;
                 }
-                let requested = {
-                    let mut state = clipboard.lock().unwrap();
-                    let requested = state.apple_requests > 0;
-                    state.apple_requests = state.apple_requests.saturating_sub(1);
-                    requested
-                };
+                let requested = finish_apple_clipboard_fetch(
+                    clipboard,
+                    desktop,
+                    uplink,
+                    &mut apple_poll_paused,
+                    &mut apple_poll_deadline,
+                )
+                .await?;
                 match vnc_apple_clipboard::parse(header, &bytes) {
                     Ok(vnc_apple_clipboard::Incoming::Text(text)) => {
                         debug!("vnc: remote Apple clipboard updated, {} bytes", text.len());
@@ -1889,6 +2019,34 @@ async fn read_loop<R: AsyncRead + Unpin>(
     }
 }
 
+/// Settle one native Apple pasteboard fetch after its complete payload has been
+/// consumed. A remote change that raced it is fetched once more before screen
+/// polling resumes; otherwise the one-request-at-a-time pixel cycle can continue.
+async fn finish_apple_clipboard_fetch(
+    clipboard: &SharedClipboard,
+    desktop: &SharedDesktop,
+    uplink: &SharedUplink,
+    poll_paused: &mut bool,
+    poll_deadline: &mut Option<tokio::time::Instant>,
+) -> anyhow::Result<bool> {
+    let (requested, fetch_again) = clipboard.lock().unwrap().finish_apple_fetch();
+    if let Some(session_id) = fetch_again {
+        send_all(
+            uplink,
+            &[
+                vnc_apple::auto_framebuffer_update((0, 0)),
+                vnc_apple_clipboard::fetch(session_id).to_vec(),
+            ],
+        )
+        .await?;
+    } else if std::mem::take(poll_paused) {
+        *poll_deadline = None;
+        let size = desktop.lock().unwrap().size;
+        send(uplink, &update_request(true, size)).await?;
+    }
+    Ok(requested)
+}
+
 /// Forward one already-recorded remote clipboard snapshot. Returns whether the
 /// browser link is gone, matching the read loop's other sink helpers.
 async fn emit_clipboard(sink: &TileSink, snapshot: ClipboardSnapshot, requested: bool) -> bool {
@@ -1910,11 +2068,11 @@ async fn request_apple_clipboard(
     uplink: &SharedUplink,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
-    let (session_id, snapshot) = {
+    let (fetch, snapshot) = {
         let mut state = clipboard.lock().unwrap();
         state.apple_requests = state.apple_requests.saturating_add(1);
         (
-            state.apple_session_id,
+            state.begin_apple_fetch(false),
             state
                 .remote
                 .clone()
@@ -1928,7 +2086,18 @@ async fn request_apple_clipboard(
         oversized_bytes: snapshot.oversized_bytes,
     })
     .await?;
-    send(uplink, &vnc_apple_clipboard::fetch(session_id)).await
+    if let Some(session_id) = fetch {
+        send_all(
+            uplink,
+            &[
+                vnc_apple::auto_framebuffer_update((0, 0)),
+                vnc_apple_clipboard::fetch(session_id).to_vec(),
+            ],
+        )
+        .await
+    } else {
+        Ok(())
+    }
 }
 
 /// Handle one Extended Clipboard message from the server.
@@ -2616,7 +2785,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     rearm_pasteboard: bool,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
-    let Shared { uplink, desktop, shadow, display, .. } = shared;
+    let Shared { uplink, desktop, clipboard, shadow, display, .. } = shared;
     let declared = reader.read_u16().await?;
     // Two fewer than declared, which is the count the Mac actually sends — see
     // [`vnc_apple::parse_layout`], where the reason and the measurement are.
@@ -2679,6 +2848,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     }
 
     let size = desktop.lock().unwrap().size;
+    let auto_region = if clipboard.lock().unwrap().apple_auto_quiet {
+        (0, 0)
+    } else {
+        size
+    };
     let mut uplink = uplink.lock().await;
     // Now that the Mac has said what it has, ask for compression. This has to wait
     // for a layout: zlib in the *first* `SetEncodings` costs the layout entirely, and
@@ -2695,13 +2869,20 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     if rearm_pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
-    // Re-arm, on every layout and not only on a change of geometry.
+    // Re-arm, on every layout and not only on a change of geometry. Once native
+    // pasteboard traffic has started, keep the automatic *pixel* region empty:
+    // the ordinary one-request-at-a-time polling loop carries the screen without
+    // letting an unsolicited pixel queue starve control messages on this same
+    // ordered stream. The automatic channel remains armed for Apple's metadata.
     //
     // Logged with the geometry it arms for: this is the one message that tells the
     // Mac what to stream, so an arming that disagrees with the desktop the gateway
     // just adopted is what a resize going wrong looks like from here.
-    debug!("vnc: arming auto framebuffer updates for {}x{}", size.0, size.1);
-    uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
+    debug!(
+        "vnc: arming auto framebuffer updates for {}x{}",
+        auto_region.0, auto_region.1
+    );
+    uplink.send(&vnc_apple::auto_framebuffer_update(auto_region)).await?;
     Ok(resized)
 }
 
@@ -5267,7 +5448,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(written(&sent), vnc_apple_clipboard::fetch(0));
+        let mut expected = vnc_apple::auto_framebuffer_update((0, 0));
+        expected.extend_from_slice(&vnc_apple_clipboard::fetch(0));
+        assert_eq!(written(&sent), expected);
         sink.flush().await;
         assert!(matches!(
             rx.try_recv(),
@@ -5292,8 +5475,15 @@ mod tests {
 
         request_apple_clipboard(&clipboard, &uplink, &sink).await.unwrap();
 
-        assert_eq!(clipboard.lock().unwrap().apple_requests, 1);
-        assert_eq!(written(&sent), vnc_apple_clipboard::fetch(7));
+        {
+            let state = clipboard.lock().unwrap();
+            assert_eq!(state.apple_requests, 1);
+            assert!(state.apple_fetch_pending);
+            assert!(state.apple_auto_quiet);
+        }
+        let mut expected = vnc_apple::auto_framebuffer_update((0, 0));
+        expected.extend_from_slice(&vnc_apple_clipboard::fetch(7));
+        assert_eq!(written(&sent), expected);
         sink.flush().await;
         assert!(matches!(
             rx.try_recv(),
@@ -5304,6 +5494,42 @@ mod tests {
                 ..
             }) if text == "cached"
         ));
+    }
+
+    #[tokio::test]
+    async fn apple_clipboard_fetches_cut_a_gap_in_the_pixel_stream() {
+        let status = [0x14, 0, 0, 4, 0, 1, 0, 2];
+        let mut wire = status.repeat(2);
+        wire.extend_from_slice(&[0, 0, 0, 0]); // one empty FramebufferUpdate
+        wire.extend_from_slice(&vnc_apple_clipboard::send(7, "first").unwrap());
+        wire.extend_from_slice(&vnc_apple_clipboard::send(7, "second").unwrap());
+
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: true, poll: true },
+            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            sink,
+        )
+        .await;
+
+        let quiet = vnc_apple::auto_framebuffer_update((0, 0));
+        let mut expected = quiet.clone();
+        expected.extend_from_slice(&vnc_apple_clipboard::fetch(0));
+        // The second change coalesces while the first fetch is outstanding. Its
+        // follow-up must precede the next pixel request or the Mac can refill the
+        // ordered stream with frames and strand the pasteboard again.
+        expected.extend_from_slice(&quiet);
+        expected.extend_from_slice(&vnc_apple_clipboard::fetch(7));
+        expected.extend_from_slice(&update_request(true, (2, 2)));
+        assert_eq!(written(&sent), expected);
     }
 
     #[tokio::test]

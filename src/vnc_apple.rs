@@ -237,11 +237,12 @@ pub fn set_encryption_stop() -> Vec<u8> {
 
 /// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates.
 ///
-/// The measured macOS 26 server does not hand its pixel-update cycle over: armed
-/// or not, it still needs one RFB request per framebuffer update. This message is
-/// sent anyway because Apple's reference says its server-driven rectangles —
-/// cursor shapes above all — depend on it across a login, lock or fast-user-switch.
-/// It is re-sent whenever the Mac changes its display layout for the same reason.
+/// Apple's metadata — cursor shapes above all — depends on this arming across a
+/// login, lock or fast-user-switch, so it is re-sent whenever the display layout
+/// changes. A `0x0` region keeps that metadata channel armed while stopping
+/// unsolicited pixel updates; the ordinary RFB polling cycle then carries pixels
+/// with one request outstanding instead of letting them queue ahead of control
+/// messages on the same ordered stream.
 pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
     let mut msg = Vec::with_capacity(16);
     msg.push(0x09);

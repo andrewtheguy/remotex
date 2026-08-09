@@ -405,6 +405,7 @@ enum MacRequest {
     Configuration((u16, u16), u16),
     Display(u32),
     AutoPasteboard(bool),
+    QuietFramebuffer,
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
 }
@@ -856,7 +857,13 @@ async fn serve_fake_mac_records(
             // AutoFrameBufferUpdate: the arming, which a real Mac answers by
             // streaming. Here the paired non-incremental request drives it.
             0x09 => {
-                records.read_exact(&mut [0u8; 15]).await?;
+                let mut body = [0u8; 15];
+                records.read_exact(&mut body).await?;
+                let w = u16::from_be_bytes([body[11], body[12]]);
+                let h = u16::from_be_bytes([body[13], body[14]]);
+                if (w, h) == (0, 0) {
+                    let _ = requests.send(MacRequest::QuietFramebuffer);
+                }
             }
             // High Performance repeats AutoPasteboard after the virtual display's
             // answering layout so monitoring remains enabled after setup.
@@ -1830,6 +1837,11 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
+        MacRequest::QuietFramebuffer,
+        "clipboard traffic did not narrow Apple's automatic pixel stream"
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
         MacRequest::ClipboardFetch(0)
     );
     let remote_clipboard = expect_clipboard(&mut ws).await;
@@ -1844,6 +1856,11 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     )))
     .await
     .unwrap();
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::QuietFramebuffer,
+        "a browser clipboard write did not keep Apple's pixel stream flow-controlled"
+    );
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::ClipboardSend {
@@ -1870,6 +1887,11 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
         "the dynamic layout did not re-arm its pasteboard"
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::QuietFramebuffer,
+        "a later display layout restarted unsolicited pixels after clipboard traffic"
     );
     expect_tile(&mut ws).await;
 
