@@ -6,11 +6,12 @@
 // ever make this authoritative.
 
 /** The three answers, which are three different things to tell somebody. */
-export type IconState = "on" | "not-granted" | "not-app-window";
+export type IconState = "on" | "elsewhere" | "not-app-window";
 
 const TITLES: Record<IconState, string> = {
   on: "RemoteX Companion is active here",
-  "not-granted": "RemoteX Companion — click to enable it for this site",
+  elsewhere:
+    "RemoteX Companion serves gateways on *.remotex.localhost, and nothing else",
   "not-app-window":
     "RemoteX Companion works in an app window, not a tab — Chrome menu → Install page as app",
 };
@@ -20,15 +21,15 @@ const TITLES: Record<IconState, string> = {
  *
  * Pure, so the decision is testable without a browser. The window kind is the content
  * script's answer, relayed: a worker cannot ask a `display-mode` media query itself,
- * and a tab with no content script in it has not answered — which reads as
- * `not-granted`, since a granted site would have one.
+ * and a tab on the served host that has not answered is an ordinary tab, because the
+ * script is injected into both and only listens in one.
  */
 export function iconStateFor(input: {
-  granted: boolean;
+  served: boolean;
   appWindow: boolean;
 }): IconState {
-  if (!input.granted) {
-    return "not-granted";
+  if (!input.served) {
+    return "elsewhere";
   }
   return input.appWindow ? "on" : "not-app-window";
 }

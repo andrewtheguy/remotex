@@ -32,6 +32,11 @@ test("a message is read only by the context it names", () => {
 
 test("an unknown type is refused even at the right address", () => {
   assert.equal(isToWorker({ to: "worker", type: "evict" }), false);
+  // Both halves of the grant flow that used to be here. Nothing sends them now, and a
+  // guard that still accepted one would be a route waiting to be re-added by accident.
+  assert.equal(isToWorker({ to: "worker", type: "granted", tabId: 1 }), false);
+  assert.equal(isToWorker({ to: "worker", type: "revoked" }), false);
+  assert.equal(isToContent({ to: "content", type: "bye" }), false);
   assert.equal(isToContent({ to: "content", type: "wake" }), false);
   assert.equal(isToOffscreen({ to: "offscreen", type: "report" }), false);
 });
@@ -42,7 +47,6 @@ test("a recognised type without its payload is refused too", () => {
   // as `undefined`; a `clipboardLocal` with none would post `undefined` at the page.
   assert.equal(isToWorker({ to: "worker", type: "describe" }), false);
   assert.equal(isToWorker({ to: "worker", type: "resize" }), false);
-  assert.equal(isToWorker({ to: "worker", type: "granted" }), false);
   assert.equal(isToWorker({ to: "worker", type: "clipboardLocal" }), false);
   assert.equal(
     isToWorker({ to: "worker", type: "clipboardFromRemote" }),
@@ -61,7 +65,7 @@ test("a payload of the wrong type is refused as firmly as a missing one", () => 
   );
   assert.equal(isToWorker({ to: "worker", type: "resize", tabId: 1.5 }), false);
   assert.equal(
-    isToWorker({ to: "worker", type: "granted", tabId: null }),
+    isToWorker({ to: "worker", type: "describe", tabId: null }),
     false,
   );
   assert.equal(
@@ -81,7 +85,7 @@ test("a payload of the wrong type is refused as firmly as a missing one", () => 
 
 test("the payloads this extension actually sends are accepted", () => {
   assert.equal(isToWorker({ to: "worker", type: "describe", tabId: 3 }), true);
-  assert.equal(isToWorker({ to: "worker", type: "granted", tabId: 0 }), true);
+  assert.equal(isToWorker({ to: "worker", type: "resize", tabId: 0 }), true);
   // An empty string is a clipboard that was cleared, which is a value and not an
   // absence: the synchronizer decides what to do with it, not the guard.
   assert.equal(

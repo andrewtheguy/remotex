@@ -1,11 +1,13 @@
-// The popup: a switch, a state card and one button.
+// The popup: a state card and one button.
 //
-// It is the only place a site is ever turned on, and that is not a UI decision — it is
-// where the user gesture is. `chrome.permissions.request` needs one, and a popup click
-// is the only gesture this extension ever receives.
+// There is nothing to turn on here. The served host is in the manifest, so a window is
+// either on it or it is not, and the popup's whole job is to say which and to offer the
+// one action that needs a click — Resize to display, which moves the window this popup
+// is hanging off.
 
 import { describeRemoteSize } from "../shared/contract.ts";
 import type { Description, ToWorker } from "../shared/messages.ts";
+import { COMPANION_MATCH } from "../shared/origin.ts";
 
 const root = document.getElementById("popup") as HTMLElement;
 
@@ -41,51 +43,27 @@ function render(tabId: number, description: Description): void {
   root.replaceChildren();
   root.removeAttribute("aria-busy");
 
-  if (!description.pattern || !description.host) {
+  if (!description.served) {
     root.append(
       element(
         "p",
         "muted",
-        "This is not a page the companion can be enabled for.",
+        // The one thing worth saying about a window this extension does nothing in: it
+        // is the address that decides, and the address is not a setting anywhere.
+        `The companion serves ${COMPANION_MATCH}, and nothing else. Set dev_subdomain in the gateway's config and it will send you there.`,
       ),
     );
     return;
   }
 
-  const row = element("div", "row");
-  row.append(element("h1", undefined, description.host));
-  const toggle = element(
-    "button",
-    undefined,
-    description.granted ? "Turn off" : "Turn on",
-  );
-  toggle.addEventListener("click", () => {
-    void switchSite(tabId, description);
-  });
-  row.append(toggle);
-  root.append(row);
-
-  if (!description.granted) {
-    root.append(
-      element(
-        "p",
-        "muted",
-        // The widening is said here rather than buried in a doc, because this is the
-        // moment it happens and Chrome's own prompt will show the pattern without one.
-        description.pattern.includes(description.host)
-          ? "Chrome will ask for permission to read and change this site."
-          : `Chrome will ask for ${description.pattern} — a permission cannot name a port, so this covers every port on this host.`,
-      ),
-    );
-    return;
-  }
+  root.append(element("h1", undefined, description.host ?? "—"));
 
   if (!description.report) {
     root.append(
       element(
         "p",
         "muted",
-        "Enabled, but this is an ordinary tab. The companion runs in an app window — Chrome menu → Install page as app.",
+        "This is an ordinary tab. The companion runs in an app window — Chrome menu → Install page as app.",
       ),
     );
     return;
@@ -113,29 +91,6 @@ function render(tabId: number, description: Description): void {
       .catch(() => {});
   });
   root.append(resize);
-}
-
-async function switchSite(
-  tabId: number,
-  description: Description,
-): Promise<void> {
-  const origins = [description.pattern as string];
-  if (description.granted) {
-    // The worker hears `permissions.onRemoved` and says goodbye to the pages; nothing
-    // is sent from here for it.
-    await chrome.permissions.remove({ origins });
-  } else {
-    const allowed = await chrome.permissions.request({ origins });
-    if (!allowed) {
-      return;
-    }
-    await chrome.runtime.sendMessage({
-      to: "worker",
-      type: "granted",
-      tabId,
-    } satisfies ToWorker);
-  }
-  window.close();
 }
 
 const tab = await currentTab();

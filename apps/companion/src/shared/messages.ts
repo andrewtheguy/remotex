@@ -28,21 +28,11 @@ export type ToWorker =
   /** The popup, opening. Answered with {@link Description}. */
   | { to: "worker"; type: "describe"; tabId: number }
   /** The popup's Resize to display. */
-  | { to: "worker"; type: "resize"; tabId: number }
-  /**
-   * The popup's switch, *after* Chrome has already granted the origin. It carries no
-   * origin: `chrome.permissions` holds the answer by the time this is sent, and a copy
-   * in the message would be a second version of it that could disagree.
-   */
-  | { to: "worker"; type: "granted"; tabId: number }
-  /** Sent by the worker to itself from `permissions.onRemoved`, for one code path. */
-  | { to: "worker"; type: "revoked" };
+  | { to: "worker"; type: "resize"; tabId: number };
 
 export type ToContent =
   /** Goes to the page as `clipboardLocal`. */
   | { to: "content"; type: "clipboardLocal"; text: string }
-  /** Goes to the page as `bye`: this site's host access was taken away. */
-  | { to: "content"; type: "bye" }
   /** Answered with {@link PageReport}. Nothing is asked of the page for it. */
   | { to: "content"; type: "report" };
 
@@ -58,11 +48,10 @@ export interface PageReport {
 
 /** What the popup draws itself from. */
 export interface Description {
-  /** The pattern this window would be granted under, or null off an http(s) page. */
-  pattern: string | null;
-  /** The host as the user reads it, port and all. */
+  /** The host as the user reads it, port and all. Null off an addressable page. */
   host: string | null;
-  granted: boolean;
+  /** Whether this window is on the one host this extension serves. */
+  served: boolean;
   /** Null when there is no content script in this tab, which includes every tab. */
   report: PageReport | null;
 }
@@ -96,13 +85,10 @@ const WORKER_TYPES: ReadonlyMap<string, Check> = new Map([
   ["clipboardLocal", withText],
   ["describe", withTabId],
   ["resize", withTabId],
-  ["granted", withTabId],
-  ["revoked", anything],
 ]);
 
 const CONTENT_TYPES: ReadonlyMap<string, Check> = new Map([
   ["clipboardLocal", withText],
-  ["bye", anything],
   ["report", anything],
 ]);
 

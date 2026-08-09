@@ -13,8 +13,7 @@ import type {
   ToOffscreen,
 } from "../shared/messages.ts";
 import { isToWorker } from "../shared/messages.ts";
-import { originPatternFor } from "../shared/origin.ts";
-import { grant, grantedOrigins, isGranted, reconcile } from "./grants.ts";
+import { isCompanionUrl } from "../shared/origin.ts";
 import { paintTab } from "./icon.ts";
 import { ensureOffscreen } from "./offscreen.ts";
 import { iconFor, route, type Surface } from "./router.ts";
@@ -46,14 +45,13 @@ const surface: Surface = {
     await quiet(chrome.tabs.sendMessage(tabId, message));
   },
 
-  async grantedTabs(): Promise<number[]> {
-    const granted = new Set(await grantedOrigins());
+  // A tab this extension has no host permission for reports no `url` at all, so the
+  // filter is doubly true: Chrome hides every window that is not the served host, and
+  // the predicate agrees with the manifest about the ones it does show.
+  async servedTabs(): Promise<number[]> {
     const tabs = await chrome.tabs.query({});
     return tabs
-      .filter((tab) => {
-        const pattern = originPatternFor(tab.url);
-        return pattern !== null && granted.has(pattern);
-      })
+      .filter((tab) => isCompanionUrl(tab.url))
       .map((tab) => tab.id)
       .filter((id): id is number => id !== undefined);
   },
@@ -65,10 +63,6 @@ const surface: Surface = {
       return undefined;
     }
   },
-
-  isGranted,
-  grant,
-  reconcile,
 
   async zoom(tabId: number) {
     try {
@@ -163,22 +157,15 @@ chrome.runtime.onMessage.addListener((data, sender, respond) => {
   return true;
 });
 
+// Nothing to reconcile: the content script is declared in the manifest, so Chrome
+// registers it and keeps it registered. Both events exist only to repaint an icon that
+// Chrome has already reset, or has never been painted at all.
 chrome.runtime.onInstalled.addListener(() => {
-  void reconcile().then(() => surface.paintAll());
+  void surface.paintAll();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void reconcile().then(() => surface.paintAll());
-});
-
-// Both directions, because a site can be revoked from `chrome://extensions` and the
-// icon's right-click menu as readily as from this extension's own popup.
-chrome.permissions.onAdded.addListener(() => {
-  void reconcile().then(() => surface.paintAll());
-});
-
-chrome.permissions.onRemoved.addListener(() => {
-  void route({ to: "worker", type: "revoked" }, undefined, surface);
+  void surface.paintAll();
 });
 
 // `status === "loading"` covers a navigation; `changeInfo.url` on its own is how a

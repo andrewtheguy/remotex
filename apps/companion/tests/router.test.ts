@@ -17,8 +17,6 @@ interface Calls {
   bounds: { tabId: number; bounds: Rect }[];
   painted: number[];
   paintedAll: number;
-  granted: number[];
-  reconciled: number;
   ensured: number;
 }
 
@@ -29,8 +27,6 @@ function fake(over: Partial<Surface> = {}): { surface: Surface; calls: Calls } {
     bounds: [],
     painted: [],
     paintedAll: 0,
-    granted: [],
-    reconciled: 0,
     ensured: 0,
   };
   const surface: Surface = {
@@ -46,20 +42,11 @@ function fake(over: Partial<Surface> = {}): { surface: Surface; calls: Calls } {
     async toContent(tabId, message) {
       calls.content.push({ tabId, message });
     },
-    async grantedTabs() {
+    async servedTabs() {
       return [];
     },
     async tabUrl() {
       return undefined;
-    },
-    async isGranted() {
-      return false;
-    },
-    async grant(tabId) {
-      calls.granted.push(tabId);
-    },
-    async reconcile() {
-      calls.reconciled += 1;
     },
     async zoom() {
       return 1;
@@ -146,7 +133,7 @@ test("another window's live desktop keeps the poller on", async () => {
   // read out of whichever `state` arrived last.
   const asked: number[] = [];
   const { surface, calls } = fake({
-    async grantedTabs() {
+    async servedTabs() {
       return [1, 2];
     },
     async report(tabId) {
@@ -170,7 +157,7 @@ test("another window's live desktop keeps the poller on", async () => {
 
 test("with every window on the picker it goes off after all", async () => {
   const { surface, calls } = fake({
-    async grantedTabs() {
+    async servedTabs() {
       return [1, 2];
     },
     async report() {
@@ -190,7 +177,7 @@ test("with every window on the picker it goes off after all", async () => {
 test("a live sender needs nobody else asked", async () => {
   let asked = 0;
   const { surface, calls } = fake({
-    async grantedTabs() {
+    async servedTabs() {
       return [1, 2, 3];
     },
     async report() {
@@ -205,9 +192,9 @@ test("a live sender needs nobody else asked", async () => {
   assert.equal(asked, 0);
 });
 
-test("a local clipboard change is fanned out to every granted window", async () => {
+test("a local clipboard change is fanned out to every served window", async () => {
   const { surface, calls } = fake({
-    async grantedTabs() {
+    async servedTabs() {
       return [4, 7];
     },
   });
@@ -230,29 +217,7 @@ test("a local clipboard change is fanned out to every granted window", async () 
   ]);
 });
 
-test("a revoke says goodbye before it unregisters", async () => {
-  const order: string[] = [];
-  const { surface } = fake({
-    async grantedTabs() {
-      return [4];
-    },
-    async toContent(_tabId, message) {
-      order.push(`bye:${(message as { type: string }).type}`);
-    },
-    async reconcile() {
-      order.push("reconcile");
-    },
-    async paintAll() {
-      order.push("paint");
-    },
-  });
-  await route({ to: "worker", type: "revoked" }, undefined, surface);
-  // The other order loses the goodbye for any window that has navigated since, and the
-  // page is then left believing in a companion that has gone.
-  assert.deepEqual(order, ["bye:bye", "reconcile", "paint"]);
-});
-
-test("describe answers with the pattern, the label and the grant", async () => {
+test("describe answers with the label and whether the host is served", async () => {
   const report: PageReport = {
     state: state(),
     metrics: {
@@ -268,10 +233,7 @@ test("describe answers with the pattern, the label and the grant", async () => {
   };
   const { surface } = fake({
     async tabUrl() {
-      return "https://gateway.example.com:8443/target/2";
-    },
-    async isGranted() {
-      return true;
+      return "http://gw-a.remotex.localhost:52380/target/2";
     },
     async report() {
       return report;
@@ -280,17 +242,15 @@ test("describe answers with the pattern, the label and the grant", async () => {
   assert.deepEqual(
     await route({ to: "worker", type: "describe", tabId: 1 }, 1, surface),
     {
-      // The pattern loses the port and the label keeps it, which is what lets the popup
-      // say the grant is wider than the host it names.
-      pattern: "https://gateway.example.com/*",
-      host: "gateway.example.com:8443",
-      granted: true,
+      // The label keeps the port, which is the half that says *which* gateway.
+      host: "gw-a.remotex.localhost:52380",
+      served: true,
       report,
     },
   );
 });
 
-test("an ungranted window is described without asking the page anything", async () => {
+test("a window elsewhere is described without asking the page anything", async () => {
   let asked = 0;
   const { surface } = fake({
     async tabUrl() {
@@ -306,7 +266,7 @@ test("an ungranted window is described without asking the page anything", async 
     1,
     surface,
   );
-  assert.equal(description?.granted, false);
+  assert.equal(description?.served, false);
   assert.equal(description?.report, null);
   assert.equal(asked, 0);
 });
@@ -363,15 +323,10 @@ test("resize on a described desktop asks for the fitted bounds", async () => {
   ]);
 });
 
-test("the icon tells a tab apart from a site nobody turned on", async () => {
-  const granted = {
-    async isGranted() {
-      return true;
-    },
-  };
-  const url = {
+test("the icon tells a tab apart from a window somewhere else entirely", async () => {
+  const served = {
     async tabUrl() {
-      return "https://gateway.example.com/";
+      return "http://gw-a.remotex.localhost:52380/";
     },
   };
 
@@ -379,18 +334,27 @@ test("the icon tells a tab apart from a site nobody turned on", async () => {
     await iconFor(
       1,
       fake({
-        ...url,
-        ...granted,
+        ...served,
         async report() {
           return null;
         },
       }).surface,
     ),
-    // Granted, but nothing answered: the script is injected in a tab too and only
-    // listens in an app window.
+    // The served host, but nothing answered: the script is injected in a tab too and
+    // only listens in an app window.
     "not-app-window",
   );
-  assert.equal(await iconFor(1, fake(url).surface), "not-granted");
+  assert.equal(
+    await iconFor(
+      1,
+      fake({
+        async tabUrl() {
+          return "https://gateway.example.com/";
+        },
+      }).surface,
+    ),
+    "elsewhere",
+  );
 });
 
 test("waking spins the offscreen document up and paints the tab that woke it", async () => {

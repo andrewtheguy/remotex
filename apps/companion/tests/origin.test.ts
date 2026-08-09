@@ -1,98 +1,92 @@
-// The one place a mistake grants more than was meant.
+// The one rule that decides where this extension does anything.
 //
-// There is no host matcher in this extension — Chrome holds the grants and Chrome
-// decides what they match — so all this has to get right is turning "the window I am
-// looking at" into the pattern to ask for. Table-driven, because the interesting cases
-// are the URLs nobody types on purpose.
+// It is written twice — as a match pattern in the manifest and as a predicate in
+// `shared/origin.ts` — and the two have to mean the same thing. Chrome enforces its
+// half, so what is tested here is that the predicate agrees with it: the same hosts in,
+// the same answers out, including the ones nobody types on purpose.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  COMPANION_MATCH,
   hostLabelFor,
-  isOriginPattern,
-  originPatternFor,
+  isCompanionUrl,
 } from "../src/shared/origin.ts";
 
-test("an ordinary gateway becomes its own origin", () => {
+test("a gateway under the served suffix is served, on any port", () => {
+  // The port is what tells two gateways apart, and a match pattern cannot express one.
+  // Every port on these names is this extension's, which is the design: nothing else
+  // answers on `.remotex.localhost` at all.
+  assert.equal(isCompanionUrl("http://gw-a.remotex.localhost/"), true);
+  assert.equal(isCompanionUrl("http://gw-a.remotex.localhost:52380/"), true);
   assert.equal(
-    originPatternFor("https://gateway.example.com/"),
-    "https://gateway.example.com/*",
-  );
-  assert.equal(
-    originPatternFor("http://localhost/picker"),
-    "http://localhost/*",
-  );
-});
-
-test("the path is dropped, because the client is a SPA", () => {
-  // The path changes under the content script as the user moves around the client, so
-  // a grant tied to one would come and go with it.
-  assert.equal(
-    originPatternFor("https://gateway.example.com/target/3?a=b#c"),
-    "https://gateway.example.com/*",
+    isCompanionUrl("http://gw-b.remotex.localhost:52676/target/2?a=b#c"),
+    true,
   );
 });
 
-test("the port is dropped, and that is a widening rather than a tidy-up", () => {
-  // A match pattern cannot express a port at all. Asking for the host is the only
-  // request Chrome will take, and it covers every port on it — which the popup says
-  // out loud rather than leaving to be discovered.
-  assert.equal(
-    originPatternFor("https://gateway.example.com:8443/"),
-    "https://gateway.example.com/*",
-  );
+test("the bare suffix counts, because Chrome's pattern matches it too", () => {
+  // `*.remotex.localhost` covers the domain as well as its subdomains. A predicate that
+  // said otherwise would call a window Chrome had injected into "not ours".
+  assert.equal(isCompanionUrl("http://remotex.localhost:52380/"), true);
 });
 
-test("an IPv6 literal keeps its brackets", () => {
-  assert.equal(originPatternFor("http://[::1]:8080/"), "http://[::1]/*");
+test("a deeper name under the suffix is still under it", () => {
+  assert.equal(isCompanionUrl("http://x.gw-a.remotex.localhost/"), true);
 });
 
-test("the scheme is kept, so http and https are different grants", () => {
-  assert.equal(originPatternFor("http://gateway/"), "http://gateway/*");
-  assert.equal(originPatternFor("https://gateway/"), "https://gateway/*");
+test("https is not served, because the gateway has no TLS listener", () => {
+  // The dev redirect always sends a browser to http://, and a `.localhost` name is a
+  // secure context regardless — so a second scheme would be a second pattern to keep in
+  // step for a URL nothing produces.
+  assert.equal(isCompanionUrl("https://gw-a.remotex.localhost/"), false);
 });
 
-test("everything Chrome would not grant is refused", () => {
+test("every other host is not served, however much it reads like one", () => {
   for (const url of [
     undefined,
     "",
     "not a url",
+    "http://localhost:52380/",
+    "http://127.0.0.1:52380/",
+    "http://[::1]:52380/",
+    // The suffix is what is reserved. These only contain the words.
+    "http://remotex.localhost.example.com/",
+    "http://notremotex.localhost/",
+    "http://gw-a.remotex.localhost.evil.com/",
+    "https://gateway.example.com/",
     "about:blank",
     "chrome://extensions",
     "chrome-extension://abc/popup.html",
     "file:///Users/andrew/notes.txt",
     "data:text/html,<p>hi",
-    "ftp://gateway.example.com/",
     "javascript:void 0",
   ]) {
-    assert.equal(originPatternFor(url), null, `${url} should be refused`);
+    assert.equal(isCompanionUrl(url), false, `${url} should not be served`);
   }
 });
 
-test("the label the popup shows keeps the port the pattern lost", () => {
-  // Deliberately different from the pattern. Showing the pattern where the two differ
-  // would quietly claim the grant is narrower than it is.
+test("the match pattern is the predicate's own suffix, spelled Chrome's way", () => {
+  // Not a tautology: it is the one line that would have to change in both places, and
+  // this is what fails if only one of them does.
+  assert.equal(COMPANION_MATCH, "http://*.remotex.localhost/*");
   assert.equal(
-    hostLabelFor("https://gateway.example.com:8443/x"),
-    "gateway.example.com:8443",
+    isCompanionUrl(COMPANION_MATCH.replace("*.", "gw-a.").replace("/*", "/")),
+    true,
+  );
+});
+
+test("the label the popup shows keeps the port", () => {
+  // The hostname says which cookie origin; the port says which gateway. The popup shows
+  // the pair, because that is the one a person recognises.
+  assert.equal(
+    hostLabelFor("http://gw-a.remotex.localhost:52380/x"),
+    "gw-a.remotex.localhost:52380",
   );
   assert.equal(
-    hostLabelFor("https://gateway.example.com/"),
-    "gateway.example.com",
+    hostLabelFor("http://gw-a.remotex.localhost/"),
+    "gw-a.remotex.localhost",
   );
   assert.equal(hostLabelFor("about:blank"), null);
   assert.equal(hostLabelFor(undefined), null);
-});
-
-test("a granted pattern is recognised, and a broad one is not", () => {
-  assert.equal(isOriginPattern("https://gateway.example.com/*"), true);
-  assert.equal(isOriginPattern("http://[::1]/*"), true);
-
-  // The two the manifest declares as *optional*. They are never granted as such — the
-  // popup only ever asks for one origin — so seeing one back means something else put
-  // it there, and it is not a site to register a content script for.
-  assert.equal(isOriginPattern("https://*/*"), false);
-  assert.equal(isOriginPattern("http://*/*"), false);
-  assert.equal(isOriginPattern("<all_urls>"), false);
-  assert.equal(isOriginPattern("https://gateway.example.com/app/*"), false);
 });

@@ -44,7 +44,7 @@ Make one with *Install page as app…* from the Chrome menu, which also leaves a
 Start-menu or desktop shortcut, or launch it directly:
 
 ```
-chrome.exe --app=https://gateway.example/
+chrome.exe --app=http://gw-a.remotex.localhost:52380/
 ```
 
 It has no tab strip and no omnibox, and `frontend/src/appWindow.ts` recognises it by
@@ -129,21 +129,19 @@ Resize is on neither side of the seam. The page reports the framebuffer in
 the window from its own content script — a resize is arithmetic over two things it
 already has, and the popup is where it is asked for.
 
-## Detection is asynchronous, and it can change back
+## Detection is asynchronous, and it can be re-asked
 
 `NATIVE_HOST` is read once at module load: the app's preload runs before any script in
 the document and cannot appear later. The window kind is read once for the same sort of
 reason. The companion can promise neither. Nothing tells a page synchronously whether a
 content script was injected into it, so the only way to find out is to ask and wait, and
 a bfcache restore makes the question worth asking twice. So this is a store, not a
-constant, and every settled answer can be unsettled:
+constant:
 
 | from | on | to | |
 |---|---|---|---|
 | `probing` | `hello` | `connected` | |
 | `probing` | the deadline | `absent` | 1.5 s of silence |
-| `connected` | `bye` | `absent` | this site's host access was revoked |
-| `absent` | `hello` | `connected` | granted, and injected without a reload |
 | `absent` | `pageshow` | `probing` | a bfcache restore, which re-arms the deadline with it |
 | `connected` | `pageshow` | `connected` | a hello goes out, but there is nothing to re-probe |
 
@@ -153,12 +151,13 @@ does — so there is no path to a phase that waits for an answer nothing will se
 it, or the older one would come due against the newer question and answer `absent` on
 its behalf, early by however long ago it was asked.
 
-Both middle rows are a site's host access changing under a live window, which is a thing
-Chrome lets the user do at any moment from its own site-access UI as much as from this
-extension's popup. What `bye` does **not** cover is the extension being disabled or
-reloaded outright: that takes its content script's context with it before anything can
-be said, so a page can be left believing in a companion that has gone until it is
-reloaded.
+**There is no goodbye**, and there is nothing left for one to say. The extension serves
+one host, named in its manifest, and asks for nothing at runtime — so it has no moment
+where it learns it is leaving. An extension disabled, reloaded, or withheld from
+`chrome://extensions` takes its content script's context with it before anything could
+be sent, which is the same hole a `bye` never covered. A page can therefore be left
+believing in a companion that has gone until it is reloaded, and reloading is the
+gesture anybody would already reach for.
 
 `probing` is not the same answer as `absent`, and the difference is load-bearing. The
 focus-driven clipboard read in `useRemoteDesktop.ts` stands down while `probing`:
@@ -204,79 +203,83 @@ apps/companion/
   src/shared/
     contract.ts               type-imports frontend/src/companion.contract.ts
     messages.ts               ToWorker / ToContent / ToOffscreen + type guards
-    origin.ts                 PURE — a tab URL to the origin pattern to ask for
+    origin.ts                 PURE — the one served host, as a pattern and a predicate
     geometry.ts               re-exports apps/viewer/src/main/geometry.ts
     resize.ts                 PURE window arithmetic
     version.ts                PURE — a Cargo version to a Chrome one
-  src/worker/                 stateless router, grants, ensureOffscreen, icon, resize
+  src/worker/                 stateless router, ensureOffscreen, icon, resize
   src/content/                the app-window gate and the page bridge
   src/offscreen/              the clipboard poller, over the viewer's synchronizer
-  src/popup/                  the site switch, the state card and Resize to display
+  src/popup/                  the state card and Resize to display
   scripts/build.ts            Bun.build, mirroring apps/viewer/scripts/build.ts
   icons/                      two SVGs, committed PNGs, and the script between them
   tests/
 ```
 
 There is no options page and no `chrome.storage`. The extension holds no settings of
-its own; the list of sites it serves is Chrome's, see below.
+its own, and the one host it serves is in the manifest, see below.
 
 Toolchain mirrors `apps/viewer` exactly: TypeScript, `Bun.build`, biome,
 `tsc --noEmit`, `bun test tests`.
 
-### The host list is Chrome's grants
+### One host, hard-coded
 
-The extension ships with **no host access at all** and no static content script. What it
-declares is that it may ask:
+The whole access model is two lines of `manifest.json`:
 
 ```json
-"optional_host_permissions": ["http://*/*", "https://*/*"],
-"permissions": ["scripting", "activeTab", "offscreen", "clipboardRead", "clipboardWrite"]
+"permissions": ["offscreen", "clipboardRead", "clipboardWrite"],
+"host_permissions": ["http://*.remotex.localhost/*"],
+"content_scripts": [{ "matches": ["http://*.remotex.localhost/*"], ... }]
 ```
 
-Nothing is granted by that. A site is added by opening the popup on it and turning it
-on, which calls `chrome.permissions.request({ origins })` from the click — Chrome asks,
-in Chrome's own words — and on a grant the worker registers a content script for that
-origin and injects it into the open window once, so the seam comes up without a reload.
-Turning it off is `permissions.remove` and `unregisterContentScripts`, and the site can
-equally be revoked from `chrome://extensions` or the icon's own right-click menu, which
-the worker hears through `permissions.onRemoved` and answers with a `bye`.
+There is no grant flow, no popup switch, no `chrome.permissions` call anywhere and no
+`optional_host_permissions` — with none declared, there is no origin this extension can
+come to hold that is not written above. Install it and it works, on that host, on every
+port. That is the setup, and there is no step where anybody turns a site on.
 
-**Chrome stores the grants, and stores them outside the installed directory** — in the
-profile, keyed by extension ID. That is the whole reason this design is worth its extra
-code: an unpacked extension has no auto-update, so every release is a folder overwritten
-by hand, and a list living in `manifest.json` would be overwritten with it. This one
-survives, and installing needs no file edited at all.
+`.remotex.localhost` is where a development gateway already puts a browser.
+`[server].dev_subdomain = "gw-a"` redirects any loopback name — `127.0.0.1`, `::1`,
+`localhost`, another gateway's label — to `http://gw-a.remotex.localhost:<port>/`,
+keeping the port, so each gateway on a machine has a cookie origin of its own
+(`src/server.rs`, and `packaging/etc/remotex.toml.example` for the key). Setting that
+key is the extension's whole installation procedure beyond loading the folder.
 
-`chrome.permissions.getAll()` **is** the host list. There is no second copy to keep in
-step, no `chrome.storage`, no options page, and no matcher of ours — a grant is what
-Chrome consults when it decides to inject, and the popup reads the same call back to
-draw its switch. The worker re-registers from `getAll()` on `onInstalled` and
-`onStartup` rather than trusting `persistAcrossSessions` across an update: the grant is
-the durable thing, and registration is derived from it.
+The cost is stated plainly: **a gateway reached at any other address gets no companion
+at all**. A LAN name, a reverse proxy's hostname, `localhost` without the redirect —
+none of them are this extension's, and the icon says so on every one. What that buys is
+that nothing has to be granted, reconciled, stored, remembered across an update, or
+asked about in a permission prompt. For a personal client whose app-window configuration
+is a development one, that trade was worth taking.
 
-Two properties of Chrome's origin patterns matter before asking for one. `*.host`
-matches subdomains **and** the apex, so `https://*.corp.example.com/*` covers
-`corp.example.com` too. And **a pattern cannot express a port**: a gateway on
-`https://gateway.example.com:8443` is asked for as `https://gateway.example.com/*`,
-which covers every port on that host. Deriving that pattern from the tab's URL is
-`shared/origin.ts`, which is pure and is where the port is dropped and a non-`http(s)`
-URL is refused.
+Two properties of Chrome's match patterns are load-bearing here. `*.host` matches
+subdomains **and** the apex, so the bare `remotex.localhost` is covered as well as every
+label under it — `isCompanionUrl` in `shared/origin.ts` says the same, because a
+predicate that disagreed with the manifest would call a window Chrome had injected into
+"not ours". And **a pattern cannot express a port**, which for once costs nothing:
+every port on these names is a loopback gateway of this project's, since nothing else
+can answer on a name RFC 6761 reserves.
 
-`http://` is in the optional list for `http://localhost` and `http://127.0.0.1`, which
-are secure contexts. It is not a second path for insecure origins: this client refuses
-to start outside one, so a content script on an insecure origin would find nothing to
-talk to.
+`http://` only. The gateway has no TLS listener and the redirect always sends a browser
+to `http://`; a `.localhost` name is a secure context by the same rule the client's
+preflight relies on, so `https://` would be a second pattern to keep in step for a URL
+nothing produces.
 
-The content script's own gate is one check: **an app window**, using the same
-`display-mode` allow-list the client uses, so both ends of the bus agree by
-construction. It needs no service worker, which Chrome may have killed, and it decides
-whether the page ever learns the extension exists.
+The content script is **declared, not registered**. With one host there is nothing to
+reconcile — no `scripting` permission, no `registerContentScripts`, no worker start-up
+pass over `permissions.getAll()`, and no injection into the current window to make a
+grant take effect without a reload. Chrome registers it from the manifest and keeps it
+registered.
 
-No `storage`, because there is nothing to store. No `tabs` — `activeTab` gives the
-popup the URL of the tab it was opened on, which is the only one it needs, and a granted
-site gives `tab.url` for the rest. No `externally_connectable` and no
-`web_accessible_resources`, the last so the extension cannot be probed by URL even from
-the gateway's own page.
+Its own gate is then one check: **an app window**, using the same `display-mode`
+allow-list the client uses, so both ends of the bus agree by construction. It needs no
+service worker, which Chrome may have killed, and it decides whether the page ever
+learns the extension exists.
+
+No `storage`, because there is nothing to store. No `tabs` — the host permission is what
+makes `tab.url` readable, and it is readable for exactly the windows this extension
+serves, which is also what makes `servedTabs()` right by construction. No
+`externally_connectable` and no `web_accessible_resources`, the last so the extension
+cannot be probed by URL even from the gateway's own page.
 
 ### The popup, and Resize to display
 
@@ -284,13 +287,9 @@ Triggered from the popup only. The page's floating menu gains nothing: it would 
 control that exists in one browser configuration and not another, and the popup is
 reachable from the app window anyway.
 
-The popup is a switch, a state card and one button.
-
-The **switch** is the site's host access, and it is the only place a site is ever added.
-`activeTab` gives the popup the URL of the window it was opened on, `shared/origin.ts`
-turns that into the pattern to ask for, and the click is the user gesture
-`chrome.permissions.request` requires. Off calls `permissions.remove`. On a window with
-no grant that switch is the entire popup — the correct rendering, not an empty state.
+The popup is a state card and one button. There is nothing to turn on in it: a window is
+on the served host or it is not, and on one that is not, the popup's entire content is
+the sentence saying so and naming the host — the correct rendering, not an empty state.
 
 The **card** is `NativeState` as last reported — which target, the framebuffer as
 `1920 × 1080 @2x`, whether the clipboard bridge is on — and the button is **Resize to
@@ -331,14 +330,14 @@ from the other side and are untouched.
 
 Two variants, on and off, painted per `tabId` from `chrome.tabs.onUpdated` (on
 `loading` *and* whenever `changeInfo.url` is set — that is how a SPA's `pushState` shows
-up), `onActivated`, `windows.onFocusChanged` and `permissions.onAdded`/`onRemoved`.
-Per-tab icon state is reset by Chrome on navigation, so `onUpdated` is required rather
-than an optimisation.
+up), `onActivated` and `windows.onFocusChanged`. Per-tab icon state is reset by Chrome
+on navigation, so `onUpdated` is required rather than an optimisation.
 
-A `tab.url` the worker cannot read is a site with no grant, which is the honest off
-state and costs no lookup to determine. The two off cases it has to tell apart in its
-title are "this site has not been turned on" — the thing the popup fixes — and "this is
-not an app window", which the popup cannot fix and the client's Help card explains.
+A `tab.url` the worker cannot read is a window this extension has no permission for,
+which is the honest off state and costs no lookup to determine. The two off cases it has
+to tell apart in its title are "this window is not a gateway of ours", which is an
+address and nothing in the popup can change, and "this is not an app window", which the
+client's Help card explains.
 
 The icon is **cosmetic and best-effort**. The gate is the content script's own check and
 is always right; nobody should make the icon authoritative.
@@ -347,15 +346,15 @@ No badge in the normal case. A badge that is always there says nothing.
 
 ## Testing
 
-Deterministic and worth having: the app-window gate, `originPatternFor` in
-`shared/origin.ts` (a URL with a port, a wildcard host, `chrome://`, `file://`, a
-gateway behind a path — table-driven, and the one piece where a mistake grants more
-than was meant), the reconciliation of registered scripts against
-`permissions.getAll()`, the resize arithmetic, the message guards, `iconStateFor`, the
-worker's router over a fake `chrome`, and a `manifest.test.ts` asserting the permission
-arrays against literals — a test that goes red the day someone adds one, and the place
-that pins `host_permissions` being *absent* and `optional_host_permissions` being the
-two broad patterns and nothing else.
+Deterministic and worth having: the app-window gate, `isCompanionUrl` in
+`shared/origin.ts` (the apex, a deeper label, a port, `https`, a host that merely
+contains the suffix, `chrome://`, `file://` — table-driven, and the one piece that has
+to agree with a match pattern Chrome enforces), the resize arithmetic, the message
+guards, `iconStateFor`, the worker's router over a fake `chrome`, and a
+`manifest.test.ts` asserting the permission arrays and the content script against
+literals — a test that goes red the day someone adds one, and the place that pins
+`optional_host_permissions` being *absent* and `host_permissions` being the one pattern
+and nothing else.
 
 Nothing goes in `tests/playwright/`. Every assertion an installed extension offers is
 out of scope by that suite's own rules — a toolbar icon is pixels, key delivery is
@@ -367,12 +366,12 @@ open an app window, which is the only configuration the extension runs in.
 So the irreducible half is manual, and all of it belongs in a shim window: Ctrl+W and
 Ctrl+T reaching the remote with no fullscreen; Alt+F4 closing the window with no
 dialog; copy while minimised; the echo loops in both directions; resize from the popup
-at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; a site granted from the popup
-and picked up **without a reload**, and revoked from `chrome://extensions` so the page
-sees the `bye`; and killing the service worker from `chrome://extensions` mid-session,
-then confirming the next clipboard change still arrives. Plus two negatives: open the
-same gateway in an ordinary tab and confirm the icon says off and the seam never wakes,
-and open an unrelated site and confirm no content script runs in it at all.
+at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; and killing the service worker
+from `chrome://extensions` mid-session, then confirming the next clipboard change still
+arrives. Plus three negatives: open the same gateway in an ordinary tab and confirm the
+icon says off and the seam never wakes; open the same gateway at `127.0.0.1` and confirm
+the redirect is what carries you onto the served host; and open an unrelated site and
+confirm no content script runs in it at all.
 
 ## Distribution
 
@@ -389,14 +388,13 @@ unzip -d ~/Applications/remotex-companion remotex-companion-<version>.zip
 # chrome://extensions → Developer mode → Load unpacked → that folder
 ```
 
-Then click the toolbar icon on the gateway and turn the site on. **No file is edited at
-any point**, which is the point: nothing in the installation is yours to preserve.
+That is the end of it. Nothing is clicked, nothing is granted and **no file is edited at
+any point** — open the gateway at its `.remotex.localhost` name in an app window and the
+companion is already there.
 
-Updating is unzipping the next release over the same folder and pressing Reload. Same
-path, so the same extension ID — Chrome derives an unpacked extension's ID from the
-directory path — so the granted sites are still there. Unzip to a versioned folder
-instead and it is a new extension with nothing granted, which is worth knowing before
-doing it once.
+Updating is unzipping the next release over the same folder and pressing Reload. A
+versioned folder instead is a new extension ID, which now costs nothing but is still
+worth knowing: with the host in the manifest there is no per-profile state left to lose.
 
 Two things that cannot be fixed and should not be discovered later: there is **no
 auto-update**, because self-updating means a `.crx` with an `update_url`; and Developer
@@ -415,19 +413,17 @@ else catches.
 
 ## Costs, stated
 
-1. **A match pattern cannot express a port**, so granting a gateway on a non-default
-   port grants every port on that host. On a personal gateway that host is trusted
-   completely already; where it is not, one `location.port` check in the content script
-   narrows it.
-2. **`optional_host_permissions` is `http://*/*` and `https://*/*`**, which is as broad
-   as a declaration gets, and `chrome://extensions` says so in those words. What it
-   grants is nothing: no site is reachable and no content script exists anywhere until
-   the user turns one on, and each is one origin. The narrower alternative is a fixed
-   list in the manifest, which cannot be added to without editing the installed copy and
-   loses every entry on update — the cost this design was chosen to avoid.
-3. **The grants live in the Chrome profile**, so they follow the browser rather than the
-   installation, and unzipping an update to a *different* path is a different extension
-   ID with nothing granted.
+1. **Only `*.remotex.localhost` is served**, and a gateway reached at any other address
+   gets no companion at all — no LAN name, no reverse proxy, not even a plain
+   `localhost` without `[server].dev_subdomain` set. That is the price of the whole
+   grant flow going away, and the icon says so on every window it does not serve.
+2. **A match pattern cannot express a port**, so this covers every port on those names.
+   Here that is what is wanted rather than a widening: two gateways on one machine are
+   two ports, and nothing but a loopback gateway can answer on a name RFC 6761 reserves.
+3. **The host is in the installed copy.** Changing it means editing `manifest.json` in
+   the loaded folder or shipping a build that says something else — which is the cost
+   the old per-grant design was paying its extra code to avoid, taken deliberately now
+   that there is exactly one name to hard-code.
 4. **Nothing works in a tab**, and that is deliberate rather than a gap to close later.
    The icon is what says so there, and the client's Help card is what says how to fix
    it; neither is load-bearing, so somebody can still end up wondering why a tab is

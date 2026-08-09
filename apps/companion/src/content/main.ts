@@ -1,9 +1,8 @@
 // The relay between the page's bus and the extension's.
 //
-// It exists only where Chrome has been granted this site, because there is no static
-// `content_scripts` entry — `src/worker/grants.ts` registers one per granted origin.
-// So there is no whitelist check here: being injected at all *is* the check, and it is
-// Chrome's.
+// It exists only on `http://*.remotex.localhost/*`, which the manifest declares as this
+// script's `matches` and as the extension's one host permission. So there is no
+// whitelist check here: being injected at all *is* the check, and it is Chrome's.
 //
 // The one gate left is the window kind. **Nothing is posted in an ordinary tab**, and
 // that is the whole design rather than a limitation: the extension serves app windows,
@@ -125,8 +124,6 @@ if (appWindow()) {
     }
     if (data.type === "clipboardLocal") {
       toPage({ type: "clipboardLocal", text: data.text });
-    } else if (data.type === "bye") {
-      toPage({ type: "bye" });
     }
     return false;
   });

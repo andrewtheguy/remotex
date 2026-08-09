@@ -8,7 +8,8 @@ It adds the two things a page in a Chrome **app window** cannot do for itself:
 - the system clipboard while the window is unfocused or minimised
 - resizing that window to the remote's framebuffer
 
-It does nothing in an ordinary tab, and nothing on a site the user has not turned on.
+It does nothing in an ordinary tab, and nothing outside `http://*.remotex.localhost/*`,
+which is the one host it serves and the only one it may ask Chrome for.
 
 ## Install
 
@@ -25,14 +26,13 @@ permanent rather than at `dist/`, which the next build deletes:
 cp -R dist ~/Applications/remotex-companion
 ```
 
-Then open the gateway in an app window (Chrome menu → *Install page as app…*), click
-the toolbar icon, and turn the site on. Chrome asks for the permission in its own
-words; nothing here stores a host list.
+Set `dev_subdomain` in the gateway's `[server]` config, which is what sends a loopback
+browser to `http://<label>.remotex.localhost:<port>/`, then open that in an app window
+(Chrome menu → *Install page as app…*). There is nothing to enable: the host is in the
+manifest, so the companion is running the moment the page loads.
 
-Updating is unzipping or copying the next build over the **same** folder and pressing
-Reload. Chrome derives an unpacked extension's ID from the directory path, and the
-grants are keyed by that ID — a different path is a different extension with nothing
-turned on.
+Updating is unzipping or copying the next build over the same folder and pressing
+Reload.
 
 ## Develop
 
@@ -54,10 +54,10 @@ and needs `rsvg-convert`. Nothing in the build rasterizes anything.
 
 ## What is not here
 
-No options page, no `chrome.storage`, no host list and no matcher. The sites this
-extension runs in are Chrome's granted origins, read back with
-`chrome.permissions.getAll()`; the content script is registered per grant rather than
-declared in the manifest, so there is no ambient access anywhere. See the design doc
-for why that was chosen over a list in the manifest, and what it costs.
+No options page, no `chrome.storage`, no grant flow and no `chrome.permissions` call.
+One host permission, one `content_scripts` entry, the same pattern in both, and
+`shared/origin.ts` saying it a third time for code that has a URL rather than a pattern
+in hand. See the design doc for what that costs — chiefly that a gateway reached at any
+other address gets no companion at all.
 
 Not Firefox: no `chrome.offscreen`, and no app windows.

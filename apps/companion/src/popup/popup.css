@@ -42,13 +42,6 @@ h1 {
   color: var(--muted);
 }
 
-.row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-}
-
 dl {
   margin: 0;
   display: grid;

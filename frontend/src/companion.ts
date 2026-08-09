@@ -16,20 +16,17 @@
 // was injected into it, so the only way to find out is to ask and wait. "Is there a
 // companion?" arrives late. It is a store, not a constant.
 //
-// Every settled answer can be unsettled, because every one of them can stop being true.
-// Host access is granted and revoked per site from the extension's popup and from
-// Chrome's own site-access UI, so a companion can arrive in the middle of a session and
-// leave in the middle of one: a `hello` when a grant lands, a `bye` when it is taken
-// away. `pageshow` re-opens the question too, because a bfcache restore replays no
-// injection and the page may come back to an extension that is there or gone.
+// A settled answer can still be re-asked, and `pageshow` is the one thing that asks:
+// a bfcache restore replays no injection, so the page may come back to an extension
+// that is there or gone. What is *not* allowed is drifting back to `probing` on its
+// own — only a `pageshow` does that, and it re-arms the deadline with it, so there is
+// no phase left waiting for an answer nothing will settle.
 //
-// What is *not* allowed is drifting back to `probing` on its own — only a `pageshow`
-// does that, and it re-arms the deadline with it, so there is no phase left waiting for
-// an answer nothing will settle.
-//
-// The one thing `bye` cannot cover is an extension disabled or reloaded outright, which
-// takes its content script's context with it before anything can be said. That leaves a
-// page believing in a companion that has gone until it is reloaded.
+// Nothing tells this page a companion has *left*. The extension serves one hard-coded
+// host and asks for nothing at runtime, so there is no grant to be taken away mid-
+// session; and one disabled or reloaded from chrome://extensions takes its content
+// script's context with it before it could say anything. That leaves a page believing
+// in a companion that has gone until it is reloaded.
 //
 // With no extension installed every export here is inert bar the deadline: `hello`
 // goes out to a bus nobody is reading, the phase settles to `absent`, and the client
@@ -128,8 +125,6 @@ function receive(event: MessageEvent): void {
   const command: CompanionCommand = event.data;
   if (command.type === "hello") {
     settle({ phase: "connected", capabilities: command.capabilities });
-  } else if (command.type === "bye") {
-    settle(ABSENT);
   }
   for (const handler of commandHandlers) {
     handler(command);
