@@ -214,7 +214,10 @@ export const TEMPLATE = `# remotex.app's own configuration.
 
 # What this instance calls itself: the heading above the target list, the
 # window title, and the launch screen. Useful when two instances run at once.
-# branding = "remotex"
+# logo is a path to an image file served as the page's tab icon.
+# [branding]
+# text = "remotex"
+# logo = "/path/to/logo.png"
 
 # A Windows machine over RDP:
 #

@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(instance.config_path(), PathBuf::from("/tmp/inst/remotex.toml"));
     }
 
-    /// The app's config is `branding` and `[[targets]]`, and an empty one is a first
+    /// The app's config is `[branding]` and `[[targets]]`, and an empty one is a first
     /// launch rather than an error.
     #[test]
     fn the_embedded_audience_accepts_a_config_with_nothing_in_it() {
@@ -334,19 +334,23 @@ mod tests {
         }
     }
 
-    /// One key, one place, both audiences — including the app, whose config has no
-    /// `[server]` block a name could have lived in.
+    /// One table, one place, both audiences — including the app, whose config has
+    /// no `[server]` block a name could have lived in.
     #[test]
-    fn branding_is_one_top_level_key_for_both_audiences() {
-        check("branding = \"work laptop\"\n", Audience::Embedded)
-            .expect("the app names itself with the top-level key");
+    fn branding_is_one_top_level_table_for_both_audiences() {
+        check("[branding]\ntext = \"work laptop\"\n", Audience::Embedded)
+            .expect("the app names itself with the top-level table");
 
-        let file = ConfigFile::parse_with("branding = \"work laptop\"\n", Audience::Embedded)
-            .unwrap();
+        let file = ConfigFile::parse_with(
+            "[branding]\ntext = \"work laptop\"\nlogo = \"/tmp/logo.png\"\n",
+            Audience::Embedded,
+        )
+        .unwrap();
         let resolved = file
             .resolve_embedded(EmbeddedToken::generate(), PathBuf::from("/w"))
             .unwrap();
-        assert_eq!(resolved.branding, "work laptop");
+        assert_eq!(resolved.branding.text, "work laptop");
+        assert_eq!(resolved.branding.logo.unwrap().mime, "image/png");
         assert_eq!(resolved.static_dir, PathBuf::from("/w"), "the app's bundle");
 
         // There is exactly one place to write it, so the block it used to live in
@@ -354,6 +358,12 @@ mod tests {
         // the migration this project offers.
         let error = check("[server]\nbranding = \"x\"\n", Audience::Served)
             .expect_err("[server].branding is gone");
+        assert!(format!("{error:#}").contains("branding"), "{error:#}");
+
+        // And the old top-level string spelling fails to parse: a table is not a
+        // string.
+        let error = check("branding = \"x\"\n", Audience::Embedded)
+            .expect_err("the string spelling is gone");
         assert!(format!("{error:#}").contains("branding"), "{error:#}");
     }
 

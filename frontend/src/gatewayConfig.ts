@@ -8,10 +8,13 @@ import { gatewayFetch } from "./gateway.ts";
 
 export interface GatewayConfig {
   branding: string;
+  /** Whether the gateway serves an icon at `/api/logo`. */
+  logo: boolean;
 }
 
 const FALLBACK: GatewayConfig = {
   branding: "remotex",
+  logo: false,
 };
 
 let pending: Promise<GatewayConfig> | null = null;
@@ -28,6 +31,7 @@ export function gatewayConfig(): Promise<GatewayConfig> {
     .then((res) => res.json() as Promise<Partial<GatewayConfig>>)
     .then((config) => ({
       branding: config.branding || FALLBACK.branding,
+      logo: config.logo === true,
     }))
     .catch(() => FALLBACK);
   return pending;

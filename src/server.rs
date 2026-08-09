@@ -152,6 +152,9 @@ pub(crate) fn router_with_sessions(
         .route("/health", get(|| async { "ok" }))
         // Public: the login screen reads its branding before authenticating.
         .route("/config", get(config_handler))
+        // Public for the same reason: the tab's icon is set the moment the page
+        // loads, which is before anybody has typed a password.
+        .route("/logo", get(logo_handler))
         .merge(auth_routes)
         .merge(
             Router::new()
@@ -508,12 +511,35 @@ async fn logout_handler(
 #[derive(Serialize)]
 struct ConfigResponse {
     branding: String,
+    /// Whether `GET /api/logo` has an icon to serve. A flag rather than a URL:
+    /// the client already knows its gateway's origin, and a URL here would be a
+    /// second spelling of it.
+    logo: bool,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
 /// browser tab title carry the deployment's branding before authentication.
 async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
-    Json(ConfigResponse { branding: state.config.branding.clone() })
+    Json(ConfigResponse {
+        branding: state.config.branding.text.clone(),
+        logo: state.config.branding.logo.is_some(),
+    })
+}
+
+/// The `[branding].logo` file, as the page's icon.
+///
+/// Read from disk per request rather than held in memory: the file is a favicon,
+/// requested once per tab, and reading it here is what lets an operator swap the
+/// image without a restart. A configured path that cannot be read answers 404 —
+/// the extension was checked at config resolution, but existence is a fact about
+/// disk that can change under a running gateway.
+async fn logo_handler(State(state): State<AppState>) -> ApiResult<impl IntoResponse> {
+    let logo = state.config.branding.logo.as_ref().ok_or(AppError::NotFound)?;
+    let bytes = tokio::fs::read(&logo.path).await.map_err(|e| {
+        warn!("cannot read [branding].logo {}: {e}", logo.path.display());
+        AppError::NotFound
+    })?;
+    Ok(([(header::CONTENT_TYPE, logo.mime)], bytes))
 }
 
 /// The login routes on an embedded gateway: 403, always.
@@ -660,7 +686,10 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            branding: "remotex".to_owned(),
+            branding: crate::config::Branding {
+                text: "remotex".to_owned(),
+                logo: None,
+            },
             dev_hostname: dev_hostname.map(str::to_owned),
             allow_shell_origin: false,
         }
@@ -1150,7 +1179,10 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            branding: "audio tone harness".to_owned(),
+            branding: crate::config::Branding {
+                text: "audio tone harness".to_owned(),
+                logo: None,
+            },
             dev_hostname: None,
             allow_shell_origin: false,
         };
@@ -1222,8 +1254,9 @@ mod tests {
     fn config_response_contains_only_public_branding() {
         let json = serde_json::to_string(&ConfigResponse {
             branding: "remotex".to_owned(),
+            logo: false,
         })
         .unwrap();
-        assert_eq!(json, r#"{"branding":"remotex"}"#);
+        assert_eq!(json, r#"{"branding":"remotex","logo":false}"#);
     }
 }

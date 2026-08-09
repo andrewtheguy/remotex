@@ -45,6 +45,11 @@ test("an unreachable gateway answers with the fallback rather than rejecting", a
   const { gatewayConfig } = await import("./gatewayConfig.ts");
   const config = await gatewayConfig();
   assert.equal(config.branding, "remotex");
+  assert.equal(
+    config.logo,
+    false,
+    "no gateway answered, so there is no icon to ask for",
+  );
 
   // And memoized even in failure: one unreachable gateway is one request, not one per
   // caller. Identity, so this says nothing about how many callers there were.

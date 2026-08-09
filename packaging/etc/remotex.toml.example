@@ -14,16 +14,22 @@
 # directory and is the thing that edits it; everything below applies to both
 # except [server], which that one has no use for and refuses.
 
-# Display name of this gateway: the login screen, the interstitials, and the
-# browser tab title. Defaults to "remotex". Top-level rather than under [server]:
-# it names the deployment rather than the server, and one value with two spellings
-# is one of them going stale.
+# What this gateway calls itself, and the icon it shows. Top-level rather than
+# under [server]: it names the deployment rather than the server, and one value
+# with two spellings is one of them going stale.
 #
-# It is also the one setting this file shares with remotex.app's own config, which
+# text is the login screen, the interstitials, and the browser tab title;
+# defaults to "remotex". logo is a path to an image file (.png, .ico, .svg,
+# .jpg, .gif or .webp) the gateway serves as the page's tab icon; without it
+# the page keeps no icon.
+#
+# It is also the one table this file shares with remotex.app's own config, which
 # has no [server] block at all. The app supplies its gateway's ephemeral loopback
 # listener, authentication token and bundled web root; its window loads that same
 # web root as remotex://app. Edit that config from the app, not here.
-#branding = "remotex"
+#[branding]
+#text = "remotex"
+#logo = "/opt/remotex/etc/logo.png"
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
