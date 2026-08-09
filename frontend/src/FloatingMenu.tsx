@@ -10,15 +10,6 @@ import {
 import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
-import {
-  enterImmersive,
-  exitImmersive,
-  immersiveActive,
-  available as immersiveAvailable,
-  keyboardLockHeld,
-  onImmersiveChange,
-  onKeyboardLockChange,
-} from "./immersive.ts";
 import type {
   ClipboardSnapshot,
   DisplayInfo,
@@ -177,93 +168,6 @@ export interface PanelControls {
 /// the whole of what `onAppWindowChange` exists for. See appWindow.ts.
 function useAppWindow(): boolean {
   return useSyncExternalStore(onAppWindowChange, appWindow, () => false);
-}
-
-// What Immersive is *for*, which is not the same in both window kinds: a tab is buying
-// the six chords a browser keeps, and an app window — which reserves none of them
-// already — is buying screen area. Saying the second thing in the first window's words
-// would be promising something that is already true.
-const immersiveExitHint = (app: boolean) =>
-  app
-    ? "Leave full screen"
-    : "Leave full screen and give this browser its shortcuts back";
-
-const immersiveEnterHint = (app: boolean) =>
-  app
-    ? "Full screen. This window already sends ⌘W, ⌘T and the rest to the remote"
-    : "Full screen, and send ⌘W, ⌘T and the rest to the remote instead of this browser";
-
-// The one state the other two hints cannot describe: full screen, and the browser
-// refused the lock. Worth its own sentence rather than a silent "Exit immersive",
-// because the chords the enter hint promised are the thing that did not happen.
-const IMMERSIVE_UNLOCKED_HINT =
-  "Full screen, but this browser kept ⌘W and ⌘T for itself";
-
-/// Full screen plus a keyboard lock, which is how a browser *tab* is given ⌘W, ⌘T and
-/// the four other chords it otherwise keeps for itself. See immersive.ts.
-///
-/// Absent, not disabled, where the browser has no lock to give: a greyed button here
-/// would be explaining an API Firefox and Safari do not have, which is not this menu's
-/// job. It is its own component because both conditions are browser-wide rather than
-/// this menu's state — a held Esc, ⌃⌘F or F11 changes them without anything here being
-/// clicked — so the subscriptions belong next to the label they keep honest.
-///
-/// It toggles on *full screen*, not on the lock, and that is the difference between a
-/// way out and a trap: a browser that refuses the lock leaves a full screen window
-/// whose button would otherwise still be offering to enter one. The lock only picks
-/// the hint, because the lock is only what full screen turned out to buy.
-function ImmersiveButton({ onToggle }: { onToggle: () => void }) {
-  const active = useSyncExternalStore(
-    onImmersiveChange,
-    immersiveActive,
-    () => false,
-  );
-  const locked = useSyncExternalStore(
-    onKeyboardLockChange,
-    keyboardLockHeld,
-    () => false,
-  );
-  const app = useAppWindow();
-  if (!immersiveAvailable()) {
-    return null;
-  }
-  let hint = immersiveEnterHint(app);
-  if (active) {
-    hint = locked ? immersiveExitHint(app) : IMMERSIVE_UNLOCKED_HINT;
-  }
-  return (
-    <button
-      type="button"
-      className="toolbar-btn"
-      aria-pressed={active}
-      onClick={() => {
-        onToggle();
-        if (active) {
-          void exitImmersive();
-        } else {
-          void enterImmersive();
-        }
-      }}
-      title={hint}
-    >
-      {active ? "Exit immersive" : "Immersive"}
-    </button>
-  );
-}
-
-/// The one thing about a keyboard lock a user has to be told: the way out is the
-/// browser's own, it cannot be captured by anything on this page or on any remote, and
-/// it is what makes a locked session never a trapped one.
-function ImmersiveHelpRow() {
-  if (!immersiveAvailable()) {
-    return null;
-  }
-  return (
-    <div className="help-item">
-      <dt>Leave immersive mode</dt>
-      <dd>Hold Esc for a second — always, and uncapturable</dd>
-    </div>
-  );
 }
 
 /// The recommendation, shown only to the window that is not taking it.
@@ -1064,7 +968,6 @@ export default function FloatingMenu({
           />
 
           <div className="toolbar-section toolbar-actions">
-            <ImmersiveButton onToggle={() => setOpen(false)} />
             <button
               type="button"
               className="toolbar-btn"
@@ -1129,7 +1032,6 @@ export default function FloatingMenu({
                     looks gone for good. */}
                     <dd>{hideChromeShortcut(isMacHost)}</dd>
                   </div>
-                  <ImmersiveHelpRow />
                   <AppWindowHelpRow />
                 </dl>
               </>

@@ -136,13 +136,13 @@ extension — the spike is a proof of viability, not a design:
   a copy made while Chrome was minimized reached the page, and a push made while
   Chrome was minimized reached the system pasteboard.
 - **⌘W and ⌘Q reaching the guest.** In a regular tab Chrome reserves them and the
-  page never sees a keydown, which is why `macKeys.ts` forwards Command as itself
-  there rather than mapping the chord. Two ways out, both confirmed: in an
-  **immersive** view — fullscreen plus `navigator.keyboard.lock(['KeyW','KeyQ'])` —
-  both arrive as ordinary keydowns; and in a **macOS installed-app window** no keys
-  are reserved at all, so the page sees every shortcut first and `preventDefault()`
-  captures ⌘W/⌘Q windowed. Held Esc always escapes the lock, by design, and is the
-  one chord a remote session can never have.
+  page never sees a keydown. Two ways out, both confirmed: fullscreen plus
+  `navigator.keyboard.lock(['KeyW','KeyQ'])`, where both arrive as ordinary keydowns;
+  and a **macOS installed-app window**, where no keys are reserved and
+  `preventDefault()` captures ⌘W/⌘Q windowed. The client uses one always-on Command
+  table and requests the fullscreen lock automatically, with no mode or toggle. Held
+  Esc always escapes the lock, by design, and is the one chord a remote session can
+  never have.
 
 Only those two. Everything else the app owns is a menu bar standing in front of
 this client's own controls, and a browser needs none of it — which is also why the

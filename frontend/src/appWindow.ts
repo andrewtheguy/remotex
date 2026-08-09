@@ -14,9 +14,9 @@
 // Linux a shim window captures the browser's chords with no fullscreen, no Keyboard
 // Lock and no code at all.
 //
-// One place needs more than that, and it is a Mac: `macKeys.ts` decides by table which
-// Command chords become Control chords, and the six a browser normally keeps are absent
-// from it precisely because they never arrive. In an app window they do.
+// On a Mac, `macKeys.ts` maps the Command chords that arrive to their remote Control
+// equivalents. Its table is fixed; this window kind decides whether Chrome delivers
+// the six shortcuts a normal tab keeps for itself.
 // `tmp/programs_for_reference/chrome_extension_spike/PWA_KEYS.md` is the per-key
 // measurement that goes with this, including the ones no window of any kind is given:
 // ⌘Tab, ⌘Space, Alt+F4, the Windows key.
@@ -25,11 +25,8 @@
 // window, so this is what turns the seam on at all — see docs/companion-extension.md.
 //
 // Read as the three *app* display modes rather than as "not `browser`", because a plain
-// tab reports `display-mode: fullscreen` the moment it goes full screen, and that window
-// is given no chords at all: it is `immersive.ts`'s keyboard lock that changes a tab's
-// answer, not the fullscreen underneath it. `immersive.ts` watches that same `fullscreen`
-// answer live, for the opposite reason — it is the only way to see a ⌃⌘F — which is why
-// the two modules read one media feature and disagree about whether it may move.
+// tab reports `display-mode: fullscreen` the moment it goes full screen. Fullscreen
+// does not turn a tab into the app window the companion extension is allowed to serve.
 const APP_DISPLAY_MODES = [
   "standalone",
   "minimal-ui",
@@ -69,8 +66,8 @@ export interface AppWindowStore {
  * Both halves are load-bearing, and each fixes what the other would get wrong:
  *
  * - *Never goes back*, because full screen replaces the display mode with `fullscreen`.
- *   An app window that went immersive would otherwise stop looking like one and take
- *   the Command chord table down with it, mid-session.
+ *   An app window would otherwise stop looking like one and take the companion seam
+ *   down with it mid-session.
  * - *Latches*, rather than being answered once at module load, because **a tab can
  *   become an app window under a running document**. *Install page as app…* reparents
  *   the live tab into the new window instead of reloading it (Chromium's

@@ -23,9 +23,9 @@
 //
 // Keys are not here at all, and that is the scope rule for the whole extension: it
 // does only what the browser cannot. An app window reserves no chords, so a page in
-// one keeps ⌘W and Ctrl+W by calling `preventDefault` (`appWindow.ts`); a plain tab
-// gets the same from fullscreen plus Keyboard Lock (`immersive.ts`). Both are the
-// page's own doing and work with nothing installed.
+// one keeps ⌘W and Ctrl+W by calling `preventDefault` (`appWindow.ts`). A fullscreen
+// tab gets the chords from the page's automatic Keyboard Lock (`keyboardLock.ts`).
+// Neither path belongs in the extension.
 //
 // Apart from `companion.ts` for the same reason `nativeHost.contract.ts` is apart from
 // `nativeHost.ts`: **this file must not import React**, or anything that does.
