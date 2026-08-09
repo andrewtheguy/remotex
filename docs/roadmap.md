@@ -135,14 +135,15 @@ extension — the spike is a proof of viability, not a design:
   system clipboard regardless of focus. Confirmed on macOS in both directions:
   a copy made while Chrome was minimized reached the page, and a push made while
   Chrome was minimized reached the system pasteboard.
-- **⌘W and ⌘Q reaching the guest.** In a regular tab Chrome reserves them and the
-  page never sees a keydown. Two ways out, both confirmed: fullscreen plus
-  `navigator.keyboard.lock(['KeyW','KeyQ'])`, where both arrive as ordinary keydowns;
-  and a **macOS installed-app window**, where no keys are reserved and
-  `preventDefault()` captures ⌘W/⌘Q windowed. The client uses one always-on Command
-  table and requests the fullscreen lock automatically, with no mode or toggle. Held
-  Esc always escapes the lock, by design, and is the one chord a remote session can
-  never have.
+- **The browser's own chords reaching the guest.** In a regular tab Chrome reserves
+  ⌘W, ⌘Q, ⌘T, ⌘N, ⌘L, ⌘O and ⌘R, and the page never sees a keydown. Two ways out,
+  both confirmed: fullscreen plus a Keyboard Lock over that whole set —
+  `keyboardLock.ts` asks for `KeyW`, `KeyQ`, `KeyT`, `KeyN`, `KeyL`, `KeyO` and
+  `KeyR` — where they arrive as ordinary keydowns; and a **macOS installed-app
+  window**, where no keys are reserved and `preventDefault()` captures them
+  windowed. The client uses one always-on Command table and requests the fullscreen
+  lock automatically, with no mode or toggle. Held Esc always escapes the lock, by
+  design, and is the one chord a remote session can never have.
 
 Only those two. Everything else the app owns is a menu bar standing in front of
 this client's own controls, and a browser needs none of it — which is also why the
