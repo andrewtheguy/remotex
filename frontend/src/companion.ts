@@ -33,7 +33,7 @@
 // carries on exactly as it did before this file existed.
 
 import { useEffect, useSyncExternalStore } from "react";
-import { appWindow } from "./appWindow.ts";
+import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import {
   type CompanionCapabilities,
   type CompanionCommand,
@@ -86,10 +86,16 @@ const ABSENT: Snapshot = { phase: "absent", capabilities: null };
  * A tab is `absent` from the first render rather than after the deadline, which is the
  * one behavioural difference and it is the right way round — the focus-driven clipboard
  * read has nothing to stand down for there.
+ *
+ * Asked again when a tab *becomes* an app window, which *Install page as app…* does to
+ * this very document without reloading it. Read once, this seam would stay dead in the
+ * window the install just opened.
  */
-const POSSIBLE = typeof window !== "undefined" && appWindow();
+function possible(): boolean {
+  return typeof window !== "undefined" && appWindow();
+}
 
-let snapshot: Snapshot = POSSIBLE ? INITIAL : ABSENT;
+let snapshot: Snapshot = possible() ? INITIAL : ABSENT;
 const listeners = new Set<() => void>();
 
 // A new object only when something actually changed. `useSyncExternalStore` compares
@@ -170,12 +176,25 @@ function probe(): void {
   }, HANDSHAKE_DEADLINE_MS);
 }
 
-if (POSSIBLE) {
+function listen(): void {
   window.addEventListener("message", receive);
   probe();
   // A bfcache restore re-runs no content script. Ours may still be there and may not;
   // saying hello again is how we find out, and it costs one message.
   window.addEventListener("pageshow", probe);
+}
+
+if (possible()) {
+  listen();
+} else if (typeof window !== "undefined") {
+  // The install case, and the only way out of `absent` a tab has. The extension's own
+  // content script is already in this document — it is matched on the host, not on the
+  // window kind — and it arms on the same signal, so both sides of the handshake wake
+  // up together and either may be first.
+  const stop = onAppWindowChange(() => {
+    stop();
+    listen();
+  });
 }
 
 function subscribe(notify: () => void): () => void {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appWindow } from "./appWindow.ts";
+import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import {
   type AudioPlayer,
   createAudioContext,
@@ -1827,18 +1827,24 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    // Three ways to be given every Command chord, and only one of them changes under
-    // a running session. `remotex.app` drops its menu accelerators for the whole
-    // session, and an app window reserves nothing for the whole session either
-    // (appWindow.ts) — both are settled before this effect runs. A keyboard lock in a
-    // plain tab comes and goes, a held Esc ends one without asking, so the table
-    // follows the lock rather than being chosen once.
-    const chordsGranted = NATIVE_HOST || appWindow();
+    // Three ways to be given every Command chord, and two of them can arrive under a
+    // running session. `remotex.app` drops its menu accelerators for the whole session
+    // and is settled before this effect runs. A keyboard lock in a plain tab comes and
+    // goes, and a held Esc ends one without asking. And *Install page as app…*
+    // reparents this document into a window that reserves nothing — a tab becoming an
+    // app window mid-session, which is why that one is subscribed to as well
+    // (appWindow.ts). Neither subscription ever takes chords away: the lock's own
+    // handler reads both, and the window kind only ever gains.
+    let chordsGranted = NATIVE_HOST || appWindow();
     const macKeys = new MacKeyboardTranslator(
       chordsGranted || keyboardLockHeld(),
     );
     const stopWatchingLock = onKeyboardLockChange((locked) => {
       macKeys.setCapturesEveryChord(chordsGranted || locked);
+    });
+    const stopWatchingWindow = onAppWindowChange(() => {
+      chordsGranted = true;
+      macKeys.setCapturesEveryChord(true);
     });
 
     // Touch gestures, only on pinch-zoom-capable devices — they
@@ -2027,6 +2033,7 @@ export function useRemoteDesktop(
     return () => {
       gestures?.detach();
       stopWatchingLock();
+      stopWatchingWindow();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);

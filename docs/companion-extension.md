@@ -25,11 +25,13 @@ a real remote.
 
 ## App windows only
 
-**The extension does nothing in an ordinary tab.** The content script exits, the page
-posts nothing, and `frontend/src/companion.ts` settles to `absent` on the first render
-without a handshake. That is the simplification the whole design rests on: one window
-kind to serve, no capability that is present in one and missing in the other, and no
-state where half of it works.
+**The extension does nothing in an ordinary tab.** The content script installs no
+listeners and posts nothing, and `frontend/src/companion.ts` settles to `absent` on the
+first render without a handshake. That is the simplification the whole design rests on:
+one window kind to serve, no capability that is present in one and missing in the other,
+and no state where half of it works. Both sides are *waiting* rather than finished,
+though — see [below](#installing-as-an-app-does-not-reload-the-page): a tab that is
+installed as an app becomes an app window without reloading, and both ends arm then.
 
 A tab is not left unserved so much as served by the client itself. Full screen plus
 Keyboard Lock (`frontend/src/immersive.ts`) gives a tab the chords — automatically, on
@@ -132,16 +134,17 @@ already has, and the popup is where it is asked for.
 ## Detection is asynchronous, and it can be re-asked
 
 `NATIVE_HOST` is read once at module load: the app's preload runs before any script in
-the document and cannot appear later. The window kind is read once for the same sort of
-reason. The companion can promise neither. Nothing tells a page synchronously whether a
-content script was injected into it, so the only way to find out is to ask and wait, and
-a bfcache restore makes the question worth asking twice. So this is a store, not a
-constant:
+the document and cannot appear later. The companion can promise nothing of the sort.
+Nothing tells a page synchronously whether a content script was injected into it, so the
+only way to find out is to ask and wait; a bfcache restore makes the question worth
+asking twice; and **the window kind itself can change under a running document**. So
+this is a store, not a constant:
 
 | from | on | to | |
 |---|---|---|---|
 | `probing` | `hello` | `connected` | |
 | `probing` | the deadline | `absent` | 1.5 s of silence |
+| `absent` | installed as an app | `probing` | the tab was reparented into an app window |
 | `absent` | `pageshow` | `probing` | a bfcache restore, which re-arms the deadline with it |
 | `connected` | `pageshow` | `connected` | a hello goes out, but there is nothing to re-probe |
 
@@ -174,12 +177,31 @@ extension turns that off today — there is no options page to turn it off from 
 seam is the wrong place to assume it, because the page's behaviour has to follow what
 the extension says it does rather than the fact that it answered.
 
-A tab never enters `probing` at all. It is `absent` from the first read, so that
-stand-down costs nothing where there is nothing to wait for.
+A tab does not enter `probing` at all. It is `absent` from the first read, so that
+stand-down costs nothing where there is nothing to wait for — until it stops being a
+tab.
 
-The handshake is symmetric — both sides say `hello`, and the page says it again on
-`pageshow`, because a bfcache restore replays no content-script injection. Either side
-can be first and neither assumes it.
+### Installing as an app does not reload the page
+
+*Install page as app…* **reparents the live document** into the new window
+(Chromium's `ReparentWebContentsIntoAppBrowser`) rather than loading it again. So a
+window kind read once at load is read as `browser`, and stays wrong for as long as the
+window is open: the installed window insists it is a tab, the seam never wakes, the
+Command chords are not claimed, and the client's own Help card goes on advising an
+install that has already happened. Closing it and launching the app again was the only
+cure, because that is what finally produced a fresh document.
+
+Nothing dispatches an event for it — the display mode simply changes underneath the
+document — so both ends of the bus watch the three `(display-mode: …)` media queries and
+**latch**: `frontend/src/appWindow.ts` for the page, and the same three queries in the
+content script for the extension. Latch, not track, because full screen reports
+`display-mode: fullscreen`, and a window that stopped counting as an app window on the
+way into immersive would take the chord table down with it mid-session. The answer
+therefore moves once, from tab to app window, and never back.
+
+Both ends arm on the same signal, and neither has to be first: the handshake is
+symmetric — both sides say `hello`, and the page says it again on `pageshow`, because a
+bfcache restore replays no content-script injection.
 
 ## The wire
 
@@ -346,7 +368,9 @@ No badge in the normal case. A badge that is always there says nothing.
 
 ## Testing
 
-Deterministic and worth having: the app-window gate, `isCompanionUrl` in
+Deterministic and worth having: the app-window gate and its latch (a tab promoted to an
+app window tells its subscribers exactly once; an app window that goes full screen stays
+one), `isCompanionUrl` in
 `shared/origin.ts` (the apex, a deeper label, a port, `https`, a host that merely
 contains the suffix, `chrome://`, `file://` — table-driven, and the one piece that has
 to agree with a match pattern Chrome enforces), the resize arithmetic, the message
@@ -368,10 +392,13 @@ Ctrl+T reaching the remote with no fullscreen; Alt+F4 closing the window with no
 dialog; copy while minimised; the echo loops in both directions; resize from the popup
 at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; and killing the service worker
 from `chrome://extensions` mid-session, then confirming the next clipboard change still
-arrives. Plus three negatives: open the same gateway in an ordinary tab and confirm the
-icon says off and the seam never wakes; open the same gateway at `127.0.0.1` and confirm
-the redirect is what carries you onto the served host; and open an unrelated site and
-confirm no content script runs in it at all.
+arrives; and **the install itself** — *Install page as app…* from a tab with a live
+session, confirming the seam comes up, the Help card's install row goes away and the
+chords start reaching the remote **in the window Chrome just opened**, with nothing
+closed and nothing reloaded. Plus three negatives: open the same gateway in an ordinary
+tab and confirm the icon says off and the seam never wakes; open the same gateway at
+`127.0.0.1` and confirm the redirect is what carries you onto the served host; and open
+an unrelated site and confirm no content script runs in it at all.
 
 ## Distribution
 

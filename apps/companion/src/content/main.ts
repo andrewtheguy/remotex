@@ -41,6 +41,41 @@ function appWindow(): boolean {
 }
 
 /**
+ * Run `start` as soon as this is an app window, now or later.
+ *
+ * Later is the case that matters: *Install page as app…* reparents the live document
+ * into the new window instead of reloading it, so a script that asked once at
+ * `document_start` asked while it was still a tab and would stay silent in the window
+ * the user just installed. `frontend/src/appWindow.ts` latches the same way, on the same
+ * signal, which is what keeps the two ends of the bus agreeing about the window they
+ * are in.
+ *
+ * One way only. Full screen replaces the display mode with `fullscreen`, so an armed
+ * window must not disarm when it goes immersive.
+ */
+function whenAppWindow(start: () => void): void {
+  if (appWindow()) {
+    start();
+    return;
+  }
+  const queries = APP_DISPLAY_MODES.map((mode) =>
+    window.matchMedia(`(display-mode: ${mode})`),
+  );
+  const promote = () => {
+    if (!appWindow()) {
+      return;
+    }
+    for (const query of queries) {
+      query.removeEventListener("change", promote);
+    }
+    start();
+  };
+  for (const query of queries) {
+    query.addEventListener("change", promote);
+  }
+}
+
+/**
  * The page's last state, which is the only thing cached here.
  *
  * A cache of something the page owns, not a second copy of it: the popup asks for a
@@ -110,7 +145,7 @@ function hello(): void {
   });
 }
 
-if (appWindow()) {
+whenAppWindow(() => {
   window.addEventListener("message", receiveFromPage);
 
   chrome.runtime.onMessage.addListener((data, _sender, respond) => {
@@ -133,4 +168,4 @@ if (appWindow()) {
   // A bfcache restore replays no injection. The page says hello again on `pageshow`
   // for the mirror-image reason, and either side may be the one that gets there first.
   window.addEventListener("pageshow", hello);
-}
+});
