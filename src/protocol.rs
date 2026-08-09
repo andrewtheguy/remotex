@@ -21,7 +21,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// panels name the size and the limit), so the surprise happens at the
 /// clipboard, where it can be understood. Clipboard text rides the same link as
 /// live frames, so an accidental 200 MB copy must not stall a session.
-pub const MAX_CLIPBOARD_BYTES: usize = 65_536;
+pub const MAX_CLIPBOARD_BYTES: usize = 524_288;
 
 /// Whether `text` fits one clipboard transfer. `str::len` is already UTF-8
 /// bytes, which is exactly what [`MAX_CLIPBOARD_BYTES`] bounds.
@@ -1548,7 +1548,7 @@ mod tests {
 
     // Nothing may put an unbounded string on the browser link. Refused rather
     // than truncated: the browser is told the size so it can say so, where the
-    // first 64 KiB of a copy could not be told from all of it.
+    // first 512 KiB of a copy could not be told from all of it.
     #[test]
     fn oversized_clipboard_text_is_refused_with_its_size() {
         assert!(clipboard_fits(&"a".repeat(MAX_CLIPBOARD_BYTES)));

@@ -123,7 +123,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   const webValue = `remotex-ui-web-${Date.now()}`;
   await input.fill(webValue);
   await expect(
-    page.getByText(`${Buffer.byteLength(webValue)} / 65536 bytes`),
+    page.getByText(`${Buffer.byteLength(webValue)} / 524288 bytes`),
   ).toBeVisible();
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Clipboard sent to remote")).toBeVisible();

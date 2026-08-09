@@ -99,7 +99,7 @@ export type ClientMsg =
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
 // src/protocol.rs. The backend refuses anything over it in either direction;
 // checking here too is what lets the panel say so before the round trip.
-export const MAX_CLIPBOARD_BYTES = 65_536;
+export const MAX_CLIPBOARD_BYTES = 524_288;
 
 export interface ClipboardSnapshot {
   text: string;
