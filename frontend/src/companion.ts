@@ -16,27 +16,24 @@
 // was injected into it, so the only way to find out is to ask and wait. "Is there a
 // companion?" arrives late. It is a store, not a constant.
 //
-// Every settled answer can be unsettled, because every one of them can stop being true.
-// Host access is granted and revoked per site from the extension's popup and from
-// Chrome's own site-access UI, so a companion can arrive in the middle of a session and
-// leave in the middle of one: a `hello` when a grant lands, a `bye` when it is taken
-// away. `pageshow` re-opens the question too, because a bfcache restore replays no
-// injection and the page may come back to an extension that is there or gone.
+// A settled answer can still be re-asked, and `pageshow` is the one thing that asks:
+// a bfcache restore replays no injection, so the page may come back to an extension
+// that is there or gone. What is *not* allowed is drifting back to `probing` on its
+// own — only a `pageshow` does that, and it re-arms the deadline with it, so there is
+// no phase left waiting for an answer nothing will settle.
 //
-// What is *not* allowed is drifting back to `probing` on its own — only a `pageshow`
-// does that, and it re-arms the deadline with it, so there is no phase left waiting for
-// an answer nothing will settle.
-//
-// The one thing `bye` cannot cover is an extension disabled or reloaded outright, which
-// takes its content script's context with it before anything can be said. That leaves a
-// page believing in a companion that has gone until it is reloaded.
+// Nothing tells this page a companion has *left*. The extension serves one hard-coded
+// host and asks for nothing at runtime, so there is no grant to be taken away mid-
+// session; and one disabled or reloaded from chrome://extensions takes its content
+// script's context with it before it could say anything. That leaves a page believing
+// in a companion that has gone until it is reloaded.
 //
 // With no extension installed every export here is inert bar the deadline: `hello`
 // goes out to a bus nobody is reading, the phase settles to `absent`, and the client
 // carries on exactly as it did before this file existed.
 
 import { useEffect, useSyncExternalStore } from "react";
-import { appWindow } from "./appWindow.ts";
+import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import {
   type CompanionCapabilities,
   type CompanionCommand,
@@ -89,10 +86,16 @@ const ABSENT: Snapshot = { phase: "absent", capabilities: null };
  * A tab is `absent` from the first render rather than after the deadline, which is the
  * one behavioural difference and it is the right way round — the focus-driven clipboard
  * read has nothing to stand down for there.
+ *
+ * Asked again when a tab *becomes* an app window, which *Install page as app…* does to
+ * this very document without reloading it. Read once, this seam would stay dead in the
+ * window the install just opened.
  */
-const POSSIBLE = typeof window !== "undefined" && appWindow();
+function possible(): boolean {
+  return typeof window !== "undefined" && appWindow();
+}
 
-let snapshot: Snapshot = POSSIBLE ? INITIAL : ABSENT;
+let snapshot: Snapshot = possible() ? INITIAL : ABSENT;
 const listeners = new Set<() => void>();
 
 // A new object only when something actually changed. `useSyncExternalStore` compares
@@ -128,8 +131,6 @@ function receive(event: MessageEvent): void {
   const command: CompanionCommand = event.data;
   if (command.type === "hello") {
     settle({ phase: "connected", capabilities: command.capabilities });
-  } else if (command.type === "bye") {
-    settle(ABSENT);
   }
   for (const handler of commandHandlers) {
     handler(command);
@@ -175,12 +176,25 @@ function probe(): void {
   }, HANDSHAKE_DEADLINE_MS);
 }
 
-if (POSSIBLE) {
+function listen(): void {
   window.addEventListener("message", receive);
   probe();
   // A bfcache restore re-runs no content script. Ours may still be there and may not;
   // saying hello again is how we find out, and it costs one message.
   window.addEventListener("pageshow", probe);
+}
+
+if (possible()) {
+  listen();
+} else if (typeof window !== "undefined") {
+  // The install case, and the only way out of `absent` a tab has. The extension's own
+  // content script is already in this document — it is matched on the host, not on the
+  // window kind — and it arms on the same signal, so both sides of the handshake wake
+  // up together and either may be first.
+  const stop = onAppWindowChange(() => {
+    stop();
+    listen();
+  });
 }
 
 function subscribe(notify: () => void): () => void {

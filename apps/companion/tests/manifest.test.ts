@@ -15,31 +15,34 @@ const manifest = JSON.parse(
   await readFile(join(root, "src/manifest.json"), "utf8"),
 ) as Record<string, unknown>;
 
-test("the permissions are exactly these five", () => {
+test("the permissions are exactly these three", () => {
   assert.deepEqual(manifest.permissions, [
-    "scripting",
-    "activeTab",
     "offscreen",
     "clipboardRead",
     "clipboardWrite",
   ]);
 });
 
-test("host access is optional, and there is none of it by default", () => {
-  // The two broad patterns are what this extension may *ask* for. Granting is per site
-  // and the user's, and `host_permissions` being absent is what makes that true — one
-  // entry there would be access nobody was asked about.
-  assert.deepEqual(manifest.optional_host_permissions, [
-    "http://*/*",
-    "https://*/*",
-  ]);
-  assert.equal("host_permissions" in manifest, false);
+test("there is one host, it is hard-coded, and nothing may be asked for later", () => {
+  // The whole access model, in two lines of JSON. `optional_host_permissions` being
+  // absent is half of it: with none declared, there is no origin this extension can
+  // come to hold that is not written here.
+  assert.deepEqual(manifest.host_permissions, ["http://*.remotex.localhost/*"]);
+  assert.equal("optional_host_permissions" in manifest, false);
 });
 
-test("no content script is declared, because they are registered per grant", () => {
-  // A `content_scripts` entry would run in every matching renderer whether the user
-  // had turned the site on or not, which is the design this one replaced.
-  assert.equal("content_scripts" in manifest, false);
+test("the content script is declared, and only for that host", () => {
+  // Declared rather than registered per grant: with one host there is nothing to
+  // reconcile, and the matches must be the host permission exactly — a wider pattern
+  // here would be a renderer this extension runs in without having said so above.
+  assert.deepEqual(manifest.content_scripts, [
+    {
+      matches: ["http://*.remotex.localhost/*"],
+      js: ["content.js"],
+      run_at: "document_start",
+      all_frames: false,
+    },
+  ]);
 });
 
 test("nothing is reachable from a page, and nothing is probeable", () => {

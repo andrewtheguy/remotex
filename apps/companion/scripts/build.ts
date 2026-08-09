@@ -3,8 +3,7 @@
 //
 // The content script is the only one that is not an ES module, and that is not a
 // preference: Chrome loads a `content_scripts` file as a classic script, so the bundle
-// must have no imports left in it. It is registered at runtime rather than declared —
-// see src/worker/grants.ts — but it is loaded the same way either way.
+// must have no imports left in it.
 
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

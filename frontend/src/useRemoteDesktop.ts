@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appWindow } from "./appWindow.ts";
+import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import {
   type AudioPlayer,
   createAudioContext,
@@ -1787,29 +1787,6 @@ export function useRemoteDesktop(
     };
   }, [mode, canClipboard, companion, companionClipboard]);
 
-  // A live session is a thing to lose, and ⌘W or Ctrl+W closes a tab before this page
-  // sees the key — except under a keyboard lock, or in an app window, where they
-  // arrive as ordinary keydowns and go to the remote instead. So the mitigation is the
-  // browser's own leave-site dialog, which needs sticky activation: a desktop the user
-  // has clicked on always has it. Kept in an app window too, where the chord is caught
-  // but Alt+F4 and the title bar's close button are not.
-  //
-  // `mode`, not `status`: a reconnecting session is still one worth not closing. Not
-  // in `remotex.app`, where closing the window is the app's own quit path and this
-  // would put a web dialog in front of it.
-  useEffect(() => {
-    if (NATIVE_HOST || mode !== "desktop") {
-      return;
-    }
-    const guard = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-    };
-    window.addEventListener("beforeunload", guard);
-    return () => {
-      window.removeEventListener("beforeunload", guard);
-    };
-  }, [mode]);
-
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
   // excluded: the desktop can pan up above it and the gesture cursor won't
@@ -1850,18 +1827,24 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    // Three ways to be given every Command chord, and only one of them changes under
-    // a running session. `remotex.app` drops its menu accelerators for the whole
-    // session, and an app window reserves nothing for the whole session either
-    // (appWindow.ts) — both are settled before this effect runs. A keyboard lock in a
-    // plain tab comes and goes, a held Esc ends one without asking, so the table
-    // follows the lock rather than being chosen once.
-    const chordsGranted = NATIVE_HOST || appWindow();
+    // Three ways to be given every Command chord, and two of them can arrive under a
+    // running session. `remotex.app` drops its menu accelerators for the whole session
+    // and is settled before this effect runs. A keyboard lock in a plain tab comes and
+    // goes, and a held Esc ends one without asking. And *Install page as app…*
+    // reparents this document into a window that reserves nothing — a tab becoming an
+    // app window mid-session, which is why that one is subscribed to as well
+    // (appWindow.ts). Neither subscription ever takes chords away: the lock's own
+    // handler reads both, and the window kind only ever gains.
+    let chordsGranted = NATIVE_HOST || appWindow();
     const macKeys = new MacKeyboardTranslator(
       chordsGranted || keyboardLockHeld(),
     );
     const stopWatchingLock = onKeyboardLockChange((locked) => {
       macKeys.setCapturesEveryChord(chordsGranted || locked);
+    });
+    const stopWatchingWindow = onAppWindowChange(() => {
+      chordsGranted = true;
+      macKeys.setCapturesEveryChord(true);
     });
 
     // Touch gestures, only on pinch-zoom-capable devices — they
@@ -2050,6 +2033,7 @@ export function useRemoteDesktop(
     return () => {
       gestures?.detach();
       stopWatchingLock();
+      stopWatchingWindow();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);

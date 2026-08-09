@@ -3,14 +3,16 @@
   "name": "RemoteX Companion",
   "description": "System clipboard sync without window focus, and Resize to display, for the RemoteX web client.",
   "minimum_chrome_version": "116",
-  "permissions": [
-    "scripting",
-    "activeTab",
-    "offscreen",
-    "clipboardRead",
-    "clipboardWrite"
+  "permissions": ["offscreen", "clipboardRead", "clipboardWrite"],
+  "host_permissions": ["http://*.remotex.localhost/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*.remotex.localhost/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
   ],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "worker.js",
     "type": "module"

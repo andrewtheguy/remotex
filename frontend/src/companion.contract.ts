@@ -72,21 +72,14 @@ export type CompanionEvent =
    */
   | { type: "clipboardFromRemote"; text: string };
 
-// `bye` covers a revoked site and nothing else. An extension disabled or reloaded from
-// chrome://extensions loses its content script's context without a turn to speak, so a
-// page can still be left believing in a companion that has gone — reloading it is the
-// only cure, and it is the gesture anyone would already reach for.
+// There is no goodbye. The extension serves one hard-coded host and asks for nothing at
+// runtime, so it has no moment where it learns it is leaving: an extension disabled,
+// reloaded or withheld from `chrome://extensions` loses its content script's context
+// without a turn to speak. That leaves a page believing in a companion that has gone
+// until it is reloaded, which is the gesture anyone would already reach for.
 /** What the extension tells the page. */
 export type CompanionCommand =
   | { type: "hello"; version: string; capabilities: CompanionCapabilities }
-  /**
-   * Host access for this site was taken away — from the popup's own switch, or from
-   * Chrome's site-access UI, which the extension hears about the same way. The content
-   * script already injected into this window keeps running until it navigates, so it
-   * has one last thing to say. The page goes back to reading the clipboard on focus;
-   * it does not go back to waiting for a hello.
-   */
-  | { type: "bye" }
   /** The system clipboard changed, focused or not. Goes to `pushLocalClipboard`. */
   | { type: "clipboardLocal"; text: string };
 
@@ -116,11 +109,7 @@ export type CompanionCommandHandlers = {
 export type PageMessage = CompanionEvent & { source: typeof PAGE_SOURCE };
 export type ExtMessage = CompanionCommand & { source: typeof EXT_SOURCE };
 
-const EXT_TYPES: ReadonlySet<string> = new Set([
-  "hello",
-  "bye",
-  "clipboardLocal",
-]);
+const EXT_TYPES: ReadonlySet<string> = new Set(["hello", "clipboardLocal"]);
 
 const PAGE_TYPES: ReadonlySet<string> = new Set([
   "hello",

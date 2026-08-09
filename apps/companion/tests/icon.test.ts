@@ -5,20 +5,14 @@ import { test } from "node:test";
 import { iconStateFor } from "../src/worker/icon.ts";
 
 test("the icon's three states", () => {
-  assert.equal(iconStateFor({ granted: true, appWindow: true }), "on");
+  assert.equal(iconStateFor({ served: true, appWindow: true }), "on");
 
-  // The distinction the title exists for: "you have not turned this site on", which the
-  // popup fixes, against "this is a tab", which it cannot.
+  // The distinction the title exists for: "this is a tab", which nothing in the popup
+  // can fix, against "this window is not a gateway of ours", which is an address.
   assert.equal(
-    iconStateFor({ granted: true, appWindow: false }),
+    iconStateFor({ served: true, appWindow: false }),
     "not-app-window",
   );
-  assert.equal(
-    iconStateFor({ granted: false, appWindow: true }),
-    "not-granted",
-  );
-  assert.equal(
-    iconStateFor({ granted: false, appWindow: false }),
-    "not-granted",
-  );
+  assert.equal(iconStateFor({ served: false, appWindow: true }), "elsewhere");
+  assert.equal(iconStateFor({ served: false, appWindow: false }), "elsewhere");
 });

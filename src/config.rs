@@ -868,7 +868,7 @@ pub struct ServerSection {
     // refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
     /// loopback: a browser arriving at `127.0.0.1`, `::1` or `localhost` is
-    /// redirected to `<label>.localhost`, keeping the port and path.
+    /// redirected to `<label>.remotex.localhost`, keeping the port and path.
     ///
     /// It exists for one problem, which has no other clean answer: a cookie is
     /// scoped by *host* and ignores the port, so two gateways on one machine
@@ -878,9 +878,10 @@ pub struct ServerSection {
     /// reads as a session bug in whatever you were actually testing. Testing
     /// session takeover needs two gateways, so this is not a rare corner.
     ///
-    /// `<label>.localhost` because every label under `.localhost` resolves to
-    /// loopback without DNS (RFC 6761) and is a *distinct* cookie origin, so two
-    /// gateways become two independent logins in one browser.
+    /// Under `.localhost` because every name below it resolves to loopback without
+    /// DNS (RFC 6761) and is a *distinct* cookie origin, so two gateways become two
+    /// independent logins in one browser. Under `.remotex.localhost` in particular
+    /// so the names this project hands out are all one suffix, taken from nobody.
     ///
     /// Never reachable in a deployment: [`AppConfig::dev_hostname`] redirects only
     /// a request whose own `Host` is a loopback name, so a gateway behind a real
@@ -965,7 +966,7 @@ pub struct AppConfig {
     pub auth: GatewayAuth,
     /// Display name for the login screen, interstitials, and browser tab title.
     pub branding: String,
-    /// `<label>.localhost` to send a loopback browser to, from
+    /// `<label>.remotex.localhost` to send a loopback browser to, from
     /// `[server].dev_subdomain`. `None` disables the redirect entirely.
     ///
     /// Stored as the whole hostname rather than the label so the one place that
@@ -1587,13 +1588,19 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
     Ok(ListenAddr::Tcp(format!("{host}:{port}")))
 }
 
-/// `<label>.localhost`, refusing anything that is not a single DNS label.
+/// `<label>.remotex.localhost`, refusing anything that is not a single DNS label.
 ///
 /// The check is what makes the redirect target unforgeable: a `Location` built
 /// from an unvalidated string could name any host at all, and this one is
 /// assembled from a label that has been proved to contain no dot, no slash, no
 /// colon and no credentials. So the target is always some name under
 /// `.localhost`, which by RFC 6761 can only be loopback.
+///
+/// The `remotex` label in the middle is what keeps a development gateway from
+/// claiming a name somebody else's tooling may already answer to: `gw-a.localhost`
+/// is a name anything on this machine may have taken, while everything under
+/// `.remotex.localhost` is this project's by construction. It is one name to
+/// recognise in a browser's history and one suffix to clear cookies for.
 ///
 /// Length is bounded at 63, the DNS label limit, for the same reason the shape is
 /// checked rather than trusted: a name nothing can resolve is a redirect loop
@@ -1608,13 +1615,13 @@ fn dev_hostname(label: &str) -> anyhow::Result<String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-'),
         "{label:?} must be one DNS label — ASCII letters, digits and hyphens only, \
-         and no dots (it is used as <label>.localhost)"
+         and no dots (it is used as <label>.remotex.localhost)"
     );
     anyhow::ensure!(
         !label.starts_with('-') && !label.ends_with('-'),
         "{label:?} may not start or end with a hyphen"
     );
-    Ok(format!("{label}.localhost"))
+    Ok(format!("{label}.remotex.localhost"))
 }
 
 /// Load the config file: the explicit `--config` path, or the global
@@ -1921,10 +1928,10 @@ mod tests {
     // carrying a dot, a slash, a colon or credentials would point somewhere that is
     // not loopback at all.
     #[test]
-    fn a_dev_subdomain_becomes_one_label_under_localhost() {
+    fn a_dev_subdomain_becomes_one_label_under_remotex_localhost() {
         assert_eq!(
             resolved(r#"dev_subdomain = "a""#).dev_hostname.as_deref(),
-            Some("a.localhost")
+            Some("a.remotex.localhost")
         );
         // Unset, and whitespace-only, both disable it — as `branding` does.
         assert_eq!(resolved("").dev_hostname, None);
@@ -1932,20 +1939,20 @@ mod tests {
         // Trimmed, so a stray space cannot become part of a hostname.
         assert_eq!(
             resolved(r#"dev_subdomain = "  b  ""#).dev_hostname.as_deref(),
-            Some("b.localhost")
+            Some("b.remotex.localhost")
         );
         // Digits and inner hyphens are legal in a DNS label.
         assert_eq!(
             resolved(r#"dev_subdomain = "gw-2""#).dev_hostname.as_deref(),
-            Some("gw-2.localhost")
+            Some("gw-2.remotex.localhost")
         );
     }
 
     #[test]
     fn a_dev_subdomain_that_is_not_one_label_is_refused() {
         for bad in [
-            // A dot would move the name out from under `.localhost` entirely,
-            // which is the whole of what keeps the target on loopback.
+            // A dot would move the name out from under `.remotex.localhost`
+            // entirely, which is the whole of what keeps the target on loopback.
             "a.b",
             "evil.example.com",
             "a/b",
@@ -1971,7 +1978,7 @@ mod tests {
             resolved(&format!("dev_subdomain = {:?}", "a".repeat(63)))
                 .dev_hostname
                 .as_deref(),
-            Some(&*format!("{}.localhost", "a".repeat(63)))
+            Some(&*format!("{}.remotex.localhost", "a".repeat(63)))
         );
     }
 

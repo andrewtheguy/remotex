@@ -226,25 +226,6 @@ test("a restore of a connected seam says hello without re-opening the question",
   );
 });
 
-test("bye stands the seam down, and a later hello brings it back", () => {
-  // Both directions are a site's host access being taken away and given back, which is
-  // a thing that happens mid-session from Chrome's own site-access UI as much as from
-  // the extension's popup.
-  deliver({ data: { source: "remotex-ext", type: "bye" } });
-  assert.equal(companionPhase(), "absent");
-  assert.equal(
-    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
-    false,
-  );
-
-  deliver({ data: helloFromExtension() });
-  assert.equal(companionPhase(), "connected");
-  assert.equal(
-    postToCompanion({ type: "clipboardFromRemote", text: "x" }),
-    true,
-  );
-});
-
 test("the guards accept what they should and refuse the rest", () => {
   assert.equal(isExtMessage(helloFromExtension()), true);
   assert.equal(
@@ -258,7 +239,9 @@ test("the guards accept what they should and refuse the rest", () => {
   assert.equal(isExtMessage({ type: "clipboardLocal" }), false);
   assert.equal(isExtMessage({ source: "remotex-page", type: "hello" }), false);
   assert.equal(isExtMessage({ source: "remotex-ext", type: "evict" }), false);
-  assert.equal(isExtMessage({ source: "remotex-ext", type: "bye" }), true);
+  // The goodbye nothing can send any more: the extension serves one hard-coded host and
+  // has no moment where it learns it is leaving.
+  assert.equal(isExtMessage({ source: "remotex-ext", type: "bye" }), false);
   // A tag on a nested object is not a tag on the message.
   assert.equal(
     isExtMessage({

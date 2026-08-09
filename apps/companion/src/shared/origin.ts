@@ -1,58 +1,67 @@
-// A tab's URL to the origin pattern this extension asks Chrome for.
+// The one host this extension serves, in the one place that decides it.
 //
-// Pure, and the one place a mistake grants more than was meant, which is why it is its
-// own module with its own table-driven test rather than three lines in the popup.
+// There is no grant flow, no popup switch and no host list to keep: the manifest
+// declares `http://*.remotex.localhost/*` as a host permission and as the content
+// script's `matches`, and this module is the same rule written for code that has a URL
+// in hand rather than a match pattern. The two must agree — Chrome decides where the
+// content script runs, and this decides what the icon and the popup say about it, so a
+// disagreement is an extension that works somewhere it claims not to or the reverse.
 //
-// There is no matcher here and there is no host list. Chrome holds the grants and
-// Chrome decides what they match; all this does is turn "the window I am looking at"
-// into the pattern to request for it.
+// `[server].dev_subdomain` in a gateway's config is what puts a browser there: it
+// redirects any loopback name to `<label>.remotex.localhost`, keeping the port. That is
+// the whole of the setup, and it is why the host can be hard-coded at all.
+
+/** The match pattern in the manifest, repeated here so a reader sees both at once. */
+export const COMPANION_MATCH = "http://*.remotex.localhost/*";
+
+/** What the popup and the icon call it, and the only host in this tree. */
+export const COMPANION_HOST = "remotex.localhost";
 
 /**
- * The pattern to ask for, or null if this is not a page a grant would mean anything on.
+ * Whether this is a URL the companion serves.
  *
- * Refused: everything that is not `http:` or `https:`. `chrome://`, `about:`, `file:`
- * and `data:` are not sites Chrome will grant, and a null here is what makes the popup
- * render its "nothing to enable" state rather than a switch that cannot be turned on.
+ * `http:` only, because the gateway has no TLS listener and the dev redirect always
+ * sends a browser to `http://`. A `.remotex.localhost` name is loopback by RFC 6761 and
+ * a secure context by the same rule the client's preflight relies on, so there is
+ * nothing `https:` would add here beyond a second pattern to keep in step.
  *
- * **The port is dropped, because a match pattern cannot express one.** A gateway on
- * `https://gateway.example:8443` is asked for as `https://gateway.example/*`, which
- * covers every port on that host. That is a real widening and it is stated in
- * docs/companion-extension.md; it is not something this function can fix, only
- * something it must not hide.
+ * The bare `remotex.localhost` counts, because Chrome's `*.remotex.localhost` matches
+ * the domain as well as its subdomains — the predicate has to say what the manifest
+ * says. A port is ignored, since a match pattern cannot express one, so every port on
+ * these names is served.
  *
- * The path is dropped too, and `/*` is always the path pattern: the client is a SPA
- * whose path changes under the content script, so a grant tied to one would come and
- * go as the user moved around it.
+ * **This is where the bridge may run, not who is on the other end.** RFC 6761 reserves
+ * the name to loopback; it does not reserve it to this project, and any local process
+ * that binds a port answers there too. Nothing here authenticates anything, and nothing
+ * should be built on the idea that it does — docs/companion-extension.md states the
+ * cost under Costs.
  */
-export function originPatternFor(url: string | undefined): string | null {
+export function isCompanionUrl(url: string | undefined): boolean {
   if (!url) {
-    return null;
+    return false;
   }
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return null;
+    return false;
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return null;
+  if (parsed.protocol !== "http:") {
+    return false;
   }
-  // `hostname`, not `host`: the latter carries the port. An IPv6 literal keeps its
-  // brackets here, which is what Chrome's patterns want too.
-  if (parsed.hostname === "") {
-    return null;
-  }
-  return `${parsed.protocol}//${parsed.hostname}/*`;
+  // Already lower-cased by the URL parser, and an IPv6 literal keeps its brackets —
+  // neither of which can ever end in this suffix, which is the answer wanted there.
+  return (
+    parsed.hostname === COMPANION_HOST ||
+    parsed.hostname.endsWith(`.${COMPANION_HOST}`)
+  );
 }
 
 /**
  * The host as the popup prints it, which is the host and its port.
  *
- * Deliberately *not* what {@link originPatternFor} returns. The pattern is what Chrome
- * is asked for and the label is what the user is looking at, and where those two
- * differ — a non-default port — showing the pattern would quietly claim the grant is
- * narrower than it is. Showing the real host and asking for the wider pattern is the
- * honest pair; the popup says which in its own words.
+ * The port is what tells two gateways apart on one machine — the label in the hostname
+ * is only there to give each of them a cookie origin — so the popup shows both.
  */
 export function hostLabelFor(url: string | undefined): string | null {
   if (!url) {
@@ -63,9 +72,4 @@ export function hostLabelFor(url: string | undefined): string | null {
   } catch {
     return null;
   }
-}
-
-/** Whether a granted pattern is one this extension asked for, rather than a leftover. */
-export function isOriginPattern(pattern: string): boolean {
-  return /^https?:\/\/[^/*]+\/\*$/.test(pattern);
 }

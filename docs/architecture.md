@@ -1010,9 +1010,14 @@ hears about. The menu's Immersive button is only a way to reach full screen with
 gesture in hand; it toggles on full screen rather than on the lock, so a browser that
 refuses the lock still leaves a way back out. The Command translation table follows the
 lock rather than being chosen once, because a held Esc ends a lock at any moment and
-that escape hatch is uncapturable by design; the window kind, by contrast, is read once
-and cannot change. A live session also arms the browser's own leave-site dialog, so a close
-chord — or Alt+F4, which no window catches — asks first.
+that escape hatch is uncapturable by design. The window kind moves in one direction
+only: *Install page as app…* reparents the live document into the new window instead of
+reloading it, so `appWindow.ts` latches its answer true and notifies rather than
+answering once at load — and full screen, which reports `display-mode: fullscreen` and
+would otherwise unmake an app window mid-session, is what the latch defends against. A
+close chord the page never sees — and Alt+F4, which no window
+catches — ends the session without asking: the client raises no leave-site dialog,
+because a dialog on every deliberate window close is worse than the session it saves.
 
 The canvas is presented at the remote's point size, derived from framebuffer
 pixels and remote scale. Desktop clients scroll when necessary. Touch clients

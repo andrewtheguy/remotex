@@ -75,9 +75,9 @@ function keyboardApi(): KeyboardLockApi | undefined {
 /// The media query that sees the full screen the Fullscreen API does not own.
 ///
 /// `appWindow.ts` reads the same feature to decide what a window *is*, and treats a
-/// `fullscreen` answer as the reason its own answer must be cached. Here it is the
-/// live signal rather than the thing to be defended against — read every time, never
-/// remembered, because this is precisely the state that moves.
+/// `fullscreen` answer as the reason its own answer latches true once given. Here it is
+/// the live signal rather than the thing to be defended against — read every time,
+/// never remembered, because this is precisely the state that moves.
 const FULLSCREEN_QUERY = "(display-mode: fullscreen)";
 
 function fullscreenQuery(): MediaQueryList | undefined {

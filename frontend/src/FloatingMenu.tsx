@@ -7,7 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { appWindow } from "./appWindow.ts";
+import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
 import {
@@ -170,17 +170,28 @@ export interface PanelControls {
   openHelp: () => void;
 }
 
+/// The window kind, subscribed to rather than read once.
+///
+/// *Install page as app…* reparents this very document into the new window, so every
+/// line below that depends on the answer has to be able to change its mind — that is
+/// the whole of what `onAppWindowChange` exists for. See appWindow.ts.
+function useAppWindow(): boolean {
+  return useSyncExternalStore(onAppWindowChange, appWindow, () => false);
+}
+
 // What Immersive is *for*, which is not the same in both window kinds: a tab is buying
 // the six chords a browser keeps, and an app window — which reserves none of them
 // already — is buying screen area. Saying the second thing in the first window's words
 // would be promising something that is already true.
-const IMMERSIVE_EXIT_HINT = appWindow()
-  ? "Leave full screen"
-  : "Leave full screen and give this browser its shortcuts back";
+const immersiveExitHint = (app: boolean) =>
+  app
+    ? "Leave full screen"
+    : "Leave full screen and give this browser its shortcuts back";
 
-const IMMERSIVE_ENTER_HINT = appWindow()
-  ? "Full screen. This window already sends ⌘W, ⌘T and the rest to the remote"
-  : "Full screen, and send ⌘W, ⌘T and the rest to the remote instead of this browser";
+const immersiveEnterHint = (app: boolean) =>
+  app
+    ? "Full screen. This window already sends ⌘W, ⌘T and the rest to the remote"
+    : "Full screen, and send ⌘W, ⌘T and the rest to the remote instead of this browser";
 
 // The one state the other two hints cannot describe: full screen, and the browser
 // refused the lock. Worth its own sentence rather than a silent "Exit immersive",
@@ -212,12 +223,13 @@ function ImmersiveButton({ onToggle }: { onToggle: () => void }) {
     keyboardLockHeld,
     () => false,
   );
+  const app = useAppWindow();
   if (!immersiveAvailable()) {
     return null;
   }
-  let hint = IMMERSIVE_ENTER_HINT;
+  let hint = immersiveEnterHint(app);
   if (active) {
-    hint = locked ? IMMERSIVE_EXIT_HINT : IMMERSIVE_UNLOCKED_HINT;
+    hint = locked ? immersiveExitHint(app) : IMMERSIVE_UNLOCKED_HINT;
   }
   return (
     <button
@@ -262,7 +274,9 @@ function ImmersiveHelpRow() {
 /// runs (see docs/companion-extension.md), which is the second reason a tab is worth
 /// this line and an app window is worth none.
 function AppWindowHelpRow() {
-  if (appWindow()) {
+  // Subscribed, not read: the row is telling the user to install this page as an app,
+  // and doing so must make the row itself go away without a reload.
+  if (useAppWindow()) {
     return null;
   }
   return (
