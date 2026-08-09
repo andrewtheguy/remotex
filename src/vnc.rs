@@ -1500,6 +1500,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let mut full_repaint: Option<FullRepaint> = None;
     let mut apple_poll_paused = false;
     let mut apple_poll_deadline: Option<tokio::time::Instant> = None;
+    let apple_fetch_active = |apple: &Option<Apple>| {
+        apple.is_some() && clipboard.lock().unwrap().apple_fetch_pending
+    };
     // The connection's decoder state: the deflate streams and whatever else an
     // encoding carries from one rectangle to the next.
     let mut decoders = Decoders::default();
@@ -1555,7 +1558,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 apple_poll_deadline = None;
                 let size = desktop.lock().unwrap().size;
                 debug!("vnc: Apple pasteboard fetch left unanswered; resuming framebuffer polling");
-                send(uplink, &update_request(true, size)).await?;
+                send(uplink, &update_request(full_repaint.is_none(), size)).await?;
                 continue;
             }
         };
@@ -1663,9 +1666,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     if full_repaint.as_ref().is_some_and(FullRepaint::complete) {
                         full_repaint = None;
                         if poll {
-                            if apple.is_some()
-                                && clipboard.lock().unwrap().apple_fetch_pending
-                            {
+                            if apple_fetch_active(&apple) {
                                 apple_poll_paused = true;
                                 apple_poll_deadline = Some(
                                     tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
@@ -1677,11 +1678,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     } else if full_repaint.is_some() {
                         send(uplink, &update_request(false, size)).await?;
                     } else if poll || resized {
-                        if poll
-                            && !resized
-                            && apple.is_some()
-                            && clipboard.lock().unwrap().apple_fetch_pending
-                        {
+                        if poll && !resized && apple_fetch_active(&apple) {
                             apple_poll_paused = true;
                             apple_poll_deadline = Some(
                                 tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
@@ -5530,6 +5527,67 @@ mod tests {
         expected.extend_from_slice(&vnc_apple_clipboard::fetch(7));
         expected.extend_from_slice(&update_request(true, (2, 2)));
         assert_eq!(written(&sent), expected);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_apple_clipboard_fetch_resumes_polling_after_an_idle_gap() {
+        tokio::time::pause();
+        for repaint_pending in [false, true] {
+            let status = [0x14, 0, 0, 4, 0, 1, 0, 2];
+            let tickle = [0x14, 0, 0, 4, 0, 1, 0, 4];
+            let (mut server, reader) = tokio::io::duplex(256);
+            let (uplink_wire, mut mac) = tokio::io::duplex(256);
+            let uplink = Arc::new(Mutex::new(Uplink::plain(uplink_wire)));
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(
+                uplink,
+                shared_desktop((2, 2), None, None),
+                test_shadow((2, 2)),
+            );
+            let clipboard = shared.clipboard.clone();
+            let task = tokio::spawn(read_loop(
+                reader,
+                shared,
+                ReadFlags { clipboard: true, poll: true },
+                Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+                sink,
+            ));
+
+            server.write_all(&status).await.unwrap();
+            server.write_all(&status).await.unwrap();
+            server.write_all(&[0, 0, 0, 0]).await.unwrap();
+            server.write_all(&tickle).await.unwrap();
+
+            let quiet = vnc_apple::auto_framebuffer_update((0, 0));
+            let mut before_idle = quiet.clone();
+            before_idle.extend_from_slice(&vnc_apple_clipboard::fetch(0));
+            before_idle.extend_from_slice(&quiet);
+            if repaint_pending {
+                server.write_all(&apple_layout_update(Some(11), (2, 2))).await.unwrap();
+                before_idle.extend_from_slice(&quiet);
+                before_idle.extend_from_slice(&update_request(false, (2, 2)));
+            }
+            let mut observed = vec![0; before_idle.len()];
+            mac.read_exact(&mut observed).await.unwrap();
+            assert_eq!(observed, before_idle);
+            {
+                let state = clipboard.lock().unwrap();
+                assert!(state.apple_fetch_pending);
+                assert!(state.apple_fetch_again);
+            }
+
+            tokio::time::advance(APPLE_CLIPBOARD_IDLE_GAP + Duration::from_millis(1)).await;
+            let mut resumed = [0; 10];
+            mac.read_exact(&mut resumed).await.unwrap();
+            assert_eq!(resumed, update_request(!repaint_pending, (2, 2)));
+            {
+                let state = clipboard.lock().unwrap();
+                assert!(!state.apple_fetch_pending);
+                assert!(!state.apple_fetch_again);
+            }
+
+            task.abort();
+        }
     }
 
     #[tokio::test]
