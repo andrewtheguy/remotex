@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import {
   type AudioPlayer,
   createAudioContext,
@@ -21,7 +20,7 @@ import {
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
-import { keyboardLockHeld, onKeyboardLockChange } from "./immersive.ts";
+import "./keyboardLock.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
@@ -1400,8 +1399,7 @@ export function useRemoteDesktop(
         case "remoteOs":
           // Decides one keyboard convention: does a local Command shortcut stay
           // Command or become remote Control. Only meaningful on a Mac host, and
-          // only for the eight chords in macKeys.ts — the browser reserves the
-          // rest for itself.
+          // only for the Command chords in macKeys.ts.
           setRemoteIsMac(msg.macos);
           break;
         case "picker":
@@ -1827,25 +1825,12 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    // Three ways to be given every Command chord, and two of them can arrive under a
-    // running session. `remotex.app` drops its menu accelerators for the whole session
-    // and is settled before this effect runs. A keyboard lock in a plain tab comes and
-    // goes, and a held Esc ends one without asking. And *Install page as app…*
-    // reparents this document into a window that reserves nothing — a tab becoming an
-    // app window mid-session, which is why that one is subscribed to as well
-    // (appWindow.ts). Neither subscription ever takes chords away: the lock's own
-    // handler reads both, and the window kind only ever gains.
-    let chordsGranted = NATIVE_HOST || appWindow();
-    const macKeys = new MacKeyboardTranslator(
-      chordsGranted || keyboardLockHeld(),
-    );
-    const stopWatchingLock = onKeyboardLockChange((locked) => {
-      macKeys.setCapturesEveryChord(chordsGranted || locked);
-    });
-    const stopWatchingWindow = onAppWindowChange(() => {
-      chordsGranted = true;
-      macKeys.setCapturesEveryChord(true);
-    });
+    // Command translation is always on. Hosts that can deliver browser-reserved
+    // chords — remotex.app, an installed app window, or a tab with Keyboard Lock —
+    // use the same fixed table. A windowed browser tab still keeps those keydowns
+    // before the page can see them, but there is no client mode to toggle around that
+    // browser boundary.
+    const macKeys = new MacKeyboardTranslator();
 
     // Touch gestures, only on pinch-zoom-capable devices — they
     // drive the same view transform applyCanvasCss renders.
@@ -2032,8 +2017,6 @@ export function useRemoteDesktop(
 
     return () => {
       gestures?.detach();
-      stopWatchingLock();
-      stopWatchingWindow();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);

@@ -33,12 +33,11 @@ and no state where half of it works. Both sides are *waiting* rather than finish
 though — see [below](#installing-as-an-app-does-not-reload-the-page): a tab that is
 installed as an app becomes an app window without reloading, and both ends arm then.
 
-A tab is not left unserved so much as served by the client itself. Full screen plus
-Keyboard Lock (`frontend/src/immersive.ts`) gives a tab the chords — automatically, on
-any full screen the page can observe, including the browser's own ⌃⌘F — and the
-clipboard falls back to the page's own focus-driven sync. Nothing there is worse for
-the extension declining to participate; the answer to "I want more" is the app window,
-which is one menu item away.
+A tab is not left unserved so much as served by the client itself. An automatic
+Keyboard Lock (`frontend/src/keyboardLock.ts`) gives a fullscreen tab the chords, and
+the clipboard falls back to the page's own focus-driven sync. A windowed tab remains
+subject to the shortcuts Chrome consumes before the page sees them; the answer to "I
+want more" is the app window, which is one menu item away.
 
 ## The shim window
 
@@ -96,7 +95,7 @@ capability implemented in an extension as well is a second implementation of the
 thing, drifting from the day it lands.
 
 That rule decided the keys out of it twice over. In an app window the chords are the
-page's for the asking, and in a tab full screen and Keyboard Lock are plain web APIs.
+page's for the asking, and a fullscreen tab uses the page's automatic Keyboard Lock.
 `beforeunload` is a page event and only the page knows whether a session is live, so
 the close guard is the page's too. The spike this design comes from put all of it in a
 content script, and only because it had no client to put it in.
@@ -196,7 +195,7 @@ document — so both ends of the bus watch the three `(display-mode: …)` media
 **latch**: `frontend/src/appWindow.ts` for the page, and the same three queries in the
 content script for the extension. Latch, not track, because full screen reports
 `display-mode: fullscreen`, and a window that stopped counting as an app window on the
-way into immersive would take the chord table down with it mid-session. The answer
+way into fullscreen would take the companion seam down with it mid-session. The answer
 therefore moves once, from tab to app window, and never back.
 
 Both ends arm on the same signal, and neither has to be first: the handshake is

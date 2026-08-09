@@ -25,8 +25,8 @@ import type { ViewportMetrics } from "../shared/resize.ts";
  * The same `display-mode` allow-list `frontend/src/appWindow.ts` uses.
  *
  * Deliberately not `!browser`: a plain tab reports `display-mode: fullscreen` the
- * moment it goes full screen, and a client in immersive mode is still a tab. Both ends
- * of the bus have to agree on what an app window is, so both ask this way.
+ * moment it goes full screen, and fullscreen does not turn it into an app window. Both
+ * ends of the bus have to agree on what an app window is, so both ask this way.
  */
 const APP_DISPLAY_MODES = [
   "standalone",
@@ -51,7 +51,7 @@ function appWindow(): boolean {
  * are in.
  *
  * One way only. Full screen replaces the display mode with `fullscreen`, so an armed
- * window must not disarm when it goes immersive.
+ * window must not disarm when it enters fullscreen.
  */
 function whenAppWindow(start: () => void): void {
   if (appWindow()) {
