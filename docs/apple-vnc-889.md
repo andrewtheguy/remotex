@@ -144,9 +144,11 @@ pasteboard status can arrive just after the gateway has requested the next updat
 putting its fetch behind that one response. Once that response completes, remotex
 pauses normal incremental framebuffer polling while the fetch remains pending. A
 layout-required non-incremental full-repaint request may still be sent during that
-pause. The pasteboard reply, or an idle-gap recovery that preserves any outstanding
-full repaint, then resumes incremental polling. Repeated change statuses coalesce
-into one follow-up fetch.
+pause, and each completed pointer click may advance one incremental cycle so Apple
+does not split a double-click while the clipboard gap is open. The pasteboard reply,
+or an idle-gap recovery that preserves any outstanding full repaint, then resumes
+normal incremental polling. Repeated change statuses coalesce into one follow-up
+fetch.
 
 `AutoFrameBufferUpdate` is not a flow-control command. remotex only sends the
 measured full-framebuffer arming at setup and after layouts; changing that rectangle

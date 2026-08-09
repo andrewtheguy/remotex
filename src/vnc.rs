@@ -468,6 +468,13 @@ struct ClipboardState {
     /// flight. One reply cannot prove it includes that later change, so it earns
     /// exactly one follow-up fetch.
     apple_fetch_again: bool,
+    /// Clipboard flow control has deliberately left no framebuffer request
+    /// outstanding, so a completed click may advance one update cycle.
+    apple_click_poll_ready: bool,
+    /// A click completed before the read side reached that gap.
+    apple_click_poll_pending: bool,
+    /// The bounded request earned by a click has been sent but not answered.
+    apple_click_poll_in_flight: bool,
 }
 
 impl ClipboardState {
@@ -496,6 +503,39 @@ impl ClipboardState {
             self.apple_fetch_pending = false;
             (requested, None)
         }
+    }
+
+    /// Remember a completed click during a fetch and consume an already-open
+    /// polling gap when there is one.
+    fn complete_apple_click(&mut self) -> bool {
+        if !self.apple_fetch_pending {
+            return false;
+        }
+        self.apple_click_poll_pending = true;
+        if std::mem::take(&mut self.apple_click_poll_ready) {
+            self.apple_click_poll_pending = false;
+            self.apple_click_poll_in_flight = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Open the polling gap, or spend a click that raced its opening.
+    fn pause_apple_poll(&mut self) -> bool {
+        self.apple_click_poll_ready = true;
+        if std::mem::take(&mut self.apple_click_poll_pending) {
+            self.apple_click_poll_ready = false;
+            self.apple_click_poll_in_flight = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel_apple_click_poll(&mut self) {
+        self.apple_click_poll_ready = false;
+        self.apple_click_poll_pending = false;
     }
 }
 
@@ -1357,7 +1397,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         Ok(())
                     }
                 } else {
-                    let msgs = translate_input(
+                    let completed_pointer_click = matches!(
+                        &input,
+                        ClientMsg::MouseButton {
+                            button: MouseButton::Left | MouseButton::Middle | MouseButton::Right,
+                            pressed: false,
+                            ..
+                        }
+                    );
+                    let resume_apple_poll = completed_pointer_click
+                        && clipboard.lock().unwrap().complete_apple_click();
+                    let mut msgs = translate_input(
                         input,
                         &buttons,
                         &mut button_mask,
@@ -1365,6 +1415,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         &mut pressed_keys,
                         &mut wheel,
                     );
+                    // Apple's input and framebuffer request handling are coupled:
+                    // leaving no request outstanding across a complete click makes
+                    // the next click arrive as another single click. Clipboard flow
+                    // control still stops background polling, but one completed
+                    // click may advance one update cycle so a double-click remains
+                    // two consecutive clicks at the Mac.
+                    if resume_apple_poll {
+                        let size = desktop.lock().unwrap().size;
+                        msgs.push(update_request(true, size).to_vec());
+                    }
                     send_all(&uplink, &msgs).await
                 };
                 // Break instead of `?`: the error must pass the trailing
@@ -1535,6 +1595,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     let mut state = clipboard.lock().unwrap();
                     state.apple_fetch_pending = false;
                     state.apple_fetch_again = false;
+                    state.cancel_apple_click_poll();
+                    state.apple_click_poll_in_flight = false;
                 }
                 apple_poll_paused = false;
                 apple_poll_deadline = None;
@@ -1583,6 +1645,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         match msg_type {
             // FramebufferUpdate
             0 => {
+                clipboard.lock().unwrap().apple_click_poll_in_flight = false;
                 reader.read_u8().await?; // padding
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
                 // an update a server starts sending before it knows how long it
@@ -1640,6 +1703,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     // immediately replace this full one on macOS.
                     let expected = display.lock().unwrap().repaint_pixels;
                     full_repaint = Some(FullRepaint::new(expected));
+                    clipboard.lock().unwrap().cancel_apple_click_poll();
                     send(uplink, &update_request(false, size)).await?;
                 } else {
                     if let Some(repaint) = &mut full_repaint {
@@ -1650,22 +1714,35 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         if poll {
                             if apple_fetch_active(&apple) {
                                 apple_poll_paused = true;
+                                let resume_for_click =
+                                    clipboard.lock().unwrap().pause_apple_poll();
+                                if resume_for_click {
+                                    send(uplink, &update_request(true, size)).await?;
+                                }
                                 apple_poll_deadline = Some(
                                     tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
                                 );
                             } else {
+                                clipboard.lock().unwrap().cancel_apple_click_poll();
                                 send(uplink, &update_request(true, size)).await?;
                             }
                         }
                     } else if full_repaint.is_some() {
+                        clipboard.lock().unwrap().cancel_apple_click_poll();
                         send(uplink, &update_request(false, size)).await?;
                     } else if poll || resized {
                         if poll && !resized && apple_fetch_active(&apple) {
                             apple_poll_paused = true;
+                            let resume_for_click =
+                                clipboard.lock().unwrap().pause_apple_poll();
+                            if resume_for_click {
+                                send(uplink, &update_request(true, size)).await?;
+                            }
                             apple_poll_deadline = Some(
                                 tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
                             );
                         } else {
+                            clipboard.lock().unwrap().cancel_apple_click_poll();
                             send(uplink, &update_request(poll && !resized, size)).await?;
                         }
                     }
@@ -1981,13 +2058,22 @@ async fn finish_apple_clipboard_fetch(
     poll_paused: &mut bool,
     poll_deadline: &mut Option<tokio::time::Instant>,
 ) -> anyhow::Result<bool> {
-    let (requested, fetch_again) = clipboard.lock().unwrap().finish_apple_fetch();
+    let (requested, fetch_again, click_poll_in_flight) = {
+        let mut state = clipboard.lock().unwrap();
+        let (requested, fetch_again) = state.finish_apple_fetch();
+        if fetch_again.is_none() {
+            state.cancel_apple_click_poll();
+        }
+        (requested, fetch_again, state.apple_click_poll_in_flight)
+    };
     if let Some(session_id) = fetch_again {
         send(uplink, &vnc_apple_clipboard::fetch(session_id)).await?;
     } else if std::mem::take(poll_paused) {
         *poll_deadline = None;
-        let size = desktop.lock().unwrap().size;
-        send(uplink, &update_request(true, size)).await?;
+        if !click_poll_in_flight {
+            let size = desktop.lock().unwrap().size;
+            send(uplink, &update_request(true, size)).await?;
+        }
     }
     Ok(requested)
 }
@@ -5451,6 +5537,34 @@ mod tests {
         expected.extend_from_slice(&vnc_apple_clipboard::fetch(7));
         expected.extend_from_slice(&update_request(true, (2, 2)));
         assert_eq!(written(&sent), expected);
+    }
+
+    #[tokio::test]
+    async fn a_click_poll_in_flight_resumes_after_the_clipboard_reply_without_a_duplicate() {
+        let clipboard = Arc::new(std::sync::Mutex::new(ClipboardState {
+            apple_fetch_pending: true,
+            apple_click_poll_in_flight: true,
+            ..ClipboardState::default()
+        }));
+        let desktop = shared_desktop((2, 2), None, None);
+        let (uplink, sent) = test_uplink();
+        let mut poll_paused = true;
+        let mut poll_deadline = Some(tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP);
+
+        let requested = finish_apple_clipboard_fetch(
+            &clipboard,
+            &desktop,
+            &uplink,
+            &mut poll_paused,
+            &mut poll_deadline,
+        )
+        .await
+        .unwrap();
+
+        assert!(!requested);
+        assert!(!poll_paused);
+        assert!(poll_deadline.is_none());
+        assert!(written(&sent).is_empty());
     }
 
     #[tokio::test]
