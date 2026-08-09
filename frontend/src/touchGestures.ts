@@ -12,7 +12,8 @@
 //   two-finger tap        right-click at the cursor
 //   two-finger pinch      zoom (1x-8x, anchored at the finger midpoint)
 //   two-finger drag       pan the zoomed view (when not in drag mode)
-//   three-finger swipe    scroll, axis-locked (vertical or horizontal wheel)
+//   three-finger swipe    scroll, axis-locked (vertical or horizontal wheel),
+//                         natural direction: content follows the fingers
 //
 // The state machine keeps its thresholds local to this file. The output layer
 // sends remotex ClientMsg JSON (a scroll tick is one wheel message; the server
@@ -684,13 +685,15 @@ export function attachTouchGestures(
       return true;
     }
 
+    // Negated: natural (touch) direction, where content follows the fingers —
+    // swiping up scrolls the content up, i.e. a wheel-down tick.
     if (scroll.axis === "x") {
       scroll.carryX = drainScrollCarry(scroll.carryX + stepX, (dir) =>
-        sendScrollTick(dir * THREE_FINGER_SCROLL_STEP_PX, 0),
+        sendScrollTick(-dir * THREE_FINGER_SCROLL_STEP_PX, 0),
       );
     } else {
       scroll.carryY = drainScrollCarry(scroll.carryY + stepY, (dir) =>
-        sendScrollTick(0, dir * THREE_FINGER_SCROLL_STEP_PX),
+        sendScrollTick(0, -dir * THREE_FINGER_SCROLL_STEP_PX),
       );
     }
     return true;
