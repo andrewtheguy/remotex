@@ -6,17 +6,30 @@
 // the same answers out, including the ones nobody types on purpose.
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   COMPANION_MATCH,
   hostLabelFor,
   isCompanionUrl,
 } from "../src/shared/origin.ts";
 
+const manifest = JSON.parse(
+  await readFile(
+    join(dirname(fileURLToPath(import.meta.url)), "../src/manifest.json"),
+    "utf8",
+  ),
+) as {
+  host_permissions?: string[];
+  content_scripts?: { matches?: string[] }[];
+};
+
 test("a gateway under the served suffix is served, on any port", () => {
-  // The port is what tells two gateways apart, and a match pattern cannot express one.
-  // Every port on these names is this extension's, which is the design: nothing else
-  // answers on `.remotex.localhost` at all.
+  // The port is what tells two gateways apart, and a match pattern cannot express one,
+  // so every port on these names is served. That is a routing rule and not a
+  // credential — see the Costs section of docs/companion-extension.md.
   assert.equal(isCompanionUrl("http://gw-a.remotex.localhost/"), true);
   assert.equal(isCompanionUrl("http://gw-a.remotex.localhost:52380/"), true);
   assert.equal(
@@ -66,9 +79,14 @@ test("every other host is not served, however much it reads like one", () => {
   }
 });
 
-test("the match pattern is the predicate's own suffix, spelled Chrome's way", () => {
-  // Not a tautology: it is the one line that would have to change in both places, and
-  // this is what fails if only one of them does.
+test("the manifest and the predicate name one host between them", () => {
+  // The host is spelled three times — a host permission, the content script's matches,
+  // and this constant — and only Chrome enforces the first two. So the contract is
+  // asserted rather than assumed: a manifest widened without the predicate would run
+  // this extension somewhere it says it does not, and a predicate widened without the
+  // manifest would claim a window Chrome never injects into.
+  assert.deepEqual(manifest.host_permissions, [COMPANION_MATCH]);
+  assert.deepEqual(manifest.content_scripts?.[0]?.matches, [COMPANION_MATCH]);
   assert.equal(COMPANION_MATCH, "http://*.remotex.localhost/*");
   assert.equal(
     isCompanionUrl(COMPANION_MATCH.replace("*.", "gw-a.").replace("/*", "/")),

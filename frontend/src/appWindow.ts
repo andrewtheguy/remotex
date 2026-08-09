@@ -105,19 +105,25 @@ export function createAppWindowStore(
     const queries = APP_DISPLAY_MODES.map((mode) =>
       match(`(display-mode: ${mode})`),
     );
+    // Three queries change together for one transition and a browser may dispatch all
+    // three before this detaches any of them, so "told once" is this flag's doing
+    // rather than the `removeEventListener` below.
+    //
+    // The flag is deliberately *not* the latch. A `get` between the display mode
+    // changing and the handlers running — a React render is enough — latches on its own
+    // re-read, and a promote that took `latched` for "already announced" would then
+    // return having told nobody, leaving every subscriber on the wrong answer for the
+    // life of the window. Which is the bug this whole file exists to fix, arrived at
+    // from the other end.
+    let announced = false;
     const promote = () => {
-      // Three queries change together for one transition, and a browser may dispatch
-      // all three before this gets to detach any of them — so the latch is what makes
-      // "told once" true, not the `removeEventListener` below.
-      if (latched) {
-        return;
-      }
       // `get` does the re-read and the latch; this only has to notice it has happened.
       // A change *away* from an app mode is what the latch swallows, which is why this
       // cannot simply forward the query's own `matches`.
-      if (!get()) {
+      if (announced || !get()) {
         return;
       }
+      announced = true;
       for (const query of queries) {
         query.removeEventListener?.("change", promote);
       }

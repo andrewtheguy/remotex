@@ -27,9 +27,14 @@ export const COMPANION_HOST = "remotex.localhost";
  *
  * The bare `remotex.localhost` counts, because Chrome's `*.remotex.localhost` matches
  * the domain as well as its subdomains — the predicate has to say what the manifest
- * says. A port is ignored, since a match pattern cannot express one: every port on
- * these names is this extension's, which is the point rather than a widening, as
- * nothing else can answer on them.
+ * says. A port is ignored, since a match pattern cannot express one, so every port on
+ * these names is served.
+ *
+ * **This is where the bridge may run, not who is on the other end.** RFC 6761 reserves
+ * the name to loopback; it does not reserve it to this project, and any local process
+ * that binds a port answers there too. Nothing here authenticates anything, and nothing
+ * should be built on the idea that it does — docs/companion-extension.md states the
+ * cost under Costs.
  */
 export function isCompanionUrl(url: string | undefined): boolean {
   if (!url) {

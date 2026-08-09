@@ -49,8 +49,11 @@ function render(tabId: number, description: Description): void {
         "p",
         "muted",
         // The one thing worth saying about a window this extension does nothing in: it
-        // is the address that decides, and the address is not a setting anywhere.
-        `The companion serves ${COMPANION_MATCH}, and nothing else. Set dev_subdomain in the gateway's config and it will send you there.`,
+        // is the address that decides, and the address is not a setting anywhere. Said
+        // with the redirect's own limit in it, because a gateway reached over a LAN
+        // address or a proxy is never sent anywhere and would otherwise be left waiting
+        // for a redirect that is not coming.
+        `The companion serves ${COMPANION_MATCH}, and nothing else — open the gateway at http://<label>.remotex.localhost:<port>/. Its [server].dev_subdomain key sends you there from a loopback address; any other address is left alone.`,
       ),
     );
     return;

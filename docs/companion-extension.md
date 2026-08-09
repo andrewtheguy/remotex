@@ -277,9 +277,12 @@ Two properties of Chrome's match patterns are load-bearing here. `*.host` matche
 subdomains **and** the apex, so the bare `remotex.localhost` is covered as well as every
 label under it — `isCompanionUrl` in `shared/origin.ts` says the same, because a
 predicate that disagreed with the manifest would call a window Chrome had injected into
-"not ours". And **a pattern cannot express a port**, which for once costs nothing:
-every port on these names is a loopback gateway of this project's, since nothing else
-can answer on a name RFC 6761 reserves.
+"not ours". And **a pattern cannot express a port**, so every port on these names is
+covered. What RFC 6761 reserves is that the name resolves to loopback and never leaves
+this machine — not that this project is what answers there. Any local process that binds
+a port answers to `anything.remotex.localhost:<that port>` too, so the host is a
+**routing rule, not a credential**: it says where the bridge may run, and nothing about
+who is on the other end. See [Costs](#costs-stated).
 
 `http://` only. The gateway has no TLS listener and the redirect always sends a browser
 to `http://`; a `.localhost` name is a secure context by the same rule the client's
@@ -415,9 +418,12 @@ unzip -d ~/Applications/remotex-companion remotex-companion-<version>.zip
 # chrome://extensions → Developer mode → Load unpacked → that folder
 ```
 
-That is the end of it. Nothing is clicked, nothing is granted and **no file is edited at
-any point** — open the gateway at its `.remotex.localhost` name in an app window and the
-companion is already there.
+**No file of the extension's is edited and no permission is granted** — there is nothing
+to click in `chrome://extensions` beyond loading the folder. The one thing that is
+configured is on the other side: the gateway's own config must set
+`[server].dev_subdomain`, which is what puts a loopback browser on
+`http://<label>.remotex.localhost:<port>/`. Open that in an app window and the companion
+is already there.
 
 Updating is unzipping the next release over the same folder and pressing Reload. A
 versioned folder instead is a new extension ID, which now costs nothing but is still
@@ -445,8 +451,15 @@ else catches.
    `localhost` without `[server].dev_subdomain` set. That is the price of the whole
    grant flow going away, and the icon says so on every window it does not serve.
 2. **A match pattern cannot express a port**, so this covers every port on those names.
-   Here that is what is wanted rather than a widening: two gateways on one machine are
-   two ports, and nothing but a loopback gateway can answer on a name RFC 6761 reserves.
+   Two gateways on one machine are two ports, so that much is wanted — but it is the
+   whole of the check, and the check is a routing rule rather than a credential. **Any
+   local process** that binds a port answers to `anything.remotex.localhost:<port>`, and
+   a page it serves, opened in an app window, is handed the same clipboard bridge a
+   gateway gets: the system clipboard while unfocused, in both directions. Nothing
+   pairs, authenticates or asks. The bar is local code execution plus the user opening
+   that address as an app, which for a personal development client was judged
+   acceptable; a gateway-issued token exchanged over the page seam is what would close
+   it, and there isn't one.
 3. **The host is in the installed copy.** Changing it means editing `manifest.json` in
    the loaded folder or shipping a build that says something else — which is the cost
    the old per-grant design was paying its extra code to avoid, taken deliberately now

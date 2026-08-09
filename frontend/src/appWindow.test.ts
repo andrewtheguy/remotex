@@ -35,6 +35,16 @@ function movableWindow(initial: string) {
         }
       },
     }),
+    /** The display mode changing, with the `change` events not dispatched yet. */
+    set(next: string) {
+      mode = next;
+    },
+    /** The queued handlers running, which is a turn of the event loop later. */
+    dispatch() {
+      for (const handler of [...handlers]) {
+        handler();
+      }
+    },
     /** What Chrome does to this document on *Install page as app…*, or on full screen. */
     become(next: string) {
       mode = next;
@@ -143,4 +153,35 @@ test("an unsubscribed handler is not told", () => {
   stop();
   browser.become("standalone");
   assert.equal(told, 0);
+});
+
+test("a get between the change and its handlers still tells the subscribers", () => {
+  // The ordering that costs everything if the latch is mistaken for the announcement.
+  // The display mode changes, something reads the store before the queued handlers run
+  // — a React render is enough — and the latch is already true by the time `promote`
+  // gets its turn. A promote that read the latch as "already announced" would return
+  // having told nobody, and every subscriber would sit on the wrong answer for the life
+  // of the window.
+  const browser = movableWindow("browser");
+  const store = createAppWindowStore(browser.match);
+  let told = 0;
+  store.subscribe(() => {
+    told += 1;
+  });
+
+  browser.set("standalone");
+  assert.equal(
+    store.get(),
+    true,
+    "the re-read latches without waiting for an event",
+  );
+  assert.equal(told, 0, "nothing has been dispatched yet");
+
+  browser.dispatch();
+  assert.equal(told, 1, "and the subscribers are told exactly once");
+  assert.equal(
+    browser.listening(),
+    0,
+    "with the listeners detached on the way",
+  );
 });
