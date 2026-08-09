@@ -4,17 +4,27 @@ import { join } from "node:path";
 import { BrowserWindow, screen, session } from "electron";
 import { documentSize, windowFrameFitting } from "./geometry.ts";
 import { CLIENT_URL, isShellUrl, shellPageUrl } from "./scheme-routes.ts";
+import { DEFAULT_WINDOW_SIZE, type WindowSize } from "./window-size.ts";
 
-/** How small the window may get before it stops being a desktop. */
+/**
+ * How small the window may get before it stops being a desktop.
+ *
+ * A live-resize floor only. What a launch *opens* at is the remembered size
+ * (window-size.ts), whose own floor is higher — the two are different
+ * questions, and this one deliberately allows sizes the other refuses to
+ * write down.
+ */
 export const MINIMUM_SIZE = { width: 720, height: 480 };
 
 export function createViewerWindow(
   distDir: string,
   onPreloadError: (message: string) => void,
+  openingSize: WindowSize | null,
 ): BrowserWindow {
+  const size = openingSize ?? DEFAULT_WINDOW_SIZE;
   const window = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: size.width,
+    height: size.height,
     minWidth: MINIMUM_SIZE.width,
     minHeight: MINIMUM_SIZE.height,
     show: false,

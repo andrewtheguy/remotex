@@ -57,6 +57,7 @@ import {
   refuseEveryPermission,
   seedSessionCookie,
 } from "./window.ts";
+import { WindowSizeStore } from "./window-size.ts";
 
 /** Stamped in at build time from `Cargo.toml`'s workspace version. */
 declare const __VIEWER_VERSION__: string;
@@ -153,6 +154,14 @@ const gateway = new EmbeddedGateway(instance, {
   webRoot: layout.webRoot,
 });
 const config = new ConfigStore(instance, validatorOverBinary(layout.binary));
+// In the profile directory with the client's other remembered preferences, so
+// `--instance-dir` isolates it the same way.
+const windowSize = new WindowSizeStore(
+  join(instance.profileDir, "window-size.json"),
+);
+
+/** A drag fires `resize` continuously; only the size it settles at matters. */
+const WINDOW_SIZE_SAVE_DELAY_MS = 500;
 
 let window: BrowserWindow | null = null;
 let endpoint: { port: number; token: string } | null = null;
@@ -375,13 +384,47 @@ async function openConfiguration(): Promise<void> {
 
 function getWindow(): BrowserWindow {
   if (!window) {
-    window = createViewerWindow(distDir, (message) => {
-      // Straight to the launch screen: a client that cannot reach its shell is not
-      // a client, and the alternative is a login form for a gateway nobody named.
-      report(new LaunchFailure("clientMissing", message));
-    });
+    const created = createViewerWindow(
+      distDir,
+      (message) => {
+        // Straight to the launch screen: a client that cannot reach its shell is not
+        // a client, and the alternative is a login form for a gateway nobody named.
+        report(new LaunchFailure("clientMissing", message));
+      },
+      windowSize.read(),
+    );
+    window = created;
     window.on("closed", () => {
       window = null;
+    });
+    // Remember the size the window settles at, so the next launch opens there.
+    // Fullscreen and maximized sizes are the display's, not a choice worth
+    // replaying on the next launch, so those states write nothing — the last
+    // freely chosen size stands.
+    let sizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const rememberSize = () => {
+      if (
+        created.isDestroyed() ||
+        created.isFullScreen() ||
+        created.isMaximized()
+      ) {
+        return;
+      }
+      const [width, height] = created.getSize();
+      windowSize.remember({ width, height });
+    };
+    created.on("resize", () => {
+      if (sizeTimer) {
+        clearTimeout(sizeTimer);
+      }
+      sizeTimer = setTimeout(rememberSize, WINDOW_SIZE_SAVE_DELAY_MS);
+    });
+    // A resize inside the debounce window would otherwise be lost with it.
+    created.on("close", () => {
+      if (sizeTimer) {
+        clearTimeout(sizeTimer);
+      }
+      rememberSize();
     });
     // A window that is not focused is not one the guest is typing at, so the menu
     // gets its shortcuts back until it is.
