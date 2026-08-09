@@ -157,8 +157,10 @@ describe("asking the gateway", () => {
     writeFileSync(fake, "#!/bin/sh\ncat > /dev/null\nexit 0\n", {
       mode: 0o755,
     });
-    expect(await validatorOverBinary(fake)('[branding]\ntext = "x"\n')).toEqual({
-      ok: true,
-    });
+    expect(await validatorOverBinary(fake)('[branding]\ntext = "x"\n')).toEqual(
+      {
+        ok: true,
+      },
+    );
   });
 });
