@@ -144,11 +144,9 @@ pasteboard status can arrive just after the gateway has requested the next updat
 putting its fetch behind that one response. Once that response completes, remotex
 pauses normal incremental framebuffer polling while the fetch remains pending. A
 layout-required non-incremental full-repaint request may still be sent during that
-pause, and each completed pointer click may advance one incremental cycle so Apple
-does not split a double-click while the clipboard gap is open. The pasteboard reply,
-or an idle-gap recovery that preserves any outstanding full repaint, then resumes
-normal incremental polling. Repeated change statuses coalesce into one follow-up
-fetch.
+pause. The pasteboard reply, or an idle-gap recovery that preserves any outstanding
+full repaint, then resumes incremental polling. Repeated change statuses coalesce
+into one follow-up fetch.
 
 `AutoFrameBufferUpdate` is not a flow-control command. remotex only sends the
 measured full-framebuffer arming at setup and after layouts; changing that rectangle
@@ -322,6 +320,26 @@ predates this correction and works, so whatever the agent reads them as agrees
 with RFB in effect. The native client's own input path is `0x10`
 EncryptedInputEvent, not the plain RFB PointerEvent — presumably why Apple never
 noticed the plain path's ordering.
+
+### Double-click is chained by the Mac, at a login-time threshold
+
+A plain RFB PointerEvent carries no click count, so the Mac decides which
+presses chain into a double-click: `ScreensharingAgent` stamps `clickState` on
+the events it posts. Measured with a passive event tap on macOS 26.6: two
+identical-coordinate clicks with no motion between them chain when the
+down-to-down gap is under the session's double-click window and stay two singles
+when it is not, with the cutoff sitting exactly at the machine's
+`com.apple.mouse.doubleClickThreshold`.
+
+That window is seeded **once at login**. Writing the preference, moving the
+System Settings slider, and restarting `screensharingd` or `ScreensharingAgent`
+all left the live window unchanged; only a logout or reboot re-seeds it. The
+native client is immune — its EncryptedInputEvent path chains clicks itself and
+chained at gaps well past the same session's window. So a Mac that
+double-clicks fine in Apple's client but not through remotex has a stale or
+too-fast threshold on the Mac itself: set it to a sane value
+(`defaults write -g com.apple.mouse.doubleClickThreshold -float 0.5`) and
+reboot. remotex forwards the clicks as they happened and adds no compensation.
 
 ### `AutoFrameBufferUpdate` (`0x09`) does not make the server stream — §8.11, R-A16b
 
