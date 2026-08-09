@@ -321,6 +321,26 @@ with RFB in effect. The native client's own input path is `0x10`
 EncryptedInputEvent, not the plain RFB PointerEvent — presumably why Apple never
 noticed the plain path's ordering.
 
+### Double-click is chained by the Mac, at a login-time threshold
+
+A plain RFB PointerEvent carries no click count, so the Mac decides which
+presses chain into a double-click: `ScreensharingAgent` stamps `clickState` on
+the events it posts. Measured with a passive event tap on macOS 26.6: two
+identical-coordinate clicks with no motion between them chain when the
+down-to-down gap is under the session's double-click window and stay two singles
+when it is not, with the cutoff sitting exactly at the machine's
+`com.apple.mouse.doubleClickThreshold`.
+
+That window is seeded **once at login**. Writing the preference, moving the
+System Settings slider, and restarting `screensharingd` or `ScreensharingAgent`
+all left the live window unchanged; only a logout or reboot re-seeds it. The
+native client is immune — its EncryptedInputEvent path chains clicks itself and
+chained at gaps well past the same session's window. So a Mac that
+double-clicks fine in Apple's client but not through remotex has a stale or
+too-fast threshold on the Mac itself: set it to a sane value
+(`defaults write -g com.apple.mouse.doubleClickThreshold -float 0.5`) and
+reboot. remotex forwards the clicks as they happened and adds no compensation.
+
 ### `AutoFrameBufferUpdate` (`0x09`) does not make the server stream — §8.11, R-A16b
 
 The document says it "switches the server to server-driven framebuffer streaming"
