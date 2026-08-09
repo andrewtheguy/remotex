@@ -142,10 +142,11 @@ archive and session-id handling are shared with Standard mode.
 Framebuffer responses and pasteboard messages share one ordered server stream. A
 pasteboard status can arrive just after the gateway has requested the next update,
 putting its fetch behind that one response. Once that response completes, remotex
-does not issue another framebuffer request while the fetch remains pending; the
-pasteboard reply (or an idle-gap recovery) therefore resumes polling before another
-pixel response can get ahead of it. Repeated change statuses coalesce into one
-follow-up fetch.
+pauses normal incremental framebuffer polling while the fetch remains pending. A
+layout-required non-incremental full-repaint request may still be sent during that
+pause. The pasteboard reply, or an idle-gap recovery that preserves any outstanding
+full repaint, then resumes incremental polling. Repeated change statuses coalesce
+into one follow-up fetch.
 
 `AutoFrameBufferUpdate` is not a flow-control command. remotex only sends the
 measured full-framebuffer arming at setup and after layouts; changing that rectangle
