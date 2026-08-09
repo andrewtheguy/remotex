@@ -749,8 +749,7 @@ holds the latest remote value and its observed change time:
 - both Apple VNC subtypes read and write the Mac's native compressed pasteboard;
   while a fetch is pending, the normal framebuffer cycle finishes its one
   outstanding response and pauses before requesting another, leaving the ordered
-  server stream free to deliver the pasteboard reply; a completed pointer click may
-  advance one request-driven cycle so double-click input remains consecutive;
+  server stream free to deliver the pasteboard reply;
 - RDP requests `CF_UNICODETEXT` after a remote format announcement.
 
 Clients may request the current value after attaching, since they may have

@@ -407,7 +407,6 @@ enum MacRequest {
     AutoPasteboard(bool),
     AutoFramebuffer((u16, u16)),
     IncrementalFramebuffer,
-    Pointer { mask: u8, x: u16, y: u16 },
     Fence { flags: u32, payload: Vec<u8> },
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
@@ -862,20 +861,6 @@ async fn serve_fake_mac_records(
                 records.read_exact(&mut req).await?;
                 if req[0] != 0 {
                     let _ = requests.send(MacRequest::IncrementalFramebuffer);
-                    if clipboard_fetch_pending {
-                        // Apple needs one request-driven turn after a complete
-                        // click even while background polling is paused. Answer
-                        // that bounded request, then fence the gateway back into
-                        // its paused state before the next click.
-                        write_half
-                            .write_all(writer.frame(&[0, 0, 0, 0]).unwrap())
-                            .await?;
-                        let mut fence = vec![MSG_FENCE, 0, 0, 0];
-                        fence.extend_from_slice(&(1u32 << 31).to_be_bytes());
-                        fence.push(4);
-                        fence.extend_from_slice(b"poll");
-                        write_half.write_all(writer.frame(&fence).unwrap()).await?;
-                    }
                     continue;
                 }
                 let (points, density) = configurations
@@ -902,13 +887,7 @@ async fn serve_fake_mac_records(
             }
             // PointerEvent
             5 => {
-                let mut body = [0u8; 5];
-                records.read_exact(&mut body).await?;
-                let _ = requests.send(MacRequest::Pointer {
-                    mask: body[0],
-                    x: u16::from_be_bytes([body[1], body[2]]),
-                    y: u16::from_be_bytes([body[3], body[4]]),
-                });
+                records.read_exact(&mut [0u8; 5]).await?;
             }
             // AutoFrameBufferUpdate: the arming. The paired non-incremental
             // request drives pixels in this fake, as on the measured Mac.
@@ -1931,50 +1910,8 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::Fence { flags: 0, payload: b"clip".to_vec() },
-        "background framebuffer polling overtook the clipboard reply"
+        "an incremental framebuffer request overtook the clipboard reply"
     );
-
-    // A clipboard gap must not turn a double-click into two single clicks. The
-    // normal polling loop stays paused, but each completed click earns exactly
-    // one request-driven Mac turn. The fence after each empty answer proves the
-    // gateway has returned to the pause before the next click starts.
-    ws.send(Message::text(r#"{"type":"mouseMove","x":12,"y":14}"#))
-        .await
-        .unwrap();
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::Pointer { mask: 0, x: 12, y: 14 }
-    );
-    for clicks in [1, 2] {
-        ws.send(Message::text(format!(
-            r#"{{"type":"mouseButton","button":"left","pressed":true,"clicks":{clicks}}}"#
-        )))
-        .await
-        .unwrap();
-        ws.send(Message::text(format!(
-            r#"{{"type":"mouseButton","button":"left","pressed":false,"clicks":{clicks}}}"#
-        )))
-        .await
-        .unwrap();
-        assert_eq!(
-            next_mac_request(&mut requests).await,
-            MacRequest::Pointer { mask: 1, x: 12, y: 14 }
-        );
-        assert_eq!(
-            next_mac_request(&mut requests).await,
-            MacRequest::Pointer { mask: 0, x: 12, y: 14 }
-        );
-        assert_eq!(
-            next_mac_request(&mut requests).await,
-            MacRequest::IncrementalFramebuffer,
-            "a complete click did not advance the paused Apple request cycle"
-        );
-        assert_eq!(
-            next_mac_request(&mut requests).await,
-            MacRequest::Fence { flags: 0, payload: b"poll".to_vec() },
-            "the interaction update did not settle before the next click"
-        );
-    }
     actions
         .send(MacAction::CompleteClipboardFetch)
         .expect("the fake Mac stopped before completing the clipboard fetch");
