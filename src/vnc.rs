@@ -1545,6 +1545,17 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let apple_fetch_active = |apple: &Option<Apple>| {
         apple.is_some() && clipboard.lock().unwrap().apple_fetch_pending
     };
+    // Opening the polling gap is the same three steps wherever it happens: spend a
+    // click that raced the gap open on one bounded request, leave no other pixel
+    // request outstanding, and arm the deadline that recovers an unanswered fetch.
+    // Returns that deadline; the caller still owns the paused flag.
+    let pause_apple_polling = |size: (u16, u16)| async move {
+        let resume_for_click = clipboard.lock().unwrap().pause_apple_poll();
+        if resume_for_click {
+            send(uplink, &update_request(true, size)).await?;
+        }
+        anyhow::Ok(tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP)
+    };
     // The connection's decoder state: the deflate streams and whatever else an
     // encoding carries from one rectangle to the next.
     let mut decoders = Decoders::default();
@@ -1714,14 +1725,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         if poll {
                             if apple_fetch_active(&apple) {
                                 apple_poll_paused = true;
-                                let resume_for_click =
-                                    clipboard.lock().unwrap().pause_apple_poll();
-                                if resume_for_click {
-                                    send(uplink, &update_request(true, size)).await?;
-                                }
-                                apple_poll_deadline = Some(
-                                    tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
-                                );
+                                apple_poll_deadline = Some(pause_apple_polling(size).await?);
                             } else {
                                 clipboard.lock().unwrap().cancel_apple_click_poll();
                                 send(uplink, &update_request(true, size)).await?;
@@ -1733,14 +1737,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     } else if poll || resized {
                         if poll && !resized && apple_fetch_active(&apple) {
                             apple_poll_paused = true;
-                            let resume_for_click =
-                                clipboard.lock().unwrap().pause_apple_poll();
-                            if resume_for_click {
-                                send(uplink, &update_request(true, size)).await?;
-                            }
-                            apple_poll_deadline = Some(
-                                tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
-                            );
+                            apple_poll_deadline = Some(pause_apple_polling(size).await?);
                         } else {
                             clipboard.lock().unwrap().cancel_apple_click_poll();
                             send(uplink, &update_request(poll && !resized, size)).await?;
