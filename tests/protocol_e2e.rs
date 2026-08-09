@@ -405,8 +405,9 @@ enum MacRequest {
     Configuration((u16, u16), u16),
     Display(u32),
     AutoPasteboard(bool),
-    QuietFramebuffer,
+    AutoFramebuffer((u16, u16)),
     IncrementalFramebuffer,
+    Fence { flags: u32, payload: Vec<u8> },
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
 }
@@ -888,16 +889,16 @@ async fn serve_fake_mac_records(
             5 => {
                 records.read_exact(&mut [0u8; 5]).await?;
             }
-            // AutoFrameBufferUpdate: the arming, which a real Mac answers by
-            // streaming. Here the paired non-incremental request drives it.
+            // AutoFrameBufferUpdate: the arming. The paired non-incremental
+            // request drives pixels in this fake, as on the measured Mac.
             0x09 => {
                 let mut body = [0u8; 15];
                 records.read_exact(&mut body).await?;
-                let w = u16::from_be_bytes([body[11], body[12]]);
-                let h = u16::from_be_bytes([body[13], body[14]]);
-                if (w, h) == (0, 0) {
-                    let _ = requests.send(MacRequest::QuietFramebuffer);
-                }
+                let size = (
+                    u16::from_be_bytes([body[11], body[12]]),
+                    u16::from_be_bytes([body[13], body[14]]),
+                );
+                let _ = requests.send(MacRequest::AutoFramebuffer(size));
             }
             // High Performance repeats AutoPasteboard after the virtual display's
             // answering layout so monitoring remains enabled after setup.
@@ -908,7 +909,7 @@ async fn serve_fake_mac_records(
                 let _ = requests.send(MacRequest::AutoPasteboard(true));
             }
             // ClipboardFetch: leave the reply gated while an empty update and a
-            // tickle expose whether the gateway incorrectly polls before the
+            // fence expose whether the gateway incorrectly polls before the
             // archive completes.
             0x0b => {
                 let mut body = [0u8; 7];
@@ -921,8 +922,11 @@ async fn serve_fake_mac_records(
                 write_half
                     .write_all(writer.frame(&[0, 0, 0, 0]).unwrap())
                     .await?;
-                let tickle = [0x14, 0, 0, 4, 0, 1, 0, 4];
-                write_half.write_all(writer.frame(&tickle).unwrap()).await?;
+                let mut fence = vec![MSG_FENCE, 0, 0, 0];
+                fence.extend_from_slice(&(1u32 << 31).to_be_bytes());
+                fence.push(4);
+                fence.extend_from_slice(b"clip");
+                write_half.write_all(writer.frame(&fence).unwrap()).await?;
             }
             // SetDisplayMessage, reported so a later request can order assertions
             // without relying on a timeout.
@@ -979,6 +983,15 @@ async fn serve_fake_mac_records(
                 records.read_exact(&mut compressed).await?;
                 let (session_id, text) = fake_mac_read_clipboard(&header, &compressed);
                 let _ = requests.send(MacRequest::ClipboardSend { session_id, text });
+            }
+            // ClientFence: the deterministic marker sent after the empty update.
+            MSG_FENCE => {
+                let mut head = [0u8; 8];
+                records.read_exact(&mut head).await?;
+                let flags = u32::from_be_bytes([head[3], head[4], head[5], head[6]]);
+                let mut payload = vec![0u8; usize::from(head[7])];
+                records.read_exact(&mut payload).await?;
+                let _ = requests.send(MacRequest::Fence { flags, payload });
             }
             other => panic!("fake Mac got unexpected message type {other:#x}"),
         }
@@ -1839,6 +1852,10 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         next_mac_request(&mut requests).await,
         MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1)
     );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
 
     // ServerInit precedes the encrypted display request, then the answering layout
     // replaces that provisional geometry with the opening virtual mode.
@@ -1863,6 +1880,10 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
         MacRequest::IncrementalFramebuffer
     );
     assert_eq!(
@@ -1884,16 +1905,11 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::QuietFramebuffer,
-        "clipboard traffic did not narrow Apple's automatic pixel stream"
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
         MacRequest::ClipboardFetch(0)
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::QuietFramebuffer,
+        MacRequest::Fence { flags: 0, payload: b"clip".to_vec() },
         "an incremental framebuffer request overtook the clipboard reply"
     );
     actions
@@ -1916,11 +1932,6 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     )))
     .await
     .unwrap();
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::QuietFramebuffer,
-        "a browser clipboard write did not keep Apple's pixel stream flow-controlled"
-    );
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::ClipboardSend {
@@ -1950,8 +1961,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::QuietFramebuffer,
-        "a later display layout restarted unsolicited pixels after clipboard traffic"
+        MacRequest::AutoFramebuffer((24, 18))
     );
     expect_tile(&mut ws).await;
     assert_eq!(
@@ -1997,6 +2007,10 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
         next_mac_request(&mut requests).await,
         MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)
     );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
 
     // ServerInit's provisional geometry first, then the answering layout: the
     // backing pixels doubled and the density that earned them, which presents
@@ -2011,6 +2025,10 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
         "the answering layout re-arms its pasteboard"
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH * 2, MAC_SCREEN_HEIGHT * 2))
     );
     // The re-arm rides with one more update request; consume its repaint so the
     // fake Mac is back at its read loop — and sees a clean end of stream rather

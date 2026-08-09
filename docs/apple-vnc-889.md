@@ -139,16 +139,17 @@ answering layout. The Mac reports changes with `MiscStatus(cmd=2)`;
 Each complete post-rekey client message is carried in an encrypted 003.889 record;
 archive and session-id handling are shared with Standard mode.
 
-Apple's automatic framebuffer pixels and its pasteboard messages share one ordered
-server stream. On a continuously changing desktop, unsolicited zlib frames can be
-produced faster than the gateway consumes them; a later pasteboard reply then sits
-behind an ever-growing pixel queue, and writes wait behind the outstanding fetch.
-At the first native pasteboard fetch or write, remotex re-arms
-`AutoFrameBufferUpdate` with a `0x0` pixel region and leaves it that way across later
-display layouts. Apple metadata remains armed, while ordinary RFB update requests
-carry pixels one at a time. A fetch pauses that polling request until its reply (or
-until the drained stream stays idle), so clipboard traffic cannot become stuck
-mid-session behind framebuffer traffic.
+Framebuffer responses and pasteboard messages share one ordered server stream. A
+pasteboard status can arrive just after the gateway has requested the next update,
+putting its fetch behind that one response. Once that response completes, remotex
+does not issue another framebuffer request while the fetch remains pending; the
+pasteboard reply (or an idle-gap recovery) therefore resumes polling before another
+pixel response can get ahead of it. Repeated change statuses coalesce into one
+follow-up fetch.
+
+`AutoFrameBufferUpdate` is not a flow-control command. remotex only sends the
+measured full-framebuffer arming at setup and after layouts; changing that rectangle
+mid-session corrupts the live Mac's later updates.
 
 ### Picking a physical screen in Standard mode
 
@@ -331,9 +332,10 @@ never re-requesting: **zero rectangles in 25 seconds.** The same cycle with a
 non-incremental request appended returns a full update every time.
 
 A client that follows the document paints one frame and then freezes. **Keep
-polling.** Sending `0x09` anyway is harmless and is what the document says keeps
-cursor updates alive across a login or lock transition, which is why this
-implementation still sends it — but it is not the update driver.
+polling.** Sending the measured full-framebuffer `0x09` is what keeps cursor updates
+alive across a login or lock transition, which is why this implementation still
+sends it at setup and after a layout — but it is not the update driver, and its
+rectangle is not changed as a flow-control mechanism.
 
 ### `ViewerInfo` (`0x21`) has no strings in it — §5.5
 

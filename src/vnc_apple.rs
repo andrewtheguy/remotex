@@ -237,12 +237,9 @@ pub fn set_encryption_stop() -> Vec<u8> {
 
 /// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates.
 ///
-/// Apple's metadata — cursor shapes above all — depends on this arming across a
-/// login, lock or fast-user-switch, so it is re-sent whenever the display layout
-/// changes. A `0x0` region keeps that metadata channel armed while stopping
-/// unsolicited pixel updates; the ordinary RFB polling cycle then carries pixels
-/// with one request outstanding instead of letting them queue ahead of control
-/// messages on the same ordered stream.
+/// Cursor shapes above all depend on this arming across a login, lock or
+/// fast-user-switch, so it is re-sent for the full framebuffer whenever the
+/// display layout changes.
 pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
     let mut msg = Vec::with_capacity(16);
     msg.push(0x09);
