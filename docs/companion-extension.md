@@ -33,10 +33,10 @@ state where half of it works.
 
 A tab is not left unserved so much as served by the client itself. Full screen plus
 Keyboard Lock (`frontend/src/immersive.ts`) gives a tab the chords — automatically, on
-any full screen the page can observe, including the browser's own ⌃⌘F — the close guard in
-`useRemoteDesktop.ts` gives it the leave-site dialog, and the clipboard falls back to
-the page's own focus-driven sync. Nothing there is worse for the extension declining to
-participate; the answer to "I want more" is the app window, which is one menu item away.
+any full screen the page can observe, including the browser's own ⌃⌘F — and the
+clipboard falls back to the page's own focus-driven sync. Nothing there is worse for
+the extension declining to participate; the answer to "I want more" is the app window,
+which is one menu item away.
 
 ## The shim window
 
@@ -80,9 +80,8 @@ its popup is where Resize to display lives.
 
 **What no window of any kind gets**: Alt+F4, Alt+Tab, the Windows key, Ctrl+Alt+Del,
 and on a Mac ⌘Tab, ⌘Space and the screenshot chords. Those belong to the OS, and
-neither a keyboard lock nor an extension changes that. The close guard in
-`useRemoteDesktop.ts` is the answer to the first of them: the browser's own leave-site
-dialog, armed while a session is live.
+neither a keyboard lock nor an extension changes that. There is no answer to the first
+of them: closing the window ends the session, and the client does not ask first.
 
 `NATIVE_HOST` stays false in an app window, as it does in a tab. The floating menu is
 the only chrome the client has here and it must stay on screen.
@@ -366,8 +365,8 @@ harness is not built for and which would leak a profile between specs. It also c
 open an app window, which is the only configuration the extension runs in.
 
 So the irreducible half is manual, and all of it belongs in a shim window: Ctrl+W and
-Ctrl+T reaching the remote with no fullscreen; Alt+F4 raising the leave-site dialog
-instead; copy while minimised; the echo loops in both directions; resize from the popup
+Ctrl+T reaching the remote with no fullscreen; Alt+F4 closing the window with no
+dialog; copy while minimised; the echo loops in both directions; resize from the popup
 at 1×, HiDPI, a `scale: 2` Retina remote and 125% zoom; a site granted from the popup
 and picked up **without a reload**, and revoked from `chrome://extensions` so the page
 sees the `bye`; and killing the service worker from `chrome://extensions` mid-session,

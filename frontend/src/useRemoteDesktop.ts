@@ -1787,29 +1787,6 @@ export function useRemoteDesktop(
     };
   }, [mode, canClipboard, companion, companionClipboard]);
 
-  // A live session is a thing to lose, and ⌘W or Ctrl+W closes a tab before this page
-  // sees the key — except under a keyboard lock, or in an app window, where they
-  // arrive as ordinary keydowns and go to the remote instead. So the mitigation is the
-  // browser's own leave-site dialog, which needs sticky activation: a desktop the user
-  // has clicked on always has it. Kept in an app window too, where the chord is caught
-  // but Alt+F4 and the title bar's close button are not.
-  //
-  // `mode`, not `status`: a reconnecting session is still one worth not closing. Not
-  // in `remotex.app`, where closing the window is the app's own quit path and this
-  // would put a web dialog in front of it.
-  useEffect(() => {
-    if (NATIVE_HOST || mode !== "desktop") {
-      return;
-    }
-    const guard = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-    };
-    window.addEventListener("beforeunload", guard);
-    return () => {
-      window.removeEventListener("beforeunload", guard);
-    };
-  }, [mode]);
-
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
   // excluded: the desktop can pan up above it and the gesture cursor won't
