@@ -40,7 +40,7 @@ export const POLL_INTERVAL_MS = 400;
  * skipped rather than truncated — the remote keeps what it had, which is better than
  * being given half of something.
  */
-export const MAXIMUM_BYTES = 65_536;
+export const MAXIMUM_BYTES = 524_288;
 
 export class ClipboardSynchronizer {
   private enabled = false;

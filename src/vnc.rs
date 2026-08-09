@@ -1699,7 +1699,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     continue;
                 }
                 // Discard an oversized announcement and report its size instead
-                // of the first 64 KiB, which would look like the whole thing.
+                // of the first 512 KiB, which would look like the whole thing.
                 // The body is consumed either way: the stream position must stay
                 // exact whatever the server sends.
                 if len > MAX_CLIPBOARD_BYTES as u64 {
@@ -2120,7 +2120,7 @@ async fn extended_cut_text(
         }
         vnc_clipboard::Incoming::Provide(None) => {}
         // Refused, and reported as the size it was: the panel says so instead of
-        // showing the first 64 KiB as though it were the whole clipboard.
+        // showing the first 512 KiB as though it were the whole clipboard.
         vnc_clipboard::Incoming::Oversized(bytes) => {
             debug!(
                 "vnc: remote clipboard is {bytes} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit"

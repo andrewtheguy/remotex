@@ -43,7 +43,7 @@ proves that unsolicited remote copies still auto-sync, while opening and
 revealing the panel leave the local clipboard untouched until explicit Copy.
 
 `oversized-clipboard.spec.ts` covers the refusal path: a Mac pasteboard larger
-than `MAX_CLIPBOARD_BYTES` reaches the panel as its size, not as the first 64 KiB
+than `MAX_CLIPBOARD_BYTES` reaches the panel as its size, not as the first 512 KiB
 of itself. It is here rather than only in the Rust unit tests because
 the claim spans macOS Screen Sharing, the gateway, the browser link and the panel,
 and the failure it guards against — a truncated value arriving *successfully* —

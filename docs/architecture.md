@@ -758,7 +758,7 @@ from unsolicited changes. Only unsolicited changes are eligible for automatic
 remote-to-local synchronization; an explicit fetch fills the UI until the user
 chooses Copy.
 
-Transfers are capped at 64 KiB and refused rather than truncated. Browser
+Transfers are capped at 512 KiB and refused rather than truncated. Browser
 clipboard integration is best effort because Safari's permission rules, and an
 unfocused tab, may prevent automatic access.
 

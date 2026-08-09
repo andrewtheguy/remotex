@@ -1198,7 +1198,7 @@ async fn handle_clipboard(
                     debug!("rdp: remote clipboard updated, {} bytes", text.len());
                     ClipboardSnapshot::changed(text, remote.as_ref())
                 }
-                // Reported as its size instead of the first 64 KiB
+                // Reported as its size instead of the first 512 KiB
                 // of it: the panel can say what happened, where a
                 // truncated paste could not be told from a whole one.
                 Err(bytes) => {

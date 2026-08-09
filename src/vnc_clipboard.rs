@@ -103,7 +103,7 @@ pub enum Incoming {
     Provide(Option<String>),
     /// The peer's text is larger than [`MAX_CLIPBOARD_BYTES`], carrying the size
     /// it declared. Refused rather than inflated: reporting the size lets the
-    /// panel say what happened, where the first 64 KiB of it could not be told
+    /// panel say what happened, where the first 512 KiB of it could not be told
     /// from the whole clipboard.
     Oversized(u64),
     /// An action this build does not implement. Named rather than an error:
@@ -334,7 +334,11 @@ mod tests {
 
         // And a line break, whose CR expansion is the other way the wire form
         // outgrows the text it carries.
-        let lines = format!("{}\n{}", "a".repeat(30_000), "b".repeat(35_535));
+        let lines = format!(
+            "{}\n{}",
+            "a".repeat(30_000),
+            "b".repeat(MAX_CLIPBOARD_BYTES - 30_001)
+        );
         assert_eq!(lines.len(), MAX_CLIPBOARD_BYTES);
         match roundtrip(&provide(&lines).expect("fits")) {
             Incoming::Provide(Some(out)) => assert_eq!(out, lines),
