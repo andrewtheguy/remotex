@@ -862,10 +862,10 @@ pub struct ServerSection {
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
-    // No `branding` here: it is a top-level key now (see `ConfigFile::branding`),
-    // because `remotex.app`'s config has no `[server]` block to hold it and one
-    // value with two spellings is one of them going stale. `deny_unknown_fields`
-    // refuses a file that still has it here.
+    // No `branding` here: it is the top-level `[branding]` table now (see
+    // `ConfigFile::branding`), because `remotex.app`'s config has no `[server]`
+    // block to hold it and one value with two spellings is one of them going
+    // stale. `deny_unknown_fields` refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
     /// loopback: a browser arriving at `127.0.0.1`, `::1` or `localhost` is
     /// redirected to `<label>.remotex.localhost`, keeping the port and path.
@@ -889,8 +889,81 @@ pub struct ServerSection {
     pub dev_subdomain: Option<String>,
 }
 
-/// The default display name when top-level `branding` is unset.
+/// The default display name when `[branding].text` is unset.
 pub const DEFAULT_BRANDING: &str = "remotex";
+
+/// The `[branding]` table as written: what the deployment calls itself, and the
+/// image it puts in the browser tab.
+///
+/// Top-level rather than in `[server]`, and it is the **only** place to set it.
+/// `remotex.app`'s config has no `[server]` block at all ([`Audience::Embedded`]),
+/// so a table that lived there could not name the app — and accepting both
+/// spellings would be two places to write one value, with the loser losing
+/// silently. `deny_unknown_fields` refuses a file that still has anything of it
+/// under `[server]`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrandingSection {
+    /// Display name of this gateway: the browser's login screen, interstitials and
+    /// tab title, and in `remotex.app` the heading above its target list, its window
+    /// title and its launch screen.
+    ///
+    /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
+    pub text: Option<String>,
+    /// Path to an image file the gateway serves as the page's icon (`GET
+    /// /api/logo`, the favicon of every client tab). The content type comes from
+    /// the extension, so an extension nothing recognizes as an image is refused
+    /// at resolution — see [`logo_mime`]. Unset means the page keeps no icon,
+    /// exactly as before.
+    pub logo: Option<PathBuf>,
+}
+
+/// The resolved branding: always a name, and an icon when one was configured.
+#[derive(Clone, Debug)]
+pub struct Branding {
+    /// Display name for the login screen, interstitials, and browser tab title.
+    pub text: String,
+    /// The icon file, with its content type already decided.
+    pub logo: Option<Logo>,
+}
+
+/// A configured logo file, paired with the content type it is served under.
+///
+/// The pair exists so the one place that knows extension → MIME ([`logo_mime`])
+/// runs at config resolution — a gateway never serves an icon it could not name,
+/// and `check-config` refuses the file before it is saved.
+#[derive(Clone, Debug)]
+pub struct Logo {
+    /// As written in the config; a relative path resolves against the process's
+    /// working directory, the same as `[server].static_dir`.
+    pub path: PathBuf,
+    pub mime: &'static str,
+}
+
+/// The content type `[branding].logo` is served under, from its extension.
+///
+/// A closed list rather than a guess: what belongs here is what browsers take as
+/// a favicon, and an extension outside it is far more likely a typo than a format
+/// this list forgot.
+fn logo_mime(path: &Path) -> anyhow::Result<&'static str> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("png") => Ok("image/png"),
+        Some("ico") => Ok("image/x-icon"),
+        Some("svg") => Ok("image/svg+xml"),
+        Some("jpg" | "jpeg") => Ok("image/jpeg"),
+        Some("gif") => Ok("image/gif"),
+        Some("webp") => Ok("image/webp"),
+        _ => anyhow::bail!(
+            "[branding].logo {} is not an image a browser tab can show — \
+             use .png, .ico, .svg, .jpg, .gif or .webp",
+            path.display()
+        ),
+    }
+}
 
 /// Who a config file is for, and therefore which rules it is held to.
 ///
@@ -921,20 +994,12 @@ pub struct ConfigFile {
     /// "present and empty" is the whole reason this is an `Option`.
     #[serde(default)]
     pub server: Option<ServerSection>,
-    /// Display name of this gateway: the browser's login screen, interstitials and
-    /// tab title, and in `remotex.app` the heading above its target list, its window
-    /// title and its launch screen.
-    ///
-    /// Top-level rather than in `[server]`, and it is the **only** place to set it.
-    /// `remotex.app`'s config has no `[server]` block at all
-    /// ([`Audience::Embedded`]), so a key that lived there could not name the app —
-    /// and accepting both spellings would be two places to write one value, with the
-    /// loser losing silently. `deny_unknown_fields` refuses a file that still has it
-    /// under `[server]`, which is the whole of the migration.
-    ///
-    /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
+    /// The `[branding]` table: display name and tab icon. See [`BrandingSection`]
+    /// for why it is top-level and nowhere else. A config that still writes the
+    /// old `branding = "…"` string fails to parse — a table is not a string, and
+    /// that refusal is the whole of the migration.
     #[serde(default)]
-    pub branding: Option<String>,
+    pub branding: Option<BrandingSection>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
@@ -964,8 +1029,9 @@ pub struct AppConfig {
     pub targets: Vec<TargetConfig>,
     /// What gets a request past the door: a login, or the embedded client's token.
     pub auth: GatewayAuth,
-    /// Display name for the login screen, interstitials, and browser tab title.
-    pub branding: String,
+    /// The deployment's name and, when configured, the icon file behind
+    /// `GET /api/logo`.
+    pub branding: Branding,
     /// `<label>.remotex.localhost` to send a loopback browser to, from
     /// `[server].dev_subdomain`. `None` disables the redirect entirely.
     ///
@@ -1028,7 +1094,7 @@ impl ConfigFile {
                 config.server.is_none(),
                 "this config is remotex.app's own and may not have a [server] block: \
                  the app decides where its gateway listens, where the client it \
-                 serves comes from, and how it authenticates. Only branding and \
+                 serves comes from, and how it authenticates. Only [branding] and \
                  [[targets]] belong here"
             );
         } else {
@@ -1437,7 +1503,7 @@ impl ConfigFile {
     ///
     /// Every one of those is an argument here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
-    /// the way in. `branding` is the one thing such a config *may* say about the
+    /// the way in. `[branding]` is the one thing such a config *may* say about the
     /// gateway itself, because it is about the app rather than about the server: it
     /// names a window, not a deployment, and two instances on one Mac are easier to
     /// tell apart if they can be called different things.
@@ -1459,7 +1525,7 @@ impl ConfigFile {
             static_dir: web_root,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
-            branding: Self::resolve_branding(self.branding.as_deref()),
+            branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: None,
             // The client is loaded as `remotex://app` out of the bundle, so it talks
             // to this gateway cross-origin. See the field.
@@ -1467,17 +1533,29 @@ impl ConfigFile {
         })
     }
 
-    /// The display name, or [`DEFAULT_BRANDING`].
+    /// The `[branding]` table resolved: the display name (or
+    /// [`DEFAULT_BRANDING`]), and the logo with its content type decided.
     ///
-    /// Whitespace-only counts as absent: a heading of one space is not a name
-    /// somebody meant to give. Shared by both audiences because it is one key now,
-    /// and a second copy of this three-line rule is how the two would come to differ.
-    fn resolve_branding(configured: Option<&str>) -> String {
-        configured
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_BRANDING)
-            .to_owned()
+    /// Whitespace-only text counts as absent: a heading of one space is not a name
+    /// somebody meant to give. Shared by both audiences because it is one table now,
+    /// and a second copy of these rules is how the two would come to differ. Failing
+    /// here is what puts a bad logo extension in front of `check-config` — both
+    /// audiences resolve on the way through it.
+    fn resolve_branding(configured: Option<&BrandingSection>) -> anyhow::Result<Branding> {
+        let section = configured.cloned().unwrap_or_default();
+        Ok(Branding {
+            text: section
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_BRANDING)
+                .to_owned(),
+            logo: section
+                .logo
+                .map(|path| anyhow::Ok(Logo { mime: logo_mime(&path)?, path }))
+                .transpose()?,
+        })
     }
 
     /// Resolve the runtime configuration with the file's own listen address.
@@ -1516,7 +1594,7 @@ impl ConfigFile {
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
-            branding: Self::resolve_branding(self.branding.as_deref()),
+            branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: server
                 .dev_subdomain
                 .as_deref()
@@ -1984,15 +2062,18 @@ mod tests {
 
     #[test]
     fn branding_defaults_and_overrides() {
-        // Unset → the default name.
+        // Unset → the default name, no logo.
         let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
-        assert_eq!(config.branding, DEFAULT_BRANDING);
+        assert_eq!(config.branding.text, DEFAULT_BRANDING);
+        assert!(config.branding.logo.is_none());
 
-        // Set → carried through, trimmed. Top-level, which is the only place it
-        // lives: an app instance's config has no [server] block to hold it.
+        // Set → carried through, trimmed. A top-level table, which is the only
+        // place it lives: an app instance's config has no [server] block to hold it.
         let toml = format!(
             r#"
-            branding = "  Acme Remote  "
+            [branding]
+            text = "  Acme Remote  "
+            logo = "/etc/remotex/acme.png"
 
             [server]
             {}
@@ -2005,12 +2086,42 @@ mod tests {
             site_passwd_line()
         );
         let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
-        assert_eq!(config.branding, "Acme Remote");
+        assert_eq!(config.branding.text, "Acme Remote");
+        let logo = config.branding.logo.expect("the logo was configured");
+        assert_eq!(logo.path, PathBuf::from("/etc/remotex/acme.png"));
+        assert_eq!(logo.mime, "image/png");
 
         // Whitespace-only → falls back to the default.
         let toml = toml.replace("  Acme Remote  ", "   ");
         let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
-        assert_eq!(config.branding, DEFAULT_BRANDING);
+        assert_eq!(config.branding.text, DEFAULT_BRANDING);
+    }
+
+    /// The old top-level string spelling is gone, and gone loudly: a table is not
+    /// a string, so the file fails to parse rather than quietly naming nothing.
+    #[test]
+    fn the_old_branding_string_is_refused() {
+        let toml = format!("branding = \"remotex\"\n{}", minimal());
+        let err = ConfigFile::parse(&toml).expect_err("a string is not a [branding] table");
+        assert!(format!("{err:#}").contains("branding"), "{err:#}");
+    }
+
+    /// The logo's content type is decided at resolution, so a file no browser
+    /// would take as an icon is refused before a gateway ever serves it —
+    /// including by `check-config`, which resolves on the way through.
+    #[test]
+    fn a_logo_that_is_not_an_image_is_refused() {
+        for bad in ["logo = \"/etc/remotex/logo.pdf\"", "logo = \"/etc/remotex/logo\""] {
+            let toml = format!("[branding]\n{bad}\n{}", minimal());
+            let err = ConfigFile::parse(&toml)
+                .and_then(ConfigFile::resolve)
+                .expect_err("not a favicon format");
+            assert!(format!("{err:#}").contains("[branding].logo"), "{err:#}");
+        }
+        // Case does not decide it: .PNG is the same file format.
+        let toml = format!("[branding]\nlogo = \"C:/logo.PNG\"\n{}", minimal());
+        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        assert_eq!(config.branding.logo.unwrap().mime, "image/png");
     }
 
     #[test]

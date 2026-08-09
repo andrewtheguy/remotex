@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { gatewayFetch } from "./gateway.ts";
+import { gatewayFetch, gatewayUrl } from "./gateway.ts";
 import { gatewayConfig } from "./gatewayConfig.ts";
 import Login from "./Login.tsx";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
@@ -20,10 +20,22 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    gatewayConfig().then(({ branding }) => {
-      if (!cancelled && branding) {
+    gatewayConfig().then(({ branding, logo }) => {
+      if (cancelled) {
+        return;
+      }
+      if (branding) {
         setBranding(branding);
         document.title = branding;
+      }
+      // The tab's icon. There is no <link rel="icon"> in index.html to fight
+      // with — a gateway without a logo keeps no icon at all — so this only ever
+      // adds one, and never needs removing: the config is fetched once per page.
+      if (logo) {
+        const link = document.createElement("link");
+        link.rel = "icon";
+        link.href = gatewayUrl("/api/logo");
+        document.head.appendChild(link);
       }
     });
     return () => {

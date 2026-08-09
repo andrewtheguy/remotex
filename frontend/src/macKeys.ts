@@ -24,7 +24,11 @@
 //   - **A release flush on Command up.** macOS can withhold `keyup` for a
 //     character key while Command is held. A missing `keyup` would strand both the
 //     letter *and* the synthetic Control down on the guest, so Command's own
-//     release flushes anything still held.
+//     release flushes anything still held — translated chords, letters forwarded
+//     as themselves, and the pass-through mode a Mac guest uses alike. The
+//     withholding is a fact about the local browser, not the guest, so no mode is
+//     exempt: a stranded Q turns every ⌘Q after the first into an auto-repeat of
+//     a key the guest thinks is still down, which fires nothing.
 //
 // Command-V does not read the local clipboard on its way past.
 // `useRemoteDesktop` already pushes on focus
@@ -128,12 +132,18 @@ export class MacKeyboardTranslator {
   // sent for the same code and the synthetic Control is lifted after the last.
   private translatedCommandKeys = new Set<string>();
   private syntheticControlHeld = false;
+  // Non-modifier keys sent to the guest as themselves while Command was down — a
+  // forwarded chord's letter, or any key in pass-through mode. Their keyups are
+  // the ones macOS may withhold, so Command's release sweeps whatever is left.
+  private heldUnderCommand = new Set<string>();
 
   /// Translate one event into what should go on the wire, in order.
   ///
   /// `mapCommandToControl` false is a pass-through: the caller's own `code` goes
   /// out unchanged, which is what a Mac guest wants (Command-V should arrive as
-  /// Command-V) and what the preference turns off.
+  /// Command-V) and what the preference turns off. The flush on Command up still
+  /// applies there — the withheld keyup is the local browser's doing, and a Mac
+  /// guest's ⌘Q is exactly the chord that hit it.
   translate(event: SourceKey, mapCommandToControl: boolean): TranslatedKey[] {
     const { code, pressed, caps } = event;
 
@@ -147,6 +157,12 @@ export class MacKeyboardTranslator {
     }
 
     if (!mapCommandToControl) {
+      if (META_CODES.has(code) && !pressed) {
+        const translated = this.flushHeldUnderCommand(caps);
+        translated.push({ code, pressed, caps });
+        return translated;
+      }
+      this.noteHeldUnderCommand(code, pressed, event.meta);
       return [{ code, pressed, caps }];
     }
 
@@ -176,6 +192,7 @@ export class MacKeyboardTranslator {
     this.pendingCommandCodes.clear();
     this.forwardedCommandCodes.clear();
     this.translatedCommandKeys.clear();
+    this.heldUnderCommand.clear();
     this.commandWasUsed = false;
     this.syntheticControlHeld = false;
   }
@@ -192,8 +209,10 @@ export class MacKeyboardTranslator {
 
     // Command is up, so anything it was holding down is over. This is the guard
     // the viewer does not need: without it a swallowed `keyup` leaves the letter
-    // and the synthetic Control pressed on the guest forever.
+    // and the synthetic Control pressed on the guest forever. Both kinds of held
+    // key are swept — the translated ones, and the ones forwarded as themselves.
     const translated = this.flushHeldTranslations(caps);
+    translated.push(...this.flushHeldUnderCommand(caps));
 
     const wasPending = this.pendingCommandCodes.delete(code);
     if (this.forwardedCommandCodes.delete(code)) {
@@ -239,6 +258,7 @@ export class MacKeyboardTranslator {
     if (!pressed && this.translatedCommandKeys.delete(code)) {
       return this.endTranslatedChord(code, caps);
     }
+    this.noteHeldUnderCommand(code, pressed, meta);
     const translated = pressed && meta ? this.forwardPendingCommands(caps) : [];
     translated.push({ code, pressed, caps });
     return translated;
@@ -314,6 +334,39 @@ export class MacKeyboardTranslator {
     }
     this.translatedCommandKeys.clear();
     translated.push(...this.releaseSyntheticControl(caps));
+    return translated;
+  }
+
+  /// Follows a key that went to the guest as itself, whichever mode sent it.
+  /// Modifiers stay out: their keyups arrive even under Command, and sweeping a
+  /// Shift the user is still holding would take it off the guest mid-chord.
+  /// Command itself stays out too — in pass-through mode its own keydown reports
+  /// `meta` and would otherwise sweep itself.
+  private noteHeldUnderCommand(
+    code: string,
+    pressed: boolean,
+    meta: boolean,
+  ): void {
+    if (CHORD_MODIFIERS.has(code) || META_CODES.has(code)) {
+      return;
+    }
+    if (pressed && meta) {
+      this.heldUnderCommand.add(code);
+    } else if (!pressed) {
+      this.heldUnderCommand.delete(code);
+    }
+  }
+
+  /// Releases for keys sent as themselves under a Command that is now up, or
+  /// nothing when their keyups arrived normally. A keyup that turns up late —
+  /// Command let go first, the letter after — goes out as a second release,
+  /// which every guest treats as a no-op.
+  private flushHeldUnderCommand(caps: boolean): TranslatedKey[] {
+    const translated: TranslatedKey[] = [];
+    for (const held of this.heldUnderCommand) {
+      translated.push({ code: held, pressed: false, caps });
+    }
+    this.heldUnderCommand.clear();
     return translated;
   }
 

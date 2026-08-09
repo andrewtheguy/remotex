@@ -1535,6 +1535,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     let mut state = clipboard.lock().unwrap();
                     state.apple_fetch_pending = false;
                     state.apple_fetch_again = false;
+                    // The waiting browser reads go with it. A reply that arrives
+                    // after this gap has been given up on is an unsolicited push,
+                    // and marking it `requested` would let it answer a read the
+                    // panel had not made yet.
+                    state.apple_requests = 0;
                 }
                 apple_poll_paused = false;
                 apple_poll_deadline = None;

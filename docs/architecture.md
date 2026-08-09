@@ -486,7 +486,9 @@ logins.
 ## Client protocol
 
 `src/protocol.rs` and `frontend/src/protocol.ts` define the client contract.
-`GET /api/config` publishes the deployment branding before authentication. There
+`GET /api/config` publishes the deployment branding before authentication —
+the display name, and whether `GET /api/logo` (equally public) serves an icon
+the page then sets as its favicon. There
 is no client/server version negotiation: the gateway serves the matching SPA from
 the same build, and no second client is supported.
 
@@ -1084,9 +1086,12 @@ gateway over one HTTP origin and two WebSockets, all of which need a host and a
 port, so whatever terminates the proxy is what a browser talks to. It is also why
 `remotex.app`'s embedded gateway stays on loopback TCP.
 
-`branding` is top-level rather than a `[server]` key: it names the deployment
-rather than the server, and one value with two spellings is one of them going
-stale. There is one place to write it and no second spelling.
+`[branding]` is a top-level table rather than `[server]` keys: it names the
+deployment rather than the server, and one value with two spellings is one of
+them going stale. There is one place to write it and no second spelling. `text`
+is the display name; `logo` is a path to an image file the gateway serves at
+`GET /api/logo` and the page sets as its tab icon, with the content type decided
+from the extension at config resolution.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session

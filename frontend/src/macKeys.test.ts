@@ -311,6 +311,70 @@ test("a keyup swallowed under Command is flushed when Command comes up", () => {
   ]);
 });
 
+// ⌘Q is deliberately unmapped, so its letter goes to the guest as itself — and
+// its withheld keyup used to strand Q there, turning every ⌘Q after the first
+// into an auto-repeat of a held key. The flush covers forwarded letters too.
+test("a swallowed keyup on a forwarded chord is flushed when Command comes up", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), true);
+  assert.deepEqual(t.translate(down("KeyQ", true), true), [
+    sent("MetaLeft", true),
+    sent("KeyQ", true),
+  ]);
+  // No `up("KeyQ")` — straight to Command's release.
+  assert.deepEqual(t.translate(up("MetaLeft"), true), [
+    sent("KeyQ", false),
+    sent("MetaLeft", false),
+  ]);
+});
+
+// The same hazard with translation off: a Mac guest gets ⌘Q as Meta+Q, and the
+// withheld keyup is the local browser's doing, so pass-through owes the same
+// releases.
+test("pass-through flushes a keyup swallowed under Command", () => {
+  const t = new MacKeyboardTranslator();
+  assert.deepEqual(t.translate(down("MetaLeft"), false), [
+    sent("MetaLeft", true),
+  ]);
+  assert.deepEqual(t.translate(down("KeyQ", true), false), [
+    sent("KeyQ", true),
+  ]);
+  assert.deepEqual(t.translate(up("MetaLeft"), false), [
+    sent("KeyQ", false),
+    sent("MetaLeft", false),
+  ]);
+  // And the chord fires again instead of arriving as an auto-repeat.
+  assert.deepEqual(t.translate(down("MetaLeft"), false), [
+    sent("MetaLeft", true),
+  ]);
+  assert.deepEqual(t.translate(down("KeyQ", true), false), [
+    sent("KeyQ", true),
+  ]);
+});
+
+test("pass-through does not sweep a keyup that arrived normally", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), false);
+  t.translate(down("KeyV", true), false);
+  assert.deepEqual(t.translate(up("KeyV", true), false), [sent("KeyV", false)]);
+  assert.deepEqual(t.translate(up("MetaLeft"), false), [
+    sent("MetaLeft", false),
+  ]);
+});
+
+test("pass-through does not flush a modifier Command was held with", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), false);
+  t.translate(down("ShiftLeft", true), false);
+  // Shift's own keyup is never withheld, and the user may still be holding it.
+  assert.deepEqual(t.translate(up("MetaLeft"), false), [
+    sent("MetaLeft", false),
+  ]);
+  assert.deepEqual(t.translate(up("ShiftLeft"), false), [
+    sent("ShiftLeft", false),
+  ]);
+});
+
 test("a flush still lets the same chord be typed again", () => {
   const t = new MacKeyboardTranslator();
   t.translate(down("MetaLeft"), true);

@@ -60,7 +60,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         static_dir: "frontend/dist".into(),
         auth: common::test_auth(),
-        branding: "remotex".to_owned(),
+        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
             allow_shell_origin: false,
         targets: vec![TargetConfig {

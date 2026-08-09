@@ -56,9 +56,9 @@ describe("reading", () => {
   test("bootstrapping writes the template once and never over an edit", () => {
     const store = new ConfigStore(instance, accepts);
     store.bootstrapIfNeeded();
-    writeFileSync(instance.configPath, 'branding = "mine"\n');
+    writeFileSync(instance.configPath, '[branding]\ntext = "mine"\n');
     store.bootstrapIfNeeded();
-    expect(store.read()).toBe('branding = "mine"\n');
+    expect(store.read()).toBe('[branding]\ntext = "mine"\n');
   });
 });
 
@@ -94,10 +94,10 @@ describe("saving", () => {
   test("an accepted config is written owner-only", async () => {
     // The file holds every target's credentials.
     const store = new ConfigStore(instance, accepts);
-    const result = await store.save('branding = "work"\n');
+    const result = await store.save('[branding]\ntext = "work"\n');
     expect(result.ok).toBe(true);
     expect(readFileSync(instance.configPath, "utf8")).toBe(
-      'branding = "work"\n',
+      '[branding]\ntext = "work"\n',
     );
     expect(statSync(instance.configPath).mode & 0o777).toBe(0o600);
     expect(leftovers()).toEqual([]);
@@ -134,7 +134,7 @@ describe("saving", () => {
 describe("asking the gateway", () => {
   test("a binary that is not there is a failure, not a crash", async () => {
     const validate = validatorOverBinary(join(instance.dir, "no-such-binary"));
-    const result = await validate('branding = "x"\n');
+    const result = await validate('[branding]\ntext = "x"\n');
     expect(result.ok).toBe(false);
   });
 
@@ -157,7 +157,7 @@ describe("asking the gateway", () => {
     writeFileSync(fake, "#!/bin/sh\ncat > /dev/null\nexit 0\n", {
       mode: 0o755,
     });
-    expect(await validatorOverBinary(fake)('branding = "x"\n')).toEqual({
+    expect(await validatorOverBinary(fake)('[branding]\ntext = "x"\n')).toEqual({
       ok: true,
     });
   });

@@ -54,8 +54,19 @@ function appWindow(): boolean {
  * window must not disarm when it enters fullscreen.
  */
 function whenAppWindow(start: () => void): void {
-  if (appWindow()) {
+  // The latch itself, rather than the listener removal that usually happens to be
+  // enough: three queries flip together, and a run that claimed this guard is the
+  // only one that may arm the bus.
+  let armed = false;
+  const announce = () => {
+    if (armed) {
+      return;
+    }
+    armed = true;
     start();
+  };
+  if (appWindow()) {
+    announce();
     return;
   }
   const queries = APP_DISPLAY_MODES.map((mode) =>
@@ -68,7 +79,7 @@ function whenAppWindow(start: () => void): void {
     for (const query of queries) {
       query.removeEventListener("change", promote);
     }
-    start();
+    announce();
   };
   for (const query of queries) {
     query.addEventListener("change", promote);

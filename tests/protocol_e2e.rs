@@ -1006,7 +1006,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         static_dir: "frontend/dist".into(),
         targets: vec![target],
         auth: common::test_auth(),
-        branding: "remotex".to_owned(),
+        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
             allow_shell_origin: false,
     };
