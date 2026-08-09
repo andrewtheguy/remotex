@@ -34,8 +34,8 @@ import {
 const REPEAT_DELAY_MS = 400;
 const REPEAT_INTERVAL_MS = 80;
 
-// How far a finger may travel before a tap on a *scrollable* row counts as a
-// scroll instead. 8px, squared so the check needs no square root.
+// How far a finger may travel *along the scroll axis* before a tap on a
+// scrollable row counts as a scroll instead.
 //
 // The scrollable rows cannot fire on pointer-down the way the fixed rows do —
 // that would send a key every time the row is flicked sideways. They used to use
@@ -43,7 +43,17 @@ const REPEAT_INTERVAL_MS = 80;
 // on the same element with no scroll intervening, so a tap with a few pixels of
 // drift is swallowed and the key never sends at all. Tracking the pointer gives
 // both — the row still scrolls, and a tap that stayed put still counts.
-const SCROLL_DRAG_THRESHOLD_SQ = 64;
+//
+// Only horizontal travel disqualifies a tap: these rows scroll on one axis, and
+// vertical drift is just what a sloppy tap looks like. Keep this at or below
+// the browsers' own scroll slop (~8–10px) — the tap also fires on
+// `pointercancel` when it stayed inside this budget, so a threshold above the
+// browser's would let a slow deliberate scroll send a key.
+const SCROLL_DRAG_THRESHOLD_PX = 8;
+
+// A finger that has slid several key-heights *off* the row before lifting is a
+// change of mind, not tap jitter — abandon the key instead of firing it.
+const VERTICAL_ABANDON_THRESHOLD_PX = 32;
 
 const MODIFIER_LABELS: Record<keyof SoftKeyModifiers, string> = {
   ctrl: "Ctrl",
@@ -181,11 +191,19 @@ function SoftKeyButton({
     }
     const dx = e.clientX - start.x;
     const dy = e.clientY - start.y;
-    if (dx * dx + dy * dy > SCROLL_DRAG_THRESHOLD_SQ) {
+    if (
+      Math.abs(dx) > SCROLL_DRAG_THRESHOLD_PX ||
+      Math.abs(dy) > VERTICAL_ABANDON_THRESHOLD_PX
+    ) {
       draggedRef.current = true;
     }
   }, []);
 
+  // Decides the tap on pointer-up *and* pointer-cancel. The cancel matters:
+  // the browser fires it the moment it claims the gesture for scrolling, and
+  // its slop can trip before pointer-up ever arrives — under the old
+  // cancel-means-drop rule that tap was silently swallowed. If the finger
+  // never crossed the drag threshold, it was a tap, whoever ended it.
   const finishScrollableTap = useCallback(() => {
     if (pointerStartRef.current && !draggedRef.current) {
       onPress(def);
@@ -193,8 +211,9 @@ function SoftKeyButton({
     pointerStartRef.current = null;
   }, [def, onPress]);
 
-  // A finger that leaves the key, or a gesture the browser takes over for
-  // scrolling, is not a tap on this key.
+  // A mouse pointer that leaves the key mid-press is not a tap on this key.
+  // (Touch never gets here mid-gesture: touch pointers are implicitly captured
+  // by the element that received pointer-down.)
   const cancelScrollableTap = useCallback(() => {
     pointerStartRef.current = null;
   }, []);
@@ -219,7 +238,7 @@ function SoftKeyButton({
             onPointerMove: trackScrollableTap,
             onPointerUp: finishScrollableTap,
             onPointerLeave: cancelScrollableTap,
-            onPointerCancel: cancelScrollableTap,
+            onPointerCancel: finishScrollableTap,
           }
         : {
             onPointerDown: handlePointerDown,

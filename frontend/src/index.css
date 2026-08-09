@@ -827,16 +827,22 @@ body {
   display: none;
 }
 
+/* `pan-x`, not `manipulation`: these rows scroll on one axis only, so the sole
+   gesture the browser may claim from a key is a horizontal pan. Under
+   `manipulation` a few px of vertical tap jitter could start a (useless)
+   vertical pan, firing pointercancel and eating the tap. */
 .sk-combo-row .sk-button {
   flex: 0 0 auto;
   padding: 6px 10px;
   font-size: 0.7rem;
+  touch-action: pan-x;
 }
 
 .sk-fkey-row .sk-button {
   flex: 0 0 auto;
   padding: 6px 8px;
   font-size: 0.68rem;
+  touch-action: pan-x;
 }
 
 /* Grid and rows.
