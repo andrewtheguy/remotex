@@ -139,6 +139,19 @@ answering layout. The Mac reports changes with `MiscStatus(cmd=2)`;
 Each complete post-rekey client message is carried in an encrypted 003.889 record;
 archive and session-id handling are shared with Standard mode.
 
+Framebuffer responses and pasteboard messages share one ordered server stream. A
+pasteboard status can arrive just after the gateway has requested the next update,
+putting its fetch behind that one response. Once that response completes, remotex
+pauses normal incremental framebuffer polling while the fetch remains pending. A
+layout-required non-incremental full-repaint request may still be sent during that
+pause. The pasteboard reply, or an idle-gap recovery that preserves any outstanding
+full repaint, then resumes incremental polling. Repeated change statuses coalesce
+into one follow-up fetch.
+
+`AutoFrameBufferUpdate` is not a flow-control command. remotex only sends the
+measured full-framebuffer arming at setup and after layouts; changing that rectangle
+mid-session corrupts the live Mac's later updates.
+
 ### Picking a physical screen in Standard mode
 
 For `subtype = "ard"`, `SetDisplayMessage` (`0x0d`) selects a physical display, and
@@ -320,9 +333,10 @@ never re-requesting: **zero rectangles in 25 seconds.** The same cycle with a
 non-incremental request appended returns a full update every time.
 
 A client that follows the document paints one frame and then freezes. **Keep
-polling.** Sending `0x09` anyway is harmless and is what the document says keeps
-cursor updates alive across a login or lock transition, which is why this
-implementation still sends it — but it is not the update driver.
+polling.** Sending the measured full-framebuffer `0x09` is what keeps cursor updates
+alive across a login or lock transition, which is why this implementation still
+sends it at setup and after a layout — but it is not the update driver, and its
+rectangle is not changed as a flow-control mechanism.
 
 ### `ViewerInfo` (`0x21`) has no strings in it — §5.5
 

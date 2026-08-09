@@ -405,8 +405,16 @@ enum MacRequest {
     Configuration((u16, u16), u16),
     Display(u32),
     AutoPasteboard(bool),
+    AutoFramebuffer((u16, u16)),
+    IncrementalFramebuffer,
+    Fence { flags: u32, payload: Vec<u8> },
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MacAction {
+    CompleteClipboardFetch,
 }
 
 /// A scripted High Performance Screen Sharing server. Returns the port, a channel
@@ -415,16 +423,18 @@ enum MacRequest {
 async fn spawn_fake_mac() -> (
     u16,
     mpsc::UnboundedReceiver<MacRequest>,
+    mpsc::UnboundedSender<MacAction>,
     tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = mpsc::unbounded_channel();
+    let (action_tx, action_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        serve_fake_mac(stream, tx).await
+        serve_fake_mac(stream, tx, action_rx).await
     });
-    (port, rx, task)
+    (port, rx, action_tx, task)
 }
 
 /// The server half of Apple's DH authentication: offer the group, then recover the
@@ -661,6 +671,7 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
 async fn serve_fake_mac(
     mut stream: TcpStream,
     requests: mpsc::UnboundedSender<MacRequest>,
+    mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
     use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
@@ -767,8 +778,15 @@ async fn serve_fake_mac(
     // while a reply is mid-write: a client is free to vanish between a request
     // and its answer, so a broken pipe reads as the EOF it is about to become
     // rather than as a fault — with the recorded configurations kept either way.
-    match serve_fake_mac_records(records, write_half, writer, requests, &mut configurations)
-        .await
+    match serve_fake_mac_records(
+        records,
+        write_half,
+        writer,
+        requests,
+        &mut actions,
+        &mut configurations,
+    )
+    .await
     {
         Ok(()) => Ok(configurations),
         Err(err)
@@ -789,6 +807,7 @@ async fn serve_fake_mac_records(
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     mut writer: remotex::vnc_record::RecordWriter,
     requests: mpsc::UnboundedSender<MacRequest>,
+    actions: &mut mpsc::UnboundedReceiver<MacAction>,
     configurations: &mut Vec<((u16, u16), u16)>,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt as _;
@@ -796,10 +815,26 @@ async fn serve_fake_mac_records(
     let mut shade = 0x40u8;
     let mut sent_layout = false;
     let mut sent_clipboard_status = false;
+    let mut clipboard_fetch_pending = false;
 
     loop {
         let mut kind = [0u8; 1];
-        match records.read_exact(&mut kind).await {
+        let read = tokio::select! {
+            read = records.read_exact(&mut kind) => read,
+            action = actions.recv(), if clipboard_fetch_pending => {
+                assert_eq!(
+                    action,
+                    Some(MacAction::CompleteClipboardFetch),
+                    "the clipboard fetch gate closed unexpectedly",
+                );
+                let message =
+                    fake_mac_clipboard_message(MAC_CLIPBOARD_SESSION, MAC_REMOTE_CLIPBOARD);
+                write_half.write_all(writer.frame(&message).unwrap()).await?;
+                clipboard_fetch_pending = false;
+                continue;
+            }
+        };
+        match read {
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(());
@@ -825,6 +860,7 @@ async fn serve_fake_mac_records(
                 let mut req = [0u8; 9];
                 records.read_exact(&mut req).await?;
                 if req[0] != 0 {
+                    let _ = requests.send(MacRequest::IncrementalFramebuffer);
                     continue;
                 }
                 let (points, density) = configurations
@@ -853,10 +889,16 @@ async fn serve_fake_mac_records(
             5 => {
                 records.read_exact(&mut [0u8; 5]).await?;
             }
-            // AutoFrameBufferUpdate: the arming, which a real Mac answers by
-            // streaming. Here the paired non-incremental request drives it.
+            // AutoFrameBufferUpdate: the arming. The paired non-incremental
+            // request drives pixels in this fake, as on the measured Mac.
             0x09 => {
-                records.read_exact(&mut [0u8; 15]).await?;
+                let mut body = [0u8; 15];
+                records.read_exact(&mut body).await?;
+                let size = (
+                    u16::from_be_bytes([body[11], body[12]]),
+                    u16::from_be_bytes([body[13], body[14]]),
+                );
+                let _ = requests.send(MacRequest::AutoFramebuffer(size));
             }
             // High Performance repeats AutoPasteboard after the virtual display's
             // answering layout so monitoring remains enabled after setup.
@@ -866,17 +908,25 @@ async fn serve_fake_mac_records(
                 assert_eq!(body, [0, 0, 1, 0, 0, 0, 0], "AutoPasteboard re-arm");
                 let _ = requests.send(MacRequest::AutoPasteboard(true));
             }
-            // ClipboardFetch: answer with the fake Mac's current UTF-8 text and
-            // a nonzero session id that subsequent browser writes must preserve.
+            // ClipboardFetch: leave the reply gated while an empty update and a
+            // fence expose whether the gateway incorrectly polls before the
+            // archive completes.
             0x0b => {
                 let mut body = [0u8; 7];
                 records.read_exact(&mut body).await?;
                 assert_eq!(&body[..3], &[0, 0, 0], "clipboard fetch padding");
                 let session_id = u32::from_be_bytes(body[3..7].try_into().unwrap());
                 let _ = requests.send(MacRequest::ClipboardFetch(session_id));
-                let message =
-                    fake_mac_clipboard_message(MAC_CLIPBOARD_SESSION, MAC_REMOTE_CLIPBOARD);
-                write_half.write_all(writer.frame(&message).unwrap()).await?;
+                assert!(!clipboard_fetch_pending, "overlapping clipboard fetches");
+                clipboard_fetch_pending = true;
+                write_half
+                    .write_all(writer.frame(&[0, 0, 0, 0]).unwrap())
+                    .await?;
+                let mut fence = vec![MSG_FENCE, 0, 0, 0];
+                fence.extend_from_slice(&(1u32 << 31).to_be_bytes());
+                fence.push(4);
+                fence.extend_from_slice(b"clip");
+                write_half.write_all(writer.frame(&fence).unwrap()).await?;
             }
             // SetDisplayMessage, reported so a later request can order assertions
             // without relying on a timeout.
@@ -933,6 +983,15 @@ async fn serve_fake_mac_records(
                 records.read_exact(&mut compressed).await?;
                 let (session_id, text) = fake_mac_read_clipboard(&header, &compressed);
                 let _ = requests.send(MacRequest::ClipboardSend { session_id, text });
+            }
+            // ClientFence: the deterministic marker sent after the empty update.
+            MSG_FENCE => {
+                let mut head = [0u8; 8];
+                records.read_exact(&mut head).await?;
+                let flags = u32::from_be_bytes([head[3], head[4], head[5], head[6]]);
+                let mut payload = vec![0u8; usize::from(head[7])];
+                records.read_exact(&mut payload).await?;
+                let _ = requests.send(MacRequest::Fence { flags, payload });
             }
             other => panic!("fake Mac got unexpected message type {other:#x}"),
         }
@@ -1772,7 +1831,7 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
 /// pasteboard messages in both directions.
 #[tokio::test]
 async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard() {
-    let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
+    let (mac_port, mut requests, actions, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
@@ -1792,6 +1851,10 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
 
     // ServerInit precedes the encrypted display request, then the answering layout
@@ -1815,6 +1878,18 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         MacRequest::AutoPasteboard(true),
         "the virtual display's answering layout did not re-arm its pasteboard"
     );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::IncrementalFramebuffer
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::IncrementalFramebuffer
+    );
 
     // Remote → browser. Selecting the already-active display gives the fake Mac
     // a deterministic point to announce a pasteboard change; the gateway fetches
@@ -1831,6 +1906,19 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::ClipboardFetch(0)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Fence { flags: 0, payload: b"clip".to_vec() },
+        "an incremental framebuffer request overtook the clipboard reply"
+    );
+    actions
+        .send(MacAction::CompleteClipboardFetch)
+        .expect("the fake Mac stopped before completing the clipboard fetch");
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::IncrementalFramebuffer,
+        "framebuffer polling did not resume after the clipboard reply"
     );
     let remote_clipboard = expect_clipboard(&mut ws).await;
     assert_eq!(remote_clipboard.text, MAC_REMOTE_CLIPBOARD);
@@ -1871,7 +1959,15 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         MacRequest::AutoPasteboard(true),
         "the dynamic layout did not re-arm its pasteboard"
     );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((24, 18))
+    );
     expect_tile(&mut ws).await;
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::IncrementalFramebuffer
+    );
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
@@ -1892,7 +1988,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
 /// that treated the scale as one would open this desktop at half its size.
 #[tokio::test]
 async fn high_performance_opens_a_retina_client_at_its_screens_density() {
-    let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
+    let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
@@ -1911,6 +2007,10 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
         next_mac_request(&mut requests).await,
         MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)
     );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
 
     // ServerInit's provisional geometry first, then the answering layout: the
     // backing pixels doubled and the density that earned them, which presents
@@ -1926,10 +2026,22 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
         MacRequest::AutoPasteboard(true),
         "the answering layout re-arms its pasteboard"
     );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH * 2, MAC_SCREEN_HEIGHT * 2))
+    );
     // The re-arm rides with one more update request; consume its repaint so the
     // fake Mac is back at its read loop — and sees a clean end of stream rather
     // than a mid-write break — when the disconnect closes the session.
     expect_tile(&mut ws).await;
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::IncrementalFramebuffer
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::IncrementalFramebuffer
+    );
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
