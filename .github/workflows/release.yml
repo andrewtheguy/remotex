@@ -73,7 +73,7 @@ jobs:
             ${{ steps.version.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
   # The frontend bundle is platform-agnostic — build it once here and reuse it
-  # for every target tarball, rather than rebuilding on each matrix runner.
+  # for every target artifact, rather than rebuilding on each matrix runner.
   frontend:
     needs: prepare
     runs-on: ubuntu-latest
@@ -121,14 +121,22 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release tarball (${{ matrix.target-note }})
-        run: SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
+      - name: Install RPM packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - name: Build release artifacts (${{ matrix.target-note }})
+        run: |
+          SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
+          bash packaging/build-native-packages.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: remotex-${{ matrix.target-note }}
-          path: dist/*.tar.gz
+          path: dist/*
           if-no-files-found: error
 
   # remotex.app: the macOS shell around the same client, shipped as a disk image
@@ -313,9 +321,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .dmg is remotex.app.
+        # release assets. The .pkg is the native gateway package; the .dmg is
+        # remotex.app.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
+            artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
             artifacts/*.tar.gz artifacts/*.dmg --clobber
 
       - name: Publish release (remove draft, creates the tag)

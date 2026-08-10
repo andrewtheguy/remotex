@@ -1,9 +1,10 @@
 name: Pages
 
-# Publishes the install script to GitHub Pages, so
+# Publishes the unsupported-package fallback script to GitHub Pages, so
 #   curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
-# always serves the copy on `main`. Only install.sh is published — install
-# instructions live in the repo (docs/install.md), not on Pages. Enable Pages
+# always serves the copy on `main`. Native packages remain the recommended
+# install method. Only install.sh is published — install instructions live in
+# the repo (docs/install.md), not on Pages. Enable Pages
 # once (Settings → Pages → Source: GitHub Actions) for this to deploy.
 
 on:

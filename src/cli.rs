@@ -23,8 +23,8 @@ pub enum Commands {
     /// Start the web server. Every [[targets]] profile is served; the browser
     /// picks one after login (there is no --target selector).
     Serve {
-        /// TOML config file (default: the installed <prefix>/etc/remotex.toml;
-        /// required when running from a checkout)
+        /// TOML config file (default: the installed global config; required
+        /// when running from a checkout)
         #[arg(short, long)]
         config: Option<PathBuf>,
 
