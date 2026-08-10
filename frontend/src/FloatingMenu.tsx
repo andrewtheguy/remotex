@@ -10,6 +10,12 @@ import {
 import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
+import {
+  type AudioRow,
+  type AudioStreamInfo,
+  audioLabel,
+  videoLabel,
+} from "./mediaLabel.ts";
 import type {
   ClipboardSnapshot,
   DisplayInfo,
@@ -153,7 +159,8 @@ export interface PanelControls {
    *
    * The one route to it in a chromeless host: the ☰ button that opens it is the
    * chrome such a host replaces, so without this the card — the remote's size and
-   * density against this window's, the connection, the render dial — is
+   * density against this window's, the connection, the render dial, and what the
+   * audio and video decoders were built with — is
    * unreachable in `remotex.app`. Reported by the page rather than
    * rebuilt natively, because every line of it is derived from state this page
    * already holds and a second copy is a second copy to keep in step.
@@ -322,12 +329,17 @@ function ScreenHelp({
   hostScale,
   connection,
   renderPlan,
+  audio,
+  videoStreams,
 }: {
   size: RemoteSize | null;
   hostScale: number;
   connection: string;
   renderPlan: string;
+  audio: AudioRow;
+  videoStreams: readonly string[];
 }) {
+  const video = videoLabel(videoStreams);
   return (
     <>
       <h3>This session</h3>
@@ -367,6 +379,29 @@ function ScreenHelp({
               usually does not have. Empty only before `connected`. */}
           <dd>{renderPlan || "Waiting for the target"}</dd>
         </div>
+        <div className="help-item">
+          <dt>Audio</dt>
+          {/* The row above describes the picture and says nothing about the sound,
+              which is a separate per-target choice made in the same config file:
+              which of the two audio paths this target uses, at what rate, and — the
+              one state that is a fault rather than a setting — why a decoder
+              stopped. That last is why this row is here rather than only on the
+              drawer's toggle: `remotex.app` hides the drawer, so the card is the
+              only place its failure can appear. See mediaLabel.ts. */}
+          <dd>{audioLabel(audio)}</dd>
+        </div>
+        {/* Absent for every session with no video in it, which the Render row has
+            already said: a "none" here would be repeating it. */}
+        {video && (
+          <div className="help-item">
+            <dt>Video decoder</dt>
+            {/* The exact WebCodecs configuration each decoder was built with. It is
+                what a `VideoDecoder` complaint names, and until this row it was
+                readable only in the console — on a session that is *working*, not
+                one that failed, which is when the question is usually asked. */}
+            <dd>{video}</dd>
+          </div>
+        )}
       </dl>
     </>
   );
@@ -473,6 +508,8 @@ export default function FloatingMenu({
   canAudio,
   audioEnabled,
   audioError,
+  audioStream,
+  videoStreams,
   onAudioChange,
   macKeyOverridesEnabled,
   macKeyOverridesActive,
@@ -531,6 +568,11 @@ export default function FloatingMenu({
   canAudio: boolean;
   audioEnabled: boolean;
   audioError: string | null;
+  // The two the card reads and the drawer does not: what the sound turned out to
+  // be, and what each video decoder was configured with. Both null/empty until a
+  // format arrives, which is a state the card words rather than hides.
+  audioStream: AudioStreamInfo | null;
+  videoStreams: readonly string[];
   onAudioChange: (enabled: boolean) => void;
   // The Command-to-Control preference and whether it is doing anything. The two
   // differ when the guest is itself a Mac, which is why the section reports the
@@ -972,7 +1014,7 @@ export default function FloatingMenu({
               type="button"
               className="toolbar-btn"
               onClick={() => setHelpOpen(true)}
-              title="This session's size and density, and the touch gestures"
+              title="This session's size, density, render dial and decoders, and the touch gestures"
             >
               Help
             </button>
@@ -1016,6 +1058,13 @@ export default function FloatingMenu({
               hostScale={hostScale}
               connection={connection}
               renderPlan={renderPlan}
+              audio={{
+                available: canAudio,
+                enabled: audioEnabled,
+                error: audioError,
+                stream: audioStream,
+              }}
+              videoStreams={videoStreams}
             />
             {/* Only where there is a menu to hide. A chromeless host has no ☰ and
                 does not take the chord (the listener returns early there), so this
