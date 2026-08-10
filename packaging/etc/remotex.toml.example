@@ -1,12 +1,14 @@
 # remotex configuration example
 #
 # The binary loads this file on startup (see src/config.rs). The config is
-# global-only: --config <path> if given, else the installed
-# <prefix>/etc/remotex.toml — no per-user or working-directory files. The listen
-# address below is the one setting that can also come from outside this file
-# (--listen, or REMOTEX_LISTEN); everything else, credentials included, is
-# configured here. Keep this file readable only by the service user — it holds
-# credentials.
+# global-only: --config <path> if given, else the installed global config
+# (/etc/remotex/remotex.toml from a Linux package,
+# /usr/local/etc/remotex/remotex.toml from the macOS package, or
+# <prefix>/etc/remotex.toml from the quick installer). There are no per-user or
+# working-directory files. The listen address below is the one setting that can
+# also come from outside this file (--listen, or REMOTEX_LISTEN); everything
+# else, credentials included, is configured here. Keep this file readable only
+# by the service user — it holds credentials.
 #
 #   chmod 600 remotex.toml
 #
@@ -29,7 +31,7 @@
 # web root as remotex://app. Edit that config from the app, not here.
 #[branding]
 #text = "remotex"
-#logo = "/opt/remotex/etc/logo.png"
+#logo = "/path/to/logo.png"
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,

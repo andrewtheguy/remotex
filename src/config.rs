@@ -1702,9 +1702,8 @@ fn dev_hostname(label: &str) -> anyhow::Result<String> {
     Ok(format!("{label}.remotex.localhost"))
 }
 
-/// Load the config file: the explicit `--config` path, or the global
-/// `<prefix>/etc/remotex.toml` of the installed layout. Returns the parsed file
-/// and the path it came from.
+/// Load the config file: the explicit `--config` path, or the global path of the
+/// installed layout. Returns the parsed file and the path it came from.
 pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
     let path = config_path(explicit)?;
     let text = std::fs::read_to_string(&path)
@@ -1720,40 +1719,65 @@ fn config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
     match explicit {
         Some(path) => Ok(path.to_path_buf()),
         None => installed_config_path().context(
-            "no --config given and not running from an installed prefix \
-             (<prefix>/versions/<version>/bin/remotex) — pass --config <path>",
+            "no --config given and not running from an installed layout — \
+             pass --config <path>",
         ),
     }
 }
 
-/// The one global config location, `<prefix>/etc/remotex.toml`, when the
-/// executable runs from the versioned install layout (see packaging/README.md).
+/// The one global config location for the running installation.
 pub fn installed_config_path() -> Option<PathBuf> {
-    Some(installed_etc_dir()?.join("remotex.toml"))
+    Some(installed_layout()?.config)
 }
 
-/// The active version root, derived from the running binary's own location.
-///
-/// The binary is shipped at `<prefix>/versions/<version>/bin/remotex`. We
-/// canonicalize `current_exe` so a launcher symlink resolves to the real
-/// versioned directory. Returns `None` in odd environments where the executable
-/// path can't be determined.
-pub fn version_root() -> Option<PathBuf> {
+/// Paths belonging to one recognized installation.
+struct InstalledLayout {
+    config: PathBuf,
+    static_dir: PathBuf,
+}
+
+/// Resolve the package-manager layout or the quick installer's relocatable
+/// layout from the executable that is actually running.
+fn installed_layout() -> Option<InstalledLayout> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
-    // <root>/bin/remotex → <root>
-    Some(exe.parent()?.parent()?.to_path_buf())
+    installed_layout_for_exe(&exe)
 }
 
-/// `<prefix>/etc` when the executable lives in the versioned install layout
-/// (`<prefix>/versions/<version>/bin/remotex`), else `None`.
-fn installed_etc_dir() -> Option<PathBuf> {
-    let root = version_root()?;
-    let versions_dir = root.parent()?;
+fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
+    let bin_dir = exe.parent()?;
+
+    // Native Linux packages own the executable and web bundle at their FHS
+    // paths. Configuration is administrator-created under /etc, not under
+    // /usr: package removal must not delete a file containing credentials.
+    if bin_dir == Path::new("/usr/bin") {
+        return Some(InstalledLayout {
+            config: "/etc/remotex/remotex.toml".into(),
+            static_dir: "/usr/share/remotex/web".into(),
+        });
+    }
+
+    // The macOS package is the same direct layout under the locally managed
+    // prefix. Its configuration follows that prefix as well.
+    if bin_dir == Path::new("/usr/local/bin") {
+        return Some(InstalledLayout {
+            config: "/usr/local/etc/remotex/remotex.toml".into(),
+            static_dir: "/usr/local/share/remotex/web".into(),
+        });
+    }
+
+    // The fallback quick installer is relocatable. Its launcher resolves to
+    // <prefix>/versions/<version>/bin/remotex, while configuration deliberately
+    // lives outside the version being replaced.
+    let version_root = bin_dir.parent()?;
+    let versions_dir = version_root.parent()?;
     if versions_dir.file_name()? != "versions" {
         return None;
     }
-    Some(versions_dir.parent()?.join("etc"))
+    Some(InstalledLayout {
+        config: versions_dir.parent()?.join("etc/remotex.toml"),
+        static_dir: version_root.join("share/remotex/web"),
+    })
 }
 
 /// Say so, before binding, when the web root is not one.
@@ -1782,15 +1806,14 @@ pub fn warn_if_no_web_root(static_dir: &Path, hint: &str) {
 
 /// Default location of the built frontend.
 ///
-/// Prefers the installed layout (`<root>/share/remotex/web`); falls back to
-/// `frontend/dist` relative to the working directory for `cargo run` in a
+/// Prefers the web bundle belonging to a recognized installation; falls back
+/// to `frontend/dist` relative to the working directory for `cargo run` in a
 /// checkout. Override with `static_dir` in the `[server]` block.
 pub fn default_static_dir() -> PathBuf {
-    if let Some(root) = version_root() {
-        let installed = root.join("share/remotex/web");
-        if installed.is_dir() {
-            return installed;
-        }
+    if let Some(layout) = installed_layout()
+        && layout.static_dir.is_dir()
+    {
+        return layout.static_dir;
     }
     PathBuf::from("frontend/dist")
 }
@@ -1798,6 +1821,29 @@ pub fn default_static_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_paths_follow_each_install_layout() {
+        let linux = installed_layout_for_exe(Path::new("/usr/bin/remotex")).unwrap();
+        assert_eq!(linux.config, Path::new("/etc/remotex/remotex.toml"));
+        assert_eq!(linux.static_dir, Path::new("/usr/share/remotex/web"));
+
+        let mac = installed_layout_for_exe(Path::new("/usr/local/bin/remotex")).unwrap();
+        assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
+        assert_eq!(mac.static_dir, Path::new("/usr/local/share/remotex/web"));
+
+        let quick = installed_layout_for_exe(Path::new(
+            "/srv/remotex/versions/0.0.144/bin/remotex",
+        ))
+        .unwrap();
+        assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
+        assert_eq!(
+            quick.static_dir,
+            Path::new("/srv/remotex/versions/0.0.144/share/remotex/web")
+        );
+
+        assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
+    }
 
     /// The moving encode a plan resolves, for the tests that are about that and not
     /// about which arm of [`RenderPlan`] they landed in. `video` has none by

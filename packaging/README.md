@@ -1,57 +1,84 @@
 # Packaging
 
-The gateway ships as a relocatable tarball containing the Rust binary, built
-frontend, config example, and version metadata.
+Native packages are the release install contract. Linux ships both `.deb` and
+`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the input for
+container and viewer builds and the payload used by the unsupported-platform
+quick installer.
 
-## Installed layout
+## Native layouts
+
+Linux package managers own the conventional FHS paths directly:
 
 ```text
-<prefix>/
-├── etc/remotex.toml
-├── versions/<version>/
-│   ├── bin/remotex
-│   ├── share/doc/remotex/remotex.toml.example
-│   ├── share/remotex/web/
-│   └── VERSION
-├── current -> versions/<version>
-└── .install.lock
+/usr/bin/remotex
+/usr/share/remotex/web/
+/usr/share/doc/remotex/remotex.toml.example
 ```
 
-The launcher points to `<prefix>/current/bin/remotex`. The binary resolves its
-assets relative to its real path and loads the stable config from
-`<prefix>/etc/remotex.toml`.
+The macOS package owns the corresponding local prefix:
+
+```text
+/usr/local/bin/remotex
+/usr/local/share/remotex/web/
+/usr/local/share/doc/remotex/remotex.toml.example
+```
+
+There is no package wrapper, version directory, active-version symlink, or
+package-managed rollback. The package manager replaces and removes its files.
+
+The live config is deliberately outside the manifests:
+`/etc/remotex/remotex.toml` on Linux and
+`/usr/local/etc/remotex/remotex.toml` on macOS. The operator creates it from the
+example with mode `0600` and ownership of the account that runs the gateway.
+That keeps both upgrades and removals away from stored credentials.
 
 ## Scripts
 
 | Path | Purpose |
 |---|---|
-| `build-tarball.sh` | build the gateway and assemble a platform tarball |
-| `install.sh` | stage a version, switch `current`, and retain one rollback |
-| `uninstall.sh` | remove an installation or one version |
+| `build-tarball.sh` | build the gateway and assemble the common release payload |
+| `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
+| `install.sh` | install the tarball fallback under a relocatable prefix |
+| `uninstall.sh` | remove that fallback installation or one fallback version |
 | `Dockerfile` | build an image from an extracted release tarball |
 
-remotex.app is not built here. It is an Electron shell in
-[`apps/viewer`](../apps/viewer) — `bun run dist` there — and it carries a copy of
-the gateway this directory packages. See [`docs/macos-viewer.md`](../docs/macos-viewer.md).
-
 The repository-root `install.sh` downloads and verifies a release before
-calling `packaging/install.sh`.
+calling the tarball's `packaging/install.sh`. That path is retained only for a
+Linux distribution that supports neither native package format.
+
+**remotex.app** is not built here. It is an Electron shell in
+[`apps/viewer`](../apps/viewer), ships as a `.dmg`, and carries the same gateway
+binary and frontend. See [`docs/macos-viewer.md`](../docs/macos-viewer.md).
 
 ## Local build
 
 ```sh
 cd frontend && bun install --frozen-lockfile && cd ..
 bash packaging/build-tarball.sh
+bash packaging/build-native-packages.sh
 ```
 
-Output is written to `dist/remotex-<version>-<os>-<arch>.tar.gz`.
+The native builder requires `dpkg-deb` and `rpmbuild` on Linux, or `pkgbuild` on
+macOS. Outputs are:
+
+```text
+dist/remotex-linux-amd64.deb
+dist/remotex-linux-amd64.rpm
+dist/remotex-macos-arm64.pkg
+```
+
+Arm Linux runners use `arm64` in the asset names. The tarballs retain their
+existing versioned filenames because the quick installer selects and verifies
+them by release version.
 
 ## Releases
 
-`.github/workflows/release.yml` creates a draft, builds gateway tarballs for
-Linux x86_64, Linux arm64, and macOS arm64, then publishes only after all assets
-succeed.
+`.github/workflows/release.yml` creates a draft, builds the frontend once, then
+builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
+arm64. The release is published only after the packages, **remotex.app** disk
+image, and common artifacts succeed.
 
-The frontend is built once and reused for every platform. Container images are
-assembled from the published Linux tarballs, so they contain the same binary
-and frontend as the release assets.
+The macOS viewer takes its gateway from the macOS tarball. Container images are
+assembled from the Linux tarballs. Those tarballs therefore remain build
+plumbing and fallback payloads even though native packages are what users are
+directed to install.

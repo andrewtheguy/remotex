@@ -82,11 +82,11 @@ impl Handshake {
 /// The app's own instance directory: its config, its log, its preferences.
 ///
 /// Everything about an embedded gateway is under here, and nothing outside it is
-/// read — in particular not `<prefix>/etc/remotex.toml`, which belongs to the
-/// server install. The two can therefore sit on one Mac without either being able
-/// to change what the other does, which is the point of naming the directory on the
-/// command line rather than deriving it from the executable's location the way
-/// [`crate::config::installed_config_path`] does.
+/// read — in particular not the installed gateway's global config, which belongs
+/// to the server install. The two can therefore sit on one Mac without either
+/// being able to change what the other does, which is the point of naming the
+/// directory on the command line rather than deriving it from the executable's
+/// location the way [`crate::config::installed_config_path`] does.
 #[derive(Clone, Debug)]
 pub struct Instance {
     dir: PathBuf,

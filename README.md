@@ -49,31 +49,58 @@ than re-investigating.
 
 ## Install
 
-Install the latest release:
+Native packages are the supported install method. Download the matching asset
+from the [latest release](https://github.com/andrewtheguy/remotex/releases/latest).
+
+Debian or Ubuntu, on x86-64 (use the `arm64` asset on arm64):
 
 ```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
+curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-linux-amd64.deb
+sudo apt install ./remotex-linux-amd64.deb
 ```
 
-Generate a web-login credential, then edit the installed config:
+Fedora, RHEL, or another RPM-based distribution, on x86-64 (use the `arm64`
+asset on arm64, and your distribution's own RPM frontend in place of `dnf`):
 
 ```sh
+curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-linux-amd64.rpm
+sudo dnf install ./remotex-linux-amd64.rpm
+```
+
+macOS arm64:
+
+```sh
+curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-macos-arm64.pkg
+sudo installer -pkg remotex-macos-arm64.pkg -target /
+```
+
+The macOS package is unsigned and not notarized, so fetch it with `curl` as
+shown rather than through a browser. It installs the gateway CLI; the separate
+`.dmg` installs **remotex.app**.
+
+Packages do not own the live config because it contains credentials. On Linux,
+create it for the account that will run the gateway:
+
+```sh
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex
+sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
+  /usr/share/doc/remotex/remotex.toml.example /etc/remotex/remotex.toml
 remotex gen-passwd admin
-${EDITOR:-vi} /opt/remotex/etc/remotex.toml
+${EDITOR:-vi} /etc/remotex/remotex.toml
 ```
 
-Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
-replace the example `[[targets]]` entry with the remote desktop you want to
-reach. Then start the server in the foreground:
+On macOS, use `/usr/local/etc/remotex/remotex.toml` and the example under
+`/usr/local/share/doc/remotex/` instead. Paste the generated `admin:$2b$...`
+value into `[server].site_passwd`, replace the example `[[targets]]` entry, then
+start the server in the foreground:
 
 ```sh
 remotex serve
 ```
 
-The installer verifies the release digest, installs versioned files under
-`/opt/remotex`, and links `remotex` into `/usr/local/bin`. See
-[`docs/install.md`](docs/install.md) for custom locations, upgrades, rollback,
-and uninstall.
+See [`docs/install.md`](docs/install.md) for package upgrades, removal, macOS
+config setup, and the quick-install fallback for Linux distributions that
+support neither `.deb` nor `.rpm`.
 
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
 no additional software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac
@@ -170,8 +197,10 @@ The main directories are:
 
 ## Configuration
 
-remotex reads one TOML file. Installed deployments default to
-`<prefix>/etc/remotex.toml`; a checkout should pass `--config`.
+remotex reads one TOML file. Native packages default to
+`/etc/remotex/remotex.toml` on Linux and
+`/usr/local/etc/remotex/remotex.toml` on macOS. The quick-installer fallback
+uses `<prefix>/etc/remotex.toml`; a checkout should pass `--config`.
 
 ```toml
 [server]
@@ -237,7 +266,9 @@ resolved for the tests' direct RDP and VNC connections.
 bun install --cwd frontend
 cargo build --release
 bash packaging/build-tarball.sh
+bash packaging/build-native-packages.sh
 ```
 
 Local Cargo builds automatically rebuild the frontend when its sources change.
-The tarball contains the gateway binary and built frontend.
+The native package builder consumes the tarball so every artifact contains the
+same gateway binary and built frontend.
