@@ -55,6 +55,8 @@ export default function RemoteDesktop({
     audioEnabled,
     audioError,
     videoError,
+    audioStream,
+    videoStreams,
     audioByDefault,
     setAudioByDefault,
     displays,
@@ -255,6 +257,8 @@ export default function RemoteDesktop({
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}
+          audioStream={audioStream}
+          videoStreams={videoStreams}
           onAudioChange={setAudio}
           macKeyOverridesEnabled={macKeyOverridesEnabled}
           macKeyOverridesActive={macKeyOverridesActive}

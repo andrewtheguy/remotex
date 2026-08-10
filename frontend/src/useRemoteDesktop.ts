@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AudioPlayer,
   createAudioContext,
@@ -22,6 +22,7 @@ import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import "./keyboardLock.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
+import type { AudioStreamInfo } from "./mediaLabel.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
@@ -439,6 +440,12 @@ export function useRemoteDesktop(
   // refusal is reported rather than worked around: the codec is the gateway's to
   // choose and there is no second representation to fall back to (audioPlayer.ts).
   const [audioError, setAudioError] = useState<string | null>(null);
+  // What the sound actually is, from `audioFormat`, for the session card: which of
+  // the two audio paths this target chose and at what shape. Null whenever no
+  // player is up, which is every state the card already words for itself. The
+  // `OpusHead` is deliberately not kept — only a decoder wants it, and it is built
+  // by the time this is set.
+  const [audioStream, setAudioStream] = useState<AudioStreamInfo | null>(null);
   // Why this browser is showing nothing for a video target, or null.
   //
   // Kept apart from `connectError` because the session is fine — it is this client
@@ -447,6 +454,21 @@ export function useRemoteDesktop(
   // decoder means no desktop at all, so this needs a surface that stays up while
   // `status` is "connected", which the status overlay does not.
   const [videoError, setVideoError] = useState<string | null>(null);
+  // The configuration string every video decoder this attachment holds was built
+  // with, by stream id — the card's Video row, and the counterpart of `audioStream`.
+  //
+  // Kept here as well as in the worker because they are two different uses of the
+  // same fact: the worker configures a `VideoDecoder` with it, and this reports what
+  // was configured. Emptied with the decoders themselves in `clearDesktop`, so it
+  // never describes a desktop that has ended.
+  const [videoDecodes, setVideoDecodes] = useState<Record<number, string>>({});
+  // The same thing without its ids, which is all the card wants: stream ids are how
+  // a format finds its decoder, not something to show. Memoized so a repaint that
+  // re-announces an unchanged format hands the card the same array it had.
+  const videoStreams = useMemo(
+    () => Object.values(videoDecodes),
+    [videoDecodes],
+  );
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // What this session is speaking, from `connected`: the protocol and the target's
@@ -665,6 +687,9 @@ export function useRemoteDesktop(
     audioPlayerRef.current = null;
     void audioContextRef.current?.close();
     audioContextRef.current = null;
+    // The card describes the player, so it goes with it: a format left behind would
+    // have the row naming a codec nothing is decoding.
+    setAudioStream(null);
   }, []);
 
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
@@ -756,6 +781,9 @@ export function useRemoteDesktop(
       // memory. (Nothing could be *drawn* wrongly: a reference always follows
       // the tile that filled its slot on the same socket.)
       painter?.clear();
+      // The decoders went with it, so what the card says about them goes too. The
+      // next attachment re-announces every stream it has.
+      setVideoDecodes((prev) => (Object.keys(prev).length === 0 ? prev : {}));
       // Sound's own socket goes with this one. The gateway would keep the
       // subscription alive across a reattach — it belongs to the claim now — but this
       // browser cannot: rebuilding a decoder needs an AudioContext, and a context
@@ -1149,6 +1177,14 @@ export function useRemoteDesktop(
         // The player owns the context now, so this must not also close it.
         audioContextRef.current = null;
         setAudioError(null);
+        // Only once the decoder is up, so the row never names a format that was
+        // refused — the catch below is what that case reads as.
+        setAudioStream({
+          codec: msg.codec,
+          sampleRate: msg.sampleRate,
+          channels: msg.channels,
+          packetFrames: msg.packetFrames,
+        });
       } catch (e) {
         releaseAudio();
         setAudioEnabled(false);
@@ -1365,6 +1401,15 @@ export function useRemoteDesktop(
           painter?.setVideoFormat(msg.stream, {
             decode: msg.decode,
           });
+          // And the same string for the card, which is the only place the exact
+          // configuration is written down while the picture is working. Unchanged
+          // formats are re-announced on every repaint, so a repeat must not be a
+          // new object: the card would re-render for every refresh.
+          setVideoDecodes((prev) =>
+            prev[msg.stream] === msg.decode
+              ? prev
+              : { ...prev, [msg.stream]: msg.decode },
+          );
           break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
@@ -2048,6 +2093,11 @@ export function useRemoteDesktop(
     audioEnabled,
     audioError,
     videoError,
+    // What the sound and the picture actually are, for the card's Audio and Video
+    // rows: the codec each decoder was built with, which the render dial does not
+    // say and which nothing else on screen writes down.
+    audioStream,
+    videoStreams,
     // The remembered "by default" preference and its setter, for the picker's
     // toggle.
     audioByDefault,

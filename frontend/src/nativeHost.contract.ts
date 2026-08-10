@@ -87,7 +87,8 @@ export type NativeCommand =
   /**
    * Show the client's Help card, which is where "This session" is — the remote's
    * size and density against this window's, the connection and its subtype, the
-   * render dial, the video codec and the exact decoder configuration.
+   * render dial, the audio path and its shape, and the exact configuration every
+   * video decoder was built with.
    *
    * A command rather than fields on {@link NativeState}, and that is the whole
    * design of this seam: the card is derived from state the page already holds,

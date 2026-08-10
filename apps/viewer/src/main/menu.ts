@@ -173,8 +173,9 @@ function remoteMenu(context: MenuContext): MenuSpec {
     },
     // The client's own Help card, which is the only place the session's numbers are
     // written down: the remote's size and density against this window's, the
-    // connection and its subtype, the render dial, the video codec and the exact
-    // configuration each decoder was built with. In a browser it is behind the ☰
+    // connection and its subtype, the render dial, which audio path this target
+    // chose and why it might have stopped, and the exact configuration each video
+    // decoder was built with. In a browser it is behind the ☰
     // button this shell hides, so without an item here it is unreachable — and
     // rebuilding it natively would be a second copy of a dozen values derived from
     // state only the page has. The item opens the page's own card.
