@@ -121,46 +121,6 @@ has an answer rather than being rediscovered.
   pointer transforms. High Performance mode is unaffected because it uses one
   virtual display rather than a mosaic of physical displays.
 
-### Companion Chrome extension
-
-`remotex.app` (`apps/viewer`) has these two things today, because it is a window
-this program controls. Most people are in a browser, and this is what would give
-them the same two. Both were measured against stock Chrome plus a small MV3
-extension — the spike is a proof of viability, not a design:
-
-- **A clipboard that keeps syncing while the window is unfocused or minimized.**
-  `navigator.clipboard.readText()` is refused unless the document is focused, which
-  is why `pushBrowserClipboardOnFocus` in `useRemoteDesktop.ts` fires on focus and
-  nowhere else. An extension *offscreen document* with reason `CLIPBOARD` polls the
-  system clipboard regardless of focus. Confirmed on macOS in both directions:
-  a copy made while Chrome was minimized reached the page, and a push made while
-  Chrome was minimized reached the system pasteboard.
-- **The browser's own chords reaching the guest.** In a regular tab Chrome reserves
-  ⌘W, ⌘Q, ⌘T, ⌘N, ⌘L, ⌘O and ⌘R, and the page never sees a keydown. Two ways out,
-  both confirmed: fullscreen plus a Keyboard Lock over that whole set —
-  `keyboardLock.ts` asks for `KeyW`, `KeyQ`, `KeyT`, `KeyN`, `KeyL`, `KeyO` and
-  `KeyR` — where they arrive as ordinary keydowns; and a **macOS installed-app
-  window**, where no keys are reserved and `preventDefault()` captures them
-  windowed. The client uses one always-on Command table and requests the fullscreen
-  lock automatically, with no mode or toggle. Held Esc always escapes the lock, by
-  design, and is the one chord a remote session can never have.
-
-Only those two. Everything else the app owns is a menu bar standing in front of
-this client's own controls, and a browser needs none of it — which is also why the
-app hides the floating menu rather than duplicating what it does.
-
-The shape of the work: a `window.postMessage` handshake the page uses to notice the
-extension and degrade without it, `clipboard-changed` from the extension calling the
-same `sendClipboard` path a focus push takes (the echo guards `lastFromRemoteRef` and
-`lastToRemoteRef` already cover it), and the reverse direction replacing what
-`mirrorRemoteClipboard` hands the app. The keyboard half wants the fuller Command
-chord table `macKeys.ts` already selects for the app, gated on the extension being
-present rather than on a build flag. Distribution is "Load unpacked" for personal
-use; anything managed goes through `ExtensionSettings` with
-`installation_mode: force_installed` and an `update_url` — a hosted update manifest
-beside the `.crx`, or the Web Store's. A policy has no way to pin a `.crx` sitting
-on the disk.
-
 ## Not planned
 
 ### The screen path's remaining queue depths

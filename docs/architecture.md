@@ -1000,8 +1000,8 @@ There are two ways for this page to be given the six Command chords a browser
 otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** (`appWindow.ts`:
 *Install page as app…*, or `--app=`) reserves no keys at all, so they arrive as
 ordinary keydowns and `preventDefault` is the whole of it; that is the configuration
-the client is meant to be run in, and the only one the companion extension runs in. A
-plain tab gets the same from full screen plus `navigator.keyboard.lock`
+the client is meant to be run in. A plain tab gets the same from full screen plus
+`navigator.keyboard.lock`
 (`keyboardLock.ts`), which also locks ⌘Q. That lock is an automatic browser enhancement,
 not a mode or menu control; it follows fullscreen because Chromium does not grant it to
 a windowed tab. The Command translation table itself is always complete and never

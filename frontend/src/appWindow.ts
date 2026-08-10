@@ -21,12 +21,9 @@
 // measurement that goes with this, including the ones no window of any kind is given:
 // ⌘Tab, ⌘Space, Alt+F4, the Windows key.
 //
-// The other reader is `companion.ts`. The companion extension runs *only* in an app
-// window, so this is what turns the seam on at all — see docs/companion-extension.md.
-//
 // Read as the three *app* display modes rather than as "not `browser`", because a plain
 // tab reports `display-mode: fullscreen` the moment it goes full screen. Fullscreen
-// does not turn a tab into the app window the companion extension is allowed to serve.
+// does not turn a tab into an app window or make the browser release its shortcuts.
 const APP_DISPLAY_MODES = [
   "standalone",
   "minimal-ui",
@@ -66,8 +63,7 @@ export interface AppWindowStore {
  * Both halves are load-bearing, and each fixes what the other would get wrong:
  *
  * - *Never goes back*, because full screen replaces the display mode with `fullscreen`.
- *   An app window would otherwise stop looking like one and take the companion seam
- *   down with it mid-session.
+ *   An app window would otherwise stop looking like one while it is full screen.
  * - *Latches*, rather than being answered once at module load, because **a tab can
  *   become an app window under a running document**. *Install page as app…* reparents
  *   the live tab into the new window instead of reloading it (Chromium's
@@ -155,8 +151,8 @@ const NO_WINDOW: AppWindowStore = {
  * The one store this page has, built on first use rather than at import.
  *
  * Lazily, because a module's import order is not the client's to arrange: this file is
- * pulled in by the chord table, the floating menu and the companion seam, and building
- * a store at import would bind it to whichever `window` existed at that moment. In a
+ * pulled in by the floating menu, and building a store at import would bind it to
+ * whichever `window` existed at that moment. In a
  * browser there is exactly one and it is already there; under a test runner sharing one
  * module registry, first *use* is the honest moment.
  */
