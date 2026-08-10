@@ -35,6 +35,14 @@ things a browser cannot do: ⌘Q and ⌘W reaching the guest, and a clipboard th
 keeps syncing while the window is unfocused. It is a released disk image, and
 [`docs/macos-viewer.md`](docs/macos-viewer.md) describes it.
 
+An installed desktop browser app has **Window → Size to _width_×_height_**. It
+uses [`window.resizeTo()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/resizeTo)
+to make the app's content area exactly the remote desktop's logical size; it
+resizes the local window and never scales or resizes the remote desktop. This is
+supported in installed Chrome and Edge desktop app windows and is best-effort in
+other browsers. Ordinary tabs cannot resize their containing browser window, and
+mobile browsers ignore the request.
+
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
 than re-investigating.
@@ -90,11 +98,12 @@ displays. Both Apple subtypes
 support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
 the window continuously drives High Performance's virtual display, using Apple's
 dynamic-resolution feature to replace its mode from client viewport reports.
-There is no client-side resize toggle or one-shot resize button. The descriptor's
-fixed 3840×2160 backing ceiling permits successive arbitrary sizes within that
-bound, and every fresh connection turns the Mac's Dynamic resolution setting back
-on. Standard `ard` still refuses resize, and the one/two-virtual-display control is
-not implemented.
+There is no client-side control for resizing the remote: no auto-resize toggle or
+one-shot remote-resize button. The local app-window sizing control described above
+does not change that policy. The descriptor's fixed 3840×2160 backing ceiling
+permits successive arbitrary sizes within that bound, and every fresh connection
+turns the Mac's Dynamic resolution setting back on. Standard `ard` still refuses
+resize, and the one/two-virtual-display control is not implemented.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 High Performance mode is **experimental** because it has not been widely tested,
