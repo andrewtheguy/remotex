@@ -235,7 +235,7 @@ password = "change-me"
 # vnc_password = "change-me"
 
 # A Mac uses its built-in Screen Sharing service through this same path, with no
-# companion software — say so with a subtype, and give it an *account* rather than
+# additional software — say so with a subtype, and give it an *account* rather than
 # the Screen Sharing password. Apple's DH authentication is the only way to tell a
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So both

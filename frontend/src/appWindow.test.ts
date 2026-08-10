@@ -1,5 +1,5 @@
-// Which windows count as app windows: the gate for the companion seam and the client
-// help that recommends installing a tab as an app.
+// Which windows count as app windows: the gate for client help that recommends
+// installing a tab as an app.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAppWindowStore, isAppWindow } from "./appWindow.ts";
@@ -65,8 +65,8 @@ test("a tab is not, in a window or full screen", () => {
   assert.equal(isAppWindow(inMode("browser")), false);
   // The trap this is written as an allow-list to avoid. A plain tab reports
   // `display-mode: fullscreen` the moment it goes full screen, but it has not become
-  // the app window the companion is allowed to serve. Read as "not browser", this
-  // would have said yes.
+  // an app window where the browser releases its shortcuts. Read as "not browser",
+  // this would have said yes.
   assert.equal(isAppWindow(inMode("fullscreen")), false);
 });
 
@@ -97,7 +97,7 @@ test("a tab that becomes an app window says so, without a reload", () => {
 test("an app window that goes full screen is still an app window", () => {
   // The other half, and the reason this latches rather than tracking. Full screen
   // replaces the display mode with `fullscreen`, and a window that stopped counting
-  // would take the companion seam down with it mid-session.
+  // would make the help row wrongly reappear mid-session.
   const installed = movableWindow("standalone");
   const store = createAppWindowStore(installed.match);
 

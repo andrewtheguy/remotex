@@ -133,9 +133,8 @@ export class ClipboardSynchronizer {
   }
 }
 
-// `TextEncoder`, not `Buffer.byteLength`: this class is shared with
-// `apps/companion`, whose offscreen document is a browser context with no `Buffer` in
-// it. Same answer, one fewer environment assumption.
+// `TextEncoder`, not `Buffer.byteLength`: same answer, one fewer environment
+// assumption.
 export function utf8Bytes(text: string): number {
   return new TextEncoder().encode(text).length;
 }

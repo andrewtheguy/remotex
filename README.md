@@ -33,9 +33,7 @@ There is one client, and it is the page a browser loads. **remotex.app** shows
 that same page in a macOS window with a gateway of its own, and adds the two
 things a browser cannot do: ⌘Q and ⌘W reaching the guest, and a clipboard that
 keeps syncing while the window is unfocused. It is a released disk image, and
-[`docs/macos-viewer.md`](docs/macos-viewer.md) describes it. Giving a *browser*
-those same two is a companion Chrome extension's to do, measured and written up
-in [`docs/roadmap.md`](docs/roadmap.md).
+[`docs/macos-viewer.md`](docs/macos-viewer.md) describes it.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
@@ -70,7 +68,7 @@ The installer verifies the release digest, installs versioned files under
 and uninstall.
 
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
-no companion software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac
+no additional software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac
 account's username and password; that selects Apple Remote Desktop authentication
 so the connection lands at the user's own screen rather than a login-window
 session.

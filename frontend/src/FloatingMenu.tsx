@@ -181,9 +181,7 @@ function useAppWindow(): boolean {
 ///
 /// A tab is the one configuration where the browser keeps chords back from the remote,
 /// and the fix is a menu item rather than anything this client can do — so saying so is
-/// the whole of what it can offer. It is also the only place the companion extension
-/// runs (see docs/companion-extension.md), which is the second reason a tab is worth
-/// this line and an app window is worth none.
+/// the whole of what it can offer.
 function AppWindowHelpRow() {
   // Subscribed, not read: the row is telling the user to install this page as an app,
   // and doing so must make the row itself go away without a reload.

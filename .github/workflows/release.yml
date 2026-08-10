@@ -138,35 +138,6 @@ jobs:
   # the tarball this workflow already published — the same binary a tarball user
   # runs, rather than a second build of it that could differ — and the client comes
   # from the one `frontend-dist` every other job uses.
-  # The Chrome extension, which needs nothing this workflow builds — no gateway, no
-  # frontend bundle, no matrix. It runs here for a reason worth more than the zip:
-  # `bun run check` type-checks this tree against `frontend/src/companion.contract.ts`
-  # and `apps/viewer/src/main/geometry.ts` on a runner where neither of those trees has
-  # its `node_modules` installed. That is exactly the breakage the contract file's
-  # no-React rule exists to prevent, and nothing else in CI would catch it.
-  companion:
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Check, test and pack the companion
-        run: |
-          cd apps/companion
-          bun install --frozen-lockfile
-          bun run check
-          bun test tests
-          bun run pack
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: remotex-companion
-          path: apps/companion/dist-crx/*.zip
-          if-no-files-found: error
-
   mac-viewer:
     needs: [prepare, frontend, build]
     runs-on: macos-latest
@@ -324,7 +295,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [prepare, build, mac-viewer, companion]
+    needs: [prepare, build, mac-viewer]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -342,10 +313,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .dmg is remotex.app and the .zip is the Chrome extension.
+        # release assets. The .dmg is remotex.app.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
-            artifacts/*.tar.gz artifacts/*.dmg artifacts/*.zip --clobber
+            artifacts/*.tar.gz artifacts/*.dmg --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:
