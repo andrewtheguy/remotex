@@ -10,6 +10,7 @@ import {
 import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
+import { desktopViewportSize, sizeWindowToDesktop } from "./desktopWindow.ts";
 import {
   type AudioRow,
   type AudioStreamInfo,
@@ -22,7 +23,11 @@ import type {
   RemoteClipboard,
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
-import { densityLabel, type RemoteSize } from "./useRemoteDesktop.ts";
+import {
+  CAN_PINCH_ZOOM,
+  densityLabel,
+  type RemoteSize,
+} from "./useRemoteDesktop.ts";
 
 // The floating chrome — a draggable ☰ button that toggles a toolbar drawer. The
 // drawer carries this project's controls (browser-swallowed keys, modifier taps,
@@ -304,6 +309,41 @@ function DisplaySection({
         title="Choose which of the remote's displays to view"
       >
         {open ? "Hide displays" : (active?.label ?? "Display")}
+      </button>
+    </div>
+  );
+}
+
+// Resize the browser frame, not the desktop: the resulting content viewport is
+// exactly the remote's logical size, leaving applyCanvasCss at its invariant 100%.
+// App windows only — a tab's browser frame is not the page's to resize — and not on
+// touch clients, whose window cannot be resized and whose presentation is the one
+// deliberate fit-to-width exception.
+function WindowSection({
+  size,
+  onSize,
+}: {
+  size: RemoteSize | null;
+  onSize: () => void;
+}) {
+  const inAppWindow = useAppWindow();
+  if (!inAppWindow || CAN_PINCH_ZOOM) {
+    return null;
+  }
+  const viewport = size ? desktopViewportSize(size, size.scale) : null;
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Window</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={onSize}
+        disabled={!viewport}
+        title="Resize this app window so its content area exactly matches the remote desktop"
+      >
+        {viewport
+          ? `Size to ${viewport.w}×${viewport.h}`
+          : "Waiting for desktop size"}
       </button>
     </div>
   );
@@ -810,6 +850,18 @@ export default function FloatingMenu({
     setOpen(false);
   }, [togglePanel]);
 
+  // A button gesture in Chrome's app window requests the remote's point-size
+  // viewport plus whatever frame Chrome and this OS currently put around it.
+  // Close the drawer first so a smaller requested window does not leave its menu
+  // covering the desktop it was just sized to show.
+  const onSizeWindow = useCallback(() => {
+    if (!size) {
+      return;
+    }
+    setOpen(false);
+    sizeWindowToDesktop(size, size.scale);
+  }, [size]);
+
   // Same deal for the clipboard panel, except it cannot open straight away: it
   // fetches first and waits for the answer, so it appears already showing what
   // the remote holds right now. Without that it would open on whatever arrived
@@ -923,6 +975,8 @@ export default function FloatingMenu({
 
       {open && !hidden && !chromeless && (
         <div className="toolbar" style={toolbarStyle}>
+          <WindowSection size={size} onSize={onSizeWindow} />
+
           <DisplaySection
             displays={displays}
             activeDisplayId={activeDisplayId}
