@@ -109,12 +109,18 @@ cp "$release/bin/remotex" "$payload/usr/bin/remotex"
 cp "$release/share/doc/remotex/remotex.toml.example" "$payload/usr/share/doc/remotex/remotex.toml.example"
 cp -R "$release/share/remotex/web" "$payload/usr/share/remotex/web"
 
+# '-' separates the Debian revision, so a SemVer prerelease has to become '~',
+# which sorts before everything: '0.0.1-rc.1-1' would otherwise sort *after* the
+# '0.0.1-1' release. '+' is left alone — it is legal in a Debian version and
+# already sorts after the plain release, which is what build metadata means.
+deb_version="${version//-/~}"
+
 deb_root="$stage/deb-root"
 cp -R "$payload" "$deb_root"
 mkdir -p "$deb_root/DEBIAN"
 {
   echo "Package: remotex"
-  echo "Version: ${version}-1"
+  echo "Version: ${deb_version}-1"
   echo "Architecture: $deb_arch"
   echo "Maintainer: andrewtheguy <andrewchen5678@gmail.com>"
   echo "Section: net"

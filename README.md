@@ -60,7 +60,7 @@ sudo apt install ./remotex-linux-amd64.deb
 ```
 
 Fedora, RHEL, or another RPM-based distribution, on x86-64 (use the `arm64`
-asset on arm64):
+asset on arm64, and your distribution's own RPM frontend in place of `dnf`):
 
 ```sh
 curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-linux-amd64.rpm
