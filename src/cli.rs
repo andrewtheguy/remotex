@@ -43,6 +43,7 @@ pub enum Commands {
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
     /// is how it dies with its manager.
+    #[cfg(feature = "embedded-gateway")]
     ServeEmbedded {
         /// The managed instance directory. Nothing outside it is read.
         #[arg(long)]
@@ -64,6 +65,7 @@ pub enum Commands {
         config: Option<PathBuf>,
         /// Apply managed-instance rules instead of a served gateway's: no
         /// [server] block, and no targets configured yet is not an error
+        #[cfg(feature = "embedded-gateway")]
         #[arg(long)]
         embedded: bool,
     },
@@ -132,6 +134,7 @@ mod tests {
     /// The managed-instance subcommand takes the two paths only its launcher knows
     /// — the instance it owns and the SPA it selected — and nothing else: the port
     /// and the secret are the gateway's to decide.
+    #[cfg(feature = "embedded-gateway")]
     #[test]
     fn serve_embedded_takes_the_two_paths_the_launcher_knows() {
         let cli = Cli::try_parse_from([
@@ -181,6 +184,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "embedded-gateway")]
     #[test]
     fn check_config_reads_stdin_by_default_and_takes_an_audience() {
         let cli = Cli::try_parse_from(["remotex", "check-config"]).unwrap();
@@ -198,6 +202,21 @@ mod tests {
         };
         assert_eq!(config.as_deref(), Some(std::path::Path::new("/i/remotex.toml")));
         assert!(embedded);
+    }
+
+    #[cfg(not(feature = "embedded-gateway"))]
+    #[test]
+    fn embedded_cli_is_absent_without_the_feature() {
+        assert!(Cli::try_parse_from(["remotex", "serve-embedded"]).is_err());
+        assert!(
+            Cli::try_parse_from(["remotex", "check-config", "--embedded"]).is_err()
+        );
+
+        let cli = Cli::try_parse_from(["remotex", "check-config"]).unwrap();
+        let Commands::CheckConfig { config } = cli.command else {
+            panic!("expected the check-config subcommand");
+        };
+        assert!(config.is_none());
     }
 
     #[test]

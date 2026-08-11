@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 use tower::service_fn;
 use tower_http::services::ServeDir;
 
+#[cfg(feature = "embedded-gateway")]
+use crate::auth::GatewayAuth;
 use crate::{
-    auth::{self, AuthSessions, GatewayAuth},
+    auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
     session::SessionManager,
@@ -129,6 +131,7 @@ pub(crate) fn router_with_sessions(
     // `status` is the exception, and registering it either way is the point: the
     // page asks the same question on both, and there it answers yes because the
     // app already put the launch token in the cookie store.
+    #[cfg(feature = "embedded-gateway")]
     let auth_routes = match config.auth {
         GatewayAuth::Login(_) => Router::new()
             .route("/auth/login", post(login_handler))
@@ -138,6 +141,11 @@ pub(crate) fn router_with_sessions(
             .route("/auth/logout", post(no_login_handler)),
     }
     .route("/auth/status", get(status_handler));
+    #[cfg(not(feature = "embedded-gateway"))]
+    let auth_routes = Router::new()
+        .route("/auth/login", post(login_handler))
+        .route("/auth/logout", post(logout_handler))
+        .route("/auth/status", get(status_handler));
 
     let state = AppState {
         config,
@@ -322,11 +330,9 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(presented) = auth::token_from_headers(headers) else {
         return false;
     };
-    match &state.config.auth {
-        // Validation also refreshes the session's sliding expiry.
-        GatewayAuth::Login(_) => state.auth.validate(&presented),
-        GatewayAuth::Token(expected) => expected.matches(&presented),
-    }
+    // Login validation also refreshes the session's sliding expiry. A managed
+    // gateway instead compares the launch token inside `GatewayAuth`.
+    state.config.auth.authenticates(&state.auth, &presented)
 }
 
 /// `Set-Cookie` attributes for the session cookie. `Secure` cookies set over
@@ -363,7 +369,7 @@ async fn login_handler(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let GatewayAuth::Login(site_passwd) = &state.config.auth else {
+    let Some(site_passwd) = state.config.auth.login() else {
         // Unreachable: `router` registers `no_login_handler` at this path on a
         // token gateway. Answered rather than asserted, because the shape that
         // would reach here — a login route on a gateway with no credential — must
@@ -456,6 +462,7 @@ async fn logo_handler(State(state): State<AppState>) -> ApiResult<impl IntoRespo
 /// for a routing mistake; a 403 says the request was understood and is not allowed
 /// here — which is the truth, and it is the same answer whatever credentials are
 /// offered, since an embedded gateway holds none to check them against.
+#[cfg(feature = "embedded-gateway")]
 async fn no_login_handler() -> AppError {
     AppError::Forbidden
 }

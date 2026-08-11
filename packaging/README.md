@@ -1,9 +1,10 @@
 # Packaging
 
 Native packages are the release install contract. Linux ships both `.deb` and
-`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the input for
-container and viewer builds and the payload used by the unsupported-platform
-quick installer.
+`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout and
+frontend input for container builds and the payload used by the
+unsupported-platform quick installer. Containers replace its native binary with
+a build that excludes the `embedded-gateway` default feature.
 
 ## Native layouts
 
@@ -38,6 +39,7 @@ That keeps both upgrades and removals away from stored credentials.
 |---|---|
 | `build-tarball.sh` | build the gateway and assemble the common release payload |
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
+| `build-container-binary.sh` | build and verify a gateway with all default features disabled |
 | `install.sh` | install the tarball fallback under a relocatable prefix |
 | `uninstall.sh` | remove that fallback installation or one fallback version |
 | `Dockerfile` | build an image from an extracted release tarball |
@@ -74,6 +76,9 @@ builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
 arm64. The release is published only after the packages and common artifacts
 succeed.
 
-Container images are assembled from the Linux tarballs. Those tarballs therefore
-remain build plumbing and fallback payloads even though native packages are what
-users are directed to install.
+Container images take their layout and frontend from the Linux tarballs, then
+replace `bin/remotex` with the separately built container gateway. The build
+script, release smoke test, and Dockerfile all reject a binary that exposes
+`serve-embedded` or `check-config --embedded`. The tarballs therefore remain
+build plumbing and fallback payloads even though native packages are what users
+are directed to install.

@@ -132,11 +132,23 @@ jobs:
           SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
           bash packaging/build-native-packages.sh
 
+      - name: Build feature-minimal container gateway (${{ matrix.target-note }})
+        if: runner.os == 'Linux'
+        run: bash packaging/build-container-binary.sh "tmp/container-bin/remotex-container-${{ matrix.target-note }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: remotex-${{ matrix.target-note }}
           path: dist/*
+          if-no-files-found: error
+
+      - name: Upload container gateway
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: remotex-container-${{ matrix.target-note }}
+          path: tmp/container-bin/remotex-container-${{ matrix.target-note }}
           if-no-files-found: error
 
   release:
@@ -172,9 +184,10 @@ jobs:
 
   # Container images, built only once the release is published so a pushed image
   # tag always corresponds to a real release. Nothing is compiled here: each
-  # arch's image is the published tarball for that arch unpacked into the build
-  # context, so it carries the exact binary users download plus the one
-  # platform-agnostic frontend bundle from the `frontend` job.
+  # arch's image takes the release layout and frontend from its tarball, then
+  # replaces the native binary with the feature-minimal container binary built
+  # on the same pinned runner from the same commit. In particular, the image can
+  # never expose the managed-instance gateway surface.
   #
   # Each arch builds on its own native runner — no QEMU, no cross-compilation —
   # and plain `docker` (rather than buildx) because there is nothing to
@@ -207,6 +220,12 @@ jobs:
           name: remotex-${{ matrix.target-note }}
           path: tmp/tarball
 
+      - name: Download the feature-minimal gateway (${{ matrix.target-note }})
+        uses: actions/download-artifact@v4
+        with:
+          name: remotex-container-${{ matrix.target-note }}
+          path: tmp/container-bin
+
       - name: Unpack the tarball into the build context
         run: |
           mkdir -p tmp/docker-context
@@ -214,6 +233,9 @@ jobs:
           # context root holds bin/ and share/ as packaging/Dockerfile expects.
           tar -xzf "tmp/tarball/remotex-${{ needs.prepare.outputs.version }}-${{ matrix.target-note }}.tar.gz" \
             -C tmp/docker-context --strip-components=1
+          cp "tmp/container-bin/remotex-container-${{ matrix.target-note }}" \
+            tmp/docker-context/bin/remotex
+          chmod +x tmp/docker-context/bin/remotex
           ls -la tmp/docker-context tmp/docker-context/bin
 
       - uses: docker/login-action@v3
@@ -241,6 +263,20 @@ jobs:
             echo "::error::expected 'remotex ${{ needs.prepare.outputs.version }}'"
             exit 1
           }
+          help=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" --help)
+          case "$help" in
+            *serve-embedded*)
+              echo "::error::container image exposes serve-embedded"
+              exit 1
+              ;;
+          esac
+          help=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" check-config --help)
+          case "$help" in
+            *--embedded*)
+              echo "::error::container image exposes check-config --embedded"
+              exit 1
+              ;;
+          esac
           # The frontend has to be where the server looks for it by default.
           docker run --rm --entrypoint sh "${GHCR_IMAGE}:${IMAGE_TAG}" \
             -c 'test -f /opt/remotex/current/share/remotex/web/index.html'

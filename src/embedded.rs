@@ -32,7 +32,7 @@
 use std::io::Read as _;
 use std::io::Write as _;
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use log::info;
@@ -246,38 +246,13 @@ pub async fn parent_closed() {
 /// what it accepts is by construction what the gateway accepts. A second parser in
 /// a manager would be a second opinion, and the one that mattered would be whichever
 /// ran last.
-pub fn check(text: &str, audience: Audience) -> anyhow::Result<()> {
-    let file = ConfigFile::parse_with(text, audience)?;
+pub fn check(text: &str) -> anyhow::Result<()> {
+    let file = ConfigFile::parse_with(text, Audience::Embedded)?;
     // Parsing alone would accept a file the gateway then refuses to start on, so
-    // the check goes all the way through resolution — for the served audience that
-    // is where the login credential is validated.
-    match audience {
-        // The web root is the launcher's to name and is not in the file, so checking
-        // text says nothing about it: any path resolves, and whether it holds an
-        // SPA is a question about the installation rather than about this config.
-        Audience::Embedded => file
-            .resolve_embedded(EmbeddedToken::generate(), PathBuf::new())
-            .map(|_| ()),
-        Audience::Served => file.resolve().map(|_| ()),
-    }
-}
-
-/// Read config text from a file, or from stdin when no path is given.
-///
-/// Stdin accepts text from an editor that has not been saved, so there is no file
-/// to name yet.
-pub fn read_candidate(path: Option<&Path>) -> anyhow::Result<String> {
-    match path {
-        Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display())),
-        None => {
-            let mut text = String::new();
-            std::io::stdin()
-                .read_to_string(&mut text)
-                .context("failed to read the config from stdin")?;
-            Ok(text)
-        }
-    }
+    // the check goes all the way through resolution. The web root is the
+    // launcher's to name and is not in the file, so any path is sufficient here.
+    file.resolve_embedded(EmbeddedToken::generate(), PathBuf::new())
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -314,8 +289,8 @@ mod tests {
     /// new instance rather than an error.
     #[test]
     fn the_embedded_audience_accepts_a_config_with_nothing_in_it() {
-        check("", Audience::Embedded).expect("a first launch has no targets yet");
-        let served = check("", Audience::Served).expect_err("a served gateway needs a target");
+        check("").expect("a first launch has no targets yet");
+        let served = crate::config::check("").expect_err("a served gateway needs a target");
         assert!(format!("{served:#}").contains("[[targets]]"), "{served:#}");
     }
 
@@ -324,7 +299,7 @@ mod tests {
     #[test]
     fn the_embedded_audience_refuses_a_server_block() {
         for text in ["[server]\n", "[server]\nlisten = \"0.0.0.0:1234\"\n"] {
-            let error = check(text, Audience::Embedded).expect_err("[server] is the launcher's");
+            let error = check(text).expect_err("[server] is the launcher's");
             let message = format!("{error:#}");
             assert!(message.contains("[server]"), "{message}");
             assert!(message.contains("[[targets]]"), "it must say what does belong: {message}");
@@ -335,7 +310,7 @@ mod tests {
     /// config has no `[server]` block a name could have lived in.
     #[test]
     fn branding_is_one_top_level_table_for_both_audiences() {
-        check("[branding]\ntext = \"work laptop\"\n", Audience::Embedded)
+        check("[branding]\ntext = \"work laptop\"\n")
             .expect("the instance names itself with the top-level table");
 
         let file = ConfigFile::parse_with(
@@ -353,13 +328,13 @@ mod tests {
         // There is exactly one place to write it, so the block it used to live in
         // refuses it — `deny_unknown_fields` and nothing else, which is the whole of
         // the migration this project offers.
-        let error = check("[server]\nbranding = \"x\"\n", Audience::Served)
+        let error = crate::config::check("[server]\nbranding = \"x\"\n")
             .expect_err("[server].branding is gone");
         assert!(format!("{error:#}").contains("branding"), "{error:#}");
 
         // And the old top-level string spelling fails to parse: a table is not a
         // string.
-        let error = check("branding = \"x\"\n", Audience::Embedded)
+        let error = check("branding = \"x\"\n")
             .expect_err("the string spelling is gone");
         assert!(format!("{error:#}").contains("branding"), "{error:#}");
     }
@@ -368,8 +343,10 @@ mod tests {
     #[test]
     fn target_rules_do_not_depend_on_the_audience() {
         let text = "[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"\"\n";
-        for audience in [Audience::Embedded, Audience::Served] {
-            let error = check(text, audience).expect_err("an empty host is an empty host");
+        for error in [
+            check(text).expect_err("an empty host is an empty host"),
+            crate::config::check(text).expect_err("an empty host is an empty host"),
+        ] {
             assert!(format!("{error:#}").contains("empty host"), "{error:#}");
         }
     }
@@ -380,7 +357,7 @@ mod tests {
     #[test]
     fn checking_goes_as_far_as_starting_would() {
         let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nhost = \"::1\"\naudio = true\n";
-        let error = check(text, Audience::Embedded).expect_err("audio is rejected on vnc");
+        let error = check(text).expect_err("audio is rejected on vnc");
         assert!(format!("{error:#}").contains("audio"), "{error:#}");
     }
 }

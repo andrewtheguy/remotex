@@ -20,6 +20,10 @@
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
 - Keep e2e tests under `tests/`. Dummy RDP/VNC servers may use Docker or Podman.
+- The managed embedded gateway is the default `embedded-gateway` Cargo feature
+  for native builds. Container binaries must be built through
+  `packaging/build-container-binary.sh`, which disables default features; never
+  put `serve-embedded` or `check-config --embedded` in an image.
 - Multi-session support is permanently out of scope. Each gateway has one active
   session. A force-claim evicts the current holder (`src/session.rs`) through the
   clients' **Take over** flow. Reconnects, target switches, and browser takeovers

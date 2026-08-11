@@ -5,12 +5,15 @@
 //! half is identical for both, because a target is a target; `[server]` belongs to
 //! the one a browser reaches.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::Deserialize;
 
-use crate::auth::{EmbeddedToken, GatewayAuth, SitePasswd};
+#[cfg(feature = "embedded-gateway")]
+use crate::auth::EmbeddedToken;
+use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
 
 /// RDP security negotiation mode.
@@ -981,6 +984,7 @@ pub enum Audience {
     /// `remotex serve`: a browser's gateway.
     Served,
     /// `remotex serve-embedded`: a managed local instance.
+    #[cfg(feature = "embedded-gateway")]
     Embedded,
 }
 
@@ -1059,6 +1063,7 @@ impl ConfigFile {
                 target.port = target.protocol.default_port();
             }
         }
+        #[cfg(feature = "embedded-gateway")]
         if audience == Audience::Embedded {
             // Refused rather than ignored, and named as a whole block rather than
             // key by key: every one of them is a decision the launcher has already
@@ -1076,6 +1081,14 @@ impl ConfigFile {
                  [[targets]] belong here"
             );
         } else {
+            anyhow::ensure!(
+                !config.targets.is_empty(),
+                "config has no [[targets]] — at least one target profile is required"
+            );
+        }
+        #[cfg(not(feature = "embedded-gateway"))]
+        {
+            let _ = audience;
             anyhow::ensure!(
                 !config.targets.is_empty(),
                 "config has no [[targets]] — at least one target profile is required"
@@ -1484,6 +1497,7 @@ impl ConfigFile {
     /// the way in. `[branding]` is the one thing such a config *may* say about the
     /// gateway itself: it names the instance, and multiple local instances are
     /// easier to tell apart if they can be called different things.
+    #[cfg(feature = "embedded-gateway")]
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
@@ -1685,6 +1699,32 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
     Ok((config, path))
 }
 
+/// Validate candidate config text the way a deployed browser gateway reads it.
+///
+/// This lives in the ordinary config module so `check-config` remains useful in
+/// feature-minimal builds without pulling in the managed-instance substrate.
+pub fn check(text: &str) -> anyhow::Result<()> {
+    ConfigFile::parse(text)?.resolve().map(|_| ())
+}
+
+/// Read config text from a file, or from stdin when no path is given.
+///
+/// Stdin accepts text from an editor that has not been saved, so there is no file
+/// to name yet.
+pub fn read_candidate(path: Option<&Path>) -> anyhow::Result<String> {
+    match path {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display())),
+        None => {
+            let mut text = String::new();
+            std::io::stdin()
+                .read_to_string(&mut text)
+                .context("failed to read the config from stdin")?;
+            Ok(text)
+        }
+    }
+}
+
 
 /// Which config file to read: the one named, or the installed one.
 fn config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
@@ -1853,9 +1893,7 @@ mod tests {
     fn minimal_config_gets_defaults() {
         let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
-        let GatewayAuth::Login(site_passwd) = &config.auth else {
-            panic!("a served gateway logs in");
-        };
+        let site_passwd = config.auth.login().expect("a served gateway logs in");
         assert_eq!(site_passwd.username(), "admin");
         assert_eq!(config.targets.len(), 1);
         let t = &config.targets[0];

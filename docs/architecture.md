@@ -1038,6 +1038,13 @@ only `<instance-dir>/remotex.toml`, serves the SPA from the supplied web root, a
 stops when its parent's stdin closes (`src/embedded.rs`, `Audience::Embedded`).
 The token is accepted in the same `remotex_session` cookie a login would set.
 
+The entire substrate is behind the default `embedded-gateway` Cargo feature:
+the module, token authentication, config audience, CLI command, and its
+`check-config --embedded` validation mode compile out together. Native packages
+retain it for the future manager. Container artifacts are built separately with
+`--no-default-features`; both their build script and the Dockerfile reject a
+binary that exposes either embedded CLI surface.
+
 There is no separate native client or launcher in this repository. A manager must
 provide the browser profile, install the launch token, and open the gateway's own
 loopback origin; the client itself remains the same SPA.

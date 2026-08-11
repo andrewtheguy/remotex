@@ -23,26 +23,32 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve_with(listen.as_deref())?;
             serve(config).await?;
         }
+        #[cfg(feature = "embedded-gateway")]
         Commands::ServeEmbedded {
             instance_dir,
             web_root,
         } => {
             serve_embedded(&remotex::embedded::Instance::new(instance_dir), web_root).await?;
         }
-        Commands::CheckConfig { config, embedded } => {
-            let audience = if embedded {
-                remotex::config::Audience::Embedded
-            } else {
-                remotex::config::Audience::Served
-            };
+        Commands::CheckConfig {
+            config,
+            #[cfg(feature = "embedded-gateway")]
+            embedded,
+        } => {
             // The message is the product here: an instance manager can run this for
             // its configuration editor and show stderr to somebody about to fix the
             // file. `{:#}` keeps the whole `anyhow` chain, which
             // is what names the target the complaint is about.
-            if let Err(e) = remotex::embedded::check(
-                &remotex::embedded::read_candidate(config.as_deref())?,
-                audience,
-            ) {
+            let text = remotex::config::read_candidate(config.as_deref())?;
+            #[cfg(feature = "embedded-gateway")]
+            let result = if embedded {
+                remotex::embedded::check(&text)
+            } else {
+                remotex::config::check(&text)
+            };
+            #[cfg(not(feature = "embedded-gateway"))]
+            let result = remotex::config::check(&text);
+            if let Err(e) = result {
                 eprintln!("{e:#}");
                 std::process::exit(1);
             }
@@ -80,6 +86,7 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// end of our stdin closing, which happens however the parent ended — see
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
+#[cfg(feature = "embedded-gateway")]
 async fn serve_embedded(
     instance: &remotex::embedded::Instance,
     web_root: std::path::PathBuf,
@@ -185,7 +192,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             target.name, target.host, target.port, target.protocol
         );
     }
-    if let remotex::auth::GatewayAuth::Login(site_passwd) = &config.auth {
+    if let Some(site_passwd) = config.auth.login() {
         info!("web login: user {:?}", site_passwd.username());
     }
 
