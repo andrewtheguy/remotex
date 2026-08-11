@@ -100,6 +100,29 @@ See [`docs/install.md`](docs/install.md) for package upgrades, removal, macOS
 config setup, and the quick-install fallback for Linux distributions that
 support neither `.deb` nor `.rpm`.
 
+## Local instances
+
+Native installs also include a multi-instance terminal control plane:
+
+```sh
+remotex tui --port 52380
+```
+
+It listens only on both loopbacks. Open <http://remotex.localhost:52380>; each
+running instance has its own origin at
+`http://<instance>.remotex.localhost:52380`. Press `n` to create an instance,
+`e` to edit its `remotex.toml`, Enter to start or stop it, `r` to restart it,
+and `q` to stop every child and quit.
+
+Each immediate subdirectory is one instance. The default root is
+`~/.local/share/remotex/instances` on Linux (or
+`$XDG_DATA_HOME/remotex/instances`) and
+`~/Library/Application Support/remotex/instances` on macOS; pass
+`--instances-dir` to choose another. Its config uses the same `[branding]` and
+`[[targets]]` format as the former native viewer and deliberately has no
+`[server]` block. The supervisor owns the shared TCP port and proxies each
+subdomain to that child's private `<instance>/gateway.sock`.
+
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
 no additional software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac
 account's username and password; that selects Apple Remote Desktop authentication

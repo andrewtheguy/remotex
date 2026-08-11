@@ -24,6 +24,22 @@ async fn main() -> anyhow::Result<()> {
             serve(config).await?;
         }
         #[cfg(feature = "embedded-gateway")]
+        Commands::Tui {
+            port,
+            instances_dir,
+            web_root,
+        } => {
+            anyhow::ensure!(port != 0, "--port must be between 1 and 65535");
+            remotex::embedded::run_tui(remotex::embedded::TuiOptions {
+                port,
+                instances_dir: instances_dir
+                    .map(Ok)
+                    .unwrap_or_else(remotex::embedded::default_instances_dir)?,
+                web_root: web_root.unwrap_or_else(remotex::config::default_static_dir),
+            })
+            .await?;
+        }
+        #[cfg(feature = "embedded-gateway")]
         Commands::ServeEmbedded {
             instance_dir,
             web_root,

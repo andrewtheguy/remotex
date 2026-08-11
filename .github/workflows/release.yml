@@ -265,6 +265,10 @@ jobs:
           }
           help=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" --help)
           case "$help" in
+            *"  tui "*)
+              echo "::error::container image exposes tui"
+              exit 1
+              ;;
             *serve-embedded*)
               echo "::error::container image exposes serve-embedded"
               exit 1

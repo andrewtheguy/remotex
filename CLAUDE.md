@@ -20,10 +20,13 @@
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
 - Keep e2e tests under `tests/`. Dummy RDP/VNC servers may use Docker or Podman.
-- The managed embedded gateway is the default `embedded-gateway` Cargo feature
-  for native builds. Container binaries must be built through
+- The native `embedded-gateway` feature is the `remotex tui` multi-instance
+  control plane plus its hidden `serve-embedded` workers. The master alone owns
+  `remotex.localhost:<port>` and routes instance subdomains to private
+  `<instance>/gateway.sock` sockets; workers remain tied to its stdin liveness
+  pipes. Container binaries must be built through
   `packaging/build-container-binary.sh`, which disables default features; never
-  put `serve-embedded` or `check-config --embedded` in an image.
+  put `tui`, `serve-embedded`, or `check-config --embedded` in an image.
 - Multi-session support is permanently out of scope. Each gateway has one active
   session. A force-claim evicts the current holder (`src/session.rs`) through the
   clients' **Take over** flow. Reconnects, target switches, and browser takeovers

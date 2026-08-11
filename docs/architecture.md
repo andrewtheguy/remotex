@@ -1029,25 +1029,43 @@ Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
 
-### Embedded gateway substrate
+### Local multi-instance control plane
 
-`remotex serve-embedded --instance-dir <dir> --web-root <dir>` is the low-level
-process interface for a future cross-platform instance manager. It binds
-`127.0.0.1:0`, prints one JSON line — `{"port","token"}` — after binding, reads
-only `<instance-dir>/remotex.toml`, serves the SPA from the supplied web root, and
-stops when its parent's stdin closes (`src/embedded.rs`, `Audience::Embedded`).
-The token is accepted in the same `remotex_session` cookie a login would set.
+`remotex tui --port <port>` is the native local control plane. It discovers one
+instance per immediate subdirectory, creates and edits the same serverless
+`remotex.toml` format the former Electron viewer used, and starts, stops or
+restarts each gateway from its own list. `remotex.localhost:<port>` is a landing
+page; `<instance>.remotex.localhost:<port>` is that instance's browser origin.
+
+```text
+browser: <instance>.remotex.localhost:<port>
+                    │ Host-routed HTTP and WebSockets
+                    ▼
+             TUI master process
+                    │ <instance>/gateway.sock
+                    ▼
+       hidden serve-embedded subprocess
+```
+
+The master is the only TCP listener. Each hidden worker binds
+`<instance>/gateway.sock` at mode `0600`, prints one JSON readiness line —
+`{"socket","token"}` — after binding, reads only that instance's
+`remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
+`Audience::Embedded`). The master seeds the token as a host-only HttpOnly
+`remotex_session` cookie before proxying the browser to the child. Raw connection
+proxying preserves both ordinary HTTP and WebSocket upgrades without another
+gateway protocol implementation.
 
 The entire substrate is behind the default `embedded-gateway` Cargo feature:
-the module, token authentication, config audience, CLI command, and its
+the module, token authentication, config audience, CLI commands, and their
 `check-config --embedded` validation mode compile out together. Native packages
-retain it for the future manager. Container artifacts are built separately with
-`--no-default-features`; both their build script and the Dockerfile reject a
-binary that exposes either embedded CLI surface.
+retain it. Container artifacts are built separately with
+`--no-default-features`; the build script and Dockerfile reject a
+binary that exposes any embedded CLI surface.
 
-There is no separate native client or launcher in this repository. A manager must
-provide the browser profile, install the launch token, and open the gateway's own
-loopback origin; the client itself remains the same SPA.
+There is still no separate native client: every instance is the same SPA loaded
+by Chrome or Edge from its subdomain. The TUI is process and configuration
+control, not another remote-desktop implementation.
 
 ## Configuration and testing
 

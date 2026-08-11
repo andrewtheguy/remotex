@@ -32,8 +32,8 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     /// Live auth sessions behind the login cookie. Only a
     /// [`GatewayAuth::Login`] gateway mints or validates one — an embedded
-    /// gateway's client carries the launch token in that same cookie and there is
-    /// no session to look up, so this stays empty there.
+    /// gateway's client carries the launch token the control plane seeded in that
+    /// same cookie and there is no session to look up, so this stays empty there.
     pub auth: Arc<AuthSessions>,
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn router_with_sessions(
     //
     // `status` is the exception, and registering it either way is the point: the
     // page asks the same question on both, and there it answers yes because the
-    // app already put the launch token in the cookie store.
+    // control plane already seeded the launch token on the instance origin.
     #[cfg(feature = "embedded-gateway")]
     let auth_routes = match config.auth {
         GatewayAuth::Login(_) => Router::new()
@@ -476,8 +476,8 @@ struct StatusResponse {
 /// between the login screen and the desktop.
 ///
 /// This route exists on an embedded gateway too, unlike the two beside it: the
-/// same SPA runs there and asks the same question first. Its launcher is
-/// responsible for putting the launch token in the browser's cookie store.
+/// same SPA runs there and asks the same question first. Its control plane seeds
+/// the launch token as an HttpOnly cookie before proxying the first request.
 async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<StatusResponse> {
     Json(StatusResponse {
         authenticated: authenticate(&state, &headers),

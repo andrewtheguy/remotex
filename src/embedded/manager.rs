@@ -1,0 +1,1225 @@
+//! The native multi-instance control plane.
+//!
+//! One TUI owns one public loopback port and one subprocess per running instance.
+//! The subprocesses keep their Unix sockets private; this process routes raw
+//! HTTP connections by `Host`, so ordinary requests and WebSocket upgrades follow
+//! exactly the same path without reimplementing either protocol.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Context as _;
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::terminal::{
+    self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::{execute, queue};
+use futures_util::StreamExt as _;
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::process::{Child, Command};
+use tokio::sync::RwLock;
+
+use super::Handshake;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const STOP_GRACE: Duration = Duration::from_millis(1500);
+const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REQUEST_HEAD: usize = 64 * 1024;
+const MASTER_HOST: &str = "remotex.localhost";
+
+/// A first launch's complete instance config: no server block and no pretend
+/// target. The TUI creates this atomically before adding the instance to its list.
+pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
+#
+# There is no [server] block. The TUI control plane owns the shared loopback
+# listener, this instance's subdomain, its private Unix socket, and its launch
+# token. Only [branding] and [[targets]] belong here.
+
+# [branding]
+# text = "remotex"
+# logo = "/path/to/logo.png"
+
+# [[targets]]
+# name = "work"
+# protocol = "rdp"
+# host = "192.168.1.20"
+# username = "andrew"
+# password = "…"
+# domain = "CORP"
+# resize = true
+# clipboard = true
+# audio = true
+
+# [[targets]]
+# name = "pi"
+# protocol = "vnc"
+# host = "192.168.1.30"
+# vnc_password = "…"
+"#;
+
+/// Inputs resolved by the CLI before terminal state is changed.
+#[derive(Clone, Debug)]
+pub struct TuiOptions {
+    pub port: u16,
+    pub instances_dir: PathBuf,
+    pub web_root: PathBuf,
+}
+
+/// The platform's private application-data directory for local instances.
+pub fn default_instances_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").context("HOME is not set; pass --instances-dir")?;
+        Ok(PathBuf::from(home).join("Library/Application Support/remotex/instances"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(data).join("remotex/instances"));
+        }
+        let home = std::env::var_os("HOME").context("HOME is not set; pass --instances-dir")?;
+        Ok(PathBuf::from(home).join(".local/share/remotex/instances"))
+    }
+}
+
+/// Run the terminal UI and its shared-port router until `q` or a shutdown signal.
+pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        options.web_root.join("index.html").is_file(),
+        "the web root {} has no index.html; build the frontend or pass --web-root",
+        options.web_root.display()
+    );
+    let binary = std::env::current_exe().context("cannot locate the remotex executable")?;
+    let mut supervisor =
+        Supervisor::open(options.instances_dir.clone(), binary, options.web_root.clone()).await?;
+    let router = SharedPort::bind(options.port, supervisor.routes()).await?;
+
+    let mut terminal = TerminalSession::enter()?;
+    let mut events = EventStream::new();
+    let mut ticks = tokio::time::interval(Duration::from_millis(250));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut interrupt = Box::pin(tokio::signal::ctrl_c());
+    let mut selected = 0usize;
+    let mut input: Option<String> = None;
+    let mut message = format!(
+        "control plane listening on http://{MASTER_HOST}:{}",
+        router.port()
+    );
+
+    loop {
+        let instances = supervisor.instances();
+        selected = selected.min(instances.len().saturating_sub(1));
+        render(
+            &options,
+            router.port(),
+            &instances,
+            selected,
+            input.as_deref(),
+            &message,
+        )?;
+
+        tokio::select! {
+            _ = ticks.tick() => {
+                if supervisor.poll_exits().await? {
+                    message = "a gateway exited; see its gateway.log".to_owned();
+                }
+            }
+            result = &mut interrupt => {
+                result.context("cannot listen for Ctrl+C")?;
+                break;
+            }
+            event = events.next() => {
+                let Some(event) = event else {
+                    anyhow::bail!("terminal input ended");
+                };
+                let event = event.context("cannot read terminal input")?;
+                let Event::Key(key) = event else { continue };
+                if key.kind != KeyEventKind::Press { continue; }
+
+                if let Some(name) = &mut input {
+                    match key.code {
+                        KeyCode::Esc => {
+                            input = None;
+                            message = "instance creation cancelled".to_owned();
+                        }
+                        KeyCode::Backspace => {
+                            name.pop();
+                        }
+                        KeyCode::Char(character)
+                            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            name.push(character);
+                        }
+                        KeyCode::Enter => {
+                            let requested = std::mem::take(name);
+                            match supervisor.create(&requested).await {
+                                Ok(index) => {
+                                    selected = index;
+                                    input = None;
+                                    message = format!("created {requested}; edit its config, then start it");
+                                }
+                                Err(error) => message = format!("cannot create instance: {error:#}"),
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(instances.len().saturating_sub(1));
+                    }
+                    KeyCode::Char('n') => input = Some(String::new()),
+                    KeyCode::Char('R') => {
+                        supervisor.rescan().await?;
+                        message = "rescanned the instances directory".to_owned();
+                    }
+                    KeyCode::Char('a') => {
+                        let names: Vec<_> = supervisor.instances().into_iter().map(|i| i.name).collect();
+                        let mut failed = false;
+                        for name in names {
+                            if let Err(error) = supervisor.start(&name).await {
+                                message = format!("{name}: {error:#}");
+                                failed = true;
+                            }
+                        }
+                        if !failed {
+                            message = "started every stopped instance".to_owned();
+                        }
+                    }
+                    KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char(' ') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let name = instance.name.clone();
+                            let result = if instance.status == InstanceStatus::Running {
+                                supervisor.stop(&name).await.map(|()| "stopped")
+                            } else {
+                                supervisor.start(&name).await.map(|()| "started")
+                            };
+                            message = match result {
+                                Ok(action) => format!("{action} {name}"),
+                                Err(error) => format!("{name}: {error:#}"),
+                            };
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let name = instance.name.clone();
+                            message = match supervisor.stop(&name).await {
+                                Ok(()) => format!("stopped {name}"),
+                                Err(error) => format!("{name}: {error:#}"),
+                            };
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let name = instance.name.clone();
+                            message = match supervisor.restart(&name).await {
+                                Ok(()) => format!("restarted {name}"),
+                                Err(error) => format!("{name}: {error:#}"),
+                            };
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let name = instance.name.clone();
+                            let path = instance.config_path.clone();
+                            terminal.suspend()?;
+                            let edited = edit_config(&path).await;
+                            terminal.resume()?;
+                            events = EventStream::new();
+                            message = match edited.and_then(|()| validate_config(&path)) {
+                                Ok(()) => format!("{name} config is valid; restart it to apply changes"),
+                                Err(error) => format!("{name} config: {error:#}"),
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    terminal.suspend()?;
+    supervisor.shutdown().await;
+    drop(router);
+    println!("remotex: every instance stopped");
+    Ok(())
+}
+
+async fn edit_config(path: &Path) -> anyhow::Result<()> {
+    let editor = std::env::var_os("VISUAL")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("EDITOR").filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| OsString::from("vi"));
+    let status = Command::new(&editor)
+        .arg(path)
+        .status()
+        .await
+        .with_context(|| format!("cannot start editor {editor:?}"))?;
+    anyhow::ensure!(status.success(), "editor exited with {status}");
+    Ok(())
+}
+
+fn validate_config(path: &Path) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    super::check(&text)
+}
+
+struct TerminalSession {
+    active: bool,
+}
+
+impl TerminalSession {
+    fn enter() -> anyhow::Result<Self> {
+        anyhow::ensure!(std::io::IsTerminal::is_terminal(&std::io::stdin()), "the TUI needs a terminal");
+        anyhow::ensure!(std::io::IsTerminal::is_terminal(&std::io::stdout()), "the TUI needs a terminal");
+        terminal::enable_raw_mode().context("cannot enable terminal raw mode")?;
+        if let Err(error) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error).context("cannot enter the alternate screen");
+        }
+        Ok(Self { active: true })
+    }
+
+    fn suspend(&mut self) -> anyhow::Result<()> {
+        if self.active {
+            execute!(std::io::stdout(), Show, LeaveAlternateScreen)
+                .context("cannot leave the alternate screen")?;
+            terminal::disable_raw_mode().context("cannot restore terminal input")?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self) -> anyhow::Result<()> {
+        if !self.active {
+            terminal::enable_raw_mode().context("cannot enable terminal raw mode")?;
+            execute!(std::io::stdout(), EnterAlternateScreen, Hide)
+                .context("cannot enter the alternate screen")?;
+            self.active = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = execute!(std::io::stdout(), Show, LeaveAlternateScreen);
+            let _ = terminal::disable_raw_mode();
+        }
+    }
+}
+
+fn render(
+    options: &TuiOptions,
+    port: u16,
+    instances: &[InstanceInfo],
+    selected: usize,
+    input: Option<&str>,
+    message: &str,
+) -> anyhow::Result<()> {
+    let (width, height) = terminal::size().context("cannot read terminal size")?;
+    let mut stdout = std::io::stdout().lock();
+    queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
+    line(&mut stdout, 0, width, "remotex local control plane", Some(Color::Cyan), true)?;
+    line(
+        &mut stdout,
+        2,
+        width,
+        &format!("master   http://{MASTER_HOST}:{port}"),
+        None,
+        false,
+    )?;
+    line(
+        &mut stdout,
+        3,
+        width,
+        &format!("instances {}", options.instances_dir.display()),
+        None,
+        false,
+    )?;
+    line(
+        &mut stdout,
+        5,
+        width,
+        "  instance              state      URL",
+        Some(Color::DarkGrey),
+        false,
+    )?;
+
+    let available = height.saturating_sub(10) as usize;
+    let start = if selected >= available && available > 0 {
+        selected + 1 - available
+    } else {
+        0
+    };
+    for (row, (index, instance)) in instances.iter().enumerate().skip(start).take(available).enumerate() {
+        let marker = if index == selected { '›' } else { ' ' };
+        let text = format!(
+            "{marker} {:<20} {:<10} http://{}.{}:{port}",
+            instance.name,
+            instance.status.label(),
+            instance.name,
+            MASTER_HOST
+        );
+        line(
+            &mut stdout,
+            6 + row as u16,
+            width,
+            &text,
+            (index == selected).then_some(Color::Yellow),
+            index == selected,
+        )?;
+    }
+    if instances.is_empty() {
+        line(&mut stdout, 6, width, "  no instances — press n to create one", Some(Color::Yellow), false)?;
+    }
+
+    let footer = height.saturating_sub(3);
+    if let Some(name) = input {
+        line(
+            &mut stdout,
+            footer,
+            width,
+            &format!("new instance name: {name}_"),
+            Some(Color::Yellow),
+            true,
+        )?;
+        line(&mut stdout, footer + 1, width, "Enter create · Esc cancel", Some(Color::DarkGrey), false)?;
+    } else {
+        line(
+            &mut stdout,
+            footer,
+            width,
+            "↑↓ select · Enter start/stop · r restart · x stop · a start all · n new · e edit · R rescan · q quit",
+            Some(Color::DarkGrey),
+            false,
+        )?;
+        let detail = instances
+            .get(selected)
+            .and_then(|instance| instance.detail.as_deref())
+            .unwrap_or(message);
+        line(&mut stdout, footer + 1, width, detail, None, false)?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+fn line(
+    stdout: &mut impl Write,
+    row: u16,
+    width: u16,
+    text: &str,
+    color: Option<Color>,
+    bold: bool,
+) -> std::io::Result<()> {
+    let clipped: String = text.chars().take(width as usize).collect();
+    queue!(stdout, MoveTo(0, row))?;
+    if let Some(color) = color {
+        queue!(stdout, SetForegroundColor(color))?;
+    }
+    if bold {
+        queue!(stdout, SetAttribute(Attribute::Bold))?;
+    }
+    queue!(stdout, Print(clipped), SetAttribute(Attribute::Reset), ResetColor)
+}
+
+/// Stable state shown by both the TUI and the master landing page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceStatus {
+    Stopped,
+    Starting,
+    Running,
+    Failed,
+}
+
+impl InstanceStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One row of the manager's public state, with no launch token or socket path.
+#[derive(Clone, Debug)]
+pub struct InstanceInfo {
+    pub name: String,
+    pub status: InstanceStatus,
+    pub config_path: PathBuf,
+    pub detail: Option<String>,
+}
+
+enum InstanceState {
+    Stopped,
+    Starting,
+    Running(RunningGateway),
+    Failed(String),
+}
+
+struct ManagedInstance {
+    name: String,
+    dir: PathBuf,
+    state: InstanceState,
+}
+
+struct RunningGateway {
+    child: Child,
+    socket: PathBuf,
+    token: String,
+}
+
+/// Owns every instance subprocess. Dropping the process closes every child's
+/// liveness pipe; [`Self::shutdown`] is the polite path on top of that guarantee.
+pub struct Supervisor {
+    root: PathBuf,
+    binary: PathBuf,
+    web_root: PathBuf,
+    instances: Vec<ManagedInstance>,
+    routes: RouteTable,
+}
+
+impl Supervisor {
+    pub async fn open(root: PathBuf, binary: PathBuf, web_root: PathBuf) -> anyhow::Result<Self> {
+        create_private_dir(&root)?;
+        let mut manager = Self {
+            root,
+            binary,
+            web_root,
+            instances: Vec::new(),
+            routes: RouteTable::default(),
+        };
+        manager.rescan().await?;
+        Ok(manager)
+    }
+
+    pub fn routes(&self) -> RouteTable {
+        self.routes.clone()
+    }
+
+    pub fn instances(&self) -> Vec<InstanceInfo> {
+        self.instances
+            .iter()
+            .map(|instance| {
+                let (status, detail) = match &instance.state {
+                    InstanceState::Stopped => (InstanceStatus::Stopped, None),
+                    InstanceState::Starting => (InstanceStatus::Starting, None),
+                    InstanceState::Running(_) => (InstanceStatus::Running, None),
+                    InstanceState::Failed(error) => (InstanceStatus::Failed, Some(error.clone())),
+                };
+                InstanceInfo {
+                    name: instance.name.clone(),
+                    status,
+                    config_path: instance.dir.join("remotex.toml"),
+                    detail,
+                }
+            })
+            .collect()
+    }
+
+    pub async fn rescan(&mut self) -> anyhow::Result<()> {
+        let mut names = BTreeSet::new();
+        for entry in std::fs::read_dir(&self.root)
+            .with_context(|| format!("cannot list {}", self.root.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if valid_instance_name(&name).is_ok() {
+                names.insert(name);
+            }
+        }
+
+        let mut previous: BTreeMap<_, _> = std::mem::take(&mut self.instances)
+            .into_iter()
+            .map(|instance| (instance.name.clone(), instance))
+            .collect();
+        for name in names {
+            if let Some(instance) = previous.remove(&name) {
+                self.instances.push(instance);
+            } else {
+                let dir = self.root.join(&name);
+                bootstrap_config(&dir)?;
+                self.instances.push(ManagedInstance {
+                    name,
+                    dir,
+                    state: InstanceState::Stopped,
+                });
+            }
+        }
+        // A running process stays manageable even if its directory was renamed or
+        // removed behind the TUI. Stopped vanished entries simply leave the list.
+        self.instances.extend(previous.into_values().filter(|instance| {
+            matches!(instance.state, InstanceState::Running(_) | InstanceState::Starting)
+        }));
+        self.instances.sort_by(|a, b| a.name.cmp(&b.name));
+        self.publish().await;
+        Ok(())
+    }
+
+    pub async fn create(&mut self, name: &str) -> anyhow::Result<usize> {
+        valid_instance_name(name)?;
+        let dir = self.root.join(name);
+        std::fs::create_dir(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+        set_private_dir_permissions(&dir)?;
+        if let Err(error) = bootstrap_config(&dir) {
+            let _ = std::fs::remove_dir(&dir);
+            return Err(error);
+        }
+        self.rescan().await?;
+        self.instances
+            .iter()
+            .position(|instance| instance.name == name)
+            .context("the new instance did not appear after rescan")
+    }
+
+    pub async fn start(&mut self, name: &str) -> anyhow::Result<()> {
+        let index = self.index(name)?;
+        if matches!(
+            self.instances[index].state,
+            InstanceState::Running(_) | InstanceState::Starting
+        ) {
+            return Ok(());
+        }
+        let dir = self.instances[index].dir.clone();
+        validate_config(&dir.join("remotex.toml"))
+            .with_context(|| format!("instance {name:?} has an invalid config"))?;
+        self.instances[index].state = InstanceState::Starting;
+        self.publish().await;
+
+        match spawn_gateway(&self.binary, &self.web_root, &dir).await {
+            Ok(gateway) => {
+                self.instances[index].state = InstanceState::Running(gateway);
+                self.publish().await;
+                Ok(())
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.instances[index].state = InstanceState::Failed(message.clone());
+                self.publish().await;
+                Err(anyhow::anyhow!(message))
+            }
+        }
+    }
+
+    pub async fn stop(&mut self, name: &str) -> anyhow::Result<()> {
+        let index = self.index(name)?;
+        let state = std::mem::replace(&mut self.instances[index].state, InstanceState::Stopped);
+        if let InstanceState::Running(gateway) = state {
+            stop_gateway(gateway).await;
+        }
+        self.publish().await;
+        Ok(())
+    }
+
+    pub async fn restart(&mut self, name: &str) -> anyhow::Result<()> {
+        self.stop(name).await?;
+        self.start(name).await
+    }
+
+    pub async fn poll_exits(&mut self) -> anyhow::Result<bool> {
+        let mut changed = false;
+        for instance in &mut self.instances {
+            let InstanceState::Running(gateway) = &mut instance.state else {
+                continue;
+            };
+            if let Some(status) = gateway.child.try_wait().context("cannot inspect gateway child")? {
+                instance.state = InstanceState::Failed(format!(
+                    "gateway exited with {status}; see {}",
+                    instance.dir.join("gateway.log").display()
+                ));
+                changed = true;
+            }
+        }
+        if changed {
+            self.publish().await;
+        }
+        Ok(changed)
+    }
+
+    pub async fn shutdown(&mut self) {
+        for instance in &mut self.instances {
+            let state = std::mem::replace(&mut instance.state, InstanceState::Stopped);
+            if let InstanceState::Running(gateway) = state {
+                stop_gateway(gateway).await;
+            }
+        }
+        self.publish().await;
+    }
+
+    fn index(&self, name: &str) -> anyhow::Result<usize> {
+        self.instances
+            .iter()
+            .position(|instance| instance.name == name)
+            .with_context(|| format!("unknown instance {name:?}"))
+    }
+
+    async fn publish(&self) {
+        let mut published = BTreeMap::new();
+        for instance in &self.instances {
+            let (status, target) = match &instance.state {
+                InstanceState::Stopped => (InstanceStatus::Stopped, None),
+                InstanceState::Starting => (InstanceStatus::Starting, None),
+                InstanceState::Failed(_) => (InstanceStatus::Failed, None),
+                InstanceState::Running(gateway) => (
+                    InstanceStatus::Running,
+                    Some(RouteTarget {
+                        socket: gateway.socket.clone(),
+                        token: gateway.token.clone(),
+                    }),
+                ),
+            };
+            published.insert(instance.name.clone(), PublishedInstance { status, target });
+        }
+        *self.routes.inner.write().await = published;
+    }
+}
+
+async fn spawn_gateway(binary: &Path, web_root: &Path, dir: &Path) -> anyhow::Result<RunningGateway> {
+    let log_path = dir.join("gateway.log");
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("cannot open {}", log_path.display()))?;
+    writeln!(log, "\n--- gateway launch ---")?;
+    let stderr = log.try_clone()?;
+    let mut child = Command::new(binary)
+        .arg("serve-embedded")
+        .arg("--instance-dir")
+        .arg(dir)
+        .arg("--web-root")
+        .arg(web_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr))
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("cannot start gateway for {}", dir.display()))?;
+    let stdout = child.stdout.take().context("gateway stdout was not piped")?;
+    let mut stdout = tokio::io::BufReader::new(stdout);
+    let mut line = String::new();
+    let bytes = tokio::time::timeout(HANDSHAKE_TIMEOUT, stdout.read_line(&mut line))
+        .await
+        .context("gateway did not print its handshake within 20 seconds")??;
+    anyhow::ensure!(bytes != 0, "gateway exited before printing its handshake; see {}", log_path.display());
+    let handshake: Handshake = serde_json::from_str(line.trim_end())
+        .with_context(|| format!("gateway printed a malformed handshake: {line:?}"))?;
+    let socket = PathBuf::from(&handshake.socket);
+    anyhow::ensure!(socket == dir.join("gateway.sock"), "gateway returned the wrong socket path");
+    anyhow::ensure!(!handshake.token.is_empty(), "gateway returned an empty token");
+    Ok(RunningGateway {
+        child,
+        socket,
+        token: handshake.token,
+    })
+}
+
+async fn stop_gateway(mut gateway: RunningGateway) {
+    drop(gateway.child.stdin.take());
+    if tokio::time::timeout(STOP_GRACE, gateway.child.wait()).await.is_err() {
+        let _ = gateway.child.start_kill();
+        let _ = gateway.child.wait().await;
+    }
+}
+
+fn valid_instance_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.is_empty(), "the name is empty");
+    anyhow::ensure!(name.len() <= 63, "the name is longer than one DNS label");
+    anyhow::ensure!(
+        name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+        "use lowercase ASCII letters, digits, and hyphens only"
+    );
+    anyhow::ensure!(!name.starts_with('-') && !name.ends_with('-'), "the name may not start or end with '-'");
+    Ok(())
+}
+
+fn create_private_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("cannot create {}", path.display()))?;
+    set_private_dir_permissions(path)
+}
+
+fn set_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("cannot make {} private", path.display()))?;
+    }
+    Ok(())
+}
+
+fn bootstrap_config(dir: &Path) -> anyhow::Result<()> {
+    let path = dir.join("remotex.toml");
+    if path.exists() {
+        return Ok(());
+    }
+    let temporary = dir.join(format!("remotex.toml.{}.new", std::process::id()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("cannot create {}", temporary.display()))?;
+        file.write_all(INSTANCE_TEMPLATE.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("cannot install {}", path.display()))
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+#[derive(Clone, Default)]
+pub struct RouteTable {
+    inner: Arc<RwLock<BTreeMap<String, PublishedInstance>>>,
+}
+
+#[derive(Clone)]
+struct PublishedInstance {
+    status: InstanceStatus,
+    target: Option<RouteTarget>,
+}
+
+#[derive(Clone)]
+struct RouteTarget {
+    socket: PathBuf,
+    token: String,
+}
+
+/// The one loopback port shared by the landing page and every instance origin.
+pub struct SharedPort {
+    port: u16,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl SharedPort {
+    pub async fn bind(requested_port: u16, routes: RouteTable) -> anyhow::Result<Self> {
+        let ipv4 = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), requested_port))?;
+        let port = ipv4.local_addr()?.port();
+        let ipv6 = bind_listener(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))?;
+        let listeners = [ipv4, ipv6];
+        let mut tasks = Vec::new();
+        for listener in listeners {
+            let listener = tokio::net::TcpListener::from_std(listener)
+                .context("cannot hand the control-plane listener to the runtime")?;
+            let routes = routes.clone();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _peer)) = listener.accept().await else {
+                        break;
+                    };
+                    let routes = routes.clone();
+                    tokio::spawn(async move {
+                        let _ = route_connection(stream, routes, port).await;
+                    });
+                }
+            }));
+        }
+        Ok(Self { port, tasks })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for SharedPort {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+fn bind_listener(address: SocketAddr) -> anyhow::Result<std::net::TcpListener> {
+    let domain = if address.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    if address.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    socket
+        .bind(&address.into())
+        .with_context(|| format!("cannot bind local control plane to {address}"))?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
+async fn route_connection(
+    mut client: tokio::net::TcpStream,
+    routes: RouteTable,
+    public_port: u16,
+) -> anyhow::Result<()> {
+    client.set_nodelay(true)?;
+    let request = read_request_head(&mut client).await?;
+    let Some(request) = request else {
+        return Ok(());
+    };
+    let parsed = parse_request(&request)?;
+    let host = hostname(&parsed.host);
+
+    if host == MASTER_HOST || matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") {
+        let snapshot = routes.inner.read().await.clone();
+        let body = landing_page(public_port, &snapshot);
+        write_response(&mut client, "200 OK", "text/html; charset=utf-8", &body, &[]).await?;
+        return Ok(());
+    }
+
+    let Some(name) = host.strip_suffix(&format!(".{MASTER_HOST}")) else {
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex host\n", &[]).await?;
+        return Ok(());
+    };
+    if valid_instance_name(name).is_err() {
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex instance\n", &[]).await?;
+        return Ok(());
+    }
+    let published = routes.inner.read().await.get(name).cloned();
+    let Some(published) = published else {
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex instance\n", &[]).await?;
+        return Ok(());
+    };
+    let Some(target) = published.target else {
+        let body = format!(
+            "instance {name} is {}; start it from the remotex TUI\n",
+            published.status.label()
+        );
+        write_response(&mut client, "503 Service Unavailable", "text/plain; charset=utf-8", &body, &[]).await?;
+        return Ok(());
+    };
+
+    if !cookie_has_token(parsed.cookie.as_deref(), &target.token) {
+        let cookie = format!(
+            "remotex_session={}; HttpOnly; SameSite=Strict; Path=/",
+            target.token
+        );
+        write_response(
+            &mut client,
+            "307 Temporary Redirect",
+            "text/plain; charset=utf-8",
+            "",
+            &[("Location", parsed.target.as_str()), ("Set-Cookie", cookie.as_str())],
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut gateway = match tokio::net::UnixStream::connect(&target.socket).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            write_response(
+                &mut client,
+                "502 Bad Gateway",
+                "text/plain; charset=utf-8",
+                &format!("instance gateway is unavailable: {error}\n"),
+                &[],
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    gateway.write_all(&request).await?;
+    tokio::io::copy_bidirectional(&mut client, &mut gateway).await?;
+    Ok(())
+}
+
+struct ParsedRequest {
+    host: String,
+    target: String,
+    cookie: Option<String>,
+}
+
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> anyhow::Result<Option<Vec<u8>>> {
+    tokio::time::timeout(REQUEST_HEAD_TIMEOUT, async {
+        let mut request = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok((!request.is_empty()).then_some(request));
+            }
+            request.extend_from_slice(&chunk[..read]);
+            anyhow::ensure!(request.len() <= MAX_REQUEST_HEAD, "request headers exceed 64 KiB");
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return Ok(Some(request));
+            }
+        }
+    })
+    .await
+    .context("request headers did not arrive within 10 seconds")?
+}
+
+fn parse_request(request: &[u8]) -> anyhow::Result<ParsedRequest> {
+    let end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("incomplete HTTP request headers")?;
+    let head = std::str::from_utf8(&request[..end]).context("HTTP headers are not UTF-8")?;
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().context("missing HTTP request line")?;
+    let mut pieces = request_line.split_whitespace();
+    let _method = pieces.next().context("missing HTTP method")?;
+    let target = pieces.next().context("missing HTTP request target")?.to_owned();
+    let version = pieces.next().context("missing HTTP version")?;
+    anyhow::ensure!(version.starts_with("HTTP/"), "invalid HTTP version");
+    anyhow::ensure!(target.starts_with('/'), "only origin-form HTTP requests are accepted");
+
+    let mut host = None;
+    let mut cookies = Vec::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            anyhow::bail!("malformed HTTP header");
+        };
+        if name.eq_ignore_ascii_case("host") {
+            host = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("cookie") {
+            cookies.push(value.trim());
+        }
+    }
+    Ok(ParsedRequest {
+        host: host.context("request has no Host header")?,
+        target,
+        cookie: (!cookies.is_empty()).then(|| cookies.join("; ")),
+    })
+}
+
+fn hostname(host: &str) -> String {
+    let lowercase = host.trim().to_ascii_lowercase();
+    if lowercase.starts_with('[') {
+        return lowercase
+            .find(']')
+            .map_or(lowercase.clone(), |end| lowercase[..=end].to_owned());
+    }
+    match lowercase.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => name.to_owned(),
+        _ => lowercase,
+    }
+}
+
+fn cookie_has_token(cookie: Option<&str>, expected: &str) -> bool {
+    cookie.is_some_and(|cookies| {
+        cookies.split(';').any(|pair| {
+            pair.trim()
+                .split_once('=')
+                .is_some_and(|(name, value)| name == "remotex_session" && value == expected)
+        })
+    })
+}
+
+async fn write_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+    extra: &[(&str, &str)],
+) -> std::io::Result<()> {
+    let mut head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+fn landing_page(port: u16, instances: &BTreeMap<String, PublishedInstance>) -> String {
+    let mut rows = String::new();
+    for (name, instance) in instances {
+        let state = instance.status.label();
+        if instance.status == InstanceStatus::Running {
+            rows.push_str(&format!(
+                "<li><a href=\"http://{name}.{MASTER_HOST}:{port}/\">{name}</a> <span>{state}</span></li>"
+            ));
+        } else {
+            rows.push_str(&format!("<li>{name} <span>{state}</span></li>"));
+        }
+    }
+    if rows.is_empty() {
+        rows.push_str("<li>No instances. Press <kbd>n</kbd> in the TUI to create one.</li>");
+    }
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>remotex instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>remotex instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_names_are_exactly_one_lowercase_dns_label() {
+        for valid in ["one", "work-2", "a"] {
+            valid_instance_name(valid).unwrap();
+        }
+        for invalid in ["", "UPPER", "two.words", "-first", "last-", "has space"] {
+            assert!(valid_instance_name(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn request_parsing_separates_host_target_and_cookie() {
+        let parsed = parse_request(
+            b"GET /api/targets?q=1 HTTP/1.1\r\nHost: Work.remotex.localhost:52380\r\nCookie: other=1; remotex_session=secret\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(hostname(&parsed.host), "work.remotex.localhost");
+        assert_eq!(parsed.target, "/api/targets?q=1");
+        assert!(cookie_has_token(parsed.cookie.as_deref(), "secret"));
+        assert!(!cookie_has_token(parsed.cookie.as_deref(), "other"));
+    }
+
+    #[test]
+    fn a_new_instance_gets_the_embedded_config_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        bootstrap_config(temp.path()).unwrap();
+        let text = std::fs::read_to_string(temp.path().join("remotex.toml")).unwrap();
+        assert!(!text.lines().any(|line| line.trim() == "[server]"));
+        super::super::check(&text).unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_subdomains_share_one_port_and_reach_different_gateways() {
+        let routes = RouteTable::default();
+        let first = fake_gateway("one").await;
+        let second = fake_gateway("two").await;
+        routes.inner.write().await.extend([
+            (
+                "one".to_owned(),
+                PublishedInstance {
+                    status: InstanceStatus::Running,
+                    target: Some(RouteTarget {
+                        socket: first.0.clone(),
+                        token: "token-one".to_owned(),
+                    }),
+                },
+            ),
+            (
+                "two".to_owned(),
+                PublishedInstance {
+                    status: InstanceStatus::Running,
+                    target: Some(RouteTarget {
+                        socket: second.0.clone(),
+                        token: "token-two".to_owned(),
+                    }),
+                },
+            ),
+        ]);
+        let router = SharedPort::bind(0, routes).await.unwrap();
+
+        let first_response = request(
+            router.port(),
+            "one.remotex.localhost",
+            Some("remotex_session=token-one"),
+        )
+        .await;
+        let second_response = request(
+            router.port(),
+            "two.remotex.localhost",
+            Some("remotex_session=token-two"),
+        )
+        .await;
+        assert!(first_response.ends_with("one"), "{first_response}");
+        assert!(second_response.ends_with("two"), "{second_response}");
+        first.1.await.unwrap();
+        second.1.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_router_seeds_the_launch_cookie_before_proxying() {
+        let routes = RouteTable::default();
+        routes.inner.write().await.insert(
+            "one".to_owned(),
+            PublishedInstance {
+                status: InstanceStatus::Running,
+                target: Some(RouteTarget {
+                    socket: PathBuf::from("/no/such/remotex-gateway.sock"),
+                    token: "launch-token".to_owned(),
+                }),
+            },
+        );
+        let router = SharedPort::bind(0, routes).await.unwrap();
+        let response = request(router.port(), "one.remotex.localhost", None).await;
+        assert!(response.starts_with("HTTP/1.1 307 Temporary Redirect"), "{response}");
+        assert!(response.contains("Set-Cookie: remotex_session=launch-token;"), "{response}");
+        assert!(response.contains("Location: /"), "{response}");
+    }
+
+    async fn fake_gateway(
+        body: &'static str,
+    ) -> (PathBuf, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gateway.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        (path, task, directory)
+    }
+
+    async fn request(port: u16, host: &str, cookie: Option<&str>) -> String {
+        let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let cookie = cookie.map_or(String::new(), |cookie| format!("Cookie: {cookie}\r\n"));
+        stream
+            .write_all(
+                format!("GET / HTTP/1.1\r\nHost: {host}:{port}\r\n{cookie}Connection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response
+    }
+}

@@ -36,14 +36,33 @@ pub enum Commands {
         listen: Option<String>,
     },
 
-    /// Start a managed gateway: an ephemeral port on 127.0.0.1, the SPA from a
-    /// caller-provided web root, and a token printed on stdout for the process
-    /// that started it.
+    /// Run the local multi-instance control plane. The TUI supervises one gateway
+    /// process per instance and serves every instance through one loopback port at
+    /// <instance>.remotex.localhost.
+    #[cfg(feature = "embedded-gateway")]
+    Tui {
+        /// Loopback port shared by remotex.localhost and every instance subdomain
+        #[arg(long)]
+        port: u16,
+
+        /// Directory whose immediate subdirectories are remotex instances
+        #[arg(long)]
+        instances_dir: Option<PathBuf>,
+
+        /// Built SPA to serve (default: the installed or checkout frontend/dist)
+        #[arg(long)]
+        web_root: Option<PathBuf>,
+    },
+
+    /// Start one managed worker on <instance-dir>/gateway.sock, serving the SPA
+    /// from a caller-provided web root and printing its socket and launch token
+    /// on stdout for the TUI that started it.
     ///
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
     /// is how it dies with its manager.
     #[cfg(feature = "embedded-gateway")]
+    #[command(hide = true)]
     ServeEmbedded {
         /// The managed instance directory. Nothing outside it is read.
         #[arg(long)]
@@ -131,9 +150,9 @@ mod tests {
         assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
     }
 
-    /// The managed-instance subcommand takes the two paths only its launcher knows
-    /// — the instance it owns and the SPA it selected — and nothing else: the port
-    /// and the secret are the gateway's to decide.
+    /// The managed worker takes the two paths only its supervisor knows — the
+    /// instance it owns and the SPA it selected — and nothing else: the socket
+    /// path and secret are the gateway's to decide.
     #[cfg(feature = "embedded-gateway")]
     #[test]
     fn serve_embedded_takes_the_two_paths_the_launcher_knows() {
@@ -186,6 +205,34 @@ mod tests {
 
     #[cfg(feature = "embedded-gateway")]
     #[test]
+    fn tui_requires_its_one_shared_port() {
+        let cli = Cli::try_parse_from([
+            "remotex",
+            "tui",
+            "--port",
+            "52380",
+            "--instances-dir",
+            "/instances",
+            "--web-root",
+            "/web",
+        ])
+        .unwrap();
+        let Commands::Tui {
+            port,
+            instances_dir,
+            web_root,
+        } = cli.command
+        else {
+            panic!("expected the tui subcommand");
+        };
+        assert_eq!(port, 52380);
+        assert_eq!(instances_dir.as_deref(), Some(std::path::Path::new("/instances")));
+        assert_eq!(web_root.as_deref(), Some(std::path::Path::new("/web")));
+        assert!(Cli::try_parse_from(["remotex", "tui"]).is_err());
+    }
+
+    #[cfg(feature = "embedded-gateway")]
+    #[test]
     fn check_config_reads_stdin_by_default_and_takes_an_audience() {
         let cli = Cli::try_parse_from(["remotex", "check-config"]).unwrap();
         let Commands::CheckConfig { config, embedded } = cli.command else {
@@ -208,6 +255,7 @@ mod tests {
     #[test]
     fn embedded_cli_is_absent_without_the_feature() {
         assert!(Cli::try_parse_from(["remotex", "serve-embedded"]).is_err());
+        assert!(Cli::try_parse_from(["remotex", "tui", "--port", "52380"]).is_err());
         assert!(
             Cli::try_parse_from(["remotex", "check-config", "--embedded"]).is_err()
         );

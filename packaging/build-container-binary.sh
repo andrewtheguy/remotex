@@ -13,6 +13,10 @@ cargo build --release --no-default-features
 
 binary="target/release/remotex"
 case "$("$binary" --help)" in
+  *"  tui "*)
+    echo "container gateway unexpectedly exposes tui" >&2
+    exit 1
+    ;;
   *serve-embedded*)
     echo "container gateway unexpectedly exposes serve-embedded" >&2
     exit 1

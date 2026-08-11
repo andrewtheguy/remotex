@@ -46,6 +46,9 @@ RUN set -eu; \
     binary=/opt/remotex/current/bin/remotex; \
     "$binary" --version >/dev/null; \
     case "$("$binary" --help)" in \
+      *"  tui "*) echo "container binary exposes tui" >&2; exit 1 ;; \
+    esac; \
+    case "$("$binary" --help)" in \
       *serve-embedded*) echo "container binary exposes serve-embedded" >&2; exit 1 ;; \
     esac; \
     case "$("$binary" check-config --help)" in \

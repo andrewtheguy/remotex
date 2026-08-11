@@ -79,6 +79,6 @@ succeed.
 Container images take their layout and frontend from the Linux tarballs, then
 replace `bin/remotex` with the separately built container gateway. The build
 script, release smoke test, and Dockerfile all reject a binary that exposes
-`serve-embedded` or `check-config --embedded`. The tarballs therefore remain
+`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
 build plumbing and fallback payloads even though native packages are what users
 are directed to install.

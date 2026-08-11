@@ -1013,9 +1013,8 @@ pub struct ConfigFile {
 pub struct AppConfig {
     /// Where the web server binds, already validated by `parse_listen`.
     ///
-    /// A TCP port of `0` asks the kernel for an ephemeral one, which is what an
-    /// embedded gateway does — the port it got is then read off the listener and
-    /// told to its client, never guessed.
+    /// A served gateway uses the configured TCP or Unix address. A managed local
+    /// worker uses the private Unix socket supplied by its control plane.
     pub listen: ListenAddr,
     /// Directory holding the built frontend (index.html + assets), served from
     /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
@@ -1067,8 +1066,8 @@ impl ConfigFile {
         if audience == Audience::Embedded {
             // Refused rather than ignored, and named as a whole block rather than
             // key by key: every one of them is a decision the launcher has already
-            // made for this gateway — an ephemeral loopback port it reads back off
-            // the socket, a web root it hands over on the command line
+            // made for this gateway — a private Unix socket under the instance, a
+            // web root it hands over on the command line
             // (`serve-embedded --web-root`), and a token instead of a login. A key
             // that is quietly overridden is worse than
             // one that is refused: it reads as configuration and behaves as
@@ -1488,9 +1487,9 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Resolve the runtime configuration of a managed local instance: loopback,
-    /// an ephemeral port, the SPA from the launcher's web root, and a freshly
-    /// minted token.
+    /// Resolve the runtime configuration of a managed local instance: its private
+    /// Unix socket, the SPA from the launcher's web root, and a freshly minted
+    /// token.
     ///
     /// Every one of those is an argument here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
@@ -1502,17 +1501,12 @@ impl ConfigFile {
         self,
         token: EmbeddedToken,
         web_root: PathBuf,
+        socket_path: PathBuf,
     ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
-            // Not `localhost`: that name resolves to both loopbacks and the client
-            // is told one port on one address. The manager connects to 127.0.0.1,
-            // on whatever port the kernel gives us.
-            //
-            // TCP rather than a socket, and not by omission: the thing that talks to
-            // this gateway is a page in a window, and a page addresses its gateway
-            // with URLs — an HTTP origin and two WebSockets. None of that can name a
-            // socket file. See [`ListenAddr`].
-            listen: ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+            // Only the native control plane reaches this listener. It owns the TCP
+            // origin a browser addresses and proxies both HTTP and WebSockets here.
+            listen: ListenAddr::Unix(socket_path),
             static_dir: web_root,
             targets: self.targets,
             auth: GatewayAuth::Token(token),

@@ -1,25 +1,26 @@
-//! A managed local gateway: one browser instance, one loopback port, one token.
+//! A managed local gateway: one browser instance, one Unix socket, one token.
 //!
 //! `remotex serve-embedded --instance-dir <dir> --web-root <dir>` is not a
 //! deployment. It is started by an instance manager, serves that browser instance
 //! alone, and dies with its parent. Everything that makes a `serve` gateway
-//! configurable is therefore decided here instead: the port is whatever the kernel
-//! gives, the address is `127.0.0.1`, the SPA comes from a caller-provided web root,
+//! configurable is therefore decided here instead: the socket is
+//! `<instance-dir>/gateway.sock`, the SPA comes from a caller-provided web root,
 //! and there is no login to offer — see
 //! [`crate::config::Audience::Embedded`].
 //!
 //! The SPA it serves is the same browser client as `remotex serve`. The token below
-//! stands in for the login: the manager puts it in the browser's cookie store, so
-//! the page authenticates itself the way any logged-in browser does and the manager
-//! needs no session protocol of its own.
+//! stands in for the login: the master listener seeds it with an `HttpOnly` response
+//! cookie before proxying the browser to the child, so the page authenticates itself
+//! the way any logged-in browser does and the manager needs no session protocol of
+//! its own.
 //!
 //! Two pipes carry the whole arrangement, in opposite directions, and neither one
 //! carries the other's job:
 //!
 //! - **stdout, once**: the [`Handshake`] line, printed after the socket is bound so
-//!   the port in it is a fact rather than an intention. It is how the parent learns
-//!   both the port and the token, and it is the only thing this process ever writes
-//!   to stdout — logging goes to stderr for the parent to retain.
+//!   its path in it is a fact rather than an intention. It is how the parent learns
+//!   the socket is ready and receives the token, and it is the only thing this
+//!   process writes to stdout — logging goes to stderr for the parent to retain.
 //! - **stdin, never**: nothing is written to it in either direction. It exists so
 //!   this process can notice that its parent is gone; see [`parent_closed`].
 //!
@@ -31,7 +32,6 @@
 
 use std::io::Read as _;
 use std::io::Write as _;
-use std::net::TcpListener;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
@@ -41,6 +41,11 @@ use serde::{Deserialize, Serialize};
 use crate::auth::EmbeddedToken;
 use crate::config::{Audience, ConfigFile};
 
+#[doc(hidden)]
+pub mod manager;
+
+pub use manager::{TuiOptions, default_instances_dir, run_tui};
+
 /// The line this process prints on stdout once, before serving.
 ///
 /// Serialized as JSON rather than as two lines of text so the parent can tell a
@@ -49,10 +54,10 @@ use crate::config::{Audience, ConfigFile};
 /// coming" from "this build does not send it".
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct Handshake {
-    /// The loopback port the kernel gave us, and the only one the parent may use.
-    pub port: u16,
-    /// The token the manager puts in the browser's `remotex_session` cookie, which
-    /// then carries it to every request and to the `/ws` upgrades.
+    /// The private Unix socket the control plane proxies to.
+    pub socket: String,
+    /// The token the master listener seeds in the browser's `remotex_session`
+    /// cookie, which then carries it to every request and `/ws` upgrade.
     pub token: String,
 }
 
@@ -63,7 +68,7 @@ pub struct Handshake {
 impl std::fmt::Debug for Handshake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Handshake")
-            .field("port", &self.port)
+            .field("socket", &self.socket)
             .finish_non_exhaustive()
     }
 }
@@ -71,7 +76,7 @@ impl std::fmt::Debug for Handshake {
 impl Handshake {
     /// The line to print, newline included.
     ///
-    /// Never fails in practice — a `u16` and a base64 string always serialize — and
+    /// Never fails in practice — a socket path and base64 string always serialize — and
     /// a handshake that could not be built is a gateway the parent cannot reach, so
     /// the error is returned rather than swallowed into an empty line.
     pub fn line(&self) -> anyhow::Result<String> {
@@ -105,6 +110,11 @@ impl Instance {
         self.dir.join("remotex.toml")
     }
 
+    /// `<dir>/gateway.sock` — private transport between the supervisor and child.
+    pub fn socket_path(&self) -> PathBuf {
+        self.dir.join("gateway.sock")
+    }
+
     /// Read and check this instance's config.
     ///
     /// The error carries the path so a manager can put the right file in front of
@@ -120,13 +130,14 @@ impl Instance {
 
 /// Serve an instance until something stops us, printing the handshake to `stdout`.
 ///
-/// The order is the contract: bind, *then* announce. A port announced before it is
+/// The order is the contract: bind, *then* announce. A socket announced before it is
 /// bound is a promise this process might not keep, and the parent would race a
 /// connection against a listener that does not exist yet.
 pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
-    let config = file.resolve_embedded(token.clone(), web_root)?;
+    let socket_path = instance.socket_path();
+    let config = file.resolve_embedded(token.clone(), web_root, socket_path.clone())?;
 
     // Before the bind so a missing page is reported before the handshake. This path
     // is supplied by the launcher rather than the config, so name that half in the
@@ -136,28 +147,15 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
         "the launcher-provided --web-root is incomplete",
     );
 
-    // One socket on one address, and that address comes from the config rather than
-    // from a literal here — `resolve_embedded` is where it is decided, and two places
-    // saying `127.0.0.1` is one of them going stale the day the other changes.
-    //
-    // `serve` binds every address its host name resolves to, for reasons that do not
-    // apply here: the client is told a single port on a single address by the line
-    // below, so there is no name to resolve and no second family for it to arrive on.
-    // Always TCP here: `resolve_embedded` decides this address, and an embedded
-    // config may not carry a `[server]` block to argue with it. The refusal is for
-    // the day that stops being true, because a browser cannot address a
-    // socket file.
-    let crate::config::ListenAddr::Tcp(addr) = &config.listen else {
-        anyhow::bail!("the embedded gateway listens on loopback TCP, which its client addresses by URL");
+    let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {
+        anyhow::bail!("the embedded gateway must listen on its private Unix socket");
     };
-    let listener =
-        TcpListener::bind(addr.as_str()).with_context(|| format!("cannot listen on {addr}"))?;
-    let local = listener
-        .local_addr()
-        .context("cannot read the port the kernel gave us")?;
+    anyhow::ensure!(configured_socket == &socket_path, "embedded socket path changed during resolution");
+    let listener = bind_instance_socket(&socket_path)?;
+    let _socket_file = InstanceSocket(socket_path.clone());
 
     let handshake = Handshake {
-        port: local.port(),
+        socket: socket_path.to_string_lossy().into_owned(),
         token: token.as_str().to_owned(),
     };
     // Written and flushed before the runtime is handed the socket: the parent is
@@ -169,8 +167,7 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
         .context("cannot write the handshake to stdout")?;
     drop(stdout);
 
-    // The bound socket rather than the configured address: the port there is 0.
-    info!("embedded gateway listening on http://{local}");
+    info!("embedded gateway listening on unix:{}", socket_path.display());
     info!("config: {}", instance.config_path().display());
     info!("web root: {}", config.static_dir.display());
     info!("{} target(s) available in the picker:", config.targets.len());
@@ -185,12 +182,50 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
     listener
         .set_nonblocking(true)
         .context("cannot make the listening socket non-blocking")?;
-    let listener = tokio::net::TcpListener::from_std(listener)
+    let listener = tokio::net::UnixListener::from_std(listener)
         .context("cannot hand the listening socket to the runtime")?;
-    axum::serve(crate::server::NodelayListener(listener), app)
+    axum::serve(listener, app)
         .await
         .context("server error")?;
     Ok(())
+}
+
+fn bind_instance_socket(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let listener = match UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            anyhow::ensure!(
+                UnixStream::connect(path).is_err(),
+                "{} is already served by another gateway",
+                path.display()
+            );
+            std::fs::remove_file(path)
+                .with_context(|| format!("cannot remove stale socket {}", path.display()))?;
+            UnixListener::bind(path)
+                .with_context(|| format!("cannot bind {}", path.display()))?
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot bind {}", path.display()));
+        }
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("cannot make {} private", path.display()))?;
+    Ok(listener)
+}
+
+struct InstanceSocket(PathBuf);
+
+impl Drop for InstanceSocket {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!("cannot remove {}: {error}", self.0.display()),
+        }
+    }
 }
 
 /// Resolve when the process that started us is gone.
@@ -251,7 +286,11 @@ pub fn check(text: &str) -> anyhow::Result<()> {
     // Parsing alone would accept a file the gateway then refuses to start on, so
     // the check goes all the way through resolution. The web root is the
     // launcher's to name and is not in the file, so any path is sufficient here.
-    file.resolve_embedded(EmbeddedToken::generate(), PathBuf::new())
+    file.resolve_embedded(
+        EmbeddedToken::generate(),
+        PathBuf::new(),
+        PathBuf::from("gateway.sock"),
+    )
         .map(|_| ())
 }
 
@@ -263,7 +302,7 @@ mod tests {
     #[test]
     fn a_handshake_is_one_parseable_line() {
         let handshake = Handshake {
-            port: 49213,
+            socket: "/tmp/remotex/gateway.sock".to_owned(),
             token: "abc-123".to_owned(),
         };
         let line = handshake.line().unwrap();
@@ -275,7 +314,7 @@ mod tests {
         );
         // The field names the parent reads, spelled out so renaming one here fails
         // here rather than at launch.
-        assert!(line.contains("\"port\":49213"), "{line}");
+        assert!(line.contains("\"socket\":\"/tmp/remotex/gateway.sock\""), "{line}");
         assert!(line.contains("\"token\":\"abc-123\""), "{line}");
     }
 
@@ -319,7 +358,11 @@ mod tests {
         )
         .unwrap();
         let resolved = file
-            .resolve_embedded(EmbeddedToken::generate(), PathBuf::from("/w"))
+            .resolve_embedded(
+                EmbeddedToken::generate(),
+                PathBuf::from("/w"),
+                PathBuf::from("/i/gateway.sock"),
+            )
             .unwrap();
         assert_eq!(resolved.branding.text, "work laptop");
         assert_eq!(resolved.branding.logo.unwrap().mime, "image/png");
