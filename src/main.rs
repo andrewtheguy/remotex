@@ -35,9 +35,9 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 remotex::config::Audience::Served
             };
-            // The message is the product here: this subcommand exists to be run by
-            // the app's configuration editor and have its stderr shown to somebody
-            // about to fix the file. `{:#}` keeps the whole `anyhow` chain, which
+            // The message is the product here: an instance manager can run this for
+            // its configuration editor and show stderr to somebody about to fix the
+            // file. `{:#}` keeps the whole `anyhow` chain, which
             // is what names the target the complaint is about.
             if let Err(e) = remotex::embedded::check(
                 &remotex::embedded::read_candidate(config.as_deref())?,
@@ -74,10 +74,10 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the gateway `remotex.app` started, and stop when the app does.
+/// Run a managed embedded gateway, and stop when its parent does.
 ///
-/// Three ways out, and the first is the one the guarantee rests on: the app's end
-/// of our stdin closing, which happens however the app ended — see
+/// Three ways out, and the first is the one the guarantee rests on: the parent's
+/// end of our stdin closing, which happens however the parent ended — see
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
 async fn serve_embedded(

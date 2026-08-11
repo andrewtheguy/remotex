@@ -1008,7 +1008,6 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         auth: common::test_auth(),
         branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
-            allow_shell_origin: false,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

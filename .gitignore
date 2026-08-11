@@ -1,11 +1,7 @@
 /target
 frontend/node_modules
 tests/playwright/node_modules
-apps/viewer/node_modules
 frontend/dist
-# The shell's bundled main process and preloads, and the .app electron-builder
-# assembles from them.
-apps/viewer/dist
 /dist
 tmp/
 .env

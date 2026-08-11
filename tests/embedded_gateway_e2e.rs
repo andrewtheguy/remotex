@@ -1,8 +1,8 @@
-//! End-to-end tests of the gateway inside `remotex.app`: the handshake it prints,
+//! End-to-end tests of a managed embedded gateway: the handshake it prints,
 //! the token it takes in a cookie, the login it refuses, the SPA it serves out of
-//! the app's bundle, and the way it dies with whatever started it.
+//! the provided web root, and the way it dies with whatever started it.
 //!
-//! The real binary, spawned as a child the way the app spawns it — because every
+//! The real binary, spawned as a child the way a manager spawns it — because every
 //! one of those is a property of the *process*, not of a router built in-process.
 //! The handshake has to arrive on a pipe, the port has to be one the kernel chose,
 //! and the shutdown is the whole point: none of that can be observed from inside.
@@ -46,7 +46,7 @@ impl Embedded {
             .arg(dir.path())
             .arg("--web-root")
             .arg(&web)
-            // stdin is the liveness pipe: closing our end is how the app tells this
+            // stdin is the liveness pipe: closing our end is how the parent tells this
             // process to stop, so it must be a pipe and not this test's terminal.
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -103,7 +103,7 @@ impl Embedded {
         (status, body)
     }
 
-    /// The cookie the app puts in its window's store, spelled the way a browser
+    /// The cookie the manager puts in the browser's store, spelled the way a browser
     /// sends it back.
     fn cookie(&self) -> String {
         format!("remotex_session={}", self.token)
@@ -113,7 +113,7 @@ impl Embedded {
         self.get(path, Some(&self.cookie())).await
     }
 
-    /// Close our end of the liveness pipe: the app quitting, as the child sees it.
+    /// Close our end of the liveness pipe: the parent quitting, as the child sees it.
     fn close_stdin(&mut self) {
         drop(self.child.stdin.take());
     }
@@ -151,7 +151,7 @@ fn one_target() -> &'static str {
      port = 9\n"
 }
 
-/// The handshake is the app's only way in, so it has to be complete, and the port
+/// The handshake is the parent's only way in, so it has to be complete, and the port
 /// in it has to be the one that answers — a number printed before the bind would
 /// pass a parse and fail a connection.
 #[tokio::test]
@@ -194,7 +194,7 @@ async fn nothing_but_the_token_gets_past_the_guard() {
         .await;
     assert_eq!(status, 200);
 
-    // The header the app used to send is not accepted any more.
+    // A bearer header is not another spelling of the cookie credential.
     let req = format!(
         "GET /api/targets HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Connection: close\r\n\r\n",
@@ -225,8 +225,7 @@ async fn the_login_routes_refuse_rather_than_vanish() {
         "and certainly no cookie: {head}"
     );
 
-    // The one public route that does still answer: the app reads the branding off
-    // it to name its window and its About panel, before any cookie exists.
+    // The public branding route still answers before any cookie exists.
     let (status, body) = embedded.get("/api/config", None).await;
     assert_eq!(status, 200, "the branding is still readable: {body}");
     assert!(body.contains("branding"), "{body}");
@@ -234,7 +233,7 @@ async fn the_login_routes_refuse_rather_than_vanish() {
 
 /// `status` is the exception among the auth routes, and it has to be: the SPA asks
 /// it before it renders anything, and on this gateway the honest answer is yes —
-/// the app put the launch token in the cookie store before the first load. A 403
+/// the manager put the launch token in the cookie store before the first load. A 403
 /// here would put a login form in front of somebody with nothing to type into it.
 #[tokio::test]
 async fn the_status_route_answers_for_the_token() {
@@ -283,9 +282,9 @@ async fn the_socket_upgrade_takes_the_cookie() {
     assert_eq!(response.status(), 101);
 }
 
-/// The SPA is what `remotex.app` shows, so this gateway serves it: real files as
+/// This gateway serves the same SPA as `remotex serve`: real files as
 /// themselves, unknown paths as the index, and — the part worth pinning — the
-/// document itself without any credential, because the window has to be able to
+/// document itself without any credential, because the browser has to be able to
 /// load the page before its own scripts can present the cookie to anything.
 #[tokio::test]
 async fn the_spa_is_served_and_unknown_api_paths_are_not() {
@@ -324,12 +323,12 @@ async fn closing_the_liveness_pipe_stops_the_gateway() {
 
     assert!(
         embedded.exited_within(Duration::from_secs(3)),
-        "the gateway must not outlive the app that started it"
+        "the gateway must not outlive the parent that started it"
     );
 }
 
 /// A first launch has nothing configured, and that is a state to be served rather
-/// than an error: the app's picker is what says "no targets are configured".
+/// than an error: the browser's picker is what says "no targets are configured".
 #[tokio::test]
 async fn a_config_with_no_targets_still_serves() {
     let embedded = Embedded::start("");
@@ -338,9 +337,9 @@ async fn a_config_with_no_targets_still_serves() {
     assert_eq!((status, body.as_str()), (200, "[]"));
 }
 
-/// `[server]` is the app's to decide, so a config claiming it is refused — loudly,
+/// `[server]` is the launcher's to decide, so a config claiming it is refused — loudly,
 /// on stderr, and by not starting at all. The message has to name the block and say
-/// what does belong, because it is read by somebody in the app's config editor.
+/// what does belong, because a manager may show it in a config editor.
 #[test]
 fn a_server_block_refuses_the_start() {
     let dir = common::ScratchDir::new("embedded-server-block");
@@ -376,7 +375,7 @@ fn a_server_block_refuses_the_start() {
     );
 }
 
-/// `check-config` is what the app's editor calls before it writes, so its verdicts
+/// `check-config` is what a manager's editor calls before it writes, so its verdicts
 /// are the gateway's own: the same text that starts a gateway passes, and the same
 /// text that refuses one fails with the reason on stderr.
 #[test]
@@ -405,10 +404,10 @@ fn check_config_agrees_with_what_the_gateway_would_do() {
     let (ok, stderr) = check(one_target(), true);
     assert!(ok, "a config the gateway serves must pass: {stderr}");
     // An empty one too — that is a first launch.
-    assert!(check("", true).0, "no targets yet is not an error for the app");
+    assert!(check("", true).0, "no targets yet is not an error for an instance");
 
     let (ok, stderr) = check("[server]\n", true);
-    assert!(!ok, "the app's rules apply");
+    assert!(!ok, "the embedded-instance rules apply");
     assert!(stderr.contains("[server]"), "{stderr}");
 
     // Silence is not a pass: the served audience has its own rules, and the same

@@ -13,10 +13,10 @@
 //! which is fine for a single-user program.
 //!
 //! **The token.** `remotex serve-embedded` has no user to ask and nowhere to keep
-//! a credential: it is started by `remotex.app`, which is its only client. So it
-//! mints an [`EmbeddedToken`], hands it over down a pipe (see [`crate::embedded`]),
+//! a credential: it is started for one managed browser instance. So it mints an
+//! [`EmbeddedToken`], hands it to its parent down a pipe (see [`crate::embedded`]),
 //! and takes it in the same `remotex_session` cookie a login would have set. The
-//! client puts it in its window's cookie store, which is what lets one page load
+//! manager puts it in that browser's cookie store, which is what lets one page load
 //! carry it to `/api/*` and to the WebSocket upgrades alike — a header cannot reach
 //! either from inside a document. Such a gateway still refuses `/api/auth/login`
 //! and `/api/auth/logout`: there is no credential to check and no session to end.

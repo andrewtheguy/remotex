@@ -46,10 +46,6 @@ The repository-root `install.sh` downloads and verifies a release before
 calling the tarball's `packaging/install.sh`. That path is retained only for a
 Linux distribution that supports neither native package format.
 
-**remotex.app** is not built here. It is an Electron shell in
-[`apps/viewer`](../apps/viewer), ships as a `.dmg`, and carries the same gateway
-binary and frontend. See [`docs/macos-viewer.md`](../docs/macos-viewer.md).
-
 ## Local build
 
 ```sh
@@ -75,10 +71,9 @@ them by release version.
 
 `.github/workflows/release.yml` creates a draft, builds the frontend once, then
 builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
-arm64. The release is published only after the packages, **remotex.app** disk
-image, and common artifacts succeed.
+arm64. The release is published only after the packages and common artifacts
+succeed.
 
-The macOS viewer takes its gateway from the macOS tarball. Container images are
-assembled from the Linux tarballs. Those tarballs therefore remain build
-plumbing and fallback payloads even though native packages are what users are
-directed to install.
+Container images are assembled from the Linux tarballs. Those tarballs therefore
+remain build plumbing and fallback payloads even though native packages are what
+users are directed to install.

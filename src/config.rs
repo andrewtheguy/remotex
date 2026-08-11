@@ -863,7 +863,7 @@ pub struct ServerSection {
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
     // No `branding` here: it is the top-level `[branding]` table now (see
-    // `ConfigFile::branding`), because `remotex.app`'s config has no `[server]`
+    // `ConfigFile::branding`), because an embedded config has no `[server]`
     // block to hold it and one value with two spellings is one of them going
     // stale. `deny_unknown_fields` refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
@@ -896,17 +896,16 @@ pub const DEFAULT_BRANDING: &str = "remotex";
 /// image it puts in the browser tab.
 ///
 /// Top-level rather than in `[server]`, and it is the **only** place to set it.
-/// `remotex.app`'s config has no `[server]` block at all ([`Audience::Embedded`]),
-/// so a table that lived there could not name the app — and accepting both
+/// An embedded config has no `[server]` block at all ([`Audience::Embedded`]),
+/// so a table that lived there could not name the instance — and accepting both
 /// spellings would be two places to write one value, with the loser losing
 /// silently. `deny_unknown_fields` refuses a file that still has anything of it
 /// under `[server]`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrandingSection {
-    /// Display name of this gateway: the browser's login screen, interstitials and
-    /// tab title, and in `remotex.app` the heading above its target list, its window
-    /// title and its launch screen.
+    /// Display name of this gateway: the browser's login screen, interstitials,
+    /// tab title, and target picker.
     ///
     /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
     pub text: Option<String>,
@@ -973,15 +972,15 @@ fn logo_mime(path: &Path) -> anyhow::Result<&'static str> {
 ///
 /// - a [`Self::Served`] gateway is useless without a target to offer and a
 ///   credential to guard it, and it is told where to listen;
-/// - an [`Self::Embedded`] one is started by `remotex.app` with the port, the
-///   secret and the web root decided by the app, so a `[server]` block could only
-///   contradict it — and it must come up with **no targets at all**, because that
-///   is what a first launch has and the picker's job is to say so.
+/// - an [`Self::Embedded`] one is started by a manager with the port, secret and
+///   web root decided outside the config, so a `[server]` block could only
+///   contradict them — and it may come up with **no targets at all**, because that
+///   is a valid new instance and the picker's job is to say so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audience {
     /// `remotex serve`: a browser's gateway.
     Served,
-    /// `remotex serve-embedded`: the gateway inside `remotex.app`.
+    /// `remotex serve-embedded`: a managed local instance.
     Embedded,
 }
 
@@ -1016,12 +1015,10 @@ pub struct AppConfig {
     pub listen: ListenAddr,
     /// Directory holding the built frontend (index.html + assets), served from
     /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
-    /// one is told where its bundle keeps it (`--web-root`).
+    /// one is given it by its launcher (`--web-root`).
     ///
-    /// Every gateway has one, because every client is the same SPA: a browser
-    /// loads it over the network, while `remotex.app` maps the same directory to
-    /// `remotex://app` and the embedded gateway serves it over loopback beside
-    /// that custom-scheme view.
+    /// Every gateway has one, because every client is the same SPA and loads it
+    /// from the gateway's own HTTP origin.
     pub static_dir: PathBuf,
     /// Every target profile this process serves; the post-login picker selects
     /// one. Non-empty for [`Audience::Served`]; possibly empty for an embedded
@@ -1039,25 +1036,6 @@ pub struct AppConfig {
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
     pub dev_hostname: Option<String>,
-    /// Answer cross-origin requests from the **shell's** origin —
-    /// `remotex://app`, the custom scheme `remotex.app` loads its client from —
-    /// with credentials allowed.
-    ///
-    /// True for [`Audience::Embedded`] and false everywhere else, and the
-    /// difference is not a preference. `remotex.app` loads its client from a
-    /// `remotex://` scheme its main process registers, so every call the page
-    /// makes to its gateway is cross-origin; without this the page cannot reach
-    /// the backend it was shipped with.
-    ///
-    /// On a **served** gateway the same header would be a hole with nothing behind
-    /// it: that gateway is reachable by browsers on a network and has a login cookie
-    /// worth stealing, and no browser on a network can be a `remotex://` document
-    /// anyway, so answering for one is a header that can only ever be wrong. An
-    /// embedded gateway is bound to loopback, serves the single client that started
-    /// it, and its credential is a token minted per launch and kept in that app's own
-    /// cookie store — so the audience that gets this header is the audience for which
-    /// it grants nothing anybody else can use.
-    pub allow_shell_origin: bool,
 }
 
 impl ConfigFile {
@@ -1083,17 +1061,17 @@ impl ConfigFile {
         }
         if audience == Audience::Embedded {
             // Refused rather than ignored, and named as a whole block rather than
-            // key by key: every one of them is a decision the app has already made
-            // for this gateway — an ephemeral loopback port it reads back off the
-            // socket, a web root the app hands over on the command line
+            // key by key: every one of them is a decision the launcher has already
+            // made for this gateway — an ephemeral loopback port it reads back off
+            // the socket, a web root it hands over on the command line
             // (`serve-embedded --web-root`), and a token instead of a login. A key
             // that is quietly overridden is worse than
             // one that is refused: it reads as configuration and behaves as
             // decoration.
             anyhow::ensure!(
                 config.server.is_none(),
-                "this config is remotex.app's own and may not have a [server] block: \
-                 the app decides where its gateway listens, where the client it \
+                "an embedded instance config may not have a [server] block: \
+                 the launcher decides where its gateway listens, where the client it \
                  serves comes from, and how it authenticates. Only [branding] and \
                  [[targets]] belong here"
             );
@@ -1497,16 +1475,15 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Resolve the runtime configuration of the gateway inside `remotex.app`:
-    /// loopback, an ephemeral port, the SPA out of the app's bundle, and a freshly
+    /// Resolve the runtime configuration of a managed local instance: loopback,
+    /// an ephemeral port, the SPA from the launcher's web root, and a freshly
     /// minted token.
     ///
     /// Every one of those is an argument here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
     /// the way in. `[branding]` is the one thing such a config *may* say about the
-    /// gateway itself, because it is about the app rather than about the server: it
-    /// names a window, not a deployment, and two instances on one Mac are easier to
-    /// tell apart if they can be called different things.
+    /// gateway itself: it names the instance, and multiple local instances are
+    /// easier to tell apart if they can be called different things.
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
@@ -1514,8 +1491,8 @@ impl ConfigFile {
     ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
             // Not `localhost`: that name resolves to both loopbacks and the client
-            // is told one port on one address. The app connects to 127.0.0.1, on
-            // whatever port the kernel gives us.
+            // is told one port on one address. The manager connects to 127.0.0.1,
+            // on whatever port the kernel gives us.
             //
             // TCP rather than a socket, and not by omission: the thing that talks to
             // this gateway is a page in a window, and a page addresses its gateway
@@ -1527,9 +1504,6 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: None,
-            // The client is loaded as `remotex://app` out of the bundle, so it talks
-            // to this gateway cross-origin. See the field.
-            allow_shell_origin: true,
         })
     }
 
@@ -1603,8 +1577,6 @@ impl ConfigFile {
                 .map(dev_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
-            // Never on a gateway browsers reach over a network. See the field.
-            allow_shell_origin: false,
         })
     }
 }
@@ -1784,12 +1756,12 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
 ///
 /// The SPA handler still answers per request, so this changes nothing about what
 /// happens — it changes whether anyone can tell *why*. A gateway with no page to
-/// serve is a browser tab showing a 404, or `remotex.app` showing a blank window,
-/// and neither says which of the two ends is wrong.
+/// serve is a browser window showing a 404, which does not say which of the two
+/// ends is wrong.
 ///
 /// `hint` is the half that differs: a served gateway is told where to look in its
-/// config, and an embedded one is told this path came from its own bundle — the
-/// config it reads has no key for it and `[server]` is refused there.
+/// config, and an embedded one is told the launcher supplied this path — the config
+/// it reads has no key for it and `[server]` is refused there.
 pub fn warn_if_no_web_root(static_dir: &Path, hint: &str) {
     if !static_dir.is_dir() {
         log::warn!(

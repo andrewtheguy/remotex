@@ -29,11 +29,10 @@ per resize.
   been widely tested — it is also reverse engineered, having no specification.
   Prefer `ard` unless you need a virtual display.
 
-There is one client, and it is the page a browser loads. **remotex.app** shows
-that same page in a macOS window with a gateway of its own, and adds the two
-things a browser cannot do: ⌘Q and ⌘W reaching the guest, and a clipboard that
-keeps syncing while the window is unfocused. It is a released disk image, and
-[`docs/macos-viewer.md`](docs/macos-viewer.md) describes it.
+There is one client: the page a browser loads. For desktop use, install that page
+as an app in Chrome or Edge. The app window gives the client the browser-reserved
+key chords that a normal windowed tab keeps for itself, without a separate native
+wrapper or a second client lifecycle.
 
 An installed desktop browser app has **Window → Size to _width_×_height_**. It
 uses [`window.resizeTo()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/resizeTo)
@@ -75,8 +74,7 @@ sudo installer -pkg remotex-macos-arm64.pkg -target /
 ```
 
 The macOS package is unsigned and not notarized, so fetch it with `curl` as
-shown rather than through a browser. It installs the gateway CLI; the separate
-`.dmg` installs **remotex.app**.
+shown rather than through a browser. It installs the gateway CLI and web client.
 
 Packages do not own the live config because it contains credentials. On Linux,
 create it for the account that will run the gateway:

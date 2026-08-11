@@ -987,8 +987,8 @@ client be simple: nothing downstream tests for either again or carries a fallbac
 its absence. `navigator.clipboard`, `navigator.keyboard` and WebCodecs itself all
 require a secure context; the gateway speaks plain HTTP and has no TLS listener, so
 one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`,
-any `.localhost` label), a TLS-terminating reverse proxy, or the shell's own
-`remotex://app` scheme. A LAN address over plain `http://` is the case this refuses,
+any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
+plain `http://` is the case this refuses,
 by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
 alone, because audio is a target's choice and video is a render dial's: a browser
 with one and not the other would play some targets and not others, which is the
@@ -1005,8 +1005,8 @@ the client is meant to be run in. A plain tab gets the same from full screen plu
 (`keyboardLock.ts`), which also locks ⌘Q. That lock is an automatic browser enhancement,
 not a mode or menu control; it follows fullscreen because Chromium does not grant it to
 a windowed tab. The Command translation table itself is always complete and never
-changes with fullscreen. App windows and `remotex.app` therefore send every chord in
-windowed and fullscreen use alike, while a normal windowed tab remains subject to the
+changes with fullscreen. App windows therefore send every chord in windowed and
+fullscreen use alike, while a normal windowed tab remains subject to the
 shortcuts Chrome consumes before the page sees them. The window kind moves in one
 direction only: *Install page as app…* reparents the live document into the new window
 instead of reloading it, so `appWindow.ts` latches its answer true and notifies rather
@@ -1029,36 +1029,18 @@ Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
 
-### remotex.app, the macOS shell
+### Embedded gateway substrate
 
-`apps/viewer` is an Electron shell around that same SPA — the same
-`frontend/dist`, the same gateway, the same wire — adding only what a page cannot
-do for itself: every ⌘ chord reaching the guest, a clipboard that keeps syncing
-while the window is unfocused, a menu bar, and a gateway of its own. It holds no
-session and no wire format, so there is no version pair between it and the gateway:
-the protocol is the client's and the gateway's, changed in both as it always is, and
-the shell is not a third party to keep in step.
+`remotex serve-embedded --instance-dir <dir> --web-root <dir>` is the low-level
+process interface for a future cross-platform instance manager. It binds
+`127.0.0.1:0`, prints one JSON line — `{"port","token"}` — after binding, reads
+only `<instance-dir>/remotex.toml`, serves the SPA from the supplied web root, and
+stops when its parent's stdin closes (`src/embedded.rs`, `Audience::Embedded`).
+The token is accepted in the same `remotex_session` cookie a login would set.
 
-It runs `remotex serve-embedded --instance-dir <dir> --web-root <dir>`, which
-binds `127.0.0.1:0` and prints one JSON line — `{"port","token"}` — before serving
-(`src/embedded.rs`, `Audience::Embedded`). The token goes in the same
-`remotex_session` cookie a login would set, so one page load carries it to
-`/api/*` and to the socket upgrades alike. Nothing is passed the other way: the
-app never gets to choose the port or the secret, and `src/cli.rs` refuses flags
-that would let it. The gateway stops when the app's end of its stdin closes,
-which the kernel does however the app ends.
-
-The page loads as `remotex://app` out of the bundle rather than from the gateway's
-ephemeral port, so the client's remembered preferences have an origin that holds
-still. That makes its calls cross-origin, which `shell_origin_cors` in
-`src/server.rs` answers for that one literal origin when the gateway
-authenticates by token.
-
-The seam is `frontend/src/nativeHost.ts`: one state object the menus derive
-themselves from, and commands back for the controls the shell hides. Keys are not
-on it — the app drops its own menu accelerators while a live desktop has focus, so
-⌘W and ⌘Q arrive as ordinary key events on the client's existing path. See
-[`docs/macos-viewer.md`](macos-viewer.md).
+There is no separate native client or launcher in this repository. A manager must
+provide the browser profile, install the launch token, and open the gateway's own
+loopback origin; the client itself remains the same SPA.
 
 ## Configuration and testing
 
@@ -1083,8 +1065,8 @@ connect, a leftover from a killed gateway is taken over on the next start, one
 that something is still serving refuses the start, and the file is removed when
 the gateway stops. No client addresses that form directly — the page reaches its
 gateway over one HTTP origin and two WebSockets, all of which need a host and a
-port, so whatever terminates the proxy is what a browser talks to. It is also why
-`remotex.app`'s embedded gateway stays on loopback TCP.
+port, so whatever terminates the proxy is what a browser talks to. An embedded
+gateway likewise stays on loopback TCP because its browser addresses it by URL.
 
 `[branding]` is a top-level table rather than `[server]` keys: it names the
 deployment rather than the server, and one value with two spellings is one of

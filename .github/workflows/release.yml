@@ -1,4 +1,4 @@
-name: Release remotex and remotex.app
+name: Release remotex
 
 on:
   workflow_dispatch:
@@ -139,171 +139,8 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # remotex.app: the macOS shell around the same client, shipped as a disk image
-  # beside the tarballs.
-  #
-  # Nothing is compiled here. The gateway that goes in the bundle is taken out of
-  # the tarball this workflow already published — the same binary a tarball user
-  # runs, rather than a second build of it that could differ — and the client comes
-  # from the one `frontend-dist` every other job uses.
-  mac-viewer:
-    needs: [prepare, frontend, build]
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Download prebuilt frontend
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist
-
-      - name: Download the macOS tarball
-        uses: actions/download-artifact@v4
-        with:
-          name: remotex-macos-arm64
-          path: tmp/tarball
-
-      - name: Take the gateway out of it
-        run: |
-          mkdir -p tmp/unpacked target/release
-          tar -xzf "tmp/tarball/remotex-${{ needs.prepare.outputs.version }}-macos-arm64.tar.gz" \
-            -C tmp/unpacked --strip-components=1
-          cp tmp/unpacked/bin/remotex target/release/remotex
-
-      - name: Check and test the shell
-        run: |
-          cd apps/viewer
-          bun install --frozen-lockfile
-          bun run check
-          bun test tests
-
-      - name: Build remotex.app and its disk image
-        run: cd apps/viewer && bun run dist
-
-      - name: Verify the disk image
-        run: |
-          version="${{ needs.prepare.outputs.version }}"
-          dmg="dist/remotex-viewer-${version}-macos-arm64-unsigned.dmg"
-          mnt="$RUNNER_TEMP/viewer-dmg-mount"
-          mkdir -p "$mnt" "$RUNNER_TEMP/viewer-installed"
-          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
-          [ "$(readlink "$mnt/Applications")" = "/Applications" ] || {
-            echo "::error::the viewer image has no /Applications symlink"
-            exit 1
-          }
-          # Copied out and unmounted first, so everything below is checked after the
-          # archive round-trip — which is where a lost execute bit would show up.
-          /usr/bin/ditto "$mnt/remotex.app" \
-            "$RUNNER_TEMP/viewer-installed/remotex.app"
-          hdiutil detach "$mnt"
-          app="$RUNNER_TEMP/viewer-installed/remotex.app"
-          codesign --verify --deep --strict --verbose=2 "$app"
-
-          # The version reached the bundle. Not `--version` on the executable: an
-          # Electron binary has no such flag, and the plist is what macOS reads.
-          got=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-            "$app/Contents/Info.plist")
-          [ "$got" = "$version" ] || {
-            echo "::error::expected CFBundleShortVersionString ${version}, got ${got}"
-            exit 1
-          }
-
-          # The gateway, because an app with only one of its two executables is not
-          # an app: the client cannot serve itself and the gateway has no window.
-          got=$("$app/Contents/Resources/remotex-gateway" --version)
-          [ "$got" = "remotex ${version}" ] || {
-            echo "::error::expected 'remotex ${version}', got '${got}'"
-            exit 1
-          }
-
-          # And the client it shows. Without it the app has nothing but its own
-          # launch screen, and says so.
-          [ -f "$app/Contents/Resources/web/index.html" ] || {
-            echo "::error::remotex.app is missing the SPA it shows"
-            exit 1
-          }
-          # The shell's own two documents, which are the screen that explains a
-          # gateway that would not start — so they must not depend on one.
-          [ -f "$app/Contents/Resources/app.asar" ] || {
-            echo "::error::remotex.app has no app.asar"
-            exit 1
-          }
-          npx --yes @electron/asar list "$app/Contents/Resources/app.asar" \
-            > "$RUNNER_TEMP/asar.txt"
-          # One preload, not two: it belongs to a window and the one window shows
-          # both the launch screen and the client, so it picks its bridge from the
-          # document's own URL. The `.js` files are here because a shell document
-          # whose script did not ship is a page frozen on its own markup — which is
-          # exactly the failure that put this line here.
-          for needed in /dist/main.cjs /dist/bridge.cjs \
-            /dist/shell/launch.html /dist/shell/launch.js \
-            /dist/shell/config.html /dist/shell/config.js; do
-            grep -qx "$needed" "$RUNNER_TEMP/asar.txt" || {
-              echo "::error::remotex.app is missing ${needed}"
-              exit 1
-            }
-          done
-
-          # Every local file the document names, resolved under the web root. The
-          # `index.html` check above is satisfied by an `assets/` that lost the one
-          # hashed script it asks for — and vite renames that file on every build, so
-          # "the directory is there" is the weakest form of this question.
-          python3 - "$app/Contents/Resources/web" <<'PY'
-          import html.parser, pathlib, sys, urllib.parse
-
-          root = pathlib.Path(sys.argv[1])
-
-          class Refs(html.parser.HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.refs = []
-
-              def handle_starttag(self, tag, attrs):
-                  for name, value in attrs:
-                      if name in ("src", "href") and value:
-                          self.refs.append(value)
-
-          parser = Refs()
-          parser.feed((root / "index.html").read_text(encoding="utf-8"))
-
-          missing = []
-          checked = 0
-          for ref in parser.refs:
-              parsed = urllib.parse.urlparse(ref)
-              # Somebody else's to serve (a scheme or a host), or not a file at all
-              # (a bare `#fragment`): either way not this bundle's to carry.
-              if parsed.scheme or parsed.netloc or not parsed.path:
-                  continue
-              checked += 1
-              # Resolved against the web root. Vite emits `./assets/…` and index.html
-              # sits at that root, so document-relative and root-relative are the same
-              # thing here; `lstrip` keeps an absolute `/assets/…` working too.
-              if not (root / urllib.parse.unquote(parsed.path).lstrip("/")).is_file():
-                  missing.append(ref)
-
-          if missing:
-              print("::error::remotex.app references files it does not ship: " + ", ".join(missing))
-              sys.exit(1)
-          if not checked:
-              # A document naming nothing is a build that emitted no script, which
-              # would otherwise pass every check above and show a blank window.
-              print("::error::remotex.app ships an index.html that references nothing")
-              sys.exit(1)
-          print(f"index.html references {checked} bundled file(s), all present")
-          PY
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: remotex-viewer-macos-arm64
-          path: dist/*.dmg
-          if-no-files-found: error
-
   release:
-    needs: [prepare, build, mac-viewer]
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -321,12 +158,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .pkg is the native gateway package; the .dmg is
-        # remotex.app.
+        # release assets. The .pkg is the native macOS gateway package.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
-            artifacts/*.tar.gz artifacts/*.dmg --clobber
+            artifacts/*.tar.gz --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:
@@ -347,10 +183,6 @@ jobs:
   # These runners need no pinning (unlike the tarball builds above): the runner
   # only unpacks a tarball and drives docker, so all that matters is its arch —
   # the glibc that has to line up is the *base image*'s against the binary's.
-  #
-  # The image is the gateway alone. Nothing from `mac-viewer` goes into it: the app
-  # is a macOS bundle shipped as a disk image and never in a container. Its only
-  # relation to this job is that both hang off the same published release.
   docker:
     needs: [prepare, release]
     strategy:

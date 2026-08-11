@@ -36,21 +36,19 @@ pub enum Commands {
         listen: Option<String>,
     },
 
-    /// Start the gateway inside remotex.app: an ephemeral port on 127.0.0.1, the
-    /// SPA out of the app's bundle, and a token printed on stdout for the app
+    /// Start a managed gateway: an ephemeral port on 127.0.0.1, the SPA from a
+    /// caller-provided web root, and a token printed on stdout for the process
     /// that started it.
     ///
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
-    /// is how it dies with the app.
+    /// is how it dies with its manager.
     ServeEmbedded {
-        /// The app's instance directory, holding remotex.toml, gateway.log and
-        /// the viewer's own preferences. Nothing outside it is read.
+        /// The managed instance directory. Nothing outside it is read.
         #[arg(long)]
         instance_dir: PathBuf,
-        /// Where the built SPA lives — Contents/Resources/web inside the app
-        /// bundle. Passed rather than derived: nothing about a bundle's layout
-        /// is this binary's to know.
+        /// Where the built SPA lives. Passed rather than derived: its installation
+        /// layout is not this process's to guess.
         #[arg(long)]
         web_root: PathBuf,
     },
@@ -58,14 +56,14 @@ pub enum Commands {
     /// Check a config file and say what is wrong with it, without starting
     /// anything. Reads stdin unless --config names a file.
     ///
-    /// This is what remotex.app's configuration editor calls before it saves, so
-    /// that what the editor accepts is what the gateway accepts.
+    /// An instance manager can use this before saving so its editor accepts
+    /// exactly what the gateway accepts.
     CheckConfig {
         /// The file to check (default: read the config from stdin)
         #[arg(short, long)]
         config: Option<PathBuf>,
-        /// Apply remotex.app's rules instead of a served gateway's: no [server]
-        /// block, and no targets configured yet is not an error
+        /// Apply managed-instance rules instead of a served gateway's: no
+        /// [server] block, and no targets configured yet is not an error
         #[arg(long)]
         embedded: bool,
     },
@@ -131,11 +129,11 @@ mod tests {
         assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
     }
 
-    /// The app's own subcommand. It takes the two paths only the app knows — the
-    /// instance it owns and where its bundle keeps the SPA — and nothing else: the
-    /// port and the secret are the gateway's to decide, not the app's to pass.
+    /// The managed-instance subcommand takes the two paths only its launcher knows
+    /// — the instance it owns and the SPA it selected — and nothing else: the port
+    /// and the secret are the gateway's to decide.
     #[test]
-    fn serve_embedded_takes_the_two_paths_the_app_knows() {
+    fn serve_embedded_takes_the_two_paths_the_launcher_knows() {
         let cli = Cli::try_parse_from([
             "remotex",
             "serve-embedded",
@@ -162,7 +160,7 @@ mod tests {
         ] {
             assert!(
                 Cli::try_parse_from(&missing).is_err(),
-                "neither path has a default: the app names both {missing:?}"
+                "neither path has a default: the launcher names both {missing:?}"
             );
         }
         for rejected in ["--port", "--gateway", "--token"] {
@@ -178,7 +176,7 @@ mod tests {
                     "x"
                 ])
                 .is_err(),
-                "{rejected} is not the app's to pass"
+                "{rejected} is not the launcher's to pass"
             );
         }
     }

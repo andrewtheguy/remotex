@@ -84,7 +84,7 @@ impl axum::serve::Listener for NodelayListener {
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).
 ///   The static shell stays public — it renders the login screen and holds no
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
-///   serves the same SPA out of `remotex.app`'s bundle.
+///   serves the same SPA from its launcher-provided web root.
 pub fn router(config: AppConfig) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions)
@@ -180,108 +180,15 @@ pub(crate) fn router_with_sessions(
 
     routed
         .fallback_service(spa)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            shell_origin_cors,
-        ))
-        // Added last and therefore **outermost**: it sees every request before the
-        // CORS layer and before routing, because what it acts on is the `Host` a
-        // browser arrived under rather than which handler would answer. Inert unless
-        // `[server].dev_subdomain` is set *and* that host is loopback — and the two
-        // never meet, because `ConfigFile::resolve_embedded` leaves `dev_hostname`
-        // `None` on the only gateway that answers the shell origin. That is what
-        // keeps a 307 off an `OPTIONS`: a redirected preflight never completes, and
-        // the request it was clearing then never happens.
+        // Added last and therefore **outermost**: it sees every request before
+        // routing, because what it acts on is the `Host` a browser arrived under
+        // rather than which handler would answer. Inert unless
+        // `[server].dev_subdomain` is set and that host is loopback.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dev_hostname_redirect,
         ))
         .with_state(state)
-}
-
-/// The one origin an embedded gateway answers cross-origin: the shell's own.
-///
-/// A real origin, not the opaque `null` a `file://` document sends. The app registers
-/// `remotex` as a standard, secure, CORS-enabled scheme and serves the SPA out of its
-/// own bundle at `remotex://app/index.html`, so the
-/// page has one origin that holds still across launches — which is what keeps the
-/// client's remembered preferences, and which an ephemeral loopback port never could.
-///
-/// So this is not a wildcard standing in for "anything". It is the literal origin of
-/// the one page this gateway exists to serve.
-const SHELL_ORIGIN: &str = "remotex://app";
-
-/// Let the bundled `remotex://` client talk to its own gateway.
-///
-/// Two headers and a preflight, and the pair of them is the whole mechanism:
-/// `Access-Control-Allow-Origin: remotex://app` names the caller, and
-/// `Access-Control-Allow-Credentials: true` is what lets the `remotex_session`
-/// cookie travel — without the second one the request succeeds and arrives
-/// *unauthenticated*, which is the confusing half of getting this wrong.
-///
-/// Deliberately narrow in four ways:
-///
-/// - **Only when [`AppConfig::allow_shell_origin`] is set**, which is only an
-///   embedded gateway. A served one has no business answering for a scheme no
-///   browser on a network can be; see that field.
-/// - **Only on a [`GatewayAuth::Token`] gateway**, and this is not the same
-///   condition said twice. The credential is what the second header lets travel, so
-///   what makes this safe is that it is a token minted for one launch and given to
-///   one page — not a login cookie a person typed a password for, which is what
-///   would be at stake if the two fields ever came apart. Checked here rather than
-///   trusted from [`crate::config::ConfigFile::resolve_embedded`], because a
-///   middleware relying on a distant constructor to hold an invariant it depends on
-///   is one refactor from not holding it.
-/// - **Only for `Origin: remotex://app`.** Every other origin is either same-origin
-///   (a browser opened on this gateway's own address, which needs no header at all)
-///   or something this gateway has no business answering. Echoing back whatever
-///   arrived would turn one allowed caller into all of them — and `null`, which this
-///   used to answer, is the origin of every sandboxed frame and `data:` URL on the
-///   web rather than of one client.
-/// - **`Vary: Origin`**, so nothing caches an answer made for one origin and
-///   serves it to another.
-async fn shell_origin_cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let embedded = state.config.allow_shell_origin
-        && matches!(state.config.auth, GatewayAuth::Token(_));
-    if !embedded {
-        return next.run(req).await;
-    }
-    let from_shell = req
-        .headers()
-        .get(header::ORIGIN)
-        .is_some_and(|value| value.as_bytes() == SHELL_ORIGIN.as_bytes());
-    if !from_shell {
-        return next.run(req).await;
-    }
-
-    // A preflight is answered here rather than routed: it asks what *would* be
-    // allowed, and no handler downstream knows. `OPTIONS` never reaches a route.
-    let mut response = if req.method() == axum::http::Method::OPTIONS {
-        let mut preflight = StatusCode::NO_CONTENT.into_response();
-        preflight.headers_mut().insert(
-            header::ACCESS_CONTROL_ALLOW_METHODS,
-            header::HeaderValue::from_static("GET, POST, OPTIONS"),
-        );
-        preflight.headers_mut().insert(
-            header::ACCESS_CONTROL_ALLOW_HEADERS,
-            header::HeaderValue::from_static("content-type"),
-        );
-        preflight
-    } else {
-        next.run(req).await
-    };
-
-    let headers = response.headers_mut();
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        header::HeaderValue::from_static(SHELL_ORIGIN),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-        header::HeaderValue::from_static("true"),
-    );
-    headers.insert(header::VARY, header::HeaderValue::from_static("Origin"));
-    response
 }
 
 /// Whether `name` — a `Host` header with its port and brackets already stripped —
@@ -562,10 +469,8 @@ struct StatusResponse {
 /// between the login screen and the desktop.
 ///
 /// This route exists on an embedded gateway too, unlike the two beside it: the
-/// same SPA runs there, asks the same question first, and the answer is yes as
-/// soon as `remotex.app` has put the launch token in its window's cookie store.
-/// A no there means the client and the gateway disagree about the token, which is
-/// the app's problem to report — it is not something a login form could fix.
+/// same SPA runs there and asks the same question first. Its launcher is
+/// responsible for putting the launch token in the browser's cookie store.
 async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<StatusResponse> {
     Json(StatusResponse {
         authenticated: authenticate(&state, &headers),
@@ -691,164 +596,6 @@ mod tests {
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
-            allow_shell_origin: false,
-        }
-    }
-
-    /// `dev_router`, but answering the shell's origin the way an embedded gateway
-    /// does.
-    ///
-    /// Both halves of that shape, not just the flag: `resolve_embedded` mints a
-    /// token and sets the flag together, so a router carrying one without the other
-    /// is a gateway that cannot exist — and the tests below would then be asserting
-    /// credentialed CORS on top of a *login* cookie, which is the one combination
-    /// this must never produce.
-    fn embedded_router() -> Router {
-        let mut config = router_config(None);
-        config.auth = GatewayAuth::Token(crate::auth::EmbeddedToken::generate());
-        config.allow_shell_origin = true;
-        router(config)
-    }
-
-    /// The response to `method path` carrying `origin` as `Origin`, or no `Origin`
-    /// header at all when it is `None`.
-    async fn response_for(
-        router: Router,
-        method: &str,
-        path: &str,
-        origin: Option<&str>,
-    ) -> Response {
-        use tower::ServiceExt as _;
-
-        let mut request = axum::http::Request::builder().method(method).uri(path);
-        if let Some(origin) = origin {
-            request = request.header(header::ORIGIN, origin);
-        }
-        router
-            .oneshot(request.body(axum::body::Body::empty()).unwrap())
-            .await
-            .unwrap()
-    }
-
-    fn header_of(response: &Response, name: header::HeaderName) -> Option<String> {
-        response
-            .headers()
-            .get(name)
-            .map(|value| value.to_str().unwrap().to_owned())
-    }
-
-    /// The client is loaded from `remotex://app`, so it calls its own gateway
-    /// cross-origin. Both headers matter and for different reasons: without the
-    /// first the call is refused, and without the second it succeeds *without the
-    /// cookie* — which surfaces as a mysterious 401 rather than as a CORS error.
-    #[tokio::test]
-    async fn an_embedded_gateway_answers_the_shell_origin_with_credentials() {
-        let response =
-            response_for(embedded_router(), "GET", "/api/health", Some(SHELL_ORIGIN)).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
-            Some(SHELL_ORIGIN)
-        );
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS).as_deref(),
-            Some("true"),
-            "without this the cookie does not travel and the call arrives anonymous"
-        );
-        assert_eq!(
-            header_of(&response, header::VARY).as_deref(),
-            Some("Origin"),
-            "or a cache could serve this answer to a different origin"
-        );
-    }
-
-    /// The preflight has to be answered here, because no route knows what would be
-    /// allowed and `OPTIONS` reaches none of them.
-    #[tokio::test]
-    async fn a_preflight_from_the_shell_origin_is_answered() {
-        let response = response_for(
-            embedded_router(),
-            "OPTIONS",
-            "/api/session",
-            Some(SHELL_ORIGIN),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
-            Some(SHELL_ORIGIN)
-        );
-        assert!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_METHODS)
-                .is_some_and(|methods| methods.contains("POST")),
-            "claiming the session slot is a POST"
-        );
-    }
-
-    /// The half that keeps this safe. A served gateway is reachable by browsers on
-    /// a network and holds a login cookie, and nothing that reaches it can be a
-    /// `remotex://` document — so these headers there could only ever be granted to
-    /// something lying about where it came from.
-    #[tokio::test]
-    async fn a_served_gateway_never_answers_the_shell_origin() {
-        let response =
-            response_for(dev_router(None), "GET", "/api/health", Some(SHELL_ORIGIN)).await;
-
-        assert_eq!(response.status(), StatusCode::OK, "the request still works");
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            None,
-            "but a browser may not read it cross-origin"
-        );
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
-            None
-        );
-    }
-
-    /// The credential is the other half of the condition. A login gateway's cookie
-    /// is a password somebody typed and a session that outlives the page; the flag
-    /// alone must not be enough to let the shell origin send one, however it came to
-    /// be set.
-    #[tokio::test]
-    async fn the_flag_alone_does_not_open_a_login_gateway() {
-        let mut config = router_config(None);
-        config.allow_shell_origin = true;
-        let response = response_for(router(config), "GET", "/api/health", Some(SHELL_ORIGIN)).await;
-
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            None,
-            "a login credential is never handed to the shell origin"
-        );
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
-            None
-        );
-    }
-
-    /// Only the shell origin, and not whatever turned up. Echoing the request's own
-    /// `Origin` back is how one allowed caller quietly becomes all of them — and
-    /// `null` is in this list because it is what a `file://` document and every
-    /// sandboxed frame on the web send, which this gateway used to answer and no
-    /// longer does.
-    #[tokio::test]
-    async fn an_embedded_gateway_answers_no_other_origin() {
-        for origin in [
-            "http://evil.example",
-            "http://127.0.0.1:52675",
-            "null",
-            "remotex://elsewhere",
-        ] {
-            let response =
-                response_for(embedded_router(), "GET", "/api/health", Some(origin)).await;
-            assert_eq!(
-                header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
-                None,
-                "{origin} must not be granted cross-origin access"
-            );
         }
     }
 
@@ -1184,7 +931,6 @@ mod tests {
                 logo: None,
             },
             dev_hostname: None,
-            allow_shell_origin: false,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
