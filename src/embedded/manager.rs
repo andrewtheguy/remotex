@@ -825,10 +825,32 @@ impl SharedPort {
     pub async fn bind(requested_port: u16, routes: RouteTable) -> anyhow::Result<Self> {
         let ipv4 = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), requested_port))?;
         let port = ipv4.local_addr()?.port();
-        let ipv6 = bind_listener(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))?;
-        let listeners = [ipv4, ipv6];
+        // The second name for one loopback, not a second service — `localhost` and
+        // `remotex.localhost` resolve to `::1` first on most of these machines. The
+        // policy is `bind_all`'s in `src/main.rs`, and for its reason: the only
+        // tolerated failure is an address family this host does not have, because
+        // refusing to start over a loopback that cannot exist is useless. Everything
+        // else is fatal, `AddrInUse` above all — a browser picks either family, so a
+        // master left holding `[::1]:port` from an earlier run would keep answering
+        // and keep routing to *its* instance workers, and which one a page reached
+        // would be the resolver's choice.
+        let ipv6 = match bind_listener(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)) {
+            Ok(listener) => Some(listener),
+            Err(error)
+                if error.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
+                    == Some(std::io::ErrorKind::AddrNotAvailable) =>
+            {
+                log::warn!(
+                    "the control plane is IPv4-only: {error:#} — this machine has no \
+                     such address, which is what an IPv6 name resolves to on a host \
+                     with IPv6 disabled"
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
         let mut tasks = Vec::new();
-        for listener in listeners {
+        for listener in [Some(ipv4), ipv6].into_iter().flatten() {
             let listener = tokio::net::TcpListener::from_std(listener)
                 .context("cannot hand the control-plane listener to the runtime")?;
             let routes = routes.clone();
@@ -917,6 +939,19 @@ async fn route_connection(
         return Ok(());
     };
 
+    // Whoever asks is handed the token, and that is the threat model rather than a
+    // gap in it: the boundary this control plane draws is the machine, not the
+    // user. The listener is bound to `127.0.0.1` and `::1` alone, so nothing off
+    // the machine can ask; the token stands in for a login the embedded gateway
+    // does not have, and seeding it here is what lets one page load carry it to
+    // `/api/*` and to both WebSocket upgrades, which a header cannot reach from
+    // inside a document. What follows is that **any local user may drive any
+    // instance** — including one who could not open the instance directory's
+    // `0700` socket directly. This is a single-user desktop tool: do not run
+    // `remotex tui` on a machine you share with people you would not give the
+    // desktops to. A launch nonce would not change that, only make it a step
+    // longer: the page it authenticates has to keep something the next request
+    // presents, and the redirect is where that something is handed over.
     if !cookie_has_token(parsed.cookie.as_deref(), &target.token) {
         let cookie = format!(
             "remotex_session={}; HttpOnly; SameSite=Strict; Path=/",
@@ -1025,12 +1060,18 @@ fn hostname(host: &str) -> String {
     }
 }
 
+/// Whether the request already carries this instance's launch token.
+///
+/// The value is folded rather than compared, through the one comparison the
+/// gateway itself uses on the same secret: `==` on a token stops at the first
+/// wrong byte, and this runs on a loopback port where the timing is not buried
+/// under a network.
 fn cookie_has_token(cookie: Option<&str>, expected: &str) -> bool {
     cookie.is_some_and(|cookies| {
         cookies.split(';').any(|pair| {
-            pair.trim()
-                .split_once('=')
-                .is_some_and(|(name, value)| name == "remotex_session" && value == expected)
+            pair.trim().split_once('=').is_some_and(|(name, value)| {
+                name == "remotex_session" && crate::auth::secrets_match(expected, value)
+            })
         })
     })
 }
@@ -1178,6 +1219,27 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 307 Temporary Redirect"), "{response}");
         assert!(response.contains("Set-Cookie: remotex_session=launch-token;"), "{response}");
         assert!(response.contains("Location: /"), "{response}");
+    }
+
+    /// A master left holding one family of the shared port is not something to
+    /// start beside: the browser picks the family, so half its page loads would
+    /// reach the old process and its old instance workers.
+    #[tokio::test]
+    async fn a_port_half_taken_by_an_earlier_master_refuses_the_start() {
+        let squatter = bind_listener(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
+        let port = squatter.local_addr().unwrap().port();
+
+        let Err(error) = SharedPort::bind(port, RouteTable::default()).await else {
+            panic!("the v6 half of this port is already served");
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::AddrInUse),
+            "{error:#}"
+        );
+        drop(squatter);
     }
 
     async fn fake_gateway(

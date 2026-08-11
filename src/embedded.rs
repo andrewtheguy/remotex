@@ -191,15 +191,43 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
 }
 
 fn bind_instance_socket(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::os::unix::net::{UnixListener, UnixStream};
+
+    // The directory before the socket. There is no bind that takes a mode, so the
+    // socket exists at whatever the umask says for the few microseconds before the
+    // `0600` below — and behind that window is a gateway that asks for no login at
+    // all. A `0700` parent makes it unreachable rather than merely short. The
+    // supervisor already creates instance directories this way; a directory made
+    // by hand, or before that was true, is brought up to it here.
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => std::path::Path::new("."),
+    };
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot make {} private", dir.display()))?;
 
     let listener = match UnixListener::bind(path) {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            let stale = std::fs::symlink_metadata(path)
+                .with_context(|| format!("cannot inspect {}", path.display()))?;
             anyhow::ensure!(
                 UnixStream::connect(path).is_err(),
                 "{} is already served by another gateway",
+                path.display()
+            );
+            // Between that refused connection and this removal, another gateway may
+            // have reached the same verdict and bound the path itself — and removing
+            // *that* socket would leave it listening on a name nothing can reach.
+            // Only the exact file the verdict was reached about is removed; a path
+            // that changed underneath is a takeover this start loses rather than
+            // wins, and says so.
+            let current = std::fs::symlink_metadata(path)
+                .with_context(|| format!("cannot inspect {}", path.display()))?;
+            anyhow::ensure!(
+                (current.dev(), current.ino()) == (stale.dev(), stale.ino()),
+                "{} was replaced while its leftover was being taken over",
                 path.display()
             );
             std::fs::remove_file(path)

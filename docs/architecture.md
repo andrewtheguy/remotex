@@ -1091,7 +1091,10 @@ that something is still serving refuses the start, and the file is removed when
 the gateway stops. No client addresses that form directly — the page reaches its
 gateway over one HTTP origin and two WebSockets, all of which need a host and a
 port, so whatever terminates the proxy is what a browser talks to. An embedded
-gateway likewise stays on loopback TCP because its browser addresses it by URL.
+gateway is that arrangement in one process tree: the worker listens on
+`<instance>/gateway.sock` and never on TCP, and the thing terminating the proxy
+is the TUI master, which the browser reaches over loopback TCP and which
+forwards each connection to that socket.
 
 `[branding]` is a top-level table rather than `[server]` keys: it names the
 deployment rather than the server, and one value with two spellings is one of

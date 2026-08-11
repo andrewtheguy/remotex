@@ -176,17 +176,29 @@ impl EmbeddedToken {
     /// a mismatched length answers immediately. The bytes are, so they are folded
     /// into one accumulator rather than compared with an early return.
     pub fn matches(&self, presented: &str) -> bool {
-        let expected = self.0.as_bytes();
-        let presented = presented.as_bytes();
-        if expected.len() != presented.len() {
-            return false;
-        }
-        let mut difference = 0u8;
-        for (a, b) in expected.iter().zip(presented) {
-            difference |= a ^ b;
-        }
-        difference == 0
+        secrets_match(&self.0, presented)
     }
+}
+
+/// Whether two secrets are the same, without leaking *where* they stop matching.
+///
+/// A free function because the same token is checked in two places: here, by the
+/// embedded gateway holding the [`EmbeddedToken`], and by the control plane's
+/// router, which reads it out of a cookie before proxying
+/// ([`crate::embedded::manager`]) and never holds the token type at all. One
+/// comparison, so there is no second copy to be the one that compares with `==`.
+#[cfg(feature = "embedded-gateway")]
+pub fn secrets_match(expected: &str, presented: &str) -> bool {
+    let expected = expected.as_bytes();
+    let presented = presented.as_bytes();
+    if expected.len() != presented.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in expected.iter().zip(presented) {
+        difference |= a ^ b;
+    }
+    difference == 0
 }
 
 /// Generate a `site_passwd` value (the `gen-passwd` subcommand; tests pass a
