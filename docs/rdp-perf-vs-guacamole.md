@@ -43,10 +43,23 @@ acknowledging the surface flavour the way guacd does; EGFX sessions need no mark
 because the pipeline flushes its surfaces once per frame PDU, and the wrapper marks
 that flush. On the first `Frame` a server ever sends, `src/rdp.rs` switches
 regimes: the marker becomes the flush signal and the timer demotes to a 100 ms
-safety net (`FRAME_NET`, guacd's own fallback number). A server that never marks —
-none has been seen; the Windows 11 host and xrdp both mark — keeps the original
-coalescer. Measured with `freerdp-e2e`: both kinds of server marked 4 boundaries
-across 5 paints, the expected shape.
+safety net (`FRAME_NET`, guacd's own fallback number). A server that never marks
+keeps the original coalescer. Measured with `freerdp-e2e`: both kinds of server
+marked 4 boundaries across 5 paints, the expected shape.
+
+That measurement was taken on the EGFX path, and the caches below later showed it
+does not carry to the other one. The ALTSEC frame marker is itself an order, so
+it cannot arrive on a connection sending none: the same Windows 11 host, run with
+`egfx = false` and no bitmap cache, marked **nothing at all**, and began marking
+only once the caches gave it a reason to send orders.
+
+Orders turn out to be necessary but not sufficient, and this is where the claim
+above — that no never-marking server had been seen — was simply untested rather
+than true. xrdp on the legacy path marks nothing in any run, with the caches or
+without, while sending 960 MemBlt orders. So `FRAME_NET` and the 16 ms coalescer
+are live code on that pairing rather than a theoretical fallback, and the regime
+switch in `src/rdp.rs` is doing real work in deciding per server rather than
+per configuration.
 
 ### Performance flags — taken
 
@@ -61,9 +74,62 @@ decision (the reversal and its price are in the wrapper's comment). Only the
 booleans are set, because the pinned FreeRDP derives the wire value from them
 (`freerdp_performance_flags_make`) as the info packet is written — the redundant
 uint32 guacd also sets guards older FreeRDPs this build does not link.
-`BitmapCacheEnabled` and `OffscreenSupportLevel` guacd also enables on the legacy
-path remain untaken; glyph caching it forces off regardless of settings, for
-upstream instability (GUACAMOLE-1191).
+
+### The legacy path's caches — taken
+
+`BitmapCacheEnabled` and `OffscreenSupportLevel`, which guacd also enables
+(`settings.c:1730-1731`), are now set in the wrapper too. FreeRDP 3 ships both
+off — `freerdp_settings_new` leaves the bitmap key zeroed, reachable only through
+a Windows registry hook, and sets the offscreen level to 0 — so every session
+before this ran the legacy orders path with no client-side cache at all. Glyph
+caching stays off: guacd forces it off regardless of settings for upstream
+instability (GUACAMOLE-1191), and FreeRDP's own settings warning calls a non-NONE
+level experimental.
+
+The effect is larger than "some blits get cheaper". Measured against the Windows
+11 host with `egfx = false`, twice each way, reading FreeRDP's end-of-session
+`update_dump_stats`: **without** the caches that host sent no drawing orders
+whatsoever — 71 and 72 raw bitmap updates, every one of them pixels. **With**
+them it sent no raw bitmap update at all: 1941 and 1945 MemBlt orders drawn out
+of 574 and 587 cached bitmaps, so roughly two of every three blits repainted from
+memory the client already held. Denying a server the cache does not make it send
+the same picture more cheaply some other way; it makes it stop using orders and
+push pixels. The same counters print from a gateway — `WLOG_LEVEL=TRACE` against
+an `egfx = false` target — which is where a third reading of 2922 MemBlt over 152
+cached bitmaps came from.
+
+xrdp is the check that this is not one vendor's quirk, and it gives the same
+shape from a much quieter desktop: 0 orders and 5 raw bitmap updates without the
+caches, 960 MemBlt orders over 156 and 337 cached bitmaps and no raw update at
+all with them. What moves is the server's choice of mechanism, not the amount it
+had to draw.
+
+Order counts are mechanism and not volume, so whether the new mechanism is
+*cheaper* is a separate measurement: inbound bytes on the socket to xrdp over
+fixed 25-second windows held by a gateway on an `egfx = false` target, with the
+arms interleaved on/off/on/off so a drifting desktop could not land on one of
+them.
+
+| workload | with caches | without | |
+| --- | --- | --- | --- |
+| static desktop | ~1.6 KB | ~1.0 KB | nothing to be better at |
+| video in a window | 104 MB | 121 MB | −14%, arms not overlapping |
+| full-screen video | 279 MB | 301 MB | −7%, all four pairs |
+
+Full-screen video is the case with a reason to regress — nearly every pixel is
+novel, and each tile now carries an order as well — and it did not; all six pairs
+across both video workloads fell the same way. That is a byte rate rather than a
+per-frame efficiency claim, because the uncached arm painted slightly more frames
+downstream and this instrument cannot separate that from cheaper ones. The static
+desktop is the honest shape of the win: a cache pays where content repeats, and
+an idle screen transfers nothing to save.
+
+Frame markers came with it on the Windows host, which is the correction recorded
+above; xrdp sends orders and still marks nothing. Both settings
+are unconditional rather than gated on `egfx`, because they are capabilities of
+the orders channel — what an EGFX-off session speaks, and what an EGFX-on session
+falls back to when a server declines the pipeline. A server driving EGFX ignores
+them.
 
 ### Adaptive quality, per update rather than per session — taken, as an option
 
@@ -176,7 +242,9 @@ bound-at-sink — is worth remembering when a new symptom appears.
 6. Per-tile content-aware codec choice (the PNG-optimality estimator).
 7. ~~The EGFX retry with guacd's exact settings~~ — **done**; it was the black
    screen's cause and the fix for Windows resize audio besides.
-8. Explicit bitmap/offscreen cache flags on the legacy path.
+8. ~~Explicit bitmap/offscreen cache flags on the legacy path~~ — **done**, in the
+   wrapper; it turned out to decide whether that path uses drawing orders at all,
+   and on Windows brought that path's frame markers with it.
 
 The audio half of what this comparison session found — RDP sound dying after a
 legacy-path resize — was a bug, not a gap, and is recorded in
