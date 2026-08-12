@@ -1,9 +1,10 @@
 # Packaging
 
 Native packages are the release install contract. Linux ships both `.deb` and
-`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the input for
-container and viewer builds and the payload used by the unsupported-platform
-quick installer.
+`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout and
+frontend input for container builds and the payload used by the
+unsupported-platform quick installer. Containers replace its native binary with
+a build that excludes the `embedded-gateway` default feature.
 
 ## Native layouts
 
@@ -38,6 +39,7 @@ That keeps both upgrades and removals away from stored credentials.
 |---|---|
 | `build-tarball.sh` | build the gateway and assemble the common release payload |
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
+| `build-container-binary.sh` | build and verify a gateway with all default features disabled |
 | `install.sh` | install the tarball fallback under a relocatable prefix |
 | `uninstall.sh` | remove that fallback installation or one fallback version |
 | `Dockerfile` | build an image from an extracted release tarball |
@@ -45,10 +47,6 @@ That keeps both upgrades and removals away from stored credentials.
 The repository-root `install.sh` downloads and verifies a release before
 calling the tarball's `packaging/install.sh`. That path is retained only for a
 Linux distribution that supports neither native package format.
-
-**remotex.app** is not built here. It is an Electron shell in
-[`apps/viewer`](../apps/viewer), ships as a `.dmg`, and carries the same gateway
-binary and frontend. See [`docs/macos-viewer.md`](../docs/macos-viewer.md).
 
 ## Local build
 
@@ -75,10 +73,12 @@ them by release version.
 
 `.github/workflows/release.yml` creates a draft, builds the frontend once, then
 builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
-arm64. The release is published only after the packages, **remotex.app** disk
-image, and common artifacts succeed.
+arm64. The release is published only after the packages and common artifacts
+succeed.
 
-The macOS viewer takes its gateway from the macOS tarball. Container images are
-assembled from the Linux tarballs. Those tarballs therefore remain build
-plumbing and fallback payloads even though native packages are what users are
-directed to install.
+Container images take their layout and frontend from the Linux tarballs, then
+replace `bin/remotex` with the separately built container gateway. The build
+script, release smoke test, and Dockerfile all reject a binary that exposes
+`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
+build plumbing and fallback payloads even though native packages are what users
+are directed to install.

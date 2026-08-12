@@ -1,19 +1,13 @@
 // Mac host, non-Mac guest: turn local Command chords into the Control chords the
-// guest expects. A port of the macOS viewer's `KeyboardTranslator` (see
-// apps/remotex-viewer/Sources/Input/KeyboardTranslator.swift) — same state
-// machine, same emitted vocabulary, deliberately a smaller mapping table.
-//
-// The two clients can share the logic because they already share the alphabet:
-// the viewer maps macOS virtual keycodes to DOM `code` strings, which is what a
-// `KeyboardEvent` hands us directly. Neither the wire format nor the gateway
-// knows this file exists — a translated chord is indistinguishable from one the
-// user really typed.
+// guest expects. This is entirely a browser concern: neither the wire format nor
+// the gateway knows this file exists, and a translated chord is indistinguishable
+// from one the user really typed.
 //
 // What differs from the viewer, and why:
 //
-//   - **The full Command table is always active.** `remotex.app` and a Chrome app
-//     window deliver the six chords a normal browser tab reserves, and an automatic
-//     Keyboard Lock supplies them to a fullscreen tab. A windowed tab never sends
+//   - **The full Command table is always active.** A Chrome app window delivers the
+//     six chords a normal browser tab reserves, and an automatic Keyboard Lock
+//     supplies them to a fullscreen tab. A windowed tab never sends
 //     those keydowns to the page, so including them here changes nothing there; it
 //     means every chord that does arrive has one stable meaning regardless of window
 //     or fullscreen state.

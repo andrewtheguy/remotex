@@ -28,8 +28,7 @@ test("an available stream nobody asked for is distinguished from one that failed
     audioLabel({ available: true, enabled: false, error: null, stream: null }),
     "Available, not playing",
   );
-  // The one state here that is wrong rather than off, and in `remotex.app` this
-  // card is the only place it appears at all.
+  // The one state here that is wrong rather than off.
   assert.equal(
     audioLabel({
       available: true,

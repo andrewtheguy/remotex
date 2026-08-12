@@ -78,9 +78,7 @@ function streamLabel(stream: AudioStreamInfo): string {
  * The Audio row.
  *
  * The failure is reported ahead of everything else because it is the only state
- * here that is *wrong* rather than merely off, and because it has nowhere else to
- * appear in `remotex.app`: the drawer that shows it in a browser is exactly the
- * chrome that host replaces (see `chromeless` in FloatingMenu).
+ * here that is *wrong* rather than merely off.
  */
 export function audioLabel(row: AudioRow): string {
   if (!row.available) {

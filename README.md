@@ -29,11 +29,10 @@ per resize.
   been widely tested — it is also reverse engineered, having no specification.
   Prefer `ard` unless you need a virtual display.
 
-There is one client, and it is the page a browser loads. **remotex.app** shows
-that same page in a macOS window with a gateway of its own, and adds the two
-things a browser cannot do: ⌘Q and ⌘W reaching the guest, and a clipboard that
-keeps syncing while the window is unfocused. It is a released disk image, and
-[`docs/macos-viewer.md`](docs/macos-viewer.md) describes it.
+There is one client: the page a browser loads. For desktop use, install that page
+as an app in Chrome or Edge. The app window gives the client the browser-reserved
+key chords that a normal windowed tab keeps for itself, without a separate native
+wrapper or a second client lifecycle.
 
 An installed desktop browser app has **Window → Size to _width_×_height_**. It
 uses [`window.resizeTo()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/resizeTo)
@@ -75,8 +74,7 @@ sudo installer -pkg remotex-macos-arm64.pkg -target /
 ```
 
 The macOS package is unsigned and not notarized, so fetch it with `curl` as
-shown rather than through a browser. It installs the gateway CLI; the separate
-`.dmg` installs **remotex.app**.
+shown rather than through a browser. It installs the gateway CLI and web client.
 
 Packages do not own the live config because it contains credentials. On Linux,
 create it for the account that will run the gateway:
@@ -101,6 +99,33 @@ remotex serve
 See [`docs/install.md`](docs/install.md) for package upgrades, removal, macOS
 config setup, and the quick-install fallback for Linux distributions that
 support neither `.deb` nor `.rpm`.
+
+## Local instances
+
+Native installs also include a multi-instance terminal control plane:
+
+```sh
+remotex tui
+```
+
+It listens only on both loopbacks, at `serve`'s port: 52380 unless `--port` or
+`REMOTEX_TUI_PORT` says otherwise, and never a port the kernel picked, because
+this is a number you type into a browser. A port something else is already
+serving refuses the start rather than answering on half of it.
+Open <http://remotex.localhost:52380>; each
+running instance has its own origin at
+`http://<instance>.remotex.localhost:52380`. Press `n` to create an instance,
+`e` to edit its `remotex.toml`, Enter to start or stop it, `r` to restart it,
+and `q` to stop every child and quit.
+
+Each immediate subdirectory is one instance. The default root is
+`~/.local/share/remotex/instances` on Linux (or
+`$XDG_DATA_HOME/remotex/instances`) and
+`~/Library/Application Support/remotex/instances` on macOS; pass
+`--instances-dir` to choose another. Its config uses the same `[branding]` and
+`[[targets]]` format as the former native viewer and deliberately has no
+`[server]` block. The supervisor owns the shared TCP port and proxies each
+subdomain to that child's private `<instance>/gateway.sock`.
 
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
 no additional software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac

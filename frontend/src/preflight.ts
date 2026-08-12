@@ -27,7 +27,6 @@
 //   http://localhost:52380, http://127.0.0.1:52380, http://[::1]:52380   loopback
 //   http://<label>.localhost:52380                                       RFC 6761
 //   https://gateway.example                                    TLS-terminating proxy
-//   remotex://app                                     the shell's own scheme, `secure`
 //
 // A LAN address on plain http is the case this refuses, and the message names the
 // three ways out.

@@ -1,12 +1,7 @@
-# The gateway is the only package here. The macOS agent and the protocol crate it
-# shared were removed (see docs/roadmap.md for the virtual-display utility idea
-# that could one day revive its one kept feature), and so was the native macOS
-# viewer that embedded Chromium by hand.
-#
-# `remotex.app` is back and is not in this workspace: it is `apps/viewer`, an
-# Electron shell around the same SPA, built with bun and electron-builder. What it
-# needs from this crate is a mode — `serve-embedded` (src/embedded.rs) — and the
-# binary itself, which its bundle carries. See docs/macos-viewer.md.
+# The gateway is the only package here. `serve` is the deployable browser gateway;
+# `tui` is the feature-gated local multi-instance control plane;
+# `serve-embedded` is its hidden per-instance worker. Every shape serves the same
+# SPA and uses the same protocol implementation.
 #
 # One version for the whole workspace. `[workspace.package]` below is the only
 # literal `version` in the tree — the root package inherits it with
@@ -28,9 +23,16 @@ name = "remotex"
 version.workspace = true
 edition = "2024"
 
+[features]
+# Native builds include the local TUI control plane. Container artifacts
+# explicitly disable default features: a remotely deployed gateway must not
+# expose process supervision or its private worker surface.
+default = ["embedded-gateway"]
+embedded-gateway = ["dep:crossterm"]
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Serves the built frontend from disk (see src/server.rs). Assets are no longer
@@ -38,6 +40,7 @@ serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
@@ -194,6 +197,14 @@ socket2 = { version = "0.6", features = ["all"] }
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
 freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260807194353-26441e1" }
+
+[[test]]
+name = "embedded_gateway_e2e"
+required-features = ["embedded-gateway"]
+
+[[test]]
+name = "tui_control_plane_e2e"
+required-features = ["embedded-gateway"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

@@ -2,9 +2,9 @@
 // mode. The Command translator always uses its complete table; this lock only makes
 // the browser-reserved members of that table reach the page when Chromium permits it.
 //
-// Chromium restricts Keyboard Lock to fullscreen. App windows and `remotex.app` do
-// not need it in windowed mode because their hosts reserve no browser shortcuts. A
-// normal windowed tab keeps those shortcuts before any page code can see them.
+// Chromium restricts Keyboard Lock to fullscreen. Installed app windows do not
+// need it in windowed mode because they reserve no browser shortcuts. A normal
+// windowed tab keeps those shortcuts before any page code can see them.
 //
 // Two events report fullscreen because there are two routes into it. The Fullscreen
 // API fires `fullscreenchange`; the browser's own shortcut is visible through the

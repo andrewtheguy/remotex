@@ -152,27 +152,6 @@ function readViewport(): Viewport {
 // clear the other — and this makes it impossible to express.
 type Panel = "clipboard" | "keyboard" | "display";
 
-/// The panel actions, for a host with its own menus. The clipboard one fetches
-/// first and resolves when the panel is up, exactly as the drawer's button does —
-/// there is one implementation of "open the clipboard", and a menu item calls it.
-export interface PanelControls {
-  openClipboard: () => void;
-  toggleDisplays: () => void;
-  closePanel: () => void;
-  /**
-   * Show the Help card, which is where "This session" lives.
-   *
-   * The one route to it in a chromeless host: the ☰ button that opens it is the
-   * chrome such a host replaces, so without this the card — the remote's size and
-   * density against this window's, the connection, the render dial, and what the
-   * audio and video decoders were built with — is
-   * unreachable in `remotex.app`. Reported by the page rather than
-   * rebuilt natively, because every line of it is derived from state this page
-   * already holds and a second copy is a second copy to keep in step.
-   */
-  openHelp: () => void;
-}
-
 /// The window kind, subscribed to rather than read once.
 ///
 /// *Install page as app…* reparents this very document into the new window, so every
@@ -423,9 +402,7 @@ function ScreenHelp({
               which is a separate per-target choice made in the same config file:
               which of the two audio paths this target uses, at what rate, and — the
               one state that is a fault rather than a setting — why a decoder
-              stopped. That last is why this row is here rather than only on the
-              drawer's toggle: `remotex.app` hides the drawer, so the card is the
-              only place its failure can appear. See mediaLabel.ts. */}
+              stopped. See mediaLabel.ts. */}
           <dd>{audioLabel(audio)}</dd>
         </div>
         {/* Absent for every session with no video in it, which the Render row has
@@ -555,8 +532,6 @@ export default function FloatingMenu({
   remoteIsMac,
   onMacKeyOverridesChange,
   onLocalShortcut,
-  chromeless = false,
-  onPanelControls,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -625,18 +600,6 @@ export default function FloatingMenu({
   // unwind what it was holding for one. Only the Mac spelling of the chrome
   // shortcut needs it, and only because Command is in it. See useRemoteDesktop.
   onLocalShortcut: () => void;
-  // Drop this component's own chrome — the button, the drawer, the help card and
-  // the chord that hides them — and keep the docked panels.
-  //
-  // For `remotex.app`, where a real menu bar offers all of it and a floating
-  // button over a native window would be a second menu disagreeing with the first.
-  // The panels stay because they are not chrome: they are the clipboard editor and
-  // the display list themselves, and rebuilding those natively would be two of
-  // each. See nativeHost.ts.
-  chromeless?: boolean;
-  // Hands the panel actions out so the menu bar can drive them, and `null` on
-  // unmount. Only the shell passes it.
-  onPanelControls?: (controls: PanelControls | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -734,11 +697,6 @@ export default function FloatingMenu({
   // Capture the non-persisted chrome shortcut before remote input forwarding.
   const [hidden, setHidden] = useState(false);
   useEffect(() => {
-    // Nothing to hide, and the chord would be one this page must not eat: with a
-    // menu bar on screen every key belongs to the remote.
-    if (chromeless) {
-      return;
-    }
     const onKeyDown = (e: KeyboardEvent) => {
       // The host's own middle modifier and pointedly not the other one, which is
       // what leaves the four-modifier hyper chord to its owner. See
@@ -763,7 +721,7 @@ export default function FloatingMenu({
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [isMacHost, onLocalShortcut, chromeless]);
+  }, [isMacHost, onLocalShortcut]);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>) => {
@@ -888,29 +846,6 @@ export default function FloatingMenu({
     });
   }, [panel, clipboardPending, onFetchClipboard, closePanel, setPanel]);
 
-  // The same three actions the drawer's buttons take, published for a host whose
-  // menus replace the drawer. Republished when they change, and withdrawn on
-  // unmount so a menu item cannot open a panel belonging to a session that ended.
-  useEffect(() => {
-    if (!onPanelControls) {
-      return;
-    }
-    const toggleDisplays = () => {
-      setOpen(false);
-      togglePanel("display");
-    };
-    onPanelControls({
-      openClipboard: onClipboard,
-      toggleDisplays,
-      closePanel,
-      openHelp: () => {
-        setOpen(false);
-        setHelpOpen(true);
-      },
-    });
-    return () => onPanelControls(null);
-  }, [onPanelControls, onClipboard, togglePanel, closePanel]);
-
   // The drawer anchors to the FAB: right-aligned to it, placed below unless the
   // FAB sits too low, in which case it flips above.
   const toolbarStyle = useMemo(() => {
@@ -948,9 +883,8 @@ export default function FloatingMenu({
       {/* The button and its drawer go together: a toolbar anchored to a button
           that isn't there reads as a bug. Both keep their state while hidden, so
           the chord brings back exactly what was on screen. Docked panels are left
-          alone — they carry their own Close, and in a chromeless host they are the
-          only thing this component renders. */}
-      {!hidden && !chromeless && (
+          alone because they carry their own Close. */}
+      {!hidden && (
         <button
           type="button"
           className={`fab${open ? " fab-open" : ""}${dragging ? " fab-dragging" : ""}`}
@@ -973,7 +907,7 @@ export default function FloatingMenu({
         </button>
       )}
 
-      {open && !hidden && !chromeless && (
+      {open && !hidden && (
         <div className="toolbar" style={toolbarStyle}>
           <WindowSection size={size} onSize={onSizeWindow} />
 
@@ -1118,25 +1052,18 @@ export default function FloatingMenu({
               }}
               videoStreams={videoStreams}
             />
-            {/* Only where there is a menu to hide. A chromeless host has no ☰ and
-                does not take the chord (the listener returns early there), so this
-                row would be documenting a shortcut that does nothing. */}
-            {!chromeless && (
-              <>
-                <h3>Shortcuts</h3>
-                <dl className="help-list">
-                  <div className="help-item">
-                    <dt>Hide or show this menu</dt>
-                    {/* Worth documenting precisely because of what it does: once the
+            <h3>Shortcuts</h3>
+            <dl className="help-list">
+              <div className="help-item">
+                <dt>Hide or show this menu</dt>
+                {/* Worth documenting precisely because of what it does: once the
                     ☰ button is hidden there is nothing left on screen to read the
                     way back off, so a shortcut nobody wrote down is a menu that
                     looks gone for good. */}
-                    <dd>{hideChromeShortcut(isMacHost)}</dd>
-                  </div>
-                  <AppWindowHelpRow />
-                </dl>
-              </>
-            )}
+                <dd>{hideChromeShortcut(isMacHost)}</dd>
+              </div>
+              <AppWindowHelpRow />
+            </dl>
             {isMacHost && (
               <>
                 <h3>Mac key override</h3>

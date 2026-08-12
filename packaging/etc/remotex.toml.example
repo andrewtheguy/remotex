@@ -12,9 +12,7 @@
 #
 #   chmod 600 remotex.toml
 #
-# This is the served gateway's file. remotex.app keeps its own in its instance
-# directory and is the thing that edits it; everything below applies to both
-# except [server], which that one has no use for and refuses.
+# This is a served gateway's file.
 
 # What this gateway calls itself, and the icon it shows. Top-level rather than
 # under [server]: it names the deployment rather than the server, and one value
@@ -25,10 +23,6 @@
 # .jpg, .gif or .webp) the gateway serves as the page's tab icon; without it
 # the page keeps no icon.
 #
-# It is also the one table this file shares with remotex.app's own config, which
-# has no [server] block at all. The app supplies its gateway's ephemeral loopback
-# listener, authentication token and bundled web root; its window loads that same
-# web root as remotex://app. Edit that config from the app, not here.
 #[branding]
 #text = "remotex"
 #logo = "/path/to/logo.png"

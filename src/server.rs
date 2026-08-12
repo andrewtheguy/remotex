@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 use tower::service_fn;
 use tower_http::services::ServeDir;
 
+#[cfg(feature = "embedded-gateway")]
+use crate::auth::GatewayAuth;
 use crate::{
-    auth::{self, AuthSessions, GatewayAuth},
+    auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
     session::SessionManager,
@@ -30,8 +32,8 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     /// Live auth sessions behind the login cookie. Only a
     /// [`GatewayAuth::Login`] gateway mints or validates one — an embedded
-    /// gateway's client carries the launch token in that same cookie and there is
-    /// no session to look up, so this stays empty there.
+    /// gateway's client carries the launch token the control plane seeded in that
+    /// same cookie and there is no session to look up, so this stays empty there.
     pub auth: Arc<AuthSessions>,
 }
 
@@ -68,6 +70,68 @@ impl axum::serve::Listener for NodelayListener {
     }
 }
 
+/// Take a listening socket on every address, or none at all.
+///
+/// **A port already in use is fatal, on any one of them.** It means something else
+/// is serving that port — most often a gateway from an earlier run — and starting
+/// beside it is worse than not starting: a browser resolving `localhost` picks
+/// either family, so it would reach the old process or the new one depending on
+/// which address it happened to try, and the two would fight over the target's
+/// session. This is the "stale gateway answered while the fresh one thought
+/// it was serving" failure, and refusing to start is the only honest answer.
+///
+/// The one tolerated failure is an address family this machine does not have:
+/// `localhost` resolves to `::1` on a host with IPv6 switched off, and refusing to
+/// start over a loopback that cannot exist would be useless. It is warned about,
+/// and it is still fatal if it leaves nothing bound.
+///
+/// All-or-nothing rather than a preflight probe, because a probe is a lie by the
+/// time it returns: whatever it found free can be taken in the microseconds before
+/// the real bind. Holding the sockets *is* the check, and dropping the ones already
+/// taken on the way out leaves every port exactly as it was found.
+///
+/// This lives here rather than beside `serve` because the TUI control plane binds
+/// the same pair of loopbacks for the same reason (`crate::embedded::manager`), and
+/// two implementations of "is this port already somebody else's" is one of them
+/// being wrong.
+pub fn bind_all(
+    addrs: &[std::net::SocketAddr],
+    addr: &str,
+) -> anyhow::Result<Vec<std::net::TcpListener>> {
+    use anyhow::Context as _;
+
+    let mut listeners = Vec::new();
+    for &socket in addrs {
+        match std::net::TcpListener::bind(socket) {
+            Ok(listener) => listeners.push(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                warn!(
+                    "not listening on {socket}: {e} — this machine has no such \
+                     address, which is what an IPv6 name resolves to on a host \
+                     with IPv6 disabled"
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // `listeners` drops here, releasing anything already taken.
+                anyhow::bail!(
+                    "{socket} is already in use — something else is serving that \
+                     port (an earlier `remotex serve`?). Stop it first; starting \
+                     beside it would leave two gateways answering {addr} \
+                     unpredictably"
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot listen on {socket}"));
+            }
+        }
+    }
+    anyhow::ensure!(
+        !listeners.is_empty(),
+        "none of the addresses {addr} resolves to can be listened on"
+    );
+    Ok(listeners)
+}
+
 /// Build the axum router.
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
@@ -84,7 +148,7 @@ impl axum::serve::Listener for NodelayListener {
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).
 ///   The static shell stays public — it renders the login screen and holds no
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
-///   serves the same SPA out of `remotex.app`'s bundle.
+///   serves the same SPA from its launcher-provided web root.
 pub fn router(config: AppConfig) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions)
@@ -128,7 +192,8 @@ pub(crate) fn router_with_sessions(
     //
     // `status` is the exception, and registering it either way is the point: the
     // page asks the same question on both, and there it answers yes because the
-    // app already put the launch token in the cookie store.
+    // control plane already seeded the launch token on the instance origin.
+    #[cfg(feature = "embedded-gateway")]
     let auth_routes = match config.auth {
         GatewayAuth::Login(_) => Router::new()
             .route("/auth/login", post(login_handler))
@@ -138,6 +203,11 @@ pub(crate) fn router_with_sessions(
             .route("/auth/logout", post(no_login_handler)),
     }
     .route("/auth/status", get(status_handler));
+    #[cfg(not(feature = "embedded-gateway"))]
+    let auth_routes = Router::new()
+        .route("/auth/login", post(login_handler))
+        .route("/auth/logout", post(logout_handler))
+        .route("/auth/status", get(status_handler));
 
     let state = AppState {
         config,
@@ -180,108 +250,15 @@ pub(crate) fn router_with_sessions(
 
     routed
         .fallback_service(spa)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            shell_origin_cors,
-        ))
-        // Added last and therefore **outermost**: it sees every request before the
-        // CORS layer and before routing, because what it acts on is the `Host` a
-        // browser arrived under rather than which handler would answer. Inert unless
-        // `[server].dev_subdomain` is set *and* that host is loopback — and the two
-        // never meet, because `ConfigFile::resolve_embedded` leaves `dev_hostname`
-        // `None` on the only gateway that answers the shell origin. That is what
-        // keeps a 307 off an `OPTIONS`: a redirected preflight never completes, and
-        // the request it was clearing then never happens.
+        // Added last and therefore **outermost**: it sees every request before
+        // routing, because what it acts on is the `Host` a browser arrived under
+        // rather than which handler would answer. Inert unless
+        // `[server].dev_subdomain` is set and that host is loopback.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dev_hostname_redirect,
         ))
         .with_state(state)
-}
-
-/// The one origin an embedded gateway answers cross-origin: the shell's own.
-///
-/// A real origin, not the opaque `null` a `file://` document sends. The app registers
-/// `remotex` as a standard, secure, CORS-enabled scheme and serves the SPA out of its
-/// own bundle at `remotex://app/index.html`, so the
-/// page has one origin that holds still across launches — which is what keeps the
-/// client's remembered preferences, and which an ephemeral loopback port never could.
-///
-/// So this is not a wildcard standing in for "anything". It is the literal origin of
-/// the one page this gateway exists to serve.
-const SHELL_ORIGIN: &str = "remotex://app";
-
-/// Let the bundled `remotex://` client talk to its own gateway.
-///
-/// Two headers and a preflight, and the pair of them is the whole mechanism:
-/// `Access-Control-Allow-Origin: remotex://app` names the caller, and
-/// `Access-Control-Allow-Credentials: true` is what lets the `remotex_session`
-/// cookie travel — without the second one the request succeeds and arrives
-/// *unauthenticated*, which is the confusing half of getting this wrong.
-///
-/// Deliberately narrow in four ways:
-///
-/// - **Only when [`AppConfig::allow_shell_origin`] is set**, which is only an
-///   embedded gateway. A served one has no business answering for a scheme no
-///   browser on a network can be; see that field.
-/// - **Only on a [`GatewayAuth::Token`] gateway**, and this is not the same
-///   condition said twice. The credential is what the second header lets travel, so
-///   what makes this safe is that it is a token minted for one launch and given to
-///   one page — not a login cookie a person typed a password for, which is what
-///   would be at stake if the two fields ever came apart. Checked here rather than
-///   trusted from [`crate::config::ConfigFile::resolve_embedded`], because a
-///   middleware relying on a distant constructor to hold an invariant it depends on
-///   is one refactor from not holding it.
-/// - **Only for `Origin: remotex://app`.** Every other origin is either same-origin
-///   (a browser opened on this gateway's own address, which needs no header at all)
-///   or something this gateway has no business answering. Echoing back whatever
-///   arrived would turn one allowed caller into all of them — and `null`, which this
-///   used to answer, is the origin of every sandboxed frame and `data:` URL on the
-///   web rather than of one client.
-/// - **`Vary: Origin`**, so nothing caches an answer made for one origin and
-///   serves it to another.
-async fn shell_origin_cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let embedded = state.config.allow_shell_origin
-        && matches!(state.config.auth, GatewayAuth::Token(_));
-    if !embedded {
-        return next.run(req).await;
-    }
-    let from_shell = req
-        .headers()
-        .get(header::ORIGIN)
-        .is_some_and(|value| value.as_bytes() == SHELL_ORIGIN.as_bytes());
-    if !from_shell {
-        return next.run(req).await;
-    }
-
-    // A preflight is answered here rather than routed: it asks what *would* be
-    // allowed, and no handler downstream knows. `OPTIONS` never reaches a route.
-    let mut response = if req.method() == axum::http::Method::OPTIONS {
-        let mut preflight = StatusCode::NO_CONTENT.into_response();
-        preflight.headers_mut().insert(
-            header::ACCESS_CONTROL_ALLOW_METHODS,
-            header::HeaderValue::from_static("GET, POST, OPTIONS"),
-        );
-        preflight.headers_mut().insert(
-            header::ACCESS_CONTROL_ALLOW_HEADERS,
-            header::HeaderValue::from_static("content-type"),
-        );
-        preflight
-    } else {
-        next.run(req).await
-    };
-
-    let headers = response.headers_mut();
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        header::HeaderValue::from_static(SHELL_ORIGIN),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-        header::HeaderValue::from_static("true"),
-    );
-    headers.insert(header::VARY, header::HeaderValue::from_static("Origin"));
-    response
 }
 
 /// Whether `name` — a `Host` header with its port and brackets already stripped —
@@ -415,11 +392,9 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(presented) = auth::token_from_headers(headers) else {
         return false;
     };
-    match &state.config.auth {
-        // Validation also refreshes the session's sliding expiry.
-        GatewayAuth::Login(_) => state.auth.validate(&presented),
-        GatewayAuth::Token(expected) => expected.matches(&presented),
-    }
+    // Login validation also refreshes the session's sliding expiry. A managed
+    // gateway instead compares the launch token inside `GatewayAuth`.
+    state.config.auth.authenticates(&state.auth, &presented)
 }
 
 /// `Set-Cookie` attributes for the session cookie. `Secure` cookies set over
@@ -456,7 +431,7 @@ async fn login_handler(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let GatewayAuth::Login(site_passwd) = &state.config.auth else {
+    let Some(site_passwd) = state.config.auth.login() else {
         // Unreachable: `router` registers `no_login_handler` at this path on a
         // token gateway. Answered rather than asserted, because the shape that
         // would reach here — a login route on a gateway with no credential — must
@@ -549,6 +524,7 @@ async fn logo_handler(State(state): State<AppState>) -> ApiResult<impl IntoRespo
 /// for a routing mistake; a 403 says the request was understood and is not allowed
 /// here — which is the truth, and it is the same answer whatever credentials are
 /// offered, since an embedded gateway holds none to check them against.
+#[cfg(feature = "embedded-gateway")]
 async fn no_login_handler() -> AppError {
     AppError::Forbidden
 }
@@ -562,10 +538,8 @@ struct StatusResponse {
 /// between the login screen and the desktop.
 ///
 /// This route exists on an embedded gateway too, unlike the two beside it: the
-/// same SPA runs there, asks the same question first, and the answer is yes as
-/// soon as `remotex.app` has put the launch token in its window's cookie store.
-/// A no there means the client and the gateway disagree about the token, which is
-/// the app's problem to report — it is not something a login form could fix.
+/// same SPA runs there and asks the same question first. Its control plane seeds
+/// the launch token as an HttpOnly cookie before proxying the first request.
 async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<StatusResponse> {
     Json(StatusResponse {
         authenticated: authenticate(&state, &headers),
@@ -634,6 +608,103 @@ async fn claim_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// Both loopbacks at one port, which is what `host = "localhost"` resolves to
+    /// and the reason `bind_all` exists.
+    fn both_loopbacks(port: u16) -> Vec<SocketAddr> {
+        vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        ]
+    }
+
+    /// A port nothing is listening on, found by taking one and letting it go.
+    ///
+    /// Racy in principle and fine in practice: the window is microseconds and the
+    /// alternative is a hardcoded port, which is racy against every other test run
+    /// on the machine rather than against nothing in particular.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn both_loopbacks_are_bound_for_one_name() {
+        // `::1` does not exist on a host with IPv6 off, and `bind_all` warns past it
+        // by design — so the v6 half is required only where it can be had. The v4
+        // loopback is required either way.
+        let has_v6 = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
+        let port = free_port();
+        let listeners = bind_all(&both_loopbacks(port), "localhost:0").unwrap();
+        let bound: Vec<_> = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap())
+            .collect();
+        if has_v6 {
+            assert_eq!(bound, both_loopbacks(port), "both, in the order resolved");
+        } else {
+            assert_eq!(
+                bound,
+                vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)]
+            );
+        }
+    }
+
+    /// The check the whole function is for: a port held on *any* resolved address
+    /// stops the start, even when the other address is free.
+    #[test]
+    fn a_port_already_in_use_on_one_address_refuses_the_start() {
+        let port = free_port();
+        // Hold IPv4 only, leaving the IPv6 loopback free — the half-bound shape
+        // that used to start happily and answer on one family.
+        let squatter = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+
+        let err = bind_all(&both_loopbacks(port), "localhost:0")
+            .expect_err("a port in use must refuse the start");
+        let text = format!("{err:#}");
+        assert!(text.contains("already in use"), "{text}");
+        assert!(text.contains(&port.to_string()), "it must name the port: {text}");
+
+        // And nothing was left holding the address that *was* free: the IPv6
+        // listener taken on the way through has to be released, or a retry after
+        // stopping the other process would fail against ourselves.
+        drop(squatter);
+        bind_all(&both_loopbacks(port), "localhost:0")
+            .expect("the refused attempt must not have kept a socket");
+    }
+
+    /// An address this machine does not have is warned about, not fatal — that is
+    /// what `::1` is on a host with IPv6 disabled. Simulated with an address no
+    /// machine has assigned.
+    #[test]
+    fn an_unavailable_address_is_skipped_while_the_rest_still_bind() {
+        let port = free_port();
+        let mut addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), port)];
+        addrs.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+
+        let listeners = bind_all(&addrs, "example:0").expect("the loopback still binds");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(
+            listeners[0].local_addr().unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        );
+    }
+
+    /// ...unless it leaves nothing at all, which is a gateway nobody can reach.
+    #[test]
+    fn an_address_nothing_could_bind_is_still_fatal() {
+        let addrs = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            free_port(),
+        )];
+        let err = bind_all(&addrs, "example:0").expect_err("nothing bound is fatal");
+        assert!(format!("{err:#}").contains("can be listened on"), "{err:#}");
+    }
+
 
     /// A router whose only interesting property is the dev hostname, over a
     /// static dir that does not exist — every assertion below is about the
@@ -691,164 +762,6 @@ mod tests {
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
-            allow_shell_origin: false,
-        }
-    }
-
-    /// `dev_router`, but answering the shell's origin the way an embedded gateway
-    /// does.
-    ///
-    /// Both halves of that shape, not just the flag: `resolve_embedded` mints a
-    /// token and sets the flag together, so a router carrying one without the other
-    /// is a gateway that cannot exist — and the tests below would then be asserting
-    /// credentialed CORS on top of a *login* cookie, which is the one combination
-    /// this must never produce.
-    fn embedded_router() -> Router {
-        let mut config = router_config(None);
-        config.auth = GatewayAuth::Token(crate::auth::EmbeddedToken::generate());
-        config.allow_shell_origin = true;
-        router(config)
-    }
-
-    /// The response to `method path` carrying `origin` as `Origin`, or no `Origin`
-    /// header at all when it is `None`.
-    async fn response_for(
-        router: Router,
-        method: &str,
-        path: &str,
-        origin: Option<&str>,
-    ) -> Response {
-        use tower::ServiceExt as _;
-
-        let mut request = axum::http::Request::builder().method(method).uri(path);
-        if let Some(origin) = origin {
-            request = request.header(header::ORIGIN, origin);
-        }
-        router
-            .oneshot(request.body(axum::body::Body::empty()).unwrap())
-            .await
-            .unwrap()
-    }
-
-    fn header_of(response: &Response, name: header::HeaderName) -> Option<String> {
-        response
-            .headers()
-            .get(name)
-            .map(|value| value.to_str().unwrap().to_owned())
-    }
-
-    /// The client is loaded from `remotex://app`, so it calls its own gateway
-    /// cross-origin. Both headers matter and for different reasons: without the
-    /// first the call is refused, and without the second it succeeds *without the
-    /// cookie* — which surfaces as a mysterious 401 rather than as a CORS error.
-    #[tokio::test]
-    async fn an_embedded_gateway_answers_the_shell_origin_with_credentials() {
-        let response =
-            response_for(embedded_router(), "GET", "/api/health", Some(SHELL_ORIGIN)).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
-            Some(SHELL_ORIGIN)
-        );
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS).as_deref(),
-            Some("true"),
-            "without this the cookie does not travel and the call arrives anonymous"
-        );
-        assert_eq!(
-            header_of(&response, header::VARY).as_deref(),
-            Some("Origin"),
-            "or a cache could serve this answer to a different origin"
-        );
-    }
-
-    /// The preflight has to be answered here, because no route knows what would be
-    /// allowed and `OPTIONS` reaches none of them.
-    #[tokio::test]
-    async fn a_preflight_from_the_shell_origin_is_answered() {
-        let response = response_for(
-            embedded_router(),
-            "OPTIONS",
-            "/api/session",
-            Some(SHELL_ORIGIN),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
-            Some(SHELL_ORIGIN)
-        );
-        assert!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_METHODS)
-                .is_some_and(|methods| methods.contains("POST")),
-            "claiming the session slot is a POST"
-        );
-    }
-
-    /// The half that keeps this safe. A served gateway is reachable by browsers on
-    /// a network and holds a login cookie, and nothing that reaches it can be a
-    /// `remotex://` document — so these headers there could only ever be granted to
-    /// something lying about where it came from.
-    #[tokio::test]
-    async fn a_served_gateway_never_answers_the_shell_origin() {
-        let response =
-            response_for(dev_router(None), "GET", "/api/health", Some(SHELL_ORIGIN)).await;
-
-        assert_eq!(response.status(), StatusCode::OK, "the request still works");
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            None,
-            "but a browser may not read it cross-origin"
-        );
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
-            None
-        );
-    }
-
-    /// The credential is the other half of the condition. A login gateway's cookie
-    /// is a password somebody typed and a session that outlives the page; the flag
-    /// alone must not be enough to let the shell origin send one, however it came to
-    /// be set.
-    #[tokio::test]
-    async fn the_flag_alone_does_not_open_a_login_gateway() {
-        let mut config = router_config(None);
-        config.allow_shell_origin = true;
-        let response = response_for(router(config), "GET", "/api/health", Some(SHELL_ORIGIN)).await;
-
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            None,
-            "a login credential is never handed to the shell origin"
-        );
-        assert_eq!(
-            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
-            None
-        );
-    }
-
-    /// Only the shell origin, and not whatever turned up. Echoing the request's own
-    /// `Origin` back is how one allowed caller quietly becomes all of them — and
-    /// `null` is in this list because it is what a `file://` document and every
-    /// sandboxed frame on the web send, which this gateway used to answer and no
-    /// longer does.
-    #[tokio::test]
-    async fn an_embedded_gateway_answers_no_other_origin() {
-        for origin in [
-            "http://evil.example",
-            "http://127.0.0.1:52675",
-            "null",
-            "remotex://elsewhere",
-        ] {
-            let response =
-                response_for(embedded_router(), "GET", "/api/health", Some(origin)).await;
-            assert_eq!(
-                header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
-                None,
-                "{origin} must not be granted cross-origin access"
-            );
         }
     }
 
@@ -1184,7 +1097,6 @@ mod tests {
                 logo: None,
             },
             dev_hostname: None,
-            allow_shell_origin: false,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

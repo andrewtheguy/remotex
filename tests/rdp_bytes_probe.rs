@@ -62,7 +62,6 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         auth: common::test_auth(),
         branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
-            allow_shell_origin: false,
         targets: vec![TargetConfig {
             name: "xrdp-dummy".to_owned(),
             protocol: Protocol::Rdp,

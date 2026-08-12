@@ -23,26 +23,48 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve_with(listen.as_deref())?;
             serve(config).await?;
         }
+        #[cfg(feature = "embedded-gateway")]
+        Commands::Tui {
+            port,
+            instances_dir,
+            web_root,
+        } => {
+            anyhow::ensure!(port != 0, "--port must be between 1 and 65535");
+            remotex::embedded::run_tui(remotex::embedded::TuiOptions {
+                port,
+                instances_dir: instances_dir
+                    .map(Ok)
+                    .unwrap_or_else(remotex::embedded::default_instances_dir)?,
+                web_root: web_root.unwrap_or_else(remotex::config::default_static_dir),
+            })
+            .await?;
+        }
+        #[cfg(feature = "embedded-gateway")]
         Commands::ServeEmbedded {
             instance_dir,
             web_root,
         } => {
             serve_embedded(&remotex::embedded::Instance::new(instance_dir), web_root).await?;
         }
-        Commands::CheckConfig { config, embedded } => {
-            let audience = if embedded {
-                remotex::config::Audience::Embedded
-            } else {
-                remotex::config::Audience::Served
-            };
-            // The message is the product here: this subcommand exists to be run by
-            // the app's configuration editor and have its stderr shown to somebody
-            // about to fix the file. `{:#}` keeps the whole `anyhow` chain, which
+        Commands::CheckConfig {
+            config,
+            #[cfg(feature = "embedded-gateway")]
+            embedded,
+        } => {
+            // The message is the product here: an instance manager can run this for
+            // its configuration editor and show stderr to somebody about to fix the
+            // file. `{:#}` keeps the whole `anyhow` chain, which
             // is what names the target the complaint is about.
-            if let Err(e) = remotex::embedded::check(
-                &remotex::embedded::read_candidate(config.as_deref())?,
-                audience,
-            ) {
+            let text = remotex::config::read_candidate(config.as_deref())?;
+            #[cfg(feature = "embedded-gateway")]
+            let result = if embedded {
+                remotex::embedded::check(&text)
+            } else {
+                remotex::config::check(&text)
+            };
+            #[cfg(not(feature = "embedded-gateway"))]
+            let result = remotex::config::check(&text);
+            if let Err(e) = result {
                 eprintln!("{e:#}");
                 std::process::exit(1);
             }
@@ -74,12 +96,13 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the gateway `remotex.app` started, and stop when the app does.
+/// Run a managed embedded gateway, and stop when its parent does.
 ///
-/// Three ways out, and the first is the one the guarantee rests on: the app's end
-/// of our stdin closing, which happens however the app ended — see
+/// Three ways out, and the first is the one the guarantee rests on: the parent's
+/// end of our stdin closing, which happens however the parent ended — see
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
+#[cfg(feature = "embedded-gateway")]
 async fn serve_embedded(
     instance: &remotex::embedded::Instance,
     web_root: std::path::PathBuf,
@@ -141,7 +164,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             //
             // A literal is unaffected: `127.0.0.1`, `::1` and `0.0.0.0` each resolve
             // to themselves and bind exactly one socket, as before.
-            let listeners = bind_all(&resolved_addrs(addr).await?, addr)?;
+            let listeners = server::bind_all(&resolved_addrs(addr).await?, addr)?;
             for listener in &listeners {
                 if let Ok(socket) = listener.local_addr() {
                     info!("listening on http://{socket}");
@@ -185,7 +208,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             target.name, target.host, target.port, target.protocol
         );
     }
-    if let remotex::auth::GatewayAuth::Login(site_passwd) = &config.auth {
+    if let Some(site_passwd) = config.auth.login() {
         info!("web login: user {:?}", site_passwd.username());
     }
 
@@ -287,61 +310,6 @@ fn unix_bind_error(path: &std::path::Path, e: std::io::Error) -> anyhow::Error {
     anyhow::Error::new(e).context(format!("cannot listen on unix:{}{hint}", path.display()))
 }
 
-/// Take a listening socket on every address, or none at all.
-///
-/// **A port already in use is fatal, on any one of them.** It means something else
-/// is serving that port — most often a gateway from an earlier run — and starting
-/// beside it is worse than not starting: a browser resolving `localhost` picks
-/// either family, so it would reach the old process or the new one depending on
-/// which address it happened to try, and the two would fight over the target's
-/// session. This is the "stale gateway answered while the fresh one thought
-/// it was serving" failure, and refusing to start is the only honest answer.
-///
-/// The one tolerated failure is an address family this machine does not have:
-/// `localhost` resolves to `::1` on a host with IPv6 switched off, and refusing to
-/// start over a loopback that cannot exist would be useless. It is warned about,
-/// and it is still fatal if it leaves nothing bound.
-///
-/// All-or-nothing rather than a preflight probe, because a probe is a lie by the
-/// time it returns: whatever it found free can be taken in the microseconds before
-/// the real bind. Holding the sockets *is* the check, and dropping the ones already
-/// taken on the way out leaves every port exactly as it was found.
-fn bind_all(
-    addrs: &[std::net::SocketAddr],
-    addr: &str,
-) -> anyhow::Result<Vec<std::net::TcpListener>> {
-    let mut listeners = Vec::new();
-    for &socket in addrs {
-        match std::net::TcpListener::bind(socket) {
-            Ok(listener) => listeners.push(listener),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
-                warn!(
-                    "not listening on {socket}: {e} — this machine has no such \
-                     address, which is what an IPv6 name resolves to on a host \
-                     with IPv6 disabled"
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                // `listeners` drops here, releasing anything already taken.
-                anyhow::bail!(
-                    "{socket} is already in use — something else is serving that \
-                     port (an earlier `remotex serve`?). Stop it first; starting \
-                     beside it would leave two gateways answering {addr} \
-                     unpredictably"
-                );
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("cannot listen on {socket}"));
-            }
-        }
-    }
-    anyhow::ensure!(
-        !listeners.is_empty(),
-        "none of the addresses {addr} resolves to can be listened on"
-    );
-    Ok(listeners)
-}
-
 /// Every socket address `addr` names, in the resolver's order and without
 /// duplicates.
 ///
@@ -394,91 +362,6 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-
-    /// Both loopbacks at one port, which is what `host = "localhost"` resolves to
-    /// and the reason `bind_all` exists.
-    fn both_loopbacks(port: u16) -> Vec<SocketAddr> {
-        vec![
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-        ]
-    }
-
-    /// A port nothing is listening on, found by taking one and letting it go.
-    ///
-    /// Racy in principle and fine in practice: the window is microseconds and the
-    /// alternative is a hardcoded port, which is racy against every other test run
-    /// on the machine rather than against nothing in particular.
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
-    #[test]
-    fn both_loopbacks_are_bound_for_one_name() {
-        let port = free_port();
-        let listeners = bind_all(&both_loopbacks(port), "localhost:0").unwrap();
-        let bound: Vec<_> = listeners
-            .iter()
-            .map(|l| l.local_addr().unwrap())
-            .collect();
-        assert_eq!(bound, both_loopbacks(port), "both, in the order resolved");
-    }
-
-    /// The check the whole function is for: a port held on *any* resolved address
-    /// stops the start, even when the other address is free.
-    #[test]
-    fn a_port_already_in_use_on_one_address_refuses_the_start() {
-        let port = free_port();
-        // Hold IPv4 only, leaving the IPv6 loopback free — the half-bound shape
-        // that used to start happily and answer on one family.
-        let squatter = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
-
-        let err = bind_all(&both_loopbacks(port), "localhost:0")
-            .expect_err("a port in use must refuse the start");
-        let text = format!("{err:#}");
-        assert!(text.contains("already in use"), "{text}");
-        assert!(text.contains(&port.to_string()), "it must name the port: {text}");
-
-        // And nothing was left holding the address that *was* free: the IPv6
-        // listener taken on the way through has to be released, or a retry after
-        // stopping the other process would fail against ourselves.
-        drop(squatter);
-        bind_all(&both_loopbacks(port), "localhost:0")
-            .expect("the refused attempt must not have kept a socket");
-    }
-
-    /// An address this machine does not have is warned about, not fatal — that is
-    /// what `::1` is on a host with IPv6 disabled. Simulated with an address no
-    /// machine has assigned.
-    #[test]
-    fn an_unavailable_address_is_skipped_while_the_rest_still_bind() {
-        let port = free_port();
-        let mut addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), port)];
-        addrs.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
-
-        let listeners = bind_all(&addrs, "example:0").expect("the loopback still binds");
-        assert_eq!(listeners.len(), 1);
-        assert_eq!(
-            listeners[0].local_addr().unwrap(),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
-        );
-    }
-
-    /// ...unless it leaves nothing at all, which is a gateway nobody can reach.
-    #[test]
-    fn an_address_nothing_could_bind_is_still_fatal() {
-        let addrs = vec![SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            free_port(),
-        )];
-        let err = bind_all(&addrs, "example:0").expect_err("nothing bound is fatal");
-        assert!(format!("{err:#}").contains("can be listened on"), "{err:#}");
-    }
 
     /// The socket is created with a mode the filesystem can act on, which is the
     /// only reason to prefer one to a loopback port.

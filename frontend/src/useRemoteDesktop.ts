@@ -18,7 +18,6 @@ import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import "./keyboardLock.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import type { AudioStreamInfo } from "./mediaLabel.ts";
-import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
 import { createRectCache } from "./pointerRect.ts";
@@ -1303,14 +1302,6 @@ export function useRemoteDesktop(
       if (alreadyMirrored || echoedFromHost) {
         return;
       }
-      // Inside `remotex.app` the app owns the pasteboard and writes it with
-      // AppKit. Not a preference: `navigator.clipboard.writeText` in a web view
-      // has no user gesture behind it, so it is refused, and the remote's copy
-      // would silently never arrive on the Mac.
-      if (NATIVE_HOST) {
-        postToHost({ type: "clipboardFromRemote", text });
-        return;
-      }
       void navigator.clipboard.writeText(text).catch(() => {});
     };
 
@@ -1596,13 +1587,6 @@ export function useRemoteDesktop(
     sendRef.current({ type: "selectDisplay", id });
   }, []);
 
-  // Re-announce the size and repaint everything, for a canvas that has gone
-  // wrong. Only the native shell offers it — a browser has reload, which does
-  // this and more.
-  const refresh = useCallback(() => {
-    sendRef.current({ type: "refresh" });
-  }, []);
-
   // Start or stop the remote's sound (the floating menu's Audio button).
   //
   // **Must be called from a click**, and the AudioContext is why: a context created
@@ -1700,44 +1684,10 @@ export function useRemoteDesktop(
     sendRef.current({ type: "clipboard", text });
   }, []);
 
-  // The host's clipboard changed and something outside this page noticed. Only
-  // the native shell has such a thing — it polls `NSPasteboard.changeCount` —
-  // and it lands here rather than in `sendClipboard` so it passes the same echo
-  // guards the browser's own focus push does: a value that came *from* the remote
-  // a moment ago must not go straight back to it.
-  const pushLocalClipboard = useCallback(
-    (text: string) => {
-      // The shell polls the pasteboard and stops when it thinks the session cannot
-      // take one, but what it thinks is one IPC hop behind what this page knows —
-      // and the session it *would* reach after a target switch is a different
-      // machine. So the page decides too, from the same two values its own focus
-      // push uses.
-      if (mode !== "desktop" || !canClipboard) {
-        return;
-      }
-      if (
-        text === "" ||
-        overClipboardLimit(text) ||
-        text === lastFromRemoteRef.current ||
-        text === lastToRemoteRef.current
-      ) {
-        return;
-      }
-      lastToRemoteRef.current = text;
-      sendRef.current({ type: "clipboard", text });
-    },
-    [mode, canClipboard],
-  );
-
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
   // values are skipped locally; the explicit panel reports the limit.
-  //
-  // Not in the native shell, where the app polls `NSPasteboard.changeCount` and
-  // pushes what it finds: reading the pasteboard from a page there would ask macOS
-  // for permission a second time, on behalf of a "browser" the user cannot see.
-  //
   useEffect(() => {
-    if (NATIVE_HOST || mode !== "desktop" || !canClipboard) {
+    if (mode !== "desktop" || !canClipboard) {
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
@@ -1817,11 +1767,10 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    // Command translation is always on. Hosts that can deliver browser-reserved
-    // chords — remotex.app, an installed app window, or a tab with Keyboard Lock —
-    // use the same fixed table. A windowed browser tab still keeps those keydowns
-    // before the page can see them, but there is no client mode to toggle around that
-    // browser boundary.
+    // Command translation is always on. An installed app window or a tab with
+    // Keyboard Lock can deliver browser-reserved chords and uses the same fixed
+    // table. A windowed browser tab still keeps those keydowns before the page can
+    // see them, but there is no client mode to toggle around that browser boundary.
     const macKeys = new MacKeyboardTranslator();
 
     // Touch gestures, only on pinch-zoom-capable devices — they
@@ -1958,10 +1907,8 @@ export function useRemoteDesktop(
     // was told about in different codes than the user typed.
     //
     // Taken apart from the DOM event so the translation and the held-key
-    // bookkeeping have one home. Inside `remotex.app` the chords a browser never
-    // sees — ⌘W, ⌘Q, ⌘T — arrive here as ordinary `keydown` events, because the
-    // shell drops its menu accelerators while the desktop has focus rather than
-    // injecting keys down a side channel. See nativeHost.ts.
+    // bookkeeping have one home. In an installed app window the chords a normal
+    // browser tab keeps — ⌘W, ⌘T and the rest — arrive here as ordinary key events.
     const emitKey = (
       code: string,
       pressed: boolean,
@@ -2066,12 +2013,10 @@ export function useRemoteDesktop(
     connect,
     switchTarget,
     selectDisplay,
-    refresh,
     setAudio,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
-    pushLocalClipboard,
     setBottomInset,
   };
 }

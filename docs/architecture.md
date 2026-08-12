@@ -987,8 +987,8 @@ client be simple: nothing downstream tests for either again or carries a fallbac
 its absence. `navigator.clipboard`, `navigator.keyboard` and WebCodecs itself all
 require a secure context; the gateway speaks plain HTTP and has no TLS listener, so
 one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`,
-any `.localhost` label), a TLS-terminating reverse proxy, or the shell's own
-`remotex://app` scheme. A LAN address over plain `http://` is the case this refuses,
+any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
+plain `http://` is the case this refuses,
 by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
 alone, because audio is a target's choice and video is a render dial's: a browser
 with one and not the other would play some targets and not others, which is the
@@ -1005,8 +1005,8 @@ the client is meant to be run in. A plain tab gets the same from full screen plu
 (`keyboardLock.ts`), which also locks ⌘Q. That lock is an automatic browser enhancement,
 not a mode or menu control; it follows fullscreen because Chromium does not grant it to
 a windowed tab. The Command translation table itself is always complete and never
-changes with fullscreen. App windows and `remotex.app` therefore send every chord in
-windowed and fullscreen use alike, while a normal windowed tab remains subject to the
+changes with fullscreen. App windows therefore send every chord in windowed and
+fullscreen use alike, while a normal windowed tab remains subject to the
 shortcuts Chrome consumes before the page sees them. The window kind moves in one
 direction only: *Install page as app…* reparents the live document into the new window
 instead of reloading it, so `appWindow.ts` latches its answer true and notifies rather
@@ -1029,36 +1029,54 @@ Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
 
-### remotex.app, the macOS shell
+### Local multi-instance control plane
 
-`apps/viewer` is an Electron shell around that same SPA — the same
-`frontend/dist`, the same gateway, the same wire — adding only what a page cannot
-do for itself: every ⌘ chord reaching the guest, a clipboard that keeps syncing
-while the window is unfocused, a menu bar, and a gateway of its own. It holds no
-session and no wire format, so there is no version pair between it and the gateway:
-the protocol is the client's and the gateway's, changed in both as it always is, and
-the shell is not a third party to keep in step.
+`remotex tui --port <port>` is the native local control plane. It discovers one
+instance per immediate subdirectory, creates and edits the same serverless
+`remotex.toml` format the former Electron viewer used, and starts, stops or
+restarts each gateway from its own list. `remotex.localhost:<port>` is a landing
+page; `<instance>.remotex.localhost:<port>` is that instance's browser origin.
 
-It runs `remotex serve-embedded --instance-dir <dir> --web-root <dir>`, which
-binds `127.0.0.1:0` and prints one JSON line — `{"port","token"}` — before serving
-(`src/embedded.rs`, `Audience::Embedded`). The token goes in the same
-`remotex_session` cookie a login would set, so one page load carries it to
-`/api/*` and to the socket upgrades alike. Nothing is passed the other way: the
-app never gets to choose the port or the secret, and `src/cli.rs` refuses flags
-that would let it. The gateway stops when the app's end of its stdin closes,
-which the kernel does however the app ends.
+```text
+browser: <instance>.remotex.localhost:<port>
+                    │ Host-routed HTTP and WebSockets
+                    ▼
+             TUI master process
+                    │ <instance>/gateway.sock
+                    ▼
+       hidden serve-embedded subprocess
+```
 
-The page loads as `remotex://app` out of the bundle rather than from the gateway's
-ephemeral port, so the client's remembered preferences have an origin that holds
-still. That makes its calls cross-origin, which `shell_origin_cors` in
-`src/server.rs` answers for that one literal origin when the gateway
-authenticates by token.
+The master is the only TCP listener, and it takes its port the way `serve` takes
+its address: `DEFAULT_PORT` (52380, the one `[server].listen` defaults to —
+they are two ways to serve, never two servers) unless `--port` or
+`REMOTEX_TUI_PORT` overrides it. Both loopbacks are bound through the same
+`server::bind_all` a served gateway uses, so the policy is one implementation: a
+family this host does not have is a warning, and a port already in use is fatal
+on either of them, because a browser picks the family and a master left holding
+`[::1]:<port>` would keep routing to its own workers. Nothing asks the kernel
+for a port — an ephemeral one is a control plane nobody can be told how to
+reach, and `SharedPort::bind` refuses `0` on every path, tests included.
 
-The seam is `frontend/src/nativeHost.ts`: one state object the menus derive
-themselves from, and commands back for the controls the shell hides. Keys are not
-on it — the app drops its own menu accelerators while a live desktop has focus, so
-⌘W and ⌘Q arrive as ordinary key events on the client's existing path. See
-[`docs/macos-viewer.md`](macos-viewer.md).
+Each hidden worker binds
+`<instance>/gateway.sock` at mode `0600`, prints one JSON readiness line —
+`{"socket","token"}` — after binding, reads only that instance's
+`remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
+`Audience::Embedded`). The master seeds the token as a host-only HttpOnly
+`remotex_session` cookie before proxying the browser to the child. Raw connection
+proxying preserves both ordinary HTTP and WebSocket upgrades without another
+gateway protocol implementation.
+
+The entire substrate is behind the default `embedded-gateway` Cargo feature:
+the module, token authentication, config audience, CLI commands, and their
+`check-config --embedded` validation mode compile out together. Native packages
+retain it. Container artifacts are built separately with
+`--no-default-features`; the build script and Dockerfile reject a
+binary that exposes any embedded CLI surface.
+
+There is still no separate native client: every instance is the same SPA loaded
+by Chrome or Edge from its subdomain. The TUI is process and configuration
+control, not another remote-desktop implementation.
 
 ## Configuration and testing
 
@@ -1083,8 +1101,11 @@ connect, a leftover from a killed gateway is taken over on the next start, one
 that something is still serving refuses the start, and the file is removed when
 the gateway stops. No client addresses that form directly — the page reaches its
 gateway over one HTTP origin and two WebSockets, all of which need a host and a
-port, so whatever terminates the proxy is what a browser talks to. It is also why
-`remotex.app`'s embedded gateway stays on loopback TCP.
+port, so whatever terminates the proxy is what a browser talks to. An embedded
+gateway is that arrangement in one process tree: the worker listens on
+`<instance>/gateway.sock` and never on TCP, and the thing terminating the proxy
+is the TUI master, which the browser reaches over loopback TCP and which
+forwards each connection to that socket.
 
 `[branding]` is a top-level table rather than `[server]` keys: it names the
 deployment rather than the server, and one value with two spellings is one of

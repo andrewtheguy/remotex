@@ -11,20 +11,22 @@
   (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
   do not detect a stale bundle. For source-based iteration, use
   `REMOTEX_DEV_BACKEND=<port> bun run dev`.
-- **There is one client, and it is the page a browser loads.** `remotex.app`
-  (`apps/viewer`, Electron) shows that same page, so a frontend change is a change
-  to both — and `NATIVE_HOST` in `frontend/src/nativeHost.ts` is the only thing
-  that may differ between them. Do not add a second implementation of anything the
-  page already does. After viewer changes run `bun run check` and `bun test tests`
-  in `apps/viewer/`.
-- One `bun run build`, one `frontend/dist`, both hosts. It is served over HTTP
-  from an origin root, and `Contents/Resources/web` is that same directory served
-  as `remotex://app` by the app and over `http://` by the gateway beside it at the
-  same time. Every URL the page uses goes through `frontend/src/gateway.ts`.
+- **There is one client, and it is the page a browser loads.** Desktop app use is
+  that page installed as a Chrome or Edge app, not a native wrapper. Do not add a
+  second implementation of anything the page already does.
+- One `bun run build`, one `frontend/dist`, served over HTTP from the gateway's
+  origin root. Every URL the page uses goes through `frontend/src/gateway.ts`.
 - Put temporary files and test config under `tmp/`. Run efficient local Python
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
 - Keep e2e tests under `tests/`. Dummy RDP/VNC servers may use Docker or Podman.
+- The native `embedded-gateway` feature is the `remotex tui` multi-instance
+  control plane plus its hidden `serve-embedded` workers. The master alone owns
+  `remotex.localhost:<port>` and routes instance subdomains to private
+  `<instance>/gateway.sock` sockets; workers remain tied to its stdin liveness
+  pipes. Container binaries must be built through
+  `packaging/build-container-binary.sh`, which disables default features; never
+  put `tui`, `serve-embedded`, or `check-config --embedded` in an image.
 - Multi-session support is permanently out of scope. Each gateway has one active
   session. A force-claim evicts the current holder (`src/session.rs`) through the
   clients' **Take over** flow. Reconnects, target switches, and browser takeovers

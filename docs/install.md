@@ -58,9 +58,8 @@ It installs:
 ```
 
 The package is unsigned and not notarized. A browser download is quarantined,
-so fetch it with `curl` as shown and install it from the terminal. This `.pkg`
-is the browser gateway. The release's `.dmg` is the separate **remotex.app**
-viewer described in [`macos-viewer.md`](macos-viewer.md).
+so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
+contains the gateway CLI and web client.
 
 ## First configuration
 

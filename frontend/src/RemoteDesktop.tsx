@@ -1,12 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import FloatingMenu, { type PanelControls } from "./FloatingMenu.tsx";
-import {
-  NATIVE_HOST,
-  type NativeCommandHandlers,
-  type NativeState,
-  useNativeCommands,
-  useNativeState,
-} from "./nativeHost.ts";
+import { useEffect, useRef } from "react";
+import FloatingMenu from "./FloatingMenu.tsx";
 import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
@@ -68,101 +61,12 @@ export default function RemoteDesktop({
     connect,
     switchTarget,
     selectDisplay,
-    refresh,
     setAudio,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
-    pushLocalClipboard,
     setBottomInset,
   } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
-
-  // The panel actions, published by FloatingMenu and called by the native menu
-  // bar. A ref because the menus reach in at any moment, not as part of a render.
-  const panelControlsRef = useRef<PanelControls | null>(null);
-  const onPanelControls = useCallback((controls: PanelControls | null) => {
-    panelControlsRef.current = controls;
-  }, []);
-
-  // Whether the caret is in something typeable, which is the shell's cue to take
-  // its menu shortcuts back so ⌘V reaches the field instead of the guest.
-  //
-  // One listener on the document rather than a prop on every input: the panels are
-  // the client's and may grow another text box at any time, and a field that
-  // forgot to report itself would be one the user cannot paste into.
-  const [editing, setEditing] = useState(false);
-  useEffect(() => {
-    if (!NATIVE_HOST) {
-      return;
-    }
-    const update = () => {
-      const el = document.activeElement;
-      setEditing(
-        el instanceof HTMLElement &&
-          (el.isContentEditable ||
-            el instanceof HTMLInputElement ||
-            el instanceof HTMLTextAreaElement),
-      );
-    };
-    update();
-    document.addEventListener("focusin", update);
-    document.addEventListener("focusout", update);
-    return () => {
-      document.removeEventListener("focusin", update);
-      document.removeEventListener("focusout", update);
-    };
-  }, []);
-
-  // One description of this session for `remotex.app`, which renders its menu bar
-  // from it. In a browser the native-host hook posts nothing.
-  const hostState: NativeState = {
-    branding,
-    mode,
-    status,
-    ready: size !== null,
-    editing,
-    size,
-    canClipboard,
-    canAudio,
-    audioEnabled,
-    audioError,
-    displays,
-    activeDisplayId,
-    macKeyOverridesEnabled,
-    macKeyOverridesActive,
-    remoteIsMac,
-  };
-  useNativeState(hostState);
-
-  // The other direction. Every one of these is a control the shell hides: the
-  // menu item is the button, and this is the wire between them.
-  const nativeCommands: NativeCommandHandlers = useMemo(
-    () => ({
-      clipboardLocal: ({ text }) => pushLocalClipboard(text),
-      openClipboard: () => panelControlsRef.current?.openClipboard(),
-      openSessionInfo: () => panelControlsRef.current?.openHelp(),
-      openDisplays: () => panelControlsRef.current?.toggleDisplays(),
-      closePanel: () => panelControlsRef.current?.closePanel(),
-      selectDisplay: ({ id }) => selectDisplay(id),
-      setAudio: ({ enabled }) => setAudio(enabled),
-      setMacKeyOverrides: ({ enabled }) => setMacKeyOverridesEnabled(enabled),
-      refresh: () => refresh(),
-      switchTarget: () => switchTarget(),
-      takeOver: () => takeOver(),
-      sendKeyCombo: ({ codes }) => sendKeyCombo(codes),
-    }),
-    [
-      pushLocalClipboard,
-      selectDisplay,
-      setAudio,
-      setMacKeyOverridesEnabled,
-      refresh,
-      switchTarget,
-      takeOver,
-      sendKeyCombo,
-    ],
-  );
-  useNativeCommands(nativeCommands);
 
   // A speaker on the tab title while sound is playing — the one place the desktop
   // has room to say so, since the toggle lives in the drawer. At the *front*, not
@@ -238,8 +142,6 @@ export default function RemoteDesktop({
           remoteIsMac={remoteIsMac}
           onMacKeyOverridesChange={setMacKeyOverridesEnabled}
           onLocalShortcut={onLocalShortcut}
-          chromeless={NATIVE_HOST}
-          onPanelControls={NATIVE_HOST ? onPanelControls : undefined}
         />
       )}
 
