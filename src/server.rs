@@ -501,19 +501,28 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     })
 }
 
-/// The `[branding].logo` file, as the page's icon.
+/// The `[branding].logo` image, as the page's icon.
 ///
-/// Read from disk per request rather than held in memory: the file is a favicon,
-/// requested once per tab, and reading it here is what lets an operator swap the
-/// image without a restart. A configured path that cannot be read answers 404 —
-/// the extension was checked at config resolution, but existence is a fact about
-/// disk that can change under a running gateway.
+/// A configured file is read from disk per request rather than held in memory:
+/// the file is a favicon, requested once per tab, and reading it here is what
+/// lets an operator swap the image without a restart. A path that cannot be read
+/// answers 404 — the extension was checked at config resolution, but existence is
+/// a fact about disk that can change under a running gateway.
+///
+/// A `data:` logo has no such fact to check: it was decoded once when the config
+/// resolved, so there is nothing here that can fail.
 async fn logo_handler(State(state): State<AppState>) -> ApiResult<impl IntoResponse> {
     let logo = state.config.branding.logo.as_ref().ok_or(AppError::NotFound)?;
-    let bytes = tokio::fs::read(&logo.path).await.map_err(|e| {
-        warn!("cannot read [branding].logo {}: {e}", logo.path.display());
-        AppError::NotFound
-    })?;
+    let bytes = match &logo.source {
+        crate::config::LogoSource::Inline(bytes) => bytes.clone(),
+        crate::config::LogoSource::File(path) => tokio::fs::read(path)
+            .await
+            .map_err(|e| {
+                warn!("cannot read [branding].logo {}: {e}", path.display());
+                AppError::NotFound
+            })?
+            .into(),
+    };
     Ok(([(header::CONTENT_TYPE, logo.mime)], bytes))
 }
 
@@ -705,6 +714,38 @@ mod tests {
         assert!(format!("{err:#}").contains("can be listened on"), "{err:#}");
     }
 
+
+    /// An inline icon reaches the wire under the type the config declared.
+    /// `/api/logo` is public and answers before anybody has logged in, so this is
+    /// the whole path a tab takes to its favicon.
+    #[tokio::test]
+    async fn a_data_url_logo_is_served_from_memory() {
+        use tower::ServiceExt as _;
+
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+        let mut config = router_config(None);
+        config.branding.logo = Some(crate::config::Logo {
+            mime: "image/png",
+            source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
+        });
+
+        let response = router(config)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/logo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], PNG);
+    }
 
     /// A router whose only interesting property is the dev hostname, over a
     /// static dir that does not exist — every assertion below is about the

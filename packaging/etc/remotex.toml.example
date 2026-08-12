@@ -19,13 +19,28 @@
 # with two spellings is one of them going stale.
 #
 # text is the login screen, the interstitials, and the browser tab title;
-# defaults to "remotex". logo is a path to an image file (.png, .ico, .svg,
-# .jpg, .gif or .webp) the gateway serves as the page's tab icon; without it
-# the page keeps no icon.
+# defaults to "remotex". logo is the page's tab icon; without it the page keeps
+# no icon.
 #
 #[branding]
 #text = "remotex"
 #logo = "/path/to/logo.png"
+#
+# A logo is either a path to an image file (.png, .ico, .svg, .jpg, .gif or
+# .webp), or the image itself as a data: URL, for a config with nowhere to put a
+# file beside it. Produce one with:
+#
+#   printf 'data:image/png;base64,%s\n' "$(base64 < logo.png)"
+#
+# Line breaks inside the base64 are ignored, so a wrapped blob can go straight
+# into a TOML multi-line string:
+#
+#[branding]
+#logo = """
+#data:image/png;base64,
+#iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ
+#DwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+#"""
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,

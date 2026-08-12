@@ -1110,9 +1110,18 @@ forwards each connection to that socket.
 `[branding]` is a top-level table rather than `[server]` keys: it names the
 deployment rather than the server, and one value with two spellings is one of
 them going stale. There is one place to write it and no second spelling. `text`
-is the display name; `logo` is a path to an image file the gateway serves at
-`GET /api/logo` and the page sets as its tab icon, with the content type decided
-from the extension at config resolution.
+is the display name; `logo` is the image the gateway serves at `GET /api/logo`
+and the page sets as its tab icon.
+
+A logo is written either as a path to an image file or as a `data:` URL holding
+the image itself, and the value decides which — nothing else begins `data:`, so
+one key covers both and no config can set two. Either way the content type is
+settled at resolution, from the extension or from the URL's own media type
+against the same closed list of what a tab can show; a `data:` URL is decoded
+there too, so `check-config` refuses an icon the browser would have. A file is
+then read per request, which is what lets an operator swap the image without a
+restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
+with the state around it.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
