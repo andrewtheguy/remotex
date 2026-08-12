@@ -1,22 +1,20 @@
 //! End-to-end test of the tile transport against a real RDP server.
 //!
-//! The server is the operator's own Windows box, named `windows` in the
-//! gitignored `tmp/test_uat.toml` — a dummy xrdp container stood in here
-//! once, but its login screen paints text through a Cache Glyph order the
-//! session layer refuses as unannounced, killing the session after the first
-//! tile. Until the gateway handles that, real Windows is the reliable server.
+//! Starts the dummy xrdp container (`tests/xrdp-dummy/`) with podman or
+//! docker, points the real axum server at it, and connects a raw WebSocket
+//! client. Browser automation deliberately does not validate canvas paint
+//! timing or pixels (see CLAUDE.md). The gateway's autologon attempt fails in
+//! the container — sesman runs but the user does not exist — so xrdp paints
+//! its login screen with the error, and real bitmap updates flow through
+//! the whole pipeline: RDP session -> `ServerMsg::Tile` -> binary WS
+//! frames, which this test validates byte-for-byte against the wire layout
+//! documented in `src/protocol.rs` / `frontend/src/protocol.ts`.
 //!
-//! The test connects the raw WebSocket a browser would and validates the
-//! whole pipeline — RDP session -> `ServerMsg::Tile` -> binary WS frames —
-//! byte-for-byte against the wire layout documented in `src/protocol.rs` /
-//! `frontend/src/protocol.ts`. Browser automation deliberately does not
-//! validate canvas paint timing or pixels (see CLAUDE.md).
-//!
-//! Ignored by default; run it with the device reachable:
-//!
-//! ```sh
-//! cargo test --test rdp_tiles_e2e -- --ignored --nocapture
-//! ```
+//! That login screen's *text* arrives as glyph orders whether or not the
+//! client consented — xrdp keys glyph usage off having drawing orders at all
+//! — so this test also depends on the `freerdp` crate announcing glyph
+//! support (`FreeRDP_GlyphSupportLevel` in libfreerdp-prebuilt's
+//! `session.rs`); without it the session dies on the first glyph.
 
 mod common;
 
@@ -24,45 +22,85 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, RenderSubtype, RenderType, TargetConfig};
+use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::server;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 /// `Tile::FORMAT_PNG`, spelled out rather than imported: this test is a
 /// stand-in for a client, and a client only has the number.
 const TILE_FORMAT_PNG: u8 = 1;
 
-/// The real Windows host on the plainest dial there is: lossless tiles, no
-/// resize, no channels. This test is about the tile transport; everything
-/// else the operator's config enables is turned off so a failure names the
-/// transport and not a channel.
-fn uat_target() -> TargetConfig {
-    let mut target = common::uat_target("windows");
-    target.render_type = RenderType::Tiles;
-    target.render_subtype = RenderSubtype::Png;
-    target.render_quality = None;
-    target.render_motion_subtype = None;
-    target.render_motion_quality = None;
-    target.render_motion_debug = false;
-    target.render_classify_debug = false;
-    target.render_adaptive = false;
-    target.render_adaptive_min = None;
-    target.resize = false;
-    target.clipboard = false;
-    target.audio = false;
-    target
+/// Wait until xrdp actually answers RDP on the published port.
+///
+/// A bare TCP-accept probe is not enough: rootless podman's port forwarder
+/// accepts immediately and then resets if nothing listens inside yet. So the
+/// probe sends an X.224 Connection Request (TPKT-framed) and requires xrdp to
+/// send bytes back.
+async fn wait_for_rdp_port(port: u16) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // TPKT header (len 11) + X.224 CR TPDU, no negotiation payload.
+    const X224_CONNECT: [u8; 11] = [3, 0, 0, 11, 6, 0xe0, 0, 0, 0, 0, 0];
+
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let attempt = async {
+                let mut stream = TcpStream::connect((common::container_host(), port)).await.ok()?;
+                stream.write_all(&X224_CONNECT).await.ok()?;
+                let mut buf = [0u8; 4];
+                stream.read_exact(&mut buf).await.ok()
+            };
+            match tokio::time::timeout(Duration::from_secs(2), attempt).await {
+                Ok(Some(_)) => return,
+                _ => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+    })
+    .await
+    .expect("dummy RDP server never answered the X.224 probe");
 }
 
-/// Start the real server pointed at the real RDP target.
-async fn spawn_app(target: TargetConfig) -> SocketAddr {
+/// Start the real server pointed at the dummy RDP target (the autologon the
+/// gateway always requests fails there, leaving the login screen on show).
+async fn spawn_app(rdp_port: u16) -> SocketAddr {
     let config = AppConfig {
         listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         static_dir: "frontend/dist".into(),
         auth: common::test_auth(),
         branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
-        targets: vec![target],
+        targets: vec![TargetConfig {
+            name: "xrdp-dummy".to_owned(),
+            protocol: Protocol::Rdp,
+            subtype: None,
+            host: common::container_host(),
+            port: rdp_port,
+            username: "dummy".to_owned(),
+            password: "dummy".to_owned(),
+            vnc_password: String::new(),
+            domain: None,
+            width: Some(1280),
+            height: Some(800),
+            security: Security::Auto,
+            egfx: None,
+            resize: false,
+            clipboard: false,
+            audio: false,
+            audio_codec: None,
+            render_type: remotex::config::RenderType::Tiles,
+            render_subtype: remotex::config::RenderSubtype::Png,
+            render_quality: None,
+            render_motion_subtype: None,
+            render_motion_quality: None,
+            render_motion_debug: false,
+            render_classify_debug: false,
+            render_adaptive: false,
+            render_adaptive_min: None,
+            audio_bitrate: None,
+            audio_adaptive: false,
+            audio_bitrate_min: None,
+        }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -111,19 +149,25 @@ fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> Vec<(u16, 
 }
 
 #[tokio::test]
-#[ignore = "needs the real Windows RDP host from tmp/test_uat.toml"]
+#[ignore = "requires Docker or Podman"]
 async fn tiles_arrive_as_binary_frames_after_resize_text() {
     common::init_logging();
-    let addr = spawn_app(uat_target()).await;
+    let runtime = common::container_runtime();
+    let (_container, rdp_port) =
+        common::start_dummy_server(runtime, "remotex-e2e-xrdp", "xrdp-dummy", 3389);
+    wait_for_rdp_port(rdp_port).await;
+
+    let addr = spawn_app(rdp_port).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     // The fresh attach lands on the picker; pick the target to start the engine.
-    common::connect_target(&mut ws, "windows").await;
+    common::connect_target(&mut ws, "xrdp-dummy").await;
 
-    // The current desktop, from the last `resize` control message. There can
-    // be more than one: an RDP server may re-announce the desktop through a
-    // deactivation-reactivation after the first offer.
+    // The current desktop, from the last `resize` control message. There can be
+    // more than one: xrdp's auto-login path hands the connection to its session
+    // module through a deactivation-reactivation, which may re-announce the
+    // desktop (and at a different height than it first offered).
     let mut coverage: Option<common::TileCoverage> = None;
     let mut sent_refresh = false;
     // Whether the server's pointer reached this client as a shape. RDP does not
@@ -183,11 +227,11 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                     let coverage = coverage.as_mut().expect("tile arrived before resize");
                     // Area rather than a tile count: how many tiles a paint
                     // splits into is the encoder's business, and how much of
-                    // the desktop survives the shadow-copy trim is too. So
-                    // once tiles flow at all, ask for a `refresh` — it forgets
-                    // the shadow and repaints the whole desktop — and a
-                    // desktop's worth of painted pixels becomes the
-                    // deterministic finish line.
+                    // the mostly-black failed-login screen survives the
+                    // shadow-copy trim is too. So once tiles flow at all, ask
+                    // for a `refresh` — it forgets the shadow and repaints the
+                    // whole desktop — and a desktop's worth of painted pixels
+                    // becomes the deterministic finish line.
                     for tile in check_tile_frame(&mut stream, &frame) {
                         coverage.add(tile);
                     }
