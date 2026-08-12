@@ -1,0 +1,9 @@
+# The x86-64 Linux CPU floor is an Intel i5-8400T — Coffee Lake, which is
+# x86-64-v3. The prebuilt libopus archive already presumes that floor (its AVX2
+# kernels are called, not dispatched), so the binary cannot run below it anyway;
+# this line extends the same floor to the Rust side, where the PNG filter and
+# fdeflate loops on the tile hot path are pure Rust and get AVX2 only through
+# autovectorization. rustc's aarch64 defaults (apple-m1 on macOS, NEON baseline
+# on Linux) already match the ARM archives, so only this target needs a line.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

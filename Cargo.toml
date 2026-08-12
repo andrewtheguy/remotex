@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.150"
+version = "0.0.151"
 
 [package]
 name = "remotex"
@@ -78,7 +78,7 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Encoder and decoder are both in the archive; this gateway only encodes. libvpx
 # asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
 # plain `?` path under `panic = "abort"`.
-vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260804003457-6bca589" }
+vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260812223526-982acae" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a

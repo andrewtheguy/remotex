@@ -927,7 +927,7 @@ source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-202607
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260804003457-6bca589#6bca589a7ed6e94a3b85943296bba063f421808a"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260812223526-982acae#982acae3d93341f307e3d60d23d8e895c91ba94e"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1279,7 +1279,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.150"
+version = "0.0.151"
 dependencies = [
  "aes",
  "anyhow",
