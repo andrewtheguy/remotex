@@ -154,8 +154,7 @@ pub enum RenderType {
     #[default]
     Full,
     /// One quality for the whole session, set by [`TargetConfig::render_quality`]
-    /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`] or
-    /// [`RenderSubtype::Webp`]).
+    /// and never varied. Pairs with the lossy codec ([`RenderSubtype::Jpeg`]).
     FixedQuality,
     /// The base encode, plus a second and much cheaper one for the cells changing
     /// fastest right now.
@@ -278,41 +277,33 @@ pub enum RenderSubtype {
     /// — there is no content classifier — so flat UI and text soften along with
     /// photographic content. That is the trade the fixed dial makes.
     Jpeg,
-    /// WebP at [`TargetConfig::render_quality`] — the same fixed-quality, no-
-    /// classifier trade as [`Self::Jpeg`], but typically ~30% fewer bytes at a
-    /// matched quality. Both clients decode it natively.
-    Webp,
 }
 
 /// The encode for what [`RenderType::Motion`] finds in motion — an axis of its own
-/// rather than a reuse of [`RenderSubtype`], for two reasons.
+/// rather than a reuse of [`RenderSubtype`].
 ///
-/// The base is sent once when a cell settles and can afford WebP's slower, smaller
-/// encode, while a moving cell is re-encoded every frame, where JPEG's faster
-/// encode may beat WebP's smaller output; cheapest and smallest are not the same
-/// question at quality 60 as at 10. And this is the axis `stream` appears on, where
-/// the moving encode stops being a still image at all — which it could only do by
-/// being nameable apart from the base. `png` is not a variant and never will be: a
-/// moving cell needs a quality to turn down, and lossless has none.
+/// This is the axis `stream` appears on, where the moving encode stops being a
+/// still image at all — which it could only do by being nameable apart from the
+/// base. It is also what lets a lossless base carry a lossy discount, since a `png`
+/// base has no quality of its own to turn down. `png` is not a variant here and
+/// never will be: a moving cell needs a quality to turn down, and lossless has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MotionSubtype {
     /// Baseline JPEG at [`TargetConfig::render_motion_quality`].
     Jpeg,
-    /// WebP at [`TargetConfig::render_motion_quality`].
-    Webp,
     /// A video stream per coalesced moving region, at
     /// [`TargetConfig::render_motion_quality`], with the base codec carrying
     /// everything else.
     ///
-    /// The other two are still pictures per cell, re-encoded from scratch every
+    /// The other one is a still picture per cell, re-encoded from scratch every
     /// frame; this is an inter-frame stream, which is what moving content is cheap
     /// in. What it costs instead is statefulness — an access unit means nothing out
     /// of sequence — and that is why it never reaches the client as a tile. See
     /// [`crate::regions`] for which regions get a stream and when one ends, and
     /// [`crate::protocol::VideoUnit`] for what arrives.
     ///
-    /// Never the default: it has to be written out, because unlike `jpeg` and `webp`
+    /// Never the default: it has to be written out, because unlike `jpeg`
     /// it is not a cheaper version of the base but a different transport beside it.
     ///
     /// Named `stream` rather than after a codec because what it names is the transport;
@@ -330,8 +321,6 @@ pub enum TileCodec {
     Png,
     /// JPEG at the given quality (1–100).
     Jpeg(u8),
-    /// WebP at the given quality (1–100).
-    Webp(u8),
 }
 
 /// What the `motion` strategy does with what it finds moving, resolved from
@@ -419,7 +408,6 @@ impl RenderPlan {
             match codec {
                 TileCodec::Png => "lossless png".to_owned(),
                 TileCodec::Jpeg(q) => format!("jpeg q{q}"),
-                TileCodec::Webp(q) => format!("webp q{q}"),
             }
         }
         // The floor as a suffix, because it modifies the whole plan rather than
@@ -623,11 +611,10 @@ pub struct TargetConfig {
     /// legal pairing with [`Self::render_type`] is enforced at parse time.
     #[serde(default)]
     pub render_subtype: RenderSubtype,
-    /// Fixed quality (1–100) for [`RenderType::FixedQuality`], applied by whichever
-    /// lossy codec [`Self::render_subtype`] selects ([`RenderSubtype::Jpeg`] or
-    /// [`RenderSubtype::Webp`]). Required for that strategy and refused for
-    /// [`RenderType::Full`], which is lossless and has no dial. `None` (unset) is
-    /// the default.
+    /// Fixed quality (1–100) for [`RenderType::FixedQuality`], applied by the lossy
+    /// codec [`Self::render_subtype`] selects ([`RenderSubtype::Jpeg`]). Required
+    /// for that strategy and refused for [`RenderType::Full`], which is lossless
+    /// and has no dial. `None` (unset) is the default.
     ///
     /// Under [`RenderType::Motion`] this is the *base* quality — what a settled
     /// cell gets — and it is omitted when the base is lossless PNG.
@@ -669,7 +656,7 @@ pub struct TargetConfig {
     ///   adds the client's own lag — how long the oldest unacknowledged paint
     ///   batch has been owed, beyond the link's measured floor — as a second
     ///   reason to, and moves the walk's floor up from 1.
-    /// - A lossy tile codec (JPEG/WebP, base or motion) gets a quality per
+    /// - A lossy tile codec (JPEG, base or motion) gets a quality per
     ///   *encode* instead of per session, scaled down linearly with that same
     ///   lag — Guacamole's curve, on this gateway's own signal.
     ///
@@ -747,13 +734,11 @@ impl TargetConfig {
         }
         let base = match (self.render_subtype, self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
-            (RenderSubtype::Webp, Some(q)) => TileCodec::Webp(q),
             _ => TileCodec::Png,
         };
         let motion = match (self.render_type, self.render_motion_quality) {
             (RenderType::Motion, Some(q)) => match self.motion_subtype() {
                 Some(MotionSubtype::Jpeg) => Some(MotionEncode::Tile(TileCodec::Jpeg(q))),
-                Some(MotionSubtype::Webp) => Some(MotionEncode::Tile(TileCodec::Webp(q))),
                 Some(MotionSubtype::Stream) => Some(MotionEncode::Stream { quality: q }),
                 None => None,
             },
@@ -797,7 +782,6 @@ impl TargetConfig {
     fn motion_subtype(&self) -> Option<MotionSubtype> {
         self.render_motion_subtype.or(match self.render_subtype {
             RenderSubtype::Jpeg => Some(MotionSubtype::Jpeg),
-            RenderSubtype::Webp => Some(MotionSubtype::Webp),
             RenderSubtype::Png => None,
         })
     }
@@ -1425,11 +1409,11 @@ impl ConfigFile {
                         target.render_quality.is_none(),
                         "target {:?} sets render_quality, which render_type \"full\" has no \
                          use for — it is lossless PNG. Set render_type = \"fixed-quality\" \
-                         with a lossy render_subtype (\"jpeg\" or \"webp\") to choose a quality",
+                         with a lossy render_subtype (\"jpeg\") to choose a quality",
                         target.name
                     );
                 }
-                (RenderType::FixedQuality, RenderSubtype::Jpeg | RenderSubtype::Webp) => {
+                (RenderType::FixedQuality, RenderSubtype::Jpeg) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} is render_type \"fixed-quality\" but sets no \
                          render_quality — it needs one, an integer 1–100",
@@ -1442,16 +1426,16 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Full, RenderSubtype::Jpeg | RenderSubtype::Webp) => anyhow::bail!(
+                (RenderType::Full, RenderSubtype::Jpeg) => anyhow::bail!(
                     "target {:?} sets render_type \"full\" with a lossy render_subtype: \
                      \"full\" is lossless and pairs only with render_subtype \"png\". Use \
-                     render_type = \"fixed-quality\" for JPEG or WebP",
+                     render_type = \"fixed-quality\" for JPEG",
                     target.name
                 ),
                 (RenderType::FixedQuality, RenderSubtype::Png) => anyhow::bail!(
                     "target {:?} sets render_type \"fixed-quality\" with render_subtype \
                      \"png\": PNG is lossless and has no quality dial. Use render_subtype = \
-                     \"jpeg\" or \"webp\", or render_type = \"full\" to stay lossless",
+                     \"jpeg\", or render_type = \"full\" to stay lossless",
                     target.name
                 ),
                 // `motion` reads the base off the subtype and the quality rather
@@ -1475,12 +1459,12 @@ impl ConfigFile {
                         "target {:?} pairs render_type \"motion\" with render_subtype \"png\" \
                          but names no render_motion_subtype. The motion encode defaults to the \
                          base codec, and PNG is lossless — it has no quality to turn down — so \
-                         a PNG base must name its own: \"jpeg\", \"webp\", or \"stream\" for a \
+                         a PNG base must name its own: \"jpeg\", or \"stream\" for a \
                          video stream per moving region",
                         target.name
                     );
                 }
-                (RenderType::Motion, RenderSubtype::Jpeg | RenderSubtype::Webp) => {
+                (RenderType::Motion, RenderSubtype::Jpeg) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} is render_type \"motion\" with a lossy render_subtype, \
                          which makes that subtype the *base* encode — the one a settled cell \
@@ -1514,18 +1498,14 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Video, RenderSubtype::Jpeg | RenderSubtype::Webp) => anyhow::bail!(
-                    "target {:?} sets render_type \"video\" with render_subtype {:?}. \
+                (RenderType::Video, RenderSubtype::Jpeg) => anyhow::bail!(
+                    "target {:?} sets render_type \"video\" with render_subtype \"jpeg\". \
                      render_subtype names a codec for each changed region separately, and \
                      \"video\" does not send regions at all — it sends the whole desktop as one \
                      video stream, where every frame depends on the one before it. Drop \
                      render_subtype to keep \"video\", or set \
                      render_type = \"fixed-quality\" to keep this one",
-                    target.name,
-                    match target.render_subtype {
-                        RenderSubtype::Jpeg => "jpeg",
-                        _ => "webp",
-                    }
+                    target.name
                 ),
             }
             // Both `motion` pairings need this, and neither of the arms above is
@@ -2550,36 +2530,14 @@ mod tests {
     }
 
     #[test]
-    fn fixed_quality_webp_is_accepted() {
-        let cfg = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            host = "h"
-            render_type = "fixed-quality"
-            render_subtype = "webp"
-            render_quality = 50
-            "#,
-        )
-        .unwrap();
-        let t = &cfg.targets[0];
-        assert_eq!(t.render_subtype, RenderSubtype::Webp);
-        assert_eq!(
-            t.render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Webp(50), motion: None, debug: false, adaptive: None }
-        );
-    }
-
-    #[test]
-    fn full_with_webp_is_rejected() {
+    fn full_with_a_lossy_subtype_is_rejected() {
         let err = ConfigFile::parse(
             r#"
             [[targets]]
             name = "a"
             protocol = "rdp"
             host = "h"
-            render_subtype = "webp"
+            render_subtype = "jpeg"
             "#,
         )
         .unwrap_err();
@@ -2675,24 +2633,22 @@ mod tests {
     /// video target means somebody expected the wrong thing to happen.
     #[test]
     fn video_refuses_a_render_subtype() {
-        for subtype in ["jpeg", "webp"] {
-            let toml = format!(
-                r#"
-                [[targets]]
-                name = "a"
-                protocol = "rdp"
-                host = "h"
-                render_type = "video"
-                render_subtype = "{subtype}"
-                render_quality = 60
-                "#
-            );
-            let err = ConfigFile::parse(&toml).unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(msg.contains(subtype), "the message should name the subtype: {msg}");
-            assert!(msg.contains("video stream"), "the message should say what video is: {msg}");
-            assert!(msg.contains("fixed-quality"), "the message should say the way out: {msg}");
-        }
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "video"
+            render_subtype = "jpeg"
+            render_quality = 60
+            "#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("jpeg"), "the message should name the subtype: {msg}");
+        assert!(msg.contains("video stream"), "the message should say what video is: {msg}");
+        assert!(msg.contains("fixed-quality"), "the message should say the way out: {msg}");
     }
 
     /// The motion keys belong to `motion`, and `video` is not a second place to put
@@ -2829,7 +2785,7 @@ mod tests {
             protocol = "rdp"
             host = "h"
             render_type = "motion"
-            render_subtype = "webp"
+            render_subtype = "jpeg"
             render_quality = 60
             render_motion_quality = 10
             "#,
@@ -2838,19 +2794,19 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
-                base: TileCodec::Webp(60),
-                motion: Some(MotionEncode::Tile(TileCodec::Webp(10))),
+                base: TileCodec::Jpeg(60),
+                motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
                 debug: false,
                 adaptive: None
             }
         );
     }
 
-    /// The reason the motion codec is an axis of its own: a moving cell is
-    /// re-encoded every frame, where JPEG's faster encode may beat WebP's smaller
-    /// output, so it need not be the codec a settled cell gets.
+    /// The reason the motion encode is an axis of its own: what a settled cell gets
+    /// is a still picture, and what is moving may stop being one at all, so it need
+    /// not be what the base resolved to.
     #[test]
-    fn the_motion_codec_need_not_be_the_base_codec() {
+    fn the_motion_encode_need_not_be_the_base_codec() {
         let cfg = ConfigFile::parse(
             r#"
             [[targets]]
@@ -2858,9 +2814,9 @@ mod tests {
             protocol = "rdp"
             host = "h"
             render_type = "motion"
-            render_subtype = "webp"
+            render_subtype = "jpeg"
             render_quality = 60
-            render_motion_subtype = "jpeg"
+            render_motion_subtype = "stream"
             render_motion_quality = 10
             "#,
         )
@@ -2868,8 +2824,8 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
-                base: TileCodec::Webp(60),
-                motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
+                base: TileCodec::Jpeg(60),
+                motion: Some(MotionEncode::Stream { quality: 10 }),
                 debug: false,
                 adaptive: None
             }
@@ -2895,19 +2851,14 @@ mod tests {
                 "tiles · jpeg q60",
             ),
             (
-                "fixed quality webp",
-                "render_type = \"fixed-quality\"\nrender_subtype = \"webp\"\nrender_quality = 55",
-                "tiles · webp q55",
-            ),
-            (
                 "motion over a lossless base",
                 "render_type = \"motion\"\nrender_motion_subtype = \"jpeg\"\nrender_motion_quality = 30",
                 "motion · base lossless png, moving jpeg q30",
             ),
             (
                 "motion whose moving encode defaults to the base",
-                "render_type = \"motion\"\nrender_subtype = \"webp\"\nrender_quality = 70\nrender_motion_quality = 35",
-                "motion · base webp q70, moving webp q35",
+                "render_type = \"motion\"\nrender_subtype = \"jpeg\"\nrender_quality = 70\nrender_motion_quality = 35",
+                "motion · base jpeg q70, moving jpeg q35",
             ),
             (
                 "motion with a stream per region",
@@ -2989,7 +2940,7 @@ mod tests {
             protocol = "rdp"
             host = "h"
             render_type = "motion"
-            render_subtype = "webp"
+            render_subtype = "jpeg"
             render_quality = 60
             render_motion_quality = 30
             "#,
@@ -2997,7 +2948,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             motion_of(cfg.targets[0].render_plan()),
-            Some(MotionEncode::Tile(TileCodec::Webp(30))),
+            Some(MotionEncode::Tile(TileCodec::Jpeg(30))),
             "a lossy base defaulted its moving encode to a stream"
         );
     }
@@ -3203,7 +3154,7 @@ mod tests {
         )
         .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("jpeg") && msg.contains("webp"), "{msg}");
+        assert!(msg.contains("jpeg"), "{msg}");
     }
 
     /// A resize under both corrupts the desktop until the gateway is restarted,
@@ -3261,14 +3212,14 @@ mod tests {
             width = 1600
             height = 1000
             render_type = "fixed-quality"
-            render_subtype = "webp"
+            render_subtype = "jpeg"
             render_quality = 60
             "#,
         )
         .expect("only the motion pairing is refused");
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: None, debug: false, adaptive: None }
+            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None }
         );
     }
 

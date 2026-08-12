@@ -26,7 +26,6 @@ const NO_SLOT = 0xffff;
 const SLOT_COUNT = 256;
 const TILE_FORMAT_PNG = 1;
 const TILE_FORMAT_JPEG = 2;
-const TILE_FORMAT_WEBP = 3;
 
 interface Record {
   op: number;
@@ -205,13 +204,9 @@ test.describe("v4 batch envelope", () => {
           expect(copy?.h).toBeGreaterThan(0);
           continue;
         }
-        // The gateway encodes tiles as PNG, JPEG, or WebP according to the target's
-        // render dial, so any sample uses one of the three wire formats.
-        expect([
-          TILE_FORMAT_PNG,
-          TILE_FORMAT_JPEG,
-          TILE_FORMAT_WEBP,
-        ]).toContain(record.format);
+        // The gateway encodes tiles as PNG or JPEG according to the target's
+        // render dial, so any sample uses one of the two wire formats.
+        expect([TILE_FORMAT_PNG, TILE_FORMAT_JPEG]).toContain(record.format);
         // Either a slot inside the cache, or "do not remember this".
         if (record.slot !== NO_SLOT) {
           expect(record.slot).toBeLessThan(SLOT_COUNT);

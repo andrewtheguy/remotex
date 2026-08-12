@@ -696,7 +696,7 @@ mod tests {
         let message = format!("{refused:#}");
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
-        assert!(message.contains("webp"), "the message does not say what to do instead");
+        assert!(message.contains("jpeg"), "the message does not say what to do instead");
     }
 
     /// Two streams over disjoint regions of one mirror, which is the `motion` shape: each sees
