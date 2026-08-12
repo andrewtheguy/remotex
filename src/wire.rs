@@ -731,7 +731,7 @@ mod tests {
     }
 
     // The format byte is the codec, and the wire relays it untouched: the tile
-    // encoder may send PNG, JPEG, or WebP, and neither batching nor the cache may
+    // encoder may send PNG or JPEG, and neither batching nor the cache may
     // drop or rewrite it.
     #[test]
     fn the_tile_format_byte_survives_encoding() {

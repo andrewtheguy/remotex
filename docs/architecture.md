@@ -20,7 +20,7 @@ axum server ── single session slot ── protocol engine
 
 RDP and VNC frames are decoded in the gateway and sent as independent image tiles
 or as VP9 streams, according to the target's render plan. Tiles are lossless
-PNG by default, with JPEG and WebP available at fixed quality. A Mac is reached
+PNG by default, with JPEG available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the experimental
 `ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
@@ -74,10 +74,9 @@ combinations that exist are:
 |---|---|---|
 | `full` | `png` | lossless PNG. The default, and byte-identical to the PNG-only gateway that preceded the dial |
 | `fixed-quality` | `jpeg` | every tile JPEG at `render_quality` |
-| `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
 | `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
-| `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
-| `motion` + `render_motion_subtype = "stream"` | `png` / `jpeg` / `webp` | base as above; a video stream per coalesced moving region at `render_motion_quality` |
+| `motion` | `jpeg` | base at `render_quality`; cells in motion cheaper still |
+| `motion` + `render_motion_subtype = "stream"` | `png` / `jpeg` | base as above; a video stream per coalesced moving region at `render_motion_quality` |
 | `video` | *(refused)* | the whole desktop as one video stream at `render_quality` |
 
 `video` is the one row where `render_subtype` is empty, and that is what it is
@@ -89,10 +88,9 @@ only what is moving becomes a stream.
 **Neither streaming row names a video codec, because video is VP9 only** — see
 [the codec](#the-codec).
 
-No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
+No classifier runs in the fixed lossy combination: `jpeg` sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
-honest trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer
-bytes for the same visible result.
+honest trade of a single fixed knob.
 
 Two more keys sit across the whole dial rather than on either axis.
 `render_adaptive = true` lets every lossy quality the target configures track the
@@ -103,8 +101,8 @@ one number for the whole plan: whichever dials exist — `render_quality`,
 `render_motion_quality`, a stream's — all stop at it.
 
 The still dial costs no wire change. A tile record's first byte is already its format
-(`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and the client decodes all
-three through `createImageBitmap` from a MIME type. What streams costs one: a
+(`Tile::FORMAT_PNG` / `FORMAT_JPEG`) and the client decodes both
+through `createImageBitmap` from a MIME type. What streams costs one: a
 `VIDEO` record, described under the client protocol below.
 
 The engines never see the config enums. The axes and the qualities collapse to one
@@ -122,13 +120,13 @@ mechanism.
 render_type / render_subtype / render_quality / render_motion_*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
-  → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
+  → Tile::from_rgb / from_rgb_jpeg
 ```
 
 Because `TileSink` is shared, RDP and VNC get every codec from one implementation,
 and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
-`encode_webp` wraps the `webp` crate's `libwebp`, built by `cc` with the target's
-SIMD and no cmake, at `thread_level = 1` so one encode can use all cores.
+`encode_jpeg` wraps `jpeg-encoder`, built with the target's SIMD, so the encode on
+the session hot path costs no C toolchain and no runtime dependency.
 
 #### `motion`: a discount on what is too busy to notice
 
@@ -149,12 +147,10 @@ render_motion_quality = 10       # moving cells: as cheap as it takes
 ```
 
 The moving encode has its own axis (`MotionSubtype`, which admits no `png` and does
-admit `stream` — see below), not just its own quality. A settled cell is sent once and can afford WebP's slower,
-smaller encode, while a moving cell is re-encoded every frame, where JPEG's faster
-encode may beat WebP's smaller output; cheapest and smallest are not the same
-question at quality 60 as at 10. `render_motion_subtype` defaults to
-`render_subtype`, and is required when the base is `png` — lossless has no dial to
-turn down.
+admit `stream` — see below), not just its own quality: what a settled cell gets is a
+still picture, and what is moving may stop being one at all.
+`render_motion_subtype` defaults to `render_subtype`, and is required when the base
+is `png` — lossless has no dial to turn down.
 
 **`motion` is refused on `subtype = "ard-high-performance"`.** A resize under both
 corrupts the desktop until the whole gateway is restarted — a reconnect does not
@@ -300,7 +296,7 @@ One measurement, so that the shape of the trade is on the record rather than ass
 
 | dial | to the client | encode CPU |
 |---|---|---|
-| `motion` + `webp` 10 | 4.5 MB | 0.17 s |
+| `motion` + a still encode at 10 | 4.5 MB | 0.17 s |
 | `motion` + `stream` 30 | 0.70 MB | 1.39 s |
 | `video` 60 | 0.45 MB | 5.48 s |
 
@@ -397,8 +393,8 @@ paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
 flight while every queue stayed shallow. The walk's floor moves from 1 to
 `render_adaptive_min`, and the same key puts a *per-encode* quality on the lossy
 tile paths: Guacamole's curve — one quality point per millisecond of lag past
-20 ms, clamped at the floor — applied at `Shared::adapted` wherever a JPEG or
-WebP tile is about to be encoded, cleanups included. PNG passes through
+20 ms, clamped at the floor — applied at `Shared::adapted` wherever a JPEG
+tile is about to be encoded, cleanups included. PNG passes through
 untouched; which cells deserve losslessness was the operator's call, not the
 link's. Without the key, nothing changes: pressure-only walk for streams, fixed
 quality for tiles.
@@ -529,7 +525,7 @@ VIDEO    op 0x03: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
 COPY     op 0x04: u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
 ```
 
-Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
+Tile formats are PNG and JPEG. One frame carries multiple ready updates so a
 repaint does not require one WebSocket event per tile. Receivers reject unknown
 operations, truncated records, and unsupported formats, and reject a nonzero frame
 flags byte. A `VIDEO` record's own flags byte is `0x01` for a keyframe and nothing

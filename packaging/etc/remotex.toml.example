@@ -318,8 +318,7 @@ password = "change-me"
 # which is what a slow or metered link wants. "motion" and "video" are described in
 # their own blocks below.
 #
-# render_subtype picks the codec: "jpeg" is decoded by everything, "webp" is roughly
-# 30% smaller at a matched quality and is decoded natively by the browser. With
+# render_subtype picks the codec: "jpeg" is decoded by everything. With
 # "full" the subtype must be "png". Under "motion" it is the *base* codec — see the
 # block below, where it also decides which of the motion keys are required.
 #
@@ -336,7 +335,7 @@ password = "change-me"
 # afford exact pixels. A separate configuration from the two lines above, not more
 # of them:
 #render_type = "fixed-quality"
-#render_subtype = "webp"
+#render_subtype = "jpeg"
 #render_quality = 75
 
 # render_type = "motion" adds a second, cheaper encode used only for the cells that
@@ -352,7 +351,7 @@ password = "change-me"
 #   render_subtype = "png"  — render_quality refused (nothing to turn down), and
 #                             render_motion_subtype required, since PNG cannot name
 #                             the motion codec for it.
-#   "jpeg" or "webp"        — render_quality required, and render_motion_subtype
+#   "jpeg"                  — render_quality required, and render_motion_subtype
 #                             optional: omitted, the motion cells use the same codec
 #                             as the base at render_motion_quality.
 #
@@ -364,7 +363,7 @@ password = "change-me"
 # A lossy base with cheaper motion, for a link that cannot afford PNG at all. One
 # codec, two qualities, so render_motion_subtype is left out:
 #render_type = "motion"
-#render_subtype = "webp"
+#render_subtype = "jpeg"
 #render_quality = 60
 #render_motion_quality = 10
 
@@ -382,7 +381,7 @@ password = "change-me"
 # else. A video in a window costs its own pixels; the text beside it stays exactly
 # what render_subtype says, and is never re-encoded at all.
 #
-# It is never a default — "jpeg" and "webp" fall back to the base codec, this one has
+# It is never a default — "jpeg" falls back to the base codec, this one has
 # to be written out — because it is not a cheaper version of the base but a different
 # transport beside it. render_motion_quality is its dial, and there it is a *ceiling*:
 # on a link that can carry it you get that quality, and a link that cannot makes the
@@ -426,7 +425,7 @@ password = "change-me"
 #render_quality = 60
 
 # Let every lossy quality in this target's render plan track measured client
-# queueing. The configured qualities remain ceilings. JPEG/WebP tiles lower their
+# queueing. The configured qualities remain ceilings. JPEG tiles lower their
 # quality per encode; video streams add the client's paint lag to their existing
 # send-pressure signal. Refused with `render_type = "full"`, which has no lossy
 # dial to move.

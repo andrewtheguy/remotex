@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.147"
+version = "0.0.148"
 
 [package]
 name = "remotex"
@@ -62,11 +62,6 @@ png = "0.18"
 # already distinguishes PNG from JPEG on the wire and the client decodes either,
 # so this is a gateway-only encoder. `simd` because it runs on the session hot path.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
-# WebP for the lossy tile path's `webp` subtype — ~30% fewer bytes than JPEG at a
-# matched quality, decoded natively by the browser through `createImageBitmap`.
-# Binds a statically-linked libwebp built by `cc`
-# (not cmake) with the target's SIMD, so it costs no cmake and no new runtime dep.
-webp = "0.3"
 # libvpx, for VP9 — the video codec, for either streaming mode: the whole framebuffer
 # under `render_type = "video"`, or moving regions under `render_motion_subtype =
 # "stream"` (src/vp9.rs). VP9 is BSD-3-Clause with a patent grant, so every browser

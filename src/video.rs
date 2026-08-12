@@ -295,7 +295,7 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
          target a still render_type (\"fixed-quality\" with render_subtype = \
-         \"webp\"), or ask the remote for a smaller desktop",
+         \"jpeg\"), or ask the remote for a smaller desktop",
         rect.w(),
         rect.h()
     );
@@ -710,7 +710,7 @@ mod tests {
         let message = format!("{refused:#}");
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
-        assert!(message.contains("webp"), "the message does not say what to do instead");
+        assert!(message.contains("jpeg"), "the message does not say what to do instead");
         // The limit is on the picture, not on width: turning a legal desktop on its side
         // does not make it illegal.
         assert!(
