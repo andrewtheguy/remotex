@@ -138,32 +138,35 @@ impl Protocol {
     }
 }
 
-/// How a target's tiles are encoded — the quality *strategy*, the first of the
-/// two render axes (the second is [`RenderSubtype`], the codec, and a lossy
-/// strategy also reads [`TargetConfig::render_quality`]). Two flat sibling keys
-/// rather than a nested table, matching the rest of the target schema.
+/// How a target's pixels travel — the *strategy*, the first of the two render
+/// axes. The second, [`RenderSubtype`], is the codec of the base tiles, and a
+/// lossy base also reads [`TargetConfig::render_quality`]. Two flat sibling
+/// keys rather than a nested table, matching the rest of the target schema.
+///
+/// The two axes are orthogonal on purpose: this one says *what kind of thing
+/// goes on the wire* (still tiles, tiles with a motion discount, one video
+/// stream), the subtype says *what a base tile is encoded as* (lossless PNG, a
+/// fixed-quality JPEG, or the classifier's per-tile choice between the two).
+/// Every tiles-carrying strategy takes every subtype.
 ///
 /// Only implemented strategies are variants; anything else is refused by serde
 /// with the list of what is accepted. See docs/architecture.md for the dial.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderType {
-    /// Lossless: every tile is PNG, byte-for-byte what the gateway has always
-    /// sent. The default, so an existing config behaves exactly as before. Pairs
-    /// only with [`RenderSubtype::Png`].
+    /// Every changed region as an independent still image at the base codec,
+    /// and nothing else. The default; with the default subtype (lossless PNG)
+    /// an unset target is byte-identical to the PNG-only gateway that preceded
+    /// the dial.
     #[default]
-    Full,
-    /// One quality for the whole session, set by [`TargetConfig::render_quality`]
-    /// and never varied. Pairs with the lossy codec ([`RenderSubtype::Jpeg`]).
-    FixedQuality,
+    Tiles,
     /// The base encode, plus a second and much cheaper one for the cells changing
     /// fastest right now.
     ///
     /// Not a third way to encode every tile: it *builds on* the base a target
     /// would otherwise have, which is still what a settled cell is sent as. The
-    /// base is read from [`RenderSubtype`] and [`TargetConfig::render_quality`]
-    /// rather than from this axis, which `motion` occupies — `png` with no quality
-    /// is a lossless base, a lossy subtype with a quality is a fixed-quality one.
+    /// base is read from [`RenderSubtype`] and [`TargetConfig::render_quality`],
+    /// same as under [`RenderType::Tiles`].
     /// The moving encode has its own two keys,
     /// [`TargetConfig::render_motion_subtype`] and
     /// [`TargetConfig::render_motion_quality`], and it may be either a cheaper still
@@ -263,20 +266,28 @@ impl Default for AudioPlan {
 }
 
 /// The codec a target's **base** tiles are encoded with — the second render axis,
-/// paired with [`RenderType`]. Under `full` and `fixed-quality` that is every
-/// tile; under [`RenderType::Motion`] it is every tile except the ones currently
-/// in motion, which [`MotionSubtype`] names instead. All implemented codecs are
+/// paired with [`RenderType`]. Under `tiles` that is every tile; under
+/// [`RenderType::Motion`] it is every tile except the ones currently
+/// in motion, which [`MotionSubtype`] names instead. [`RenderType::Video`] sends
+/// no tiles and refuses the axis. All implemented codecs are
 /// variants; serde refuses anything else.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderSubtype {
-    /// Lossless PNG. The default, and the only codec [`RenderType::Full`] takes.
+    /// Lossless PNG. The default.
     #[default]
     Png,
     /// Baseline JPEG at [`TargetConfig::render_quality`]. Every tile goes to JPEG
     /// — there is no content classifier — so flat UI and text soften along with
     /// photographic content. That is the trade the fixed dial makes.
     Jpeg,
+    /// Per tile, whichever of the two fits: a picture classifier
+    /// ([`crate::classify`]) reads each tile's pixels and sends photographic
+    /// content as JPEG at [`TargetConfig::render_quality`], everything else —
+    /// flat UI, text — as lossless PNG. The classifier has no dial of its own;
+    /// under [`RenderType::Motion`] it is the base, so a settled cell is
+    /// classified and a moving one takes the motion encode as usual.
+    Classify,
 }
 
 /// The encode for what [`RenderType::Motion`] finds in motion — an axis of its own
@@ -321,6 +332,18 @@ pub enum TileCodec {
     Png,
     /// JPEG at the given quality (1–100).
     Jpeg(u8),
+    /// Per tile, whichever of the other two [`crate::classify`] says fits:
+    /// photographic content as JPEG at this quality (1–100), everything else
+    /// as PNG. The decision runs on the encode worker, from the tile's own
+    /// pixels, so it costs the read loops nothing.
+    Classify {
+        quality: u8,
+        /// Outline the tiles the classifier sent as JPEG, in the pixels
+        /// themselves, so QA reads the decision off the screen
+        /// ([`TargetConfig::render_classify_debug`]). Carried here because the
+        /// encoder is the one place the decision exists to be drawn.
+        debug: bool,
+    },
 }
 
 /// What the `motion` strategy does with what it finds moving, resolved from
@@ -408,6 +431,10 @@ impl RenderPlan {
             match codec {
                 TileCodec::Png => "lossless png".to_owned(),
                 TileCodec::Jpeg(q) => format!("jpeg q{q}"),
+                TileCodec::Classify { quality, debug } => {
+                    let debug = if debug { " (debug outlines)" } else { "" };
+                    format!("classified png / jpeg q{quality}{debug}")
+                }
             }
         }
         // The floor as a suffix, because it modifies the whole plan rather than
@@ -421,9 +448,8 @@ impl RenderPlan {
                 format!("video q{quality}{}", floor(*adaptive))
             }
             RenderPlan::Tiles { base, motion: None, adaptive, .. } => {
-                // No motion arm at all, which is `full` and `fixed-quality` alike: the
-                // difference between them is only whether the base is lossless, and that is
-                // what the base already says.
+                // No motion arm at all — plain `tiles`, whatever the base: whether
+                // it is lossless is what the base already says.
                 format!("tiles · {}{}", tile(*base), floor(*adaptive))
             }
             RenderPlan::Tiles { base, motion: Some(motion), debug, adaptive } => {
@@ -601,23 +627,28 @@ pub struct TargetConfig {
     /// that could not do anything.
     #[serde(default)]
     pub audio_bitrate_min: Option<u32>,
-    /// Quality *strategy* for this target's tiles. Defaults to [`RenderType::Full`]
-    /// (lossless PNG), so an unset target is byte-identical to before the dial
-    /// existed. Validated against [`Self::render_subtype`] and [`Self::render_quality`]
-    /// in [`ConfigFile::parse_with`]. Works for both RDP and VNC.
+    /// Render *strategy* for this target. Defaults to [`RenderType::Tiles`],
+    /// which with the default subtype (lossless PNG) is byte-identical to
+    /// before the dial existed. Validated against [`Self::render_subtype`] and
+    /// [`Self::render_quality`] in [`ConfigFile::parse_with`]. Works for both
+    /// RDP and VNC.
     #[serde(default)]
     pub render_type: RenderType,
-    /// Codec for this target's tiles. Defaults to [`RenderSubtype::Png`]. The
-    /// legal pairing with [`Self::render_type`] is enforced at parse time.
+    /// Codec for this target's base tiles. Defaults to [`RenderSubtype::Png`].
+    /// The legal pairing with [`Self::render_type`] is enforced at parse time.
     #[serde(default)]
     pub render_subtype: RenderSubtype,
-    /// Fixed quality (1–100) for [`RenderType::FixedQuality`], applied by the lossy
-    /// codec [`Self::render_subtype`] selects ([`RenderSubtype::Jpeg`]). Required
-    /// for that strategy and refused for [`RenderType::Full`], which is lossless
-    /// and has no dial. `None` (unset) is the default.
+    /// The quality (1–100) of the base codec's lossy side: what
+    /// [`RenderSubtype::Jpeg`] encodes every tile at, and what
+    /// [`RenderSubtype::Classify`] encodes its photographic tiles at. Required
+    /// exactly when the subtype is one of those two and refused for
+    /// [`RenderSubtype::Png`], which is lossless and has no dial. `None`
+    /// (unset) is the default.
     ///
     /// Under [`RenderType::Motion`] this is the *base* quality — what a settled
-    /// cell gets — and it is omitted when the base is lossless PNG.
+    /// cell gets — and it is omitted when the base is lossless PNG. Under
+    /// [`RenderType::Video`], which has no tiles and no subtype, it is the one
+    /// quality the stream holds.
     #[serde(default)]
     pub render_quality: Option<u8>,
     /// What [`RenderType::Motion`] does with what it finds moving. Defaults to
@@ -645,6 +676,19 @@ pub struct TargetConfig {
     /// keep the true pixels, and a cleanup erases the outline it replaces.
     #[serde(default)]
     pub render_motion_debug: bool,
+    /// Outline every tile the classifier sends as JPEG, in the pixels
+    /// themselves, so which regions it reads as photographic is visible on the
+    /// screen instead of inferred from how soft something looks. A QA aid for
+    /// [`RenderSubtype::Classify`] and refused for any other subtype; off
+    /// unless asked for.
+    ///
+    /// The outline goes on the copy handed to the JPEG encoder, never on the
+    /// pixels the shadow records as delivered — so the mark lasts exactly as
+    /// long as the lossy tile it describes, and the next change repaints it
+    /// away. PNG tiles are never marked: unmarked-and-sharp is the quiet
+    /// majority, and outlining it would say nothing.
+    #[serde(default)]
+    pub render_classify_debug: bool,
     /// Let quality track the measured link, on every lossy dial this target has.
     ///
     /// The configured qualities stay the *ceiling* — a link with room to spare
@@ -660,8 +704,8 @@ pub struct TargetConfig {
     ///   *encode* instead of per session, scaled down linearly with that same
     ///   lag — Guacamole's curve, on this gateway's own signal.
     ///
-    /// Refused for `render_type = "full"`, which is lossless everywhere and has
-    /// no dial for this to move.
+    /// Refused for lossless PNG tiles — the one plan with no dial for this to
+    /// move.
     #[serde(default)]
     pub render_adaptive: bool,
     /// Floor (1–100) for [`Self::render_adaptive`]; `None` reads as
@@ -734,6 +778,9 @@ impl TargetConfig {
         }
         let base = match (self.render_subtype, self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
+            (RenderSubtype::Classify, Some(q)) => {
+                TileCodec::Classify { quality: q, debug: self.render_classify_debug }
+            }
             _ => TileCodec::Png,
         };
         let motion = match (self.render_type, self.render_motion_quality) {
@@ -771,17 +818,20 @@ impl TargetConfig {
         match self.render_type {
             RenderType::Video => true,
             RenderType::Motion => self.motion_subtype() == Some(MotionSubtype::Stream),
-            RenderType::Full | RenderType::FixedQuality => false,
+            RenderType::Tiles => false,
         }
     }
 
-    /// The motion encode this target asked for, falling back to the base codec when
-    /// the key is omitted — which `stream` never is, since a stream is not a cheaper
-    /// version of a still. `None` only for the pairing parse rejects: a `png` base
-    /// with no motion subtype named.
+    /// The motion encode this target asked for, defaulting off the base codec
+    /// when the key is omitted — which `stream` never is, since a stream is not
+    /// a cheaper version of a still. A `jpeg` base defaults to `jpeg`, and so
+    /// does a `classify` base: its moving cells are changing too fast to be
+    /// worth classifying, and the artifacts the classifier exists to keep off
+    /// text are the ones motion hides anyway. `None` only for the pairing parse
+    /// rejects: a `png` base with no motion subtype named.
     fn motion_subtype(&self) -> Option<MotionSubtype> {
         self.render_motion_subtype.or(match self.render_subtype {
-            RenderSubtype::Jpeg => Some(MotionSubtype::Jpeg),
+            RenderSubtype::Jpeg | RenderSubtype::Classify => Some(MotionSubtype::Jpeg),
             RenderSubtype::Png => None,
         })
     }
@@ -1404,19 +1454,24 @@ impl ConfigFile {
             // belongs to exactly one of them. The match is exhaustive so a future
             // variant cannot be added without deciding what it pairs with here.
             match (target.render_type, target.render_subtype) {
-                (RenderType::Full, RenderSubtype::Png) => {
+                (RenderType::Tiles, RenderSubtype::Png) => {
                     anyhow::ensure!(
                         target.render_quality.is_none(),
-                        "target {:?} sets render_quality, which render_type \"full\" has no \
-                         use for — it is lossless PNG. Set render_type = \"fixed-quality\" \
-                         with a lossy render_subtype (\"jpeg\") to choose a quality",
+                        "target {:?} sets render_quality, which the lossless \"png\" \
+                         subtype has no use for. Set render_subtype = \"jpeg\" for a fixed \
+                         lossy quality, or \"classify\" to spend it only on photographic \
+                         tiles",
                         target.name
                     );
                 }
-                (RenderType::FixedQuality, RenderSubtype::Jpeg) => {
+                // The two lossy bases make the same demand for the same reason:
+                // `jpeg` spends the quality on every tile, `classify` only on
+                // the ones its classifier reads as photographic, and neither
+                // has a default — a quality nobody chose is not a quality.
+                (RenderType::Tiles, RenderSubtype::Jpeg | RenderSubtype::Classify) => {
                     let q = target.render_quality.with_context(|| format!(
-                        "target {:?} is render_type \"fixed-quality\" but sets no \
-                         render_quality — it needs one, an integer 1–100",
+                        "target {:?} sets a lossy render_subtype but no render_quality — \
+                         it needs one, an integer 1–100",
                         target.name
                     ))?;
                     anyhow::ensure!(
@@ -1426,18 +1481,6 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Full, RenderSubtype::Jpeg) => anyhow::bail!(
-                    "target {:?} sets render_type \"full\" with a lossy render_subtype: \
-                     \"full\" is lossless and pairs only with render_subtype \"png\". Use \
-                     render_type = \"fixed-quality\" for JPEG",
-                    target.name
-                ),
-                (RenderType::FixedQuality, RenderSubtype::Png) => anyhow::bail!(
-                    "target {:?} sets render_type \"fixed-quality\" with render_subtype \
-                     \"png\": PNG is lossless and has no quality dial. Use render_subtype = \
-                     \"jpeg\", or render_type = \"full\" to stay lossless",
-                    target.name
-                ),
                 // `motion` reads the base off the subtype and the quality rather
                 // than off `render_type`, which it occupies itself: a `png` base
                 // is lossless and takes no quality, a lossy base needs one. This
@@ -1464,7 +1507,11 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Motion, RenderSubtype::Jpeg) => {
+                // Same rule for both lossy bases, and under `motion` the
+                // classifier is at its most natural: a settled cell is
+                // classified — photographic goes JPEG, text stays lossless —
+                // while a moving cell takes the motion encode either way.
+                (RenderType::Motion, RenderSubtype::Jpeg | RenderSubtype::Classify) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} is render_type \"motion\" with a lossy render_subtype, \
                          which makes that subtype the *base* encode — the one a settled cell \
@@ -1498,16 +1545,27 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Video, RenderSubtype::Jpeg) => anyhow::bail!(
-                    "target {:?} sets render_type \"video\" with render_subtype \"jpeg\". \
-                     render_subtype names a codec for each changed region separately, and \
-                     \"video\" does not send regions at all — it sends the whole desktop as one \
-                     video stream, where every frame depends on the one before it. Drop \
-                     render_subtype to keep \"video\", or set \
-                     render_type = \"fixed-quality\" to keep this one",
-                    target.name
-                ),
+                (RenderType::Video, RenderSubtype::Jpeg | RenderSubtype::Classify) => {
+                    anyhow::bail!(
+                        "target {:?} sets render_type \"video\" with a render_subtype. \
+                         render_subtype names a codec for each changed region separately, and \
+                         \"video\" does not send regions at all — it sends the whole desktop as \
+                         one video stream, where every frame depends on the one before it. Drop \
+                         render_subtype to keep \"video\", or set render_type = \"tiles\" to \
+                         keep this subtype",
+                        target.name
+                    )
+                }
             }
+            // The debug outlines belong to the classifier: no other subtype
+            // has a per-tile decision to draw.
+            anyhow::ensure!(
+                target.render_subtype == RenderSubtype::Classify || !target.render_classify_debug,
+                "target {:?} sets render_classify_debug without render_subtype = \
+                 \"classify\" — the outlines show which tiles the classifier sent as JPEG, \
+                 and no other subtype makes that decision",
+                target.name
+            );
             // Both `motion` pairings need this, and neither of the arms above is
             // the place for it: the moving encode is the whole point of the
             // strategy, and it is the one key that has no default to fall back on.
@@ -1529,14 +1587,16 @@ impl ConfigFile {
                     target.name
                 );
             }
-            // The adaptive switch needs a dial to move. Every strategy has one
-            // except `full`, which is lossless everywhere — and a `motion` plan
-            // always has at least the motion quality, so only `full` can be empty.
+            // The adaptive switch needs a dial to move. The one plan without one
+            // is lossless tiles: a `motion` plan always has at least the motion
+            // quality, `video` has its own, and a lossy base carries one.
             anyhow::ensure!(
-                !target.render_adaptive || target.render_type != RenderType::Full,
-                "target {:?} sets render_adaptive with render_type \"full\", which is \
-                 lossless everywhere and has no quality for the link to move. Pick a \
-                 strategy with a lossy dial — \"fixed-quality\", \"motion\" or \"video\"",
+                !target.render_adaptive
+                    || target.render_type != RenderType::Tiles
+                    || target.render_subtype != RenderSubtype::Png,
+                "target {:?} sets render_adaptive on lossless PNG tiles, which have no \
+                 quality for the link to move. Pick a plan with a lossy dial — a \"jpeg\" \
+                 or \"classify\" subtype, \"motion\", or \"video\"",
                 target.name
             );
             anyhow::ensure!(
@@ -2496,7 +2556,7 @@ mod tests {
         )
         .unwrap();
         let t = &cfg.targets[0];
-        assert_eq!(t.render_type, RenderType::Full);
+        assert_eq!(t.render_type, RenderType::Tiles);
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(t.render_quality, None);
         assert_eq!(
@@ -2506,21 +2566,21 @@ mod tests {
     }
 
     #[test]
-    fn fixed_quality_jpeg_is_accepted() {
+    fn tiles_with_a_jpeg_base_is_accepted() {
         let cfg = ConfigFile::parse(
             r#"
             [[targets]]
             name = "a"
             protocol = "rdp"
             host = "h"
-            render_type = "fixed-quality"
+            render_type = "tiles"
             render_subtype = "jpeg"
             render_quality = 60
             "#,
         )
         .unwrap();
         let t = &cfg.targets[0];
-        assert_eq!(t.render_type, RenderType::FixedQuality);
+        assert_eq!(t.render_type, RenderType::Tiles);
         assert_eq!(t.render_subtype, RenderSubtype::Jpeg);
         assert_eq!(t.render_quality, Some(60));
         assert_eq!(
@@ -2529,8 +2589,154 @@ mod tests {
         );
     }
 
+    /// The subtype is the codec axis, so a lossy one needs no particular
+    /// render_type: `tiles` is the default, and naming it changes nothing.
     #[test]
-    fn full_with_a_lossy_subtype_is_rejected() {
+    fn a_lossy_subtype_needs_no_explicit_render_type() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_subtype = "jpeg"
+            render_quality = 60
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None }
+        );
+    }
+
+    #[test]
+    fn tiles_with_a_classify_base_is_accepted() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "tiles"
+            render_subtype = "classify"
+            render_quality = 60
+            "#,
+        )
+        .unwrap();
+        let t = &cfg.targets[0];
+        assert_eq!(t.render_subtype, RenderSubtype::Classify);
+        assert_eq!(
+            t.render_plan(),
+            RenderPlan::Tiles {
+                base: TileCodec::Classify { quality: 60, debug: false },
+                motion: None,
+                debug: false,
+                adaptive: None
+            }
+        );
+    }
+
+    #[test]
+    fn classify_without_a_quality_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_subtype = "classify"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_quality"), "{err:#}");
+    }
+
+    /// The classifier as a `motion` base — the pairing the subtype axis exists
+    /// to make expressible: a settled cell is classified (photographic JPEG,
+    /// text lossless), a moving cell takes the motion encode, which defaults
+    /// to `jpeg` because a cell changing fast is not worth classifying.
+    #[test]
+    fn motion_takes_a_classify_base() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_subtype = "classify"
+            render_quality = 60
+            render_motion_quality = 15
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles {
+                base: TileCodec::Classify { quality: 60, debug: false },
+                motion: Some(MotionEncode::Tile(TileCodec::Jpeg(15))),
+                debug: false,
+                adaptive: None
+            }
+        );
+    }
+
+    /// And with `stream` written out, the moving regions become video while the
+    /// settled ones are still classified.
+    #[test]
+    fn motion_streams_over_a_classify_base() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_subtype = "classify"
+            render_quality = 60
+            render_motion_subtype = "stream"
+            render_motion_quality = 30
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles {
+                base: TileCodec::Classify { quality: 60, debug: false },
+                motion: Some(MotionEncode::Stream { quality: 30 }),
+                debug: false,
+                adaptive: None
+            }
+        );
+    }
+
+    /// The outlines are the classifier's own debug aid, and resolve into the
+    /// plan's codec so the encoder — the place the decision is made — sees it.
+    #[test]
+    fn the_classify_debug_overlay_is_opt_in_and_belongs_to_classify() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_subtype = "classify"
+            render_quality = 60
+            render_classify_debug = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles {
+                base: TileCodec::Classify { quality: 60, debug: true },
+                motion: None,
+                debug: false,
+                adaptive: None
+            }
+        );
+
         let err = ConfigFile::parse(
             r#"
             [[targets]]
@@ -2538,21 +2744,22 @@ mod tests {
             protocol = "rdp"
             host = "h"
             render_subtype = "jpeg"
+            render_quality = 60
+            render_classify_debug = true
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("lossless"), "{err:#}");
+        assert!(format!("{err:#}").contains("render_classify_debug"), "{err:#}");
     }
 
     #[test]
-    fn fixed_quality_without_a_quality_is_rejected() {
+    fn a_lossy_subtype_without_a_quality_is_rejected() {
         let err = ConfigFile::parse(
             r#"
             [[targets]]
             name = "a"
             protocol = "rdp"
             host = "h"
-            render_type = "fixed-quality"
             render_subtype = "jpeg"
             "#,
         )
@@ -2569,7 +2776,6 @@ mod tests {
                 name = "a"
                 protocol = "rdp"
                 host = "h"
-                render_type = "fixed-quality"
                 render_subtype = "jpeg"
                 render_quality = {q}
                 "#
@@ -2646,9 +2852,9 @@ mod tests {
         )
         .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("jpeg"), "the message should name the subtype: {msg}");
+        assert!(msg.contains("render_subtype"), "the message should name the axis: {msg}");
         assert!(msg.contains("video stream"), "the message should say what video is: {msg}");
-        assert!(msg.contains("fixed-quality"), "the message should say the way out: {msg}");
+        assert!(msg.contains("tiles"), "the message should say the way out: {msg}");
     }
 
     /// The motion keys belong to `motion`, and `video` is not a second place to put
@@ -2673,52 +2879,22 @@ mod tests {
     }
 
     #[test]
-    fn render_quality_on_full_is_rejected() {
-        // render_type/subtype default to full/png, so a stray quality has nothing
-        // to apply to.
-        let err = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            host = "h"
-            render_quality = 50
-            "#,
-        )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("full"), "{err:#}");
-    }
-
-    #[test]
-    fn mismatched_render_axes_are_rejected() {
-        // full + jpeg: full is lossless.
-        let err = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            host = "h"
-            render_type = "full"
-            render_subtype = "jpeg"
-            "#,
-        )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("lossless"), "{err:#}");
-
-        // fixed-quality + png: PNG has no dial.
-        let err = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            host = "h"
-            render_type = "fixed-quality"
-            render_subtype = "png"
-            render_quality = 50
-            "#,
-        )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("quality dial"), "{err:#}");
+    fn render_quality_on_lossless_png_is_rejected() {
+        // render_type/subtype default to tiles/png, so a stray quality has
+        // nothing to apply to — with or without the defaults written out.
+        for keys in ["", "render_type = \"tiles\"\nrender_subtype = \"png\"\n"] {
+            let toml = format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                {keys}render_quality = 50
+                "#
+            );
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            assert!(format!("{err:#}").contains("lossless"), "{err:#}");
+        }
     }
 
     #[test]
@@ -2735,7 +2911,7 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("full") && msg.contains("fixed-quality") && msg.contains("motion"),
+            msg.contains("tiles") && msg.contains("motion") && msg.contains("video"),
             "{msg}"
         );
     }
@@ -2844,11 +3020,26 @@ mod tests {
     #[test]
     fn every_render_combination_describes_itself() {
         let cases = [
-            ("full, the default", "render_type = \"full\"", "tiles · lossless png"),
+            ("tiles over lossless png, the default", "render_type = \"tiles\"", "tiles · lossless png"),
             (
-                "fixed quality jpeg",
-                "render_type = \"fixed-quality\"\nrender_subtype = \"jpeg\"\nrender_quality = 60",
+                "tiles over fixed-quality jpeg",
+                "render_subtype = \"jpeg\"\nrender_quality = 60",
                 "tiles · jpeg q60",
+            ),
+            (
+                "tiles behind the classifier",
+                "render_subtype = \"classify\"\nrender_quality = 60",
+                "tiles · classified png / jpeg q60",
+            ),
+            (
+                "the classifier's debug outlines, a different session to be looking at",
+                "render_subtype = \"classify\"\nrender_quality = 60\nrender_classify_debug = true",
+                "tiles · classified png / jpeg q60 (debug outlines)",
+            ),
+            (
+                "motion over a classify base",
+                "render_type = \"motion\"\nrender_subtype = \"classify\"\nrender_quality = 60\nrender_motion_quality = 15",
+                "motion · base classified png / jpeg q60, moving jpeg q15",
             ),
             (
                 "motion over a lossless base",
@@ -3125,7 +3316,7 @@ mod tests {
                 name = "a"
                 protocol = "rdp"
                 host = "h"
-                render_type = "fixed-quality"
+                render_type = "tiles"
                 render_subtype = "jpeg"
                 render_quality = 60
                 {extra}
@@ -3211,7 +3402,7 @@ mod tests {
             password = "p"
             width = 1600
             height = 1000
-            render_type = "fixed-quality"
+            render_type = "tiles"
             render_subtype = "jpeg"
             render_quality = 60
             "#,
@@ -3239,7 +3430,7 @@ mod tests {
             name = "b"
             protocol = "rdp"
             host = "h"
-            render_type = "fixed-quality"
+            render_type = "tiles"
             render_subtype = "jpeg"
             render_quality = 60
             "#,
@@ -3710,7 +3901,7 @@ mod tests {
         assert_eq!(plan.describe(), "video q80 · adaptive ≥20");
 
         let cfg = parse_target(
-            "render_type = \"fixed-quality\"\nrender_subtype = \"jpeg\"\n\
+            "render_subtype = \"jpeg\"\n\
              render_quality = 70\nrender_adaptive = true\nrender_adaptive_min = 35",
         )
         .expect("adaptive tiles");
@@ -3748,13 +3939,13 @@ mod tests {
         );
     }
 
-    /// `full` is lossless everywhere: there is no dial for the link to move.
+    /// Lossless PNG tiles — the default plan — have no dial for the link to move.
     #[test]
-    fn render_adaptive_on_full_is_refused() {
+    fn render_adaptive_on_lossless_tiles_is_refused() {
         let err = parse_target("render_adaptive = true").unwrap_err();
         let rendered = format!("{err:#}");
         assert!(rendered.contains("render_adaptive"), "{rendered}");
-        assert!(rendered.contains("full"), "{rendered}");
+        assert!(rendered.contains("lossless"), "{rendered}");
     }
 
     /// The floor belongs to the walk; without the walk nothing reads it.

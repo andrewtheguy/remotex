@@ -1481,7 +1481,7 @@ mod tests {
             "[branding]\ntext = \"work laptop\"\n\n\
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
              username = \"andrew\"\npassword = \"hunter2\"\naudio = true\nresize = true\n\
-             render_type = \"fixed-quality\"\nrender_subtype = \"jpeg\"\nrender_quality = 70\n",
+             render_type = \"tiles\"\nrender_subtype = \"jpeg\"\nrender_quality = 70\n",
         )
         .unwrap();
 

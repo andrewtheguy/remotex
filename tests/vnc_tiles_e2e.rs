@@ -100,12 +100,13 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all
             audio_codec: None,
-            render_type: remotex::config::RenderType::Full,
+            render_type: remotex::config::RenderType::Tiles,
             render_subtype: remotex::config::RenderSubtype::Png,
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            render_classify_debug: false,
             render_adaptive: false,
             render_adaptive_min: None,
             audio_bitrate: None,

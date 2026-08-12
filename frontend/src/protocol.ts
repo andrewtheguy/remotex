@@ -245,7 +245,7 @@ export interface TileMsg {
   // The encoded picture, in `codec`.
   data: Uint8Array;
   // What `data` is, as a MIME type handed to createImageBitmap as a Blob: the
-  // gateway sends lossless PNG by default, and a target on the fixed-quality render
+  // gateway sends lossless PNG by default, and a target on a lossy render
   // dial sends JPEG instead. Both of them are a self-contained picture;
   // a frame that only means something in sequence is a VideoMsg, not a tile.
   codec: "image/png" | "image/jpeg";

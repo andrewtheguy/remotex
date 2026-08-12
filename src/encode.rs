@@ -102,6 +102,14 @@ const MARK_MOTION: [u8; 3] = [255, 0, 255];
 const MARK_CRISP: [u8; 3] = [0, 255, 255];
 /// Colour of a `render_motion_debug` outline on a cleanup tile.
 const MARK_CLEANUP: [u8; 3] = [0, 255, 0];
+/// Colour of a `render_classify_debug` outline on a tile the classifier sent
+/// as JPEG. Yellow, its own colour and not one of the motion marks': a
+/// `classify` base pairs with `motion`, so the two aids can run together and a
+/// shared colour would make one decision unreadable as the other. It holds the
+/// same properties the motion trio was chosen for — it survives a low-quality
+/// JPEG and no desktop draws it in a straight line by accident. PNG tiles are
+/// never outlined: sharp-and-unmarked is the quiet majority of a desktop.
+const MARK_JPEG: [u8; 3] = [255, 255, 0];
 /// Thickness of a `render_motion_debug` outline. Two pixels, because one does not
 /// reliably survive chroma subsampling at the quality a moving cell is sent at.
 const MARK_PX: u16 = 2;
@@ -604,8 +612,16 @@ fn marked(rgb: &Arc<Vec<u8>>, rect: Rect, colour: [u8; 3]) -> Arc<Vec<u8>> {
         // that corrupts a frame, so it declines rather than indexes on a guess.
         return Arc::clone(rgb);
     }
-    let t = usize::from(MARK_PX);
     let mut out = rgb.as_ref().clone();
+    outline(&mut out, w, h, colour);
+    Arc::new(out)
+}
+
+/// Paint the [`MARK_PX`]-thick border of a `w`×`h` packed-RGB888 buffer
+/// `colour`, in place. The caller owns making sure these are throwaway pixels;
+/// see [`marked`] for why the original must never be painted.
+fn outline(out: &mut [u8], w: usize, h: usize, colour: [u8; 3]) {
+    let t = usize::from(MARK_PX);
     let mut paint = |row: usize, from: usize, to: usize| {
         for x in from..to {
             out[(row * w + x) * 3..][..3].copy_from_slice(&colour);
@@ -619,7 +635,6 @@ fn marked(rgb: &Arc<Vec<u8>>, rect: Rect, colour: [u8; 3]) -> Arc<Vec<u8>> {
             paint(y, w.saturating_sub(t), w);
         }
     }
-    Arc::new(out)
 }
 
 /// State the sink and its order task both touch.
@@ -758,7 +773,7 @@ impl Shared {
         };
         let quality = match codec {
             TileCodec::Png => return codec,
-            TileCodec::Jpeg(q) => q,
+            TileCodec::Jpeg(q) | TileCodec::Classify { quality: q, .. } => q,
         };
         let lag = self.feedback.lag(now);
         let cut = lag.saturating_sub(TILE_LAG_FREE).as_millis().min(u128::from(u8::MAX)) as u8;
@@ -767,6 +782,9 @@ impl Shared {
         match codec {
             TileCodec::Png => unreachable!("returned above"),
             TileCodec::Jpeg(_) => TileCodec::Jpeg(adapted),
+            // Only the lossy arm walks: the tiles the classifier keeps
+            // lossless were never spending the bytes the lag is about.
+            TileCodec::Classify { debug, .. } => TileCodec::Classify { quality: adapted, debug },
         }
     }
 }
@@ -1377,11 +1395,30 @@ impl TileSink {
 }
 
 /// Encode one rectangle of packed RGB888 with the given codec.
+///
+/// [`TileCodec::Classify`] decides here, on the encode worker, from the pixels
+/// themselves ([`crate::classify::photographic`]): JPEG for photographic
+/// content, PNG for everything else. Under its `debug` flag the JPEG tiles are
+/// outlined — on a copy, because `rgb` is what the shadow has recorded as
+/// delivered, and a mark painted into it would be compared against on the next
+/// update and suppressed as already sent.
 fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile> {
     let (x, y, w, h) = (rect.left, rect.top, rect.w(), rect.h());
     match codec {
         TileCodec::Png => Tile::from_rgb(x, y, w, h, rgb),
         TileCodec::Jpeg(q) => Tile::from_rgb_jpeg(x, y, w, h, rgb, q),
+        TileCodec::Classify { quality, debug } => {
+            if !crate::classify::photographic(w, h, rgb) {
+                return Tile::from_rgb(x, y, w, h, rgb);
+            }
+            if debug {
+                let mut copy = rgb.to_vec();
+                outline(&mut copy, usize::from(w), usize::from(h), MARK_JPEG);
+                Tile::from_rgb_jpeg(x, y, w, h, &copy, quality)
+            } else {
+                Tile::from_rgb_jpeg(x, y, w, h, rgb, quality)
+            }
+        }
     }
 }
 
@@ -1948,6 +1985,77 @@ mod tests {
             panic!("expected a tile");
         };
         assert_eq!(tile.format, Tile::FORMAT_JPEG);
+    }
+
+    /// A classify base sends each tile as what its own pixels are: flat content
+    /// stays lossless PNG, photographic content takes the JPEG — one sink, one
+    /// plan, two answers.
+    #[tokio::test]
+    async fn a_classify_base_picks_the_codec_per_tile() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = TileSink::new(
+            "test",
+            frame_tx,
+            plan(TileCodec::Classify { quality: 60, debug: false }, None),
+            feedback(),
+        );
+
+        let (w, h) = (320u16, 64u16);
+        let flat = vec![200u8; usize::from(w) * usize::from(h) * 3];
+        let photo: Vec<u8> = (0..usize::from(w) * usize::from(h))
+            .flat_map(|i| {
+                let (x, y) = (i % usize::from(w), i / usize::from(w));
+                [(x * 2) as u8, (y * 4) as u8, ((x + y) * 2) as u8]
+            })
+            .collect();
+        sink.tile(0, 0, w, h, flat).await.unwrap();
+        sink.tile(0, 64, w, h, photo).await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 2).await;
+        let format = |i: usize| match &out[i] {
+            ServerMsg::Tile(tile) => tile.format,
+            other => panic!("expected a tile at {i}, got {other:?}"),
+        };
+        assert_eq!(format(0), Tile::FORMAT_PNG, "flat content took the lossy encode");
+        assert_eq!(format(1), Tile::FORMAT_JPEG, "photographic content stayed lossless");
+    }
+
+    /// The same classifier as the base of a motion plan: a quiet cell is
+    /// classified exactly as it would be with no motion strategy at all. (A
+    /// moving cell takes the motion encode instead — that switch is churn's,
+    /// tested with the rest of the motion path.)
+    #[tokio::test]
+    async fn a_motion_plan_classifies_its_quiet_base_tiles() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = TileSink::new(
+            "test",
+            frame_tx,
+            plan(
+                TileCodec::Classify { quality: 60, debug: false },
+                Some(TileCodec::Jpeg(10)),
+            ),
+            feedback(),
+        );
+
+        let (w, h) = (320u16, 64u16);
+        let photo: Vec<u8> = (0..usize::from(w) * usize::from(h))
+            .flat_map(|i| {
+                let (x, y) = (i % usize::from(w), i / usize::from(w));
+                [(x * 2) as u8, (y * 4) as u8, ((x + y) * 2) as u8]
+            })
+            .collect();
+        sink.tile(0, 0, w, h, vec![200u8; usize::from(w) * usize::from(h) * 3]).await.unwrap();
+        sink.tile(0, 64, w, h, photo).await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 2).await;
+        let format = |i: usize| match &out[i] {
+            ServerMsg::Tile(tile) => tile.format,
+            other => panic!("expected a tile at {i}, got {other:?}"),
+        };
+        assert_eq!(format(0), Tile::FORMAT_PNG);
+        assert_eq!(format(1), Tile::FORMAT_JPEG);
     }
 
     /// The hazard a side channel for control messages would create: the client
