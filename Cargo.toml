@@ -56,9 +56,11 @@ toml = "1"
 # PNG. `encode_png` in src/protocol.rs is shared by both. Fast compression on the
 # session's hot path.
 png = "0.18"
-# JPEG for the lossy tile path: a target with `render_type = "fixed-quality"`,
-# `render_subtype = "jpeg"` encodes every tile at a fixed `render_quality` instead
-# of lossless PNG (`Tile::from_rgb_jpeg` in src/protocol.rs). The format byte
+# JPEG for the lossy tile path: a target with `render_subtype = "jpeg"` encodes
+# every tile at a fixed `render_quality` instead of lossless PNG
+# (`Tile::from_rgb_jpeg` in src/protocol.rs), and `render_subtype = "classify"`
+# encodes the tiles its picture classifier reads as photographic
+# (src/classify.rs) the same way. The format byte
 # already distinguishes PNG from JPEG on the wire and the client decodes either,
 # so this is a gateway-only encoder. `simd` because it runs on the session hot path.
 jpeg-encoder = { version = "0.7", features = ["simd"] }

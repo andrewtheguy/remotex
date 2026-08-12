@@ -64,39 +64,62 @@ updates in source order even when individual tile encodes finish concurrently.
 ### The render dial
 
 How a target's pixels reach a client is a per-target choice on two flat axes, plus a
-quality: `render_type` is the quality strategy, `render_subtype` the codec, and
-`render_quality` (1–100) the fixed quality a lossy strategy uses. Two axes rather
-than one flat mode list because strategy and codec vary independently. The legal
-pairings are validated at config-load time in `ConfigFile::parse_with`; the
-combinations that exist are:
+quality: `render_type` is the *strategy* — what kind of thing goes on the wire —
+and `render_subtype` the codec of the base tiles, with `render_quality` (1–100)
+the fixed quality of that codec's lossy side. Two axes rather
+than one flat mode list because strategy and codec vary independently: every
+tiles-carrying strategy takes every base codec. The legal
+pairings are validated at config-load time in `ConfigFile::parse_with`:
 
-| `render_type` | `render_subtype` | behavior |
-|---|---|---|
-| `full` | `png` | lossless PNG. The default, and byte-identical to the PNG-only gateway that preceded the dial |
-| `fixed-quality` | `jpeg` | every tile JPEG at `render_quality` |
-| `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
-| `motion` | `jpeg` | base at `render_quality`; cells in motion cheaper still |
-| `motion` + `render_motion_subtype = "stream"` | `png` / `jpeg` | base as above; a video stream per coalesced moving region at `render_motion_quality` |
-| `video` | *(refused)* | the whole desktop as one video stream at `render_quality` |
+`render_type`, the strategy:
 
-`video` is the one row where `render_subtype` is empty, and that is what it is
-saying: it sends no per-region streams and no tiles at all — one fixed region, the
-whole desktop, for the whole session — so there is no per-tile codec left to name.
-The `stream` motion row still has one, because the base encode is still a still image:
-only what is moving becomes a stream.
+- `tiles` — every changed region as an independent still image at the base codec,
+  and nothing else. The default; with the default subtype it is byte-identical to
+  the PNG-only gateway that preceded the dial.
+- `motion` — the base, plus a much cheaper encode for the cells changing fast
+  (`render_motion_subtype` / `render_motion_quality`), each re-sent at the base
+  once it settles.
+- `video` — the whole desktop as one video stream at `render_quality`.
 
-**Neither streaming row names a video codec, because video is VP9 only** — see
+`render_subtype`, the base codec — any of the three under `tiles` and `motion`
+alike:
+
+- `png` — lossless, no quality key. The default.
+- `jpeg` — every base tile JPEG at `render_quality`.
+- `classify` — per tile, what its own pixels are: photographic content JPEG at
+  `render_quality`, flat UI and text lossless PNG.
+
+`video` is the one strategy with nothing on the subtype axis, and refuses it: it
+sends no tiles at all — one fixed region, the whole desktop, for the whole session
+— so there is no per-tile codec left to name. `motion` under
+`render_motion_subtype = "stream"` still has a base codec, because the base encode
+is still a still image: only what is moving becomes a stream.
+
+**No strategy names a video codec, because video is VP9 only** — see
 [the codec](#the-codec).
 
-No classifier runs in the fixed lossy combination: `jpeg` sends *every* tile as
+No classifier runs under the `jpeg` subtype: it sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
-honest trade of a single fixed knob.
+honest trade of a single fixed knob. `classify` is that trade removed for a little
+CPU: a picture classifier (`src/classify.rs`) reads each tile on the encode worker
+— a palette gate, then the shape of neighbour-to-neighbour deltas — and only what
+reads as photographic takes the JPEG; PNG is the verdict for everything flat,
+sharp, small or ambiguous, because a photo sent lossless only costs bytes while
+text sent lossy costs legibility until that region next changes. The decision is
+per tile and stateless, so the same window answers differently as content scrolls
+through it. As a `motion` base it composes: a settled cell is classified, a moving
+one takes the motion encode (which defaults to `jpeg` there — a cell changing fast
+is not worth classifying). `render_classify_debug = true` outlines the tiles sent
+as JPEG in yellow — drawn on the copy handed to the encoder, never on the pixels
+the shadow records, so the mark lives exactly as long as the lossy tile it
+describes, and a colour of its own so it stays readable beside the motion marks.
 
 Two more keys sit across the whole dial rather than on either axis.
 `render_adaptive = true` lets every lossy quality the target configures track the
 measured link between `render_adaptive_min` (default 20) and its configured value,
 which stays the ceiling — see [what the link will bear](#the-codec) for the signal
-and the walks. It is refused on `full`, which has no quality to move. The floor is
+and the walks. It is refused on lossless PNG tiles, the one plan with no quality to
+move. The floor is
 one number for the whole plan: whichever dials exist — `render_quality`,
 `render_motion_quality`, a stream's — all stop at it.
 
@@ -132,9 +155,9 @@ the session hot path costs no C toolchain and no runtime dependency.
 
 `motion` is not a third way to encode every tile. It builds on the base encode a
 target already has and changes nothing about it — the base is read from
-`render_subtype` and `render_quality` rather than from `render_type`, which
-`motion` occupies — and adds a second, much cheaper encode used *only* for cells
-currently changing fast. A lossless base is the configuration the fixed dial cannot
+`render_subtype` and `render_quality`, same as under `tiles` — and adds a second,
+much cheaper encode used *only* for cells
+currently changing fast. A lossless base is the configuration a fixed quality cannot
 express at all, and the interesting one: text and flat UI stay perfect, and only
 what moves gets ugly.
 
@@ -149,8 +172,9 @@ render_motion_quality = 10       # moving cells: as cheap as it takes
 The moving encode has its own axis (`MotionSubtype`, which admits no `png` and does
 admit `stream` — see below), not just its own quality: what a settled cell gets is a
 still picture, and what is moving may stop being one at all.
-`render_motion_subtype` defaults to `render_subtype`, and is required when the base
-is `png` — lossless has no dial to turn down.
+`render_motion_subtype` defaults to `jpeg` under a lossy base — a `classify` base
+included, since a cell changing fast is not worth classifying — and is required
+when the base is `png`: lossless has no dial to turn down.
 
 **`motion` is refused on `subtype = "ard-high-performance"`.** A resize under both
 corrupts the desktop until the whole gateway is restarted — a reconnect does not

@@ -30,6 +30,24 @@ pub fn test_auth() -> remotex::auth::GatewayAuth {
     remotex::auth::GatewayAuth::Login(remotex::auth::SitePasswd::parse(&encoded).unwrap())
 }
 
+/// Pull `name` out of the operator's UAT config, for a test that borrows a
+/// real device. The config is gitignored and machine-local, which is the
+/// point: the hosts and credentials of real devices stay out of the
+/// repository, and the same file that drives manual QA drives these tests.
+/// The caller overrides whatever dial settings its assertions need.
+#[allow(dead_code)]
+pub fn uat_target(name: &str) -> remotex::config::TargetConfig {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tmp/test_uat.toml");
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("these tests need the local UAT config at {path}: {e}"));
+    let config = remotex::config::ConfigFile::parse(&text).expect("tmp/test_uat.toml should parse");
+    config
+        .targets
+        .into_iter()
+        .find(|t| t.name == name)
+        .unwrap_or_else(|| panic!("tmp/test_uat.toml names no target {name:?}"))
+}
+
 /// A directory that removes itself, for a test that needs somewhere to put a
 /// config file.
 ///
@@ -352,6 +370,58 @@ impl TileStream {
 impl Default for TileStream {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Pixel coverage of one announced desktop, so "the whole screen was painted"
+/// is the finish line rather than a tile count that depends on how the encoder
+/// happened to band the damage. Tiles may overlap or repaint a region, so a
+/// pixel advances the completion count at most once.
+#[allow(dead_code)]
+pub struct TileCoverage {
+    width: u32,
+    height: u32,
+    pixels: Vec<bool>,
+    covered: u64,
+}
+
+#[allow(dead_code)]
+impl TileCoverage {
+    pub fn new(width: u32, height: u32) -> Self {
+        let pixels = usize::try_from(u64::from(width) * u64::from(height))
+            .expect("desktop is too large to track coverage");
+        Self {
+            width,
+            height,
+            pixels: vec![false; pixels],
+            covered: 0,
+        }
+    }
+
+    /// Mark the rectangle painted, clamped to the desktop. Takes the tuple
+    /// [`Painted::rect`] returns.
+    pub fn add(&mut self, (x, y, w, h): (u16, u16, u16, u16)) {
+        let right = u32::from(x).saturating_add(u32::from(w)).min(self.width);
+        let bottom = u32::from(y).saturating_add(u32::from(h)).min(self.height);
+        for y in u32::from(y).min(self.height)..bottom {
+            for x in u32::from(x).min(self.width)..right {
+                let at = usize::try_from(u64::from(y) * u64::from(self.width) + u64::from(x))
+                    .expect("desktop index does not fit usize");
+                if !self.pixels[at] {
+                    self.pixels[at] = true;
+                    self.covered += 1;
+                }
+            }
+        }
+    }
+
+    /// Distinct pixels painted so far, for the timeout's progress report.
+    pub fn covered(&self) -> u64 {
+        self.covered
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.covered == u64::from(self.width) * u64::from(self.height)
     }
 }
 

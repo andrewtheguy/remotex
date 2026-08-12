@@ -294,8 +294,8 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
         "a video stream will not encode a {}x{} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
-         target a still render_type (\"fixed-quality\" with render_subtype = \
-         \"jpeg\"), or ask the remote for a smaller desktop",
+         target render_type = \"tiles\" (with render_subtype = \"jpeg\" for a lossy \
+         picture), or ask the remote for a smaller desktop",
         rect.w(),
         rect.h()
     );

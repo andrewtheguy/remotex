@@ -426,7 +426,7 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// right MIME type.
 ///
 /// The RDP and VNC engines decode a framebuffer and compress it here: lossless
-/// PNG ([`Tile::from_rgb`], the default) or, for a target on the fixed-quality
+/// PNG ([`Tile::from_rgb`], the default) or, for a target on a lossy render
 /// dial, JPEG ([`Tile::from_rgb_jpeg`]). The format travels with the tile instead
 /// of being a constant.
 #[derive(Debug, Clone)]
@@ -471,9 +471,10 @@ impl Tile {
     /// for a JPEG base or JPEG motion encode (see [`crate::config::RenderType`]);
     /// the format byte carries the choice, so no client is told anything new.
     ///
-    /// Every tile goes to JPEG here — there is no content classifier — so flat UI
-    /// and text soften along with everything else. That is the documented trade of
-    /// the fixed dial; a classifying subtype is a separate, future render subtype.
+    /// Every tile handed here goes to JPEG — whether every tile *is* handed here
+    /// is the render dial's decision: all of them under `render_subtype = "jpeg"`,
+    /// only the ones the picture classifier reads as photographic under
+    /// `render_subtype = "classify"` (see [`crate::classify`]).
     pub fn from_rgb_jpeg(x: u16, y: u16, w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 3;
         anyhow::ensure!(

@@ -313,30 +313,57 @@ password = "change-me"
 # [[targets]] block precedes them, which is the "example" one at the top of this file.
 # There is no global render setting.
 #
-# render_type = "full" (the default) is lossless PNG: exact pixels, and the right
-# answer on a LAN. "fixed-quality" trades exactness for bytes at a constant quality,
-# which is what a slow or metered link wants. "motion" and "video" are described in
-# their own blocks below.
+# The two axes are independent. render_type is the *strategy* — what kind of
+# thing goes on the wire:
 #
-# render_subtype picks the codec: "jpeg" is decoded by everything. With
-# "full" the subtype must be "png". Under "motion" it is the *base* codec — see the
-# block below, where it also decides which of the motion keys are required.
+#   "tiles"  (the default) — every changed region as an independent still image.
+#   "motion" — the same, plus a much cheaper encode for whatever is changing
+#              fast right now. Its own block below.
+#   "video"  — the whole desktop as one video stream. Its own block below.
 #
-# render_quality is 1-100 and is *required* whenever the subtype is lossy, refused
-# when it is "png" — there is no default, because a quality nobody chose is not a
-# quality. Higher is larger and closer to exact.
+# render_subtype is the codec of the base tiles, and any of the three pairs with
+# "tiles" and "motion" alike ("video" sends no tiles and refuses the key):
+#
+#   "png"      (the default) — lossless: exact pixels, and the right answer on
+#              a LAN.
+#   "jpeg"     — every tile at one fixed quality, for a link that cannot afford
+#              exact pixels. Text softens along with everything else; that is
+#              the trade of the single knob.
+#   "classify" — per tile, whichever of the two fits: a picture classifier reads
+#              each tile's own pixels, and only what looks photographic — a
+#              photo, a thumbnail, a gradient — goes to JPEG at render_quality;
+#              flat UI and text stay lossless PNG, which for them is smaller
+#              *and* sharp. PNG is also the verdict for every small or ambiguous
+#              tile, because a photo sent lossless only costs bytes while text
+#              sent lossy stays soft until that region next changes. What it
+#              costs is a little gateway CPU per tile, on the encode workers.
+#
+# render_quality is 1-100 and is *required* whenever the subtype is lossy ("jpeg",
+# "classify"), refused when it is "png" — there is no default, because a quality
+# nobody chose is not a quality. Higher is larger and closer to exact.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
-#render_type = "full"
+#render_type = "tiles"
 #render_subtype = "png"
 #
-# A fixed lossy encode instead — every tile at one quality, for a link that cannot
-# afford exact pixels. A separate configuration from the two lines above, not more
-# of them:
-#render_type = "fixed-quality"
+# A fixed lossy encode instead — naming "tiles" is optional, it is the default:
 #render_subtype = "jpeg"
 #render_quality = 75
+#
+# Or the classifier deciding per tile:
+#render_subtype = "classify"
+#render_quality = 75
+#
+# QA aid for "classify", off unless asked for: outline every tile the classifier
+# sent as JPEG in yellow, in the pixels themselves, so which regions it reads as
+# photographic is something you read off the screen rather than infer from how soft
+# they look. PNG tiles are never outlined — sharp-and-unmarked is the quiet
+# majority — and the mark lives exactly as long as the lossy tile it describes:
+# the next change repaints it away. Valid only with render_subtype = "classify",
+# under either strategy; the colour is its own so it stays readable beside the
+# "motion" outlines below.
+#render_classify_debug = false
 
 # render_type = "motion" adds a second, cheaper encode used only for the cells that
 # are currently changing fast, re-sending each one at the base encode once it
@@ -344,16 +371,20 @@ password = "change-me"
 # keys above are what a still cell keeps. The motion quality can be very low —
 # motion hides it, and it does not last.
 #
-# "motion" does not replace the base keys, it builds on them, so a base that is not
-# PNG is spelled the ordinary way — with render_subtype and render_quality. Which of
-# them are required follows from whether that base is lossless:
+# "motion" does not replace the base keys, it builds on them: render_subtype and
+# render_quality mean exactly what they mean under "tiles", they just describe the
+# settled cells only. Which keys are required follows from whether that base is
+# lossless:
 #
 #   render_subtype = "png"  — render_quality refused (nothing to turn down), and
 #                             render_motion_subtype required, since PNG cannot name
 #                             the motion codec for it.
-#   "jpeg"                  — render_quality required, and render_motion_subtype
-#                             optional: omitted, the motion cells use the same codec
-#                             as the base at render_motion_quality.
+#   "jpeg", "classify"      — render_quality required, and render_motion_subtype
+#                             optional: omitted, the motion cells go to JPEG at
+#                             render_motion_quality. (A "classify" base never
+#                             classifies its *moving* cells — a cell changing fast
+#                             is not worth the look, and motion hides the
+#                             artifacts the classifier exists to keep off text.)
 #
 # A lossless base with lossy motion — everything settled is exact:
 #render_type = "motion"
@@ -364,6 +395,13 @@ password = "change-me"
 # codec, two qualities, so render_motion_subtype is left out:
 #render_type = "motion"
 #render_subtype = "jpeg"
+#render_quality = 60
+#render_motion_quality = 10
+#
+# The classifier as the base: settled photos JPEG at 60, settled text lossless,
+# and whatever is moving cheap until it stops:
+#render_type = "motion"
+#render_subtype = "classify"
 #render_quality = 60
 #render_motion_quality = 10
 
@@ -427,8 +465,8 @@ password = "change-me"
 # Let every lossy quality in this target's render plan track measured client
 # queueing. The configured qualities remain ceilings. JPEG tiles lower their
 # quality per encode; video streams add the client's paint lag to their existing
-# send-pressure signal. Refused with `render_type = "full"`, which has no lossy
-# dial to move.
+# send-pressure signal. Refused on lossless PNG tiles — the one plan with no
+# lossy dial to move.
 #render_adaptive = false
 
 # Floor for that adaptive walk, 1–100 and defaulting to 20. Valid only with

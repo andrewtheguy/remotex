@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod auth;
+pub mod classify;
 pub mod cli;
 pub mod config;
 pub mod copies;
