@@ -634,13 +634,24 @@ mod tests {
 
     #[test]
     fn both_loopbacks_are_bound_for_one_name() {
+        // `::1` does not exist on a host with IPv6 off, and `bind_all` warns past it
+        // by design — so the v6 half is required only where it can be had. The v4
+        // loopback is required either way.
+        let has_v6 = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
         let port = free_port();
         let listeners = bind_all(&both_loopbacks(port), "localhost:0").unwrap();
         let bound: Vec<_> = listeners
             .iter()
             .map(|l| l.local_addr().unwrap())
             .collect();
-        assert_eq!(bound, both_loopbacks(port), "both, in the order resolved");
+        if has_v6 {
+            assert_eq!(bound, both_loopbacks(port), "both, in the order resolved");
+        } else {
+            assert_eq!(
+                bound,
+                vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)]
+            );
+        }
     }
 
     /// The check the whole function is for: a port held on *any* resolved address

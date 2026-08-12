@@ -1344,7 +1344,15 @@ mod tests {
     #[tokio::test]
     async fn a_port_half_taken_by_an_earlier_master_refuses_the_start() {
         let port = free_port();
-        let squatter = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, port)).unwrap();
+        // The earlier master is simulated by holding one family, so a machine with
+        // IPv6 off has no half to take: `bind_all` skips `::1` there and the start
+        // it would refuse is one that legitimately succeeds. Any other bind error is
+        // still the test failing.
+        let squatter = match std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, port)) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => return,
+            Err(error) => panic!("cannot hold the v6 half of {port}: {error}"),
+        };
 
         let Err(error) = SharedPort::bind(port, RouteTable::default()).await else {
             panic!("the v6 half of this port is already served");
