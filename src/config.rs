@@ -9,6 +9,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use base64::Engine as _;
+use bytes::Bytes;
 use serde::Deserialize;
 
 #[cfg(feature = "embedded-gateway")]
@@ -921,12 +923,15 @@ pub struct BrandingSection {
     ///
     /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
     pub text: Option<String>,
-    /// Path to an image file the gateway serves as the page's icon (`GET
-    /// /api/logo`, the favicon of every client tab). The content type comes from
-    /// the extension, so an extension nothing recognizes as an image is refused
-    /// at resolution — see [`logo_mime`]. Unset means the page keeps no icon,
-    /// exactly as before.
-    pub logo: Option<PathBuf>,
+    /// The page's icon (`GET /api/logo`, the favicon of every client tab), as
+    /// either a path to an image file or the image itself in a `data:` URL.
+    ///
+    /// One key for both because it is one thing — the icon — and which form it is
+    /// written in is decided by the value: anything starting `data:` is the image,
+    /// everything else is a path. A second key would let a config set both and
+    /// leave the loser losing silently. See [`resolve_logo`]; unset means the page
+    /// keeps no icon.
+    pub logo: Option<String>,
 }
 
 /// The resolved branding: always a name, and an icon when one was configured.
@@ -938,20 +943,34 @@ pub struct Branding {
     pub logo: Option<Logo>,
 }
 
-/// A configured logo file, paired with the content type it is served under.
+/// A configured logo, paired with the content type it is served under.
 ///
-/// The pair exists so the one place that knows extension → MIME ([`logo_mime`])
-/// runs at config resolution — a gateway never serves an icon it could not name,
-/// and `check-config` refuses the file before it is saved.
+/// The pair exists so the one place that knows how to name an image
+/// ([`logo_mime`], [`logo_media_type`]) runs at config resolution — a gateway
+/// never serves an icon it could not name, and `check-config` refuses the value
+/// before it is saved.
 #[derive(Clone, Debug)]
 pub struct Logo {
-    /// As written in the config; a relative path resolves against the process's
-    /// working directory, the same as `[server].static_dir`.
-    pub path: PathBuf,
+    pub source: LogoSource,
     pub mime: &'static str,
 }
 
-/// The content type `[branding].logo` is served under, from its extension.
+/// Where the icon's bytes come from.
+#[derive(Clone, Debug)]
+pub enum LogoSource {
+    /// A file, read per request. As written in the config; a relative path
+    /// resolves against the process's working directory, the same as
+    /// `[server].static_dir`.
+    File(PathBuf),
+    /// The image itself, decoded once from the config's `data:` URL.
+    ///
+    /// [`Bytes`] rather than a `Vec`, because the whole [`AppConfig`] is cloned
+    /// per request by the router's state and an icon that copied itself each time
+    /// would be the one config value with a cost per hit.
+    Inline(Bytes),
+}
+
+/// The content type `[branding].logo` is served under, from a file's extension.
 ///
 /// A closed list rather than a guess: what belongs here is what browsers take as
 /// a favicon, and an extension outside it is far more likely a typo than a format
@@ -974,6 +993,81 @@ fn logo_mime(path: &Path) -> anyhow::Result<&'static str> {
             path.display()
         ),
     }
+}
+
+/// The same closed list, reached from a `data:` URL's declared media type
+/// instead of an extension. Lowercase in, canonical spelling out — a media type
+/// is case-insensitive, and `image/vnd.microsoft.icon` is the registered name of
+/// the type everything actually writes as `image/x-icon`.
+fn logo_media_type(declared: &str) -> anyhow::Result<&'static str> {
+    match declared {
+        "image/png" => Ok("image/png"),
+        "image/x-icon" | "image/vnd.microsoft.icon" => Ok("image/x-icon"),
+        "image/svg+xml" => Ok("image/svg+xml"),
+        "image/jpeg" => Ok("image/jpeg"),
+        "image/gif" => Ok("image/gif"),
+        "image/webp" => Ok("image/webp"),
+        _ => anyhow::bail!(
+            "[branding].logo declares {declared:?}, which is not an image a browser \
+             tab can show — use image/png, image/x-icon, image/svg+xml, image/jpeg, \
+             image/gif or image/webp"
+        ),
+    }
+}
+
+/// Read `[branding].logo`: a path to an image file, or the image itself.
+///
+/// The inline form is an ordinary `data:` URL —
+/// `data:image/png;base64,iVBORw0…` — which is what makes one key enough. It is
+/// self-describing, so the media type comes from the value rather than from an
+/// extension the value does not have; it is what every tool that turns an image
+/// into text already emits; and no path begins with it, so the two forms cannot
+/// be confused for one another.
+///
+/// It exists for the configs that have nowhere to put a file: an instance
+/// directory synced between machines, a container with one mounted config, a
+/// `remotex.toml` pasted into a gist. The path form stays the better one whenever
+/// there *is* somewhere — it survives an image being swapped without a restart,
+/// and it keeps the config readable.
+///
+/// Whitespace inside the payload is dropped before decoding, so a blob wrapped at
+/// 76 columns can be pasted straight into a TOML multi-line string the way
+/// `base64` prints it.
+fn resolve_logo(value: &str) -> anyhow::Result<Logo> {
+    let value = value.trim();
+    // A URI scheme is case-insensitive (RFC 3986 §3.1), and reading one spelling
+    // only would send every other one to the path branch — where it fails, but
+    // about an extension, which is not what is wrong with it.
+    let scheme = value
+        .get(.."data:".len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case("data:"));
+    let Some(scheme) = scheme else {
+        let path = PathBuf::from(value);
+        return Ok(Logo { mime: logo_mime(&path)?, source: LogoSource::File(path) });
+    };
+    let uri = &value[scheme.len()..];
+
+    let (declared, payload) = uri.split_once(',').context(
+        "[branding].logo is a data: URL with no comma, so it has no image after \
+         its media type",
+    )?;
+    let declared = declared.trim().to_ascii_lowercase();
+    let declared = declared.strip_suffix(";base64").with_context(|| {
+        format!(
+            "[branding].logo is a data: URL that is not base64 ({declared:?}) — \
+             write it as data:image/png;base64,<the encoded image>"
+        )
+    })?;
+    let mime = logo_media_type(declared)?;
+
+    // A wrapped blob is the normal shape of base64 in a file, and TOML keeps the
+    // newlines of a multi-line string verbatim.
+    let payload: String = payload.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&payload)
+        .context("[branding].logo is a data: URL whose base64 does not decode")?;
+    anyhow::ensure!(!bytes.is_empty(), "[branding].logo decodes to no image at all");
+    Ok(Logo { mime, source: LogoSource::Inline(Bytes::from(bytes)) })
 }
 
 /// Who a config file is for, and therefore which rules it is held to.
@@ -1544,7 +1638,8 @@ impl ConfigFile {
                 .to_owned(),
             logo: section
                 .logo
-                .map(|path| anyhow::Ok(Logo { mime: logo_mime(&path)?, path }))
+                .as_deref()
+                .map(resolve_logo)
                 .transpose()?,
         })
     }
@@ -2154,7 +2249,10 @@ mod tests {
         let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
         assert_eq!(config.branding.text, "Acme Remote");
         let logo = config.branding.logo.expect("the logo was configured");
-        assert_eq!(logo.path, PathBuf::from("/etc/remotex/acme.png"));
+        let LogoSource::File(path) = &logo.source else {
+            panic!("a plain string is a path");
+        };
+        assert_eq!(path, &PathBuf::from("/etc/remotex/acme.png"));
         assert_eq!(logo.mime, "image/png");
 
         // Whitespace-only → falls back to the default.
@@ -2188,6 +2286,68 @@ mod tests {
         let toml = format!("[branding]\nlogo = \"C:/logo.PNG\"\n{}", minimal());
         let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
         assert_eq!(config.branding.logo.unwrap().mime, "image/png");
+    }
+
+    /// A 1×1 PNG, so the inline tests carry a real image rather than an arbitrary
+    /// blob that happens to be base64.
+    const PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    /// The image written into the config instead of beside it. Decoded once, here,
+    /// so a `data:` URL that is not one fails `check-config` and not the tab.
+    #[test]
+    fn a_data_url_logo_is_decoded_at_resolution() {
+        let logo = resolve_logo(PNG_DATA_URL).expect("a data: URL is the image itself");
+        assert_eq!(logo.mime, "image/png");
+        let LogoSource::Inline(bytes) = &logo.source else {
+            panic!("a data: URL is not a path");
+        };
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "the PNG signature");
+
+        // Through a real config, and wrapped the way `base64` prints it: TOML keeps
+        // a multi-line string's newlines, so the payload arrives with them in it.
+        let wrapped = PNG_DATA_URL.replace("base64,", "base64,\n").replace("AAAA", "AAAA\n  ");
+        let toml = format!("[branding]\nlogo = \"\"\"\n{wrapped}\n\"\"\"\n{}", minimal());
+        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        let Some(Logo { source: LogoSource::Inline(from_file), mime }) = config.branding.logo
+        else {
+            panic!("the wrapped data: URL is the same image");
+        };
+        assert_eq!(mime, "image/png");
+        assert_eq!(&from_file, bytes, "the wrapping is not part of the image");
+
+        // The media type is the value's, not an extension's, and it is canonical:
+        // a case a browser would take either way arrives spelled one way.
+        let ico = resolve_logo("DATA:IMAGE/VND.MICROSOFT.ICON;BASE64,AAAA").unwrap();
+        assert_eq!(ico.mime, "image/x-icon");
+        // Including the scheme, which is case-insensitive and is the one part that
+        // decides which branch the value takes at all.
+        let mixed = resolve_logo("dAtA:image/GIF;Base64,AAAA").unwrap();
+        assert_eq!(mixed.mime, "image/gif");
+        assert!(matches!(mixed.source, LogoSource::Inline(_)), "not a path");
+    }
+
+    /// Every way a `data:` logo can be wrong says which way it was wrong, because
+    /// the operator is looking at one long line of base64 either way.
+    #[test]
+    fn a_data_url_that_is_not_an_image_is_refused() {
+        for (value, expected) in [
+            // Not base64 — a data: URL may carry percent-encoded text, and that is
+            // not a thing this reads.
+            ("data:image/png,%89PNG", "not base64"),
+            // Base64 of something no tab can show.
+            ("data:application/pdf;base64,JVBERi0=", "not an image"),
+            ("data:;base64,AAAA", "not an image"),
+            // Base64 that is not base64.
+            ("data:image/png;base64,not valid!", "does not decode"),
+            // Well-formed and empty, which is a tab with a broken icon rather than
+            // the no-icon a missing key gets.
+            ("data:image/png;base64,", "no image at all"),
+            ("data:image/png;base64", "no comma"),
+        ] {
+            let error = format!("{:#}", resolve_logo(value).unwrap_err());
+            assert!(error.contains(expected), "{value:?} said {error}");
+            assert!(error.contains("[branding].logo"), "{error}");
+        }
     }
 
     #[test]
