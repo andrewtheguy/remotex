@@ -1035,13 +1035,17 @@ fn logo_media_type(declared: &str) -> anyhow::Result<&'static str> {
 /// `base64` prints it.
 fn resolve_logo(value: &str) -> anyhow::Result<Logo> {
     let value = value.trim();
-    let Some(uri) = value
-        .strip_prefix("data:")
-        .or_else(|| value.strip_prefix("DATA:"))
-    else {
+    // A URI scheme is case-insensitive (RFC 3986 §3.1), and reading one spelling
+    // only would send every other one to the path branch — where it fails, but
+    // about an extension, which is not what is wrong with it.
+    let scheme = value
+        .get(.."data:".len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case("data:"));
+    let Some(scheme) = scheme else {
         let path = PathBuf::from(value);
         return Ok(Logo { mime: logo_mime(&path)?, source: LogoSource::File(path) });
     };
+    let uri = &value[scheme.len()..];
 
     let (declared, payload) = uri.split_once(',').context(
         "[branding].logo is a data: URL with no comma, so it has no image after \
@@ -2315,6 +2319,11 @@ mod tests {
         // a case a browser would take either way arrives spelled one way.
         let ico = resolve_logo("DATA:IMAGE/VND.MICROSOFT.ICON;BASE64,AAAA").unwrap();
         assert_eq!(ico.mime, "image/x-icon");
+        // Including the scheme, which is case-insensitive and is the one part that
+        // decides which branch the value takes at all.
+        let mixed = resolve_logo("dAtA:image/GIF;Base64,AAAA").unwrap();
+        assert_eq!(mixed.mime, "image/gif");
+        assert!(matches!(mixed.source, LogoSource::Inline(_)), "not a path");
     }
 
     /// Every way a `data:` logo can be wrong says which way it was wrong, because
