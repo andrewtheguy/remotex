@@ -30,7 +30,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, ConfigFile, RenderSubtype, RenderType, TargetConfig};
+use remotex::config::{AppConfig, RenderSubtype, RenderType, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -48,21 +48,10 @@ const QUALITY: u8 = 60;
 /// [`QUALITY`], and lower for the same reason an operator's would be.
 const MOTION_QUALITY: u8 = 15;
 
-/// Pull `name` out of the operator's UAT config and put it on a classify-base
-/// dial under `strategy` — [`RenderType::Tiles`] or [`RenderType::Motion`].
-/// The config is gitignored and machine-local, which is the point: the
-/// hosts and credentials of real devices stay out of the repository, and the
-/// same file that drives manual QA drives this.
+/// Put the operator's `name` target on a classify-base dial under `strategy`
+/// — [`RenderType::Tiles`] or [`RenderType::Motion`].
 fn uat_target(name: &str, strategy: RenderType) -> TargetConfig {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tmp/test_uat.toml");
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("these tests need the local UAT config at {path}: {e}"));
-    let config = ConfigFile::parse(&text).expect("tmp/test_uat.toml should parse");
-    let mut target = config
-        .targets
-        .into_iter()
-        .find(|t| t.name == name)
-        .unwrap_or_else(|| panic!("tmp/test_uat.toml names no target {name:?}"));
+    let mut target = common::uat_target(name);
     target.render_type = strategy;
     target.render_subtype = RenderSubtype::Classify;
     target.render_quality = Some(QUALITY);
@@ -100,43 +89,6 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
     addr
 }
 
-/// Pixel coverage of one announced desktop, so "the whole screen was painted"
-/// is the finish line rather than a tile count that depends on how the encoder
-/// happened to band the damage.
-struct TileCoverage {
-    width: u32,
-    height: u32,
-    pixels: Vec<bool>,
-    covered: u64,
-}
-
-impl TileCoverage {
-    fn new(width: u32, height: u32) -> Self {
-        let pixels = usize::try_from(u64::from(width) * u64::from(height))
-            .expect("desktop is too large to track coverage");
-        Self { width, height, pixels: vec![false; pixels], covered: 0 }
-    }
-
-    fn add(&mut self, (x, y, w, h): (u16, u16, u16, u16)) {
-        let right = u32::from(x).saturating_add(u32::from(w)).min(self.width);
-        let bottom = u32::from(y).saturating_add(u32::from(h)).min(self.height);
-        for y in u32::from(y).min(self.height)..bottom {
-            for x in u32::from(x).min(self.width)..right {
-                let at = usize::try_from(u64::from(y) * u64::from(self.width) + u64::from(x))
-                    .expect("desktop index does not fit usize");
-                if !self.pixels[at] {
-                    self.pixels[at] = true;
-                    self.covered += 1;
-                }
-            }
-        }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.covered == u64::from(self.width) * u64::from(self.height)
-    }
-}
-
 /// The per-format tally one session produced.
 #[derive(Default)]
 struct Tally {
@@ -155,7 +107,7 @@ async fn paint_a_whole_desktop(name: &str, strategy: RenderType) -> Tally {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, name).await;
 
-    let mut coverage: Option<TileCoverage> = None;
+    let mut coverage: Option<common::TileCoverage> = None;
     let mut sent_refresh = false;
     let mut stream = common::TileStream::new();
     let mut tally = Tally::default();
@@ -175,7 +127,7 @@ async fn paint_a_whole_desktop(name: &str, strategy: RenderType) -> Tally {
                         assert!(w > 0 && h > 0, "resize dimensions must be positive: {w}x{h}");
                         // A new surface starts blank; nothing painted on the
                         // old one counts toward covering it.
-                        coverage = Some(TileCoverage::new(w, h));
+                        coverage = Some(common::TileCoverage::new(w, h));
                         sent_refresh = false;
                     }
                 }
@@ -206,7 +158,7 @@ async fn paint_a_whole_desktop(name: &str, strategy: RenderType) -> Tally {
         }
         panic!(
             "websocket closed after {} uniquely covered pixels without covering the desktop",
-            coverage.as_ref().map_or(0, |coverage| coverage.covered)
+            coverage.as_ref().map_or(0, |coverage| coverage.covered())
         );
     })
     .await
