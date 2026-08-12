@@ -42,6 +42,19 @@ supported in installed Chrome and Edge desktop app windows and is best-effort in
 other browsers. Ordinary tabs cannot resize their containing browser window, and
 mobile browsers ignore the request.
 
+On macOS, the window's own rounded corners are masked over the page, so a window
+sized to the desktop loses the framebuffer's corner pixels — a desktop shown at
+100% has nothing to spare there. The corner radius is a system-wide setting
+rather than a per-app one; one point is square enough to see every pixel:
+
+```sh
+defaults write -g NSConvolutionOverride1 -float 1
+```
+
+Windows pick the value up when their app next launches, so quit and reopen the
+browser app. `defaults delete -g NSConvolutionOverride1` restores Apple's radius
+— 26 points on macOS 26, 10 before it.
+
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
 than re-investigating.
