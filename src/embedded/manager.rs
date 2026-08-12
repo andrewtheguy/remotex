@@ -28,6 +28,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
 use super::Handshake;
+use crate::config::{
+    DEFAULT_AUDIO_BITRATE_KBPS, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, Security, TargetConfig,
+};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(1500);
@@ -109,7 +112,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut interrupt = Box::pin(tokio::signal::ctrl_c());
     let mut selected = 0usize;
-    let mut input: Option<String> = None;
+    let mut view = View::List;
     let mut message = format!(
         "control plane listening on http://{MASTER_HOST}:{}",
         router.port()
@@ -119,14 +122,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
         let instances = supervisor.instances();
         selected = selected.min(instances.len().saturating_sub(1));
         screen.draw(
-            render(
-                &options,
-                router.port(),
-                &instances,
-                selected,
-                input.as_deref(),
-                &message,
-            )?,
+            render(&options, router.port(), &instances, selected, &view, &message)?,
             &mut std::io::stdout().lock(),
         )?;
 
@@ -148,10 +144,10 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                 let Event::Key(key) = event else { continue };
                 if key.kind != KeyEventKind::Press { continue; }
 
-                if let Some(name) = &mut input {
+                if let View::Naming(name) = &mut view {
                     match key.code {
                         KeyCode::Esc => {
-                            input = None;
+                            view = View::List;
                             message = "instance creation cancelled".to_owned();
                         }
                         KeyCode::Backspace => {
@@ -167,12 +163,28 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             match supervisor.create(&requested).await {
                                 Ok(index) => {
                                     selected = index;
-                                    input = None;
+                                    view = View::List;
                                     message = format!("created {requested}; edit its config, then start it");
                                 }
                                 Err(error) => message = format!("cannot create instance: {error:#}"),
                             }
                         }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // The specs screen is a reader, so it takes only the keys that
+                // move within it or leave it: acting on an instance is the list's,
+                // and a stop pressed over a page of text is one nobody aimed.
+                if let View::Specs { lines, offset, .. } = &mut view {
+                    match key.code {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            *offset = (*offset + 1).min(lines.len().saturating_sub(1));
+                        }
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => view = View::List,
                         _ => {}
                     }
                     continue;
@@ -185,7 +197,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                     KeyCode::Down | KeyCode::Char('j') => {
                         selected = (selected + 1).min(instances.len().saturating_sub(1));
                     }
-                    KeyCode::Char('n') => input = Some(String::new()),
+                    KeyCode::Char('n') => view = View::Naming(String::new()),
                     KeyCode::Char('R') => {
                         supervisor.rescan().await?;
                         message = "rescanned the instances directory".to_owned();
@@ -203,17 +215,25 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             message = "started every stopped instance".to_owned();
                         }
                     }
-                    KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char(' ') => {
+                    KeyCode::Char('s') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
-                            let result = if instance.status == InstanceStatus::Running {
-                                supervisor.stop(&name).await.map(|()| "stopped")
+                            message = if instance.status == InstanceStatus::Running {
+                                format!("{name} is already running; x stops it")
                             } else {
-                                supervisor.start(&name).await.map(|()| "started")
+                                match supervisor.start(&name).await {
+                                    Ok(()) => format!("started {name}"),
+                                    Err(error) => format!("{name}: {error:#}"),
+                                }
                             };
-                            message = match result {
-                                Ok(action) => format!("{action} {name}"),
-                                Err(error) => format!("{name}: {error:#}"),
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(instance) = instances.get(selected) {
+                            view = View::Specs {
+                                name: instance.name.clone(),
+                                lines: describe_instance(instance, router.port()),
+                                offset: 0,
                             };
                         }
                     }
@@ -238,7 +258,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                     KeyCode::Char('e') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
-                            let path = instance.config_path.clone();
+                            let path = instance.config_path();
                             terminal.suspend()?;
                             let edited = edit_config(&path).await;
                             terminal.resume()?;
@@ -359,17 +379,36 @@ impl Screen {
     }
 }
 
+/// What the screen is showing. One value rather than a flag per overlay, because
+/// the list, the name prompt and the specs page each take the keyboard whole.
+enum View {
+    List,
+    /// A new instance's name, as it is being typed.
+    Naming(String),
+    /// One instance's specs, as read when the page was opened, scrolled by
+    /// `offset` lines.
+    Specs {
+        name: String,
+        lines: Vec<String>,
+        offset: usize,
+    },
+}
+
 fn render(
     options: &TuiOptions,
     port: u16,
     instances: &[InstanceInfo],
     selected: usize,
-    input: Option<&str>,
+    view: &View,
     message: &str,
 ) -> anyhow::Result<Vec<u8>> {
     let (width, height) = terminal::size().context("cannot read terminal size")?;
     let mut frame = Vec::new();
     queue!(frame, MoveTo(0, 0), Clear(ClearType::All))?;
+    if let View::Specs { name, lines, offset } = view {
+        render_specs(&mut frame, width, height, name, lines, *offset)?;
+        return Ok(frame);
+    }
     line(&mut frame, 0, width, "remotex local control plane", Some(Color::Cyan), true)?;
     line(
         &mut frame,
@@ -425,7 +464,7 @@ fn render(
     }
 
     let footer = height.saturating_sub(3);
-    if let Some(name) = input {
+    if let View::Naming(name) = view {
         line(
             &mut frame,
             footer,
@@ -440,7 +479,7 @@ fn render(
             &mut frame,
             footer,
             width,
-            "↑↓ select · Enter start/stop · r restart · x stop · a start all · n new · e edit · R rescan · q quit",
+            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · n new · e edit · R rescan · q quit",
             Some(Color::DarkGrey),
             false,
         )?;
@@ -451,6 +490,188 @@ fn render(
         line(&mut frame, footer + 1, width, detail, None, false)?;
     }
     Ok(frame)
+}
+
+fn render_specs(
+    frame: &mut Vec<u8>,
+    width: u16,
+    height: u16,
+    name: &str,
+    lines: &[String],
+    offset: usize,
+) -> anyhow::Result<()> {
+    line(frame, 0, width, &format!("instance {name}"), Some(Color::Cyan), true)?;
+    let available = height.saturating_sub(4) as usize;
+    for (row, text) in lines.iter().skip(offset).take(available).enumerate() {
+        line(frame, 2 + row as u16, width, text, None, false)?;
+    }
+    let more = if offset + available < lines.len() { " · more below" } else { "" };
+    line(
+        frame,
+        height.saturating_sub(1),
+        width,
+        &format!("↑↓ scroll · Esc back{more}"),
+        Some(Color::DarkGrey),
+        false,
+    )?;
+    Ok(())
+}
+
+/// Everything known about one instance, as the specs page's lines: its own state
+/// and paths, then what its config says each target will do.
+///
+/// Read from the file when the page is opened rather than from the child process,
+/// because there is nothing to ask a child — the gateway parses this config at
+/// launch and keeps no channel back. So for a running instance this is the config
+/// it *would* start on, which is exactly what somebody who has just edited it
+/// wants to check, and the same reason `e` says to restart.
+fn describe_instance(instance: &InstanceInfo, port: u16) -> Vec<String> {
+    let mut lines = vec![
+        spec("state", instance.status.label()),
+        spec("url", &format!("http://{}.{MASTER_HOST}:{port}", instance.name)),
+        spec("config", &instance.config_path().display().to_string()),
+        spec("log", &instance.log_path().display().to_string()),
+    ];
+    if let Some(detail) = &instance.detail {
+        lines.push(spec("detail", detail));
+    }
+
+    let file = match super::Instance::new(&instance.dir).load() {
+        Ok(file) => file,
+        Err(error) => {
+            lines.push(String::new());
+            lines.push(format!("this config will not start: {error:#}"));
+            return lines;
+        }
+    };
+    let branding = file
+        .branding
+        .as_ref()
+        .and_then(|branding| branding.text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(DEFAULT_BRANDING);
+    lines.push(spec("shown as", branding));
+    lines.push(spec("targets", &file.targets.len().to_string()));
+
+    if file.targets.is_empty() {
+        lines.push(String::new());
+        lines.push("no targets yet — press e to add one".to_owned());
+    }
+    for target in &file.targets {
+        lines.push(String::new());
+        lines.push(format!("target {}", target.name));
+        lines.extend(target_specs(target));
+    }
+    lines
+}
+
+/// One `[[targets]]` profile as sentences: what this target will do, not which
+/// keys were written. Credentials are reported as present, never printed — this
+/// page is on somebody's screen, and the passwords are the reason the instance
+/// directory is `0700`.
+fn target_specs(target: &TargetConfig) -> Vec<String> {
+    let mut lines = Vec::new();
+    let protocol = match target.subtype {
+        None => target.protocol.name().to_owned(),
+        Some(subtype) => format!("{} {}", target.protocol.name(), subtype.name()),
+    };
+    lines.push(spec("protocol", &protocol));
+    lines.push(spec("address", &format!("{}:{}", target.host, target.port)));
+
+    let mut credentials = Vec::new();
+    if !target.username.is_empty() {
+        credentials.push(format!("user {}", target.username));
+    }
+    if let Some(domain) = target.domain.as_deref().filter(|domain| !domain.is_empty()) {
+        credentials.push(format!("domain {domain}"));
+    }
+    if !target.password.is_empty() {
+        credentials.push("account password set".to_owned());
+    }
+    if !target.vnc_password.is_empty() {
+        credentials.push("vnc password set".to_owned());
+    }
+    if credentials.is_empty() {
+        credentials.push("none configured".to_owned());
+    }
+    lines.push(spec("sign-in", &credentials.join(", ")));
+
+    lines.push(spec(
+        "opens at",
+        &match target.pinned_size() {
+            Some((w, h)) => format!("{w}×{h} points, pinned"),
+            None => format!(
+                "the client screen's own size, or {}×{} when it names none",
+                DEFAULT_SIZE.0, DEFAULT_SIZE.1
+            ),
+        },
+    ));
+    lines.push(spec(
+        "resize",
+        if target.resize {
+            "the client's window drives the remote size"
+        } else {
+            "fixed for the session"
+        },
+    ));
+
+    if target.protocol == Protocol::Rdp {
+        lines.push(spec(
+            "security",
+            match target.security {
+                Security::Auto => "auto — the server picks tls or nla",
+                Security::Nla => "nla required",
+                Security::Tls => "tls only; the remote shows its login window",
+            },
+        ));
+        lines.push(spec(
+            "graphics",
+            if target.egfx() {
+                "egfx pipeline; a resize is a layout change"
+            } else {
+                "legacy; a resize reactivates the session"
+            },
+        ));
+        lines.push(spec("audio", &describe_audio(target)));
+    }
+
+    lines.push(spec(
+        "clipboard",
+        if target.clipboard {
+            "the browser reads and writes the remote clipboard"
+        } else {
+            "off"
+        },
+    ));
+    lines.push(spec("render", &target.render_plan().describe()));
+    lines
+}
+
+/// A target's audio as it will sound on the wire. Kilobits because the config
+/// speaks kilobits, and the codec named the way `ServerMsg::AudioFormat` names it.
+fn describe_audio(target: &TargetConfig) -> String {
+    if !target.audio {
+        return "off".to_owned();
+    }
+    let plan = target.audio_plan();
+    match plan.codec {
+        crate::config::AudioCodec::Pcm => {
+            "pcm passthrough, 1.41 Mbit/s, no encoder and no decoder".to_owned()
+        }
+        crate::config::AudioCodec::Opus => {
+            let ceiling = target.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
+            match plan.adaptive_floor_bps {
+                Some(floor) => format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s", floor / 1000),
+                None => format!("opus at {ceiling} kbit/s"),
+            }
+        }
+    }
+}
+
+/// One `label   value` row of a specs page, indented under its heading.
+fn spec(label: &str, value: &str) -> String {
+    format!("  {label:<10} {value}")
 }
 
 fn line(
@@ -497,8 +718,22 @@ impl InstanceStatus {
 pub struct InstanceInfo {
     pub name: String,
     pub status: InstanceStatus,
-    pub config_path: PathBuf,
+    /// The instance directory, which is where every path this instance has comes
+    /// from — see [`super::Instance`] for the ones the gateway itself uses.
+    pub dir: PathBuf,
     pub detail: Option<String>,
+}
+
+impl InstanceInfo {
+    /// The one file a user edits.
+    pub fn config_path(&self) -> PathBuf {
+        super::Instance::new(&self.dir).config_path()
+    }
+
+    /// Where a failed gateway said why.
+    pub fn log_path(&self) -> PathBuf {
+        self.dir.join("gateway.log")
+    }
 }
 
 enum InstanceState {
@@ -562,7 +797,7 @@ impl Supervisor {
                 InstanceInfo {
                     name: instance.name.clone(),
                     status,
-                    config_path: instance.dir.join("remotex.toml"),
+                    dir: instance.dir.clone(),
                     detail,
                 }
             })
@@ -639,7 +874,7 @@ impl Supervisor {
             return Ok(());
         }
         let dir = self.instances[index].dir.clone();
-        validate_config(&dir.join("remotex.toml"))
+        validate_config(&super::Instance::new(&dir).config_path())
             .with_context(|| format!("instance {name:?} has an invalid config"))?;
         self.instances[index].state = InstanceState::Starting;
         self.publish().await;
@@ -1226,6 +1461,47 @@ mod tests {
         screen.invalidate();
         screen.draw(b"second".to_vec(), &mut out).unwrap();
         assert_eq!(out, b"firstsecondsecond");
+    }
+
+    /// The specs page answers from the config the instance would start on, and
+    /// what it says about credentials is never the credentials.
+    #[test]
+    fn the_specs_page_describes_an_instance_without_printing_its_passwords() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("work");
+        std::fs::create_dir(&dir).unwrap();
+        let instance = InstanceInfo {
+            name: "work".to_owned(),
+            status: InstanceStatus::Running,
+            dir,
+            detail: None,
+        };
+        std::fs::write(
+            instance.config_path(),
+            "[branding]\ntext = \"work laptop\"\n\n\
+             [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
+             username = \"andrew\"\npassword = \"hunter2\"\naudio = true\nresize = true\n\
+             render_type = \"fixed-quality\"\nrender_subtype = \"jpeg\"\nrender_quality = 70\n",
+        )
+        .unwrap();
+
+        let page = describe_instance(&instance, 52380).join("\n");
+        assert!(page.contains(&spec("state", "running")), "{page}");
+        assert!(page.contains("http://work.remotex.localhost:52380"), "{page}");
+        assert!(page.contains(&spec("shown as", "work laptop")), "{page}");
+        assert!(page.contains("target win"), "{page}");
+        assert!(page.contains("192.168.1.20:3389"), "the standard port is filled in: {page}");
+        assert!(page.contains("account password set"), "{page}");
+        assert!(!page.contains("hunter2"), "a password does not reach the screen: {page}");
+        assert!(page.contains("opus at 96 kbit/s"), "an unset dial is named at its default: {page}");
+        assert!(page.contains("jpeg q70"), "the render plan describes itself: {page}");
+
+        // A config the gateway would refuse says so, instead of a page of
+        // defaults for a start that will not happen.
+        std::fs::write(instance.config_path(), "[server]\n").unwrap();
+        let page = describe_instance(&instance, 52380).join("\n");
+        assert!(page.contains("will not start"), "{page}");
+        assert!(page.contains("[server]"), "it names what is wrong: {page}");
     }
 
     #[test]
