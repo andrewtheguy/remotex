@@ -103,6 +103,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     let router = SharedPort::bind(options.port, supervisor.routes()).await?;
 
     let mut terminal = TerminalSession::enter()?;
+    let mut screen = Screen::default();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_millis(250));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -117,13 +118,16 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     loop {
         let instances = supervisor.instances();
         selected = selected.min(instances.len().saturating_sub(1));
-        render(
-            &options,
-            router.port(),
-            &instances,
-            selected,
-            input.as_deref(),
-            &message,
+        screen.draw(
+            render(
+                &options,
+                router.port(),
+                &instances,
+                selected,
+                input.as_deref(),
+                &message,
+            )?,
+            &mut std::io::stdout().lock(),
         )?;
 
         tokio::select! {
@@ -238,6 +242,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             terminal.suspend()?;
                             let edited = edit_config(&path).await;
                             terminal.resume()?;
+                            screen.invalidate();
                             events = EventStream::new();
                             message = match edited.and_then(|()| validate_config(&path)) {
                                 Ok(()) => format!("{name} config is valid; restart it to apply changes"),
@@ -324,6 +329,36 @@ impl Drop for TerminalSession {
     }
 }
 
+/// The frame currently on the terminal, so an identical one is not written again.
+///
+/// The loop wakes on a 250 ms tick whether or not anything moved, and a frame
+/// begins by erasing the display. Repainting that unchanged frame four times a
+/// second is what stops a terminal that anchors a selection to the text under it —
+/// VS Code's — from letting anyone select a URL off this screen: the selection is
+/// dropped by the next tick's erase. So the frame is built into a buffer and
+/// compared, and an idle control plane writes nothing at all.
+#[derive(Default)]
+struct Screen {
+    shown: Vec<u8>,
+}
+
+impl Screen {
+    fn draw(&mut self, frame: Vec<u8>, out: &mut impl Write) -> anyhow::Result<()> {
+        if frame == self.shown {
+            return Ok(());
+        }
+        out.write_all(&frame).context("cannot write to the terminal")?;
+        out.flush().context("cannot write to the terminal")?;
+        self.shown = frame;
+        Ok(())
+    }
+
+    /// Forget what is on screen, for when something else has been writing to it.
+    fn invalidate(&mut self) {
+        self.shown.clear();
+    }
+}
+
 fn render(
     options: &TuiOptions,
     port: u16,
@@ -331,13 +366,13 @@ fn render(
     selected: usize,
     input: Option<&str>,
     message: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u8>> {
     let (width, height) = terminal::size().context("cannot read terminal size")?;
-    let mut stdout = std::io::stdout().lock();
-    queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
-    line(&mut stdout, 0, width, "remotex local control plane", Some(Color::Cyan), true)?;
+    let mut frame = Vec::new();
+    queue!(frame, MoveTo(0, 0), Clear(ClearType::All))?;
+    line(&mut frame, 0, width, "remotex local control plane", Some(Color::Cyan), true)?;
     line(
-        &mut stdout,
+        &mut frame,
         2,
         width,
         &format!("master   http://{MASTER_HOST}:{port}"),
@@ -345,7 +380,7 @@ fn render(
         false,
     )?;
     line(
-        &mut stdout,
+        &mut frame,
         3,
         width,
         &format!("instances {}", options.instances_dir.display()),
@@ -353,7 +388,7 @@ fn render(
         false,
     )?;
     line(
-        &mut stdout,
+        &mut frame,
         5,
         width,
         "  instance              state      URL",
@@ -377,7 +412,7 @@ fn render(
             MASTER_HOST
         );
         line(
-            &mut stdout,
+            &mut frame,
             6 + row as u16,
             width,
             &text,
@@ -386,23 +421,23 @@ fn render(
         )?;
     }
     if instances.is_empty() {
-        line(&mut stdout, 6, width, "  no instances — press n to create one", Some(Color::Yellow), false)?;
+        line(&mut frame, 6, width, "  no instances — press n to create one", Some(Color::Yellow), false)?;
     }
 
     let footer = height.saturating_sub(3);
     if let Some(name) = input {
         line(
-            &mut stdout,
+            &mut frame,
             footer,
             width,
             &format!("new instance name: {name}_"),
             Some(Color::Yellow),
             true,
         )?;
-        line(&mut stdout, footer + 1, width, "Enter create · Esc cancel", Some(Color::DarkGrey), false)?;
+        line(&mut frame, footer + 1, width, "Enter create · Esc cancel", Some(Color::DarkGrey), false)?;
     } else {
         line(
-            &mut stdout,
+            &mut frame,
             footer,
             width,
             "↑↓ select · Enter start/stop · r restart · x stop · a start all · n new · e edit · R rescan · q quit",
@@ -413,10 +448,9 @@ fn render(
             .get(selected)
             .and_then(|instance| instance.detail.as_deref())
             .unwrap_or(message);
-        line(&mut stdout, footer + 1, width, detail, None, false)?;
+        line(&mut frame, footer + 1, width, detail, None, false)?;
     }
-    stdout.flush()?;
-    Ok(())
+    Ok(frame)
 }
 
 fn line(
@@ -1101,6 +1135,31 @@ fn landing_page(port: u16, instances: &BTreeMap<String, PublishedInstance>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tick is not a reason to touch the terminal. A repaint that changes
+    /// nothing still erases the display, and a selection made over this screen
+    /// does not survive that.
+    #[test]
+    fn an_unchanged_frame_is_not_written_again() {
+        let mut screen = Screen::default();
+        let mut out = Vec::new();
+
+        screen.draw(b"first".to_vec(), &mut out).unwrap();
+        assert_eq!(out, b"first");
+
+        for _ in 0..4 {
+            screen.draw(b"first".to_vec(), &mut out).unwrap();
+        }
+        assert_eq!(out, b"first", "four idle ticks wrote nothing");
+
+        screen.draw(b"second".to_vec(), &mut out).unwrap();
+        assert_eq!(out, b"firstsecond", "a frame that differs is written");
+
+        // Something else — the editor — has had the screen since the last frame.
+        screen.invalidate();
+        screen.draw(b"second".to_vec(), &mut out).unwrap();
+        assert_eq!(out, b"firstsecondsecond");
+    }
 
     #[test]
     fn instance_names_are_exactly_one_lowercase_dns_label() {
