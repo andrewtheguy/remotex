@@ -105,10 +105,14 @@ support neither `.deb` nor `.rpm`.
 Native installs also include a multi-instance terminal control plane:
 
 ```sh
-remotex tui --port 52380
+remotex tui
 ```
 
-It listens only on both loopbacks. Open <http://remotex.localhost:52380>; each
+It listens only on both loopbacks, at `serve`'s port: 52380 unless `--port` or
+`REMOTEX_TUI_PORT` says otherwise, and never a port the kernel picked, because
+this is a number you type into a browser. A port something else is already
+serving refuses the start rather than answering on half of it.
+Open <http://remotex.localhost:52380>; each
 running instance has its own origin at
 `http://<instance>.remotex.localhost:52380`. Press `n` to create an instance,
 `e` to edit its `remotex.toml`, Enter to start or stop it, `r` to restart it,

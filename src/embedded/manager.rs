@@ -23,7 +23,6 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use futures_util::StreamExt as _;
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
@@ -822,35 +821,30 @@ pub struct SharedPort {
 }
 
 impl SharedPort {
-    pub async fn bind(requested_port: u16, routes: RouteTable) -> anyhow::Result<Self> {
-        let ipv4 = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), requested_port))?;
-        let port = ipv4.local_addr()?.port();
-        // The second name for one loopback, not a second service — `localhost` and
-        // `remotex.localhost` resolve to `::1` first on most of these machines. The
-        // policy is `bind_all`'s in `src/main.rs`, and for its reason: the only
-        // tolerated failure is an address family this host does not have, because
-        // refusing to start over a loopback that cannot exist is useless. Everything
-        // else is fatal, `AddrInUse` above all — a browser picks either family, so a
-        // master left holding `[::1]:port` from an earlier run would keep answering
-        // and keep routing to *its* instance workers, and which one a page reached
-        // would be the resolver's choice.
-        let ipv6 = match bind_listener(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)) {
-            Ok(listener) => Some(listener),
-            Err(error)
-                if error.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
-                    == Some(std::io::ErrorKind::AddrNotAvailable) =>
-            {
-                log::warn!(
-                    "the control plane is IPv4-only: {error:#} — this machine has no \
-                     such address, which is what an IPv6 name resolves to on a host \
-                     with IPv6 disabled"
-                );
-                None
-            }
-            Err(error) => return Err(error),
-        };
+    /// Take both loopbacks at `port`, under `serve`'s binding policy.
+    ///
+    /// The port is the caller's and is never asked of the kernel: `remotex.localhost`
+    /// and every instance subdomain are typed into a browser, and a port the operator
+    /// did not choose is one nobody can type. That is why there is no ephemeral path
+    /// here even for tests — a test picks a concrete free port the way `serve`'s do,
+    /// so the code under test is the code that ships.
+    ///
+    /// [`crate::server::bind_all`] is the same all-or-nothing it applies to
+    /// `localhost:52380`, and for the same reason one level up: the browser picks the
+    /// family, so a master left holding `[::1]:port` from an earlier run would keep
+    /// answering and keep routing to *its* instance workers, and which one a page
+    /// reached would be the resolver's choice.
+    pub async fn bind(port: u16, routes: RouteTable) -> anyhow::Result<Self> {
+        anyhow::ensure!(port != 0, "the control plane needs a port a browser can be told");
+        let addrs = [
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        ];
         let mut tasks = Vec::new();
-        for listener in [Some(ipv4), ipv6].into_iter().flatten() {
+        for listener in crate::server::bind_all(&addrs, &format!("{MASTER_HOST}:{port}"))? {
+            listener
+                .set_nonblocking(true)
+                .context("cannot make a control-plane listener non-blocking")?;
             let listener = tokio::net::TcpListener::from_std(listener)
                 .context("cannot hand the control-plane listener to the runtime")?;
             let routes = routes.clone();
@@ -880,21 +874,6 @@ impl Drop for SharedPort {
             task.abort();
         }
     }
-}
-
-fn bind_listener(address: SocketAddr) -> anyhow::Result<std::net::TcpListener> {
-    let domain = if address.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_reuse_address(true)?;
-    if address.is_ipv6() {
-        socket.set_only_v6(true)?;
-    }
-    socket
-        .bind(&address.into())
-        .with_context(|| format!("cannot bind local control plane to {address}"))?;
-    socket.listen(1024)?;
-    socket.set_nonblocking(true)?;
-    Ok(socket.into())
 }
 
 async fn route_connection(
@@ -1181,7 +1160,7 @@ mod tests {
                 },
             ),
         ]);
-        let router = SharedPort::bind(0, routes).await.unwrap();
+        let router = SharedPort::bind(free_port(), routes).await.unwrap();
 
         let first_response = request(
             router.port(),
@@ -1214,11 +1193,23 @@ mod tests {
                 }),
             },
         );
-        let router = SharedPort::bind(0, routes).await.unwrap();
+        let router = SharedPort::bind(free_port(), routes).await.unwrap();
         let response = request(router.port(), "one.remotex.localhost", None).await;
         assert!(response.starts_with("HTTP/1.1 307 Temporary Redirect"), "{response}");
         assert!(response.contains("Set-Cookie: remotex_session=launch-token;"), "{response}");
         assert!(response.contains("Location: /"), "{response}");
+    }
+
+    /// A port nothing is listening on, found by taking one and letting it go —
+    /// `free_port` in `src/server.rs`, for its reason. A test needs a port the rest
+    /// of the machine is not using; the control plane needs a port its operator
+    /// chose, and asking the kernel for one is not a thing it may do.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     /// A master left holding one family of the shared port is not something to
@@ -1226,20 +1217,32 @@ mod tests {
     /// reach the old process and its old instance workers.
     #[tokio::test]
     async fn a_port_half_taken_by_an_earlier_master_refuses_the_start() {
-        let squatter = bind_listener(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
-        let port = squatter.local_addr().unwrap().port();
+        let port = free_port();
+        let squatter = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, port)).unwrap();
 
         let Err(error) = SharedPort::bind(port, RouteTable::default()).await else {
             panic!("the v6 half of this port is already served");
         };
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::AddrInUse),
-            "{error:#}"
-        );
+        let text = format!("{error:#}");
+        assert!(text.contains("already in use"), "{text}");
+        assert!(text.contains(&port.to_string()), "it must name the port: {text}");
+
+        // And the refusal took nothing: the v4 half it bound on the way through is
+        // released, so a retry after stopping the other master works.
         drop(squatter);
+        SharedPort::bind(port, RouteTable::default())
+            .await
+            .expect("the refused attempt must not have kept a socket");
+    }
+
+    /// The port is typed into a browser, so there is no code path that lets the
+    /// kernel choose it — including the one the tests take.
+    #[tokio::test]
+    async fn an_ephemeral_port_is_not_something_the_control_plane_can_be_asked_for() {
+        let Err(error) = SharedPort::bind(0, RouteTable::default()).await else {
+            panic!("port 0 is a control plane nobody can be told how to reach");
+        };
+        assert!(format!("{error:#}").contains("a browser can be told"), "{error:#}");
     }
 
     async fn fake_gateway(

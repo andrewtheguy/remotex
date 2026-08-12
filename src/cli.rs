@@ -41,8 +41,15 @@ pub enum Commands {
     /// <instance>.remotex.localhost.
     #[cfg(feature = "embedded-gateway")]
     Tui {
-        /// Loopback port shared by remotex.localhost and every instance subdomain
-        #[arg(long)]
+        /// Loopback port shared by remotex.localhost and every instance
+        /// subdomain (default: 52380, the same port `serve` listens on — they
+        /// are two ways to serve, never two servers)
+        #[arg(
+            long,
+            env = "REMOTEX_TUI_PORT",
+            default_value_t = crate::config::DEFAULT_PORT,
+            value_parser = clap::value_parser!(u16).range(1..),
+        )]
         port: u16,
 
         /// Directory whose immediate subdirectories are remotex instances
@@ -203,9 +210,26 @@ mod tests {
         }
     }
 
+    /// The shared port is `serve`'s: a default in the binary, an override on the
+    /// command line or in the environment, and never a port the kernel picked —
+    /// a browser is told this number.
     #[cfg(feature = "embedded-gateway")]
     #[test]
-    fn tui_requires_its_one_shared_port() {
+    fn the_tui_port_defaults_and_refuses_an_ephemeral_one() {
+        let cli = Cli::try_parse_from(["remotex", "tui"]).expect("the port has a default");
+        let Commands::Tui { port, .. } = cli.command else {
+            panic!("expected the tui subcommand");
+        };
+        assert_eq!(port, crate::config::DEFAULT_PORT);
+        assert!(
+            Cli::try_parse_from(["remotex", "tui", "--port", "0"]).is_err(),
+            "0 is the kernel's choice, and nobody can be told it"
+        );
+    }
+
+    #[cfg(feature = "embedded-gateway")]
+    #[test]
+    fn tui_takes_its_port_instances_dir_and_web_root() {
         let cli = Cli::try_parse_from([
             "remotex",
             "tui",
@@ -228,7 +252,6 @@ mod tests {
         assert_eq!(port, 52380);
         assert_eq!(instances_dir.as_deref(), Some(std::path::Path::new("/instances")));
         assert_eq!(web_root.as_deref(), Some(std::path::Path::new("/web")));
-        assert!(Cli::try_parse_from(["remotex", "tui"]).is_err());
     }
 
     #[cfg(feature = "embedded-gateway")]

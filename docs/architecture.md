@@ -1047,7 +1047,18 @@ browser: <instance>.remotex.localhost:<port>
        hidden serve-embedded subprocess
 ```
 
-The master is the only TCP listener. Each hidden worker binds
+The master is the only TCP listener, and it takes its port the way `serve` takes
+its address: `DEFAULT_PORT` (52380, the one `[server].listen` defaults to —
+they are two ways to serve, never two servers) unless `--port` or
+`REMOTEX_TUI_PORT` overrides it. Both loopbacks are bound through the same
+`server::bind_all` a served gateway uses, so the policy is one implementation: a
+family this host does not have is a warning, and a port already in use is fatal
+on either of them, because a browser picks the family and a master left holding
+`[::1]:<port>` would keep routing to its own workers. Nothing asks the kernel
+for a port — an ephemeral one is a control plane nobody can be told how to
+reach, and `SharedPort::bind` refuses `0` on every path, tests included.
+
+Each hidden worker binds
 `<instance>/gateway.sock` at mode `0600`, prints one JSON readiness line —
 `{"socket","token"}` — after binding, reads only that instance's
 `remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,

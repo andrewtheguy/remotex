@@ -811,6 +811,15 @@ impl TargetConfig {
 /// small to be a desktop (`sendMobileSize` in `frontend/src/useRemoteDesktop.ts`).
 pub const DEFAULT_SIZE: (u16, u16) = (1920, 1200);
 
+/// The port this project answers on when nothing says otherwise, in either
+/// shape: [`DEFAULT_LISTEN`] below, and the TUI control plane's `--port`.
+///
+/// One number for both because they are two ways to serve, never two servers:
+/// `remotex serve` is the deployed gateway and `remotex tui` is the local
+/// control plane, and running them at once is the collision each refuses to
+/// start into rather than a configuration to support.
+pub const DEFAULT_PORT: u16 = 52380;
+
 /// Where a served gateway listens when nothing says otherwise.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:52380";
 
@@ -1881,6 +1890,13 @@ mod tests {
             "#,
             site_passwd_line()
         )
+    }
+
+    /// Two constants, one number: the served default address and the port the TUI
+    /// takes when nothing says otherwise cannot drift apart silently.
+    #[test]
+    fn the_default_listen_address_is_the_default_port() {
+        assert_eq!(DEFAULT_LISTEN, format!("127.0.0.1:{DEFAULT_PORT}"));
     }
 
     #[test]

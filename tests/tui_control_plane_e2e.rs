@@ -37,7 +37,7 @@ async fn instances_start_stop_and_share_the_master_port() {
     )
     .await
     .unwrap();
-    let router = SharedPort::bind(0, supervisor.routes()).await.unwrap();
+    let router = SharedPort::bind(free_port(), supervisor.routes()).await.unwrap();
     supervisor.start("one").await.unwrap();
     supervisor.start("two").await.unwrap();
 
@@ -61,6 +61,17 @@ async fn instances_start_stop_and_share_the_master_port() {
 
     supervisor.shutdown().await;
     assert!(!root.path().join("two/gateway.sock").exists());
+}
+
+/// A port nothing is listening on, found by taking one and letting it go. The
+/// control plane never asks the kernel for its port — it is typed into a browser —
+/// so a test that wants one out of the way picks it here instead.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 async fn seed_cookie(port: u16, instance: &str) -> String {

@@ -70,6 +70,68 @@ impl axum::serve::Listener for NodelayListener {
     }
 }
 
+/// Take a listening socket on every address, or none at all.
+///
+/// **A port already in use is fatal, on any one of them.** It means something else
+/// is serving that port — most often a gateway from an earlier run — and starting
+/// beside it is worse than not starting: a browser resolving `localhost` picks
+/// either family, so it would reach the old process or the new one depending on
+/// which address it happened to try, and the two would fight over the target's
+/// session. This is the "stale gateway answered while the fresh one thought
+/// it was serving" failure, and refusing to start is the only honest answer.
+///
+/// The one tolerated failure is an address family this machine does not have:
+/// `localhost` resolves to `::1` on a host with IPv6 switched off, and refusing to
+/// start over a loopback that cannot exist would be useless. It is warned about,
+/// and it is still fatal if it leaves nothing bound.
+///
+/// All-or-nothing rather than a preflight probe, because a probe is a lie by the
+/// time it returns: whatever it found free can be taken in the microseconds before
+/// the real bind. Holding the sockets *is* the check, and dropping the ones already
+/// taken on the way out leaves every port exactly as it was found.
+///
+/// This lives here rather than beside `serve` because the TUI control plane binds
+/// the same pair of loopbacks for the same reason (`crate::embedded::manager`), and
+/// two implementations of "is this port already somebody else's" is one of them
+/// being wrong.
+pub fn bind_all(
+    addrs: &[std::net::SocketAddr],
+    addr: &str,
+) -> anyhow::Result<Vec<std::net::TcpListener>> {
+    use anyhow::Context as _;
+
+    let mut listeners = Vec::new();
+    for &socket in addrs {
+        match std::net::TcpListener::bind(socket) {
+            Ok(listener) => listeners.push(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                warn!(
+                    "not listening on {socket}: {e} — this machine has no such \
+                     address, which is what an IPv6 name resolves to on a host \
+                     with IPv6 disabled"
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // `listeners` drops here, releasing anything already taken.
+                anyhow::bail!(
+                    "{socket} is already in use — something else is serving that \
+                     port (an earlier `remotex serve`?). Stop it first; starting \
+                     beside it would leave two gateways answering {addr} \
+                     unpredictably"
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot listen on {socket}"));
+            }
+        }
+    }
+    anyhow::ensure!(
+        !listeners.is_empty(),
+        "none of the addresses {addr} resolves to can be listened on"
+    );
+    Ok(listeners)
+}
+
 /// Build the axum router.
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
@@ -546,6 +608,92 @@ async fn claim_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// Both loopbacks at one port, which is what `host = "localhost"` resolves to
+    /// and the reason `bind_all` exists.
+    fn both_loopbacks(port: u16) -> Vec<SocketAddr> {
+        vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        ]
+    }
+
+    /// A port nothing is listening on, found by taking one and letting it go.
+    ///
+    /// Racy in principle and fine in practice: the window is microseconds and the
+    /// alternative is a hardcoded port, which is racy against every other test run
+    /// on the machine rather than against nothing in particular.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn both_loopbacks_are_bound_for_one_name() {
+        let port = free_port();
+        let listeners = bind_all(&both_loopbacks(port), "localhost:0").unwrap();
+        let bound: Vec<_> = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap())
+            .collect();
+        assert_eq!(bound, both_loopbacks(port), "both, in the order resolved");
+    }
+
+    /// The check the whole function is for: a port held on *any* resolved address
+    /// stops the start, even when the other address is free.
+    #[test]
+    fn a_port_already_in_use_on_one_address_refuses_the_start() {
+        let port = free_port();
+        // Hold IPv4 only, leaving the IPv6 loopback free — the half-bound shape
+        // that used to start happily and answer on one family.
+        let squatter = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+
+        let err = bind_all(&both_loopbacks(port), "localhost:0")
+            .expect_err("a port in use must refuse the start");
+        let text = format!("{err:#}");
+        assert!(text.contains("already in use"), "{text}");
+        assert!(text.contains(&port.to_string()), "it must name the port: {text}");
+
+        // And nothing was left holding the address that *was* free: the IPv6
+        // listener taken on the way through has to be released, or a retry after
+        // stopping the other process would fail against ourselves.
+        drop(squatter);
+        bind_all(&both_loopbacks(port), "localhost:0")
+            .expect("the refused attempt must not have kept a socket");
+    }
+
+    /// An address this machine does not have is warned about, not fatal — that is
+    /// what `::1` is on a host with IPv6 disabled. Simulated with an address no
+    /// machine has assigned.
+    #[test]
+    fn an_unavailable_address_is_skipped_while_the_rest_still_bind() {
+        let port = free_port();
+        let mut addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), port)];
+        addrs.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+
+        let listeners = bind_all(&addrs, "example:0").expect("the loopback still binds");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(
+            listeners[0].local_addr().unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        );
+    }
+
+    /// ...unless it leaves nothing at all, which is a gateway nobody can reach.
+    #[test]
+    fn an_address_nothing_could_bind_is_still_fatal() {
+        let addrs = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            free_port(),
+        )];
+        let err = bind_all(&addrs, "example:0").expect_err("nothing bound is fatal");
+        assert!(format!("{err:#}").contains("can be listened on"), "{err:#}");
+    }
+
 
     /// A router whose only interesting property is the dev hostname, over a
     /// static dir that does not exist — every assertion below is about the
