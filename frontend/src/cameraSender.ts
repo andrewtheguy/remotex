@@ -34,6 +34,16 @@ export interface CameraSender {
 // camera.
 const MAX_ENCODE_QUEUE = 2;
 
+// Bytes allowed to sit unsent in the socket before samples are dropped instead
+// of queued: `send` itself queues without limit, so a slow uplink would
+// otherwise become unbounded memory and a picture ever further behind the
+// camera. Unlike the encoder queue above, what this drops is *output*, which
+// is never free in H.264 — everything until the next keyframe goes with the
+// first dropped delta, and that keyframe is asked for once the backlog clears,
+// the same drop-whole-and-rekey the gateway's own credit queue applies. A
+// quarter of a megabyte is a quarter second at the ceiling bitrate above.
+const MAX_BUFFERED_BYTES = 256 * 1024;
+
 // The H.264 configuration for one capture geometry. Split out pure so a unit
 // test can pin the level and bitrate choices without a camera.
 //
@@ -138,6 +148,10 @@ export async function startCameraSender(
   let stopped = false;
   let streaming = false;
   let forceKeyframe = true;
+  // Whether the socket backed up past MAX_BUFFERED_BYTES and deltas are being
+  // dropped. Set by the encoder's output, cleared by the keyframe that resumes
+  // the stream; the pump requests that keyframe when the backlog has cleared.
+  let droppingDeltas = false;
 
   const socket = new WebSocket(url);
   socket.binaryType = "arraybuffer";
@@ -147,9 +161,23 @@ export async function startCameraSender(
       if (stopped || socket.readyState !== WebSocket.OPEN) {
         return;
       }
+      const key = chunk.type === "key";
+      // Backpressure. A delta after a dropped delta is undecodable, so the
+      // first drop commits to dropping every delta until the next keyframe.
+      // Keyframes always pass: one is what lets the stream resume.
+      if (
+        !key &&
+        (droppingDeltas || socket.bufferedAmount > MAX_BUFFERED_BYTES)
+      ) {
+        droppingDeltas = true;
+        return;
+      }
+      if (key) {
+        droppingDeltas = false;
+      }
       const unit = new Uint8Array(chunk.byteLength);
       chunk.copyTo(unit);
-      const frame = encodeCameraFrame(unit, chunk.type === "key");
+      const frame = encodeCameraFrame(unit, key);
       if (frame) {
         socket.send(frame);
       }
@@ -227,6 +255,21 @@ export async function startCameraSender(
     stop(ev.code === 4002 ? "this target carries no camera" : null);
   };
 
+  // One frame's fate: skipped while the remote is not consuming or the encoder
+  // is behind — an unencoded frame constrains no GOP — and otherwise encoded,
+  // at an IDR when one is owed. The caller closes the frame either way.
+  const encodeFrame = (frame: VideoFrame) => {
+    if (!streaming || encoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
+      return;
+    }
+    if (droppingDeltas && socket.bufferedAmount <= MAX_BUFFERED_BYTES) {
+      // The backlog cleared: resume at the IDR the far decoder needs.
+      forceKeyframe = true;
+    }
+    encoder.encode(frame, { keyFrame: forceKeyframe });
+    forceKeyframe = false;
+  };
+
   // The frame pump. Frames flow whenever the camera does; which of them cost
   // anything is the remote's decision — outside start/stop they are closed
   // unencoded, which keeps the capture pipeline drained without spending CPU.
@@ -242,14 +285,8 @@ export async function startCameraSender(
         result.value?.close();
         break;
       }
-      const frame = result.value;
-      if (!streaming || encoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
-        frame.close();
-        continue;
-      }
-      encoder.encode(frame, { keyFrame: forceKeyframe });
-      forceKeyframe = false;
-      frame.close();
+      encodeFrame(result.value);
+      result.value.close();
     }
   })();
 
