@@ -631,6 +631,19 @@ async fn camera(
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heartbeat = Instant::now();
 
+    // Diagnostics for the half no unit test reaches — a real browser feeding a real
+    // host. `samples_seen` answers the first question every camera bug asks ("is the
+    // browser sending anything at all?") and is logged at close. `REMOTEX_CAMERA_DUMP`
+    // additionally appends every access unit's raw bytes to that path: Annex B
+    // concatenates into a replayable elementary stream, so the exact stream a host
+    // rejected can be inspected with ffprobe or replayed with tmp/camera_send_probe.py.
+    let mut samples_seen: u64 = 0;
+    let mut dump = std::env::var_os("REMOTEX_CAMERA_DUMP")
+        .and_then(|path| std::fs::File::create(path).ok());
+    if dump.is_some() {
+        info!("ws: dumping camera samples (REMOTEX_CAMERA_DUMP)");
+    }
+
     loop {
         tokio::select! {
             // Biased, eviction first, for the audio socket's reason turned around: a
@@ -673,6 +686,11 @@ async fn camera(
                         // [`protocol::camera::parse`] — and quietly: one bad frame at
                         // 30 fps must not become a log at 30 lines a second.
                         if let Some((keyframe, unit)) = protocol::camera::parse(&bytes) {
+                            samples_seen += 1;
+                            if let Some(file) = dump.as_mut() {
+                                use std::io::Write as _;
+                                let _ = file.write_all(unit);
+                            }
                             sessions.camera_sample(camera_id, unit, keyframe);
                         }
                     }
@@ -723,7 +741,7 @@ async fn camera(
         }
     }
     sessions.detach_camera(camera_id);
-    info!("ws: the camera socket closed");
+    info!("ws: the camera socket closed after {samples_seen} sample(s) from the browser");
 }
 
 async fn session(
