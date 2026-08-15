@@ -627,11 +627,19 @@ export function useRemoteDesktop(
   // can tell it has been overtaken — by a disable click, a target switch, or
   // the session ending — and put the sender it just built straight down.
   const cameraGenerationRef = useRef(0);
+  // The generation of an enable whose sender is still being built (the
+  // permission prompt is up), or null when none is. What keeps a second enable
+  // click from starting a second capture while the first is unresolved —
+  // `cameraSenderRef` cannot, because it is only set once the build finishes.
+  const cameraPendingRef = useRef<number | null>(null);
 
   // Stop offering the camera, idempotently: the sender's own `onStopped` also
   // lands here, so a server-side close and the toggle meet at one place.
   const stopCamera = useCallback(() => {
     cameraGenerationRef.current += 1;
+    // A build still in flight is overtaken by the bump above and stops itself
+    // on arrival; clearing the pending mark is what lets a re-enable start.
+    cameraPendingRef.current = null;
     const sender = cameraSenderRef.current;
     cameraSenderRef.current = null;
     sender?.stop();
@@ -1698,13 +1706,24 @@ export function useRemoteDesktop(
         return;
       }
       const url = cameraUrlRef.current?.();
-      if (!url || cameraSenderRef.current) {
+      if (
+        !url ||
+        cameraSenderRef.current ||
+        cameraPendingRef.current !== null
+      ) {
         return;
       }
       const generation = cameraGenerationRef.current;
+      cameraPendingRef.current = generation;
       setCameraEnabled(true);
       void startCameraSender(url, {
         onStopped: (reason) => {
+          // A sender put down for being overtaken must not touch the live
+          // state: the generation it belonged to is over, and whatever enable
+          // is current has its own sender saying its own things.
+          if (cameraGenerationRef.current !== generation) {
+            return;
+          }
           // The sender is already stopped; what is left is the state saying so.
           // `stopCamera` is safe here — its `stop` finds nothing to do.
           stopCamera();
@@ -1712,9 +1731,16 @@ export function useRemoteDesktop(
             setCameraError(reason);
           }
         },
-        onStreaming: setCameraStreaming,
+        onStreaming: (streaming) => {
+          if (cameraGenerationRef.current === generation) {
+            setCameraStreaming(streaming);
+          }
+        },
       }).then(
         (sender) => {
+          if (cameraPendingRef.current === generation) {
+            cameraPendingRef.current = null;
+          }
           // Overtaken while the permission prompt was up — a disable click, a
           // target switch, an unmount. The enable it belonged to is over.
           if (cameraGenerationRef.current !== generation) {
@@ -1724,6 +1750,9 @@ export function useRemoteDesktop(
           cameraSenderRef.current = sender;
         },
         (e: unknown) => {
+          if (cameraPendingRef.current === generation) {
+            cameraPendingRef.current = null;
+          }
           if (cameraGenerationRef.current === generation) {
             setCameraEnabled(false);
             setCameraError(

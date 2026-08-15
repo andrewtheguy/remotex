@@ -41,11 +41,15 @@ test("fractional frame rates keep their thousandths, reduced", () => {
 // frame gets between decodeAudioFrame and `audio::frame`.
 test("a camera frame is kind then flags then the unit, keyframe in bit zero", () => {
   assert.deepEqual(
-    Array.from(encodeCameraFrame(new Uint8Array([9, 8]), true)),
+    Array.from(encodeCameraFrame(new Uint8Array([9, 8]), true) ?? []),
     [0x04, 0x01, 9, 8],
   );
   assert.deepEqual(
-    Array.from(encodeCameraFrame(new Uint8Array([7]), false)),
+    Array.from(encodeCameraFrame(new Uint8Array([7]), false) ?? []),
     [0x04, 0x00, 7],
   );
+});
+
+test("an empty unit is refused, matching the gateway parser's rejection", () => {
+  assert.equal(encodeCameraFrame(new Uint8Array(), true), null);
 });

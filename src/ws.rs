@@ -689,8 +689,11 @@ async fn camera(
                                 camera_id,
                                 CameraFormat { width, height, fps_numerator, fps_denominator },
                             ),
-                            Ok(other) => {
-                                warn!("ws: the camera socket ignores {other:?}");
+                            // Named without its payload: a stray message here can
+                            // be clipboard text or keystrokes, which belong on no
+                            // log line.
+                            Ok(_) => {
+                                warn!("ws: the camera socket ignores non-camera client messages");
                             }
                             Err(e) => {
                                 warn!("ws: unparseable text on the camera socket: {e}");

@@ -640,12 +640,20 @@ impl SessionManager {
 
     /// Plug the device with the format the camera socket announced. A no-op for
     /// a socket that has been superseded or outlived its engine.
+    ///
+    /// The bridge is called with the state lock released, here and in
+    /// [`Self::camera_sample`], as [`Self::arm_audio`] already does: this mutex
+    /// is the one every mouse move goes through, and the bridge's far end is a
+    /// channel write inside the engine — real work that must not sit on it.
     pub fn camera_plug(&self, id: u64, format: CameraFormat) {
-        let st = self.state.lock().unwrap();
-        if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
-            return;
-        }
-        if let Some(bridge) = st.engine.as_ref().and_then(|e| e.camera.as_ref()) {
+        let bridge = {
+            let st = self.state.lock().unwrap();
+            if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
+                return;
+            }
+            st.engine.as_ref().and_then(|e| e.camera.clone())
+        };
+        if let Some(bridge) = bridge {
             bridge.plug(format);
         }
     }
@@ -653,11 +661,14 @@ impl SessionManager {
     /// Hand one encoded sample to the engine, with the same guard as every other
     /// per-message call: only the current camera socket is heard.
     pub fn camera_sample(&self, id: u64, data: &[u8], keyframe: bool) {
-        let st = self.state.lock().unwrap();
-        if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
-            return;
-        }
-        if let Some(bridge) = st.engine.as_ref().and_then(|e| e.camera.as_ref()) {
+        let bridge = {
+            let st = self.state.lock().unwrap();
+            if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
+                return;
+            }
+            st.engine.as_ref().and_then(|e| e.camera.clone())
+        };
+        if let Some(bridge) = bridge {
             bridge.sample(data, keyframe);
         }
     }

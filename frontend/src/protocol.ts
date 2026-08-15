@@ -583,11 +583,16 @@ function decodeVideo(
 //
 // One access unit per WebSocket frame — the unit of transfer is the unit of
 // decode — with the keyframe bit carried so the gateway can drop and recover a
-// stream without parsing H.264.
+// stream without parsing H.264. An empty unit is null rather than a frame: the
+// gateway's parser rejects a payload-less frame as malformed, so building one
+// here would only spend a send on bytes the far end drops.
 export function encodeCameraFrame(
   unit: Uint8Array,
   keyframe: boolean,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> | null {
+  if (unit.byteLength === 0) {
+    return null;
+  }
   const frame = new Uint8Array(2 + unit.byteLength);
   frame[0] = CAMERA_FRAME_KIND;
   frame[1] = keyframe ? CAMERA_KEYFRAME : 0;

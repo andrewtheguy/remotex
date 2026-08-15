@@ -149,7 +149,10 @@ export async function startCameraSender(
       }
       const unit = new Uint8Array(chunk.byteLength);
       chunk.copyTo(unit);
-      socket.send(encodeCameraFrame(unit, chunk.type === "key"));
+      const frame = encodeCameraFrame(unit, chunk.type === "key");
+      if (frame) {
+        socket.send(frame);
+      }
     },
     error: (e) => stop(e.message || "the H.264 encoder failed"),
   });
