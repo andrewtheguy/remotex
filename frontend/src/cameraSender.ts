@@ -109,7 +109,16 @@ export async function startCameraSender(
     throw new Error("this browser offers no camera capture");
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  // A facing preference, not a bare `video: true`: bare leaves the browser its
+  // device-order default, which on a Mac with an auxiliary capture device —
+  // Desk View, a virtual camera — is a camera the user is not in front of.
+  // "user" names the one pointed at the person, which is what a redirected
+  // webcam means. Ideal rather than `exact`, so a webcam that reports no
+  // facing mode at all — most external ones — is still eligible rather than
+  // refused.
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user" },
+  });
   const track = stream.getVideoTracks()[0];
   if (!track) {
     for (const t of stream.getTracks()) {
