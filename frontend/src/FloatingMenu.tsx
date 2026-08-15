@@ -456,6 +456,53 @@ function AudioSection({
   );
 }
 
+// The camera toggle is also the user gesture `getUserMedia`'s permission prompt
+// requires. Targets without a camera omit the row — the same rule as Audio's.
+// Unlike Audio there is no remembered default anywhere: this button is the one
+// and only way the camera turns on, per session, every session.
+function CameraSection({
+  available,
+  enabled,
+  error,
+  streaming,
+  onChange,
+}: {
+  available: boolean;
+  enabled: boolean;
+  error: string | null;
+  // Whether the remote is consuming right now — an application over there has
+  // the camera open. Worded rather than implied, because "enabled and idle" is
+  // the normal state until one does.
+  streaming: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  if (!available) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Camera</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => onChange(!enabled)}
+        aria-pressed={enabled}
+        title="Offer this browser's camera to the remote"
+      >
+        {enabled ? "Disable camera" : "Enable camera"}
+      </button>
+      {enabled && !error && (
+        <p className="audio-note">
+          {streaming
+            ? "The remote is using the camera"
+            : "Waiting for the remote to open the camera"}
+        </p>
+      )}
+      {error && <p className="audio-note">{error}</p>}
+    </div>
+  );
+}
+
 // macOS-only Command-to-Control preference. It remains visible but inactive for
 // a Mac guest, where Command already has native meaning.
 function MacKeyboardSection({
@@ -526,6 +573,11 @@ export default function FloatingMenu({
   audioStream,
   videoStreams,
   onAudioChange,
+  canCamera,
+  cameraEnabled,
+  cameraError,
+  cameraStreaming,
+  onCameraChange,
   macKeyOverridesEnabled,
   macKeyOverridesActive,
   isMacHost,
@@ -587,6 +639,16 @@ export default function FloatingMenu({
   audioStream: AudioStreamInfo | null;
   videoStreams: readonly string[];
   onAudioChange: (enabled: boolean) => void;
+  // The camera, under Audio's hide-don't-disable rule: `camera = true` is
+  // RDP-only, so on every other target there is nothing that could be switched
+  // on. `cameraEnabled` is per session and never remembered — see
+  // useRemoteDesktop — and `cameraStreaming` is whether the remote is
+  // consuming, which is the half the camera light cannot say.
+  canCamera: boolean;
+  cameraEnabled: boolean;
+  cameraError: string | null;
+  cameraStreaming: boolean;
+  onCameraChange: (enabled: boolean) => void;
   // The Command-to-Control preference and whether it is doing anything. The two
   // differ when the guest is itself a Mac, which is why the section reports the
   // reason rather than just showing the switch off. The whole section is absent
@@ -951,6 +1013,14 @@ export default function FloatingMenu({
             enabled={audioEnabled}
             error={audioError}
             onChange={onAudioChange}
+          />
+
+          <CameraSection
+            available={canCamera}
+            enabled={cameraEnabled}
+            error={cameraError}
+            streaming={cameraStreaming}
+            onChange={onCameraChange}
           />
 
           <div className="toolbar-section">

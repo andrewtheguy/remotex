@@ -617,7 +617,6 @@ dependencies = [
 [[package]]
 name = "freerdp"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260812213059-d4a15a0#d4a15a0944113000fb0fe78f4b1e92383d72948b"
 dependencies = [
  "freerdp-prebuilt-sys",
 ]
@@ -625,7 +624,6 @@ dependencies = [
 [[package]]
 name = "freerdp-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260812213059-d4a15a0#d4a15a0944113000fb0fe78f4b1e92383d72948b"
 
 [[package]]
 name = "futures-channel"

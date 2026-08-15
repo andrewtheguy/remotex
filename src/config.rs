@@ -627,6 +627,17 @@ pub struct TargetConfig {
     /// that could not do anything.
     #[serde(default)]
     pub audio_bitrate_min: Option<u32>,
+    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC,
+    /// like [`Self::audio`] and for the same shape of reason: RFB has no
+    /// equivalent channel at all.
+    ///
+    /// Capability only. The device itself appears when a client enables the
+    /// camera — explicitly, per session, never remembered — by opening
+    /// `/ws/camera`; a target with this key and no such client offers the
+    /// remote nothing. The browser encodes H.264 and the gateway passes it
+    /// through, so there is no codec key beside this one.
+    #[serde(default)]
+    pub camera: bool,
     /// Render *strategy* for this target. Defaults to [`RenderType::Tiles`],
     /// which with the default subtype (lossless PNG) is byte-identical to
     /// before the dial existed. Validated against [`Self::render_subtype`] and
@@ -1294,6 +1305,15 @@ impl ConfigFile {
                 "target {:?} sets audio on a {} target, and only rdp carries it: MS-RDPEA is \
                  an RDP channel and RFB has no equivalent. Remove the key to start the \
                  session without sound.",
+                target.name,
+                target.protocol.name()
+            );
+            // The camera is RDP's alone by the same rule: MS-RDPECAM is an RDP
+            // channel and RFB has nothing to redirect a client's camera onto.
+            anyhow::ensure!(
+                !target.camera || target.protocol == Protocol::Rdp,
+                "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
+                 is an RDP channel and RFB has no equivalent. Remove the key.",
                 target.name,
                 target.protocol.name()
             );
@@ -3787,6 +3807,53 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].audio);
+    }
+
+    /// The camera follows audio's rule: MS-RDPECAM is an RDP channel, so the key
+    /// is refused on VNC at parse time and opt-in (default off) on RDP.
+    #[test]
+    fn camera_belongs_to_rdp_and_is_refused_on_vnc() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "nope"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            camera = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("camera"), "{rendered}");
+        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            camera = true
+
+            [[targets]]
+            name = "quiet"
+            protocol = "rdp"
+            host = "10.0.0.6"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].camera);
+        assert!(!config.targets[1].camera, "the camera is opt-in");
     }
 
     /// An unset codec reads as Opus, and passthrough can be asked for by name.

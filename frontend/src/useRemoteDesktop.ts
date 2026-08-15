@@ -5,6 +5,7 @@ import {
   createAudioPlayer,
   decodeAudioHead,
 } from "./audioPlayer.ts";
+import { type CameraSender, startCameraSender } from "./cameraSender.ts";
 import { connectionLabel } from "./connectionLabel.ts";
 import {
   applyCursorCss,
@@ -412,6 +413,20 @@ export function useRemoteDesktop(
   // has to happen inside a click — that is what makes an AudioContext playable
   // without an autoplay policy's permission.
   const [audioEnabled, setAudioEnabled] = useState(false);
+  // Whether this target redirects the browser's camera; capability, like canAudio.
+  const [canCamera, setCanCamera] = useState(false);
+  // Whether this browser is offering its camera. Per session and never
+  // remembered, by design rather than by the AudioContext's necessity: pointing
+  // a camera at the remote is a choice to make each time, not a preference that
+  // follows the profile around. It starts off on every connect and reconnect.
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  // Why the camera is off, when it was asked for: no permission, no H.264
+  // encoder, the target refusing the socket. Named, never worked around — the
+  // gateway passes H.264 through and there is no second codec to fall back to.
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  // Whether the remote is consuming the camera right now — an application over
+  // there has it open. UI feedback only; frames stop by themselves without it.
+  const [cameraStreaming, setCameraStreaming] = useState(false);
   // Why there is no sound, when there should be. One string, and what is behind it is
   // a decoder that refused or failed — this browser having no WebCodecs at all is not
   // among the possibilities, because such a browser never got past preflight.ts. A
@@ -601,6 +616,28 @@ export function useRemoteDesktop(
     open: () => void;
     close: () => void;
   } | null>(null);
+
+  // The camera sender, while one is live, and the way to a camera socket URL.
+  // The sender itself lives *outside* the connection effect — it owns a device
+  // and an encoder, not the session socket — but the claim token lives inside
+  // it, so the effect publishes a URL getter the toggle reads at click time.
+  const cameraSenderRef = useRef<CameraSender | null>(null);
+  const cameraUrlRef = useRef<(() => string | null) | null>(null);
+  // Bumped by every stop, so an enable still waiting on the permission prompt
+  // can tell it has been overtaken — by a disable click, a target switch, or
+  // the session ending — and put the sender it just built straight down.
+  const cameraGenerationRef = useRef(0);
+
+  // Stop offering the camera, idempotently: the sender's own `onStopped` also
+  // lands here, so a server-side close and the toggle meet at one place.
+  const stopCamera = useCallback(() => {
+    cameraGenerationRef.current += 1;
+    const sender = cameraSenderRef.current;
+    cameraSenderRef.current = null;
+    sender?.stop();
+    setCameraEnabled(false);
+    setCameraStreaming(false);
+  }, []);
 
   // The engine's latest pointer state, and where the touch gesture layer's
   // virtual pointer sits (null while a hardware mouse is driving). Both are
@@ -1259,6 +1296,13 @@ export function useRemoteDesktop(
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
+      // The camera never survives into a new session state: unlike sound there
+      // is no "by default" to seed from — enabling is explicit, every time.
+      // A `connected` is a new attachment or a new target either way, and the
+      // gateway has already dropped the old camera socket on its side.
+      setCanCamera(msg.camera);
+      stopCamera();
+      setCameraError(null);
       // What this session is, for the card. Nothing is checked here: whether this
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
@@ -1418,6 +1462,10 @@ export function useRemoteDesktop(
           closeAudioSocket();
           setAudioEnabled(false);
           setAudioError(null);
+          // The camera goes with the session it was enabled for.
+          setCanCamera(false);
+          stopCamera();
+          setCameraError(null);
           // The stream itself goes with `clearDesktop` below; what has to be said
           // here is that the complaint goes too. Whatever this browser could not
           // decode is no longer on the screen, and the next target may not send
@@ -1462,6 +1510,8 @@ export function useRemoteDesktop(
     };
     startRef.current = start;
     audioSocketRef.current = { open: openAudioSocket, close: closeAudioSocket };
+    cameraUrlRef.current = () =>
+      session ? gatewaySocketUrl("/ws/camera", session) : null;
     start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
@@ -1512,6 +1562,8 @@ export function useRemoteDesktop(
       paintSocket = null;
       startRef.current = null;
       audioSocketRef.current = null;
+      cameraUrlRef.current = null;
+      stopCamera();
       audioWs?.close();
       // The socket is going away, so nothing will answer a pending fetch.
       settleClipboardWaiters(null);
@@ -1536,6 +1588,7 @@ export function useRemoteDesktop(
     syncCursor,
     settleClipboardWaiters,
     releaseAudio,
+    stopCamera,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -1622,6 +1675,67 @@ export function useRemoteDesktop(
       }
     },
     [releaseAudio],
+  );
+
+  // Start or stop offering this browser's camera (the floating menu's Camera
+  // button).
+  //
+  // **Must be called from a click** — `getUserMedia`'s permission prompt is this
+  // path's gesture requirement, the way the AudioContext is audio's. Enabling
+  // is explicit and per session: nothing is remembered, so the button starts at
+  // "off" on every connect, and the camera light going on is always the direct
+  // consequence of a click on it.
+  //
+  // Opening the socket is the whole of the enable — its first message announces
+  // what the encoder will produce, and the gateway plugs a virtual camera into
+  // the remote on its arrival. Closing it is the whole of the disable, and the
+  // remote sees the device unplug.
+  const setCamera = useCallback(
+    (enabled: boolean) => {
+      setCameraError(null);
+      if (!enabled) {
+        stopCamera();
+        return;
+      }
+      const url = cameraUrlRef.current?.();
+      if (!url || cameraSenderRef.current) {
+        return;
+      }
+      const generation = cameraGenerationRef.current;
+      setCameraEnabled(true);
+      void startCameraSender(url, {
+        onStopped: (reason) => {
+          // The sender is already stopped; what is left is the state saying so.
+          // `stopCamera` is safe here — its `stop` finds nothing to do.
+          stopCamera();
+          if (reason) {
+            setCameraError(reason);
+          }
+        },
+        onStreaming: setCameraStreaming,
+      }).then(
+        (sender) => {
+          // Overtaken while the permission prompt was up — a disable click, a
+          // target switch, an unmount. The enable it belonged to is over.
+          if (cameraGenerationRef.current !== generation) {
+            sender.stop();
+            return;
+          }
+          cameraSenderRef.current = sender;
+        },
+        (e: unknown) => {
+          if (cameraGenerationRef.current === generation) {
+            setCameraEnabled(false);
+            setCameraError(
+              e instanceof Error
+                ? e.message
+                : "this browser cannot offer a camera",
+            );
+          }
+        },
+      );
+    },
+    [stopCamera],
   );
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
@@ -1986,6 +2100,10 @@ export function useRemoteDesktop(
     canAudio,
     audioEnabled,
     audioError,
+    canCamera,
+    cameraEnabled,
+    cameraError,
+    cameraStreaming,
     videoError,
     // What the sound and the picture actually are, for the card's Audio and Video
     // rows: the codec each decoder was built with, which the render dial does not
@@ -2014,6 +2132,7 @@ export function useRemoteDesktop(
     switchTarget,
     selectDisplay,
     setAudio,
+    setCamera,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,

@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod auth;
+pub mod camera;
 pub mod classify;
 pub mod cli;
 pub mod config;
@@ -22,6 +23,7 @@ pub mod pcm_stream;
 pub mod protocol;
 pub mod rdp;
 pub mod rdp_audio;
+pub mod rdp_camera;
 pub mod rdp_clipboard;
 pub mod regions;
 pub mod server;

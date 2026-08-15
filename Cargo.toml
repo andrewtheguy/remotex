@@ -228,3 +228,10 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# The camera work rides an unreleased freerdp wrapper: MS-RDPECAM went into the
+# sibling checkout and has no tag yet. This patch points cargo at that working
+# tree so the two can be developed and tested together; it comes out the moment
+# libfreerdp-prebuilt cuts the release and the `tag` above moves to it.
+[patch."https://github.com/andrewtheguy/libfreerdp-prebuilt"]
+freerdp = { path = "../libfreerdp-prebuilt/crates/freerdp" }
