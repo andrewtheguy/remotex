@@ -93,6 +93,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             audio_adaptive: false,
             audio_bitrate_min: None,
             camera: false,
+            microphone: false,
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

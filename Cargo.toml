@@ -228,3 +228,11 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Temporary, for the in-progress microphone (MS-RDPEAI) work: the `freerdp` tag
+# above has no `audin` plugin yet, so point at the local working tree until that
+# work is merged and released. Delete this section and bump the `tag` once a
+# release carries the microphone plugin — it breaks any checkout without the
+# sibling repo beside it. See camera-freerdp-patch-pending in memory.
+[patch."https://github.com/andrewtheguy/libfreerdp-prebuilt"]
+freerdp = { path = "../libfreerdp-prebuilt/crates/freerdp" }

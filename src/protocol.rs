@@ -914,6 +914,10 @@ pub enum ServerMsg {
         /// Capability only, like `audio` — enabling is the client's move, made
         /// afresh each session by opening `/ws/camera`, and never remembered.
         camera: bool,
+        /// Whether this target redirects the browser's microphone to the remote.
+        /// Capability only, the camera's twin — enabling is the client's move,
+        /// made afresh each session by opening `/ws/mic`, and never remembered.
+        microphone: bool,
         /// The render dial this session resolved to, as one line — see
         /// [`crate::config::RenderPlan::describe`].
         ///
@@ -1025,6 +1029,17 @@ pub enum ServerMsg {
     /// Samples were dropped and the stream cannot resume mid-GOP: the next
     /// frame the browser sends must be a keyframe.
     CameraKeyframe,
+    /// The remote opened the microphone — an application on it began capturing —
+    /// in the PCM format it chose. Relayed to the one browser driving `/ws/mic`,
+    /// which starts capturing at this rate and channel count and streaming raw
+    /// signed-16-bit PCM. Never appears on the session socket.
+    MicOpen {
+        sample_rate: u32,
+        channels: u16,
+    },
+    /// The remote closed the microphone. Capture should stop; another
+    /// [`ServerMsg::MicOpen`] may follow if the host reopens.
+    MicClose,
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -1065,6 +1080,7 @@ enum ControlMsg<'a> {
         clipboard: bool,
         audio: bool,
         camera: bool,
+        microphone: bool,
         render: &'a str,
     },
     RemoteOs { macos: bool },
@@ -1106,6 +1122,12 @@ enum ControlMsg<'a> {
     },
     CameraStop,
     CameraKeyframe,
+    MicOpen {
+        #[serde(rename = "sampleRate")]
+        sample_rate: u32,
+        channels: u16,
+    },
+    MicClose,
 }
 
 /// [`DisplayInfo`] as it goes out: `virtual_display` is `virtual` on the wire,
@@ -1166,6 +1188,7 @@ impl ServerMsg {
                 clipboard,
                 audio,
                 camera,
+                microphone,
                 render,
             } => control(&ControlMsg::Connected {
                 name,
@@ -1175,6 +1198,7 @@ impl ServerMsg {
                 clipboard: *clipboard,
                 audio: *audio,
                 camera: *camera,
+                microphone: *microphone,
                 render,
             }),
             ServerMsg::CameraStart {
@@ -1190,6 +1214,14 @@ impl ServerMsg {
             }),
             ServerMsg::CameraStop => control(&ControlMsg::CameraStop),
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
+            ServerMsg::MicOpen {
+                sample_rate,
+                channels,
+            } => control(&ControlMsg::MicOpen {
+                sample_rate: *sample_rate,
+                channels: *channels,
+            }),
+            ServerMsg::MicClose => control(&ControlMsg::MicClose),
             ServerMsg::VideoFormat { stream, decode } => {
                 control(&ControlMsg::VideoFormat { stream: *stream, decode })
             }
@@ -1494,6 +1526,20 @@ mod tests {
         );
     }
 
+    /// The microphone control messages, pinned byte for byte: the open/close
+    /// decisions the browser obeys, on the mic socket alone.
+    #[test]
+    fn the_mic_controls_are_text_frames() {
+        let open = (ServerMsg::MicOpen { sample_rate: 44_100, channels: 2 })
+            .text_frame()
+            .expect("micOpen must be a text frame");
+        assert_eq!(open, r#"{"type":"micOpen","sampleRate":44100,"channels":2}"#);
+        assert_eq!(
+            ServerMsg::MicClose.text_frame().as_deref(),
+            Some(r#"{"type":"micClose"}"#)
+        );
+    }
+
     /// The camera socket's one inbound text message parses with the field names
     /// the browser sends.
     #[test]
@@ -1534,13 +1580,14 @@ mod tests {
             clipboard: true,
             audio: false,
             camera: false,
+            microphone: false,
             render: "tiles · lossless png".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"render":"tiles · lossless png"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1554,6 +1601,7 @@ mod tests {
             clipboard: false,
             audio: false,
             camera: true,
+            microphone: true,
             render: "video q60".to_owned(),
         })
         .text_frame()

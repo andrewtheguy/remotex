@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::audio::AudioBridge;
 use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
+use crate::mic::{MicBridge, MicSignal};
 use crate::config::{Protocol, Subtype, TargetConfig};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, ServerMsg};
@@ -108,6 +109,18 @@ pub enum CameraRefused {
     Unsupported,
 }
 
+/// A [`SessionManager::attach_mic`] was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum MicRefused {
+    /// The token is not the current claim — the same refusal as every socket's.
+    #[error("invalid or superseded session token")]
+    InvalidToken,
+    /// No running engine carries a microphone: the picker state, a target
+    /// without `microphone = true`, or an engine that has already ended.
+    #[error("the session's target carries no microphone")]
+    Unsupported,
+}
+
 /// A [`SessionManager::connect`] was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
@@ -185,6 +198,25 @@ pub struct CameraAttachment {
     pub evicted: oneshot::Receiver<()>,
 }
 
+/// One microphone WebSocket's live handle on the session, returned by
+/// [`SessionManager::attach_mic`].
+///
+/// The camera's twin, bound to the **engine** as well as the claim for the same
+/// reason: the microphone is enabled explicitly per session, so a target switch
+/// or an engine ending closes this socket rather than re-arming it, and the
+/// browser starts the next session with the microphone off.
+pub struct MicAttachment {
+    /// Identifies this socket for [`SessionManager::detach_mic`] and the
+    /// per-message calls, so a superseded socket cannot act on its replacement.
+    pub id: u64,
+    /// The host's decisions — open (with its chosen format) and close — relayed
+    /// to the browser as they arrive.
+    pub signals: mpsc::UnboundedReceiver<MicSignal>,
+    /// Resolves when the session drops this socket — a takeover, a log out, a
+    /// newer microphone socket, or the engine ending.
+    pub evicted: oneshot::Receiver<()>,
+}
+
 /// Spawns a protocol engine. Injectable so the manager's unit tests can run
 /// against a scripted fake instead of a real RDP/VNC connect.
 ///
@@ -200,6 +232,7 @@ type EngineSpawner = Box<
             mpsc::Sender<ServerMsg>,
             Option<Arc<AudioBridge>>,
             Option<Arc<CameraBridge>>,
+            Option<Arc<MicBridge>>,
             Arc<LinkFeedback>,
         ) + Send
         + Sync,
@@ -233,6 +266,9 @@ struct EngineSlot {
     /// enabling the camera is an explicit per-session choice that must not
     /// carry over to whatever desktop comes next.
     camera: Option<Arc<CameraBridge>>,
+    /// Where the microphone socket's PCM goes, for a mic target. The camera's
+    /// twin in every way: bound to this engine, closed with it, never re-armed.
+    microphone: Option<Arc<MicBridge>>,
 }
 
 struct ClientSlot {
@@ -272,6 +308,16 @@ struct CameraSlot {
     _close: oneshot::Sender<()>,
 }
 
+/// The dedicated microphone WebSocket, while one is open. The camera's twin,
+/// bound to the claim **and** the engine, so every [`State::take_engine`] and
+/// every claim change closes it.
+struct MicSlot {
+    id: u64,
+    /// Held, never sent on — dropping the slot resolves the socket's receiver,
+    /// exactly as for [`CameraSlot`].
+    _close: oneshot::Sender<()>,
+}
+
 #[derive(Default)]
 struct State {
     /// The current claim token. Persists across WebSocket closes so the same
@@ -291,6 +337,9 @@ struct State {
     /// The attached *camera* WebSocket, if any. See [`CameraSlot`].
     camera: Option<CameraSlot>,
     next_camera_id: u64,
+    /// The attached *microphone* WebSocket, if any. See [`MicSlot`].
+    microphone: Option<MicSlot>,
+    next_mic_id: u64,
     /// Changes whenever the browser attachment changes. Detached-engine timers
     /// capture this value so a timer from an earlier detach cannot expire a
     /// session that reattached and later detached again.
@@ -320,10 +369,11 @@ impl State {
     /// one. Every path that stops an engine goes through here.
     fn take_engine(&mut self) -> bool {
         self.stop_audio();
-        // The camera socket ends with the engine, where the audio socket survives to
-        // be re-armed: enabling the camera is per-session and explicit, so whatever
-        // desktop comes next starts with it off (see [`CameraSlot`]).
+        // The camera and microphone sockets end with the engine, where the audio
+        // socket survives to be re-armed: enabling either is per-session and
+        // explicit, so whatever desktop comes next starts with them off.
         self.evict_camera();
+        self.evict_mic();
         self.engine.take().is_some()
     }
 
@@ -336,6 +386,16 @@ impl State {
             if let Some(bridge) = self.engine.as_ref().and_then(|e| e.camera.as_ref()) {
                 bridge.unplug();
             }
+        }
+    }
+
+    /// End the microphone socket. Unlike the camera there is no device to unplug —
+    /// MS-RDPEAI has none — so dropping the slot (which resolves the socket's
+    /// eviction receiver) is the whole of it, and the host's own OPEN/close drives
+    /// whether it reads anything once no browser is feeding it.
+    fn evict_mic(&mut self) {
+        if self.microphone.take().is_some() {
+            info!("session: closing the microphone socket");
         }
     }
 
@@ -426,9 +486,11 @@ impl SessionManager {
         // read the link or a client screen, so the seam hides both from them.
         Self::with_spawner(
             targets,
-            Box::new(move |target, _display, input_rx, frame_tx, audio, _camera, _feedback| {
-                spawn_engine(target, input_rx, frame_tx, audio);
-            }),
+            Box::new(
+                move |target, _display, input_rx, frame_tx, audio, _camera, _microphone, _feedback| {
+                    spawn_engine(target, input_rx, frame_tx, audio);
+                },
+            ),
         )
     }
 
@@ -458,6 +520,8 @@ impl SessionManager {
                 // engine keeps running for somebody else's eyes must not keep the old
                 // browser's camera plugged into it.
                 st.evict_camera();
+                // The microphone goes with the claim for the same reason.
+                st.evict_mic();
             }
             let evicted = st.client.take();
             let expiry = if evicted.is_some() {
@@ -537,6 +601,7 @@ impl SessionManager {
                     clipboard: target.clipboard,
                     audio: target.audio,
                     camera: target.camera,
+                    microphone: target.microphone,
                     render: engine.render.clone(),
                 }
             }
@@ -670,6 +735,56 @@ impl SessionManager {
         };
         if let Some(bridge) = bridge {
             bridge.sample(data, keyframe);
+        }
+    }
+
+    /// Attach the microphone WebSocket holding `token`. Opening the socket is the
+    /// enable — made afresh each session, never remembered — and closing it is the
+    /// disable. The camera's twin, refused the same way when the running target
+    /// carries no microphone.
+    pub fn attach_mic(self: &Arc<Self>, token: &str) -> Result<MicAttachment, MicRefused> {
+        let mut st = self.state.lock().unwrap();
+        if st.claim.as_deref() != Some(token) {
+            return Err(MicRefused::InvalidToken);
+        }
+        let Some(bridge) = st.engine.as_ref().and_then(|e| e.microphone.clone()) else {
+            return Err(MicRefused::Unsupported);
+        };
+        // Supersede is evict-then-install, one code path for both, like the camera.
+        st.evict_mic();
+        let signals = bridge.subscribe();
+        let (close_tx, evicted) = oneshot::channel();
+        st.next_mic_id += 1;
+        let id = st.next_mic_id;
+        st.microphone = Some(MicSlot { id, _close: close_tx });
+        info!("session: a microphone socket attached");
+        Ok(MicAttachment { id, signals, evicted })
+    }
+
+    /// The microphone socket `id` went away: the disable half of the enable that
+    /// opening it was.
+    pub fn detach_mic(&self, id: u64) {
+        let mut st = self.state.lock().unwrap();
+        if st.microphone.as_ref().is_none_or(|slot| slot.id != id) {
+            return;
+        }
+        st.evict_mic();
+        info!("session: the microphone socket went away");
+    }
+
+    /// Hand one buffer of PCM to the engine, with the same guard as every other
+    /// per-message call: only the current microphone socket is heard. The bridge
+    /// is called with the state lock released, for [`Self::camera_sample`]'s reason.
+    pub fn mic_sample(&self, id: u64, pcm: &[u8]) {
+        let bridge = {
+            let st = self.state.lock().unwrap();
+            if st.microphone.as_ref().is_none_or(|slot| slot.id != id) {
+                return;
+            }
+            st.engine.as_ref().and_then(|e| e.microphone.clone())
+        };
+        if let Some(bridge) = bridge {
+            bridge.sample(pcm);
         }
     }
 
@@ -876,12 +991,15 @@ impl SessionManager {
         // use it does not exist yet, because every engine end closed the previous
         // one and the browser must enable the camera afresh.
         let camera = target.camera.then(|| Arc::new(CameraBridge::new()));
+        // The microphone bridge is the camera's twin, per-engine and never re-armed.
+        let microphone = target.microphone.then(|| Arc::new(MicBridge::new()));
         st.engine = Some(EngineSlot {
             input_tx,
             generation,
             render: render.clone(),
             audio: audio.clone(),
             camera: camera.clone(),
+            microphone: microphone.clone(),
         });
         (self.spawn_engine)(
             target.clone(),
@@ -890,6 +1008,7 @@ impl SessionManager {
             frame_tx,
             audio,
             camera,
+            microphone,
             Arc::clone(&self.feedback),
         );
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
@@ -901,6 +1020,7 @@ impl SessionManager {
         let clipboard = target.clipboard;
         let audio = target.audio;
         let camera = target.camera;
+        let microphone = target.microphone;
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
@@ -916,6 +1036,7 @@ impl SessionManager {
                 clipboard,
                 audio,
                 camera,
+                microphone,
                 render,
             }));
         }
@@ -1135,6 +1256,9 @@ impl SessionManager {
 /// `audio` reaches only the RDP engine, and only when the target opted in: MS-RDPEA
 /// is the one audio channel either of these speaks, which the config file has
 /// already refused the VNC protocol over.
+// Eight positional handoffs — the engine's whole input surface — rather than a
+// parameter struct that would exist only to be destructured at the one call site.
+#[allow(clippy::too_many_arguments)]
 fn spawn_engine(
     target: TargetConfig,
     display: Option<HostDisplay>,
@@ -1142,6 +1266,7 @@ fn spawn_engine(
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
     camera: Option<Arc<CameraBridge>>,
+    microphone: Option<Arc<MicBridge>>,
     feedback: Arc<LinkFeedback>,
 ) {
     std::thread::spawn(move || {
@@ -1154,7 +1279,7 @@ fn spawn_engine(
         };
         match target.protocol {
             Protocol::Rdp => rt.block_on(rdp::run(
-                target, display, input_rx, frame_tx, audio, camera, feedback,
+                target, display, input_rx, frame_tx, audio, camera, microphone, feedback,
             )),
             Protocol::Vnc => rt.block_on(vnc::run(target, display, input_rx, frame_tx, feedback)),
         }
@@ -1180,6 +1305,7 @@ mod tests {
         mpsc::Sender<ServerMsg>,
         Option<Arc<AudioBridge>>,
         Option<Arc<CameraBridge>>,
+        Option<Arc<MicBridge>>,
     );
 
     /// The per-target capabilities the connected status carries. One struct
@@ -1195,6 +1321,7 @@ mod tests {
         /// `None` is the target saying nothing, which is Opus.
         audio_codec: Option<crate::config::AudioCodec>,
         camera: bool,
+        microphone: bool,
     }
 
     impl Meta {
@@ -1206,6 +1333,7 @@ mod tests {
                 audio: false,
                 audio_codec: None,
                 camera: false,
+                microphone: false,
             }
         }
 
@@ -1232,6 +1360,11 @@ mod tests {
 
         const fn camera(mut self) -> Self {
             self.camera = true;
+            self
+        }
+
+        const fn microphone(mut self) -> Self {
+            self.microphone = true;
             self
         }
     }
@@ -1275,6 +1408,7 @@ mod tests {
             audio_adaptive: false,
             audio_bitrate_min: None,
             camera: meta.camera,
+            microphone: meta.microphone,
         }
     }
 
@@ -1293,8 +1427,15 @@ mod tests {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
             Box::new(
-                move |_target: TargetConfig, _display, input_rx, frame_tx, audio, camera, _feedback| {
-                    hook_tx.send((input_rx, frame_tx, audio, camera)).unwrap();
+                move |_target: TargetConfig,
+                      _display,
+                      input_rx,
+                      frame_tx,
+                      audio,
+                      camera,
+                      microphone,
+                      _feedback| {
+                    hook_tx.send((input_rx, frame_tx, audio, camera, microphone)).unwrap();
                 },
             );
         let targets = vec![
@@ -1307,6 +1448,7 @@ mod tests {
             fake_target_with("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).audio()),
             fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
+            fake_target_with("rdp-mic", Meta::of(Protocol::Rdp).microphone()),
             fake_target_with(
                 "rdp-pcm",
                 Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
@@ -1364,6 +1506,7 @@ mod tests {
                 clipboard: got_clipboard,
                 audio: got_audio,
                 camera: got_camera,
+                microphone: got_microphone,
                 render: _,
             }) => {
                 assert_eq!(got, name);
@@ -1372,6 +1515,7 @@ mod tests {
                 assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
                 assert_eq!(got_camera, meta.camera, "camera metadata for {name}");
+                assert_eq!(got_microphone, meta.microphone, "microphone metadata for {name}");
             }
             other => panic!("expected connected({name}), got {other:?}"),
         }
@@ -1439,9 +1583,11 @@ mod tests {
     async fn connect_hands_the_spawner_the_clients_screen() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
-            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
-                hook_tx.send(display).unwrap();
-            });
+            Box::new(
+                move |_target, display, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                    hook_tx.send(display).unwrap();
+                },
+            );
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
@@ -1463,9 +1609,11 @@ mod tests {
     async fn a_degenerate_screen_report_reads_as_no_report() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
-            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
-                hook_tx.send(display).unwrap();
-            });
+            Box::new(
+                move |_target, display, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                    hook_tx.send(display).unwrap();
+                },
+            );
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
@@ -1496,7 +1644,7 @@ mod tests {
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
-        let (_input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().expect("engine spawned on connect");
+        let (_input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().expect("engine spawned on connect");
 
         // Reattaching to the running engine reports the same metadata.
         mgr.detach(att.id);
@@ -1593,7 +1741,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (_input_rx, frame_tx, _audio, _camera) = hooks.try_recv().expect("engine spawned on connect");
+        let (_input_rx, frame_tx, _audio, _camera, _microphone) = hooks.try_recv().expect("engine spawned on connect");
 
         frame_tx
             .send(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED })
@@ -1651,7 +1799,7 @@ mod tests {
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target, None).unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
-            let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+            let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
             mgr.detach(att.id);
             tokio::task::yield_now().await;
@@ -1674,7 +1822,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (mut input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         mgr.detach(att.id);
         tokio::task::yield_now().await;
@@ -1696,7 +1844,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         mgr.expire_attachment(att.id);
         assert!(input_rx.is_closed(), "heartbeat expiry left the engine running");
@@ -1710,7 +1858,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (mut input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
         assert!(
             input_rx.try_recv().is_err(),
             "a fresh engine paints on connect; no refresh needed"
@@ -1734,7 +1882,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         // Switch target: the engine is torn down (its input channel closes) and
         // the browser lands back on the picker without dropping the socket.
@@ -1760,7 +1908,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         mgr.log_out();
 
@@ -1802,7 +1950,7 @@ mod tests {
         expect_picker(&mut att_a.events).await;
         mgr.connect(att_a.id, "fake", None).unwrap();
         expect_connected(&mut att_a.events, "fake").await;
-        let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (mut input_rx, frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
@@ -1847,7 +1995,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (_input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        let (_input_rx, frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         // The engine reports a final error and dies.
         frame_tx
@@ -2589,5 +2737,131 @@ mod tests {
         mgr.log_out();
         expect_camera_evicted(cam).await;
         assert_eq!(count(&recorder.unplugs), 1);
+    }
+
+    // ------------------------------------------------------------ microphone
+
+    /// A [`crate::mic::MicControl`] that counts, standing in for the RDP adapter:
+    /// what these tests assert is that the socket's PCM reaches the engine's
+    /// bridge, not what MS-RDPEAI does with it. Simpler than the camera's recorder
+    /// because the microphone has no plug/unplug — only samples.
+    #[derive(Default)]
+    struct MicRecorder {
+        samples: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::mic::MicControl for MicRecorder {
+        fn sample(&self, _pcm: &[u8]) -> bool {
+            self.samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+    }
+
+    const MIC_FORMAT: crate::mic::MicFormat =
+        crate::mic::MicFormat { channels: 1, sample_rate: 16_000 };
+
+    /// Claim, attach, connect the mic target, and hand back its bridge with a
+    /// recorder already registered as the engine's control.
+    async fn connected_mic_session(
+        mgr: &Arc<SessionManager>,
+        hooks: &std_mpsc::Receiver<EngineEnds>,
+    ) -> (String, Attachment, Arc<MicBridge>, Arc<MicRecorder>) {
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rdp-mic", None).unwrap();
+        expect_connected_meta(&mut att.events, "rdp-mic", Meta::of(Protocol::Rdp).microphone())
+            .await;
+        let ends = hooks.try_recv().unwrap();
+        let bridge = ends.4.clone().expect("a mic target's engine is given a bridge");
+        let recorder = Arc::new(MicRecorder::default());
+        bridge.set_control(recorder.clone());
+        (token, att, bridge, recorder)
+    }
+
+    async fn expect_mic_evicted(mic: MicAttachment) {
+        let resolved = tokio::time::timeout(Duration::from_secs(5), mic.evicted)
+            .await
+            .expect("timed out waiting for the mic socket's eviction");
+        assert!(resolved.is_err(), "the slot drops its sender rather than sending");
+    }
+
+    /// The refusals: no claim token, and no mic-carrying engine — the picker
+    /// state and a mic-less target alike.
+    #[tokio::test]
+    async fn a_mic_socket_needs_the_claim_and_a_mic_target() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        assert!(matches!(mgr.attach_mic("nope"), Err(MicRefused::InvalidToken)));
+
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));
+
+        mgr.connect(att.id, "fake", None).unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let _ends = hooks.try_recv().unwrap();
+        assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));
+    }
+
+    /// The socket's PCM reaches the engine, and the engine's signals reach the
+    /// socket: the whole round trip short of the RDP channel itself.
+    #[tokio::test]
+    async fn a_mic_socket_drives_the_engines_bridge_both_ways() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, bridge, recorder) = connected_mic_session(&mgr, &hooks).await;
+
+        let mut mic = mgr.attach_mic(&token).unwrap();
+        mgr.mic_sample(mic.id, &[0, 0, 0, 0]);
+        assert_eq!(count(&recorder.samples), 1);
+
+        bridge.signal(MicSignal::Open(MIC_FORMAT));
+        let signal = tokio::time::timeout(Duration::from_secs(5), mic.signals.recv())
+            .await
+            .expect("timed out waiting for the open signal")
+            .expect("the signal channel ended unexpectedly");
+        assert_eq!(signal, MicSignal::Open(MIC_FORMAT));
+    }
+
+    /// A second mic socket supersedes the first, and the stale id acts on nothing.
+    #[tokio::test]
+    async fn a_second_mic_socket_supersedes_the_first() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, recorder) = connected_mic_session(&mgr, &hooks).await;
+
+        let first = mgr.attach_mic(&token).unwrap();
+        let stale_id = first.id;
+        let second = mgr.attach_mic(&token).unwrap();
+        expect_mic_evicted(first).await;
+
+        mgr.mic_sample(stale_id, &[1, 1]);
+        assert_eq!(count(&recorder.samples), 0);
+        mgr.mic_sample(second.id, &[1, 1]);
+        assert_eq!(count(&recorder.samples), 1);
+    }
+
+    /// Disconnecting to the picker ends the mic socket with the engine.
+    #[tokio::test]
+    async fn a_disconnect_closes_the_mic_socket_with_the_engine() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, att, _bridge, _recorder) = connected_mic_session(&mgr, &hooks).await;
+
+        let mic = mgr.attach_mic(&token).unwrap();
+        mgr.disconnect(att.id);
+        expect_mic_evicted(mic).await;
+        assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));
+    }
+
+    /// A takeover closes the mic socket though the engine keeps running for the new
+    /// holder: the departing browser's microphone must not feed somebody else's desktop.
+    #[tokio::test]
+    async fn a_takeover_closes_a_live_mic_socket() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, _recorder) = connected_mic_session(&mgr, &hooks).await;
+
+        let mic = mgr.attach_mic(&token).unwrap();
+        mgr.claim(true, None).unwrap();
+        expect_mic_evicted(mic).await;
+        assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
     }
 }

@@ -248,6 +248,9 @@ pub(crate) fn router_with_sessions(
                 // The camera, going the other way, on its own socket for the same
                 // reason — and opening it is the per-session enable (see crate::ws).
                 .route("/ws/camera", any(ws::camera_handler))
+                // The microphone, the camera's twin: browser to remote, on its own
+                // socket, opening it the per-session enable.
+                .route("/ws/mic", any(ws::mic_handler))
                 .route_layer(require_auth),
         );
 
@@ -796,6 +799,7 @@ mod tests {
                 audio_adaptive: false,
                 audio_bitrate_min: None,
                 camera: false,
+                microphone: false,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1063,6 +1067,7 @@ mod tests {
             audio_adaptive: false,
             audio_bitrate_min: None,
             camera: false,
+            microphone: false,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its
