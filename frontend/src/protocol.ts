@@ -197,6 +197,10 @@ export type ControlMsg =
       // Capability only, like `audio` — enabling is this client's move, made
       // afresh each session by opening /ws/camera, never persisted.
       camera: boolean;
+      // Whether this target redirects the browser's microphone to the remote.
+      // The camera's twin — enabling is this client's move, made afresh each
+      // session by opening /ws/mic, never persisted.
+      microphone: boolean;
       // The render dial this session resolved to, in one line — `tiles · jpeg q60`,
       // `motion · base png, moving stream q40`, `video q60`. The *resolved plan*
       // rather than the config keys, which the reader may not have and which take a
@@ -263,7 +267,13 @@ export type ControlMsg =
       fpsDenominator: number;
     }
   | { type: "cameraStop" }
-  | { type: "cameraKeyframe" };
+  | { type: "cameraKeyframe" }
+  // Mic-socket traffic only, the host's decisions: an application on the remote
+  // opened the microphone in the PCM format it chose (`micOpen`), so start
+  // capturing at that rate and channel count and stream signed-16-bit PCM; or it
+  // closed the microphone (`micClose`), so stop.
+  | { type: "micOpen"; sampleRate: number; channels: number }
+  | { type: "micClose" };
 
 export interface TileMsg {
   x: number;

@@ -638,6 +638,17 @@ pub struct TargetConfig {
     /// through, so there is no codec key beside this one.
     #[serde(default)]
     pub camera: bool,
+    /// Offer the remote a redirected microphone (MS-RDPEAI). Rejected for VNC,
+    /// like [`Self::audio`] and [`Self::camera`] and for the same shape of
+    /// reason: RFB has no equivalent channel at all.
+    ///
+    /// Capability only, and the camera's twin: the microphone flows when a
+    /// client enables it — explicitly, per session, never remembered — by
+    /// opening `/ws/mic`; a target with this key and no such client offers the
+    /// remote silence. The browser captures PCM and the gateway passes it
+    /// through, so there is no codec key beside this one.
+    #[serde(default)]
+    pub microphone: bool,
     /// Render *strategy* for this target. Defaults to [`RenderType::Tiles`],
     /// which with the default subtype (lossless PNG) is byte-identical to
     /// before the dial existed. Validated against [`Self::render_subtype`] and
@@ -1313,6 +1324,15 @@ impl ConfigFile {
             anyhow::ensure!(
                 !target.camera || target.protocol == Protocol::Rdp,
                 "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
+                 is an RDP channel and RFB has no equivalent. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
+            // The microphone is RDP's alone by the same rule: MS-RDPEAI is an RDP
+            // channel and RFB has nothing to redirect a client's microphone onto.
+            anyhow::ensure!(
+                !target.microphone || target.protocol == Protocol::Rdp,
+                "target {:?} sets microphone on a {} target, and only rdp carries it: MS-RDPEAI \
                  is an RDP channel and RFB has no equivalent. Remove the key.",
                 target.name,
                 target.protocol.name()
@@ -3854,6 +3874,53 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].camera);
         assert!(!config.targets[1].camera, "the camera is opt-in");
+    }
+
+    /// The microphone follows the camera's rule: MS-RDPEAI is an RDP channel, so
+    /// the key is refused on VNC at parse time and opt-in (default off) on RDP.
+    #[test]
+    fn microphone_belongs_to_rdp_and_is_refused_on_vnc() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "nope"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            microphone = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("microphone"), "{rendered}");
+        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            microphone = true
+
+            [[targets]]
+            name = "quiet"
+            protocol = "rdp"
+            host = "10.0.0.6"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].microphone);
+        assert!(!config.targets[1].microphone, "the microphone is opt-in");
     }
 
     /// An unset codec reads as Opus, and passthrough can be asked for by name.

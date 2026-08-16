@@ -44,6 +44,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::audio::AudioBridge;
 use crate::camera::CameraBridge;
+use crate::mic::MicBridge;
 use crate::config::{Security, TargetConfig};
 use crate::copies;
 use crate::encode::TileSink;
@@ -56,6 +57,7 @@ use crate::protocol::{
 use crate::rdp_audio;
 use crate::rdp_camera;
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
+use crate::rdp_mic;
 use crate::tiles::{self, Rect, Shadow};
 
 // A Windows peer can advertise Unicode text, fail the first FormatDataRequest,
@@ -184,6 +186,8 @@ fn connect_budget() -> Duration {
 /// than [`rdp_audio::connect`]: sound leaves this engine by the sink FreeRDP
 /// calls on its own thread, never through the `select!` below. That is the whole
 /// separation — see [`crate::rdp_audio`].
+// Eight handoffs matching the engine spawner's surface; see spawn_engine.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
     display: Option<HostDisplay>,
@@ -191,10 +195,11 @@ pub async fn run(
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
     camera: Option<Arc<CameraBridge>>,
+    microphone: Option<Arc<MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, config.render_plan(), feedback);
-    session(config, display, input_rx, &sink, audio, camera).await;
+    session(config, display, input_rx, &sink, audio, camera, microphone).await;
     sink.finish().await;
 }
 
@@ -240,8 +245,10 @@ async fn session(
     sink: &TileSink,
     audio: Option<Arc<AudioBridge>>,
     camera: Option<Arc<CameraBridge>>,
+    microphone: Option<Arc<MicBridge>>,
 ) {
-    let (session, events) = Session::start(connect_config(&config, display, audio, camera));
+    let (session, events) =
+        Session::start(connect_config(&config, display, audio, camera, microphone));
     let mut events = bridge_events(events);
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
@@ -373,6 +380,7 @@ fn connect_config(
     display: Option<HostDisplay>,
     audio: Option<Arc<AudioBridge>>,
     camera: Option<Arc<CameraBridge>>,
+    microphone: Option<Arc<MicBridge>>,
 ) -> Connect {
     // The opening size, in points at 1x: the pinned config size, else the full
     // resolution of the client's own screen — the same rule every engine
@@ -395,6 +403,7 @@ fn connect_config(
         clipboard: config.clipboard,
         audio: rdp_audio::connect(audio),
         camera: rdp_camera::connect(camera),
+        microphone: rdp_mic::connect(microphone),
         resize: config.resize,
         egfx: config.egfx(),
         connect_timeout: engine::TCP_CONNECT_TIMEOUT,

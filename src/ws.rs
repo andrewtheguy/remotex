@@ -60,9 +60,10 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 use crate::{
     camera::{CameraFormat, CameraSignal},
     feedback::LinkFeedback,
+    mic::MicSignal,
     protocol::{self, ClientMsg, ServerMsg, WireFrame},
     server::AppState,
-    session::{AttachEvent, CameraRefused, REATTACH_GRACE_PERIOD, SessionManager},
+    session::{AttachEvent, CameraRefused, MicRefused, REATTACH_GRACE_PERIOD, SessionManager},
     wire::Wire,
 };
 
@@ -71,8 +72,8 @@ const CLOSE_INVALID_TOKEN: u16 = 4000;
 /// Close code: another browser took over the session slot.
 const CLOSE_EVICTED: u16 = 4001;
 /// Close code: the running target does not carry what this socket carries —
-/// today that is the camera socket on a target without `camera = true`, or with
-/// no engine running at all.
+/// the camera socket on a target without `camera = true`, the microphone socket
+/// on one without `microphone = true`, or either with no engine running at all.
 const CLOSE_UNSUPPORTED: u16 = 4002;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
@@ -744,6 +745,140 @@ async fn camera(
     info!("ws: the camera socket closed after {samples_seen} sample(s) from the browser");
 }
 
+pub async fn mic_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsParams>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS))
+}
+
+/// The microphone socket: the enable, the PCM, and the host's decisions.
+///
+/// The camera's twin, one direction over. Opening it is the enable — per session,
+/// explicit, never remembered — and closing it is the disable. Inbound it carries
+/// binary buffers of raw signed-16-bit PCM in the host's chosen format and nothing
+/// else (the browser is purely reactive here — unlike the camera it announces no
+/// format, because MS-RDPEAI lets the *host* pick one). Outbound go the host's
+/// decisions as `micOpen` and `micClose` text frames. Like the camera it is refused
+/// outright — close `4002` — when the running target carries no microphone.
+async fn mic(
+    mut socket: WebSocket,
+    sessions: Arc<SessionManager>,
+    token: Option<String>,
+    heartbeat_timings: HeartbeatTimings,
+) {
+    let attachment = match token {
+        Some(token) => sessions.attach_mic(&token),
+        None => Err(MicRefused::InvalidToken),
+    };
+    let attachment = match attachment {
+        Ok(attachment) => attachment,
+        Err(refused) => {
+            let (code, reason) = match refused {
+                MicRefused::InvalidToken => (CLOSE_INVALID_TOKEN, "invalid session token"),
+                MicRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no microphone"),
+            };
+            warn!("ws: rejected a microphone connection: {reason}");
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
+                .await;
+            return;
+        }
+    };
+
+    info!("ws: a microphone socket attached");
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mic_id, mut signals, mut evicted) =
+        (attachment.id, attachment.signals, attachment.evicted);
+    let mut heartbeat = interval(heartbeat_timings.interval);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_heartbeat = Instant::now();
+
+    // The camera socket's diagnostic, for the same reason: this half — a real browser
+    // feeding a real host — no unit test reaches. `buffers_seen` answers "is the browser
+    // sending anything?" and is logged at close; `REMOTEX_MIC_DUMP` appends every PCM
+    // buffer to that path, a headerless little-endian S16 stream ffmpeg can play with
+    // `-f s16le -ar <rate> -ac <channels>`.
+    let mut buffers_seen: u64 = 0;
+    let mut dump =
+        std::env::var_os("REMOTEX_MIC_DUMP").and_then(|path| std::fs::File::create(path).ok());
+    if dump.is_some() {
+        info!("ws: dumping microphone buffers (REMOTEX_MIC_DUMP)");
+    }
+
+    loop {
+        tokio::select! {
+            // Biased, eviction first, for the camera socket's reason: a taken-over
+            // browser must stop feeding the session now.
+            biased;
+            _ = &mut evicted => {
+                info!("ws: microphone socket evicted");
+                let _ = ws_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_EVICTED,
+                        reason: "session taken over".into(),
+                    })))
+                    .await;
+                break;
+            }
+            signal = signals.recv() => {
+                // `None` means the session dropped this socket without evicting it —
+                // the engine ended — so the enable it represents is over.
+                let Some(signal) = signal else { break };
+                let msg = match signal {
+                    MicSignal::Open(format) => ServerMsg::MicOpen {
+                        sample_rate: format.sample_rate,
+                        channels: format.channels,
+                    },
+                    MicSignal::Close => ServerMsg::MicClose,
+                };
+                let Some(json) = msg.text_frame() else { continue };
+                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            frame = ws_rx.next() => {
+                match frame {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        buffers_seen += 1;
+                        if let Some(file) = dump.as_mut() {
+                            use std::io::Write as _;
+                            let _ = file.write_all(&bytes);
+                        }
+                        sessions.mic_sample(mic_id, &bytes);
+                    }
+                    Some(Ok(Message::Text(_))) => {
+                        // The microphone socket has no inbound text message: the browser
+                        // learns its format from `micOpen` and only ever sends PCM.
+                        warn!("ws: the microphone socket ignores client text messages");
+                    }
+                    Some(Ok(Message::Pong(_))) => last_heartbeat = Instant::now(),
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
+            _ = heartbeat.tick() => {
+                // Detaching the microphone is all a timeout does, exactly as for the
+                // camera: the session socket is the authority on browser liveness.
+                if last_heartbeat.elapsed() >= heartbeat_timings.timeout {
+                    warn!(
+                        "ws: microphone socket heartbeat timed out after {}s",
+                        heartbeat_timings.timeout.as_secs()
+                    );
+                    break;
+                }
+                if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    sessions.detach_mic(mic_id);
+    info!("ws: the microphone socket closed after {buffers_seen} buffer(s) from the browser");
+}
+
 async fn session(
     mut socket: WebSocket,
     sessions: Arc<SessionManager>,
@@ -1324,6 +1459,7 @@ mod tests {
             audio_adaptive: false,
             audio_bitrate_min: None,
             camera: false,
+            microphone: false,
         }
     }
 
