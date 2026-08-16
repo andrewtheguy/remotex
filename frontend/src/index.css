@@ -600,21 +600,6 @@ body {
   border-color: #f85149;
 }
 
-/* Two-column wrap for the special-keys and modifier-tap rows. */
-.toolbar-keys {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.toolbar-btn-key {
-  flex: 1 1 calc(50% - 3px);
-  min-width: 0;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.8rem;
-  text-align: center;
-}
-
 /* The action row: buttons share lines; the danger (Log out) button spans it. */
 .toolbar-actions {
   flex-direction: row;
