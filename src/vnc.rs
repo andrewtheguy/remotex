@@ -3096,6 +3096,10 @@ fn translate_input(
         | ClientMsg::Disconnect
         | ClientMsg::CacheReset
         | ClientMsg::PaintAck { .. } => Vec::new(),
+        // The camera socket's opening message, which no VNC target can ever see:
+        // `camera = true` is refused on VNC at parse time, so a camera socket is
+        // never armed against this engine and this message never reaches it.
+        ClientMsg::CameraFormat { .. } => Vec::new(),
         // Intercepted by the input loop, which is where the requested screen is
         // checked — see the `SelectDisplay` branch there. Generic RFB has nothing
         // for it; the Apple extension supplies the selectable list on either

@@ -19,14 +19,26 @@
 //! buffers outright. It is bound to the *claim* rather than to an attachment, so it
 //! survives a reattach and a target switch and ends only when the claim does.
 //!
-//! Close codes tell the browser why either socket ended:
+//! `/ws/camera?session=<token>` is the browser's camera going the other way, and
+//! **opening it is the enable** — per session, explicit, never a remembered
+//! preference. Inbound: one `cameraFormat` text message that plugs the virtual device
+//! into the remote, then binary H.264 samples. Outbound: the remote's streaming
+//! decisions (`cameraStart` / `cameraStop` / `cameraKeyframe`). Unlike audio it is
+//! bound to the claim **and the engine**: a target switch or engine end closes it, so
+//! the next session starts with the camera off, and closing it unplugs the device
+//! from the remote.
+//!
+//! Close codes tell the browser why any socket ended:
 //! - `4000` — the token is missing or superseded; claim again.
-//! - `4001` — evicted: another browser claimed the slot, or (on the audio socket) a
-//!   newer audio socket replaced this one.
+//! - `4001` — evicted: another browser claimed the slot, or a newer audio/camera
+//!   socket replaced this one.
+//! - `4002` — the running target does not carry this socket's medium (camera on a
+//!   target without `camera = true`, or no engine running).
 //!
 //! Any other close on the session socket detaches the browser. Reattaching within the
 //! grace period restores the picker or live engine; otherwise the engine ends for every
-//! protocol. A closed audio socket ends nothing but the sound.
+//! protocol. A closed audio socket ends nothing but the sound; a closed camera socket
+//! ends nothing but the camera.
 
 use axum::{
     extract::{
@@ -46,10 +58,11 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
+    camera::{CameraFormat, CameraSignal},
     feedback::LinkFeedback,
-    protocol::{ClientMsg, WireFrame},
+    protocol::{self, ClientMsg, ServerMsg, WireFrame},
     server::AppState,
-    session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager},
+    session::{AttachEvent, CameraRefused, REATTACH_GRACE_PERIOD, SessionManager},
     wire::Wire,
 };
 
@@ -57,6 +70,10 @@ use crate::{
 const CLOSE_INVALID_TOKEN: u16 = 4000;
 /// Close code: another browser took over the session slot.
 const CLOSE_EVICTED: u16 = 4001;
+/// Close code: the running target does not carry what this socket carries —
+/// today that is the camera socket on a target without `camera = true`, or with
+/// no engine running at all.
+const CLOSE_UNSUPPORTED: u16 = 4002;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
 const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
@@ -560,6 +577,171 @@ async fn audio(
 fn finish(sessions: &Arc<SessionManager>, audio_id: u64, wire: &Wire) {
     sessions.detach_audio(audio_id);
     info!("ws: audio totals: {}", wire.totals);
+}
+
+pub async fn camera_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsParams>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS))
+}
+
+/// The camera socket: the enable, the frames, and the remote's decisions.
+///
+/// Opening it is the enable — per session, explicit, never remembered — and closing it
+/// is the disable, which also unplugs the device from the remote. Inbound it carries
+/// one `cameraFormat` text message (which plugs the device) and then binary H.264
+/// samples; outbound go the remote's streaming decisions as `cameraStart`,
+/// `cameraStop` and `cameraKeyframe` text frames. Unlike the audio socket it is
+/// refused outright — close `4002` — when the running target carries no camera.
+async fn camera(
+    mut socket: WebSocket,
+    sessions: Arc<SessionManager>,
+    token: Option<String>,
+    heartbeat_timings: HeartbeatTimings,
+) {
+    let attachment = match token {
+        Some(token) => sessions.attach_camera(&token),
+        None => Err(CameraRefused::InvalidToken),
+    };
+    let attachment = match attachment {
+        Ok(attachment) => attachment,
+        Err(refused) => {
+            let (code, reason) = match refused {
+                CameraRefused::InvalidToken => (CLOSE_INVALID_TOKEN, "invalid session token"),
+                CameraRefused::Unsupported => {
+                    (CLOSE_UNSUPPORTED, "the target carries no camera")
+                }
+            };
+            warn!("ws: rejected a camera connection: {reason}");
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
+                .await;
+            return;
+        }
+    };
+
+    info!("ws: a camera socket attached");
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (camera_id, mut signals, mut evicted) =
+        (attachment.id, attachment.signals, attachment.evicted);
+    let mut heartbeat = interval(heartbeat_timings.interval);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_heartbeat = Instant::now();
+
+    // Diagnostics for the half no unit test reaches — a real browser feeding a real
+    // host. `samples_seen` answers the first question every camera bug asks ("is the
+    // browser sending anything at all?") and is logged at close. `REMOTEX_CAMERA_DUMP`
+    // additionally appends every access unit's raw bytes to that path: Annex B
+    // concatenates into a replayable elementary stream, so the exact stream a host
+    // rejected can be inspected with ffprobe or replayed with tmp/camera_send_probe.py.
+    let mut samples_seen: u64 = 0;
+    let mut dump = std::env::var_os("REMOTEX_CAMERA_DUMP")
+        .and_then(|path| std::fs::File::create(path).ok());
+    if dump.is_some() {
+        info!("ws: dumping camera samples (REMOTEX_CAMERA_DUMP)");
+    }
+
+    loop {
+        tokio::select! {
+            // Biased, eviction first, for the audio socket's reason turned around: a
+            // taken-over browser must stop *feeding* the session now — its camera is
+            // pointed at a person who no longer holds the desktop it goes to.
+            biased;
+            _ = &mut evicted => {
+                info!("ws: camera socket evicted");
+                let _ = ws_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_EVICTED,
+                        reason: "session taken over".into(),
+                    })))
+                    .await;
+                break;
+            }
+            signal = signals.recv() => {
+                // `None` means the session dropped this socket without evicting it —
+                // the engine ended — so the enable it represents is over.
+                let Some(signal) = signal else { break };
+                let msg = match signal {
+                    CameraSignal::Start(format) => ServerMsg::CameraStart {
+                        width: format.width,
+                        height: format.height,
+                        fps_numerator: format.fps_numerator,
+                        fps_denominator: format.fps_denominator,
+                    },
+                    CameraSignal::Stop => ServerMsg::CameraStop,
+                    CameraSignal::Keyframe => ServerMsg::CameraKeyframe,
+                };
+                let Some(json) = msg.text_frame() else { continue };
+                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            frame = ws_rx.next() => {
+                match frame {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        // A malformed frame is dropped whole — see
+                        // [`protocol::camera::parse`] — and quietly: one bad frame at
+                        // 30 fps must not become a log at 30 lines a second.
+                        if let Some((keyframe, unit)) = protocol::camera::parse(&bytes) {
+                            samples_seen += 1;
+                            if let Some(file) = dump.as_mut() {
+                                use std::io::Write as _;
+                                let _ = file.write_all(unit);
+                            }
+                            sessions.camera_sample(camera_id, unit, keyframe);
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        // The one inbound text message this socket has. Anything else
+                        // parseable is a client bug worth a line, not a close.
+                        match serde_json::from_str::<ClientMsg>(&text) {
+                            Ok(ClientMsg::CameraFormat {
+                                width,
+                                height,
+                                fps_numerator,
+                                fps_denominator,
+                            }) => sessions.camera_plug(
+                                camera_id,
+                                CameraFormat { width, height, fps_numerator, fps_denominator },
+                            ),
+                            // Named without its payload: a stray message here can
+                            // be clipboard text or keystrokes, which belong on no
+                            // log line.
+                            Ok(_) => {
+                                warn!("ws: the camera socket ignores non-camera client messages");
+                            }
+                            Err(e) => {
+                                warn!("ws: unparseable text on the camera socket: {e}");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => last_heartbeat = Instant::now(),
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
+            _ = heartbeat.tick() => {
+                // Detaching the camera is *all* a timeout does, exactly as for audio:
+                // the session socket is the authority on whether the browser is alive,
+                // and a desktop has to survive its camera dying.
+                if last_heartbeat.elapsed() >= heartbeat_timings.timeout {
+                    warn!(
+                        "ws: camera socket heartbeat timed out after {}s",
+                        heartbeat_timings.timeout.as_secs()
+                    );
+                    break;
+                }
+                if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    sessions.detach_camera(camera_id);
+    info!("ws: the camera socket closed after {samples_seen} sample(s) from the browser");
 }
 
 async fn session(
@@ -1141,6 +1323,7 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: false,
             audio_bitrate_min: None,
+            camera: false,
         }
     }
 

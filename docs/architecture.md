@@ -12,6 +12,7 @@ browser SPA over loopback or the network
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input, binary image batches
    │  /ws/audio: the audio format, then binary audio frames
+   │  /ws/camera: the camera format and H.264 samples up, start/stop down
    ▼
 axum server ── single session slot ── protocol engine
                                          ├─ RDP through FreeRDP
@@ -25,6 +26,8 @@ with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the experimental
 `ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
+The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
+passed through to the host over MS-RDPECAM.
 
 ## Constraints
 
@@ -709,7 +712,66 @@ not take surfaces as a decoder error naming it rather than as silence. A
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
 
-### Client input and display control
+### Camera frames
+
+The browser's camera goes the other way, on a third socket, and only to an RDP
+target that opted in with `camera = true` (refused on VNC at parse time: the
+channel is MS-RDPECAM and RFB has no equivalent). **Opening
+`/ws/camera?session=<token>` is the enable** — explicit, per session, and never a
+remembered preference, unlike audio's "sound by default". Its refusals add one
+code to the family: 401 before the upgrade, 4000 for a stale token, 4001 on
+eviction, and **4002** when the running target carries no camera (or no engine is
+running at all). Where the audio socket is bound to the claim alone and survives a
+target switch, the camera socket is bound to the claim *and the engine*: every
+engine end and every claim change closes it, so the next session always starts
+with the camera off. Closing it — either side — unplugs the virtual device from
+the remote.
+
+The socket's first message is `cameraFormat`, naming the H.264 the browser's
+`VideoEncoder` is configured for (geometry and a rational frame rate); its arrival
+is what announces the device to the host. Binary frames follow, one encoded access
+unit each:
+
+```text
+u8 kind = 0x04 | u8 flags (bit 0: keyframe) | the Annex B access unit
+```
+
+Downstream the gateway relays the host's MS-RDPECAM decisions as `cameraStart`
+(with the confirmed format), `cameraStop`, and `cameraKeyframe`; the browser
+encodes only between start and stop, restarting at an IDR, and honors a keyframe
+request on the next frame. Streaming begins when an application on the host opens
+the camera, which is the host's move alone — an enabled camera on an idle desktop
+sends nothing.
+
+The host also decides whether redirection exists at all, before any client
+message: the MS-RDPECAM enumeration channel is created by the server, and
+**Windows Server never creates it** over plain RDP. Measured on Server 2025
+Datacenter — Microsoft's own client gets no camera against it either, and neither
+installing Media Foundation nor clearing the `fDisableCameraRedir` policy changes
+it — so an enabled camera against a Server host is an announcement nobody asks
+about: the socket stays open and `cameraStart` never comes. Windows 11 creates
+the channel and installs the redirected device as a real camera
+("Remotex Camera (redirected)", enumerable by every capture application) for
+exactly as long as the camera socket holds it plugged.
+
+The gateway never transcodes — the PCM-passthrough bargain in the other
+direction. The browser encodes Annex B Constrained Baseline H.264
+(`frontend/src/cameraSender.ts`), the host's own camera stack decodes it, and the
+gateway advertises exactly one media type: the announced geometry. There is no
+codec key beside `camera`, and a browser that cannot encode H.264 reports that by
+name instead of falling back.
+
+The channel itself is implemented in Rust in the FreeRDP wrapper
+(`crates/freerdp/src/camera.rs` in libfreerdp-prebuilt) as a generic dynamic
+virtual channel plugin: the archives compile FreeRDP's own `rdpecam` out, because
+that implementation is a V4L capture stack with its own H.264 encoder and this
+camera's source is a browser. The wrapper answers the enumeration channel's
+version exchange, announces one device, serves its stream and media-type queries,
+and meters samples by the host's credits — one SampleResponse per SampleRequest,
+a short queue while credit is owed, and on overflow the queue is dropped whole
+and the browser is asked for a keyframe, because H.264 cannot resume mid-GOP.
+`src/rdp_camera.rs` adapts that endpoint to the gateway's `CameraBridge`
+(`src/camera.rs`), which is all the session layer sees.
 
 Client JSON messages cover pointer, wheel, keyboard, clipboard, display
 selection, viewport size, refresh, cache reset, and session control. Pointer

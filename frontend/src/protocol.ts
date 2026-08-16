@@ -94,6 +94,17 @@ export type ClientMsg =
       sequence: number;
       queuedMs: number;
       drawMs: number;
+    }
+  // The camera socket's opening message — its only inbound text — announcing
+  // the H.264 the browser's encoder will produce. Sending it is what plugs the
+  // virtual device into the remote; never sent on the session socket. The rate
+  // is rational because both ends speak one (29.97 is 30000/1001).
+  | {
+      type: "cameraFormat";
+      width: number;
+      height: number;
+      fpsNumerator: number;
+      fpsDenominator: number;
     };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
@@ -182,6 +193,10 @@ export type ControlMsg =
       resize: boolean;
       clipboard: boolean;
       audio: boolean;
+      // Whether this target redirects the browser's camera to the remote.
+      // Capability only, like `audio` — enabling is this client's move, made
+      // afresh each session by opening /ws/camera, never persisted.
+      camera: boolean;
       // The render dial this session resolved to, in one line — `tiles · jpeg q60`,
       // `motion · base png, moving stream q40`, `video q60`. The *resolved plan*
       // rather than the config keys, which the reader may not have and which take a
@@ -233,7 +248,22 @@ export type ControlMsg =
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed. Requested replies
   // populate the panel without silently copying; pushes retain automatic sync.
-  | ({ type: "clipboard"; requested: boolean } & ClipboardSnapshot);
+  | ({ type: "clipboard"; requested: boolean } & ClipboardSnapshot)
+  // Camera-socket traffic only, the remote's streaming decisions: an
+  // application on the remote opened the camera, so encode and send from a
+  // keyframe on (`cameraStart`, whose format is the confirmation of what this
+  // client announced — the gateway advertises exactly one media type); it
+  // closed the camera (`cameraStop`); or samples were dropped and the next
+  // frame must be a keyframe (`cameraKeyframe`).
+  | {
+      type: "cameraStart";
+      width: number;
+      height: number;
+      fpsNumerator: number;
+      fpsDenominator: number;
+    }
+  | { type: "cameraStop" }
+  | { type: "cameraKeyframe" };
 
 export interface TileMsg {
   x: number;
@@ -319,6 +349,8 @@ const BATCH_HEADER_LEN = 8;
 const AUDIO_FRAME_KIND = 0x03;
 const AUDIO_HEADER_LEN = 4;
 const AUDIO_PACKET_HEADER_LEN = 2;
+const CAMERA_FRAME_KIND = 0x04;
+const CAMERA_KEYFRAME = 0x01;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
@@ -540,6 +572,32 @@ function decodeVideo(
     },
     next: start + len,
   };
+}
+
+// Build one camera frame: the only binary this client *sends*. Layout (matching
+// `camera` in `src/protocol.rs`):
+//
+//   offset 0: u8 frame kind, always 0x04 (camera sample)
+//   offset 1: u8 flags — bit 0 set on a keyframe
+//   offset 2: one encoded H.264 access unit, to the end of the frame
+//
+// One access unit per WebSocket frame — the unit of transfer is the unit of
+// decode — with the keyframe bit carried so the gateway can drop and recover a
+// stream without parsing H.264. An empty unit is null rather than a frame: the
+// gateway's parser rejects a payload-less frame as malformed, so building one
+// here would only spend a send on bytes the far end drops.
+export function encodeCameraFrame(
+  unit: Uint8Array,
+  keyframe: boolean,
+): Uint8Array<ArrayBuffer> | null {
+  if (unit.byteLength === 0) {
+    return null;
+  }
+  const frame = new Uint8Array(2 + unit.byteLength);
+  frame[0] = CAMERA_FRAME_KIND;
+  frame[1] = keyframe ? CAMERA_KEYFRAME : 0;
+  frame.set(unit, 2);
+  return frame;
 }
 
 // Read the binary kind before choosing the independent batch or audio parser.

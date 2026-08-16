@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::audio::AudioBridge;
+use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::config::{Protocol, Subtype, TargetConfig};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, ServerMsg};
@@ -95,6 +96,18 @@ pub struct SessionBusy;
 #[error("invalid or superseded session token")]
 pub struct InvalidToken;
 
+/// A [`SessionManager::attach_camera`] was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum CameraRefused {
+    /// The token is not the current claim — the same refusal as every socket's.
+    #[error("invalid or superseded session token")]
+    InvalidToken,
+    /// No running engine carries a camera: the picker state, a target without
+    /// `camera = true`, or an engine that has already ended.
+    #[error("the session's target carries no camera")]
+    Unsupported,
+}
+
 /// A [`SessionManager::connect`] was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
@@ -150,12 +163,34 @@ pub struct AudioAttachment {
     pub evicted: oneshot::Receiver<()>,
 }
 
+/// One camera WebSocket's live handle on the session, returned by
+/// [`SessionManager::attach_camera`].
+///
+/// The camera has its own socket for the audio socket's reason inverted: its
+/// frames are the browser's, continuous, and must not queue behind — or ahead
+/// of — anything on the session socket. Unlike audio it is bound to the
+/// **engine** as well as the claim: the camera is enabled explicitly per
+/// session, so a target switch or an engine ending closes this socket rather
+/// than re-arming it, and the browser starts the next session with the camera
+/// off.
+pub struct CameraAttachment {
+    /// Identifies this socket for [`SessionManager::detach_camera`] and the
+    /// per-message calls, so a superseded socket cannot act on its replacement.
+    pub id: u64,
+    /// The remote's streaming decisions — start, stop, keyframe — relayed to
+    /// the browser as they arrive.
+    pub signals: mpsc::UnboundedReceiver<CameraSignal>,
+    /// Resolves when the session drops this socket — a takeover, a log out, a
+    /// newer camera socket, or the engine ending.
+    pub evicted: oneshot::Receiver<()>,
+}
+
 /// Spawns a protocol engine. Injectable so the manager's unit tests can run
 /// against a scripted fake instead of a real RDP/VNC connect.
 ///
-/// The [`AudioBridge`] is `Some` only for a target that opted into audio, which
-/// today means one RDP engine reads it and the other never sees it (see
-/// [`spawn_engine`]).
+/// The [`AudioBridge`] and [`CameraBridge`] are `Some` only for a target that
+/// opted in, which today means one RDP engine reads them and the other never
+/// sees them (see [`spawn_engine`]).
 ///
 type EngineSpawner = Box<
     dyn Fn(
@@ -164,6 +199,7 @@ type EngineSpawner = Box<
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
             Option<Arc<AudioBridge>>,
+            Option<Arc<CameraBridge>>,
             Arc<LinkFeedback>,
         ) + Send
         + Sync,
@@ -191,6 +227,12 @@ struct EngineSlot {
     /// running: a takeover, where the desktop carries on for a browser that is not
     /// the one listening.
     audio: Option<Arc<AudioBridge>>,
+    /// Where the camera socket's frames go, for a camera target. On the engine
+    /// slot like [`Self::audio`], but with the *opposite* survival rule: the
+    /// camera socket is bound to this engine and closes with it, because
+    /// enabling the camera is an explicit per-session choice that must not
+    /// carry over to whatever desktop comes next.
+    camera: Option<Arc<CameraBridge>>,
 }
 
 struct ClientSlot {
@@ -217,6 +259,19 @@ struct AudioSlot {
     _close: oneshot::Sender<()>,
 }
 
+/// The dedicated camera WebSocket, while one is open.
+///
+/// Bound to the claim **and** the engine, which is the deliberate asymmetry with
+/// [`AudioSlot`]: sound is a persisted preference that survives target switches, the
+/// camera is an explicit per-session enable that must not. Every path through
+/// [`State::take_engine`] closes this socket, and so does every claim change.
+struct CameraSlot {
+    id: u64,
+    /// Held, never sent on — dropping the slot resolves the socket's receiver,
+    /// exactly as for [`AudioSlot`].
+    _close: oneshot::Sender<()>,
+}
+
 #[derive(Default)]
 struct State {
     /// The current claim token. Persists across WebSocket closes so the same
@@ -233,6 +288,9 @@ struct State {
     /// The attached *audio* WebSocket, if any. See [`AudioSlot`].
     audio: Option<AudioSlot>,
     next_audio_id: u64,
+    /// The attached *camera* WebSocket, if any. See [`CameraSlot`].
+    camera: Option<CameraSlot>,
+    next_camera_id: u64,
     /// Changes whenever the browser attachment changes. Detached-engine timers
     /// capture this value so a timer from an earlier detach cannot expire a
     /// session that reattached and later detached again.
@@ -262,7 +320,23 @@ impl State {
     /// one. Every path that stops an engine goes through here.
     fn take_engine(&mut self) -> bool {
         self.stop_audio();
+        // The camera socket ends with the engine, where the audio socket survives to
+        // be re-armed: enabling the camera is per-session and explicit, so whatever
+        // desktop comes next starts with it off (see [`CameraSlot`]).
+        self.evict_camera();
         self.engine.take().is_some()
+    }
+
+    /// End the camera socket, unplugging the device from the remote when an engine
+    /// still runs — a takeover's desktop carries on, and the departing browser's
+    /// camera must not stay plugged into it.
+    fn evict_camera(&mut self) {
+        if self.camera.take().is_some() {
+            info!("session: closing the camera socket");
+            if let Some(bridge) = self.engine.as_ref().and_then(|e| e.camera.as_ref()) {
+                bridge.unplug();
+            }
+        }
     }
 
     /// Stop forwarding audio, if this attachment was.
@@ -352,7 +426,7 @@ impl SessionManager {
         // read the link or a client screen, so the seam hides both from them.
         Self::with_spawner(
             targets,
-            Box::new(move |target, _display, input_rx, frame_tx, audio, _feedback| {
+            Box::new(move |target, _display, input_rx, frame_tx, audio, _camera, _feedback| {
                 spawn_engine(target, input_rx, frame_tx, audio);
             }),
         )
@@ -379,6 +453,11 @@ impl SessionManager {
             // takeover prompt anywhere — and must not inherit somebody else's ears.
             if !owns {
                 st.evict_audio();
+                // The camera goes with the claim too — and unlike audio it also goes
+                // on every engine end, so this is the *extra* case: a takeover whose
+                // engine keeps running for somebody else's eyes must not keep the old
+                // browser's camera plugged into it.
+                st.evict_camera();
             }
             let evicted = st.client.take();
             let expiry = if evicted.is_some() {
@@ -457,6 +536,7 @@ impl SessionManager {
                     resize: target.resize,
                     clipboard: target.clipboard,
                     audio: target.audio,
+                    camera: target.camera,
                     render: engine.render.clone(),
                 }
             }
@@ -513,6 +593,84 @@ impl SessionManager {
         st.stop_audio();
         st.audio = None;
         info!("session: the audio socket went away");
+    }
+
+    /// Attach the camera WebSocket holding `token`. Opening the socket is the
+    /// enable — made afresh each session, never remembered — and closing it is
+    /// the disable, which also unplugs the device from the remote.
+    ///
+    /// Unlike [`Self::attach_audio`] this is refused, not silently accepted, when
+    /// the running target carries no camera: the audio socket's tolerance exists
+    /// so a target switch can re-arm it, and the camera deliberately has no such
+    /// survival to serve. A refusal is [`CameraRefused::Unsupported`]; a token
+    /// that is not the claim is [`CameraRefused::InvalidToken`], exactly as on
+    /// the other sockets.
+    pub fn attach_camera(self: &Arc<Self>, token: &str) -> Result<CameraAttachment, CameraRefused> {
+        let mut st = self.state.lock().unwrap();
+        if st.claim.as_deref() != Some(token) {
+            return Err(CameraRefused::InvalidToken);
+        }
+        let Some(bridge) = st.engine.as_ref().and_then(|e| e.camera.clone()) else {
+            return Err(CameraRefused::Unsupported);
+        };
+        // Supersede is evict-then-install, one code path for both, like audio — and
+        // eviction unplugs, so the remote sees the old socket's device go before the
+        // new socket plugs its own.
+        st.evict_camera();
+        let signals = bridge.subscribe();
+        let (close_tx, evicted) = oneshot::channel();
+        st.next_camera_id += 1;
+        let id = st.next_camera_id;
+        st.camera = Some(CameraSlot { id, _close: close_tx });
+        info!("session: a camera socket attached");
+        Ok(CameraAttachment { id, signals, evicted })
+    }
+
+    /// The camera socket `id` went away: the disable half of the enable that
+    /// opening it was. Unplugs the device, so turning the camera off in the
+    /// browser turns it off on the remote too.
+    pub fn detach_camera(&self, id: u64) {
+        let mut st = self.state.lock().unwrap();
+        if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
+            return;
+        }
+        st.evict_camera();
+        info!("session: the camera socket went away");
+    }
+
+    /// Plug the device with the format the camera socket announced. A no-op for
+    /// a socket that has been superseded or outlived its engine.
+    ///
+    /// The bridge is called with the state lock released, here and in
+    /// [`Self::camera_sample`], as [`Self::arm_audio`] already does: this mutex
+    /// is the one every mouse move goes through, and the bridge's far end is a
+    /// channel write inside the engine — real work that must not sit on it.
+    pub fn camera_plug(&self, id: u64, format: CameraFormat) {
+        let bridge = {
+            let st = self.state.lock().unwrap();
+            if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
+                return;
+            }
+            st.engine.as_ref().and_then(|e| e.camera.clone())
+        };
+        if let Some(bridge) = bridge {
+            bridge.plug(format);
+        }
+    }
+
+    /// Hand one encoded sample to the engine, with the same guard as every other
+    /// per-message call: only the current camera socket is heard.
+    pub fn camera_sample(&self, id: u64, data: &[u8], keyframe: bool) {
+        let bridge = {
+            let st = self.state.lock().unwrap();
+            if st.camera.as_ref().is_none_or(|slot| slot.id != id) {
+                return;
+            }
+            st.engine.as_ref().and_then(|e| e.camera.clone())
+        };
+        if let Some(bridge) = bridge {
+            bridge.sample(data, keyframe);
+        }
     }
 
     /// Install the audio pump if — and only if — there is both a socket to send to and
@@ -713,11 +871,17 @@ impl SessionManager {
         // queue of its own, which [`Self::arm_audio`] reads (see [`crate::audio`]), and
         // a socket of its own beyond that.
         let audio = target.audio.then(|| Arc::new(AudioBridge::new()));
+        // The camera bridge is per-engine, like the engine's own audio half — and
+        // there is no arm/re-arm machinery beside it: the camera socket that would
+        // use it does not exist yet, because every engine end closed the previous
+        // one and the browser must enable the camera afresh.
+        let camera = target.camera.then(|| Arc::new(CameraBridge::new()));
         st.engine = Some(EngineSlot {
             input_tx,
             generation,
             render: render.clone(),
             audio: audio.clone(),
+            camera: camera.clone(),
         });
         (self.spawn_engine)(
             target.clone(),
@@ -725,6 +889,7 @@ impl SessionManager {
             input_rx,
             frame_tx,
             audio,
+            camera,
             Arc::clone(&self.feedback),
         );
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
@@ -735,6 +900,7 @@ impl SessionManager {
         let resize = target.resize;
         let clipboard = target.clipboard;
         let audio = target.audio;
+        let camera = target.camera;
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
@@ -749,6 +915,7 @@ impl SessionManager {
                 resize,
                 clipboard,
                 audio,
+                camera,
                 render,
             }));
         }
@@ -974,6 +1141,7 @@ fn spawn_engine(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
+    camera: Option<Arc<CameraBridge>>,
     feedback: Arc<LinkFeedback>,
 ) {
     std::thread::spawn(move || {
@@ -985,9 +1153,9 @@ fn spawn_engine(
             }
         };
         match target.protocol {
-            Protocol::Rdp => {
-                rt.block_on(rdp::run(target, display, input_rx, frame_tx, audio, feedback))
-            }
+            Protocol::Rdp => rt.block_on(rdp::run(
+                target, display, input_rx, frame_tx, audio, camera, feedback,
+            )),
             Protocol::Vnc => rt.block_on(vnc::run(target, display, input_rx, frame_tx, feedback)),
         }
     });
@@ -1011,6 +1179,7 @@ mod tests {
         mpsc::UnboundedReceiver<ClientMsg>,
         mpsc::Sender<ServerMsg>,
         Option<Arc<AudioBridge>>,
+        Option<Arc<CameraBridge>>,
     );
 
     /// The per-target capabilities the connected status carries. One struct
@@ -1025,6 +1194,7 @@ mod tests {
         audio: bool,
         /// `None` is the target saying nothing, which is Opus.
         audio_codec: Option<crate::config::AudioCodec>,
+        camera: bool,
     }
 
     impl Meta {
@@ -1035,6 +1205,7 @@ mod tests {
                 clipboard: false,
                 audio: false,
                 audio_codec: None,
+                camera: false,
             }
         }
 
@@ -1056,6 +1227,11 @@ mod tests {
         const fn audio_codec(mut self, codec: crate::config::AudioCodec) -> Self {
             self.audio = true;
             self.audio_codec = Some(codec);
+            self
+        }
+
+        const fn camera(mut self) -> Self {
+            self.camera = true;
             self
         }
     }
@@ -1098,6 +1274,7 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: false,
             audio_bitrate_min: None,
+            camera: meta.camera,
         }
     }
 
@@ -1116,8 +1293,8 @@ mod tests {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
             Box::new(
-                move |_target: TargetConfig, _display, input_rx, frame_tx, audio, _feedback| {
-                    hook_tx.send((input_rx, frame_tx, audio)).unwrap();
+                move |_target: TargetConfig, _display, input_rx, frame_tx, audio, camera, _feedback| {
+                    hook_tx.send((input_rx, frame_tx, audio, camera)).unwrap();
                 },
             );
         let targets = vec![
@@ -1129,6 +1306,7 @@ mod tests {
             fake_target_with("vnc-resize", Meta::of(Protocol::Vnc).resize()),
             fake_target_with("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).audio()),
+            fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
             fake_target_with(
                 "rdp-pcm",
                 Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
@@ -1185,6 +1363,7 @@ mod tests {
                 resize: got_resize,
                 clipboard: got_clipboard,
                 audio: got_audio,
+                camera: got_camera,
                 render: _,
             }) => {
                 assert_eq!(got, name);
@@ -1192,6 +1371,7 @@ mod tests {
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
                 assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
+                assert_eq!(got_camera, meta.camera, "camera metadata for {name}");
             }
             other => panic!("expected connected({name}), got {other:?}"),
         }
@@ -1259,7 +1439,7 @@ mod tests {
     async fn connect_hands_the_spawner_the_clients_screen() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
-            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _feedback| {
+            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
                 hook_tx.send(display).unwrap();
             });
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
@@ -1283,7 +1463,7 @@ mod tests {
     async fn a_degenerate_screen_report_reads_as_no_report() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
-            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _feedback| {
+            Box::new(move |_target, display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
                 hook_tx.send(display).unwrap();
             });
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
@@ -1316,7 +1496,7 @@ mod tests {
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
-        let (_input_rx, _frame_tx, _audio) = hooks.try_recv().expect("engine spawned on connect");
+        let (_input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().expect("engine spawned on connect");
 
         // Reattaching to the running engine reports the same metadata.
         mgr.detach(att.id);
@@ -1413,7 +1593,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (_input_rx, frame_tx, _audio) = hooks.try_recv().expect("engine spawned on connect");
+        let (_input_rx, frame_tx, _audio, _camera) = hooks.try_recv().expect("engine spawned on connect");
 
         frame_tx
             .send(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED })
@@ -1471,7 +1651,7 @@ mod tests {
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target, None).unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
-            let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+            let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
             mgr.detach(att.id);
             tokio::task::yield_now().await;
@@ -1494,7 +1674,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (mut input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
         mgr.detach(att.id);
         tokio::task::yield_now().await;
@@ -1516,7 +1696,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
         mgr.expire_attachment(att.id);
         assert!(input_rx.is_closed(), "heartbeat expiry left the engine running");
@@ -1530,7 +1710,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (mut input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
         assert!(
             input_rx.try_recv().is_err(),
             "a fresh engine paints on connect; no refresh needed"
@@ -1554,7 +1734,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
         // Switch target: the engine is torn down (its input channel closes) and
         // the browser lands back on the picker without dropping the socket.
@@ -1580,7 +1760,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
         mgr.log_out();
 
@@ -1622,7 +1802,7 @@ mod tests {
         expect_picker(&mut att_a.events).await;
         mgr.connect(att_a.id, "fake", None).unwrap();
         expect_connected(&mut att_a.events, "fake").await;
-        let (mut input_rx, frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
@@ -1667,7 +1847,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (_input_rx, frame_tx, _audio) = hooks.try_recv().unwrap();
+        let (_input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
 
         // The engine reports a final error and dies.
         frame_tx
@@ -2220,5 +2400,194 @@ mod tests {
         revived.wave(one_frame_of_pcm());
         expect_opus_format(&mut sound.packets).await;
         assert_eq!(expect_audio(&mut sound.packets).await, 1);
+    }
+
+    // ---------------------------------------------------------------- camera
+
+    /// A [`crate::camera::CameraControl`] that counts, standing in for the RDP
+    /// adapter: what these tests assert is that the socket's traffic reaches the
+    /// engine's bridge and that eviction unplugs, not what MS-RDPECAM does with it.
+    #[derive(Default)]
+    struct CamRecorder {
+        plugs: std::sync::atomic::AtomicUsize,
+        unplugs: std::sync::atomic::AtomicUsize,
+        samples: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::camera::CameraControl for CamRecorder {
+        fn plug(&self, _format: crate::camera::CameraFormat) {
+            self.plugs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn unplug(&self) {
+            self.unplugs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn sample(&self, _data: &[u8], _keyframe: bool) -> bool {
+            self.samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+    }
+
+    const CAM_FORMAT: crate::camera::CameraFormat = crate::camera::CameraFormat {
+        width: 640,
+        height: 480,
+        fps_numerator: 30,
+        fps_denominator: 1,
+    };
+
+    /// Claim, attach, connect the camera target, and hand back its bridge with a
+    /// recorder already registered as the engine's control.
+    async fn connected_camera_session(
+        mgr: &Arc<SessionManager>,
+        hooks: &std_mpsc::Receiver<EngineEnds>,
+    ) -> (String, Attachment, Arc<CameraBridge>, Arc<CamRecorder>) {
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rdp-camera", None).unwrap();
+        expect_connected_meta(&mut att.events, "rdp-camera", Meta::of(Protocol::Rdp).camera())
+            .await;
+        let ends = hooks.try_recv().unwrap();
+        let bridge = ends.3.clone().expect("a camera target's engine is given a bridge");
+        let recorder = Arc::new(CamRecorder::default());
+        bridge.set_control(recorder.clone());
+        (token, att, bridge, recorder)
+    }
+
+    fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Wait for the eviction signal, or fail naming the wait. The sender is held
+    /// and never sent on — dropping the slot is the signal — so resolution is the
+    /// receiver's error, exactly as the socket's `select!` reads it.
+    async fn expect_camera_evicted(cam: CameraAttachment) {
+        let resolved = tokio::time::timeout(Duration::from_secs(5), cam.evicted)
+            .await
+            .expect("timed out waiting for the camera socket's eviction");
+        assert!(resolved.is_err(), "the slot drops its sender rather than sending");
+    }
+
+    /// The refusals: no claim token, and no camera-carrying engine — the picker
+    /// state and a camera-less target alike.
+    #[tokio::test]
+    async fn a_camera_socket_needs_the_claim_and_a_camera_target() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        assert!(matches!(mgr.attach_camera("nope"), Err(CameraRefused::InvalidToken)));
+
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        // The picker: nothing is running, so there is nothing to plug into.
+        assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
+
+        // A connected target without `camera = true` refuses the same way, which is
+        // the "camera disabled means the socket is disabled" rule on the wire.
+        mgr.connect(att.id, "fake", None).unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let _ends = hooks.try_recv().unwrap();
+        assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
+    }
+
+    /// The socket's traffic reaches the engine, and the engine's signals reach the
+    /// socket: the whole round trip short of the RDP channel itself.
+    #[tokio::test]
+    async fn a_camera_socket_drives_the_engines_bridge_both_ways() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, bridge, recorder) = connected_camera_session(&mgr, &hooks).await;
+
+        let mut cam = mgr.attach_camera(&token).unwrap();
+        mgr.camera_plug(cam.id, CAM_FORMAT);
+        mgr.camera_sample(cam.id, &[0, 0, 0, 1], true);
+        assert_eq!(count(&recorder.plugs), 1);
+        assert_eq!(count(&recorder.samples), 1);
+
+        bridge.signal(crate::camera::CameraSignal::Start(CAM_FORMAT));
+        let signal = tokio::time::timeout(Duration::from_secs(5), cam.signals.recv())
+            .await
+            .expect("timed out waiting for the start signal")
+            .expect("the signal channel ended unexpectedly");
+        assert_eq!(signal, crate::camera::CameraSignal::Start(CAM_FORMAT));
+    }
+
+    /// Closing the socket is the disable, and the disable unplugs: turning the
+    /// camera off in the browser turns it off on the remote.
+    #[tokio::test]
+    async fn closing_the_camera_socket_unplugs_the_device() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, recorder) = connected_camera_session(&mgr, &hooks).await;
+
+        let cam = mgr.attach_camera(&token).unwrap();
+        mgr.camera_plug(cam.id, CAM_FORMAT);
+        mgr.detach_camera(cam.id);
+        assert_eq!(count(&recorder.unplugs), 1);
+
+        // The enable is per session and the engine still runs, so a fresh socket
+        // is accepted — the browser can turn the camera back on.
+        assert!(mgr.attach_camera(&token).is_ok());
+    }
+
+    /// A second camera socket supersedes the first, unplugging on the way so the
+    /// remote sees one device end before the next begins.
+    #[tokio::test]
+    async fn a_second_camera_socket_supersedes_the_first() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, recorder) = connected_camera_session(&mgr, &hooks).await;
+
+        let first = mgr.attach_camera(&token).unwrap();
+        mgr.camera_plug(first.id, CAM_FORMAT);
+        let stale_id = first.id;
+        let second = mgr.attach_camera(&token).unwrap();
+        expect_camera_evicted(first).await;
+        assert_eq!(count(&recorder.unplugs), 1);
+
+        // The superseded socket's id acts on nothing — not the new slot, not the
+        // engine.
+        mgr.camera_sample(stale_id, &[1], true);
+        assert_eq!(count(&recorder.samples), 0);
+        mgr.camera_sample(second.id, &[1], true);
+        assert_eq!(count(&recorder.samples), 1);
+    }
+
+    /// Disconnecting to the picker ends the camera socket with the engine: the
+    /// enable was for that session, and the next target starts with it off.
+    #[tokio::test]
+    async fn a_disconnect_closes_the_camera_socket_with_the_engine() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, att, _bridge, _recorder) = connected_camera_session(&mgr, &hooks).await;
+
+        let cam = mgr.attach_camera(&token).unwrap();
+        mgr.disconnect(att.id);
+        expect_camera_evicted(cam).await;
+        // And the picker state refuses a new one, as ever.
+        assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
+    }
+
+    /// A takeover closes the camera socket *and* unplugs the device, though the
+    /// engine keeps running for the new holder: the departing browser's camera
+    /// must not stay pointed at somebody else's desktop.
+    #[tokio::test]
+    async fn a_takeover_closes_a_live_camera_socket() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, recorder) = connected_camera_session(&mgr, &hooks).await;
+
+        let cam = mgr.attach_camera(&token).unwrap();
+        mgr.camera_plug(cam.id, CAM_FORMAT);
+        mgr.claim(true, None).unwrap();
+        expect_camera_evicted(cam).await;
+        assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
+        assert_eq!(count(&recorder.unplugs), 1);
+    }
+
+    /// Logging out takes the camera with everything else.
+    #[tokio::test]
+    async fn logging_out_closes_the_camera_socket() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, recorder) = connected_camera_session(&mgr, &hooks).await;
+
+        let cam = mgr.attach_camera(&token).unwrap();
+        mgr.camera_plug(cam.id, CAM_FORMAT);
+        mgr.log_out();
+        expect_camera_evicted(cam).await;
+        assert_eq!(count(&recorder.unplugs), 1);
     }
 }

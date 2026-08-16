@@ -201,6 +201,53 @@ It is closed only where the claim changes (`evict_audio`), and that eviction is
 load-bearing rather than tidy: without it the next `connect` re-arms an evicted
 browser onto the new holder's desktop.
 
+## Camera
+
+The browser's camera goes the other way, over MS-RDPECAM, and it is RDP-only like
+audio: `camera = true` per target (`src/config.rs`), refused on VNC at parse time.
+The channel itself is implemented in Rust in the wrapper crate
+(`libfreerdp-prebuilt/crates/freerdp/src/camera.rs`) as a generic DVC plugin over
+`drdynvc` — the archives compile FreeRDP's own `rdpecam` **out**, deliberately: that
+implementation is a V4L capture stack and an H.264 encoder, and this camera's source
+is a browser. Do not turn `CHANNEL_RDPECAM` on.
+
+The gateway carries **H.264 only and never transcodes** — the same bargain as PCM
+passthrough, in the other direction. The browser's `VideoEncoder` produces Annex B
+Constrained Baseline (`frontend/src/cameraSender.ts`), the Windows host decodes it,
+and one media type is advertised: the geometry the socket announced. There is no
+codec key beside `camera`, no gateway encoder, and no fallback; a browser that
+cannot encode says so by name.
+
+The camera has **its own WebSocket**, `/ws/camera`, and opening it is the enable.
+Unlike audio the enable is **explicit and per session — never persisted**: no
+localStorage key, no seed on connect, and the socket is bound to the claim *and the
+engine* (`CameraSlot`), so every engine end and every claim change closes it and the
+next session starts with the camera off. Closing the socket (either side) unplugs
+the virtual device from the remote — turning the camera off in the browser turns it
+off on the host. A camera socket against a target without `camera = true` is closed
+with `4002`, not silently tolerated.
+
+The remote drives the traffic: `cameraStart`/`cameraStop`/`cameraKeyframe` relay the
+host's MS-RDPECAM decisions to the browser, which encodes only between start and
+stop and restarts at a keyframe. Samples are credit-metered in the wrapper; on
+overflow it drops the queue whole and asks for a keyframe, because H.264 cannot
+resume mid-GOP. Streaming needs an application on the host to open the camera —
+enumeration, announcement and device installation are testable without one
+(`freerdp-e2e`'s camera leg, `tmp/camera_probe.py`), the picture itself is not.
+
+Whether a camera can exist at all is the host's decision, made before any client
+message: the server side creates the MS-RDPECAM enumeration channel, and **Windows
+Server never does** over plain RDP — measured on Server 2025 Datacenter, where
+Microsoft's own client fails the same way, and where installing Media Foundation
+and clearing `fDisableCameraRedir` changed nothing. Against such a host
+`camera = true` is an enable nothing ever answers: the socket opens, the device
+plugs, no channel arrives, no device appears. Do not debug the gateway for it;
+`FREERDP_ECAM_TRACE=1` (wrapper) shows the difference as an enumeration channel
+that never opens. Windows 11 offers the channel and installs the device
+("Remotex Camera (redirected)"), where the one remaining default to know about is
+the Camera app's: it opens on the host's own camera when one exists, and the
+redirected one is behind its change-camera button.
+
 ## Video codec
 
 Video — `render_type = "video"` and `render_motion_subtype = "stream"` alike — is
