@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.151"
+version = "0.0.152"
 
 [package]
 name = "remotex"
@@ -193,7 +193,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260812213059-d4a15a0" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260816030431-45bd36b" }
 
 [[test]]
 name = "embedded_gateway_e2e"
@@ -228,10 +228,3 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-
-# The camera work rides an unreleased freerdp wrapper: MS-RDPECAM went into the
-# sibling checkout and has no tag yet. This patch points cargo at that working
-# tree so the two can be developed and tested together; it comes out the moment
-# libfreerdp-prebuilt cuts the release and the `tag` above moves to it.
-[patch."https://github.com/andrewtheguy/libfreerdp-prebuilt"]
-freerdp = { path = "../libfreerdp-prebuilt/crates/freerdp" }
