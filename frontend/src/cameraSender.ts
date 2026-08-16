@@ -83,6 +83,39 @@ export function rationalFps(fps: number): {
   return { numerator: numerator / divisor, denominator: 1000 / divisor };
 }
 
+// Chrome currently accepts an `avc1.42e0..` configuration but can emit a
+// Baseline SPS whose profile-compatibility byte is zero. DirectShow decodes
+// that stream, while Windows' MediaCapture camera source waits forever after
+// its first sample. The encoder is already producing Baseline syntax; make the
+// SPS advertise the Constrained Baseline contract we requested. Annex B start
+// codes cannot occur unescaped inside a NAL, so finding both three- and
+// four-byte forms this way cannot mistake encoded payload for an SPS.
+export function normalizeConstrainedBaseline(unit: Uint8Array): void {
+  for (let index = 0; index + 3 < unit.length; index += 1) {
+    let header = -1;
+    if (unit[index] === 0 && unit[index + 1] === 0 && unit[index + 2] === 1) {
+      header = index + 3;
+    } else if (
+      unit[index] === 0 &&
+      unit[index + 1] === 0 &&
+      unit[index + 2] === 0 &&
+      unit[index + 3] === 1
+    ) {
+      header = index + 4;
+    }
+    if (
+      header >= 0 &&
+      header + 2 < unit.length &&
+      (unit[header] & 0x1f) === 7 &&
+      unit[header + 1] === 0x42
+    ) {
+      // constraint_set0/1/2, matching the `42e0` codec string from
+      // `h264Config`; keep any remaining compatibility bits intact.
+      unit[header + 2] |= 0xe0;
+    }
+  }
+}
+
 // Capture, configure, connect. The returned sender is live until its socket
 // closes (server side) or `stop` is called (this side); both end in exactly one
 // `onStopped`.
@@ -186,6 +219,7 @@ export async function startCameraSender(
       }
       const unit = new Uint8Array(chunk.byteLength);
       chunk.copyTo(unit);
+      normalizeConstrainedBaseline(unit);
       const frame = encodeCameraFrame(unit, key);
       if (frame) {
         socket.send(frame);

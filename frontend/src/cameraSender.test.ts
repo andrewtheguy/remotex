@@ -5,7 +5,11 @@
 // Run with `bun test src/cameraSender.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { h264Config, rationalFps } from "./cameraSender";
+import {
+  h264Config,
+  normalizeConstrainedBaseline,
+  rationalFps,
+} from "./cameraSender";
 import { encodeCameraFrame } from "./protocol";
 
 test("a 720p30 camera fits level 3.1", () => {
@@ -34,6 +38,28 @@ test("integer frame rates stay {fps, 1}", () => {
 test("fractional frame rates keep their thousandths, reduced", () => {
   assert.deepEqual(rationalFps(29.97), { numerator: 2997, denominator: 100 });
   assert.deepEqual(rationalFps(23.976), { numerator: 2997, denominator: 125 });
+});
+
+test("baseline SPS units are normalized to the requested constrained profile", () => {
+  const unit = new Uint8Array([
+    0, 0, 0, 1, 0x27, 0x42, 0x00, 0x1f, 0xaa, 0, 0, 1, 0x28, 0xce, 0x3c,
+  ]);
+  normalizeConstrainedBaseline(unit);
+  assert.deepEqual(
+    Array.from(unit),
+    [0, 0, 0, 1, 0x27, 0x42, 0xe0, 0x1f, 0xaa, 0, 0, 1, 0x28, 0xce, 0x3c],
+  );
+});
+
+test("SPS normalization handles three-byte start codes and preserves other profiles", () => {
+  const unit = new Uint8Array([
+    0, 0, 1, 0x67, 0x42, 0x40, 0x1f, 0, 0, 1, 0x67, 0x64, 0x00, 0x28,
+  ]);
+  normalizeConstrainedBaseline(unit);
+  assert.deepEqual(
+    Array.from(unit),
+    [0, 0, 1, 0x67, 0x42, 0xe0, 0x1f, 0, 0, 1, 0x67, 0x64, 0x00, 0x28],
+  );
 });
 
 // The layout mirrors `camera` in src/protocol.rs; the Rust side's parser has
