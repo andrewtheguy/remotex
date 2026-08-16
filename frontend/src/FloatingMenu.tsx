@@ -30,12 +30,12 @@ import {
 } from "./useRemoteDesktop.ts";
 
 // The floating chrome — a draggable ☰ button that toggles a toolbar drawer. The
-// drawer carries this project's controls (browser-swallowed keys, modifier taps,
-// the gesture cheat-sheet), a Switch target button that returns to the post-login
-// picker, and Log out, which ends the web login. Three of its buttons open a panel
-// instead of acting: Soft keyboard, Clipboard — only for targets that opted into
-// it, see ClipboardPanel — and Display, only for a remote that offers more than
-// one (see DisplayPanel).
+// drawer carries this project's controls, a Switch target button that returns to
+// the post-login picker, and Log out, which ends the web login. Three of its
+// buttons open a panel instead of acting: Soft keyboard — which is where every
+// key, modifier and browser-swallowed combo now lives — Clipboard, only for
+// targets that opted into it (see ClipboardPanel), and Display, only for a remote
+// that offers more than one (see DisplayPanel).
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
 // Pointer travel (px) before a press becomes a drag rather than a click.
@@ -43,26 +43,6 @@ const DRAG_THRESHOLD = 6;
 const TOOLBAR_WIDTH = 240;
 const TOOLBAR_GAP = 10;
 const TOOLBAR_MIN_HEIGHT = 120;
-
-// DOM `code` sequences the browser intercepts before the remote can see them:
-// pressed in order, released in reverse (see useRemoteDesktop.sendKeyCombo).
-const SPECIAL_KEYS: readonly { label: string; codes: string[] }[] = [
-  { label: "F5", codes: ["F5"] },
-  { label: "F11", codes: ["F11"] },
-  { label: "Ctrl+R", codes: ["ControlLeft", "KeyR"] },
-  { label: "Ctrl+W", codes: ["ControlLeft", "KeyW"] },
-  { label: "Ctrl+T", codes: ["ControlLeft", "KeyT"] },
-  { label: "Alt+F4", codes: ["AltLeft", "F4"] },
-];
-
-// Bare modifier taps — useful on touch, where there's no physical modifier to
-// hold while tapping another key.
-const MODIFIER_TAPS: readonly { label: string; code: string }[] = [
-  { label: "Ctrl", code: "ControlLeft" },
-  { label: "Alt", code: "AltLeft" },
-  { label: "Shift", code: "ShiftLeft" },
-  { label: "Super", code: "MetaLeft" },
-];
 
 // The chrome shortcut, spelled the way the Help card and the button's tooltip show
 // it. One source for all three so the card, the tooltip and the handler cannot
@@ -1022,40 +1002,6 @@ export default function FloatingMenu({
             streaming={cameraStreaming}
             onChange={onCameraChange}
           />
-
-          <div className="toolbar-section">
-            <span className="toolbar-label">Special keys</span>
-            <div className="toolbar-keys">
-              {SPECIAL_KEYS.map((key) => (
-                <button
-                  key={key.label}
-                  type="button"
-                  className="toolbar-btn toolbar-btn-key"
-                  onClick={() => sendKeyCombo(key.codes)}
-                  title={`Send ${key.label} to the remote`}
-                >
-                  {key.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="toolbar-section">
-            <span className="toolbar-label">Modifier tap</span>
-            <div className="toolbar-keys">
-              {MODIFIER_TAPS.map((mod) => (
-                <button
-                  key={mod.label}
-                  type="button"
-                  className="toolbar-btn toolbar-btn-key"
-                  onClick={() => sendKeyCombo([mod.code])}
-                  title={`Tap ${mod.label}`}
-                >
-                  {mod.label}
-                </button>
-              ))}
-            </div>
-          </div>
 
           <MacKeyboardSection
             enabled={macKeyOverridesEnabled}
