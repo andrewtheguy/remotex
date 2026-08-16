@@ -164,7 +164,9 @@ export async function startMicSender(
     stopped = true;
     generation += 1;
     tearDownGraph();
-    track.stop();
+    for (const t of stream.getTracks()) {
+      t.stop();
+    }
     if (
       socket.readyState === WebSocket.OPEN ||
       socket.readyState === WebSocket.CONNECTING
@@ -183,17 +185,30 @@ export async function startMicSender(
     tearDownGraph();
     generation += 1;
     const mine = generation;
-    const context = new AudioContext({ sampleRate });
+    // Constructing the context can throw synchronously when the host's rate is
+    // one this browser will not open; there is nothing to close yet if it does.
+    let context: AudioContext;
     try {
-      await context.audioWorklet.addModule(
-        URL.createObjectURL(
-          new Blob([WORKLET_MODULE], { type: "application/javascript" }),
-        ),
+      context = new AudioContext({ sampleRate });
+    } catch (e) {
+      stop(
+        e instanceof Error
+          ? e.message
+          : "this browser refused the audio format",
       );
+      return;
+    }
+    const moduleUrl = URL.createObjectURL(
+      new Blob([WORKLET_MODULE], { type: "application/javascript" }),
+    );
+    try {
+      await context.audioWorklet.addModule(moduleUrl);
     } catch (e) {
       void context.close().catch(() => {});
       stop(e instanceof Error ? e.message : "the audio worklet failed to load");
       return;
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
     }
     // Superseded while the module loaded: drop this graph silently.
     if (stopped || mine !== generation) {

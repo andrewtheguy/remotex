@@ -2864,4 +2864,35 @@ mod tests {
         expect_mic_evicted(mic).await;
         assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
     }
+
+    /// Closing the socket is the disable, and the stale id then acts on nothing.
+    /// The enable is per session and the engine still runs, so a fresh socket is
+    /// accepted — the browser can turn the microphone back on.
+    #[tokio::test]
+    async fn closing_the_mic_socket_leaves_it_inert_and_allows_a_fresh_one() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, recorder) = connected_mic_session(&mgr, &hooks).await;
+
+        let mic = mgr.attach_mic(&token).unwrap();
+        let stale_id = mic.id;
+        mgr.detach_mic(mic.id);
+
+        mgr.mic_sample(stale_id, &[1, 1]);
+        assert_eq!(count(&recorder.samples), 0);
+
+        let fresh = mgr.attach_mic(&token).unwrap();
+        mgr.mic_sample(fresh.id, &[1, 1]);
+        assert_eq!(count(&recorder.samples), 1);
+    }
+
+    /// Logging out takes the microphone with everything else.
+    #[tokio::test]
+    async fn logging_out_closes_the_mic_socket() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, _bridge, _recorder) = connected_mic_session(&mgr, &hooks).await;
+
+        let mic = mgr.attach_mic(&token).unwrap();
+        mgr.log_out();
+        expect_mic_evicted(mic).await;
+    }
 }
