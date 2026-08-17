@@ -236,14 +236,21 @@ enumeration, announcement and device installation are testable without one
 (`freerdp-e2e`'s camera leg, `tmp/camera_probe.py`), the picture itself is not.
 
 Whether a camera can exist at all is the host's decision, made before any client
-message: the server side creates the MS-RDPECAM enumeration channel, and **Windows
-Server never does** over plain RDP — measured on Server 2025 Datacenter, where
-Microsoft's own client fails the same way, and where installing Media Foundation
-and clearing `fDisableCameraRedir` changed nothing. Against such a host
-`camera = true` is an enable nothing ever answers: the socket opens, the device
-plugs, no channel arrives, no device appears. Do not debug the gateway for it;
-`FREERDP_ECAM_TRACE=1` (wrapper) shows the difference as an enumeration channel
-that never opens. Windows 11 offers the channel and installs the device
+message: the server side creates the MS-RDPECAM enumeration channel, and a
+**Windows Server without the Remote Desktop Session Host role never does** —
+measured on Server 2025 Datacenter, where Microsoft's own client fails the same
+way, and where installing Media Foundation and clearing `fDisableCameraRedir`
+changed nothing. Against such a host `camera = true` is an enable nothing ever
+answers: the socket opens, the device plugs, no channel arrives, no device
+appears. Do not debug the gateway for it; `FREERDP_ECAM_TRACE=1` (wrapper) shows
+the difference as an enumeration channel that never opens. The fix is on the host
+— install the role and reboot:
+
+```powershell
+Install-WindowsFeature RDS-RD-Server -IncludeAllSubFeature -Restart
+```
+
+Windows 11 offers the channel and installs the device
 ("Remotex Camera (redirected)"), where the one remaining default to know about is
 the Camera app's: it opens on the host's own camera when one exists, and the
 redirected one is behind its change-camera button.

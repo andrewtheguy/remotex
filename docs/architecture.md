@@ -744,12 +744,20 @@ the camera, which is the host's move alone — an enabled camera on an idle desk
 sends nothing.
 
 The host also decides whether redirection exists at all, before any client
-message: the MS-RDPECAM enumeration channel is created by the server, and
-**Windows Server never creates it** over plain RDP. Measured on Server 2025
-Datacenter — Microsoft's own client gets no camera against it either, and neither
-installing Media Foundation nor clearing the `fDisableCameraRedir` policy changes
-it — so an enabled camera against a Server host is an announcement nobody asks
-about: the socket stays open and `cameraStart` never comes. Windows 11 creates
+message: the MS-RDPECAM enumeration channel is created by the server, and a
+**Windows Server without the Remote Desktop Session Host role never creates it**.
+Measured on Server 2025 Datacenter — Microsoft's own client gets no camera
+against it either, and neither installing Media Foundation nor clearing the
+`fDisableCameraRedir` policy changes it — so an enabled camera against such a
+host is an announcement nobody asks about: the socket stays open and
+`cameraStart` never comes. Installing the role on the host is what turns the
+channel on:
+
+```powershell
+Install-WindowsFeature RDS-RD-Server -IncludeAllSubFeature -Restart
+```
+
+Windows 11 creates
 the channel and installs the redirected device as a real camera
 ("Remotex Camera (redirected)", enumerable by every capture application) for
 exactly as long as the camera socket holds it plugged.
