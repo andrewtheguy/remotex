@@ -308,6 +308,17 @@ body {
   font-size: 0.8rem;
 }
 
+/* The build, spelled the same way the login screen spells it, wherever a
+   session is already stopped to look at something: the picker, the ☰ drawer and
+   the Help card. Whoever is asked which version they are on is rarely at the
+   login screen when the question comes. */
+.app-version {
+  margin-top: 4px;
+  text-align: center;
+  color: #8b949e;
+  font-size: 0.75rem;
+}
+
 /* Phase 12: the post-login target picker. A centered panel over the (still
    0×0) canvas; it owns the screen while no target is connected, so it sits
    above the input overlay. */
