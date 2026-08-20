@@ -2126,6 +2126,12 @@ export function useRemoteDesktop(
       });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
+    // A finger takes keyboard focus exactly as a mouse press does. It cannot
+    // arrive through the compatibility mouse events: the gesture layer
+    // preventDefaults every touch, so the browser never synthesises them, and
+    // on a tablet the overlay then stayed unfocused with a hardware keyboard
+    // typing into nothing while the gestures themselves worked.
+    const onTouchStart = () => el.focus({ preventScroll: true });
     // Release everything still held so nothing sticks on the remote when focus
     // leaves the surface.
     const releaseKeys = () => {
@@ -2196,6 +2202,13 @@ export function useRemoteDesktop(
     window.addEventListener("resize", invalidatePointerRect);
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("contextmenu", onContextMenu);
+    // Capture phase: the gesture listeners consume touches with
+    // stopImmediatePropagation, which would skip a later bubble listener on
+    // this same element.
+    el.addEventListener("touchstart", onTouchStart, {
+      capture: true,
+      passive: true,
+    });
     // Keyboard is scoped to the focused overlay (not window) so the remote
     // surface only grabs keys when the user is interacting with it.
     el.addEventListener("keydown", onKeyDown);
@@ -2215,11 +2228,23 @@ export function useRemoteDesktop(
       window.removeEventListener("resize", invalidatePointerRect);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
+      el.removeEventListener("touchstart", onTouchStart, { capture: true });
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
   }, [overlayRef, canvasRef, syncCursor]);
+
+  // The desktop takes the keyboard as soon as it is on screen, so the first
+  // thing typed reaches the remote — the surface is the only thing on it worth
+  // focusing, and a keyboard is not obliged to wait for a pointer to arrive
+  // first. Not on the picker, whose own controls own focus there.
+  useEffect(() => {
+    if (mode !== "desktop") {
+      return;
+    }
+    overlayRef.current?.focus({ preventScroll: true });
+  }, [mode, overlayRef]);
 
   return {
     status,
