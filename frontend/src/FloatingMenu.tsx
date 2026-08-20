@@ -708,7 +708,7 @@ export default function FloatingMenu({
   // stays closed for that moment so it never opens on stale text that visibly
   // rewrites itself a beat later.
   const [clipboardPending, setClipboardPending] = useState(false);
-  // null = not yet moved; resolvedPosition falls back to the top-right corner.
+  // null = not yet moved; resolvedPosition falls back to the lower-right corner.
   const [position, setPosition] = useState<Position | null>(null);
   const [dragging, setDragging] = useState(false);
   const [viewport, setViewport] = useState<Viewport>(readViewport);
@@ -763,7 +763,7 @@ export default function FloatingMenu({
     (): Position =>
       clamp(
         viewport.offsetX + viewport.width - FAB_SIZE - FAB_MARGIN,
-        viewport.offsetY + FAB_MARGIN,
+        viewport.offsetY + viewport.height - FAB_SIZE - FAB_MARGIN,
       ),
     [clamp, viewport],
   );
