@@ -890,9 +890,9 @@ async fn active_loop(
                     damage_due = None;
                     damage_flushed = Instant::now();
                     // A repaint means the client has nothing, so the shadow must
-                    // not claim otherwise. This covers detach, reattach and
-                    // takeover in one place, because `Refresh` is injected on
-                    // every attach — and it is what keeps the session layer's
+                    // not claim otherwise. This covers detach and reattach in
+                    // one place, because `Refresh` is injected on every
+                    // reattach — and it is what keeps the session layer's
                     // frame dropping while nobody is attached from turning into
                     // a permanently blank region.
                     shadow.forget();

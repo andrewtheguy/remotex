@@ -1457,8 +1457,9 @@ async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
     let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
     expect_resize(&mut ws_a, FAKE_DESKTOP, FAKE_DESKTOP).await;
 
-    // B takes over with force: A is evicted with 4001, A's token dies, and B
-    // gets the desktop repainted from the same still-running engine session.
+    // B takes over with force: A is evicted with 4001, A's token dies, and B's
+    // attach reconnects the still-selected target — a fresh engine session
+    // opened for B's screen — and paints the desktop with no picker in between.
     let (status, body) = common::post_session(addr, &cookie, r#"{"force":true}"#).await;
     assert_eq!(status, 200, "force takeover must succeed: {body}");
     let token_b = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]

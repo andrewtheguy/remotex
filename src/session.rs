@@ -1,6 +1,8 @@
 //! The single session slot and common engine boundary. A claim owns the slot,
 //! an attachment supplies its WebSocket, and the selected engine may outlive a
-//! brief detach. Takeover replaces the attachment without adding a session.
+//! brief detach. Takeover replaces the attachment without adding a session:
+//! the previous engine ends with its claim, and the new attachment reconnects
+//! the still-selected target for its own screen.
 
 use std::sync::{Arc, Mutex};
 
@@ -256,9 +258,8 @@ struct EngineSlot {
     /// Dropping this is not what stops the sound, and it cannot be — the engine
     /// holds the other `Arc` and would keep the queue alive until it noticed its
     /// input channel close. [`State::stop_audio`] ends the pump instead, on every
-    /// path that stops an engine *and* on the one path where the engine keeps
-    /// running: a takeover, where the desktop carries on for a browser that is not
-    /// the one listening.
+    /// path that stops an engine *and* on the paths where the engine keeps
+    /// running: an audio socket superseded or closed under a live desktop.
     audio: Option<Arc<AudioBridge>>,
     /// Where the camera socket's frames go, for a camera target. On the engine
     /// slot like [`Self::audio`], but with the *opposite* survival rule: the
@@ -324,7 +325,10 @@ struct State {
     /// browser can reattach without a takeover prompt.
     claim: Option<String>,
     /// The selected target: `None` is the picker state, `Some` is a live (or
-    /// just-ended) desktop. Slot state, so a takeover inherits it.
+    /// just-ended) desktop. Slot state: it survives a claim change, which is
+    /// what lets a takeover's attach reconnect the same target — with no engine
+    /// beside it, since every non-takeover engine end clears it
+    /// ([`SessionManager::attach`] leans on that).
     selected: Option<TargetConfig>,
     /// The running engine, if any. Remains available after detach until the
     /// reattach grace expires, a heartbeat expires, or an explicit disconnect.
@@ -378,8 +382,8 @@ impl State {
     }
 
     /// End the camera socket, unplugging the device from the remote when an engine
-    /// still runs — a takeover's desktop carries on, and the departing browser's
-    /// camera must not stay plugged into it.
+    /// still runs — the browser turning its camera off mid-session must not leave
+    /// the device plugged into the desktop.
     fn evict_camera(&mut self) {
         if self.camera.take().is_some() {
             info!("session: closing the camera socket");
@@ -402,8 +406,8 @@ impl State {
     /// Stop forwarding audio, if this attachment was.
     ///
     /// Aborting the task rather than dropping something it holds: the queue it reads
-    /// belongs to the engine, which may well still be running (a takeover), and even
-    /// when it is not the engine keeps the last `Arc` until it unwinds. "Eventually"
+    /// belongs to the engine, which may well still be running (a superseded audio
+    /// socket), and even when it is not the engine keeps the last `Arc` until it unwinds. "Eventually"
     /// is the wrong answer for sound belonging to a desktop or a browser that has
     /// already gone.
     fn stop_audio(&mut self) {
@@ -496,8 +500,10 @@ impl SessionManager {
 
     /// Claim the session slot, returning the new token: a live attachment
     /// blocks the claim unless `force` (takeover) or `token` is the current
-    /// claim (the same browser reclaiming after a drop). Both
-    /// evict the previous WebSocket; the engine keeps running either way.
+    /// claim (the same browser reclaiming after a drop). Both evict the
+    /// previous WebSocket. The engine keeps running only for the owner's
+    /// reclaim; a claim by a different browser ends it, keeping the selected
+    /// target so that browser's attach reconnects it for its own screen.
     pub fn claim(self: &Arc<Self>, force: bool, token: Option<&str>) -> Result<String, SessionBusy> {
         let (id, evicted, expiry) = {
             let mut st = self.state.lock().unwrap();
@@ -513,19 +519,39 @@ impl SessionManager {
             // `force` on purpose: a plain claim succeeds whenever no socket is attached,
             // so a second browser arriving during a detach gets the slot with no
             // takeover prompt anywhere — and must not inherit somebody else's ears.
+            let mut engine_taken = false;
             if !owns {
                 st.evict_audio();
-                // The camera goes with the claim too — and unlike audio it also goes
-                // on every engine end, so this is the *extra* case: a takeover whose
-                // engine keeps running for somebody else's eyes must not keep the old
-                // browser's camera plugged into it.
-                st.evict_camera();
-                // The microphone goes with the claim for the same reason.
-                st.evict_mic();
+                // The engine goes with the claim too, taking the camera and
+                // microphone sockets with it as on every engine end: it was opened
+                // for the previous browser's screen, and the new browser must not
+                // inherit a desktop sized and scaled for somebody else's (a Retina
+                // phone taking over a non-Retina desktop's session, say).
+                // `selected` deliberately survives — it is what lets the new
+                // browser's attach reconnect the same target for its own screen,
+                // with no picker and no prompt in between. Every other engine end
+                // clears `selected`, so a selected target with no engine means
+                // exactly this: a claim change mid-session.
+                engine_taken = st.take_engine();
+                if engine_taken {
+                    info!("session: claim changed; the target will reconnect for the new browser");
+                }
             }
             let evicted = st.client.take();
-            let expiry = if evicted.is_some() {
-                st.bump_epoch_for_detach()
+            // The epoch bump covers both reasons to arm a grace timer: a socket was
+            // evicted (as on any detach), or the takeover teardown above left a
+            // reconnect standing that must lapse if the claimant never attaches.
+            let expiry = if evicted.is_some() || engine_taken {
+                st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
+                if engine_taken {
+                    // No engine left to guard: the timer expires the *selected*
+                    // target instead, unless a browser attaches first.
+                    Some((None, st.attachment_epoch))
+                } else {
+                    st.engine
+                        .as_ref()
+                        .map(|engine| (Some(engine.generation), st.attachment_epoch))
+                }
             } else {
                 None
             };
@@ -546,13 +572,29 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Attach a WebSocket holding `token` to the slot. Does **not** start an
-    /// engine — it reports the current slot state to the browser:
-    /// [`ServerMsg::Connected`] when a target session is running (and asks it to
-    /// [`ClientMsg::Refresh`] for a full repaint), else [`ServerMsg::Picker`].
-    /// The browser drives what happens next with [`Self::connect`] /
-    /// [`Self::disconnect`].
-    pub fn attach(self: &Arc<Self>, token: &str) -> Result<Attachment, InvalidToken> {
+    /// Attach a WebSocket holding `token` to the slot, reporting the current
+    /// slot state to the browser: [`ServerMsg::Connected`] when a target session
+    /// is running, else [`ServerMsg::Picker`]. The browser drives what happens
+    /// next with [`Self::connect`] / [`Self::disconnect`].
+    ///
+    /// `display` is this browser's screen, carried on the socket's URL so it
+    /// exists at attach time. It matters on exactly one path: a target that is
+    /// still selected but whose engine a claim change ended ([`Self::claim`]) is
+    /// reconnected here, opening afresh for this screen with no picker and no
+    /// prompt in between — the previous engine's opening size came from the
+    /// previous browser's screen, and a phone taking over a desktop's session
+    /// must not inherit a desktop's resolution, nor the other way around. The
+    /// same browser reattaching (an owner's reclaim keeps the engine) resumes it
+    /// and is asked to [`ClientMsg::Refresh`] for a repaint.
+    pub fn attach(
+        self: &Arc<Self>,
+        token: &str,
+        display: Option<HostDisplay>,
+    ) -> Result<Attachment, InvalidToken> {
+        // The same boundary rule as `connect`: a degenerate screen report is no
+        // report, not a request to open a 0×N desktop.
+        let display = display.and_then(HostDisplay::checked);
+        let (attachment, reconnected) = {
         let mut st = self.state.lock().unwrap();
         if st.claim.as_deref() != Some(token) {
             return Err(InvalidToken);
@@ -588,7 +630,10 @@ impl SessionManager {
         st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
 
         // Tell the freshly attached browser which post-login state it is in. The
-        // channel is empty, so try_send always lands.
+        // channel is empty, so try_send always lands (and on the reconnect path
+        // it lands before the fresh pump can acquire the lock this holds, so
+        // Connected still precedes any tile).
+        let mut reconnected = false;
         let status = match (&st.selected, &st.engine) {
             (Some(target), Some(engine)) => {
                 info!("session: reattached to the running engine, requesting a repaint");
@@ -605,7 +650,16 @@ impl SessionManager {
                     render: engine.render.clone(),
                 }
             }
-            // No engine (idle, or an engine that ended): the picker.
+            // A target with no engine is a claim change's teardown, and nothing
+            // else — every other engine end clears the selection. Reconnect it
+            // for this browser's screen instead of showing the picker.
+            (Some(target), None) => {
+                info!("session: reconnecting the selected target for the new browser");
+                let target = target.clone();
+                reconnected = true;
+                self.start_engine(&mut st, target, display)
+            }
+            // Nothing selected: the picker.
             _ => ServerMsg::Picker,
         };
         let _ = event_tx.try_send(AttachEvent::Msg(status));
@@ -614,7 +668,15 @@ impl SessionManager {
         // A fresh browser starts unmeasured: whatever the last one's link looked
         // like, this one has not shown its own yet.
         self.feedback.reset();
-        Ok(Attachment { id, events, feedback: Arc::clone(&self.feedback) })
+        (Attachment { id, events, feedback: Arc::clone(&self.feedback) }, reconnected)
+        };
+        // The reconnect built a new engine, so an audio socket already open on this
+        // claim is missing its source half — the same re-arm `connect` does, outside
+        // the lock for the same reason.
+        if reconnected {
+            self.arm_audio();
+        }
+        Ok(attachment)
     }
 
     /// Attach the audio WebSocket holding `token`. Opening the socket *is* the
@@ -972,8 +1034,36 @@ impl SessionManager {
             }
         };
 
-        let render = target.render_plan().describe();
+        let status = self.start_engine(&mut st, target, display);
+        // try_send is safe and ordered here: this runs under the state lock
+        // before the just-spawned pump can acquire it, and with no engine until
+        // now nothing else feeds this channel — so the buffer holds at most the
+        // attach status rather than a queue's worth of frames, whatever depth it
+        // was given, and Connected lands before any tile.
+        if let Some(client) = &st.client {
+            let _ = client.event_tx.try_send(AttachEvent::Msg(status));
+        }
+        }
+        // The engine that just appeared is the half an already-open audio socket was
+        // missing. This is the target switch: the socket outlived the previous desktop,
+        // so it is handed this one without the browser asking again.
+        self.arm_audio();
+        Ok(())
+    }
 
+    /// Spawn a fresh engine for `target` and install it in the slot, returning
+    /// the [`ServerMsg::Connected`] status that announces it. The two callers are
+    /// [`Self::connect`] (the picker's pick) and a claim-changed [`Self::attach`]
+    /// (a takeover reconnecting the still-selected target for the new browser's
+    /// screen). Runs under the state lock; the caller re-arms audio
+    /// ([`Self::arm_audio`]) once it is released.
+    fn start_engine(
+        self: &Arc<Self>,
+        st: &mut State,
+        target: TargetConfig,
+        display: Option<HostDisplay>,
+    ) -> ServerMsg {
+        let render = target.render_plan().describe();
         info!("session: connecting to target {:?} ({render})", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, frame_rx) = mpsc::channel(frame_buffer(&target));
@@ -1013,39 +1103,19 @@ impl SessionManager {
         );
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
-        let name = target.name.clone();
-        let protocol = target.protocol.name();
-        let subtype = target.subtype.map(Subtype::name);
-        let resize = target.resize;
-        let clipboard = target.clipboard;
-        let audio = target.audio;
-        let camera = target.camera;
-        let microphone = target.microphone;
+        let status = ServerMsg::Connected {
+            name: target.name.clone(),
+            protocol: target.protocol.name(),
+            subtype: target.subtype.map(Subtype::name),
+            resize: target.resize,
+            clipboard: target.clipboard,
+            audio: target.audio,
+            camera: target.camera,
+            microphone: target.microphone,
+            render,
+        };
         st.selected = Some(target);
-        // try_send is safe and ordered here: this runs under the state lock
-        // before the just-spawned pump can acquire it, and with no engine until
-        // now nothing else feeds this channel — so the buffer holds at most the
-        // attach status rather than a queue's worth of frames, whatever depth it
-        // was given, and Connected lands before any tile.
-        if let Some(client) = &st.client {
-            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected {
-                name,
-                protocol,
-                subtype,
-                resize,
-                clipboard,
-                audio,
-                camera,
-                microphone,
-                render,
-            }));
-        }
-        }
-        // The engine that just appeared is the half an already-open audio socket was
-        // missing. This is the target switch: the socket outlived the previous desktop,
-        // so it is handed this one without the browser asking again.
-        self.arm_audio();
-        Ok(())
+        status
     }
 
     /// Tear the current engine down and return the slot to the picker ("switch
@@ -1105,7 +1175,7 @@ impl SessionManager {
                 "session: browser detached; engine available for {}s reattach grace",
                 REATTACH_GRACE_PERIOD.as_secs()
             );
-            self.schedule_detached_engine_expiry(generation, attachment_epoch);
+            self.schedule_detached_engine_expiry(Some(generation), attachment_epoch);
         }
     }
 
@@ -1165,9 +1235,14 @@ impl SessionManager {
         }
     }
 
+    /// Arm the reattach grace timer. `generation` is the detached engine the
+    /// timer guards — still running, and expired if nobody attaches in time.
+    /// `None` guards the other thing the grace period covers: a takeover
+    /// teardown's standing reconnect ([`Self::claim`]), where there is no engine
+    /// any more and what lapses is the selected target itself.
     fn schedule_detached_engine_expiry(
         self: &Arc<Self>,
-        generation: u64,
+        generation: Option<u64>,
         attachment_epoch: u64,
     ) {
         let manager = Arc::clone(self);
@@ -1175,10 +1250,13 @@ impl SessionManager {
             tokio::time::sleep(REATTACH_GRACE_PERIOD).await;
             let expired = {
                 let mut st = manager.state.lock().unwrap();
-                if st.client.is_none()
-                    && st.attachment_epoch == attachment_epoch
-                    && st.engine.as_ref().is_some_and(|engine| engine.generation == generation)
-                {
+                let current = match generation {
+                    Some(generation) => {
+                        st.engine.as_ref().is_some_and(|engine| engine.generation == generation)
+                    }
+                    None => st.engine.is_none() && st.selected.is_some(),
+                };
+                if st.client.is_none() && st.attachment_epoch == attachment_epoch && current {
                     st.take_engine();
                     st.selected = None;
                     true
@@ -1187,7 +1265,7 @@ impl SessionManager {
                 }
             };
             if expired {
-                info!("session: reattach grace expired; engine stopped");
+                info!("session: reattach grace expired; the slot returns to the picker");
             }
         });
     }
@@ -1537,7 +1615,7 @@ mod tests {
         assert_ne!(first, second, "each claim mints a fresh token");
 
         // Attached slot: a plain claim is refused…
-        let _att = mgr.attach(&second).unwrap();
+        let _att = mgr.attach(&second, None).unwrap();
         assert!(mgr.claim(false, None).is_err());
         // …but the holder reclaims with its token, and force takes over.
         mgr.claim(false, Some(&second)).unwrap();
@@ -1547,17 +1625,17 @@ mod tests {
     #[tokio::test]
     async fn attach_requires_the_current_token() {
         let (mgr, _hooks) = manager_with_fake_engine();
-        assert!(mgr.attach("nope").is_err(), "no claim yet");
+        assert!(mgr.attach("nope", None).is_err(), "no claim yet");
         let token = mgr.claim(false, None).unwrap();
-        assert!(mgr.attach("stale").is_err());
-        assert!(mgr.attach(&token).is_ok());
+        assert!(mgr.attach("stale", None).is_err());
+        assert!(mgr.attach(&token, None).is_ok());
     }
 
     #[tokio::test]
     async fn attach_announces_the_picker_and_connect_starts_the_engine() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
 
         // No engine yet: attach lands the browser on the picker.
         expect_picker(&mut att.events).await;
@@ -1590,7 +1668,7 @@ mod tests {
             );
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
 
         let screen = HostDisplay { w: 1512, h: 982, scale: 200 };
@@ -1616,7 +1694,7 @@ mod tests {
             );
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
 
         mgr.connect(att.id, "fake", Some(HostDisplay { w: 0, h: 982, scale: 100 })).unwrap();
@@ -1632,7 +1710,7 @@ mod tests {
     async fn connected_status_carries_the_targets_capability_metadata() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
 
         // An RDP target with resize on: the connect status carries the
@@ -1646,17 +1724,18 @@ mod tests {
         // reattach below (dropping frame_tx would end it and flip to picker).
         let (_input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().expect("engine spawned on connect");
 
-        // Reattaching to the running engine reports the same metadata.
+        // Reattaching to the running engine (the owner's reclaim) reports the
+        // same metadata.
         mgr.detach(att.id);
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let token = mgr.claim(false, Some(&token)).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
 
         // The clipboard flag travels the same way, and independently of resize:
         // the vnc-clip fake target has clipboard on and resize off.
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "vnc-clip", None).unwrap();
         expect_connected_meta(&mut att.events, "vnc-clip", Meta::of(Protocol::Vnc).clipboard()).await;
@@ -1665,7 +1744,7 @@ mod tests {
         // that opens the audio socket.
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-audio", None).unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
@@ -1679,7 +1758,7 @@ mod tests {
         for (name, protocol) in [("vnc-resize", "vnc"), ("rdp-resize", "rdp")] {
             let (mgr, _hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
-            let mut att = mgr.attach(&token).unwrap();
+            let mut att = mgr.attach(&token, None).unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, name, None).unwrap();
             match recv(&mut att.events).await {
@@ -1700,7 +1779,7 @@ mod tests {
     async fn connect_rejects_unknown_targets_and_stale_attachments() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
 
         assert!(matches!(
@@ -1720,7 +1799,7 @@ mod tests {
     async fn a_video_target_connects_and_names_its_render_plan() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
 
         mgr.connect(att.id, "video", None).unwrap();
@@ -1737,7 +1816,7 @@ mod tests {
     async fn frames_reach_the_attached_client_and_are_dropped_while_detached() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -1768,10 +1847,10 @@ mod tests {
         .await
         .expect("pump never drained the detached frame");
 
-        // Reattach to the running engine: it announces connected, then only
-        // frames sent after the reattach arrive.
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        // Reattach to the running engine (the owner's reclaim): it announces
+        // connected, then only frames sent after the reattach arrive.
+        let token = mgr.claim(false, Some(&token)).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
         frame_tx
@@ -1795,7 +1874,7 @@ mod tests {
             let protocol = meta.protocol.name();
             let (mgr, hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
-            let mut att = mgr.attach(&token).unwrap();
+            let mut att = mgr.attach(&token, None).unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target, None).unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
@@ -1818,7 +1897,7 @@ mod tests {
         tokio::time::pause();
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -1827,7 +1906,7 @@ mod tests {
         mgr.detach(att.id);
         tokio::task::yield_now().await;
         tokio::time::advance(REATTACH_GRACE_PERIOD / 2).await;
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
 
@@ -1840,7 +1919,7 @@ mod tests {
     async fn heartbeat_expiry_stops_the_engine_immediately() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -1854,7 +1933,7 @@ mod tests {
     async fn reattach_asks_the_running_engine_for_a_refresh() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -1869,8 +1948,8 @@ mod tests {
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::MouseMove { x: 1, y: 2 })));
 
         mgr.detach(att.id);
-        let token = mgr.claim(false, None).unwrap();
-        let _att = mgr.attach(&token).unwrap();
+        let token = mgr.claim(false, Some(&token)).unwrap();
+        let _att = mgr.attach(&token, None).unwrap();
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
     }
 
@@ -1878,7 +1957,7 @@ mod tests {
     async fn disconnect_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -1904,7 +1983,7 @@ mod tests {
     async fn logging_out_stops_the_engine_and_the_next_login_lands_on_the_picker() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -1916,12 +1995,12 @@ mod tests {
         // The attached socket does not stay attached to a slot whose claim is gone.
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Evicted));
         // And the token it attached with is spent, so nothing can reattach on it.
-        assert!(mgr.attach(&token).is_err(), "the claim is released");
+        assert!(mgr.attach(&token, None).is_err(), "the claim is released");
 
         // The whole point: a fresh login gets the picker, not the desktop it just
         // logged out of.
         let next = mgr.claim(false, None).unwrap();
-        let mut again = mgr.attach(&next).unwrap();
+        let mut again = mgr.attach(&next, None).unwrap();
         expect_picker(&mut again.events).await;
         assert!(hooks.try_recv().is_err(), "no engine survived the log out");
     }
@@ -1934,7 +2013,7 @@ mod tests {
         let (mgr, hooks) = manager_with_fake_engine();
         mgr.log_out();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         // And again while attached but in the picker state.
         mgr.log_out();
@@ -1942,27 +2021,34 @@ mod tests {
         assert!(hooks.try_recv().is_err(), "no engine was ever spawned");
     }
 
+    /// A takeover does not inherit the running desktop — it was opened for the
+    /// previous browser's screen, and resolutions meant for a non-Retina desktop
+    /// must not land on a Retina phone (or the other way around). The claim ends
+    /// the engine, and the new browser's attach reconnects the still-selected
+    /// target for its own screen: connected, no picker, no prompt.
     #[tokio::test]
-    async fn takeover_evicts_the_previous_client_but_keeps_the_engine() {
+    async fn takeover_evicts_the_previous_client_and_reconnects_the_target() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token_a = mgr.claim(false, None).unwrap();
-        let mut att_a = mgr.attach(&token_a).unwrap();
+        let mut att_a = mgr.attach(&token_a, None).unwrap();
         expect_picker(&mut att_a.events).await;
         mgr.connect(att_a.id, "fake", None).unwrap();
         expect_connected(&mut att_a.events, "fake").await;
-        let (mut input_rx, frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
-        // The old token is superseded.
-        assert!(mgr.attach(&token_a).is_err());
+        // The old token is superseded, and A's engine ended with A's claim.
+        assert!(mgr.attach(&token_a, None).is_err());
+        assert!(input_rx.is_closed(), "the takeover ends the previous browser's engine");
 
-        // B inherits the live desktop: connected (not the picker) + a repaint.
-        let mut att_b = mgr.attach(&token_b).unwrap();
+        // B lands on the same target: connected (not the picker), through a
+        // fresh engine rather than A's.
+        let mut att_b = mgr.attach(&token_b, None).unwrap();
         expect_connected(&mut att_b.events, "fake").await;
-        assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
-        assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
-        frame_tx
+        let (_input_rx_b, frame_tx_b, _audio, _camera, _microphone) =
+            hooks.try_recv().expect("the takeover attach reconnects with a fresh engine");
+        frame_tx_b
             .send(ServerMsg::Resize { w: 5, h: 6, scale: UNSCALED })
             .await
             .unwrap();
@@ -1972,26 +2058,84 @@ mod tests {
         ));
     }
 
+    /// The screen the reconnecting attach names is the one the fresh engine
+    /// opens for — the whole point of reconnecting instead of inheriting.
+    #[tokio::test]
+    async fn a_takeover_attach_hands_the_fresh_engine_the_new_clients_screen() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner =
+            Box::new(
+                move |_target, display, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                    hook_tx.send(display).unwrap();
+                },
+            );
+        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
+        let token_a = mgr.claim(false, None).unwrap();
+        let mut att_a = mgr.attach(&token_a, None).unwrap();
+        expect_picker(&mut att_a.events).await;
+        let desktop = HostDisplay { w: 2560, h: 1440, scale: 100 };
+        mgr.connect(att_a.id, "fake", Some(desktop)).unwrap();
+        expect_connected(&mut att_a.events, "fake").await;
+        assert_eq!(hook_rx.try_recv().unwrap(), Some(desktop));
+
+        let token_b = mgr.claim(true, None).unwrap();
+        let phone = HostDisplay { w: 430, h: 932, scale: 300 };
+        let mut att_b = mgr.attach(&token_b, Some(phone)).unwrap();
+        expect_connected(&mut att_b.events, "fake").await;
+        assert_eq!(
+            hook_rx.try_recv().expect("the takeover attach reconnects"),
+            Some(phone),
+            "the reconnect must open for the new browser's screen, not the old one's"
+        );
+    }
+
     #[tokio::test]
     async fn takeover_in_the_picker_lands_the_new_browser_on_the_picker() {
         let (mgr, _hooks) = manager_with_fake_engine();
         // A never connects — it just holds the slot on the picker.
         let token_a = mgr.claim(false, None).unwrap();
-        let mut att_a = mgr.attach(&token_a).unwrap();
+        let mut att_a = mgr.attach(&token_a, None).unwrap();
         expect_picker(&mut att_a.events).await;
 
         // B force-claims and attaches: it inherits the picker state.
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
-        let mut att_b = mgr.attach(&token_b).unwrap();
+        let mut att_b = mgr.attach(&token_b, None).unwrap();
         expect_picker(&mut att_b.events).await;
+    }
+
+    /// The reconnect a takeover leaves standing lapses like a detached engine
+    /// does: a claimant that never attaches must not keep an auto-connect armed
+    /// forever, so after the grace period the slot returns to the picker.
+    #[tokio::test]
+    async fn an_unattached_takeover_claims_reconnect_lapses_after_the_grace_period() {
+        tokio::time::pause();
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token_a = mgr.claim(false, None).unwrap();
+        let mut att_a = mgr.attach(&token_a, None).unwrap();
+        expect_picker(&mut att_a.events).await;
+        mgr.connect(att_a.id, "fake", None).unwrap();
+        expect_connected(&mut att_a.events, "fake").await;
+        let _engine = hooks.try_recv().unwrap();
+
+        // B takes over but never attaches.
+        let token_b = mgr.claim(true, None).unwrap();
+        assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
+        tokio::task::yield_now().await;
+        tokio::time::advance(REATTACH_GRACE_PERIOD + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        // A much later attach lands on the picker, not on a resurrected target.
+        let mut att_b = mgr.attach(&token_b, None).unwrap();
+        expect_picker(&mut att_b.events).await;
+        assert!(hooks.try_recv().is_err(), "a lapsed reconnect must not spawn an engine");
     }
 
     #[tokio::test]
     async fn engine_death_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None).unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -2033,7 +2177,7 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<AudioBridge>, EngineEnds) {
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-audio", None).unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
@@ -2153,7 +2297,7 @@ mod tests {
     async fn a_pcm_target_is_announced_as_the_remotes_own_bytes() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-pcm", None).unwrap();
         expect_connected_meta(
@@ -2267,7 +2411,7 @@ mod tests {
     async fn an_audio_socket_with_no_source_is_accepted_and_silent() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
 
         let sound = mgr.attach_audio(&token).unwrap();
@@ -2360,7 +2504,7 @@ mod tests {
         mgr.detach(att.id);
         audio.wave(one_frame_of_pcm());
         let token_again = mgr.claim(false, Some(&token)).unwrap();
-        let mut back = mgr.attach(&token_again).unwrap();
+        let mut back = mgr.attach(&token_again, None).unwrap();
         expect_connected_meta(&mut back.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
 
         // Never interrupted: one listener throughout, and the buffer sent while the
@@ -2400,7 +2544,7 @@ mod tests {
 
         // And it stays gone across a reconnect, which is where a surviving slot would
         // have shown itself.
-        let mut att_b = mgr.attach(&token_b).unwrap();
+        let mut att_b = mgr.attach(&token_b, None).unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
         mgr.disconnect(att_b.id);
@@ -2414,10 +2558,11 @@ mod tests {
         );
     }
 
-    /// A takeover is the same rule with the prompt: the desktop keeps running for the
-    /// new browser, and the previous one stops hearing it.
+    /// A takeover is the same rule with the prompt: the previous browser stops
+    /// hearing the desktop, and the new browser's reconnected session carries its
+    /// own sound once it opens a socket on its own claim.
     #[tokio::test]
-    async fn a_takeover_ends_the_audio_while_the_engine_carries_on() {
+    async fn a_takeover_ends_the_audio_and_the_reconnected_target_carries_its_own() {
         let (mgr, hooks) = manager_with_fake_engine();
         let (token_a, mut att_a, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
 
@@ -2440,17 +2585,21 @@ mod tests {
         );
         expect_listeners(&audio, 0).await;
         assert!(
-            mgr.state.lock().unwrap().engine.is_some(),
-            "a takeover keeps the engine"
+            mgr.state.lock().unwrap().engine.is_none(),
+            "the takeover ends the previous browser's engine"
         );
 
-        // The new holder inherits the desktop, and gets audio off the same live queue
-        // once it opens a socket of its own — which it must, on its own claim.
-        let mut att_b = mgr.attach(&token_b).unwrap();
+        // The new holder's attach reconnects the target, and its own audio socket —
+        // opened before the attach, on its own claim — is re-armed onto the fresh
+        // engine's bridge by that reconnect.
+        let mut sound_b = mgr.attach_audio(&token_b).unwrap();
+        let mut att_b = mgr.attach(&token_b, None).unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
-        let mut sound_b = mgr.attach_audio(&token_b).unwrap();
-        audio.wave(one_frame_of_pcm());
+        let (_input_rx_b, _frame_tx_b, audio_b, _camera_b, _microphone_b) =
+            hooks.try_recv().expect("the takeover attach reconnects with a fresh engine");
+        let audio_b = audio_b.expect("an audio target's fresh engine gets a bridge");
+        audio_b.wave(one_frame_of_pcm());
         expect_opus_format(&mut sound_b.packets).await;
         assert_eq!(expect_audio(&mut sound_b.packets).await, 1);
     }
@@ -2589,7 +2738,7 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<CameraBridge>, Arc<CamRecorder>) {
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-camera", None).unwrap();
         expect_connected_meta(&mut att.events, "rdp-camera", Meta::of(Protocol::Rdp).camera())
@@ -2623,7 +2772,7 @@ mod tests {
         assert!(matches!(mgr.attach_camera("nope"), Err(CameraRefused::InvalidToken)));
 
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         // The picker: nothing is running, so there is nothing to plug into.
         assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
@@ -2710,9 +2859,9 @@ mod tests {
         assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
     }
 
-    /// A takeover closes the camera socket *and* unplugs the device, though the
-    /// engine keeps running for the new holder: the departing browser's camera
-    /// must not stay pointed at somebody else's desktop.
+    /// A takeover closes the camera socket *and* unplugs the device on its way
+    /// down: the claim ends the engine, and the departing browser's camera goes
+    /// with it rather than staying plugged into the reconnected desktop.
     #[tokio::test]
     async fn a_takeover_closes_a_live_camera_socket() {
         let (mgr, hooks) = manager_with_fake_engine();
@@ -2722,7 +2871,7 @@ mod tests {
         mgr.camera_plug(cam.id, CAM_FORMAT);
         mgr.claim(true, None).unwrap();
         expect_camera_evicted(cam).await;
-        assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
+        assert!(hooks.try_recv().is_err(), "no fresh engine before the new browser attaches");
         assert_eq!(count(&recorder.unplugs), 1);
     }
 
@@ -2767,7 +2916,7 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<MicBridge>, Arc<MicRecorder>) {
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-mic", None).unwrap();
         expect_connected_meta(&mut att.events, "rdp-mic", Meta::of(Protocol::Rdp).microphone())
@@ -2794,7 +2943,7 @@ mod tests {
         assert!(matches!(mgr.attach_mic("nope"), Err(MicRefused::InvalidToken)));
 
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token, None).unwrap();
         expect_picker(&mut att.events).await;
         assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));
 
@@ -2852,8 +3001,8 @@ mod tests {
         assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));
     }
 
-    /// A takeover closes the mic socket though the engine keeps running for the new
-    /// holder: the departing browser's microphone must not feed somebody else's desktop.
+    /// A takeover closes the mic socket with the engine it fed: the departing
+    /// browser's microphone must not feed somebody else's desktop.
     #[tokio::test]
     async fn a_takeover_closes_a_live_mic_socket() {
         let (mgr, hooks) = manager_with_fake_engine();
@@ -2862,7 +3011,7 @@ mod tests {
         let mic = mgr.attach_mic(&token).unwrap();
         mgr.claim(true, None).unwrap();
         expect_mic_evicted(mic).await;
-        assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
+        assert!(hooks.try_recv().is_err(), "no fresh engine before the new browser attaches");
     }
 
     /// Closing the socket is the disable, and the stale id then acts on nothing.

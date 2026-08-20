@@ -497,9 +497,12 @@ Authentication and desktop ownership are separate:
 6. Logging out ends the login and session immediately, closes the engine, and
    releases the claim.
 
-A forced takeover closes the previous WebSocket but preserves the selected
-target and engine for the replacement client. Attaching to an existing engine
-requests a full repaint.
+A forced takeover closes the previous WebSocket and its engine but preserves
+the selected target: the replacement client's attach reconnects that target
+for its own screen (named on the `/ws` URL), so a desktop opened for one
+display never carries its size and density over to a different device. Only
+the owner reclaiming its token resumes the running engine, with a full-repaint
+request instead of a reconnect.
 
 Login tokens are held in memory with sliding expiry and delivered through an
 `HttpOnly`, `SameSite=Strict` cookie. The cookie is marked `Secure` when

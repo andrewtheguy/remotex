@@ -4,7 +4,10 @@
 //! Two endpoints, both presenting the claim token from `POST /api/session`.
 //!
 //! `/ws?session=<token>` is the session: it attaches to the single slot
-//! ([`crate::session::SessionManager`]). Inbound `ClientMsg` split two ways —
+//! ([`crate::session::SessionManager`]). The URL also names the client's screen
+//! (`w`/`h`/`scale`, the same numbers `connect` carries), so an attach that finds
+//! a target whose engine a claim change ended can reconnect it for *this*
+//! browser's screen. Inbound `ClientMsg` split two ways —
 //! session-control messages (`connect` to pick a target from the post-login picker,
 //! `disconnect` to switch back to it) act on the slot; everything else is engine
 //! input, routed to the current engine (or dropped in the picker state). Outbound
@@ -35,8 +38,9 @@
 //! - `4002` — the running target does not carry this socket's medium (camera on a
 //!   target without `camera = true`, or no engine running).
 //!
-//! Any other close on the session socket detaches the browser. Reattaching within the
-//! grace period restores the picker or live engine; otherwise the engine ends for every
+//! Any other close on the session socket detaches the browser. The owner reattaching
+//! within the grace period restores the picker or live engine; a different claim's
+//! attach reconnects the selected target instead; otherwise the engine ends for every
 //! protocol. A closed audio socket ends nothing but the sound; a closed camera socket
 //! ends nothing but the camera.
 
@@ -442,6 +446,13 @@ where
 #[derive(Deserialize)]
 pub struct WsParams {
     session: Option<String>,
+    /// The client's screen, as [`crate::protocol::HostDisplay`] fields. Only the
+    /// session socket reads them, and only a claim-change reconnect acts on them
+    /// ([`SessionManager::attach`]); absent params read as no report, like a
+    /// degenerate one.
+    w: Option<u16>,
+    h: Option<u16>,
+    scale: Option<u16>,
 }
 
 pub async fn handler(
@@ -449,8 +460,12 @@ pub async fn handler(
     Query(params): Query<WsParams>,
     State(state): State<AppState>,
 ) -> Response {
+    let display = match (params.w, params.h, params.scale) {
+        (Some(w), Some(h), Some(scale)) => Some(protocol::HostDisplay { w, h, scale }),
+        _ => None,
+    };
     ws.on_upgrade(move |socket| {
-        session(socket, state.sessions, params.session, HEARTBEAT_TIMINGS)
+        session(socket, state.sessions, params.session, display, HEARTBEAT_TIMINGS)
     })
 }
 
@@ -883,9 +898,10 @@ async fn session(
     mut socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
+    display: Option<protocol::HostDisplay>,
     heartbeat_timings: HeartbeatTimings,
 ) {
-    let attachment = token.and_then(|t| sessions.attach(&t).ok());
+    let attachment = token.and_then(|t| sessions.attach(&t, display).ok());
     let Some(attachment) = attachment else {
         warn!("ws: rejected connection without a valid session token");
         let _ = socket
@@ -1480,7 +1496,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), HEARTBEAT_TIMINGS)
+                        session(socket, sessions, Some(token), None, HEARTBEAT_TIMINGS)
                     })
                 }
             }),
@@ -1540,7 +1556,7 @@ mod tests {
                 let sessions = Arc::clone(&sessions);
                 let token = token.clone();
                 async move {
-                    ws.on_upgrade(move |socket| session(socket, sessions, Some(token), timings))
+                    ws.on_upgrade(move |socket| session(socket, sessions, Some(token), None, timings))
                 }
             }),
         );
@@ -1588,7 +1604,7 @@ mod tests {
         let replacement_token = assertions
             .claim(false, None)
             .expect("heartbeat timeout did not release the browser attachment");
-        let mut replacement = assertions.attach(&replacement_token).unwrap();
+        let mut replacement = assertions.attach(&replacement_token, None).unwrap();
         assert!(matches!(
             replacement.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
@@ -1614,7 +1630,7 @@ mod tests {
         let token = sessions.claim(false, None).unwrap();
         // A live desktop, driven in process: this test is about the audio socket, and
         // the session socket only has to exist for `connect` to be legal.
-        let mut att = sessions.attach(&token).unwrap();
+        let mut att = sessions.attach(&token, None).unwrap();
         assert!(matches!(
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))

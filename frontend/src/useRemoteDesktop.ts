@@ -1015,7 +1015,12 @@ export function useRemoteDesktop(
 
     const open = (sessionId: string) => {
       session = sessionId;
-      const socket = new WebSocket(gatewaySocketUrl("/ws", sessionId));
+      // The URL names this window's screen so a takeover's attach can reconnect
+      // the selected target for it — the attach happens before this client
+      // could send anything.
+      const socket = new WebSocket(
+        gatewaySocketUrl("/ws", sessionId, hostDisplayMsg()),
+      );
       const generation = advancePaintGeneration(paintGenerationRef);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";

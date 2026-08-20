@@ -35,9 +35,23 @@ export function gatewayFetch(
 /// Derived from the gateway's origin rather than the document's, for the same
 /// reason as above — and the scheme follows it, so a gateway on `https:` gets
 /// `wss:` whether or not the page itself was loaded over TLS.
-export function gatewaySocketUrl(path: string, session: string): string {
+///
+/// The session socket also names this window's `screen` (the same numbers
+/// `connect` carries), so a gateway holding a target whose engine a claim
+/// change ended can reconnect it for this browser's screen at attach time —
+/// before any message this client could send.
+export function gatewaySocketUrl(
+  path: string,
+  session: string,
+  screen?: { w: number; h: number; scale: number },
+): string {
   const url = new URL(gatewayUrl(path));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.search = `?session=${encodeURIComponent(session)}`;
+  if (screen) {
+    url.searchParams.set("w", String(screen.w));
+    url.searchParams.set("h", String(screen.h));
+    url.searchParams.set("scale", String(screen.scale));
+  }
   return url.toString();
 }

@@ -29,8 +29,11 @@
   put `tui`, `serve-embedded`, or `check-config --embedded` in an image.
 - Multi-session support is permanently out of scope. Each gateway has one active
   session. A force-claim evicts the current holder (`src/session.rs`) through the
-  clients' **Take over** flow. Reconnects, target switches, and browser takeovers
-  resume that same session without another prompt.
+  clients' **Take over** flow. The owner's own reconnect resumes the running
+  engine; a claim by a *different* browser ends it and its attach reconnects the
+  still-selected target for the new client's screen (carried on the `/ws` URL) —
+  still without a prompt, but never inheriting an opening size and density meant
+  for somebody else's display.
 - **No AppleScript, no synthetic clicks, no screenshot loops.** Do not drive a
   browser's UI to find out what the client is doing; ask it, and ask the user for
   the one thing only eyes can answer. `remotex serve` puts its reasons on stderr,
