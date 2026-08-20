@@ -119,7 +119,7 @@ struct Live {
     carried: bool,
     /// The configuration string this stream has already announced to the client, if any.
     ///
-    /// Cleared by [`Regions::force_keyframes`], which is what makes a reattach or a takeover
+    /// Cleared by [`Regions::force_keyframes`], which is what makes a reattach
     /// re-announce: the browser that just arrived never saw the original text frame, and its
     /// decoder cannot be configured from the units alone.
     announced: Option<String>,
@@ -374,7 +374,7 @@ impl Regions {
 
     /// Drop every stream and every debt, keeping the mirror.
     ///
-    /// For a repaint, a reattach or a takeover: every pixel is about to be re-sent at
+    /// For a repaint or a reattach: every pixel is about to be re-sent at
     /// the base encode, which discharges anything that was owed, and a client with
     /// nothing on screen cannot decode from the middle of a stream.
     pub fn forget(&mut self) {
