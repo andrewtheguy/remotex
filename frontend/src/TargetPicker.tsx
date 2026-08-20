@@ -138,6 +138,7 @@ export default function TargetPicker({
         >
           Log out
         </button>
+        <div className="app-version">v{__APP_VERSION__}</div>
       </div>
     </div>
   );

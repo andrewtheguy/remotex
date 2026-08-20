@@ -1110,6 +1110,8 @@ export default function FloatingMenu({
               Log out
             </button>
           </div>
+
+          <div className="app-version">v{__APP_VERSION__}</div>
         </div>
       )}
 
@@ -1175,6 +1177,7 @@ export default function FloatingMenu({
             >
               Close
             </button>
+            <div className="app-version">v{__APP_VERSION__}</div>
           </div>
         </div>
       )}
