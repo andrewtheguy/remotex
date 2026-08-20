@@ -1431,7 +1431,7 @@ async fn continuous_updates_carry_a_copyrect_to_the_browser_as_a_copy() {
 }
 
 #[tokio::test]
-async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
+async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_new_one() {
     let vnc_port = spawn_fake_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
