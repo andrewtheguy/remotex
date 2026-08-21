@@ -63,6 +63,10 @@ export default function RemoteDesktop({
     isMacHost,
     remoteIsMac,
     setMacKeyOverridesEnabled,
+    touchOffered,
+    touchEnabled,
+    touchActive,
+    setTouchEnabled,
     onLocalShortcut,
     takeOver,
     retry,
@@ -166,6 +170,10 @@ export default function RemoteDesktop({
           isMacHost={isMacHost}
           remoteIsMac={remoteIsMac}
           onMacKeyOverridesChange={setMacKeyOverridesEnabled}
+          touchOffered={touchOffered}
+          touchEnabled={touchEnabled}
+          touchActive={touchActive}
+          onTouchChange={setTouchEnabled}
           onLocalShortcut={onLocalShortcut}
         />
       )}

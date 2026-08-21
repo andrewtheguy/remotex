@@ -11,6 +11,12 @@
   (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
   do not detect a stale bundle. For source-based iteration, use
   `REMOTEX_DEV_BACKEND=<port> bun run dev`.
+- Touch is two layers, never both at once: `touchGestures.ts` is a *trackpad*
+  (fingers drive a virtual cursor, the page interprets gestures) and
+  `touchPassthrough.ts` is a *touchscreen* (fingers go to the guest as MS-RDPEI
+  contacts and the guest interprets them). The second is RDP-only, offered on the
+  host's `touchReady` rather than a target key, and decides nothing about what
+  fingers mean — do not add gesture recognition to it.
 - **There is one client, and it is the page a browser loads.** Desktop app use is
   that page installed as a Chrome or Edge app, not a native wrapper. Do not add a
   second implementation of anything the page already does.

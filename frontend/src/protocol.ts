@@ -15,6 +15,11 @@ export type MouseButton = "left" | "middle" | "right" | "back" | "forward";
 // made trackpad scrolling jump.
 export type WheelUnit = "pixel" | "line" | "page";
 
+// What a touch contact did: MS-RDPEI's four contact transitions, which are
+// also exactly the DOM's four touch events. `cancel` is lost rather than
+// lifted — the guest forgets the gesture where an `up` would have been a tap.
+export type TouchPhase = "down" | "move" | "up" | "cancel";
+
 // Browser -> server: input events captured over the remote canvas, plus
 // viewport reports (the desired remote desktop size, in the *remote's* pixels:
 // the room the browser has times the density the remote draws at — engines that
@@ -72,6 +77,13 @@ export type ClientMsg =
   | { type: "clipboardRequest" }
   // Select an opaque id from the latest `displays` message.
   | { type: "selectDisplay"; id: number }
+  // One touch contact's transition in framebuffer pixels: the touchscreen
+  // mode, where fingers reach the remote as the contacts they are and the
+  // guest recognises the gestures. `id` names the finger from its down to its
+  // up or cancel — a small slot assigned by touchPassthrough.ts, not the DOM's
+  // identifier. Acted on by the RDP engine once the host has opened the touch
+  // channel (`touchReady`); dropped everywhere else.
+  | { type: "touch"; id: number; phase: TouchPhase; x: number; y: number }
   // Re-announce the desktop size and repaint everything. A recovery command for
   // a canvas that has gone wrong; the
   // browser has no button for it, since there is a reload right there.
@@ -243,6 +255,12 @@ export type ControlMsg =
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
   | { type: "remoteOs"; macos: boolean }
+  // The host opened its touch channel (MS-RDPEI), so `touch` messages reach it
+  // as real contacts from now on. Sent by the RDP engine shortly after connect
+  // and again on every reattach; never for a host without the channel, which
+  // is what hides the Touchscreen toggle there. Not part of `connected`: the
+  // capability is the host's answer, not the target's profile.
+  | { type: "touchReady" }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
   // follows `active`, so a selection the remote refused leaves the panel

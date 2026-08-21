@@ -675,6 +675,15 @@ body {
   padding: 0;
 }
 
+/* The touchscreen-mode note above the gesture table, in the same muted voice as
+   the labels: the table below it is what is *not* in effect while it shows. */
+.help-note {
+  margin: 0 0 10px;
+  color: #8b949e;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
 .help-item {
   display: flex;
   justify-content: space-between;

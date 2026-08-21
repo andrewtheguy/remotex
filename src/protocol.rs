@@ -173,6 +173,20 @@ pub enum WheelUnit {
     Page,
 }
 
+/// What a touch contact did: the four transitions MS-RDPEI's contact state
+/// machine has (3.1.1.1), which are also exactly the DOM's four touch events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+    /// Lost rather than lifted — the browser took the touch for a system
+    /// gesture, the window blurred mid-gesture. The guest forgets the gesture
+    /// where an `up` in the same place would have been a tap.
+    Cancel,
+}
+
 /// Browser -> server: input events captured over the remote canvas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -289,6 +303,25 @@ pub enum ClientMsg {
     /// message for this. A client that never receives [`ServerMsg::Displays`] never
     /// has an id to name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
+    /// One touch contact's transition, in framebuffer coordinates: the
+    /// touchscreen mode, where fingers are forwarded as the contacts they are
+    /// instead of being interpreted into a mouse. `id` names the finger from its
+    /// `down` to its `up` or `cancel`, and the client assigns small ids itself —
+    /// a DOM `Touch.identifier` is any 32-bit number, and the engine's contact
+    /// table is ten slots.
+    ///
+    /// Acted on by the RDP engine alone, and only once the host has opened
+    /// MS-RDPEI, announced as [`ServerMsg::TouchReady`]; VNC has no touch and
+    /// drops them, as does an RDP host that never opened the channel. The guest
+    /// recognises every gesture itself — edge swipes, pinch, press-and-hold,
+    /// multi-finger — which is the point: nothing on this side decides what two
+    /// fingers mean.
+    Touch {
+        id: i32,
+        phase: TouchPhase,
+        x: i32,
+        y: i32,
+    },
     /// What the browser's camera will send, and the camera socket's opening
     /// move: `/ws/camera`'s first message must be this, and it is what plugs
     /// the virtual device into the remote. Never sent on the session socket —
@@ -949,6 +982,14 @@ pub enum ServerMsg {
     /// discovered from the connection rather than an OS name someone has to keep
     /// correct in the config file.
     RemoteOs { macos: bool },
+    /// The host opened the touch channel (MS-RDPEI), so [`ClientMsg::Touch`]
+    /// reaches it as real touch contacts from here on. Sent by the RDP engine
+    /// when a Windows host creates the channel — shortly after connect — and
+    /// again on every reattach, next to [`ServerMsg::Resize`]. Never sent for a
+    /// host without the channel, which is how a client knows not to offer the
+    /// mode: the capability is the host's, not the target's, so it is not in
+    /// [`ServerMsg::Connected`].
+    TouchReady,
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
     /// `requested` distinguishes those paths so an explicit panel read does
@@ -1084,6 +1125,7 @@ enum ControlMsg<'a> {
         render: &'a str,
     },
     RemoteOs { macos: bool },
+    TouchReady,
     Clipboard {
         text: &'a str,
         #[serde(rename = "changedAtMs")]
@@ -1226,6 +1268,7 @@ impl ServerMsg {
                 control(&ControlMsg::VideoFormat { stream: *stream, decode })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
+            ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
@@ -1673,6 +1716,10 @@ mod tests {
                 ),
                 None => panic!("remoteOs must be a text frame"),
             }
+        }
+        match ServerMsg::TouchReady.text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"touchReady"}"#),
+            None => panic!("touchReady must be a text frame"),
         }
         match (ServerMsg::Clipboard {
             text: "hi \"there\"".to_owned(),
