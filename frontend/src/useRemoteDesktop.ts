@@ -43,6 +43,7 @@ import {
   MIN_ZOOM,
   type Point,
 } from "./touchGestures.ts";
+import { attachTouchPassthrough } from "./touchPassthrough.ts";
 
 // The WebSocket/claim connection-flow state machine (independent of the
 // picker-vs-desktop `mode` the attached socket carries):
@@ -97,6 +98,13 @@ const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
 // toggling the live control in the desktop menu writes the same value back, so
 // there is one setting with two places to set it.
 const AUDIO_KEY = "remotex.audioByDefault";
+// The touchscreen preference: fingers forwarded to the remote as touch contacts
+// rather than read as trackpad gestures. Remembered like the Mac-keys one, and
+// for the same reason — it describes the device in hand, not a session — and
+// off unless set, since the trackpad gestures work against every target and a
+// touchscreen only against a host that has one to offer. Acted on only once
+// the host has said so (`touchReady`) and only on a device with a touchscreen.
+const TOUCHSCREEN_KEY = "remotex.touchscreen";
 // Evaluated once: the host OS cannot change under a running tab, and the input
 // effect must not pay for it per keystroke.
 const IS_MAC_HOST = isMacHost();
@@ -122,6 +130,10 @@ function readOnByKey(key: string): boolean {
 }
 // Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+// Any finger at all — what the touchscreen passthrough needs, which is less
+// than the two a pinch needs: one contact is still a tap, a press-and-hold and
+// an edge swipe to the host, so a one-touch digitizer is offered the switch.
+export const HAS_TOUCH = (navigator.maxTouchPoints || 0) >= 1;
 
 // Phone or tablet, off the screen's short side in CSS pixels. Deliberately the
 // crudest test that separates them: the largest phone is around 440 CSS px across
@@ -496,6 +508,19 @@ export function useRemoteDesktop(
   const [macKeyOverridesEnabled, setMacKeyOverridesEnabled] = useState(
     readMacKeyOverridesPreference,
   );
+  // Whether the host opened its touch channel this session — the RDP engine's
+  // `touchReady`, which a Windows host sends and nothing else does. Reset on
+  // every connect and disconnect, like `remoteIsMac`: the answer belongs to the
+  // host that gave it.
+  const [canTouch, setCanTouch] = useState(false);
+  const [touchEnabled, setTouchEnabled] = useState(() =>
+    readOnByKey(TOUCHSCREEN_KEY),
+  );
+  // Offered: a host that takes contacts and a device with fingers to give it.
+  // Active: offered, and the user has the switch on. Only `touchActive` changes
+  // what a finger does; the other two decide whether the switch is shown.
+  const touchOffered = HAS_TOUCH && canTouch;
+  const touchActive = touchOffered && touchEnabled;
   // The remembered "sound by default" preference, edited from the picker and
   // from the desktop menu alike (see AUDIO_KEY). Applied to a compatible
   // connection in `handleConnected`, and read there through a ref so the
@@ -539,6 +564,14 @@ export function useRemoteDesktop(
     macKeyOverridesActiveRef.current = macKeyOverridesActive;
     releaseKeysRef.current?.();
   }, [macKeyOverridesActive]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TOUCHSCREEN_KEY, touchEnabled ? "on" : "off");
+    } catch {
+      // storage disabled or blocked; the choice lives for this tab only
+    }
+  }, [touchEnabled]);
 
   // Persist the preference as it changes rather than in the toggle callback, so
   // the stored value follows the state whatever set it.
@@ -1332,6 +1365,7 @@ export function useRemoteDesktop(
       setPendingTarget(null);
       setMode("desktop");
       setCanClipboard(msg.clipboard);
+      setCanTouch(false);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
       // The camera never survives into a new session state: unlike sound there
@@ -1488,6 +1522,9 @@ export function useRemoteDesktop(
           // only for the Command chords in macKeys.ts.
           setRemoteIsMac(msg.macos);
           break;
+        case "touchReady":
+          setCanTouch(true);
+          break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -1523,6 +1560,7 @@ export function useRemoteDesktop(
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
           setRemoteIsMac(false);
+          setCanTouch(false);
           setDisplays([]);
           setActiveDisplayId(null);
           sharedDisplay = null;
@@ -2021,58 +2059,16 @@ export function useRemoteDesktop(
     // see them, but there is no client mode to toggle around that browser boundary.
     const macKeys = new MacKeyboardTranslator();
 
-    // Touch gestures, only on pinch-zoom-capable devices — they
-    // drive the same view transform applyCanvasCss renders.
-    const gestures = CAN_PINCH_ZOOM
-      ? attachTouchGestures(el, {
-          send,
-          remoteSize: () => sizeRef.current,
-          view: () => {
-            const size = sizeRef.current;
-            return {
-              fit: size ? touchFitScale(size) : 1,
-              zoom: viewRef.current.zoom,
-              pan: viewRef.current.pan,
-            };
-          },
-          applyView: (zoom, pan) => {
-            viewRef.current.zoom = zoom;
-            viewRef.current.pan = pan;
-            applyCanvasCss(
-              canvasRef.current,
-              sizeRef.current,
-              viewRef.current,
-              bottomInsetRef.current,
-            );
-            syncCursor();
-          },
-          bottomInset: () => bottomInsetRef.current,
-          // The virtual pointer moved: redraw it at its new spot. A hardware
-          // mouse (`real`) needs no image — the CSS cursor already sits under
-          // it — so it clears the position instead.
-          onCursor: (x, y, real) => {
-            touchCursorRef.current = real ? null : { x, y };
-            syncCursor();
-          },
-        })
-      : null;
-
-    // Scroll and window resize move the canvas without going through
-    // `applyCanvasCss`, so they invalidate the pointer rect cache themselves —
-    // scroll on capture, because the scrolling element is whichever ancestor
-    // overflowed, and scroll events do not bubble.
-    const invalidatePointerRect = () => pointerRectCache.invalidate();
-
-    const toRemote = (e: MouseEvent) => {
-      // Map through the canvas rect (not the overlay): it reflects the
-      // displayed framebuffer under the current touch zoom/pan, and on
-      // desktop it coincides with the overlay anyway.
+    // Client point to remote pixels. Map through the canvas rect (not the
+    // overlay): it reflects the displayed framebuffer under the current touch
+    // zoom/pan, and on desktop it coincides with the overlay anyway.
+    const toRemotePoint = (clientX: number, clientY: number) => {
       const rect = pointerRectCache.read(canvasRef.current ?? el);
       const remote = sizeRef.current;
       const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
       const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
-      let x = Math.round((e.clientX - rect.left) * scaleX);
-      let y = Math.round((e.clientY - rect.top) * scaleY);
+      let x = Math.round((clientX - rect.left) * scaleX);
+      let y = Math.round((clientY - rect.top) * scaleY);
       // Clamp to the framebuffer bounds so a drag past the edge stays in range.
       if (remote) {
         x = Math.min(Math.max(x, 0), remote.w - 1);
@@ -2080,6 +2076,76 @@ export function useRemoteDesktop(
       }
       return { x, y };
     };
+
+    // Touchscreen mode: fingers go to the remote as contacts and the guest
+    // reads the gestures, so the trackpad layer below is not attached. The
+    // view is put back to fit — no pinch zoom, no pan, no virtual cursor —
+    // because a contact lands where the finger is, and a zoomed view would
+    // make the finger and the pixel under it disagree at the edges.
+    const passthrough = touchActive
+      ? attachTouchPassthrough(el, {
+          send,
+          toRemote: (clientX, clientY) =>
+            sizeRef.current ? toRemotePoint(clientX, clientY) : null,
+        })
+      : null;
+    if (passthrough) {
+      viewRef.current.zoom = 1;
+      viewRef.current.pan = { x: 0, y: 0 };
+      applyCanvasCss(
+        canvasRef.current,
+        sizeRef.current,
+        viewRef.current,
+        bottomInsetRef.current,
+      );
+      touchCursorRef.current = null;
+      syncCursor();
+    }
+
+    // Touch gestures, only on pinch-zoom-capable devices — they
+    // drive the same view transform applyCanvasCss renders.
+    const gestures =
+      CAN_PINCH_ZOOM && !touchActive
+        ? attachTouchGestures(el, {
+            send,
+            remoteSize: () => sizeRef.current,
+            view: () => {
+              const size = sizeRef.current;
+              return {
+                fit: size ? touchFitScale(size) : 1,
+                zoom: viewRef.current.zoom,
+                pan: viewRef.current.pan,
+              };
+            },
+            applyView: (zoom, pan) => {
+              viewRef.current.zoom = zoom;
+              viewRef.current.pan = pan;
+              applyCanvasCss(
+                canvasRef.current,
+                sizeRef.current,
+                viewRef.current,
+                bottomInsetRef.current,
+              );
+              syncCursor();
+            },
+            bottomInset: () => bottomInsetRef.current,
+            // The virtual pointer moved: redraw it at its new spot. A hardware
+            // mouse (`real`) needs no image — the CSS cursor already sits under
+            // it — so it clears the position instead.
+            onCursor: (x, y, real) => {
+              touchCursorRef.current = real ? null : { x, y };
+              syncCursor();
+            },
+          })
+        : null;
+
+    // Scroll and window resize move the canvas without going through
+    // `applyCanvasCss`, so they invalidate the pointer rect cache themselves —
+    // scroll on capture, because the scrolling element is whichever ancestor
+    // overflowed, and scroll events do not bubble.
+    const invalidatePointerRect = () => pointerRectCache.invalidate();
+
+    const toRemote = (e: MouseEvent) => toRemotePoint(e.clientX, e.clientY);
 
     const onMouseMove = (e: MouseEvent) => {
       const { x, y } = toRemote(e);
@@ -2154,6 +2220,7 @@ export function useRemoteDesktop(
       }
       pressedButtons.clear();
       gestures?.release();
+      passthrough?.release();
     };
     // Every key goes through the Command translator, which is a pass-through
     // unless this is a Mac host driving a non-Mac guest. `pressedKeys` follows what
@@ -2217,6 +2284,7 @@ export function useRemoteDesktop(
 
     return () => {
       gestures?.detach();
+      passthrough?.detach();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);
@@ -2233,7 +2301,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, syncCursor]);
+  }, [overlayRef, canvasRef, syncCursor, touchActive]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth
@@ -2288,6 +2356,11 @@ export function useRemoteDesktop(
     isMacHost: IS_MAC_HOST,
     remoteIsMac,
     setMacKeyOverridesEnabled,
+    // The touchscreen switch: shown when offered, doing something when active.
+    touchOffered,
+    touchEnabled,
+    touchActive,
+    setTouchEnabled,
     onLocalShortcut,
     takeOver,
     retry,

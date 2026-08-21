@@ -576,6 +576,44 @@ function MacKeyboardSection({
   );
 }
 
+// Touchscreen mode: fingers reach the remote as touch contacts and the guest
+// reads the gestures itself — on Windows, its own tap, drag, press-and-hold,
+// pinch, two-finger scroll and edge swipes. Shown only once the host has opened
+// its touch channel on a device that has fingers to offer it; everywhere else
+// the trackpad gestures are the only touch there is, and there is no switch to
+// show. See touchPassthrough.ts.
+function TouchscreenSection({
+  offered,
+  enabled,
+  onChange,
+}: {
+  offered: boolean;
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  if (!offered) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Touchscreen</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => onChange(!enabled)}
+        aria-pressed={enabled}
+        title={
+          enabled
+            ? "Fingers reach the remote as touch contacts: its own tap, drag, pinch, scroll and edge-swipe gestures apply. Turn off for the trackpad gestures."
+            : "Send fingers to the remote as touch contacts, so its own gestures apply, instead of driving a cursor with the trackpad gestures."
+        }
+      >
+        {enabled ? "Touchscreen: on" : "Touchscreen: off"}
+      </button>
+    </div>
+  );
+}
+
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
@@ -613,6 +651,10 @@ export default function FloatingMenu({
   isMacHost,
   remoteIsMac,
   onMacKeyOverridesChange,
+  touchOffered,
+  touchEnabled,
+  touchActive,
+  onTouchChange,
   onLocalShortcut,
 }: {
   onLogout: () => void;
@@ -696,6 +738,14 @@ export default function FloatingMenu({
   isMacHost: boolean;
   remoteIsMac: boolean;
   onMacKeyOverridesChange: (enabled: boolean) => void;
+  // The touchscreen switch. Offered when the host takes touch contacts and
+  // this device has a touchscreen; active when it is also on, which is what
+  // swaps the Help card's gesture table for the guest's own. See
+  // useRemoteDesktop and touchPassthrough.ts.
+  touchOffered: boolean;
+  touchEnabled: boolean;
+  touchActive: boolean;
+  onTouchChange: (enabled: boolean) => void;
   // A chord this component took for itself, announced to the input path so it can
   // unwind what it was holding for one. Only the Mac spelling of the chrome
   // shortcut needs it, and only because Command is in it. See useRemoteDesktop.
@@ -1077,6 +1127,12 @@ export default function FloatingMenu({
             onChange={onMacKeyOverridesChange}
           />
 
+          <TouchscreenSection
+            offered={touchOffered}
+            enabled={touchEnabled}
+            onChange={onTouchChange}
+          />
+
           <div className="toolbar-section toolbar-actions">
             <button
               type="button"
@@ -1162,6 +1218,14 @@ export default function FloatingMenu({
               </>
             )}
             <h3>Touch gestures</h3>
+            {touchActive ? (
+              <p className="help-note">
+                Touchscreen is on: fingers reach the remote as touch contacts,
+                and its own gestures apply — tap, drag, press-and-hold, pinch,
+                two-finger scroll, edge swipes. Turn it off for the trackpad
+                gestures below.
+              </p>
+            ) : null}
             <dl className="help-list">
               {GESTURE_HELP.map((row) => (
                 <div key={row.gesture} className="help-item">

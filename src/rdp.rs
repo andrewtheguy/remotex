@@ -34,6 +34,7 @@
 //!
 //! See docs/architecture.md for the design.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use freerdp::{Clipboard, ClipboardEvent, ClipboardFormat, Connect, Event, Frame, Framebuffer,
@@ -52,7 +53,7 @@ use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay, MAX_CURSOR_DIM,
-    MouseButton, ServerMsg, UNSCALED,
+    MouseButton, ServerMsg, TouchPhase, UNSCALED,
 };
 use crate::rdp_audio;
 use crate::rdp_camera;
@@ -406,6 +407,11 @@ fn connect_config(
         microphone: rdp_mic::connect(microphone),
         resize: config.resize,
         egfx: config.egfx(),
+        // Always offered, not a target key: whether touch exists is the host's
+        // answer (a Windows host opens MS-RDPEI, xrdp never does), it costs a
+        // Windows host nothing to be asked, and the client shows the mode only
+        // once the host has answered — see `Event::TouchReady` below.
+        touch: true,
         connect_timeout: engine::TCP_CONNECT_TIMEOUT,
         keepalive: engine::keepalive(),
     }
@@ -700,6 +706,14 @@ async fn active_loop(
     // nowhere to go — the engine crate would hold it, but holding it there loses
     // the retry ladder below, which is what a Windows host actually needs.
     let mut resize_ready = false;
+    // Whether the host opened MS-RDPEI. Announced to each client that attaches,
+    // since the mode is offered on the host's answer and a reattaching browser
+    // missed the first one.
+    let mut touch_ready = false;
+    // The contacts the browser has put down and not yet lifted. Kept so a
+    // reattach can cancel them: the fingers belonged to the client that went
+    // away, and the host would otherwise hold a gesture nobody is making.
+    let mut held_touches: HashSet<i32> = HashSet::new();
     // The layout in flight — a size, a density, or both — and when to repeat it.
     // The client states each *once per attach* and then dedupes it (a viewport,
     // and `sendHostDisplay` in frontend/src/useRemoteDesktop.ts), so nothing will ask
@@ -785,6 +799,11 @@ async fn active_loop(
                         damage_due = None;
                     }
                     Event::Cursor(cursor) => pointer.set(cursor),
+                    Event::TouchReady => {
+                        debug!("rdp: the host opened the touch channel");
+                        touch_ready = true;
+                        sink.msg(ServerMsg::TouchReady).await?;
+                    }
                     Event::ResizeReady { max_monitors, max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_monitors} monitors and {max_area} pixels");
                         resize_ready = true;
@@ -906,6 +925,14 @@ async fn active_loop(
                         scale: applied.scale(),
                     }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
+                    if touch_ready {
+                        sink.msg(ServerMsg::TouchReady).await?;
+                    }
+                    // The fingers of whoever was attached before are not this
+                    // client's: cancel what is still down so the host drops
+                    // that gesture rather than waiting for an up that will
+                    // never come.
+                    release_touches(input, &mut held_touches);
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
@@ -1046,6 +1073,23 @@ async fn active_loop(
                         }).await?;
                     }
                     continue;
+                }
+                if let ClientMsg::Touch { id, phase, .. } = msg {
+                    if !touch_ready {
+                        // The host has not opened MS-RDPEI (or never will): the
+                        // engine would drop the contact anyway, and remembering
+                        // it here would only leave an id to cancel later.
+                        continue;
+                    }
+                    match phase {
+                        TouchPhase::Down => {
+                            held_touches.insert(id);
+                        }
+                        TouchPhase::Up | TouchPhase::Cancel => {
+                            held_touches.remove(&id);
+                        }
+                        TouchPhase::Move => {}
+                    }
                 }
                 for event in translate_input(msg, &mut last_pos) {
                     event.apply(input);
@@ -1419,6 +1463,7 @@ enum RemoteInput {
     Button { button: RdpButton, down: bool, x: u16, y: u16 },
     Wheel { delta: i16, horizontal: bool, x: u16, y: u16 },
     Key { scancode: u8, extended: bool, down: bool },
+    Touch { phase: TouchPhase, id: i32, x: i32, y: i32 },
 }
 
 impl RemoteInput {
@@ -1428,7 +1473,26 @@ impl RemoteInput {
             Self::Button { button, down, x, y } => input.mouse_button(button, down, x, y),
             Self::Wheel { delta, horizontal, x, y } => input.wheel(delta, horizontal, x, y),
             Self::Key { scancode, extended, down } => input.key(scancode, extended, down),
+            Self::Touch { phase, id, x, y } => input.touch(touch_phase(phase), id, x, y),
         }
+    }
+}
+
+/// The wire's contact transition in the engine crate's terms — the same four.
+fn touch_phase(phase: TouchPhase) -> freerdp::TouchPhase {
+    match phase {
+        TouchPhase::Down => freerdp::TouchPhase::Down,
+        TouchPhase::Move => freerdp::TouchPhase::Move,
+        TouchPhase::Up => freerdp::TouchPhase::Up,
+        TouchPhase::Cancel => freerdp::TouchPhase::Cancel,
+    }
+}
+
+/// Cancel every contact still down, and forget them. A cancel rather than an
+/// up: nobody lifted these fingers, and an up where they were would be a tap.
+fn release_touches(input: &Input, held: &mut HashSet<i32>) {
+    for id in held.drain() {
+        input.touch(freerdp::TouchPhase::Cancel, id, 0, 0);
     }
 }
 
@@ -1488,6 +1552,17 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
             }
             events
         }
+        // A contact carries its own position and leaves `last_pos` alone: a
+        // finger is not the pointer, and a wheel arriving mid-gesture should
+        // still land where the mouse last was. Clamped to the coordinate range
+        // rather than the desktop — the client already clamps to the
+        // framebuffer, and the host clamps to its own digitizer.
+        ClientMsg::Touch { id, phase, x, y } => vec![RemoteInput::Touch {
+            phase,
+            id,
+            x: i32::from(clamp_u16(x)),
+            y: i32::from(clamp_u16(y)),
+        }],
         // `caps` is VNC-only: the RDP host tracks its own CapsLock from the
         // forwarded scancode.
         ClientMsg::Key { code, pressed, .. } => match keymap::scancode(&code) {
@@ -1901,6 +1976,33 @@ mod tests {
         let events = translate_input(ClientMsg::MouseMove { x: -5, y: 70000 }, &mut last);
         assert_eq!(events, vec![RemoteInput::Move { x: 0, y: u16::MAX }]);
         assert_eq!(last, (0, u16::MAX));
+    }
+
+    #[test]
+    fn touch_keeps_its_own_position_and_leaves_the_pointer_alone() {
+        let mut last = (7, 9);
+        let events = translate_input(
+            ClientMsg::Touch { id: 3, phase: TouchPhase::Down, x: 100, y: 200 },
+            &mut last,
+        );
+        assert_eq!(
+            events,
+            vec![RemoteInput::Touch { phase: TouchPhase::Down, id: 3, x: 100, y: 200 }]
+        );
+        assert_eq!(last, (7, 9), "a finger is not the mouse");
+        let events = translate_input(
+            ClientMsg::Touch { id: 3, phase: TouchPhase::Up, x: -4, y: 70000 },
+            &mut last,
+        );
+        assert_eq!(
+            events,
+            vec![RemoteInput::Touch {
+                phase: TouchPhase::Up,
+                id: 3,
+                x: 0,
+                y: i32::from(u16::MAX)
+            }]
+        );
     }
 
     #[test]

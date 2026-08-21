@@ -1115,6 +1115,17 @@ pixels and remote scale. Desktop clients scroll when necessary. Touch clients
 use fit-to-width presentation, pinch zoom, pan, a virtual cursor, and
 multi-finger gestures without changing framebuffer coordinates.
 
+That touch layer is a trackpad, and there is a second one that is a touchscreen.
+Against a Windows host the RDP engine offers MS-RDPEI (`Connect::touch`, always
+on), and when the host opens the channel the gateway says `touchReady`; a
+touch-capable client then shows a **Touchscreen** switch (remembered, off by
+default) that forwards fingers as `touch` contacts — down, move, up, cancel, in
+framebuffer pixels, named by small slot ids — instead of interpreting them. The
+guest recognises the gestures itself: Windows' tap, drag, press-and-hold, pinch,
+two-finger scroll and edge swipes are its own. VNC has no touch and never sends
+`touchReady`; a reattach re-announces it and cancels the contacts of whoever was
+attached before. See `frontend/src/touchPassthrough.ts` and `src/rdp.rs`.
+
 On a Mac host connected to a non-Mac remote, selected Command shortcuts are
 translated to Control. A Mac-keyboard toggle disables translation, and the
 gateway's `remoteOs` message suppresses it for Mac remotes.
