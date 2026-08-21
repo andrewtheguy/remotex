@@ -40,6 +40,7 @@ That keeps both upgrades and removals away from stored credentials.
 | `build-tarball.sh` | build the gateway and assemble the common release payload |
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
 | `build-container-binary.sh` | build and verify a gateway with all default features disabled |
+| `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `install.sh` | install the tarball fallback under a relocatable prefix |
 | `uninstall.sh` | remove that fallback installation or one fallback version |
 | `Dockerfile` | build an image from an extracted release tarball |

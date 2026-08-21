@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Remove remotex installed by install.sh.
+# Remove remotex installed by install.sh — the relocatable tarball layout.
+# The macOS .pkg is removed by uninstall-macos-pkg.sh instead.
 #
 #   PREFIX   install root   (default: /opt/remotex)
 #   BINDIR   launcher dir   (default: /usr/local/bin)

@@ -128,7 +128,19 @@ On an RPM distribution:
 sudo dnf remove remotex
 ```
 
-On macOS:
+On macOS there is no package manager to ask, so the repository ships an
+uninstaller that reads the installed receipt and removes exactly what the
+package wrote:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/andrewtheguy/remotex/main/packaging/uninstall-macos-pkg.sh
+sudo bash uninstall-macos-pkg.sh
+```
+
+`--dry-run` prints the removals without making them and needs no `sudo`. The
+script forgets the receipt afterwards, and keeps any payload directory that
+still holds a file the operator put there. Doing it by hand is the same three
+steps against the current layout:
 
 ```sh
 sudo rm -f /usr/local/bin/remotex
@@ -136,7 +148,7 @@ sudo rm -rf /usr/local/share/remotex /usr/local/share/doc/remotex
 sudo pkgutil --forget com.andrewtheguy.remotex.gateway
 ```
 
-All three leave the live config behind. Remove `/etc/remotex` on Linux or
+None of these touch the live config. Remove `/etc/remotex` on Linux or
 `/usr/local/etc/remotex` on macOS separately only when the credentials and
 configuration should be deleted too.
 
