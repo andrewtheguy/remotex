@@ -1075,6 +1075,12 @@ async fn active_loop(
                     continue;
                 }
                 if let ClientMsg::Touch { id, phase, .. } = msg {
+                    if !touch_ready {
+                        // The host has not opened MS-RDPEI (or never will): the
+                        // engine would drop the contact anyway, and remembering
+                        // it here would only leave an id to cancel later.
+                        continue;
+                    }
                     match phase {
                         TouchPhase::Down => {
                             held_touches.insert(id);

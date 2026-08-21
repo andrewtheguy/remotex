@@ -130,6 +130,10 @@ function readOnByKey(key: string): boolean {
 }
 // Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+// Any finger at all — what the touchscreen passthrough needs, which is less
+// than the two a pinch needs: one contact is still a tap, a press-and-hold and
+// an edge swipe to the host, so a one-touch digitizer is offered the switch.
+export const HAS_TOUCH = (navigator.maxTouchPoints || 0) >= 1;
 
 // Phone or tablet, off the screen's short side in CSS pixels. Deliberately the
 // crudest test that separates them: the largest phone is around 440 CSS px across
@@ -515,7 +519,7 @@ export function useRemoteDesktop(
   // Offered: a host that takes contacts and a device with fingers to give it.
   // Active: offered, and the user has the switch on. Only `touchActive` changes
   // what a finger does; the other two decide whether the switch is shown.
-  const touchOffered = CAN_PINCH_ZOOM && canTouch;
+  const touchOffered = HAS_TOUCH && canTouch;
   const touchActive = touchOffered && touchEnabled;
   // The remembered "sound by default" preference, edited from the picker and
   // from the desktop menu alike (see AUDIO_KEY). Applied to a compatible

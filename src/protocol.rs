@@ -1457,6 +1457,15 @@ mod tests {
             ClientMsg::SelectDisplay { id: u32::MAX }
         ));
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":-1}"#).is_err());
+        // A touch contact: `phase` rides as the lowercase name. Asserted on a
+        // mid-contact one, since `down` is the variant every example reaches for.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"touch","id":3,"phase":"move","x":640,"y":400}"#
+            )
+            .unwrap(),
+            ClientMsg::Touch { id: 3, phase: TouchPhase::Move, x: 640, y: 400 }
+        ));
         // There is no audio message. Subscribing is opening the audio socket, and the
         // one thing that could be said here is refused rather than ignored, so a client
         // still sending the deleted message learns it on the first attempt instead of
