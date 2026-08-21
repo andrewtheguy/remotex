@@ -37,6 +37,7 @@ import {
   type RemoteClipboard,
   wheelUnitFromEvent,
 } from "./protocol.ts";
+import { tabletGuestSize } from "./tabletGuestSize.ts";
 import {
   attachTouchGestures,
   MAX_ZOOM,
@@ -135,19 +136,17 @@ export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
 // an edge swipe to the host, so a one-touch digitizer is offered the switch.
 export const HAS_TOUCH = (navigator.maxTouchPoints || 0) >= 1;
 
-// Phone or tablet, off the screen's short side in CSS pixels. Deliberately the
-// crudest test that separates them: the largest phone is around 440 CSS px across
-// its short side and the smallest tablet around 740, so the boundary sits in a gap
-// no real device occupies and nothing near it has an answer worth getting right.
-const TABLET_MIN_SHORT_SIDE = 600;
-
-// Tablets request their screen's landscape dimensions; phones request the
-// target default. Screen dimensions keep rotation and browser chrome irrelevant.
-const MOBILE_GUEST_SIZE: { w: number; h: number } | null = (() => {
-  const long = Math.max(screen.width, screen.height);
-  const short = Math.min(screen.width, screen.height);
-  return short >= TABLET_MIN_SHORT_SIDE ? { w: long, h: short } : null;
-})();
+// Tablets request their screen's landscape dimensions less the band a status
+// bar or browser bar keeps above the page; phones request the target default.
+// See tabletGuestSize. Read when sent rather than at load: the band is measured
+// off the page as it is at that moment.
+function mobileGuestSize(): { w: number; h: number } | null {
+  const el = document.documentElement;
+  return tabletGuestSize(
+    { w: screen.width, h: screen.height },
+    { w: el.clientWidth, h: el.clientHeight },
+  );
+}
 
 // The touch view transform: the pinch zoom and pan offset the
 // gestures drive, layered on top of the fit-to-width base scale. One object
@@ -1007,16 +1006,17 @@ export function useRemoteDesktop(
       sendRef.current(msg);
     };
     // Send one mobile size after the first resize supplies the remote density.
-    // Rotations and browser chrome do not revise it.
+    // Rotations do not revise it.
     let mobileSizePending = false;
     const sendMobileSize = () => {
       mobileSizePending = false;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
+      const guest = mobileGuestSize();
       sendRef.current(
-        MOBILE_GUEST_SIZE
-          ? viewportMsg(MOBILE_GUEST_SIZE, sizeRef.current?.scale ?? 1)
+        guest
+          ? viewportMsg(guest, sizeRef.current?.scale ?? 1)
           : { type: "defaultSize" },
       );
     };
