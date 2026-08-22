@@ -12,8 +12,7 @@ test("a phone asks for the target default", () => {
 });
 
 test("a full-screen page asks for the whole landscape screen", () => {
-  // The remotex-ios web view: status bar hidden, safe area ignored, so the page
-  // and the screen are the same rectangle and nothing is deducted.
+  // The page and the screen are the same rectangle, so nothing is deducted.
   assert.deepEqual(tabletGuestSize(IPAD, { w: 1376, h: 1032 }), {
     w: 1376,
     h: 1032,

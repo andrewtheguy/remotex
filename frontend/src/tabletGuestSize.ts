@@ -32,7 +32,6 @@ export interface CssSize {
  * which the remainder is the browser's own. A windowed page (Stage Manager, split
  * view) falls short on both axes and says nothing about the status bar, so it
  * keeps the screen's full height. So does a page that fills the screen outright:
- * the remotex-ios web view hides the status bar and ignores the safe area, so
  * there the gap is zero and the full height stands, unchanged.
  */
 export function tabletGuestSize(
