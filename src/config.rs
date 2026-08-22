@@ -1471,24 +1471,6 @@ impl ConfigFile {
                     target.name
                 );
             }
-            // Refused rather than merely discouraged, because the failure is not
-            // one a person recovers from by looking at the screen: a resize under
-            // both leaves the desktop wrong until the whole gateway is restarted,
-            // and a reconnect does not clear it. Neither half is proven at fault —
-            // `ard-high-performance` is reverse engineered with no specification
-            // behind it (docs/apple-vnc-889.md), and `motion` is the newer code —
-            // so the pairing waits until one of them is understood well enough to
-            // say which. Every other subtype may use `motion`, and this target may
-            // use every other strategy.
-            anyhow::ensure!(
-                target.render_type != RenderType::Motion
-                    || target.subtype != Some(Subtype::ArdHighPerformance),
-                "target {:?} pairs render_type = \"motion\" with subtype = \
-                 \"ard-high-performance\", which this gateway refuses: a resize under both \
-                 corrupts the desktop until the gateway is restarted. Use subtype = \"ard\" \
-                 to keep \"motion\", or another render_type to keep the virtual display",
-                target.name
-            );
             // The render dial has two axes and they are validated together,
             // because only some pairings mean anything and `render_quality`
             // belongs to exactly one of them. The match is exhaustive so a future
@@ -3388,49 +3370,11 @@ mod tests {
         assert!(msg.contains("jpeg"), "{msg}");
     }
 
-    /// A resize under both corrupts the desktop until the gateway is restarted,
-    /// which a person cannot recover from by looking at the screen — so the pairing
-    /// is refused at load rather than left to be discovered. The error names both
-    /// ways out, because either half alone is fine.
+    /// Motion is a shared sink strategy, independent of which engine produced the
+    /// damage. Apple High Performance therefore gets the same plan as every other
+    /// VNC subtype, including when its virtual display can resize.
     #[test]
-    fn motion_is_refused_on_apple_high_performance() {
-        let target = |subtype: &str| {
-            format!(
-                r#"
-                [[targets]]
-                name = "a"
-                protocol = "vnc"
-                subtype = "{subtype}"
-                host = "h"
-                username = "u"
-                password = "p"
-                width = 1600
-                height = 1000
-                render_type = "motion"
-                render_motion_subtype = "jpeg"
-                render_motion_quality = 10
-                "#
-            )
-        };
-
-        let err = ConfigFile::parse(&target("ard-high-performance")).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ard-high-performance") && msg.contains("motion"), "{msg}");
-        assert!(msg.contains("restarted"), "the error should say what goes wrong: {msg}");
-
-        // The other Apple subtype is untouched: this is one pairing, not a rule
-        // about Macs.
-        let cfg = ConfigFile::parse(&target("ard")).expect("motion belongs on plain ard");
-        assert_eq!(
-            motion_of(cfg.targets[0].render_plan()),
-            Some(MotionEncode::Tile(TileCodec::Jpeg(10)))
-        );
-    }
-
-    /// And the same target is fine on any other strategy — what is refused is the
-    /// pairing, not the subtype.
-    #[test]
-    fn apple_high_performance_keeps_every_other_render_type() {
+    fn motion_is_accepted_on_apple_high_performance() {
         let cfg = ConfigFile::parse(
             r#"
             [[targets]]
@@ -3440,17 +3384,16 @@ mod tests {
             host = "h"
             username = "u"
             password = "p"
-            width = 1600
-            height = 1000
-            render_type = "tiles"
-            render_subtype = "jpeg"
-            render_quality = 60
+            resize = true
+            render_type = "motion"
+            render_motion_subtype = "jpeg"
+            render_motion_quality = 10
             "#,
         )
-        .expect("only the motion pairing is refused");
+        .expect("motion is independent of the VNC subtype");
         assert_eq!(
-            cfg.targets[0].render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None }
+            motion_of(cfg.targets[0].render_plan()),
+            Some(MotionEncode::Tile(TileCodec::Jpeg(10)))
         );
     }
 
