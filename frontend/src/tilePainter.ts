@@ -117,6 +117,12 @@ export interface TilePainter {
    * `onVideoError` exactly as a failing decode does.
    */
   setVideoFormat(stream: number, format: VideoFormat): void;
+  /**
+   * One stream's region is over: release its decoder, and with it the platform
+   * decode session behind it. Nothing arrives on this id again until the gateway
+   * announces it afresh, so nothing is lost by letting it go.
+   */
+  endVideoStream(stream: number): void;
 }
 
 export function createTilePainter(options: {
@@ -532,6 +538,12 @@ export function createTilePainter(options: {
     },
     setVideoFormat(stream, format) {
       videoStreams().setFormat(stream, format);
+    },
+    endVideoStream(stream) {
+      // Deliberately not `videoStreams()`: an end for a stream this attachment never
+      // decoded must not be the thing that builds the table, and a table that does
+      // not exist has no decoder to release.
+      video?.end(stream);
     },
   };
 }

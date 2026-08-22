@@ -60,6 +60,8 @@ export interface DesktopPainter {
   /** Set the canvas bitmap (framebuffer pixels) and fill it black. */
   resize(bitmap: { w: number; h: number }, seq: number): void;
   setVideoFormat(stream: number, format: VideoFormat): void;
+  /** One stream's region is over; release its decoder. */
+  endVideoStream(stream: number): void;
   /** The attachment boundary: wipe the bitmap, the caches and the decoders. */
   clear(): void;
 }
@@ -133,6 +135,9 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
     },
     setVideoFormat(stream, format) {
       post({ type: "videoFormat", stream, format });
+    },
+    endVideoStream(stream) {
+      post({ type: "videoEnd", stream });
     },
     clear() {
       post({ type: "clear" });

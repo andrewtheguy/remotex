@@ -72,6 +72,26 @@ export interface VideoStreams {
     data: Uint8Array,
     keyframe: boolean,
   ) => Promise<VideoFrame | null>;
+  /**
+   * One stream's region is over.
+   *
+   * The gateway says this because it is the only side that knows it — an id that has
+   * ended is otherwise indistinguishable from one whose region is merely still. What
+   * it buys is a resource: a decoder holds a platform decode session, a hardware one
+   * holds a scarce one, and under `render_motion_subtype = "stream"` regions come and
+   * go all session, so a table that never released anything would hold a session per
+   * id it had ever seen.
+   *
+   * **The decoder is retired, not closed.** Closing it here was measured to cost more
+   * than it saved: over a real scroll the gateway ended a stream 88 times in 98
+   * retunes, and most of those ids were handed straight back to another region at the
+   * same picture size — which an open decoder decodes from the next keyframe without
+   * being rebuilt at all. Closing on the spot turned 37 decoder builds into 97, and a
+   * decoder *build* is the expensive, failure-prone half of a hardware session's life.
+   * So the end starts a clock ([`RETIRE_MS`]) instead, and a stream that comes back
+   * before it runs out costs nothing.
+   */
+  end: (stream: number) => void;
   /** Drop every decoder. Everything still pending resolves to null. */
   close: () => void;
 }
@@ -87,6 +107,7 @@ export interface VideoStreams {
 export function createVideoStreams(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
+  retireMs: number = RETIRE_MS,
 ): VideoStreams {
   interface Live {
     stream: VideoStream;
@@ -101,6 +122,9 @@ export function createVideoStreams(
     timestamp: number;
   }
   const live = new Map<number, Live>();
+  // Streams the gateway has said are over, and when their decoder goes. Held rather
+  // than closed, per `end` above.
+  const retiring = new Map<number, ReturnType<typeof setTimeout>>();
   // What the gateway last announced per stream, which is not the same as what a
   // decoder is running on: the announcement arrives first and the decoder is built by
   // the unit that follows it.
@@ -109,7 +133,16 @@ export function createVideoStreams(
   // console line rather than one per frame until the repaint lands.
   const warned = new Set<number>();
 
+  const keepAlive = (id: number) => {
+    const clock = retiring.get(id);
+    if (clock !== undefined) {
+      clearTimeout(clock);
+      retiring.delete(id);
+    }
+  };
+
   const dropDecoder = (id: number) => {
+    keepAlive(id);
     const held = live.get(id);
     if (held) {
       held.stream.close();
@@ -229,6 +262,8 @@ export function createVideoStreams(
         }
         return Promise.resolve(null);
       }
+      // Whatever this id was, it is live again — see `end`.
+      keepAlive(id);
       const held = liveStream(id, size, format);
       if (!held) {
         return Promise.resolve(null);
@@ -236,7 +271,33 @@ export function createVideoStreams(
       held.timestamp += VIDEO_FRAME_US;
       return held.stream.decode(data, held.timestamp, keyframe);
     },
+    end(id) {
+      if (!live.has(id) || retiring.has(id)) {
+        return;
+      }
+      retiring.set(
+        id,
+        setTimeout(() => {
+          retiring.delete(id);
+          // The format goes with the decoder: the next stream on this id announces its
+          // own before its first unit, and a stale one would configure the wrong
+          // picture. Both stay while the decoder is merely retiring, which is what
+          // lets a region that comes back reuse it.
+          const held = live.get(id);
+          if (held) {
+            held.stream.close();
+            live.delete(id);
+          }
+          formats.delete(id);
+          warned.delete(id);
+        }, retireMs),
+      );
+    },
     close() {
+      for (const clock of retiring.values()) {
+        clearTimeout(clock);
+      }
+      retiring.clear();
       for (const held of live.values()) {
         held.stream.close();
       }
@@ -263,6 +324,17 @@ const VIDEO_FRAME_US = 33_333;
 // frames' grace at the 30 Hz `VIDEO_FRAME_INTERVAL` in src/encode.rs paces rounds at.
 // A decode that has not landed by now is not slow, it is not coming.
 const STALL_MS = 2_000;
+
+// How long a decoder outlives the end of the stream it was decoding.
+//
+// The gateway ends a region's stream after half a second of stillness and starts one
+// again the moment it moves, so ids come back constantly — and a returning region on
+// a decoder that is still open and still the right size costs nothing at all, where a
+// rebuilt one costs a platform decode session. Four seconds is long enough to cover
+// the way a scroll actually stops and starts, and short enough that a session the
+// picture has genuinely finished with is handed back while the desktop is still on
+// screen rather than at the end of the session.
+const RETIRE_MS = 4_000;
 
 export interface VideoHandlers {
   /**
@@ -443,15 +515,26 @@ export function createVideoStream(
     // smaller by up to a pixel in each axis and is not what a decoder should be told.
     codec: format.decode,
     optimizeForLatency: true,
-    // The decoder that goes quiet is the hardware one. The signature of every stall —
-    // silence where a decode error belongs, then a failed end-of-stream flush (see
-    // `stalled`) — is how a GPU-process decoder fails, and only how a GPU-process
-    // decoder fails: software libvpx answers every chunk on the calling thread, error
-    // and all. These streams are also the shape hardware decode is worst at — several
-    // small short-lived regions, built and torn down as motion comes and goes — and
-    // the shape software eats: VP9 under ~2 megapixels at 30 Hz. A hint, by
-    // specification: a browser with nothing to prefer decodes as it was going to.
-    hardwareAcceleration: "prefer-software",
+    // `hardwareAcceleration` is deliberately left out, so a browser decodes this
+    // however it decodes VP9. Asking for software is a hint by specification — WebKit
+    // falls back past it, Firefox disregards it — and on iOS and iPadOS it is a hint
+    // with nothing behind it at all: WebKit maps `prefer-software` to
+    // `HardwareAcceleration::No`, the clause routing that to a local software decoder
+    // is compiled `#if PLATFORM(MAC)`, and iOS has no software VP9 decoder to route to
+    // — `isVP9DecoderAvailable` there *is* `vp9HardwareDecoderAvailable`. So VP9 on
+    // iOS is VideoToolbox or nothing (measured against WebKit main, 2026-08-21), and
+    // a preference stated here buys one platform's decoder at most.
+    //
+    // What makes a hardware decoder safe on this dial is the gateway rather than a
+    // hint. The decoder that goes quiet is the GPU-process one — that is the signature
+    // of every stall, silence where a decode error belongs and then a failed
+    // end-of-stream flush (see `stalled`), where software libvpx answers every chunk
+    // on the calling thread, error and all — and what it goes quiet under is churn:
+    // decode sessions built and torn down as regions come and go. The `SPANS` ladder
+    // in src/regions.rs holds a region's picture size still, so an id that comes back
+    // decodes on the session it already had, and `ServerMsg::VideoEnd` hands a
+    // finished stream's session back rather than leaving it held. The stall backstop
+    // above stands whatever ends up decoding.
   });
 
   return {
