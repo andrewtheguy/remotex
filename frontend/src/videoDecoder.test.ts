@@ -281,6 +281,34 @@ test("a stream that does not come back gives its decode session up", async () =>
   assert.equal(tagOf(await again), 0xc3);
 });
 
+test("a format announced during retirement outlives the clock", async () => {
+  const s = streams();
+  const frame = s.table.decode(1, size, unit(1), true);
+  const decoder = s.decoder();
+  decoder.emit(0xa1);
+  await frame;
+
+  // The gateway ended this id and handed it straight back: the new stream's format
+  // arrives first, and its first unit may be any distance behind it.
+  s.table.end(1);
+  s.table.setFormat(1, { decode: "vp09.00.40.08" });
+  await afterRetire();
+  assert.equal(decoder.closes, 0, "the announced stream lost its decoder");
+
+  const again = s.table.decode(1, size, unit(2), true);
+  assert.equal(
+    s.decoder(),
+    decoder,
+    "a same-size stream paid for a new decoder",
+  );
+  decoder.emit(0xb2);
+  assert.equal(
+    tagOf(await again),
+    0xb2,
+    "the unit was dropped for want of its format",
+  );
+});
+
 test("ending one stream leaves the others decoding", async () => {
   const s = streams();
   s.table.setFormat(2, { decode: "vp09.00.40.08" });

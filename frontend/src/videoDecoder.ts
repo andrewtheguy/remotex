@@ -230,6 +230,10 @@ export function createVideoStreams(
 
   return {
     setFormat(id, format) {
+      // An announcement is a stream starting on this id, so a retirement in progress
+      // is over: left running, it could fire between this and the first unit and
+      // take the format it just deleted with it.
+      keepAlive(id);
       formats.set(id, format);
       warned.delete(id);
       const held = live.get(id);

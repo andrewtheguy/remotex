@@ -116,6 +116,14 @@ fn span_up(span: u16, limit: u16) -> u16 {
     SPANS.iter().copied().find(|rung| *rung >= span).unwrap_or(limit).min(limit)
 }
 
+/// Note that the client is owed an end for `id`, once: an end is said once however
+/// many paths notice it before [`Regions::drain_ended`] takes it.
+fn record_end(ended: &mut Vec<u8>, id: u8) {
+    if !ended.contains(&id) {
+        ended.push(id);
+    }
+}
+
 /// How many rectangles this target streams, and how they are chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -217,6 +225,7 @@ impl CellBox {
         let place = |lo: u16, hi: u16, limit: u16| {
             let mut span = span_up(hi - lo + 1, limit);
             loop {
+                debug_assert!(span <= limit, "a rung wider than the grid it is placed on");
                 let start = (lo / span) * span;
                 if start + span > hi {
                     let start = start.min(limit - span);
@@ -502,14 +511,17 @@ impl Regions {
         // case this dial cannot afford: the ids that come back cost nothing, and the
         // ones that do not are exactly what an end is for.
         //
+        // Recorded here, delivered later. `want` runs this before the `Resize` is
+        // even queued, but what it records is drained by the next frame's `retune`
+        // or the next cleanup tick's `expire`, both behind that `Resize` on the
+        // ordered path — so the client hears the ends after the resize, against a
+        // decoder table the resize left intact.
+        //
         // Under [`Policy::Whole`] there is one stream, it is rebuilt on the same id
         // by the next blit, and nothing ever drains this — so nothing is recorded.
         if self.policy == Policy::Moving {
-            let ended = &mut self.ended;
             for live in &self.live {
-                if !ended.contains(&live.id) {
-                    ended.push(live.id);
-                }
+                record_end(&mut self.ended, live.id);
             }
         }
         self.live.clear();
@@ -534,9 +546,10 @@ impl Regions {
     /// they drain it for: [`Self::retune`] runs before its round is taken, and
     /// [`Self::expire`] inside the same task the units go out on.
     ///
-    /// The ends [`Self::want`] records are earlier still — taken before the resize
-    /// that caused them is even queued — and an id a later retune hands straight back
-    /// is dropped from here by that retune rather than said.
+    /// The ends [`Self::want`] records are recorded earlier still — before the resize
+    /// that caused them is even queued — but delivered by the same two drains, behind
+    /// it; and an id a later retune hands straight back is dropped from here by that
+    /// retune rather than said.
     pub fn drain_ended(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.ended)
     }
@@ -689,7 +702,7 @@ impl Regions {
                 old.retain(|live| {
                     let keep = live.rect.intersect(&rect).is_none();
                     if !keep {
-                        ended.push(live.id);
+                        record_end(ended, live.id);
                     }
                     keep
                 });
@@ -767,7 +780,7 @@ impl Regions {
         self.live.retain(|live| {
             let keep = now.saturating_duration_since(live.moving_at) < STREAM_IDLE;
             if !keep {
-                ended.push(live.id);
+                record_end(ended, live.id);
             }
             keep
         });
@@ -946,11 +959,8 @@ impl Regions {
             // could not: this is the last place that knows a client is holding a
             // decoder for them.
             if self.policy == Policy::Moving {
-                let ended = &mut self.ended;
                 for live in &round.live {
-                    if !ended.contains(&live.id) {
-                        ended.push(live.id);
-                    }
+                    record_end(&mut self.ended, live.id);
                 }
             }
             return;
