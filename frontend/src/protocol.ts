@@ -251,6 +251,13 @@ export type ControlMsg =
   // Nothing here parses a bitstream to find it out; VP9 has no parameter sets to
   // parse.
   | { type: "videoFormat"; stream: number; decode: string }
+  // One stream's region is over: nothing more arrives on this id until it is
+  // announced again. The counterpart of `videoFormat`, and it is about the resource
+  // rather than the picture — a decoder holds a platform decode session, there are
+  // few of them, and under `render_motion_subtype = "stream"` regions come and go all
+  // session. Without this the browser would keep one decoder per id it had ever seen
+  // and hand the next region to start a platform with nothing left to give it.
+  | { type: "videoEnd"; stream: number }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.

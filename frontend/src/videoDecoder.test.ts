@@ -98,6 +98,10 @@ const size = { w: 320, h: 240 };
 // one is a liveness backstop measured in seconds, not something to sleep through.
 const STALL_MS = 10;
 const afterStall = () => new Promise((resolve) => setTimeout(resolve, 30));
+// The same bargain for the retirement clock: the real one is four seconds, and what
+// is under test is that it is a clock at all rather than how long it is.
+const RETIRE_MS = 10;
+const afterRetire = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 function streams() {
   const errors: string[] = [];
@@ -108,6 +112,7 @@ function streams() {
       onNeedsKeyframe: (reason) => stalls.push(reason),
     },
     STALL_MS,
+    RETIRE_MS,
   );
   table.setFormat(1, { decode: "vp09.00.40.08" });
   return { table, errors, stalls, decoder: () => built[built.length - 1] };
@@ -209,4 +214,126 @@ test("closing the table settles what the decoders owe", async () => {
   // that no longer has anything to say.
   await afterStall();
   assert.deepEqual(s.stalls, []);
+});
+
+test("an ended stream keeps its decoder until the retirement clock runs out", async () => {
+  const s = streams();
+  const frame = s.table.decode(1, size, unit(1), true);
+  const decoder = s.decoder();
+  decoder.emit(0xa1);
+  await frame;
+
+  s.table.end(1);
+  assert.equal(
+    decoder.closes,
+    0,
+    "closing on the spot rebuilds a decoder the next region could have reused",
+  );
+
+  // The region came back before the clock ran out — the common case on this dial —
+  // and it decodes on the decoder that was already there.
+  const again = s.table.decode(1, size, unit(2), true);
+  assert.equal(
+    s.decoder(),
+    decoder,
+    "a returning region paid for a new decoder",
+  );
+  decoder.emit(0xb2);
+  assert.equal(tagOf(await again), 0xb2);
+
+  // And having come back, it is not retired out from under itself later.
+  await afterRetire();
+  assert.equal(decoder.closes, 0, "the cancelled retirement still fired");
+});
+
+test("a stream that does not come back gives its decode session up", async () => {
+  const s = streams();
+  const frame = s.table.decode(1, size, unit(1), true);
+  const decoder = s.decoder();
+  decoder.emit(0xa1);
+  await frame;
+
+  s.table.end(1);
+  await afterRetire();
+  assert.equal(
+    decoder.closes,
+    1,
+    "the decode session was held for the session",
+  );
+
+  // The format went with it: the next stream on this id announces its own before its
+  // first unit, and a stale one would configure the wrong picture.
+  assert.equal(await s.table.decode(1, size, unit(2), true), null);
+  assert.equal(
+    s.decoder(),
+    decoder,
+    "a unit with no format must not build a decoder",
+  );
+
+  s.table.setFormat(1, { decode: "vp09.00.40.08" });
+  const again = s.table.decode(1, size, unit(3), true);
+  assert.notEqual(
+    s.decoder(),
+    decoder,
+    "the new region got a decoder of its own",
+  );
+  s.decoder().emit(0xc3);
+  assert.equal(tagOf(await again), 0xc3);
+});
+
+test("a format announced during retirement outlives the clock", async () => {
+  const s = streams();
+  const frame = s.table.decode(1, size, unit(1), true);
+  const decoder = s.decoder();
+  decoder.emit(0xa1);
+  await frame;
+
+  // The gateway ended this id and handed it straight back: the new stream's format
+  // arrives first, and its first unit may be any distance behind it.
+  s.table.end(1);
+  s.table.setFormat(1, { decode: "vp09.00.40.08" });
+  await afterRetire();
+  assert.equal(decoder.closes, 0, "the announced stream lost its decoder");
+
+  const again = s.table.decode(1, size, unit(2), true);
+  assert.equal(
+    s.decoder(),
+    decoder,
+    "a same-size stream paid for a new decoder",
+  );
+  decoder.emit(0xb2);
+  assert.equal(
+    tagOf(await again),
+    0xb2,
+    "the unit was dropped for want of its format",
+  );
+});
+
+test("ending one stream leaves the others decoding", async () => {
+  const s = streams();
+  s.table.setFormat(2, { decode: "vp09.00.40.08" });
+  const settled = s.table.decode(1, size, unit(1), true);
+  const one = s.decoder();
+  const kept = s.table.decode(2, size, unit(1), true);
+  const two = s.decoder();
+  // Both answered, so nothing here is owed and the stall backstop stays out of it.
+  one.emit(0xa1);
+  two.emit(0xc3);
+  await settled;
+  assert.equal(tagOf(await kept), 0xc3);
+
+  s.table.end(1);
+  await afterRetire();
+  assert.equal(one.closes, 1);
+  assert.equal(
+    two.closes,
+    0,
+    "a sibling's region ending is not this one's business",
+  );
+
+  // And stream 2 is still the decoder it was, decoding.
+  const more = s.table.decode(2, size, unit(2), false);
+  assert.equal(s.decoder(), two);
+  two.emit(0xd4);
+  assert.equal(tagOf(await more), 0xd4);
 });

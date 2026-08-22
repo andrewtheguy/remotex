@@ -53,6 +53,7 @@ export type PainterCommand =
    */
   | { type: "resize"; w: number; h: number; seq: number }
   | { type: "videoFormat"; stream: number; format: VideoFormat }
+  | { type: "videoEnd"; stream: number }
   /** The attachment boundary: wipe the bitmap, the caches and the decoders. */
   | { type: "clear" };
 
@@ -174,6 +175,12 @@ export function createPainterWorker(
           break;
         case "videoFormat":
           queued(() => painter?.setVideoFormat(command.stream, command.format));
+          break;
+        case "videoEnd":
+          // Queued behind the frames already posted, like a format is: the units
+          // still in the chain belong to the stream this ends and must decode
+          // before its decoder goes.
+          queued(() => painter?.endVideoStream(command.stream));
           break;
         case "clear":
           // Out of the chain, and starting a new one — see the module comment.

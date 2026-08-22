@@ -35,9 +35,12 @@ const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
 const VIDEO_HEADER_LEN = 15;
 const VIDEO_KEYFRAME = 0x01;
-/// `regions::MAX_STREAMS` — what a session may run at once, which is smaller than the
-/// wire's field allows.
-const MAX_STREAMS = 4;
+/// `batch::MAX_STREAMS` — the range the wire's `stream` byte may name. Deliberately
+/// not `regions::MAX_STREAMS` (4), which bounds how many streams are *live* at once
+/// and not which ids they get: a retune holds the outgoing and incoming sets in hand
+/// together, so a stream built during one can be handed an id above the live cap and
+/// keep it for its whole life.
+const WIRE_STREAMS = 16;
 
 interface VideoRecord {
   stream: number;
@@ -143,6 +146,13 @@ interface Session {
   controlTypes: string[];
   connected?: { render: string };
   formats: VideoFormat[];
+  /**
+   * Stream ids the gateway has said are over, in arrival order. A `render_type =
+   * "video"` target never ends its one stream, so this is empty there; under
+   * `render_motion_subtype = "stream"` it is how a client learns it may let a decoder
+   * — and the platform decode session behind it — go.
+   */
+  ends: number[];
   batches: Batch[];
   /** Binary frames that were not batches — audio has a socket of its own. */
   badKinds: number[];
@@ -159,6 +169,7 @@ function watchSession(page: Page): Session {
   const seen: Session = {
     controlTypes: [],
     formats: [],
+    ends: [],
     batches: [],
     badKinds: [],
     unannounced: [],
@@ -182,6 +193,16 @@ function watchSession(page: Page): Session {
             stream: message.stream,
             decode: message.decode,
           });
+        }
+        if (message.type === "videoEnd") {
+          // Forgotten, which is what makes `unannounced` below an assertion about
+          // `videoEnd` too: the id is free from here, and the next region to be given
+          // it must announce a format of its own before its first unit — a client
+          // that took this message at its word has no decoder left on it.
+          seen.formats = seen.formats.filter(
+            (format) => format.stream !== message.stream,
+          );
+          seen.ends.push(message.stream);
         }
         return;
       }
@@ -232,7 +253,7 @@ function assertTheEnvelopeHolds(seen: Session): void {
   const first = new Map<number, VideoRecord>();
   for (const unit of units(seen)) {
     expect(unit.flags & ~VIDEO_KEYFRAME, "undefined record flag bits").toBe(0);
-    expect(unit.stream).toBeLessThan(MAX_STREAMS);
+    expect(unit.stream).toBeLessThan(WIRE_STREAMS);
     expect(unit.payloadLen).toBeGreaterThan(0);
     // The coded rectangle is grown to even sides before it reaches an encoder, and
     // src/video.rs calls that a theorem rather than a hope. The wire is where it is

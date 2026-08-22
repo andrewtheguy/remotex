@@ -300,6 +300,57 @@ what makes every consumer answer which of the two it is holding.
   A screen that has stopped changing produces no frame boundary at all, so the
   cleanup tick expires idle streams itself; it may only *end* them, never start one,
   which is what keeps a cell from being delivered twice.
+- **Where a stream's rectangle is allowed to be.** A region's box is snapped out to a
+  `SPANS` rung — cell spans in roughly 1.5× steps — on a grid of that rung, before any
+  encoder is built from it. The rung holds the *picture size* still and the alignment
+  holds the *rectangle* still, and the second is worth more than the first: a region
+  that drifts one cell down is not contained by a box that merely has the right size
+  at the old origin, so it would be rebuilt for a drift exactly as for a resize. A box
+  straddling a rung boundary takes the next rung up and is tried again; only the last
+  rung, the grid itself, can run off the end, and it slides back rather than clipping,
+  because a clipped box would have a span that depended on where it started.
+
+  The reason any of this exists is the far end. A decoder is configured for one
+  picture size; a unit at another is a different picture, so the decoder is replaced —
+  and a *hardware* decoder answers that by tearing down a platform decode session and
+  asking for another, which is slow, scarce, and the first thing to fail when it is
+  asked for too often. Region geometry meanwhile is a bounding box of whatever moved
+  half a second ago, and it moves a cell for reasons nothing on screen would call a
+  change. Measured by replaying 98 retunes captured from a real scroll on a 1920×1080
+  Windows desktop: exact boxes cost 124 streams and 56 client decoder builds, the
+  ladder alone 102 and 40, the ladder aligned 97 and 37 — for 14% more streamed cells,
+  which are lossy and owed a cleanup like every other cell of a region.
+
+  Quantizing grows boxes, so two that shared no cell can share one afterwards;
+  `stabilize` merges any overlapping pair and re-quantizes the union, because a cell in
+  two live regions is a cell two streams both carry.
+- **A stream's end is said, not guessed.** `ServerMsg::VideoEnd { stream }` — the
+  counterpart of `VideoFormat`, and about the resource rather than the picture. A
+  client keys its decoders by stream id and is otherwise never told one is finished;
+  an id simply goes quiet, indistinguishable from a region that is merely still, so a
+  browser accumulated a decoder per id it had ever seen and held them for the session.
+  The gateway drains the ended ids on the ordered path — `retune` before the round it
+  took them from, `expire` inside the task the units go out on — because ids are
+  reused, and an end that overtook the next stream's units would close a decoder that
+  had just been built. An id a retune both frees and hands straight back is not an end
+  at all: the decoder on it is still the right decoder for that id.
+
+  A resize ends streams too, and says so. `forget` drops every live stream, but a
+  resize is not an attachment boundary on the client: the worker's `resize` command
+  reallocates the bitmap and touches nothing else, and only `clear` — a repaint or a
+  reattach — empties the decoder table. So the ids `forget` drops are recorded as ends
+  like any other, and the round that was out on a worker when the resize landed —
+  which `take_round` had already taken the live table for — records its own in
+  `put_back`'s stale-epoch branch, the last place that knows a client is holding a
+  decoder for them. Under `Policy::Whole` neither records anything: that dial rebuilds
+  its one stream on the same id and never drains this.
+
+  What the client does with it is *retire*, not close. In the same 98-retune replay the
+  gateway ended a stream 88 times, and most of those ids went straight back to another
+  region at the same picture size — which an open decoder decodes from the next
+  keyframe without being rebuilt. Closing on the spot turned 37 decoder builds into 97,
+  so `videoDecoder.ts` starts a four-second clock instead (`RETIRE_MS`) and any unit on
+  the id cancels it: 39 builds, and the session still comes back.
 - **The debt is a cell key, not a picture.** Every cell a stream covers is owed a
   crisp re-send from the moment it is streamed, moving or not — the stream codes
   them lossily either way and nothing else will send them. When the stream ends they
@@ -434,7 +485,19 @@ picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `tilePainter.ts` — the shared batch
 loop, which keys a decoder per `stream` id and replaces one whose region has
-restarted on a different size. That whole loop — parse, decode, paint, and the
+restarted on a different size. **Which decoder is the platform's choice**: the
+configuration states no `hardwareAcceleration`. A `prefer-software` hint was tried
+and removed, because it bought one platform's decoder at most — WebKit honours it
+only on macOS (the clause routing it to a local software decoder is compiled
+`#if PLATFORM(MAC)`), Firefox disregards it, and iOS has no software VP9 decoder to
+route to at all, so VP9 there is VideoToolbox or nothing (measured against WebKit
+main, 2026-08-21). What makes a hardware decoder safe on the region dial is the
+gateway rather than a hint: the `SPANS` ladder holding picture sizes still and
+`VideoEnd` handing finished decode sessions back, above. Verified by fast touchscreen
+scrolling on the region dial and whole-desktop `video` on a Mac and an iPad with no
+decode errors. The stall backstop in `createVideoStream` — silence where a decode
+error belongs, then a failed end-of-stream flush, which is how a GPU-process decoder
+fails — stands whatever ends up decoding. That whole loop — parse, decode, paint, and the
 decoders with it — runs in a dedicated worker drawing on an `OffscreenCanvas`
 (`desktopPainterWorker.ts`, handled from the page by `desktopPainter.ts`); each
 binary frame is transferred there, not copied. What that boundary buys is narrower

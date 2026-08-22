@@ -1486,6 +1486,21 @@ export function useRemoteDesktop(
               : { ...prev, [msg.stream]: msg.decode },
           );
           break;
+        case "videoEnd":
+          // Queued in the worker like a format is, so the units already posted for
+          // this stream decode before its decoder goes.
+          painter?.endVideoStream(msg.stream);
+          // Off the card too: the configuration written there is the one a decoder is
+          // running on, and there is no longer a decoder on this id.
+          setVideoDecodes((prev) => {
+            if (!(msg.stream in prev)) {
+              return prev;
+            }
+            const next = { ...prev };
+            delete next[msg.stream];
+            return next;
+          });
+          break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
           // into the browser's OS clipboard. Opening/revealing the panel is a

@@ -51,6 +51,9 @@ function harness() {
     setVideoFormat(stream, format) {
       calls.push(`format:${stream}:${format.decode}`);
     },
+    endVideoStream(stream) {
+      calls.push(`end:${stream}`);
+    },
   };
 
   const ctx = {

@@ -27,7 +27,12 @@ measurements are what should settle them:
   costing 38 KB of the 140 KB the streams sent, so **27% of the stream went on
   rectangles that had to be replaced**. Whether a longer `RETUNE`, or a rectangle
   deliberately grown past what is moving, recovers that is the question, and it wants
-  more than one kind of content behind it.
+  more than one kind of content behind it. `STREAM_IDLE` has one measurement on the
+  other axis, the client's decoders: replaying the same 98 retunes of a real 1920×1080
+  scroll with it at 1 s instead of 500 ms took the decoder builds from 37 to 31, for
+  76% more streamed cells — lossy cells, each owed a cleanup. With the ladder and
+  `VideoEnd` already keeping churn from breaking a hardware decoder, that trade was
+  left untaken; it is there if a future measurement asks for it.
 - **A component's own bounding box is not checked against `MERGE_WASTE`.** Only
   merges are. A single diagonal streak of moving cells therefore streams a box mostly
   full of still ones — safe, since every cell inside is owed a cleanup, but wasteful

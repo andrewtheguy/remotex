@@ -1116,9 +1116,26 @@ impl TileSink {
         // Geometry moves here, on the engine's own task, before anything is encoded:
         // that is what makes the set of streamed cells `damage` reads a stable thing
         // rather than a race.
+        let mut ended = Vec::new();
         if let RenderPlan::Tiles { .. } = self.plan {
             let moving = self.shared.motion.lock().unwrap().moving(now);
             video.regions.retune(&moving, now)?;
+            ended = video.regions.drain_ended();
+        }
+        // Ahead of this round and behind every one before it, which is the whole of
+        // what `Regions::drain_ended` asks for: the units that used these ids are
+        // already queued in front of these, and the region that takes one next is in
+        // the round about to be pushed behind them.
+        //
+        // Pushed with the lock down, because the order loop takes it for its own
+        // cleanups: a push that waits for a queue slot while holding this would be
+        // waiting on the task that empties it.
+        if !ended.is_empty() {
+            drop(video);
+            for stream in ended {
+                self.push(Pending::Msg(ServerMsg::VideoEnd { stream })).await?;
+            }
+            video = self.shared.video.lock().await;
         }
         let Some(mut round) = video.regions.take_round() else {
             return Ok(());
@@ -1532,6 +1549,7 @@ async fn flush_stream_cleanups(
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> bool {
     let mut due: Vec<(Rect, Vec<u8>)> = Vec::new();
+    let ended: Vec<u8>;
     {
         // One critical section for the whole tickful: `due` and the crops have to
         // agree about the mirror, and holding the lock across the encodes below would
@@ -1542,6 +1560,7 @@ async fn flush_stream_cleanups(
         // the only thing that will ever notice its streams have gone quiet — and a
         // stream that never ends is a region that never comes due.
         video.regions.expire(now);
+        ended = video.regions.drain_ended();
         let rects = video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
         for rect in rects {
             let mut rgb = Vec::new();
@@ -1552,6 +1571,15 @@ async fn flush_stream_cleanups(
                 // again, which is the same state a dropped cleanup already leaves.
                 Err(e) => warn!("{engine}: dropping a cleanup that would not crop: {e:#}"),
             }
+        }
+    }
+
+    // Before the cleanups rather than after: this is already the ordered task, so
+    // whatever the ended streams sent is behind us, and an end said as early as it is
+    // known is a decode session handed back before the next region asks for one.
+    for stream in ended {
+        if frame_tx.send(ServerMsg::VideoEnd { stream }).await.is_err() {
+            return false;
         }
     }
 
@@ -3262,9 +3290,17 @@ mod tests {
         }
         sink.flush().await;
 
-        let out = drain(&mut frame_rx, 1).await;
-        let ServerMsg::Tile(tile) = &out[0] else {
-            panic!("the settled region was never restored: {:?}", out[0]);
+        // The end comes first, and from the same tick: the stream is over, and the
+        // client is told so before the crisp pixels that replace it — which is what
+        // hands the decode session back before anything asks for another.
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(
+            matches!(out[0], ServerMsg::VideoEnd { stream: 0 }),
+            "the ended stream was not announced: {:?}",
+            out[0]
+        );
+        let ServerMsg::Tile(tile) = &out[1] else {
+            panic!("the settled region was never restored: {:?}", out[1]);
         };
         assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 320, 64));
         assert_eq!(tile.format, Tile::FORMAT_PNG, "a cleanup is the base encode");

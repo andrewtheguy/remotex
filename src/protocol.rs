@@ -1049,6 +1049,20 @@ pub enum ServerMsg {
     /// with the round that produced the stream's first unit because that is where the encoder's
     /// answer exists.
     VideoFormat { stream: u8, decode: String },
+    /// One stream's region is over: nothing further will arrive on this id until it
+    /// is announced again, and the decoder holding it should be released now.
+    ///
+    /// The counterpart of [`ServerMsg::VideoFormat`], and it exists for the resource
+    /// rather than for the picture. A client is otherwise never told a stream ended —
+    /// an id simply goes quiet — so under `render_motion_subtype = "stream"`, where
+    /// regions come and go with the motion, it accumulates a decoder per id it has
+    /// ever seen and holds them for the session. Every one of those is a decode
+    /// session on a platform that has few of them, and the ones a hardware decoder has
+    /// are what the *next* region to start will be asking for.
+    ///
+    /// **Ordered against [`ServerMsg::Video`] like a format is.** Ids are reused, so
+    /// this must not overtake the units of the next stream to be given the same one.
+    VideoEnd { stream: u8 },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1153,6 +1167,9 @@ enum ControlMsg<'a> {
     VideoFormat {
         stream: u8,
         decode: &'a str,
+    },
+    VideoEnd {
+        stream: u8,
     },
     CameraStart {
         width: u32,
@@ -1264,6 +1281,7 @@ impl ServerMsg {
                 channels: *channels,
             }),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
+            ServerMsg::VideoEnd { stream } => control(&ControlMsg::VideoEnd { stream: *stream }),
             ServerMsg::VideoFormat { stream, decode } => {
                 control(&ControlMsg::VideoFormat { stream: *stream, decode })
             }
@@ -1675,6 +1693,12 @@ mod tests {
                 r#"{"type":"videoFormat","stream":3,"decode":"vp09.00.40.08"}"#
             ),
             None => panic!("videoFormat must be a text frame"),
+        }
+        // And the end of one, which is what hands its decoder — and the platform decode
+        // session behind it — back before the next region asks for one.
+        match (ServerMsg::VideoEnd { stream: 3 }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"videoEnd","stream":3}"#),
+            None => panic!("videoEnd must be a text frame"),
         }
         match (ServerMsg::Displays {
             active: 7,
