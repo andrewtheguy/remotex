@@ -179,14 +179,9 @@ still picture, and what is moving may stop being one at all.
 included, since a cell changing fast is not worth classifying — and is required
 when the base is `png`: lossless has no dial to turn down.
 
-**`motion` is refused on `subtype = "ard-high-performance"`.** A resize under both
-corrupts the desktop until the whole gateway is restarted — a reconnect does not
-clear it, and the client sees it, so it is engine state rather than anything the
-render dial owns. Neither half is proven at fault: High Performance is reverse
-engineered with no specification behind it (see [apple-vnc-889.md](apple-vnc-889.md)),
-and `motion` is the newer code. The pairing waits until one of them is understood
-well enough to say which. Every other subtype may use `motion`, and a High
-Performance target may use every other strategy.
+The strategy is protocol-independent and has no subtype restrictions: every engine
+normalizes its damage before it reaches the shared sink that detects and encodes
+motion.
 
 Detection is in `src/encode.rs`, owned by the sink both engines already funnel
 their damage through:
