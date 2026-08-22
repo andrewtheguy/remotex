@@ -85,7 +85,7 @@ if [ -e "$config" ] && [ ! -f "$config" ]; then
 fi
 if [ ! -f "$config" ]; then
   echo ">> seeding config from sample — edit $config"
-  cp "$src/share/doc/remotex/remotex.toml.example" "$config"
+  cp "$src/share/doc/remotex/remotex.example.toml" "$config"
 else
   echo ">> preserving config at $config"
 fi

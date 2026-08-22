@@ -7,7 +7,7 @@
 #   remotex-<version>/
 #   ├── VERSION
 #   ├── bin/remotex                # release binary
-#   ├── share/doc/remotex/remotex.toml.example # config template
+#   ├── share/doc/remotex/remotex.example.toml # config template
 #   ├── share/remotex/web/                  # built frontend (index.html + assets)
 #   ├── install.sh
 #   └── uninstall.sh
@@ -73,7 +73,7 @@ cargo build --release
 echo ">> assembling ${pkg}"
 mkdir -p "$root/bin" "$root/share/doc/remotex" "$root/share/remotex"
 cp target/release/remotex "$root/bin/remotex"
-cp packaging/etc/remotex.toml.example "$root/share/doc/remotex/remotex.toml.example"
+cp remotex.example.toml "$root/share/doc/remotex/remotex.example.toml"
 cp -R frontend/dist "$root/share/remotex/web"
 cp packaging/install.sh packaging/uninstall.sh "$root/"
 chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/remotex"

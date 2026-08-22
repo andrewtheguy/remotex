@@ -23,7 +23,7 @@ Use the `arm64` filename on an arm64 host. The package installs:
 ```text
 /usr/bin/remotex
 /usr/share/remotex/web/
-/usr/share/doc/remotex/remotex.toml.example
+/usr/share/doc/remotex/remotex.example.toml
 ```
 
 ### Fedora, RHEL, and other RPM distributions (`.rpm`)
@@ -54,7 +54,7 @@ It installs:
 ```text
 /usr/local/bin/remotex
 /usr/local/share/remotex/web/
-/usr/local/share/doc/remotex/remotex.toml.example
+/usr/local/share/doc/remotex/remotex.example.toml
 ```
 
 The package is unsigned and not notarized. A browser download is quarantined,
@@ -65,14 +65,14 @@ contains the gateway CLI and web client.
 
 The config contains the web-login hash and target credentials. Create it as the
 account that will run `remotex serve`, mode `0600`. The package ships only the
-public example from which to create it.
+public [`remotex.example.toml`](../remotex.example.toml) from which to create it.
 
 On Linux:
 
 ```sh
 sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
-  /usr/share/doc/remotex/remotex.toml.example /etc/remotex/remotex.toml
+  /usr/share/doc/remotex/remotex.example.toml /etc/remotex/remotex.toml
 remotex gen-passwd admin
 ${EDITOR:-vi} /etc/remotex/remotex.toml
 ```
@@ -82,7 +82,7 @@ On macOS:
 ```sh
 sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /usr/local/etc/remotex
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
-  /usr/local/share/doc/remotex/remotex.toml.example \
+  /usr/local/share/doc/remotex/remotex.example.toml \
   /usr/local/etc/remotex/remotex.toml
 remotex gen-passwd admin
 ${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml

@@ -13,7 +13,7 @@ Linux package managers own the conventional FHS paths directly:
 ```text
 /usr/bin/remotex
 /usr/share/remotex/web/
-/usr/share/doc/remotex/remotex.toml.example
+/usr/share/doc/remotex/remotex.example.toml
 ```
 
 The macOS package owns the corresponding local prefix:
@@ -21,7 +21,7 @@ The macOS package owns the corresponding local prefix:
 ```text
 /usr/local/bin/remotex
 /usr/local/share/remotex/web/
-/usr/local/share/doc/remotex/remotex.toml.example
+/usr/local/share/doc/remotex/remotex.example.toml
 ```
 
 There is no package wrapper, version directory, active-version symlink, or

@@ -61,6 +61,9 @@ than re-investigating.
 
 ## Install
 
+The complete annotated configuration is
+[`remotex.example.toml`](remotex.example.toml).
+
 Native packages are the supported install method. Download the matching asset
 from the [latest release](https://github.com/andrewtheguy/remotex/releases/latest).
 
@@ -95,7 +98,7 @@ create it for the account that will run the gateway:
 ```sh
 sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
-  /usr/share/doc/remotex/remotex.toml.example /etc/remotex/remotex.toml
+  /usr/share/doc/remotex/remotex.example.toml /etc/remotex/remotex.toml
 remotex gen-passwd admin
 ${EDITOR:-vi} /etc/remotex/remotex.toml
 ```
@@ -207,6 +210,9 @@ bundle with the gateway.
 
 ```sh
 bun install --cwd frontend
+cp remotex.example.toml remotex.toml
+cargo run -- gen-passwd admin
+# Paste the generated credential into remotex.toml, then:
 cargo run -- serve -c remotex.toml
 ```
 
@@ -261,7 +267,7 @@ connection, and the Mac account's username and password. Keep the config mode `0
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in
-[`packaging/etc/remotex.toml.example`](packaging/etc/remotex.toml.example).
+[`remotex.example.toml`](remotex.example.toml).
 
 ## Checks
 

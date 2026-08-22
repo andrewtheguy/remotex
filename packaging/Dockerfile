@@ -65,7 +65,7 @@ RUN set -eu; \
 # -e REMOTEX_LISTEN=0.0.0.0:52380, which is the same setting from the one place a
 # container has that is not the mounted file; the 127.0.0.1 default is
 # unreachable from outside the container. A template ships at
-# /opt/remotex/current/share/doc/remotex/remotex.toml.example.
+# /opt/remotex/current/share/doc/remotex/remotex.example.toml.
 EXPOSE 52380
 
 # remotex installs its own SIGINT/SIGTERM handler (src/main.rs) and spawns no

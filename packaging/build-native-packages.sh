@@ -82,7 +82,7 @@ if [ "$os" = macos ]; then
   payload="$stage/payload"
   mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex" "$payload/usr/local/share/remotex"
   cp "$release/bin/remotex" "$payload/usr/local/bin/remotex"
-  cp "$release/share/doc/remotex/remotex.toml.example" "$payload/usr/local/share/doc/remotex/remotex.toml.example"
+  cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/local/share/doc/remotex/remotex.example.toml"
   cp -R "$release/share/remotex/web" "$payload/usr/local/share/remotex/web"
   output="dist/remotex-macos-${asset_arch}.pkg"
   pkgbuild \
@@ -95,7 +95,7 @@ if [ "$os" = macos ]; then
   pkgutil --payload-files "$output" > "$stage/pkg-contents"
   grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
   grep -qx './usr/local/share/remotex/web/index.html' "$stage/pkg-contents"
-  grep -qx './usr/local/share/doc/remotex/remotex.toml.example' "$stage/pkg-contents"
+  grep -qx './usr/local/share/doc/remotex/remotex.example.toml' "$stage/pkg-contents"
   echo ">> wrote $output"
   exit 0
 fi
@@ -106,7 +106,7 @@ command -v rpmbuild >/dev/null 2>&1 || { echo "rpmbuild is required" >&2; exit 1
 payload="$stage/payload"
 mkdir -p "$payload/usr/bin" "$payload/usr/share/doc/remotex" "$payload/usr/share/remotex"
 cp "$release/bin/remotex" "$payload/usr/bin/remotex"
-cp "$release/share/doc/remotex/remotex.toml.example" "$payload/usr/share/doc/remotex/remotex.toml.example"
+cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/share/doc/remotex/remotex.example.toml"
 cp -R "$release/share/remotex/web" "$payload/usr/share/remotex/web"
 
 # '-' separates the Debian revision, so a SemVer prerelease has to become '~',
@@ -137,7 +137,7 @@ dpkg-deb --build --root-owner-group "$deb_root" "$deb_output"
 dpkg-deb --contents "$deb_output" > "$stage/deb-contents"
 grep -q '\./usr/bin/remotex$' "$stage/deb-contents"
 grep -q '\./usr/share/remotex/web/index.html$' "$stage/deb-contents"
-grep -q '\./usr/share/doc/remotex/remotex.toml.example$' "$stage/deb-contents"
+grep -q '\./usr/share/doc/remotex/remotex.example.toml$' "$stage/deb-contents"
 echo ">> wrote $deb_output"
 
 # RPM does not accept SemVer's '-' in Version or '+' in either Version or
@@ -175,7 +175,7 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo '%files'
   echo '/usr/bin/remotex'
   echo '/usr/share/remotex'
-  echo '/usr/share/doc/remotex/remotex.toml.example'
+  echo '/usr/share/doc/remotex/remotex.example.toml'
 } > "$spec"
 
 rpmbuild -bb \
@@ -190,5 +190,5 @@ cp "$rpm_built" "$rpm_output"
 rpm -qpl "$rpm_output" > "$stage/rpm-contents"
 grep -qx '/usr/bin/remotex' "$stage/rpm-contents"
 grep -qx '/usr/share/remotex/web/index.html' "$stage/rpm-contents"
-grep -qx '/usr/share/doc/remotex/remotex.toml.example' "$stage/rpm-contents"
+grep -qx '/usr/share/doc/remotex/remotex.example.toml' "$stage/rpm-contents"
 echo ">> wrote $rpm_output"

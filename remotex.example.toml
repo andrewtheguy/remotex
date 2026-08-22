@@ -1,6 +1,10 @@
 # remotex configuration example
 #
-# The binary loads this file on startup (see src/config.rs). The config is
+# Copy this tracked template before adding credentials; in a checkout:
+#
+#   cp remotex.example.toml remotex.toml
+#
+# The binary loads that copy on startup (see src/config.rs). The config is
 # global-only: --config <path> if given, else the installed global config
 # (/etc/remotex/remotex.toml from a Linux package,
 # /usr/local/etc/remotex/remotex.toml from the macOS package, or
