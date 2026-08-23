@@ -677,11 +677,15 @@ mod tests {
         // 3840x2160: 8_294_400 samples — past 4.1's picture size, inside 5.0's 8_912_896 — and
         // 248_832_000 per second, inside 5.0's 311_951_360. Level 5.0, not the 5.1 a guess gives.
         assert_eq!(codec_string(3840, 2160).as_deref(), Some("vp09.00.50.08"));
+        // 3840x2400: 9_216_000 samples, past every level 5's 8_912_896 picture size by the
+        // 16:10 panel's extra 240 rows — level 6.0, the first that holds it. The ceiling in
+        // `video.rs` admits this picture, so the string has to exist for it.
+        assert_eq!(codec_string(3840, 2400).as_deref(), Some("vp09.00.60.08"));
         // Small, but not level 1: 76_800 samples is already past level 1.1's 73_728. Level 1 is
         // 256x144, which no desktop is.
         assert_eq!(codec_string(320, 240).as_deref(), Some("vp09.00.20.08"));
         // Profile and bit depth are fixed: this encoder is I420 at eight bits, whatever the size.
-        for (w, h) in [(320u16, 240u16), (1920, 1080), (3840, 2160)] {
+        for (w, h) in [(320u16, 240u16), (1920, 1080), (3840, 2160), (3840, 2400)] {
             let string = codec_string(w, h).expect("a level for a real desktop");
             assert!(string.starts_with("vp09.00."), "not profile 0: {string}");
             assert!(string.ends_with(".08"), "not 8-bit: {string}");

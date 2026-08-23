@@ -102,6 +102,20 @@ To fit the window, ask the remote to render at that size via `resize = true`,
 `ClientMsg::Viewport`, and the engine's resize mechanism. Lack of resize support
 never permits client scaling.
 
+A video stream encodes at most a 3840 long side by a 2400 short side
+(`src/video.rs`) — both 4K panels, 16:9 and the 16:10 one a 1920×1200 laptop is
+at 2x; 5K is past it — and the gateway never shrinks a picture. So on a target
+that streams (`TargetConfig::streams_video`) every size an engine asks a remote
+for — RDP's opening size and each layout, generic VNC's `SetDesktopSize` — is
+held under that ceiling per axis at the density it has (`video::fit_ceiling`),
+the way `virtual_display_mode` already holds a High Performance display under
+the Mac's own 3840×2160 backing ceiling. This is not a scale: a 5K screen gets a
+3840×2400 desktop at 100% and the rest of the window bare, and a tiles target
+gets the screen as it is and scrolls. A pinned size already over the ceiling at
+1x is refused at parse. What still reaches the encoder's refusal is a remote
+that cannot be asked — `ard`'s physical display, or a generic server without
+resize.
+
 `resize = true` means the window drives the remote's size, continuously, on every
 engine alike. There is **no client-side resize control**: no auto-resize toggle,
 no "Resize to window" button, no remembered preference — the gateway states the
@@ -113,7 +127,7 @@ makes the Mac decline any later request beyond the initial size.
 **Opening size is one rule for every engine** (`TargetConfig::opening_size`):
 the pinned `width`/`height` when the operator set both, else the full resolution
 of the client's own screen — carried in `ClientMsg::Connect` so it exists before
-the engine's handshake — else `DEFAULT_SIZE` (1920×1200). The pinch-zoom client
+the engine's handshake — else `DEFAULT_SIZE` (1920×1080, 4K at 2x). The pinch-zoom client
 (`HostDisplay::fit`, the `CAN_PINCH_ZOOM` exception above) has no screen to
 open at: it takes the pinned size or `DEFAULT_SIZE`, and its density still
 counts. `width`/`height` are `Option`s;

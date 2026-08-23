@@ -282,6 +282,7 @@ async fn session(
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: config.default_size(),
+            video: config.streams_video(),
         },
         (width, height),
         input_rx,
@@ -386,16 +387,22 @@ fn connect_config(
     // The opening size, in points at 1x: the pinned config size, else the full
     // resolution of the client's own screen — the same rule every engine
     // resolves. The density this session ends up at remains the client's to
-    // state mid-session; see `Density`.
+    // state mid-session; see `Density`. At 1x the points are the pixels, so a
+    // screen the video encoder would refuse is held under its ceiling here, as
+    // every later layout is — see `Layout::held`.
     let (width, height) = config.opening_size(display);
+    let (width, height) =
+        Layout { w: u32::from(width), h: u32::from(height), density: Density::One }
+            .held(config.streams_video())
+            .size();
     Connect {
         host: config.host.clone(),
         port: config.port,
         username: config.username.clone(),
         password: config.password.clone(),
         domain: config.domain.clone(),
-        width: u32::from(width),
-        height: u32::from(height),
+        width,
+        height,
         security: match config.security {
             Security::Auto => freerdp::Security::Auto,
             Security::Nla => freerdp::Security::Nla,
@@ -428,6 +435,10 @@ struct Flags {
     /// the built-in default. Points rather than pixels because the density can
     /// move underneath it — see [`Density::pixels`].
     default_size: (u16, u16),
+    /// Whether this target puts moving pixels on the wire as a video stream
+    /// ([`TargetConfig::streams_video`]), which is what decides whether a layout
+    /// is held under the stream's picture ceiling — see [`Layout::held`].
+    video: bool,
 }
 
 /// How dense a desktop this session has asked the RDP server to render.
@@ -535,6 +546,33 @@ impl Layout {
         }
         let px = |v: u32| v * density.percent() / self.density.percent();
         Self { w: px(self.w), h: px(self.h), density }
+    }
+
+    /// The same request held under the video stream's picture ceiling when
+    /// `video` — the target streams — and unchanged otherwise, where a tile path
+    /// carries any desktop and an oversized one simply scrolls.
+    ///
+    /// Applied to every layout this engine asks for, after the density: the
+    /// ceiling is on pixels, and 2560×1440 points is under it at 1x and a 5K
+    /// picture at 2x. The density is kept and the pixels shrunk, as the
+    /// Mac's ceiling keeps it for a High Performance virtual display — sharp and
+    /// smaller over large and refused — because the alternative is the
+    /// encoder's refusal, which ends the session. Every side stays even: the
+    /// ceiling's sides are, and an axis left alone was whatever
+    /// [`Self::adjusted`] makes of it.
+    fn held(self, video: bool) -> Self {
+        if !video {
+            return self;
+        }
+        let (w, h) = crate::video::fit_ceiling(self.size());
+        if (w, h) != self.size() {
+            info!("rdp: holding {self} under the video stream's {w}x{h} picture ceiling");
+        }
+        Self { w, h, ..self }
+    }
+
+    fn size(self) -> (u32, u32) {
+        (self.w, self.h)
     }
 }
 
@@ -654,7 +692,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, clipboard, default_size } = flags;
+    let Flags { resize, clipboard, default_size, video } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -968,7 +1006,7 @@ async fn active_loop(
                             .as_ref()
                             .map_or_else(|| Layout::current(desktop, applied), |p| p.layout);
                         install_layout(
-                            base.at_density(want),
+                            base.at_density(want).held(video),
                             Layout::current(desktop, applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -1010,7 +1048,7 @@ async fn active_loop(
                         // so a size and a density never race to set `applied`.
                         let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
                         install_layout(
-                            Layout { w, h, density: Density::One }.at_density(density),
+                            Layout { w, h, density: Density::One }.at_density(density).held(video),
                             Layout::current(desktop, applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -2199,6 +2237,24 @@ mod tests {
         assert_eq!(two.at_density(Density::One), one);
         // A no-op conversion is the identity, not a rounding of itself.
         assert_eq!(one.at_density(Density::One), one);
+    }
+
+    /// A screen the video encoder would refuse is asked for as the desktop it
+    /// will take, at the density the screen has; a tiles target asks for the
+    /// screen as it is.
+    #[test]
+    fn a_layout_is_held_under_the_video_ceiling_only_when_the_target_streams() {
+        let retina = Layout { w: 2560, h: 1440, density: Density::One }.at_density(Density::Two);
+        assert_eq!(retina.held(true), Layout { w: 3840, h: 2400, density: Density::Two });
+        assert_eq!(retina.held(false), retina, "a tile path carries any desktop");
+        // A 16:10 4K panel — 1920×1200 at 2x — is a picture the stream takes.
+        let inside = Layout { w: 1920, h: 1200, density: Density::One }.at_density(Density::Two);
+        assert_eq!(inside.held(true), inside, "a desktop the stream takes is untouched");
+        // And the held layout is what the server's answer is checked against, so the
+        // retry ladder recognises the desktop it asked for.
+        let pending = PendingLayout::new(retina.held(true));
+        assert!(confirms(&pending, (3840, 2400)));
+        assert!(!confirms(&pending, (5120, 2880)));
     }
 
     #[test]
