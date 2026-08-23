@@ -46,6 +46,16 @@
   still-selected target for the new client's screen (carried on the `/ws` URL) —
   still without a prompt, but never inheriting an opening size and density meant
   for somebody else's display.
+- **Every session starts from scratch.** A `connect` ends whatever engine is
+  running (the same target included), a switch target or a logout ends it
+  outright, and the next engine is spawned only after the previous one has
+  exited (`ENGINE_EXIT_GRACE` bounds the wait) — so the remote sees the old
+  connection close before the new one opens. The one resume is the owner's own
+  reattach to the same target after a dropped connection. Nothing else carries
+  over: not an opening size, a density, a display, or a connection. A Mac's High
+  Performance virtual display lingers for under a minute after a disconnect and
+  a new session's ServerInit reports *its* size; the session's own layout then
+  corrects it.
 - **No AppleScript, no synthetic clicks, no screenshot loops.** Do not drive a
   browser's UI to find out what the client is doing; ask it, and ask the user for
   the one thing only eyes can answer. `remotex serve` puts its reasons on stderr,
@@ -77,6 +87,16 @@ fit-to-width base scale and pinch zoom.
 pixels. Thus 3840×2160 at `scale: 2.0` is a 1920×1080 desktop at full pixel
 fidelity. Producers are RDP `Density` (`src/rdp.rs`) and Apple layout's
 backing/logical ratio (`src/vnc_apple.rs`); neither depends on the viewport.
+What a remote is asked to *render* at is `protocol::render_density`: 1x or 2x
+at the 1.5 midpoint, for RDP and High Performance alike. Never ask a Mac for a
+fractional ratio — measured 2026-08-23 on macOS 26.6, a 1.25x request came back
+as a 960×540-point display and a 1.5x one as 960×600 points, each at 2x, which
+is a desktop whose text looks zoomed while the Dock (shrunk to fit) does not.
+
+`ClientMsg::Viewport` is in **points** (the window's CSS pixels); the engine
+renders them at its own density. Not pixels at the last announced scale: right
+after a (re)connect the client has no scale yet, and a pixel report read at a
+scale the engine had already moved past asked for half a desktop.
 
 To fit the window, ask the remote to render at that size via `resize = true`,
 `ClientMsg::Viewport`, and the engine's resize mechanism. Lack of resize support
@@ -93,7 +113,10 @@ makes the Mac decline any later request beyond the initial size.
 **Opening size is one rule for every engine** (`TargetConfig::opening_size`):
 the pinned `width`/`height` when the operator set both, else the full resolution
 of the client's own screen — carried in `ClientMsg::Connect` so it exists before
-the engine's handshake — else `DEFAULT_SIZE`. `width`/`height` are `Option`s;
+the engine's handshake — else `DEFAULT_SIZE` (1920×1200). The pinch-zoom client
+(`HostDisplay::fit`, the `CAN_PINCH_ZOOM` exception above) has no screen to
+open at: it takes the pinned size or `DEFAULT_SIZE`, and its density still
+counts. `width`/`height` are `Option`s;
 *specified* is meaningful. Mid-session, `ClientMsg::HostDisplay` is a density
 report and only `resize = true` targets act on it.
 

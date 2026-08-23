@@ -38,6 +38,18 @@ def dimensions(value: str) -> tuple[int, int]:
     return width, height
 
 
+def host_display(value: str) -> dict[str, int | bool]:
+    """Parse a WIDTHxHEIGHT@SCALE[fit] client screen: scale in hundredths (200 =
+    Retina), a trailing ``fit`` for the pinch-zoom client."""
+    try:
+        size, scale = value.lower().split("@", maxsplit=1)
+        fit = scale.endswith("fit")
+        width, height = dimensions(size)
+        return {"w": width, "h": height, "scale": int(scale.removesuffix("fit")), "fit": fit}
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected WIDTHxHEIGHT@SCALE[fit]") from error
+
+
 def coordinates(value: str) -> tuple[int, int]:
     """Parse an X,Y argument."""
     try:
@@ -59,6 +71,13 @@ async def main() -> int:
     )
     parser.add_argument("--seconds", type=float, default=25.0)
     parser.add_argument(
+        "--reconnect-target",
+        default=None,
+        help="after --reconnect-after seconds, send a second connect to this target "
+        "with no disconnect in between (the gateway ends the running session first)",
+    )
+    parser.add_argument("--reconnect-after", type=float, default=6.0)
+    parser.add_argument(
         "--select",
         type=lambda value: int(value, 0),
         action="append",
@@ -66,13 +85,19 @@ async def main() -> int:
         help="display id to select once the list arrives (repeatable)",
     )
     parser.add_argument("--mouse", type=coordinates, default=None)
+    parser.add_argument(
+        "--display",
+        type=host_display,
+        default=None,
+        help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
+    )
     parser.add_argument("--mouse-width", type=int, default=None)
     parser.add_argument(
         "--viewport",
         type=dimensions,
         action="append",
         default=[],
-        help="viewport WIDTHxHEIGHT to request after the display list arrives (repeatable)",
+        help="viewport WIDTHxHEIGHT in points to request after the display list arrives (repeatable)",
     )
     parser.add_argument(
         "--burst",
@@ -100,16 +125,34 @@ async def main() -> int:
     async with websockets.connect(
         url, additional_headers={"Cookie": f"remotex_session={cookie}"}
     ) as socket:
-        await socket.send(json.dumps({"type": "connect", "target": args.target}))
+        connect = {"type": "connect", "target": args.target}
+        if args.display is not None:
+            connect["display"] = args.display
+            print(f"  -> connect {args.target} display {args.display}")
+        await socket.send(json.dumps(connect))
         pending = list(args.select)
         viewports = list(args.viewport)
         awaiting_viewport = None
         burst_sent = False
         mouse_sent = False
         tiles = 0
+        reconnect_sent = False
+        started = asyncio.get_running_loop().time()
         try:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
+                    if (
+                        args.reconnect_target is not None
+                        and not reconnect_sent
+                        and asyncio.get_running_loop().time() - started
+                        >= args.reconnect_after
+                    ):
+                        reconnect_sent = True
+                        second = {"type": "connect", "target": args.reconnect_target}
+                        if args.display is not None:
+                            second["display"] = args.display
+                        print(f"  -> connect {args.reconnect_target} (no disconnect first)")
+                        await socket.send(json.dumps(second))
                     if isinstance(message, bytes):
                         tiles += 1
                         continue
@@ -203,7 +246,7 @@ async def main() -> int:
                         print(f"  !! error: {data['message']}")
                         return 1
                     elif kind == "connected":
-                        print(f"  connected  resize={data['resize']}")
+                        print(f"  connected  {data['name']}  resize={data['resize']}")
                     elif kind not in ("cursor", "picker"):
                         print(f"  {kind}: {json.dumps(data)[:120]}")
         except TimeoutError:

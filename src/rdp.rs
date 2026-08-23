@@ -449,11 +449,11 @@ enum Density {
 impl Density {
     /// What a [`ClientMsg::HostDisplay`]'s density means here.
     ///
-    /// Through `scale_ratio` rather than dividing by hand: that is the guard which
-    /// turns a value no screen could have into 1x and centralizes the 1.5 midpoint
-    /// used for RDP's two supported densities.
+    /// Through [`crate::protocol::render_density`] rather than dividing by hand:
+    /// that is the one place the 1.5 midpoint lives, for every engine that
+    /// renders at 1x or 2x, and it turns a value no screen could have into 1x.
     fn from_host(scale: u16) -> Self {
-        if crate::protocol::scale_ratio(scale) >= 1.5 {
+        if crate::protocol::render_density(scale) >= 2.0 {
             Self::Two
         } else {
             Self::One
@@ -484,13 +484,6 @@ impl Density {
         }
     }
 
-    /// The pixels `points` covers at this density — the answer to
-    /// [`ClientMsg::DefaultSize`], which is the one size here that is configured
-    /// rather than measured, and so the one that has to be converted.
-    fn pixels(self, points: (u16, u16)) -> (u32, u32) {
-        let px = |points: u16| u32::from(points) * self.percent() / 100;
-        (px(points.0), px(points.1))
-    }
 }
 
 /// A desktop the server is being asked for: the size in pixels, and the density
@@ -988,17 +981,18 @@ async fn active_loop(
                 // this end applies each report it receives and ignores them all
                 // unless resize was negotiated.
                 //
-                // The size arrives in remote *pixels*, already multiplied by the
-                // `scale` this end announced, so it needs no conversion — but it
-                // does need the current density attached to it, or the request
-                // would tell the server to forget one it is already applying.
-                //
-                // `DefaultSize` is the same request with the size supplied from
-                // here: the pinned `width`/`height` in points, or the built-in
-                // default when no size was pinned. See [`ClientMsg::DefaultSize`].
+                // The size arrives in *points*, and so does `DefaultSize` — the
+                // pinned `width`/`height`, or the built-in default when no size
+                // was pinned (see [`ClientMsg::DefaultSize`]). Both are a 1x
+                // layout carried up to the density this end is applying, or the
+                // denser one already pending; without a density attached the
+                // request would tell the server to forget one it is already
+                // applying.
                 let wanted_size = match msg {
                     ClientMsg::Viewport { w, h } => Some((u32::from(w), u32::from(h))),
-                    ClientMsg::DefaultSize => Some(applied.pixels(default_size)),
+                    ClientMsg::DefaultSize => {
+                        Some((u32::from(default_size.0), u32::from(default_size.1)))
+                    }
                     _ => None,
                 };
                 if let Some((w, h)) = wanted_size {
@@ -1011,13 +1005,12 @@ async fn active_loop(
                         // whose target has resize enabled — the viewport and density
                         // reports both follow `connected`, before the channel is up —
                         // so without the retry the desktop stayed at its opening size
-                        // until another window change. The size arrives in the
-                        // announced density's pixels; if a denser layout is already
-                        // pending it is carried up to that density, so the two go out
-                        // as one layout and never as two resizes racing to set `applied`.
+                        // until another window change. The points go out at the
+                        // density already pending when one is, else the applied one,
+                        // so a size and a density never race to set `applied`.
                         let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
                         install_layout(
-                            Layout { w, h, density: applied }.at_density(density),
+                            Layout { w, h, density: Density::One }.at_density(density),
                             Layout::current(desktop, applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -2169,12 +2162,6 @@ mod tests {
             // a client's points and the remote's pixels from rounding apart.
             assert_eq!(density.scale(), density.percent() as f32 / 100.0);
         }
-    }
-
-    #[test]
-    fn the_configured_size_is_points_once_a_density_is_in_play() {
-        assert_eq!(Density::One.pixels((1280, 800)), (1280, 800));
-        assert_eq!(Density::Two.pixels((1280, 800)), (2560, 1600));
     }
 
     #[test]

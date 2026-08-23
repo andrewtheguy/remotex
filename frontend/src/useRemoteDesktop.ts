@@ -368,9 +368,10 @@ export function densityLabel(hundredths: number): string {
 }
 
 // The screen this window is on, as the wire carries it: full resolution in CSS
-// pixels and density in hundredths. `window.screen` follows the window between
-// displays, so reading it fresh is what keeps a re-send honest. Clamped to the
-// wire's u16 like a viewport; a screen that big does not exist.
+// pixels and density in hundredths, and whether this is the pinch-zoom client,
+// whose screen is not a size to open a desktop at. `window.screen` follows the
+// window between displays, so reading it fresh is what keeps a re-send honest.
+// Clamped to the wire's u16 like a viewport; a screen that big does not exist.
 function hostDisplayMsg(): Extract<ClientMsg, { type: "hostDisplay" }> {
   const dim = (px: number) => Math.min(65535, Math.max(1, Math.round(px) || 1));
   return {
@@ -378,17 +379,20 @@ function hostDisplayMsg(): Extract<ClientMsg, { type: "hostDisplay" }> {
     w: dim(screen.width),
     h: dim(screen.height),
     scale: hostScaleHundredths(),
+    fit: CAN_PINCH_ZOOM,
   };
 }
 
-// Requested CSS viewport converted to remote pixels and clamped to wire `u16`.
-function viewportMsg(
-  size: { w: number; h: number },
-  guestScale: number,
-): Extract<ClientMsg, { type: "viewport" }> {
-  const density = guestScale > 0 ? guestScale : 1;
+// Requested viewport in points (CSS pixels), clamped to wire `u16`. No density
+// is applied here: the engine renders points at its own, which is the only
+// reading that is right straight after a (re)connect, before any `resize` has
+// told this window what scale the remote draws at.
+function viewportMsg(size: {
+  w: number;
+  h: number;
+}): Extract<ClientMsg, { type: "viewport" }> {
   const dim = (cssPx: number) =>
-    Math.min(65535, Math.max(1, Math.round(cssPx * density)));
+    Math.min(65535, Math.max(1, Math.round(cssPx)));
   return { type: "viewport", w: dim(size.w), h: dim(size.h) };
 }
 
@@ -991,10 +995,7 @@ export function useRemoteDesktop(
         return;
       }
       const el = document.documentElement;
-      const msg = viewportMsg(
-        { w: el.clientWidth, h: el.clientHeight },
-        sizeRef.current?.scale ?? 1,
-      );
+      const msg = viewportMsg({ w: el.clientWidth, h: el.clientHeight });
       if (
         lastViewport &&
         lastViewport.w === msg.w &&
@@ -1005,20 +1006,17 @@ export function useRemoteDesktop(
       lastViewport = { w: msg.w, h: msg.h };
       sendRef.current(msg);
     };
-    // Send one mobile size after the first resize supplies the remote density.
-    // Rotations do not revise it.
-    let mobileSizePending = false;
+    // A tablet's one size request, sent once on `connected`; rotations do not
+    // revise it. A phone sends nothing: it opened at the gateway's default
+    // already, which is the size it wants (see `fit` in hostDisplayMsg).
     const sendMobileSize = () => {
-      mobileSizePending = false;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
       const guest = mobileGuestSize();
-      sendRef.current(
-        guest
-          ? viewportMsg(guest, sizeRef.current?.scale ?? 1)
-          : { type: "defaultSize" },
-      );
+      if (guest) {
+        sendRef.current(viewportMsg(guest));
+      }
     };
     // The screen this window is on, deduped the same way. Mid-session only its
     // density is acted on — an RDP target that allows resize matches it, and
@@ -1298,12 +1296,6 @@ export function useRemoteDesktop(
       sizeRef.current = s;
       setSize(s);
       syncCursor();
-      // The mobile size request, now that there is a density to convert with —
-      // see sendMobileSize. Fired from the *first* resize of a connection only, so
-      // the answer this produces does not immediately re-trigger it.
-      if (mobileSizePending) {
-        sendMobileSize();
-      }
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
@@ -1394,7 +1386,9 @@ export function useRemoteDesktop(
         // The one-shot is still gated on the target's `resize`, because there is
         // nothing to say otherwise: an engine drops the request without it.
         followWindowRef.current = false;
-        mobileSizePending = msg.resize;
+        if (msg.resize) {
+          sendMobileSize();
+        }
       } else {
         // The gateway's one switch: `resize` means this window drives the
         // remote's size, and there is nothing to toggle beside it. Report at
@@ -1723,9 +1717,14 @@ export function useRemoteDesktop(
       }
       // The connect names this window's screen, so a target with no pinned
       // config size opens at its full resolution — before any message this
-      // client could send after the fact.
-      const { w, h, scale } = hostDisplayMsg();
-      sendRef.current({ type: "connect", target, display: { w, h, scale } });
+      // client could send after the fact — or, from the pinch-zoom client, at
+      // the gateway's default.
+      const { w, h, scale, fit } = hostDisplayMsg();
+      sendRef.current({
+        type: "connect",
+        target,
+        display: { w, h, scale, fit },
+      });
     },
     [releaseAudio],
   );

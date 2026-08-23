@@ -43,7 +43,7 @@ export function gatewayFetch(
 export function gatewaySocketUrl(
   path: string,
   session: string,
-  screen?: { w: number; h: number; scale: number },
+  screen?: { w: number; h: number; scale: number; fit: boolean },
 ): string {
   const url = new URL(gatewayUrl(path));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -52,6 +52,7 @@ export function gatewaySocketUrl(
     url.searchParams.set("w", String(screen.w));
     url.searchParams.set("h", String(screen.h));
     url.searchParams.set("scale", String(screen.scale));
+    url.searchParams.set("fit", String(screen.fit));
   }
   return url.toString();
 }
