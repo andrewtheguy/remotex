@@ -5,7 +5,7 @@
 //!
 //! `/ws?session=<token>` is the session: it attaches to the single slot
 //! ([`crate::session::SessionManager`]). The URL also names the client's screen
-//! (`w`/`h`/`scale`, the same numbers `connect` carries), so an attach that finds
+//! (`w`/`h`/`scale`/`fit`, the same values `connect` carries), so an attach that finds
 //! a target whose engine a claim change ended can reconnect it for *this*
 //! browser's screen. Inbound `ClientMsg` split two ways —
 //! session-control messages (`connect` to pick a target from the post-login picker,
@@ -453,6 +453,8 @@ pub struct WsParams {
     w: Option<u16>,
     h: Option<u16>,
     scale: Option<u16>,
+    /// [`crate::protocol::HostDisplay::fit`]; absent is a pointer client.
+    fit: Option<bool>,
 }
 
 pub async fn handler(
@@ -461,7 +463,9 @@ pub async fn handler(
     State(state): State<AppState>,
 ) -> Response {
     let display = match (params.w, params.h, params.scale) {
-        (Some(w), Some(h), Some(scale)) => Some(protocol::HostDisplay { w, h, scale }),
+        (Some(w), Some(h), Some(scale)) => {
+            Some(protocol::HostDisplay { w, h, scale, fit: params.fit.unwrap_or(false) })
+        }
         _ => None,
     };
     ws.on_upgrade(move |socket| {
@@ -901,7 +905,10 @@ async fn session(
     display: Option<protocol::HostDisplay>,
     heartbeat_timings: HeartbeatTimings,
 ) {
-    let attachment = token.and_then(|t| sessions.attach(&t, display).ok());
+    let attachment = match token {
+        Some(t) => sessions.attach(&t, display).await.ok(),
+        None => None,
+    };
     let Some(attachment) = attachment else {
         warn!("ws: rejected connection without a valid session token");
         let _ = socket
@@ -1094,7 +1101,7 @@ async fn session(
                 // target from the picker, or tear the session down and go back to
                 // it ("switch target").
                 Ok(ClientMsg::Connect { target, display }) => {
-                    if let Err(e) = sessions.connect(attach_id, &target, display) {
+                    if let Err(e) = sessions.connect(attach_id, &target, display).await {
                         warn!("ws: connect to {target:?} refused: {e}");
                     }
                 }
@@ -1604,7 +1611,7 @@ mod tests {
         let replacement_token = assertions
             .claim(false, None)
             .expect("heartbeat timeout did not release the browser attachment");
-        let mut replacement = assertions.attach(&replacement_token, None).unwrap();
+        let mut replacement = assertions.attach(&replacement_token, None).await.unwrap();
         assert!(matches!(
             replacement.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
@@ -1630,12 +1637,12 @@ mod tests {
         let token = sessions.claim(false, None).unwrap();
         // A live desktop, driven in process: this test is about the audio socket, and
         // the session socket only has to exist for `connect` to be legal.
-        let mut att = sessions.attach(&token, None).unwrap();
+        let mut att = sessions.attach(&token, None).await.unwrap();
         assert!(matches!(
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
         ));
-        sessions.connect(att.id, "fake", None).unwrap();
+        sessions.connect(att.id, "fake", None).await.unwrap();
         let (input_rx, _frame_tx, bridge) = engine_rx.recv().await.unwrap();
         let bridge = bridge.expect("an audio target's engine is given a bridge");
 

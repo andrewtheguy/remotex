@@ -850,7 +850,8 @@ flushes the latest held position first.
 
 A target's `resize` means the window drives the remote's size, continuously and
 on every engine alike: an engine that has it applies every `viewport` it is
-sent, an engine without it drops them all, and the client sends them exactly
+sent — in points, the window's CSS pixels, rendered at the engine's own density —
+an engine without it drops them all, and the client sends them exactly
 when `connected` said `resize` — on every window change, with no toggle, no
 manual button and no remembered preference beside it. Standard `ard` rejects
 `resize` at config parse because it shares physical displays. On RDP the `egfx`

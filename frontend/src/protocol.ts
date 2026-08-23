@@ -21,9 +21,10 @@ export type WheelUnit = "pixel" | "line" | "page";
 export type TouchPhase = "down" | "move" | "up" | "cancel";
 
 // Browser -> server: input events captured over the remote canvas, plus
-// viewport reports (the desired remote desktop size, in the *remote's* pixels:
-// the room the browser has times the density the remote draws at — engines that
-// support dynamic resize act on them, the rest ignore them).
+// viewport reports (the desired remote desktop size, in points: the room the
+// browser has, in CSS pixels — the engine renders them at its own density, so
+// the report needs no scale this browser may not have been told yet. Engines
+// that support dynamic resize act on them, the rest ignore them).
 export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
   // `clicks` is the browser's own click count for the press (MouseEvent.detail):
@@ -42,7 +43,7 @@ export type ClientMsg =
   // already on at connect time). Synthetic sends without a real event pass
   // false — they express case through an explicit Shift code instead.
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
-  // Requested framebuffer size in remote pixels. Engines apply their own policy.
+  // Requested desktop size in points (CSS pixels). Engines apply their own policy.
   | { type: "viewport"; w: number; h: number }
   // Restore the target-defined default size; distinct from sending no request.
   | { type: "defaultSize" }
@@ -53,8 +54,11 @@ export type ClientMsg =
   // screen. Mid-session only the density is acted on (RDP density matching,
   // a High Performance Mac re-rendering at the new density); the size fields
   // matter at session-open, where `connect` carries the same shape.
-  // It does not affect canvas layout.
-  | { type: "hostDisplay"; w: number; h: number; scale: number }
+  // `fit` marks the pinch-zoom client (CAN_PINCH_ZOOM), which presents the
+  // desktop scaled to fit rather than at 100%: its screen is then no opening
+  // size, and a target with no pinned size opens at the gateway's default
+  // for it. It does not affect canvas layout.
+  | { type: "hostDisplay"; w: number; h: number; scale: number; fit: boolean }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it. The connect names this window's screen so a target
@@ -64,7 +68,7 @@ export type ClientMsg =
   | {
       type: "connect";
       target: string;
-      display: { w: number; h: number; scale: number };
+      display: { w: number; h: number; scale: number; fit: boolean };
     }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts

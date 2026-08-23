@@ -55,6 +55,23 @@ pub fn scale_ratio(scale: u16) -> f32 {
     }
 }
 
+/// The density a remote is asked to *render* at for a client screen of `scale`:
+/// 1× or 2×, decided at the 1.5 midpoint.
+///
+/// Two steps, because that is what a remote can usefully be told. An RDP server
+/// is told a `DesktopScaleFactor`, and a Mac's virtual display has a backing
+/// store that is one or two pixels per point. Neither renders at 1.25× or
+/// 1.5×, and a Mac asked for such a ratio does not round it — measured on
+/// macOS 26.6, it answered a 1.25× request with a 960×540-point display and a
+/// 1.5× one with 960×600 points, each at 2×: a desktop whose text looks zoomed
+/// while the Dock, shrunk to fit the width, does not. So the fraction is
+/// resolved here, once, for every engine, and the same screen gets the same
+/// desktop on each of them. A value in `scale` that no screen has reads as 1×,
+/// through [`scale_ratio`].
+pub fn render_density(scale: u16) -> f32 {
+    if scale_ratio(scale) >= 1.5 { 2.0 } else { 1.0 }
+}
+
 /// The client's screen, as [`ClientMsg::HostDisplay`] and
 /// [`ClientMsg::Connect`] name it: full resolution in points and density in
 /// hundredths (see [`SCALE_ONE`]). Pixels are `points × scale / 100`.
@@ -63,6 +80,16 @@ pub struct HostDisplay {
     pub w: u16,
     pub h: u16,
     pub scale: u16,
+    /// Whether this client presents the desktop scaled to fit its viewport,
+    /// with pinch zoom on top — the one client that does (`CAN_PINCH_ZOOM` in
+    /// `frontend/src/useRemoteDesktop.ts`). Its screen's resolution is then
+    /// not an opening size: the desktop is not shown at 100% and a phone's
+    /// 430×932 points is no desktop to lay windows out on, so such a client
+    /// opens a target with no pinned size at [`crate::config::DEFAULT_SIZE`]
+    /// ([`crate::config::TargetConfig::opening_size`]). Its density still
+    /// counts. Absent on the wire reads as a pointer client.
+    #[serde(default)]
+    pub fit: bool,
 }
 
 impl HostDisplay {
@@ -218,9 +245,14 @@ pub enum ClientMsg {
         pressed: bool,
         caps: bool,
     },
-    /// Requested desktop size in remote pixels: available client points
-    /// multiplied by the scale in [`ServerMsg::Resize`]. Applied by any engine the
-    /// target opted into resize for, and dropped by every other. A desktop client
+    /// Requested desktop size in *points* — the client's available CSS pixels,
+    /// as they are. The engine turns points into pixels at the density it is
+    /// rendering at, which is why the report carries no density and no
+    /// pixels: a client that had to multiply by the scale in
+    /// [`ServerMsg::Resize`] first would have nothing to multiply by right after
+    /// a (re)connect, and a report in pixels at a scale the engine had already
+    /// moved past asked for half a desktop. Applied by any engine the target
+    /// opted into resize for, and dropped by every other. A desktop client
     /// sends one when it connects and on every window change after
     /// [`ServerMsg::Connected`] says `resize`; the backend simply applies each
     /// valid report it receives.
@@ -233,7 +265,8 @@ pub enum ClientMsg {
     /// screen, 200 for a Retina one. Sent on connect and again whenever the
     /// window lands on a different screen; clients send it unconditionally
     /// rather than asking what the engine is, so being ignored is not a client
-    /// error.
+    /// error. Its density is a ratio the client *has*; what a remote is asked
+    /// to render at is [`render_density`] of it.
     ///
     /// Mid-session it is a *density* report, and only targets with `resize`
     /// act on it — a density is a resize. RDP asks the host for twice the
@@ -1419,13 +1452,13 @@ mod tests {
                 r#"{"type":"hostDisplay","w":1728,"h":1117,"scale":200}"#
             )
             .unwrap(),
-            ClientMsg::HostDisplay(HostDisplay { w: 1728, h: 1117, scale: 200 })
+            ClientMsg::HostDisplay(HostDisplay { w: 1728, h: 1117, scale: 200, fit: false })
         ));
         // A zero dimension still parses — u16 has no floor — and stops at the
         // boundary that would spend it instead ([`HostDisplay::checked`]).
-        assert_eq!(HostDisplay { w: 0, h: 1117, scale: 200 }.checked(), None);
-        assert_eq!(HostDisplay { w: 1728, h: 0, scale: 200 }.checked(), None);
-        let screen = HostDisplay { w: 1728, h: 1117, scale: 200 };
+        assert_eq!(HostDisplay { w: 0, h: 1117, scale: 200, fit: false }.checked(), None);
+        assert_eq!(HostDisplay { w: 1728, h: 0, scale: 200, fit: false }.checked(), None);
+        let screen = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
         assert_eq!(screen.checked(), Some(screen));
         // A connect names the screen it is made from, and a probe without one
         // still connects.
@@ -1436,7 +1469,7 @@ mod tests {
         {
             ClientMsg::Connect { target, display } => {
                 assert_eq!(target, "mac");
-                assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100 }));
+                assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100, fit: false }));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1444,6 +1477,18 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"connect","target":"mac"}"#).unwrap(),
             ClientMsg::Connect { display: None, .. }
         ));
+        // A pinch-zoom client says so beside its screen; a client that says
+        // nothing is a pointer client.
+        match serde_json::from_str::<ClientMsg>(
+            r#"{"type":"connect","target":"mac","display":{"w":430,"h":932,"scale":300,"fit":true}}"#,
+        )
+        .unwrap()
+        {
+            ClientMsg::Connect { display, .. } => {
+                assert_eq!(display, Some(HostDisplay { w: 430, h: 932, scale: 300, fit: true }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
                 r#"{"type":"paintAck","sequence":41,"queuedMs":7,"drawMs":13}"#
@@ -1877,6 +1922,19 @@ mod tests {
         }
         for above in [300, 350, u16::MAX] {
             assert_eq!(scale_ratio(above), 2.0, "scale {above}");
+        }
+    }
+
+    /// What a remote is asked to render at is one of the two densities a remote
+    /// has, never the client's fraction: the midpoint decides, the same way on
+    /// every engine.
+    #[test]
+    fn a_render_density_is_one_or_two_at_the_midpoint() {
+        for one in [0, 99, 100, 125, 149] {
+            assert_eq!(render_density(one), 1.0, "scale {one}");
+        }
+        for two in [150, 175, 200, 300, u16::MAX] {
+            assert_eq!(render_density(two), 2.0, "scale {two}");
         }
     }
 

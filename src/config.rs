@@ -760,9 +760,15 @@ impl TargetConfig {
     /// [`crate::protocol::ClientMsg::Connect`]), else [`DEFAULT_SIZE`]. One
     /// rule for every engine that can ask for an opening size, so none of them
     /// branches on its own.
+    ///
+    /// A client that fits the desktop to its viewport and pinch-zooms
+    /// ([`HostDisplay::fit`]) has a screen but not one to open at: it is the
+    /// one client not showing the desktop at 100%, and its screen is a phone's
+    /// or a tablet's. It takes the pinned size or the default, and its density
+    /// still counts, elsewhere.
     pub fn opening_size(&self, display: Option<HostDisplay>) -> (u16, u16) {
         self.pinned_size()
-            .or(display.map(|d| (d.w, d.h)))
+            .or(display.filter(|d| !d.fit).map(|d| (d.w, d.h)))
             .unwrap_or(DEFAULT_SIZE)
     }
 
@@ -3608,7 +3614,7 @@ mod tests {
     /// single width without its height is refused rather than half-obeyed.
     #[test]
     fn the_opening_size_prefers_pinned_then_screen_then_default() {
-        let screen = HostDisplay { w: 1728, h: 1117, scale: 200 };
+        let screen = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
 
         let pinned = &ConfigFile::parse(&vnc_toml("width = 1600\nheight = 1000")).unwrap().targets[0];
         assert_eq!(pinned.opening_size(Some(screen)), (1600, 1000));
@@ -3618,6 +3624,13 @@ mod tests {
         assert_eq!(free.opening_size(Some(screen)), (1728, 1117));
         assert_eq!(free.opening_size(None), DEFAULT_SIZE);
         assert_eq!(free.default_size(), DEFAULT_SIZE);
+
+        // A pinch-zoom client's screen is not an opening size: the pinned size
+        // still wins, and without one it opens at the default rather than at a
+        // phone's shape.
+        let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
+        assert_eq!(pinned.opening_size(Some(phone)), (1600, 1000));
+        assert_eq!(free.opening_size(Some(phone)), DEFAULT_SIZE);
 
         let err = ConfigFile::parse(&vnc_toml("width = 1600")).unwrap_err();
         assert!(

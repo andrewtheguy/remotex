@@ -572,7 +572,7 @@ async fn session(
             default_size: config.default_size(),
             apple,
             high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
-            host_density: display.map_or(UNSCALED, |d| crate::protocol::scale_ratio(d.scale)),
+            host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
         },
         input_rx,
@@ -936,11 +936,14 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
 /// every remote window out on the virtual display at that size and windows
 /// squeezed together onto a small opening display do not spread back out when
 /// it grows. The density is the client screen's whatever named the points, so
-/// a Retina client gets a sharp desktop even at a pinned size.
+/// a Retina client gets a sharp desktop even at a pinned size — quantized to
+/// the 1x or 2x a virtual display can be backed at
+/// ([`crate::protocol::render_density`]): a Mac asked for 1.25x or 1.5x
+/// answers with a small 2x display rather than a rounded one.
 fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_apple::VirtualMode {
     vnc_apple::virtual_display_mode(
         config.opening_size(display),
-        display.map_or(UNSCALED, |d| crate::protocol::scale_ratio(d.scale)),
+        display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
     )
 }
 
@@ -1171,7 +1174,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
                     ClientMsg::HostDisplay(screen) if high_performance && resize => {
-                        let density = crate::protocol::scale_ratio(screen.scale);
+                        let density = crate::protocol::render_density(screen.scale);
                         let mut d = desktop.lock().unwrap();
                         let changed = (d.host_density - density).abs() > 0.005;
                         d.host_density = density;
@@ -1381,10 +1384,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
 
 /// The unit a resize request states its size in. Everything resolves to logical
 /// points first, because that is the one unit all three speak: a viewport report
-/// is pixels at the scale this end last announced, the configured default is
-/// points outright, and a density change carries no size at all.
+/// and the configured default are points outright, and a density change carries
+/// no size at all.
 enum ResizeAsk {
-    /// A browser viewport report: pixels at the announced scale.
+    /// A browser viewport report: points.
     Viewport((u16, u16)),
     /// The target-defined default size: logical points.
     Points((u16, u16)),
@@ -1410,15 +1413,15 @@ async fn request_resize(
 ) -> anyhow::Result<()> {
     let msg = {
         let mut d = desktop.lock().unwrap();
-        let to_points = |px: (u16, u16)| {
-            let point = |v: u16| (f32::from(v) / d.scale).round().max(1.0) as u16;
-            (point(px.0), point(px.1))
-        };
         let want = match ask {
             ResizeAsk::Viewport((0, _) | (_, 0)) => return Ok(()),
-            ResizeAsk::Viewport(px) => to_points(px),
-            ResizeAsk::Points(points) => points,
-            ResizeAsk::Density => to_points(d.size),
+            ResizeAsk::Viewport(points) | ResizeAsk::Points(points) => points,
+            // The current size, in the points it is rendered from: the one
+            // request that starts from pixels, and from this end's own.
+            ResizeAsk::Density => {
+                let point = |v: u16| (f32::from(v) / d.scale).round().max(1.0) as u16;
+                (point(d.size.0), point(d.size.1))
+            }
         };
         let msg = if high_performance {
             let mode = vnc_apple::virtual_display_mode(want, d.host_density);
@@ -4593,7 +4596,7 @@ mod tests {
             ))
             .unwrap()
         };
-        let screen = crate::protocol::HostDisplay { w: 1728, h: 1117, scale: 200 };
+        let screen = crate::protocol::HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
 
         // No pinned size: the client's screen, at the client's density — how
         // Apple's own client opens, and the layout every remote window gets.
@@ -4634,11 +4637,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_viewport_report_is_read_at_the_announced_scale() {
+    async fn a_viewport_report_is_read_as_points() {
         let (uplink, wire) = test_uplink();
         // Steady state on a Retina client: the desktop is 3200×2000 pixels shown
-        // at 2x, and the browser reports its viewport pre-multiplied by that
-        // announced scale. The same size must not re-request anything.
+        // at 2x, and the browser reports its viewport in points — the 1600×1000
+        // it has — whatever scale it was last told. The same size must not
+        // re-request anything.
         let desktop = shared_desktop((3200, 2000), None, None);
         {
             let mut d = desktop.lock().unwrap();
@@ -4646,18 +4650,24 @@ mod tests {
             d.host_density = 2.0;
         }
 
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((3200, 2000)), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1000)), true).await.unwrap();
         assert!(written(&wire).is_empty(), "the browser is at the current size");
 
-        // A genuinely new window size, still pre-multiplied: 1600×1200 points.
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((3200, 2400)), true).await.unwrap();
-        assert_eq!(
-            written(&wire),
-            vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
-                (1600, 1200),
-                2.0
-            ))
-        );
+        // A genuinely new window size: 1600×1200 points, rendered at the
+        // client's density.
+        let expected = vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
+            (1600, 1200),
+            2.0,
+        ));
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
+        assert_eq!(written(&wire), expected);
+
+        // The same points reported while this end still announces 1x — a
+        // browser right after a reconnect, before the layout has reached it —
+        // ask for the same desktop again, not half of one.
+        desktop.lock().unwrap().scale = UNSCALED;
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
+        assert_eq!(written(&wire), [expected.clone(), expected].concat());
     }
 
     #[tokio::test]
