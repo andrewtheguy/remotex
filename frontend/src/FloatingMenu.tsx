@@ -762,6 +762,20 @@ export default function FloatingMenu({
   const [position, setPosition] = useState<Position | null>(null);
   const [dragging, setDragging] = useState(false);
   const [viewport, setViewport] = useState<Viewport>(readViewport);
+  // How much of the bottom edge a docked panel is covering. The canvas already
+  // insets above it; the button and its drawer float over the same edge and
+  // have to do the same, or the soft keyboard opens on top of the one control
+  // that closes it again.
+  const [dockedHeight, setDockedHeight] = useState(0);
+
+  // Kept here as well as passed on: one measurement, two readers.
+  const onDockedHeight = useCallback(
+    (px: number) => {
+      setDockedHeight(px);
+      onKeyboardInset(px);
+    },
+    [onKeyboardInset],
+  );
 
   const dragStateRef = useRef<DragState | null>(null);
   // A drag ends with a synthetic click on some platforms; swallow it so a drag
@@ -791,6 +805,11 @@ export default function FloatingMenu({
     };
   }, []);
 
+  // The lowest edge the floating chrome may reach. `visualViewport` already
+  // takes the browser's own on-screen keyboard off the bottom; a docked panel
+  // is drawn by this page, so nothing but this subtracts it.
+  const floor = viewport.offsetY + viewport.height - dockedHeight;
+
   const clamp = useCallback(
     (x: number, y: number): Position => {
       const minX = viewport.offsetX + FAB_MARGIN;
@@ -798,36 +817,33 @@ export default function FloatingMenu({
       const maxX =
         viewport.offsetX +
         Math.max(FAB_MARGIN, viewport.width - FAB_SIZE - FAB_MARGIN);
-      const maxY =
-        viewport.offsetY +
-        Math.max(FAB_MARGIN, viewport.height - FAB_SIZE - FAB_MARGIN);
+      const maxY = Math.max(minY, floor - FAB_SIZE - FAB_MARGIN);
       return {
         x: Math.min(Math.max(x, minX), maxX),
         y: Math.min(Math.max(y, minY), maxY),
       };
     },
-    [viewport],
+    [viewport, floor],
   );
 
   const defaultPosition = useCallback(
     (): Position =>
       clamp(
         viewport.offsetX + viewport.width - FAB_SIZE - FAB_MARGIN,
-        viewport.offsetY + viewport.height - FAB_SIZE - FAB_MARGIN,
+        floor - FAB_SIZE - FAB_MARGIN,
       ),
-    [clamp, viewport],
+    [clamp, viewport, floor],
   );
 
+  // Clamped on the way out rather than in place, so that what a drag stored
+  // survives a floor that only moved for a moment: a rotation, or a panel
+  // opening, bumps the button up while it lasts, and giving the room back puts
+  // it where its owner left it. Every reader — the drawer's anchor, a drag's
+  // origin — takes this and not the raw state, so nothing jumps.
   const resolvedPosition = useMemo(
-    () => position ?? defaultPosition(),
-    [position, defaultPosition],
+    () => (position ? clamp(position.x, position.y) : defaultPosition()),
+    [position, clamp, defaultPosition],
   );
-
-  // A shrinking viewport (rotation, keyboard) can strand the FAB off-screen;
-  // re-clamp whatever position is held.
-  useEffect(() => {
-    setPosition((prev) => (prev ? clamp(prev.x, prev.y) : prev));
-  }, [clamp]);
 
   // Escape dismisses the gesture-help overlay, matching the backdrop tap and
   // the Close button. Listener lives only while the overlay is open.
@@ -882,18 +898,17 @@ export default function FloatingMenu({
       ) {
         return;
       }
-      const current = position ?? defaultPosition();
       dragStateRef.current = {
         pointerId: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
-        originX: current.x,
-        originY: current.y,
+        originX: resolvedPosition.x,
+        originY: resolvedPosition.y,
         dragged: false,
       };
       e.currentTarget.setPointerCapture(e.pointerId);
     },
-    [position, defaultPosition],
+    [resolvedPosition],
   );
 
   const onPointerMove = useCallback(
@@ -1008,8 +1023,7 @@ export default function FloatingMenu({
 
     const topBelow = resolvedPosition.y + FAB_SIZE + TOOLBAR_GAP;
     const topAbove = resolvedPosition.y - TOOLBAR_GAP;
-    const availableBelow =
-      viewport.offsetY + viewport.height - topBelow - FAB_MARGIN;
+    const availableBelow = floor - topBelow - FAB_MARGIN;
     const availableAbove = topAbove - viewport.offsetY - FAB_MARGIN;
     const placeBelow =
       availableBelow >= TOOLBAR_MIN_HEIGHT || availableBelow >= availableAbove;
@@ -1026,7 +1040,7 @@ export default function FloatingMenu({
           transform: "translateY(-100%)",
           maxHeight: `${maxHeight}px`,
         };
-  }, [resolvedPosition, viewport]);
+  }, [resolvedPosition, viewport, floor]);
 
   return (
     <>
@@ -1249,7 +1263,7 @@ export default function FloatingMenu({
       <DockedPanel
         panel={panel}
         onClose={closePanel}
-        onDockedHeightChange={onKeyboardInset}
+        onDockedHeightChange={onDockedHeight}
         sendKeyCombo={sendKeyCombo}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}
