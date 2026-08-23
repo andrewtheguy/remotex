@@ -45,9 +45,12 @@ def host_display(value: str) -> dict[str, int | bool]:
         size, scale = value.lower().split("@", maxsplit=1)
         fit = scale.endswith("fit")
         width, height = dimensions(size)
-        return {"w": width, "h": height, "scale": int(scale.removesuffix("fit")), "fit": fit}
+        hundredths = int(scale.removesuffix("fit"))
     except ValueError as error:
         raise argparse.ArgumentTypeError("expected WIDTHxHEIGHT@SCALE[fit]") from error
+    if hundredths <= 0:
+        raise argparse.ArgumentTypeError("scale must be positive")
+    return {"w": width, "h": height, "scale": hundredths, "fit": fit}
 
 
 def coordinates(value: str) -> tuple[int, int]:
@@ -136,23 +139,24 @@ async def main() -> int:
         burst_sent = False
         mouse_sent = False
         tiles = 0
-        reconnect_sent = False
-        started = asyncio.get_running_loop().time()
+
+        # The second connect runs on its own clock, beside the receive loop: a
+        # quiet desktop sends nothing for seconds, and the deadline must not wait
+        # for an inbound message to be noticed.
+        async def reconnect() -> None:
+            await asyncio.sleep(args.reconnect_after)
+            second = {"type": "connect", "target": args.reconnect_target}
+            if args.display is not None:
+                second["display"] = args.display
+            print(f"  -> connect {args.reconnect_target} (no disconnect first)")
+            await socket.send(json.dumps(second))
+
+        reconnect_task = (
+            asyncio.create_task(reconnect()) if args.reconnect_target is not None else None
+        )
         try:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
-                    if (
-                        args.reconnect_target is not None
-                        and not reconnect_sent
-                        and asyncio.get_running_loop().time() - started
-                        >= args.reconnect_after
-                    ):
-                        reconnect_sent = True
-                        second = {"type": "connect", "target": args.reconnect_target}
-                        if args.display is not None:
-                            second["display"] = args.display
-                        print(f"  -> connect {args.reconnect_target} (no disconnect first)")
-                        await socket.send(json.dumps(second))
                     if isinstance(message, bytes):
                         tiles += 1
                         continue
@@ -251,6 +255,9 @@ async def main() -> int:
                         print(f"  {kind}: {json.dumps(data)[:120]}")
         except TimeoutError:
             pass
+        finally:
+            if reconnect_task is not None:
+                reconnect_task.cancel()
         print(f"\n  {tiles} tile frames")
         await socket.send(json.dumps({"type": "disconnect"}))
     return 0
