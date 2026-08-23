@@ -11,3 +11,7 @@ CLAUDE.local.md
 # Editor scaffolding, written by whichever one is open. Nothing here is shared.
 .vscode/
 .claude/worktrees
+# Python one-offs (uv scripts under tests/ and tmp/).
+__pycache__/
+*.py[cod]
+.venv/
