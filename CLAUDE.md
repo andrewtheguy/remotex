@@ -127,7 +127,7 @@ makes the Mac decline any later request beyond the initial size.
 **Opening size is one rule for every engine** (`TargetConfig::opening_size`):
 the pinned `width`/`height` when the operator set both, else the full resolution
 of the client's own screen — carried in `ClientMsg::Connect` so it exists before
-the engine's handshake — else `DEFAULT_SIZE` (1920×1200). The pinch-zoom client
+the engine's handshake — else `DEFAULT_SIZE` (1920×1080, 4K at 2x). The pinch-zoom client
 (`HostDisplay::fit`, the `CAN_PINCH_ZOOM` exception above) has no screen to
 open at: it takes the pinned size or `DEFAULT_SIZE`, and its density still
 counts. `width`/`height` are `Option`s;
