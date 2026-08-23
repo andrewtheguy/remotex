@@ -570,6 +570,7 @@ async fn session(
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: config.default_size(),
+            video: config.streams_video(),
             apple,
             high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
@@ -602,6 +603,10 @@ struct Flags {
     /// [`active_loop`] is given the handshaken link and these switches, not the
     /// profile behind them.
     default_size: (u16, u16),
+    /// Whether this target puts moving pixels on the wire as a video stream
+    /// ([`TargetConfig::streams_video`]): a generic `SetDesktopSize` is then
+    /// held under the stream's picture ceiling — see [`request_resize`].
+    video: bool,
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
     /// subtypes negotiate them; only one uses the 003.889 record transport.
@@ -1087,6 +1092,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         resize,
         clipboard: clipboard_enabled,
         default_size,
+        video,
         apple,
         high_performance,
         host_density,
@@ -1184,7 +1190,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 };
                 let sent = if let Some(ask) = ask {
                     if resize {
-                        request_resize(&uplink, &desktop, ask, high_performance).await
+                        request_resize(&uplink, &desktop, ask, high_performance, video).await
                     } else {
                         Ok(())
                     }
@@ -1404,12 +1410,17 @@ enum ResizeAsk {
 /// window to a Retina display re-renders the same desktop at 2x. Generic VNC uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
 /// rect; until then, its report is stashed for replay. It has no density to
-/// apply, so its points are its pixels.
+/// apply, so its points are its pixels — and when the target streams `video`,
+/// they are held under the stream's picture ceiling ([`crate::video::fit_ceiling`])
+/// before anything is sent or stashed, so the desktop asked for is one the encoder
+/// takes. A High Performance display needs no such hold: the Mac's own 3840×2160
+/// backing ceiling in [`vnc_apple::virtual_display_mode`] is already inside it.
 async fn request_resize(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     ask: ResizeAsk,
     high_performance: bool,
+    video: bool,
 ) -> anyhow::Result<()> {
     let msg = {
         let mut d = desktop.lock().unwrap();
@@ -1431,12 +1442,14 @@ async fn request_resize(
                 return Ok(());
             }
             vnc_apple::set_display_configuration(mode)
-        } else if want == d.size {
-            // The browser is back at the current size; drop any stale stash
-            // so a later support declaration doesn't replay it.
-            d.pending = None;
-            return Ok(());
         } else {
+            let want = if video { held_under_ceiling(want) } else { want };
+            if want == d.size {
+                // The browser is back at the current size; drop any stale stash
+                // so a later support declaration doesn't replay it.
+                d.pending = None;
+                return Ok(());
+            }
             match d.screen {
                 Some(screen) => set_desktop_size(want, screen).to_vec(),
                 None => {
@@ -1455,6 +1468,22 @@ async fn request_resize(
         msg
     };
     send(uplink, &msg).await
+}
+
+/// A generic resize request held under the video stream's picture ceiling, in
+/// the pixels a `SetDesktopSize` states. Logged when it bites, because the
+/// desktop that arrives is then not the one the window asked for.
+fn held_under_ceiling(want: (u16, u16)) -> (u16, u16) {
+    let (w, h) = crate::video::fit_ceiling((u32::from(want.0), u32::from(want.1)));
+    // Lossless: the ceiling only ever shrinks what a `u16` already held.
+    let held = (u16::try_from(w).unwrap_or(u16::MAX), u16::try_from(h).unwrap_or(u16::MAX));
+    if held != want {
+        info!(
+            "vnc: holding a {}x{} resize under the video stream's {}x{} picture ceiling",
+            want.0, want.1, held.0, held.1
+        );
+    }
+    held
 }
 
 /// Everything the read loop and the rect handlers under it share with the input
@@ -4549,25 +4578,55 @@ mod tests {
         let desktop = shared_desktop((1024, 768), None, None);
 
         // Matching the current size or a zero dimension: no-ops.
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1024, 768)), false).await.unwrap();
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((0, 600)), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1024, 768)), false, false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((0, 600)), false, false).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
         assert!(written(&wire).is_empty());
 
         // Support not declared yet: stashed, nothing on the wire.
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false, false).await.unwrap();
         assert_eq!(desktop.lock().unwrap().pending, Some((800, 600)));
         assert!(written(&wire).is_empty());
 
         // Browser back at the current size: the stale stash is dropped.
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1024, 768)), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1024, 768)), false, false).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
 
         // Support declared: SetDesktopSize goes out immediately.
         let screen = Screen { id: 7, flags: 0 };
         desktop.lock().unwrap().screen = Some(screen);
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false, false).await.unwrap();
         assert_eq!(written(&wire), set_desktop_size((800, 600), screen));
+    }
+
+    /// A streaming target never asks a generic server for a desktop the encoder
+    /// refuses: the window's size is held under the picture ceiling before it is
+    /// sent or stashed, and a tiles target asks for the window as it is.
+    #[tokio::test]
+    async fn a_generic_resize_is_held_under_the_video_ceiling_only_where_it_streams() {
+        let (uplink, wire) = test_uplink();
+        let screen = Screen { id: 7, flags: 0 };
+        let desktop = shared_desktop((1024, 768), Some(screen), None);
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((5120, 2880)), false, true).await.unwrap();
+        assert_eq!(written(&wire), set_desktop_size((3840, 2400), screen));
+
+        // Already the held size: a window still 5120×2880 asks for nothing more.
+        desktop.lock().unwrap().size = (3840, 2400);
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((5120, 2880)), false, true).await.unwrap();
+        assert_eq!(written(&wire), set_desktop_size((3840, 2400), screen), "nothing further went out");
+
+        // Stashed before support is declared: the stash is the held size too, so
+        // the replay asks for the same desktop the live request would have.
+        let stashed = shared_desktop((1024, 768), None, None);
+        request_resize(&uplink, &stashed, ResizeAsk::Viewport((5120, 2880)), false, true).await.unwrap();
+        assert_eq!(stashed.lock().unwrap().pending, Some((3840, 2400)));
+
+        // A tiles target carries the oversized desktop and asks for it whole.
+        let (uplink, wire) = test_uplink();
+        let desktop = shared_desktop((1024, 768), Some(screen), None);
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((5120, 2880)), false, false).await.unwrap();
+        assert_eq!(written(&wire), set_desktop_size((5120, 2880), screen));
     }
 
     #[tokio::test]
@@ -4575,7 +4634,7 @@ mod tests {
         let (uplink, wire) = test_uplink();
         let desktop = shared_desktop((1024, 768), None, None);
 
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true, false).await.unwrap();
 
         assert_eq!(
             written(&wire),
@@ -4625,7 +4684,7 @@ mod tests {
         let desktop = shared_desktop((1600, 1000), None, None);
         desktop.lock().unwrap().host_density = 2.0;
 
-        request_resize(&uplink, &desktop, ResizeAsk::Density, true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Density, true, false).await.unwrap();
         assert_eq!(
             written(&wire),
             vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
@@ -4650,7 +4709,7 @@ mod tests {
             d.host_density = 2.0;
         }
 
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1000)), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1000)), true, false).await.unwrap();
         assert!(written(&wire).is_empty(), "the browser is at the current size");
 
         // A genuinely new window size: 1600×1200 points, rendered at the
@@ -4659,14 +4718,14 @@ mod tests {
             (1600, 1200),
             2.0,
         ));
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true, false).await.unwrap();
         assert_eq!(written(&wire), expected);
 
         // The same points reported while this end still announces 1x — a
         // browser right after a reconnect, before the layout has reached it —
         // ask for the same desktop again, not half of one.
         desktop.lock().unwrap().scale = UNSCALED;
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true, false).await.unwrap();
         assert_eq!(written(&wire), [expected.clone(), expected].concat());
     }
 

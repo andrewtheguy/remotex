@@ -47,16 +47,46 @@ pub const QUALITY_MAX: u8 = 100;
 /// be.
 ///
 /// Checked either way up, because the limit is on the picture and not on width:
-/// 3840×2160 and 2160×3840 are both legal, and 3840×3840 is not. A `w <= 3840 &&
-/// h <= 2160` test would read almost the same and would refuse a portrait desktop the
+/// 3840×2400 and 2400×3840 are both legal, and 3840×3840 is not. A `w <= 3840 &&
+/// h <= 2400` test would read almost the same and would refuse a portrait desktop the
 /// encoder is perfectly happy with.
 ///
 /// libvpx has no ceiling this near — 4K is only VP9 level 5.0 of 6.2 — so this is the
 /// gateway's own line: past 4K a software realtime encode of a desktop stops being
-/// realtime, and the still paths carry such a desktop better.
-const MAX_LONG_SIDE: u16 = 3840;
+/// realtime, and the still paths carry such a desktop better. 4K is the *panel*, in
+/// either shape: 3840×2160 is a 16:9 one and 3840×2400 the 16:10 one a 1920×1200
+/// laptop at 2x is, 11% more pixels and one VP9 level up (6.0, which every browser's
+/// decoder takes). 5K is past the line.
+pub const MAX_LONG_SIDE: u16 = 3840;
 /// See [`MAX_LONG_SIDE`].
-const MAX_SHORT_SIDE: u16 = 2160;
+pub const MAX_SHORT_SIDE: u16 = 2400;
+
+/// Whether a picture of this many pixels is one a stream will encode — the test
+/// [`coded_rect`] refuses on, for a caller deciding what to ask a remote for.
+pub fn within_ceiling((w, h): (u32, u32)) -> bool {
+    let (long, short) = (w.max(h), w.min(h));
+    long <= u32::from(MAX_LONG_SIDE) && short <= u32::from(MAX_SHORT_SIDE)
+}
+
+/// `pixels` held under the ceiling, the way High Performance holds a virtual
+/// display under the Mac's: each axis clamped, the orientation kept, so a
+/// landscape desktop is held to 3840×2400 and a portrait one to 2400×3840.
+///
+/// This is what lets a resizing engine ask the remote for a desktop the stream
+/// will take instead of ending the session over the one it was about to get: a
+/// 5120×2880 screen, or a 2560×1440 one at 2x, opens and resizes to a 3840×2400
+/// desktop shown at 100% with the rest of the window left bare. Not a scale —
+/// the gateway never shrinks a picture, every pixel the remote draws reaches the
+/// browser as drawn — so the remote is the one asked for less. Per axis and not
+/// by aspect, as the Mac's ceiling is: it keeps the most of the window.
+pub fn fit_ceiling((w, h): (u32, u32)) -> (u32, u32) {
+    let (long, short) = (u32::from(MAX_LONG_SIDE), u32::from(MAX_SHORT_SIDE));
+    if w >= h {
+        (w.min(long), h.min(short))
+    } else {
+        (w.min(short), h.min(long))
+    }
+}
 
 /// One encoded frame: a complete access unit, and whether a decoder that has seen
 /// nothing before it can start here.
@@ -288,14 +318,14 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
         mirror.0,
         mirror.1
     );
-    let (long, short) = (coded.w().max(coded.h()), coded.w().min(coded.h()));
     anyhow::ensure!(
-        long <= MAX_LONG_SIDE && short <= MAX_SHORT_SIDE,
+        within_ceiling((u32::from(coded.w()), u32::from(coded.h()))),
         "a video stream will not encode a {}x{} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
          target render_type = \"tiles\" (with render_subtype = \"jpeg\" for a lossy \
-         picture), or ask the remote for a smaller desktop",
+         picture), or a remote that can be asked for a smaller desktop: with \
+         resize = true the gateway holds every size it asks for under this ceiling",
         rect.w(),
         rect.h()
     );
@@ -711,13 +741,38 @@ mod tests {
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
         assert!(message.contains("jpeg"), "the message does not say what to do instead");
+        // Both 4K panels are pictures: the 16:9 one and the 16:10 one a 1920×1200 laptop
+        // is at 2x.
+        assert!(coded_rect(rect(0, 0, 3840, 2160), (3840, 2160)).is_ok(), "16:9 4K was refused");
+        assert!(coded_rect(rect(0, 0, 3840, 2400), (3840, 2400)).is_ok(), "16:10 4K was refused");
         // The limit is on the picture, not on width: turning a legal desktop on its side
         // does not make it illegal.
         assert!(
-            coded_rect(rect(0, 0, 2160, 3840), (2160, 3840)).is_ok(),
+            coded_rect(rect(0, 0, 2400, 3840), (2400, 3840)).is_ok(),
             "a portrait 4K desktop was refused"
         );
         assert!(Mirror::new(0, 1080).is_err(), "a desktop with no pixels was accepted");
+    }
+
+    /// The size a resizing engine asks for instead: each axis held, the
+    /// orientation kept, and anything already inside the ceiling untouched.
+    #[test]
+    fn a_desktop_is_held_under_the_ceiling_per_axis() {
+        assert_eq!(fit_ceiling((5120, 2880)), (3840, 2400), "a 5K screen");
+        assert_eq!(fit_ceiling((2880, 5120)), (2400, 3840), "the same screen on its side");
+        assert_eq!(fit_ceiling((1920, 1200)), (1920, 1200), "a desktop the stream takes");
+        assert_eq!(fit_ceiling((3840, 2160)), (3840, 2160), "16:9 4K is under the ceiling");
+        assert_eq!(fit_ceiling((3840, 2400)), (3840, 2400), "the ceiling itself");
+        for size in [(5120, 2880), (2880, 5120), (4000, 4000), (3840, 2401)] {
+            assert!(!within_ceiling(size), "{size:?} is over the ceiling");
+            let held = fit_ceiling(size);
+            assert!(within_ceiling(held), "{size:?} held to {held:?} is still over it");
+            assert!(
+                coded_rect(rect(0, 0, held.0 as u16, held.1 as u16), (held.0 as u16, held.1 as u16))
+                    .is_ok(),
+                "the encoder refuses the {held:?} the engine was told to ask for"
+            );
+        }
     }
 
     #[test]

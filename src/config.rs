@@ -842,6 +842,9 @@ impl TargetConfig {
     ///
     /// Answered off the render dial alone, without resolving a plan, because
     /// [`ConfigFile::parse_with`] asks it before it has validated the qualities a plan needs.
+    /// The engines ask it too: a streaming target has every size it asks a remote for held
+    /// under the stream's picture ceiling ([`crate::video::fit_ceiling`]), where a tiles
+    /// target asks for the screen as it is.
     pub fn streams_video(&self) -> bool {
         match self.render_type {
             RenderType::Video => true,
@@ -1296,6 +1299,26 @@ impl ConfigFile {
                 target.name,
                 target.width,
                 target.height
+            );
+            // A pinned size is asked for as pixels at 1x, so the one oversize a
+            // video stream refuses that check-config *can* see is a pin already
+            // past the picture ceiling: at runtime the engines hold a screen under
+            // it, but holding a pin would open at a size the operator did not
+            // choose. (A pin under the ceiling at 1x may still land over it on a
+            // 2x screen; that one is held, like a screen.)
+            anyhow::ensure!(
+                !target.streams_video()
+                    || target.pinned_size().is_none_or(|(w, h)| {
+                        crate::video::within_ceiling((u32::from(w), u32::from(h)))
+                    }),
+                "target {:?} pins a {:?}×{:?} size, but a video stream encodes at most a \
+                 long side of {} and a short side of {} — pin a smaller size, leave the \
+                 pin out, or give this target render_type = \"tiles\"",
+                target.name,
+                target.width,
+                target.height,
+                crate::video::MAX_LONG_SIDE,
+                crate::video::MAX_SHORT_SIDE
             );
             // Audio is RDP's alone, and refused elsewhere rather than ignored.
             // MS-RDPEA is the one audio channel this gateway speaks; RFB has no
@@ -3491,6 +3514,23 @@ mod tests {
         assert_eq!(config.targets[0].port, 5901);
     }
 
+    /// An `rdp` target body, with whatever keys the case is about.
+    fn rdp_toml(extra: &str) -> String {
+        format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "192.0.2.10"
+            {extra}
+            "#,
+            site_passwd_line()
+        )
+    }
+
     /// A `vnc` target body, with whatever keys the case is about.
     fn vnc_toml(extra: &str) -> String {
         format!(
@@ -3641,6 +3681,30 @@ mod tests {
 
     /// A zero axis is refused on every target alike — a High Performance
     /// virtual display was merely the first place it was caught misbehaving.
+    /// The one oversize check-config can see: a pin a video stream would refuse
+    /// at 1x. The same pin on a tiles target is an oversized desktop that scrolls.
+    #[test]
+    fn a_pinned_size_over_the_video_ceiling_is_refused_only_where_it_streams() {
+        let pin = "width = 5120\nheight = 2880\n";
+        let err = ConfigFile::parse(&rdp_toml(&format!(
+            "{pin}render_type = \"video\"\nrender_quality = 60"
+        )))
+        .expect_err("a 5K pin on a video stream parsed");
+        assert!(format!("{err:#}").contains("3840"), "{err:#}");
+        assert!(format!("{err:#}").contains("tiles"), "{err:#}");
+        ConfigFile::parse(&rdp_toml(&format!(
+            "{pin}render_type = \"motion\"\nrender_subtype = \"jpeg\"\nrender_quality = 60\n\
+             render_motion_subtype = \"stream\"\nrender_motion_quality = 60"
+        )))
+        .expect_err("a 5K pin on a region stream parsed");
+        ConfigFile::parse(&rdp_toml(&format!("{pin}render_type = \"tiles\"")))
+            .expect("a 5K pin on a tiles target is an oversized desktop that scrolls");
+        for pin in ["width = 3840\nheight = 2400", "width = 2400\nheight = 3840"] {
+            ConfigFile::parse(&rdp_toml(&format!("{pin}\nrender_type = \"video\"\nrender_quality = 60")))
+                .expect("a 4K pin, either way up, is a picture the stream takes");
+        }
+    }
+
     #[test]
     fn a_pinned_size_requires_nonzero_dimensions() {
         for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
