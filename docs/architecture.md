@@ -301,9 +301,9 @@ what makes every consumer answer which of the two it is holding.
   holds the *rectangle* still, and the second is worth more than the first: a region
   that drifts one cell down is not contained by a box that merely has the right size
   at the old origin, so it would be rebuilt for a drift exactly as for a resize. A box
-  straddling a rung boundary takes the next rung up and is tried again; only the last
-  rung, the grid itself, can run off the end, and it slides back rather than clipping,
-  because a clipped box would have a span that depended on where it started.
+  straddling a rung boundary takes the next rung up and is tried again. Any selected
+  rung whose aligned block runs off the grid slides back rather than clipping, because
+  a clipped box would have a span that depended on where it started.
 
   The reason any of this exists is the far end. A decoder is configured for one
   picture size; a unit at another is a different picture, so the decoder is replaced —

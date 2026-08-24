@@ -218,8 +218,8 @@ impl CellBox {
     /// and 56 client decoder builds become 97 and 37, for 14% more streamed cells.
     ///
     /// A region straddling a rung boundary takes the next rung up and is tried again,
-    /// which terminates because the grid itself is always the last rung. Only that
-    /// last one can run off the end, and it slides back rather than clipping: a
+    /// which terminates because the grid itself is always the last rung. Any selected
+    /// rung whose aligned block runs off the grid slides back rather than clipping: a
     /// clipped box would have a span that depended on where it started, which is the
     /// size churn this exists to remove.
     fn quantized(self, cols: u16, rows: u16) -> Self {
