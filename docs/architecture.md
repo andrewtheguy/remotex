@@ -296,15 +296,14 @@ what makes every consumer answer which of the two it is holding.
   cleanup tick expires idle streams itself; it may only *end* them, never start one,
   which is what keeps a cell from being delivered twice.
 - **Where a stream's rectangle is allowed to be.** A region's box is snapped out to a
-  `SPANS` rung — cell spans in roughly 1.25× steps — before any encoder is built from
-  it. The rung holds the *picture size* still. Its origin is aligned to a block of that
-  rung when that block covers the wanted box; a box that straddles the boundary slides
-  the same-sized rung instead of being promoted merely to recover alignment. That
-  keeps the hardware decoder session reusable while bounding how many unchanged cells
-  the stream makes lossy and leaves for the paced cleanup: under the stream's video
-  size ceiling, no rung adds more than one quarter of the wanted span in either axis.
-  At the framebuffer edge the rung slides back rather than clipping, because clipping
-  would change its picture size.
+  `SPANS` rung — cell spans in roughly 1.25× steps — on a grid of that rung, before any
+  encoder is built from it. The rung holds the *picture size* still and the alignment
+  holds the *rectangle* still, and the second is worth more than the first: a region
+  that drifts one cell down is not contained by a box that merely has the right size
+  at the old origin, so it would be rebuilt for a drift exactly as for a resize. A box
+  straddling a rung boundary takes the next rung up and is tried again; only the last
+  rung, the grid itself, can run off the end, and it slides back rather than clipping,
+  because a clipped box would have a span that depended on where it started.
 
   The reason any of this exists is the far end. A decoder is configured for one
   picture size; a unit at another is a different picture, so the decoder is replaced —
@@ -312,12 +311,9 @@ what makes every consumer answer which of the two it is holding.
   asking for another, which is slow, scarce, and the first thing to fail when it is
   asked for too often. Region geometry meanwhile is a bounding box of whatever moved
   half a second ago, and it moves a cell for reasons nothing on screen would call a
-  change. Measured by replaying 98 retunes captured from a real scroll on a 1920×1080
-  Windows desktop. With the hybrid placement above, the former 1.5× ladder cost 102
-  streams, 42 client decoder builds and 4,239 streamed cell-retunes. Tightening it to
-  1.25× costs 106 streams but the same 42 decoder builds, while reducing the streamed
-  cell-retunes to 3,913 — 7.7% less lossy area to clean. The four-second decoder
-  retirement model likewise stays at 45 builds for either ladder.
+  change. The tighter ladder keeps the snapped picture closer to the requested box,
+  reducing the lossy cells owed a cleanup, while the rung-aligned placement keeps the
+  rectangle itself stable across small movements.
 
   Quantizing grows boxes, so two that shared no cell can share one afterwards;
   `stabilize` merges any overlapping pair and re-quantizes the union, because a cell in
