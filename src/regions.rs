@@ -97,15 +97,15 @@ const MERGE_WASTE: u32 = 2;
 /// So the geometry is snapped to this ladder before anything is built from it: a
 /// region that wobbles keeps one size, and a rebuild it does provoke — because it
 /// moved, or because a merge took it — hands the client a picture the decoder it
-/// already has was configured for. Roughly 1.5× steps, which bounds the idle margin
-/// a snap can add at half the region again per axis, against the powers of two that
-/// would hold a size still for longer and cost up to four times the area to do it.
+/// already has was configured for. Roughly 1.25× steps bound the idle margin a snap
+/// can add to one quarter of the wanted span per axis. The first few rungs are exact
+/// because cells are indivisible; after that they follow the ratio closely.
 ///
 /// The margin is not free — those cells are streamed lossily and owed a crisp
 /// re-send like every other cell of a region — but it is the cheap half of the
 /// trade: an idle cell codes as skipped macroblocks, where a decoder rebuilt at
 /// 30 Hz is the fault this whole ladder exists to stop.
-const SPANS: [u16; 12] = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
+const SPANS: [u16; 17] = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 19, 24, 30, 38, 48, 60, 64];
 
 /// The lowest [`SPANS`] rung that covers `span`, never more than `limit` cells.
 ///
@@ -203,42 +203,35 @@ impl CellBox {
         self.c0 <= other.c1 && other.c0 <= self.c1 && self.r0 <= other.r1 && other.r0 <= self.r1
     }
 
-    /// This box snapped out to a [`SPANS`] rung on a grid of that rung, inside a
-    /// `cols`×`rows` cell grid.
+    /// This box snapped out to a [`SPANS`] rung, inside a `cols`×`rows` cell grid.
     ///
-    /// Both halves matter and they do different jobs. The **rung** holds the picture
-    /// size still, so a decoder built for one region is the right decoder for the
-    /// next. The **alignment** holds the rectangle itself still, which is worth more:
-    /// a region that drifts a cell down is not contained by a box that merely has the
-    /// right size at the old origin, so the stream is rebuilt for a drift the way it
-    /// would be for a resize — where a box aligned to its own rung does not move at
-    /// all until the region leaves it. Measured over a real scroll (98 retunes of a
-    /// 1920×1080 Windows desktop, `tmp/replay.py`), against exact boxes: 124 streams
-    /// and 56 client decoder builds become 97 and 37, for 14% more streamed cells.
+    /// The **rung** holds the picture size still, so a decoder built for one region is
+    /// the right decoder for the next. Alignment holds the rectangle itself still
+    /// while the lowest fitting rung has an aligned block that covers the box. When
+    /// the box straddles that block's boundary, the same rung slides to cover it
+    /// instead of growing merely to recover alignment.
     ///
-    /// A region straddling a rung boundary takes the next rung up and is tried again,
-    /// which terminates because the grid itself is always the last rung. Only that
-    /// last one can run off the end, and it slides back rather than clipping: a
-    /// clipped box would have a span that depended on where it started, which is the
-    /// size churn this exists to remove.
+    /// That distinction is the cleanup bound. Alignment used to promote a three-cell
+    /// box on a six-column desktop to all six columns when it crossed the three-cell
+    /// boundary. The decoder did keep one size, but twice the screen became lossy and
+    /// owed a paced cleanup. Sliding keeps the decoder-sized rung and bounds the idle
+    /// margin to what the ladder itself chose. At the framebuffer edge the rung slides
+    /// back rather than clipping, because clipping would change the picture size.
     fn quantized(self, cols: u16, rows: u16) -> Self {
         let place = |lo: u16, hi: u16, limit: u16| {
-            let mut span = span_up(hi - lo + 1, limit);
-            loop {
-                debug_assert!(span <= limit, "a rung wider than the grid it is placed on");
-                let start = (lo / span) * span;
-                if start + span > hi {
-                    let start = start.min(limit - span);
-                    return (start, start + span - 1);
-                }
-                let wider = span_up(span + 1, limit);
-                if wider == span {
-                    // Already the whole grid, so there is no boundary left to straddle.
-                    let start = lo.min(limit - span);
-                    return (start, start + span - 1);
-                }
-                span = wider;
+            let span = span_up(hi - lo + 1, limit);
+            debug_assert!(span <= limit, "a rung wider than the grid it is placed on");
+            let aligned = (lo / span) * span;
+            let start = if hi - aligned < span {
+                aligned
+            } else {
+                // The lowest rung straddles its aligned block. Keep its decoder size
+                // and give up only the alignment, rather than promoting the picture
+                // and every cleanup debt inside it to a wider rung.
+                lo
             }
+            .min(limit - span);
+            (start, start + span - 1)
         };
         let (c0, c1) = place(self.c0, self.c1, cols);
         let (r0, r1) = place(self.r0, self.r1, rows);
@@ -1292,13 +1285,13 @@ mod tests {
     ///
     /// A scrolling window's bounding box wobbles by a row or two from one retune to
     /// the next, for reasons nothing on screen would call a change. Off the ladder
-    /// that is a different picture every time and so a decoder every time; on it a
-    /// wobble inside the block the region already occupies changes nothing at all.
+    /// that is a different picture every time and so a decoder every time; on it the
+    /// origin may move but the picture size stays one a decoder already knows.
     #[test]
     fn a_region_that_wobbles_keeps_one_picture_size() {
         let sizes: HashSet<(u16, u16)> = (0..4)
             .map(|slop| {
-                let bbox = boxed(1, 2, 3, 8 + slop);
+                let bbox = boxed(1, 2 + slop, 3, 8 + slop);
                 let placed = bbox.quantized(GRID.0, GRID.1);
                 assert!(
                     placed.c0 <= bbox.c0
@@ -1310,7 +1303,39 @@ mod tests {
                 (placed.c1 - placed.c0 + 1, placed.r1 - placed.r0 + 1)
             })
             .collect();
-        assert_eq!(sizes.len(), 1, "a wobble inside one aligned block should not move the picture, not {sizes:?}");
+        assert_eq!(sizes.len(), 1, "a wobble on one rung should not resize the picture, not {sizes:?}");
+    }
+
+    /// Alignment is an economy on top of the size ladder, not permission to make
+    /// still pixels lossy. On a 1920-wide desktop the old placement promoted this
+    /// 960-pixel region to the full 1920 pixels solely because it crossed a boundary;
+    /// all six columns then had to drain through the eight-cleanups-per-tick budget.
+    #[test]
+    fn crossing_an_alignment_boundary_keeps_the_smallest_decoder_size() {
+        let wanted = boxed(2, 0, 4, 0);
+        let placed = wanted.quantized(GRID.0, GRID.1);
+        assert_eq!(placed.c1 - placed.c0 + 1, 3, "alignment enlarged the cleanup debt");
+        assert!(placed.c0 <= wanted.c0 && placed.c1 >= wanted.c1);
+    }
+
+    /// The visible consequence of the placement above: only the cells in the
+    /// smallest decoder picture are left to sharpen after its stream ends. This is
+    /// the regression shape, not only a geometry property — the old aligned box made
+    /// the cleanup timer restore six cells for three cells of motion.
+    #[tokio::test]
+    async fn crossing_an_alignment_boundary_does_not_double_the_cleanup_debt() {
+        let mut regions = sized(1920, 64).await;
+        let t0 = Instant::now();
+        regions.retune(&[(2, 0), (3, 0), (4, 0)], t0).expect("one region");
+        assert_eq!(only_rect(&regions).w(), 960, "the stream swallowed still columns");
+
+        regions.expire(t0 + STREAM_IDLE);
+        let due = regions.due(
+            t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS,
+            CLEANUP_IDLE_FOR_TESTS,
+            usize::MAX,
+        );
+        assert_eq!(due.len(), 3, "alignment left extra lossy cells for cleanup");
     }
 
     /// Sliding rather than clipping, which is what makes a rung mean the same size at
@@ -1319,19 +1344,34 @@ mod tests {
     /// ladder exists to remove, reintroduced at the edge.
     #[test]
     fn a_rung_that_runs_off_the_grid_slides_back_instead_of_shrinking() {
-        // Rows 12..=16 take the six-row rung; aligned it starts at 12 and would end
-        // past the last row, so it slides to 11..=16 rather than losing a row.
+        // Rows 12..=16 take the five-row rung; its aligned block does not cover the
+        // last row, so it slides to 12..=16 rather than losing a row.
         let bottom = boxed(0, 12, 0, 16).quantized(GRID.0, GRID.1);
-        assert_eq!(bottom.r1 - bottom.r0 + 1, 6, "the rung shrank at the edge");
+        assert_eq!(bottom.r1 - bottom.r0 + 1, 5, "the rung shrank at the edge");
         assert_eq!(bottom.r1, GRID.1 - 1, "it should sit against the edge");
         assert!(bottom.r0 <= 12, "and still cover what was moving");
     }
 
+    /// The cleanup side of the decoder trade is a hard bound, not merely the shape
+    /// of today's rung list: through the largest rung, quantization adds at most one
+    /// quarter of the wanted cells in either axis.
+    #[test]
+    fn the_ladder_adds_at_most_one_quarter_to_each_span() {
+        let limit = *SPANS.last().expect("a ladder");
+        for wanted in 1..=limit {
+            let got = span_up(wanted, limit);
+            assert!(
+                u32::from(got) * 4 <= u32::from(wanted) * 5,
+                "{wanted} cells grew to {got}"
+            );
+        }
+    }
+
     /// The three things the ladder must never get wrong, over every box a 1920×1080
     /// desktop has: it covers what it was given, it stays on the grid, and its spans
-    /// come from the ladder. Exhaustive because it is cheap and the placement has a
-    /// loop in it — a box straddling a rung boundary takes the next rung up, and
-    /// "next" has to run out.
+    /// are the smallest rung that fits. Exhaustive because it is cheap and boundary
+    /// placement is where an off-by-one either clips the wanted box or changes the
+    /// decoder size.
     #[test]
     fn the_ladder_covers_every_box_it_is_given() {
         let rungs: HashSet<u16> = SPANS.iter().copied().chain([GRID.0, GRID.1]).collect();
@@ -1351,6 +1391,8 @@ mod tests {
                                 && rungs.contains(&(got.r1 - got.r0 + 1)),
                             "{got:?} is not on the ladder"
                         );
+                        assert_eq!(got.c1 - got.c0 + 1, span_up(c1 - c0 + 1, GRID.0));
+                        assert_eq!(got.r1 - got.r0 + 1, span_up(r1 - r0 + 1, GRID.1));
                     }
                 }
             }
@@ -1567,12 +1609,12 @@ mod tests {
         assert!(regions.live[0].keyframe_owed, "a client cannot start on the new picture");
     }
 
-    /// The ladder where it is actually spent: a region whose bounding box wobbles by
-    /// a few rows from one retune to the next keeps the stream it had, so the client
-    /// keeps the decoder it had — and, where that decoder is a hardware one, the
-    /// decode session behind it.
+    /// The ladder where it is actually spent: a region whose bounding box moves by a
+    /// row keeps the same picture size and id. Its encoder restarts because its crop
+    /// moved, but the client keeps the decoder it had — and, where that decoder is a
+    /// hardware one, the decode session behind it.
     #[tokio::test]
-    async fn a_wobbling_region_keeps_its_stream_across_retunes() {
+    async fn a_wobbling_region_keeps_its_decoder_size_across_retunes() {
         // Seventeen rows, so a region can wobble inside one rung of the ladder.
         let mut regions = sized(640, 1088).await;
         let t0 = Instant::now();
@@ -1594,10 +1636,12 @@ mod tests {
         regions.put_back(round, t0);
         assert!(!regions.live[0].keyframe_owed, "the first unit should have been the keyframe");
 
-        regions.retune(&column(2..=11), t0 + RETUNE).expect("the same stream");
-        assert_eq!(only_rect(&regions), rect, "the picture size moved under the decoder");
+        regions.retune(&column(3..=9), t0 + RETUNE).expect("a same-sized replacement");
+        let moved = only_rect(&regions);
+        assert_ne!(moved, rect, "the test did not cross an alignment boundary");
+        assert_eq!((moved.w(), moved.h()), (rect.w(), rect.h()), "the picture size moved under the decoder");
         assert_eq!(regions.live[0].id, id);
-        assert!(!regions.live[0].keyframe_owed, "the region was restarted for a wobble");
+        assert!(regions.live[0].keyframe_owed, "a moved crop continued the old reference chain");
         assert!(regions.drain_ended().is_empty(), "nothing ended");
     }
 
