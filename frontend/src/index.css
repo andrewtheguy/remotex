@@ -1214,6 +1214,13 @@ body {
   resize: vertical;
 }
 
+/* iOS Safari's other zoom, and the one `touch-action` has no say over: focusing
+   a form control smaller than 16px scales the whole page in. The pointer client
+   keeps the compact size; the touch client pays two pixels to stay put. */
+.screen-touch .cb-text {
+  font-size: 1rem;
+}
+
 @media (min-height: 800px) {
   .cb-text {
     min-height: 12rem;
