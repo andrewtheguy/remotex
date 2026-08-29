@@ -14,6 +14,20 @@ body,
   height: 100%;
 }
 
+/* The browser's own pinch zoom is never this client's zoom. The desktop has one
+   of its own (touchGestures.ts, on an overlay that takes `touch-action: none`),
+   and every other surface — login, the picker, the floating menu, the soft
+   keyboard — is app chrome that a page zoom only breaks: it scales the whole UI
+   and then lets a finger drag it off-screen. Stated once on the document rather
+   than per surface, because `touch-action` is the intersection of the hit
+   target's value with its ancestors': `pan-x pan-y` drops the pinch (and the
+   double-tap zoom) while keeping every scroll, and the desktop overlay's `none`
+   still wins underneath it. */
+html,
+body {
+  touch-action: pan-x pan-y;
+}
+
 body {
   background: #0d1117;
   color: #e6edf3;
@@ -92,24 +106,6 @@ body {
   position: fixed;
   inset: 0;
   touch-action: none;
-}
-
-/* The chrome floating above that overlay is the one place the browser's own
-   pinch zoom could still fire, and a page zoom there scales the whole UI —
-   menu, keyboard and desktop together — which is not the zoom this client
-   offers. `touch-action` is decided by the hit-test target and its ancestors,
-   so it has to be stated on the chrome itself; each element keeps the one axis
-   it actually scrolls (`.toolbar` and `.help-card` vertically, the soft
-   keyboard's combo/F-key rows horizontally) and gives up the rest. */
-.screen-touch .toolbar,
-.screen-touch .panel,
-.screen-touch .help-overlay,
-.screen-touch .video-banner {
-  touch-action: pan-y;
-}
-
-.screen-touch .sk-panel {
-  touch-action: pan-x;
 }
 
 /* Centered connection-state readout, shown until the desktop is streaming.
