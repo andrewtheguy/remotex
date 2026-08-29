@@ -94,6 +94,24 @@ body {
   touch-action: none;
 }
 
+/* The chrome floating above that overlay is the one place the browser's own
+   pinch zoom could still fire, and a page zoom there scales the whole UI —
+   menu, keyboard and desktop together — which is not the zoom this client
+   offers. `touch-action` is decided by the hit-test target and its ancestors,
+   so it has to be stated on the chrome itself; each element keeps the one axis
+   it actually scrolls (`.toolbar` and `.help-card` vertically, the soft
+   keyboard's combo/F-key rows horizontally) and gives up the rest. */
+.screen-touch .toolbar,
+.screen-touch .panel,
+.screen-touch .help-overlay,
+.screen-touch .video-banner {
+  touch-action: pan-y;
+}
+
+.screen-touch .sk-panel {
+  touch-action: pan-x;
+}
+
 /* Centered connection-state readout, shown until the desktop is streaming.
    A solid background fully hides any stale canvas content behind the readout
    (reconnecting, eviction, waiting) — a plain interstitial, no see-through. */
