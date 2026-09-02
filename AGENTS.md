@@ -62,6 +62,24 @@
   and the deterministic half of the client's behaviour is
   [`tests/playwright`](tests/playwright/README.md).
 
+## x86-64 CPU floor
+
+The x86-64 Linux binary runs on any x86-64 CPU and dispatches SIMD at run time.
+There is no `target-cpu` anywhere — no `.cargo/config.toml`, no `RUSTFLAGS` in
+packaging or CI — and the prebuilt archives the sys crates download must be
+built the same way: the x86-64 baseline with hand-written kernels selected by
+CPUID (libvpx's rtcd tables, opus's `MAY_HAVE` dispatch, FreeRDP's primitives
+autodetect). Note the sys crates fetch each repository's *latest* release, so
+the archive floor is set by that release, not by the tag pinned in `Cargo.toml`.
+
+Measured 2026-09-02 on an i5-8500T, this costs nothing where it counts: at
+`target-cpu=x86-64-v3` the PNG tile encode was 1.7x *slower* (autovectorized
+`png`/`fdeflate` loops), VP9 encode was within noise of a v3-scalar libvpx,
+and an opus archive with dispatch instead of `PRESUME_AVX2` took 0.73% of a
+core against 0.65%. What a v3 floor did do was `SIGILL` at startup on an Ivy
+Bridge. Where an AVX2 path is worth having in Rust, add it per function with
+`is_x86_feature_detected!` and `#[target_feature]`, never as a global flag.
+
 ## SSH and tmux
 
 Do not infer what this shell can do from how a client attached to it. An
