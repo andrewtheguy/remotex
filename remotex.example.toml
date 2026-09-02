@@ -146,7 +146,7 @@ password = "change-me"
 # Retina client then asks for twice the pixels. High Performance opens at the
 # connecting client's density even when its point size is pinned.
 #width = 1920
-#height = 1200
+#height = 1080
 
 # Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
 # RDP only — VNC negotiates VncAuth (password set) or None per the handshake, so the
