@@ -240,10 +240,10 @@ password = "change-me"
 # ceiling.
 #audio_bitrate_min = 32
 
-# A VNC target needs host and, usually, one of the two passwords; domain and
-# security are ignored, and width/height only ever answer a default-size request
-# (see above). `vnc_password` is the server's own password and is all a server
-# without user accounts takes.
+# A VNC target needs host and, usually, one of the two passwords; domain is
+# ignored, an explicit security is refused, and width/height only ever answer a
+# default-size request (see above). `vnc_password` is the server's own password
+# and is all a server without user accounts takes.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
