@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, Protocol, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -94,14 +94,14 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             // the size a `defaultSize` request resolves to.
             width: Some(DEFAULT_W as u16),
             height: Some(DEFAULT_H as u16),
-            security: Security::Auto, // RDP-only knob, ignored for VNC
+            security: None, // RDP-only knob, refused for VNC
             egfx: None,
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all
             audio_codec: None,
             render_type: remotex::config::RenderType::Tiles,
-            render_subtype: remotex::config::RenderSubtype::Png,
+            render_subtype: None,
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,

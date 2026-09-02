@@ -1478,7 +1478,6 @@ mod tests {
 
     use super::*;
     use crate::audio::PCM_CD_QUALITY;
-    use crate::config::Security;
     use crate::protocol::UNSCALED;
 
     /// A scripted engine: each spawn hands its channel ends — and the audio bridge the
@@ -1573,14 +1572,14 @@ mod tests {
             domain: None,
             width: Some(1),
             height: Some(1),
-            security: Security::Auto,
+            security: None,
             egfx: None,
             resize: meta.resize,
             clipboard: meta.clipboard,
             audio: meta.audio,
             audio_codec: meta.audio_codec,
             render_type: crate::config::RenderType::Tiles,
-            render_subtype: crate::config::RenderSubtype::Png,
+            render_subtype: None,
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,

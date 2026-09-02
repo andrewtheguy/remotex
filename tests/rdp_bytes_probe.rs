@@ -29,7 +29,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, Protocol, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -74,14 +74,14 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             domain: None,
             width: Some(1280),
             height: Some(800),
-            security: Security::Auto,
+            security: None,
             egfx: None,
             resize: false,
             clipboard: false,
             audio: false,
             audio_codec: None,
             render_type: remotex::config::RenderType::Tiles,
-            render_subtype: remotex::config::RenderSubtype::Png,
+            render_subtype: None,
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,

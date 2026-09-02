@@ -780,14 +780,14 @@ mod tests {
                 domain: None,
                 width: Some(1280),
                 height: Some(800),
-                security: crate::config::Security::Auto,
+                security: None,
                 egfx: None,
                 resize: false,
                 clipboard: false,
                 audio: false,
                 audio_codec: None,
                 render_type: crate::config::RenderType::Tiles,
-                render_subtype: crate::config::RenderSubtype::Png,
+                render_subtype: None,
                 render_quality: None,
                 render_motion_subtype: None,
                 render_motion_quality: None,
@@ -1008,7 +1008,7 @@ mod tests {
         use tokio::net::TcpListener;
 
         use crate::audio::{AudioBridge, PCM_CD_QUALITY};
-        use crate::config::{Protocol, Security, TargetConfig};
+        use crate::config::{Protocol, TargetConfig};
         use crate::protocol::{ServerMsg, UNSCALED};
         use crate::session::SessionManager;
 
@@ -1049,14 +1049,14 @@ mod tests {
             domain: None,
             width: Some(640),
             height: Some(480),
-            security: Security::Auto,
+            security: None,
             egfx: None,
             resize: false,
             clipboard: false,
             audio: true,
             audio_codec: tone_codec,
             render_type: crate::config::RenderType::Tiles,
-            render_subtype: crate::config::RenderSubtype::Png,
+            render_subtype: None,
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,
