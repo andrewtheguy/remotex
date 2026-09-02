@@ -38,6 +38,7 @@ pub mod vnc_apple_clipboard;
 pub mod vnc_clipboard;
 pub mod vnc_encodings;
 pub mod vnc_record;
+pub mod vnc_rsa_aes;
 pub mod vp9;
 pub mod wire;
 pub mod ws;

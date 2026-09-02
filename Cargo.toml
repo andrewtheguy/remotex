@@ -194,6 +194,18 @@ socket2 = { version = "0.6", features = ["all"] }
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
 freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260821034409-747ed2f" }
+# RealVNC's RSA-AES security types for VNC (src/vnc_rsa_aes.rs), which is how a
+# plain `vnc` target names a user to a server that is not a Mac — wayvnc with
+# `enable_auth` offers nothing else this client speaks. A fresh RSA key pair per
+# session and PKCS#1 v1.5 around the two randoms; SHA-256 beside the `sha1` above
+# for the 256-bit type's key derivation; and AES-EAX over `aes` above for every
+# byte after. The release-candidate `rsa` is the line on `rand_core` 0.10 and
+# `digest` 0.11, which are the versions already in the tree; 0.9 would bring a
+# second of each. No `encoding`: keys here are raw big-endian numbers, never
+# PEM or DER.
+rsa = { version = "0.10.0-rc.18", default-features = false }
+eax = "0.6"
+sha2 = "0.11"
 
 [[test]]
 name = "embedded_gateway_e2e"

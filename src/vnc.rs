@@ -50,12 +50,14 @@ use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::vnc_clipboard;
 use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
+use crate::vnc_rsa_aes::{self, FrameReader, Sealer, Strength};
 
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
-/// Apple's Diffie-Hellman authentication, the one RFB security type that
-/// carries a *user name* — see [`ard_authenticate`] for why a Mac target needs
-/// it and what happens without it.
+/// Apple's Diffie-Hellman authentication, the RFB security type that carries a
+/// *user name* to a Mac — see [`ard_authenticate`] for why a Mac target needs
+/// it and what happens without it. RealVNC's RSA-AES types carry one to
+/// everything else; see [`crate::vnc_rsa_aes`].
 const SECURITY_ARD: u8 = 30;
 /// Largest DH key length accepted from the server, in bytes. macOS sends 128
 /// (a 1024-bit prime); the cap is what keeps a bogus length from turning into
@@ -202,6 +204,9 @@ enum Downlink {
     /// one (two AES key schedules and a staging buffer), and every plain-RFB
     /// session would otherwise carry that on the stack for nothing.
     Records(Box<RecordReader<Reader>>),
+    /// The same socket with RSA-AES's frames peeled off, boxed for the same
+    /// reason.
+    Frames(Box<FrameReader<Reader>>),
 }
 
 impl AsyncRead for Downlink {
@@ -213,6 +218,7 @@ impl AsyncRead for Downlink {
         match self.get_mut() {
             Downlink::Plain(r) => std::pin::Pin::new(r).poll_read(cx, buf),
             Downlink::Records(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+            Downlink::Frames(r) => std::pin::Pin::new(r).poll_read(cx, buf),
         }
     }
 }
@@ -229,30 +235,49 @@ struct Uplink {
     /// so a vtable hop costs nothing measurable, and it keeps [`Shared`] and every
     /// rect handler free of a `W`.
     sock: Box<dyn AsyncWrite + Send + Unpin>,
-    /// `None` until the record layer is up, which on the plain dialect is never.
-    records: Option<RecordWriter>,
+    framing: Framing,
+}
+
+/// What wraps a message on its way out.
+enum Framing {
+    /// Bare RFB, as it has always been written.
+    Plain,
+    /// Apple's record layer, one record per message. Boxed: two AES key
+    /// schedules and a staging buffer, an order of magnitude more than the
+    /// other two, that every plain session would otherwise carry.
+    Records(Box<RecordWriter>),
+    /// RSA-AES's frames, as many per message as its length needs.
+    Frames(Sealer),
 }
 
 impl Uplink {
     fn plain(sock: impl AsyncWrite + Send + Unpin + 'static) -> Self {
         Self {
             sock: Box::new(sock),
-            records: None,
+            framing: Framing::Plain,
         }
     }
 
     fn records(sock: impl AsyncWrite + Send + Unpin + 'static, keys: Keys) -> Self {
         Self {
             sock: Box::new(sock),
-            records: Some(RecordWriter::new(keys)),
+            framing: Framing::Records(Box::new(RecordWriter::new(keys))),
+        }
+    }
+
+    fn frames(sock: impl AsyncWrite + Send + Unpin + 'static, sealer: Sealer) -> Self {
+        Self {
+            sock: Box::new(sock),
+            framing: Framing::Frames(sealer),
         }
     }
 
     async fn send(&mut self, msg: &[u8]) -> anyhow::Result<()> {
-        let Self { sock, records } = self;
-        match records {
-            Some(records) => sock.write_all(records.frame(msg)?).await?,
-            None => sock.write_all(msg).await?,
+        let Self { sock, framing } = self;
+        match framing {
+            Framing::Plain => sock.write_all(msg).await?,
+            Framing::Records(records) => sock.write_all(records.frame(msg)?).await?,
+            Framing::Frames(sealer) => sock.write_all(&sealer.frame(msg)).await?,
         }
         Ok(())
     }
@@ -689,7 +714,7 @@ async fn connect(
 
     let types = read_security_types(&mut reader).await?;
     let macos = is_macos_server(minor, &types);
-    let chosen = choose_security(&types, config.subtype, &config.vnc_password)?;
+    let chosen = choose_security(&types, config.subtype, &config.password, &config.vnc_password)?;
     if macos && chosen != SECURITY_ARD {
         // Said once, at the only moment it can still be acted on, because the
         // symptom is otherwise unreadable: a login screen that will not accept
@@ -703,14 +728,36 @@ async fn connect(
     }
     sock.write_all(&[chosen]).await?;
 
-    let wrap_key = authenticate(&mut reader, &mut sock, config, chosen).await?;
-    read_security_result(&mut reader).await?;
-    sock.write_all(&[dialect.client_init()]).await?;
-    let server = read_server_init(&mut reader).await?;
+    let secured = authenticate(&mut reader, &mut sock, config, chosen).await?;
 
     match dialect {
-        Dialect::Rfb38 => rfb38_preface(reader, sock, server, macos, config).await,
+        Dialect::Rfb38 => {
+            // SecurityResult is the first thing an RSA-AES server says inside its
+            // frames, so the transport goes up before it is read.
+            let (mut downlink, mut uplink) = match secured {
+                Secured::Frames(session) => (
+                    Downlink::Frames(Box::new(FrameReader::new(reader, session.opener))),
+                    Uplink::frames(sock, session.sealer),
+                ),
+                Secured::Plain | Secured::Apple(_) => {
+                    (Downlink::Plain(reader), Uplink::plain(sock))
+                }
+            };
+            read_security_result(&mut downlink).await?;
+            uplink.send(&[dialect.client_init()]).await?;
+            let server = read_server_init(&mut downlink).await?;
+            rfb38_preface(downlink, uplink, server, macos, config).await
+        }
         Dialect::Apple889 => {
+            let Secured::Apple(wrap_key) = secured else {
+                anyhow::bail!(
+                    "Apple's protocol revision needs its DH authentication, which this server \
+                     did not offer"
+                );
+            };
+            read_security_result(&mut reader).await?;
+            sock.write_all(&[dialect.client_init()]).await?;
+            let server = read_server_init(&mut reader).await?;
             apple_preface(reader, sock, server, macos, wrap_key, config, display).await
         }
     }
@@ -745,20 +792,29 @@ async fn read_security_types<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Re
     Ok(types)
 }
 
+/// What a security type's exchange leaves behind for the session.
+enum Secured {
+    /// Nothing: the wire stays as it was.
+    Plain,
+    /// The record layer's initial wrap key, which only Apple's DH branch
+    /// produces and only the 003.889 dialect goes on to use. It is `MD5(shared)`
+    /// — the very digest that encrypted the credentials — so on the 3.8 wire it
+    /// is computed and thrown away.
+    Apple([u8; 16]),
+    /// RSA-AES's two ciphers: every byte from here on, SecurityResult included,
+    /// rides inside their frames.
+    Frames(vnc_rsa_aes::Session),
+}
+
 /// Run the chosen security type's exchange.
-///
-/// Returns the record layer's initial wrap key, which only Apple's DH branch
-/// produces and only the 003.889 dialect goes on to use. It is `MD5(shared)` —
-/// the very digest that encrypted the credentials — so the plain path has always
-/// computed it and thrown it away.
 async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     sock: &mut W,
     config: &TargetConfig,
     chosen: u8,
-) -> anyhow::Result<Option<[u8; 16]>> {
+) -> anyhow::Result<Secured> {
     match chosen {
-        SECURITY_ARD => Ok(Some(
+        SECURITY_ARD => Ok(Secured::Apple(
             ard_authenticate(reader, sock, &config.username, &config.password).await?,
         )),
         SECURITY_VNC_AUTH => {
@@ -766,9 +822,16 @@ async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             reader.read_exact(&mut challenge).await?;
             sock.write_all(&auth_response(&config.vnc_password, &challenge))
                 .await?;
-            Ok(None)
+            Ok(Secured::Plain)
         }
-        _ => Ok(None),
+        rsa_aes if Strength::of(rsa_aes).is_some() => {
+            let strength = Strength::of(rsa_aes).expect("guarded");
+            let session =
+                vnc_rsa_aes::authenticate(reader, sock, strength, &config.username, &config.password)
+                    .await?;
+            Ok(Secured::Frames(session))
+        }
+        _ => Ok(Secured::Plain),
     }
 }
 
@@ -832,13 +895,12 @@ fn describe_desktop(field: &[u8]) -> String {
 
 /// The RFB 3.8 tail: force our pixel format and the encoding set.
 async fn rfb38_preface(
-    reader: Reader,
-    sock: OwnedWriteHalf,
+    downlink: Downlink,
+    mut uplink: Uplink,
     server: ServerInit,
     macos: bool,
     config: &TargetConfig,
 ) -> anyhow::Result<Connected> {
-    let mut uplink = Uplink::plain(sock);
     let apple = config.subtype == Some(Subtype::Ard);
     if apple {
         // Native Standard announces itself and its control mode before enabling
@@ -860,7 +922,7 @@ async fn rfb38_preface(
     }
 
     Ok(Connected {
-        downlink: Downlink::Plain(reader),
+        downlink,
         uplink,
         width: server.width,
         height: server.height,
@@ -968,16 +1030,10 @@ async fn apple_preface(
     mut sock: OwnedWriteHalf,
     server: ServerInit,
     macos: bool,
-    wrap_key: Option<[u8; 16]>,
+    wrap_key: [u8; 16],
     config: &TargetConfig,
     display: Option<HostDisplay>,
 ) -> anyhow::Result<Connected> {
-    let wrap_key = wrap_key.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Apple's protocol revision needs its DH authentication, which this server did not offer"
-        )
-    })?;
-
     // With clipboard enabled, the native control prelude is written back to back
     // before encryption. The server emits the rekey as soon as encryption starts,
     // so anything that waited for a reply in between would risk writing cleartext
@@ -3334,16 +3390,22 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 
 /// Pick the RFB security type to answer with.
 ///
-/// The target's subtype decides, not which credential fields happen to be
-/// filled: `Ard` is a declaration that the far end is a Mac and that the
-/// credentials name an account there, while a plain `vnc` target has only
-/// `vnc_password`, a secret belonging to the *machine* that tells the server
-/// nothing about who is connecting. On a Mac that difference decides which
+/// The target's subtype decides first, not which credential fields happen to
+/// be filled: `Ard` is a declaration that the far end is a Mac and that the
+/// credentials name an account there. On a Mac that difference decides which
 /// screen you get — see [`ard_authenticate`] — so a subtype the server cannot
 /// answer is an error rather than a silent fall back to the anonymous path.
+///
+/// A plain `vnc` target has two credentials for two kinds of server, and takes
+/// whichever the server can answer: `username` and `password` are an account
+/// for RSA-AES (see [`crate::vnc_rsa_aes`]), the encrypted type and so the one
+/// preferred when both are possible, at its 256-bit width over its 128-bit one;
+/// `vnc_password` is a secret belonging to the *machine* for `VncAuth`, which
+/// tells the server nothing about who is connecting.
 fn choose_security(
     types: &[u8],
     subtype: Option<Subtype>,
+    password: &str,
     vnc_password: &str,
 ) -> anyhow::Result<u8> {
     // Both Apple subtypes authenticate the same way and neither falls back: the
@@ -3359,19 +3421,41 @@ fn choose_security(
         );
         return Ok(SECURITY_ARD);
     }
+    if !password.is_empty()
+        && let Some(rsa_aes) = [
+            vnc_rsa_aes::SECURITY_RSA_AES_256,
+            vnc_rsa_aes::SECURITY_RSA_AES_128,
+        ]
+        .into_iter()
+        .find(|t| types.contains(t))
+    {
+        return Ok(rsa_aes);
+    }
     if !vnc_password.is_empty() && types.contains(&SECURITY_VNC_AUTH) {
         return Ok(SECURITY_VNC_AUTH);
     }
     if types.contains(&SECURITY_NONE) {
         return Ok(SECURITY_NONE);
     }
+    let offers_vnc_auth = types.contains(&SECURITY_VNC_AUTH);
+    let offers_rsa_aes = types.iter().any(|&t| Strength::of(t).is_some());
     anyhow::ensure!(
-        !types.contains(&SECURITY_VNC_AUTH),
-        "VNC server requires a password but the target has no vnc_password configured"
+        !(offers_vnc_auth || offers_rsa_aes),
+        "VNC server requires {} but the target has no {} configured",
+        match (offers_rsa_aes, offers_vnc_auth) {
+            (true, true) => "an account (RSA-AES) or a password (VncAuth)",
+            (true, false) => "an account (RSA-AES)",
+            _ => "a password",
+        },
+        match (offers_rsa_aes, offers_vnc_auth) {
+            (true, true) => "username and password, nor vnc_password,",
+            (true, false) => "username and password",
+            _ => "vnc_password",
+        }
     );
     anyhow::bail!(
         "no supported VNC security type (server offers {types:?}; \
-         this client speaks None, VncAuth and Apple's DH authentication)"
+         this client speaks None, VncAuth, RSA-AES and Apple's DH authentication)"
     )
 }
 
@@ -3635,14 +3719,17 @@ mod tests {
 
     #[test]
     fn the_subtype_decides_the_authentication() {
-        assert_eq!(choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw").unwrap(), SECURITY_ARD);
+        assert_eq!(
+            choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw", "").unwrap(),
+            SECURITY_ARD
+        );
         // The very same server, answered anonymously, because that is what a
         // target without the subtype asked for — and it is what costs you the
         // Mac's own screen.
-        assert_eq!(choose_security(&MACOS_TYPES, None, "pw").unwrap(), SECURITY_VNC_AUTH);
+        assert_eq!(choose_security(&MACOS_TYPES, None, "", "pw").unwrap(), SECURITY_VNC_AUTH);
         // A subtype the server cannot answer is a configuration error, not a
         // reason to authenticate as nobody.
-        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw")
+        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw", "")
             .unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
 
@@ -3650,10 +3737,10 @@ mod tests {
         // above it differs, the security type does not — and names itself when the
         // server cannot answer.
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "pw", "").unwrap(),
             SECURITY_ARD
         );
-        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "")
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "pw", "")
             .unwrap_err();
         assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
     }
@@ -3675,14 +3762,48 @@ mod tests {
 
     #[test]
     fn security_falls_back_the_way_it_always_did() {
-        assert_eq!(choose_security(&[SECURITY_NONE], None, "").unwrap(), SECURITY_NONE);
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "", "").unwrap(), SECURITY_NONE);
         // A password with no VncAuth on offer is not a failure: an open server
         // is still an open server.
-        assert_eq!(choose_security(&[SECURITY_NONE], None, "pw").unwrap(), SECURITY_NONE);
-        let err = choose_security(&[SECURITY_VNC_AUTH], None, "").unwrap_err();
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "", "pw").unwrap(), SECURITY_NONE);
+        let err = choose_security(&[SECURITY_VNC_AUTH], None, "", "").unwrap_err();
         assert!(format!("{err:#}").contains("requires a password"), "{err:#}");
-        let err = choose_security(&[19], None, "pw").unwrap_err();
+        let err = choose_security(&[19], None, "", "pw").unwrap_err();
         assert!(format!("{err:#}").contains("no supported VNC security type"), "{err:#}");
+    }
+
+    /// wayvnc's offer with `enable_auth`: VeNCrypt, RSA-AES-256, RSA-AES-128.
+    const WAYVNC_TYPES: [u8; 3] = [19, 129, 5];
+
+    #[test]
+    fn an_account_takes_rsa_aes_at_its_widest() {
+        use crate::vnc_rsa_aes::{SECURITY_RSA_AES_128, SECURITY_RSA_AES_256};
+        assert_eq!(
+            choose_security(&WAYVNC_TYPES, None, "pw", "").unwrap(),
+            SECURITY_RSA_AES_256
+        );
+        assert_eq!(
+            choose_security(&[SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], None, "pw", "").unwrap(),
+            SECURITY_RSA_AES_128
+        );
+        // Encrypted beats the classic challenge when the target could do either;
+        // the classic one is still what a vnc_password-only target gets.
+        assert_eq!(
+            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "pw", "vncpw").unwrap(),
+            SECURITY_RSA_AES_128
+        );
+        assert_eq!(
+            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "", "vncpw").unwrap(),
+            SECURITY_VNC_AUTH
+        );
+        // The Apple subtype still wants Apple's type, whatever else is offered.
+        let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), "pw", "").unwrap_err();
+        assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
+        // And the refusal says which credential is missing.
+        let err = choose_security(&WAYVNC_TYPES, None, "", "vncpw").unwrap_err();
+        assert!(format!("{err:#}").contains("username and password"), "{err:#}");
+        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "", "").unwrap_err();
+        assert!(format!("{err:#}").contains("nor vnc_password"), "{err:#}");
     }
 
     #[test]
