@@ -335,6 +335,17 @@ pub enum RenderSubtype {
     Classify,
 }
 
+impl RenderSubtype {
+    /// How the config key spells it, for messages that name it back.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::Classify => "classify",
+        }
+    }
+}
+
 /// The encode for what [`RenderType::Motion`] finds in motion — an axis of its own
 /// rather than a reuse of [`RenderSubtype`].
 ///
@@ -600,10 +611,13 @@ pub struct TargetConfig {
     /// Pinned desktop height, in points. See [`Self::width`].
     #[serde(default)]
     pub height: Option<u16>,
-    /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`. RDP only —
-    /// ignored for VNC targets (RFB security is negotiated per the handshake).
+    /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`; `None` reads
+    /// as [`Security::Auto`] ([`TargetConfig::security`]). RDP only — RFB
+    /// negotiates its own security per the handshake — and `Option` rather than
+    /// a bare default so that setting it on a VNC target is refused at parse
+    /// time instead of accepted and left inert, the same rule as `egfx`.
     #[serde(default)]
-    pub security: Security,
+    pub security: Option<Security>,
     /// Allow client-driven resize: hand this target's desktop size to the
     /// client's window. A desktop client reports every window change while this
     /// is on; there is no client-side mode, manual resize command, or second
@@ -711,10 +725,15 @@ pub struct TargetConfig {
     /// RDP and VNC.
     #[serde(default)]
     pub render_type: RenderType,
-    /// Codec for this target's base tiles. Defaults to [`RenderSubtype::Png`].
-    /// The legal pairing with [`Self::render_type`] is enforced at parse time.
+    /// Codec for this target's base tiles; `None` reads as
+    /// [`RenderSubtype::Png`] ([`TargetConfig::render_subtype`]). The legal
+    /// pairing with [`Self::render_type`] is enforced at parse time, and it is an
+    /// `Option` so that the pairing can see the key at all: `video` has no base
+    /// tiles, and a `render_subtype` named beside it — `"png"` included, the
+    /// value a bare default would have been indistinguishable from — is refused
+    /// rather than accepted and left inert.
     #[serde(default)]
-    pub render_subtype: RenderSubtype,
+    pub render_subtype: Option<RenderSubtype>,
     /// The quality (1–100) of the base codec's lossy side: what
     /// [`RenderSubtype::Jpeg`] encodes every tile at, and what
     /// [`RenderSubtype::Classify`] encodes its photographic tiles at. Required
@@ -852,6 +871,16 @@ impl TargetConfig {
         self.egfx.unwrap_or(true)
     }
 
+    /// [`Self::security`] resolved: [`Security::Auto`] unless the operator chose.
+    pub fn security(&self) -> Security {
+        self.security.unwrap_or_default()
+    }
+
+    /// [`Self::render_subtype`] resolved: lossless PNG unless the operator chose.
+    pub fn render_subtype(&self) -> RenderSubtype {
+        self.render_subtype.unwrap_or_default()
+    }
+
     /// The tile encoders to use for this target. This is the whole of the render
     /// dial as the engines see it: the axes and the qualities collapse to one
     /// [`RenderPlan`], so `rdp::run` / `vnc::run` need not know the config enums.
@@ -868,7 +897,7 @@ impl TargetConfig {
         if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_quality) {
             return RenderPlan::Video { quality, adaptive, chroma };
         }
-        let base = match (self.render_subtype, self.render_quality) {
+        let base = match (self.render_subtype(), self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
             (RenderSubtype::Classify, Some(q)) => {
                 TileCodec::Classify { quality: q, debug: self.render_classify_debug }
@@ -925,7 +954,7 @@ impl TargetConfig {
     /// text are the ones motion hides anyway. `None` only for the pairing parse
     /// rejects: a `png` base with no motion subtype named.
     fn motion_subtype(&self) -> Option<MotionSubtype> {
-        self.render_motion_subtype.or(match self.render_subtype {
+        self.render_motion_subtype.or(match self.render_subtype() {
             RenderSubtype::Jpeg | RenderSubtype::Classify => Some(MotionSubtype::Jpeg),
             RenderSubtype::Png => None,
         })
@@ -1420,6 +1449,16 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
+            // And the security mode: TLS and NLA are RDP's negotiation, where
+            // RFB settles its own in the handshake, so on a VNC target the key
+            // names a choice nothing would read.
+            anyhow::ensure!(
+                target.security.is_none() || target.protocol == Protocol::Rdp,
+                "target {:?} sets security on a {} target, and only rdp negotiates tls or \
+                 nla — RFB settles its own security in the handshake. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
             anyhow::ensure!(
                 !target.audio || target.protocol == Protocol::Rdp,
                 "target {:?} sets audio on a {} target, and only rdp carries it: MS-RDPEA is \
@@ -1585,7 +1624,7 @@ impl ConfigFile {
             // belongs to exactly one of them. The match is exhaustive so a future
             // variant cannot be added without deciding what it pairs with here.
             match (target.render_type, target.render_subtype) {
-                (RenderType::Tiles, RenderSubtype::Png) => {
+                (RenderType::Tiles, None | Some(RenderSubtype::Png)) => {
                     anyhow::ensure!(
                         target.render_quality.is_none(),
                         "target {:?} sets render_quality, which the lossless \"png\" \
@@ -1599,7 +1638,7 @@ impl ConfigFile {
                 // `jpeg` spends the quality on every tile, `classify` only on
                 // the ones its classifier reads as photographic, and neither
                 // has a default — a quality nobody chose is not a quality.
-                (RenderType::Tiles, RenderSubtype::Jpeg | RenderSubtype::Classify) => {
+                (RenderType::Tiles, Some(RenderSubtype::Jpeg | RenderSubtype::Classify)) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} sets a lossy render_subtype but no render_quality — \
                          it needs one, an integer 1–100",
@@ -1618,7 +1657,7 @@ impl ConfigFile {
                 // is the only strategy that can express a lossless base with a
                 // lossy discount, which is the interesting one — text and flat UI
                 // stay perfect and only what moves gets ugly.
-                (RenderType::Motion, RenderSubtype::Png) => {
+                (RenderType::Motion, None | Some(RenderSubtype::Png)) => {
                     anyhow::ensure!(
                         target.render_quality.is_none(),
                         "target {:?} pairs render_type \"motion\" with render_subtype \"png\" \
@@ -1642,7 +1681,7 @@ impl ConfigFile {
                 // classifier is at its most natural: a settled cell is
                 // classified — photographic goes JPEG, text stays lossless —
                 // while a moving cell takes the motion encode either way.
-                (RenderType::Motion, RenderSubtype::Jpeg | RenderSubtype::Classify) => {
+                (RenderType::Motion, Some(RenderSubtype::Jpeg | RenderSubtype::Classify)) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} is render_type \"motion\" with a lossy render_subtype, \
                          which makes that subtype the *base* encode — the one a settled cell \
@@ -1662,7 +1701,7 @@ impl ConfigFile {
                 // choose which codec to encode them with; this one is a single
                 // stateful video stream carrying the whole framebuffer, so there is
                 // no per-tile codec left to name.
-                (RenderType::Video, RenderSubtype::Png) => {
+                (RenderType::Video, None) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} is render_type \"video\" but sets no render_quality — it \
                          needs one, an integer 1–100. It is the quality the stream holds on a \
@@ -1676,22 +1715,26 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Video, RenderSubtype::Jpeg | RenderSubtype::Classify) => {
+                // Every value is refused here, `png` included: it is the default the
+                // key would otherwise read as, but a key that was written names an
+                // expectation, and on this strategy nothing would ever read it.
+                (RenderType::Video, Some(subtype)) => {
                     anyhow::bail!(
-                        "target {:?} sets render_type \"video\" with a render_subtype. \
+                        "target {:?} sets render_type \"video\" with render_subtype = {:?}. \
                          render_subtype names a codec for each changed region separately, and \
                          \"video\" does not send regions at all — it sends the whole desktop as \
                          one video stream, where every frame depends on the one before it. Drop \
                          render_subtype to keep \"video\", or set render_type = \"tiles\" to \
                          keep this subtype",
-                        target.name
+                        target.name,
+                        subtype.name()
                     )
                 }
             }
             // The debug outlines belong to the classifier: no other subtype
             // has a per-tile decision to draw.
             anyhow::ensure!(
-                target.render_subtype == RenderSubtype::Classify || !target.render_classify_debug,
+                target.render_subtype() == RenderSubtype::Classify || !target.render_classify_debug,
                 "target {:?} sets render_classify_debug without render_subtype = \
                  \"classify\" — the outlines show which tiles the classifier sent as JPEG, \
                  and no other subtype makes that decision",
@@ -1724,7 +1767,7 @@ impl ConfigFile {
             anyhow::ensure!(
                 !target.render_adaptive
                     || target.render_type != RenderType::Tiles
-                    || target.render_subtype != RenderSubtype::Png,
+                    || target.render_subtype() != RenderSubtype::Png,
                 "target {:?} sets render_adaptive on lossless PNG tiles, which have no \
                  quality for the link to move. Pick a plan with a lossy dial — a \"jpeg\" \
                  or \"classify\" subtype, \"motion\", or \"video\"",
@@ -2178,7 +2221,7 @@ mod tests {
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
         assert_eq!(t.pinned_size(), None, "an unpinned size follows the client's screen");
         assert_eq!(t.default_size(), DEFAULT_SIZE);
-        assert_eq!(t.security, Security::Auto);
+        assert_eq!(t.security(), Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
         assert!(t.egfx(), "the graphics pipeline is on unless the operator trades it away");
@@ -2557,7 +2600,7 @@ mod tests {
         assert_eq!(config.targets.len(), 2);
         let win = &config.targets[0];
         assert_eq!(win.name, "win");
-        assert_eq!(win.security, Security::Nla);
+        assert_eq!(win.security(), Security::Nla);
         assert_eq!(win.domain.as_deref(), Some("CORP"));
         assert_eq!(win.pinned_size(), Some((1920, 1080)));
         let other = &config.targets[1];
@@ -2688,7 +2731,8 @@ mod tests {
         .unwrap();
         let t = &cfg.targets[0];
         assert_eq!(t.render_type, RenderType::Tiles);
-        assert_eq!(t.render_subtype, RenderSubtype::Png);
+        assert_eq!(t.render_subtype, None, "an unset base reads as png without being one");
+        assert_eq!(t.render_subtype(), RenderSubtype::Png);
         assert_eq!(t.render_quality, None);
         assert_eq!(
             t.render_plan(),
@@ -2712,7 +2756,7 @@ mod tests {
         .unwrap();
         let t = &cfg.targets[0];
         assert_eq!(t.render_type, RenderType::Tiles);
-        assert_eq!(t.render_subtype, RenderSubtype::Jpeg);
+        assert_eq!(t.render_subtype(), RenderSubtype::Jpeg);
         assert_eq!(t.render_quality, Some(60));
         assert_eq!(
             t.render_plan(),
@@ -2756,7 +2800,7 @@ mod tests {
         )
         .unwrap();
         let t = &cfg.targets[0];
-        assert_eq!(t.render_subtype, RenderSubtype::Classify);
+        assert_eq!(t.render_subtype(), RenderSubtype::Classify);
         assert_eq!(
             t.render_plan(),
             RenderPlan::Tiles {
@@ -3064,24 +3108,60 @@ mod tests {
     /// The refusal that says what `video` is: a codec per changed region is a
     /// different idea from one stream for the whole desktop, and naming one on a
     /// video target means somebody expected the wrong thing to happen.
+    ///
+    /// Every value, `png` included: that one is what an omitted key reads as, so
+    /// it is the value a bare default would have let through — and a key that was
+    /// written names an expectation `video` cannot meet, whatever it says.
     #[test]
     fn video_refuses_a_render_subtype() {
-        let err = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            host = "h"
-            render_type = "video"
-            render_subtype = "jpeg"
-            render_quality = 60
-            "#,
-        )
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("render_subtype"), "the message should name the axis: {msg}");
-        assert!(msg.contains("video stream"), "the message should say what video is: {msg}");
-        assert!(msg.contains("tiles"), "the message should say the way out: {msg}");
+        for subtype in ["png", "jpeg", "classify"] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "video"
+                render_subtype = "{subtype}"
+                render_quality = 60
+                "#
+            ))
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("render_subtype"), "the message should name the axis: {msg}");
+            assert!(msg.contains(subtype), "the message should name the value: {msg}");
+            assert!(msg.contains("video stream"), "the message should say what video is: {msg}");
+            assert!(msg.contains("tiles"), "the message should say the way out: {msg}");
+        }
+    }
+
+    /// The same key is the default it names everywhere else: `render_subtype =
+    /// "png"` under `tiles` or `motion` is exactly what leaving it out is, and
+    /// the refusal above is about `video` having no base tiles, not about the
+    /// value.
+    #[test]
+    fn an_explicit_png_base_is_the_default_under_tiles_and_motion() {
+        for keys in [
+            "render_type = \"tiles\"",
+            "render_type = \"motion\"\nrender_motion_subtype = \"jpeg\"\nrender_motion_quality = 30",
+        ] {
+            let explicit = format!(
+                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n\
+                 render_subtype = \"png\"\n"
+            );
+            let implicit = format!(
+                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n"
+            );
+            let explicit = ConfigFile::parse(&explicit).unwrap_or_else(|e| panic!("{keys}: {e:#}"));
+            let implicit = ConfigFile::parse(&implicit).unwrap_or_else(|e| panic!("{keys}: {e:#}"));
+            assert_eq!(explicit.targets[0].render_subtype, Some(RenderSubtype::Png), "{keys}");
+            assert_eq!(implicit.targets[0].render_subtype, None, "{keys}");
+            assert_eq!(
+                explicit.targets[0].render_plan(),
+                implicit.targets[0].render_plan(),
+                "{keys}: naming the default changes nothing"
+            );
+        }
     }
 
     /// The motion keys belong to `motion`, and `video` is not a second place to put
@@ -3164,7 +3244,7 @@ mod tests {
         .unwrap();
         let t = &cfg.targets[0];
         assert_eq!(t.render_type, RenderType::Motion);
-        assert_eq!(t.render_subtype, RenderSubtype::Png);
+        assert_eq!(t.render_subtype(), RenderSubtype::Png);
         assert_eq!(
             t.render_plan(),
             RenderPlan::Tiles {
@@ -3988,6 +4068,59 @@ mod tests {
             assert!(rendered.contains("egfx"), "{rendered}");
             assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
         }
+    }
+
+    /// The security mode is RDP's negotiation, and refused on VNC by name —
+    /// every value, `auto` included, since the mistake is a key that nothing on
+    /// this protocol would read, not the value chosen for it.
+    #[test]
+    fn security_belongs_to_rdp_and_is_refused_on_vnc() {
+        for value in ["auto", "nla", "tls"] {
+            for subtype in ["", "subtype = \"ard\"\nusername = \"u\"\npassword = \"p\""] {
+                let err = ConfigFile::parse(&format!(
+                    r#"
+                    [server]
+                    {}
+
+                    [[targets]]
+                    name = "nope"
+                    protocol = "vnc"
+                    host = "10.0.0.5"
+                    security = "{value}"
+                    {subtype}
+                    "#,
+                    site_passwd_line()
+                ))
+                .unwrap_err();
+                let rendered = format!("{err:#}");
+                assert!(rendered.contains("security"), "{value}: {rendered}");
+                assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
+            }
+        }
+        // On RDP the key is read, and leaving it out is `auto` without being a
+        // choice.
+        let cfg = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            security = "tls"
+
+            [[targets]]
+            name = "bare"
+            protocol = "rdp"
+            host = "10.0.0.6"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap();
+        assert_eq!(cfg.targets[0].security, Some(Security::Tls));
+        assert_eq!(cfg.targets[1].security, None);
+        assert_eq!(cfg.targets[1].security(), Security::Auto);
     }
 
     /// Audio is RDP's, and refused on VNC by name.

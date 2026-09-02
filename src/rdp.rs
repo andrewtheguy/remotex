@@ -403,7 +403,7 @@ fn connect_config(
         domain: config.domain.clone(),
         width,
         height,
-        security: match config.security {
+        security: match config.security() {
             Security::Auto => freerdp::Security::Auto,
             Security::Nla => freerdp::Security::Nla,
             Security::Tls => freerdp::Security::Tls,

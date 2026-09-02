@@ -53,7 +53,7 @@ const MOTION_QUALITY: u8 = 15;
 fn uat_target(name: &str, strategy: RenderType) -> TargetConfig {
     let mut target = common::uat_target(name);
     target.render_type = strategy;
-    target.render_subtype = RenderSubtype::Classify;
+    target.render_subtype = Some(RenderSubtype::Classify);
     target.render_quality = Some(QUALITY);
     // Under motion the moving encode defaults to jpeg — a still tile either
     // way, so the batch parser below reads every plan this test drives.

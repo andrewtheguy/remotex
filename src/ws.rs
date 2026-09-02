@@ -1175,7 +1175,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message as ClientFrame;
 
     use super::*;
-    use crate::config::{Protocol, Security, TargetConfig};
+    use crate::config::{Protocol, TargetConfig};
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
 
@@ -1463,14 +1463,14 @@ mod tests {
             domain: None,
             width: Some(1),
             height: Some(1),
-            security: Security::Auto,
+            security: None,
             egfx: None,
             resize: false,
             clipboard: false,
             audio,
             audio_codec: None,
             render_type: crate::config::RenderType::Tiles,
-            render_subtype: crate::config::RenderSubtype::Png,
+            render_subtype: None,
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,

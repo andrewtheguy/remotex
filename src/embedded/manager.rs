@@ -619,7 +619,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     if target.protocol == Protocol::Rdp {
         lines.push(spec(
             "security",
-            match target.security {
+            match target.security() {
                 Security::Auto => "auto — the server picks tls or nla",
                 Security::Nla => "nla required",
                 Security::Tls => "tls only; the remote shows its login window",

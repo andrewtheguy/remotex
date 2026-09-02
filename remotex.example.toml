@@ -149,7 +149,8 @@ password = "change-me"
 #height = 1200
 
 # Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
-# RDP only — VNC negotiates VncAuth (password set) or None per the handshake.
+# RDP only — VNC negotiates VncAuth (password set) or None per the handshake, so the
+# key is refused on a vnc target rather than ignored, whatever its value.
 #security = "auto"
 
 # Dynamic resize (opt-in): hand the remote desktop's size to the client's window.
@@ -445,7 +446,8 @@ password = "change-me"
 # desktop as one video stream instead of one encoded image per changed region. Every
 # frame says what changed since the one before it, so nothing is cut into per-region
 # tiles and the cell grid does not apply — which is why it takes no render_subtype and
-# refuses one. (The frames still travel in the same records the still codecs use, each
+# refuses one, "png" included: that is the value an omitted key reads as elsewhere, but
+# a key that is written names an expectation this transport cannot meet. (The frames still travel in the same records the still codecs use, each
 # carrying the desktop rectangle a client crops to; what goes away is the segmentation,
 # not the framing.)
 #
