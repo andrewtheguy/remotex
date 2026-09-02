@@ -296,7 +296,7 @@ test.describe("a video target", () => {
     for (const format of seen.formats) {
       // The exact WebCodecs string, whose level comes from the picture size — which
       // is why the gateway sends it and the client does not derive it.
-      expect(format.decode).toMatch(/^vp09\.\d{2}\.\d{2}\.\d{2}$/);
+      expect(format.decode).toMatch(/^vp09\.\d{2}\.\d{2}\.\d{2}(\.\d{2}){5}$/);
     }
     assertTheEnvelopeHolds(seen);
 

@@ -466,6 +466,22 @@ password = "change-me"
 #render_type = "video"
 #render_quality = 60
 
+# How much colour a video stream carries per pixel — every stream this target has,
+# render_type = "video" and render_motion_subtype = "stream" alike. Refused on a
+# target that streams nothing.
+#
+#   "420" — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
+#           every decoder takes, hardware ones included.
+#   "444" — a colour sample per pixel (VP9 profile 1). This, not render_quality, is
+#           where a desktop stream's visible loss is: a one-pixel coloured glyph stem
+#           on a dark terminal shares its one 4:2:0 colour sample with three pixels of
+#           background and comes back at a quarter of its saturation, at any quality
+#           — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
+#           for a keyframe about a third larger and inter frames no larger. It always
+#           decodes in software (no hardware VP9 decoder takes profile 1): Chromium
+#           does; iOS and iPadOS have no software VP9 at all and refuse it by name.
+#render_chroma = "420"
+
 # Let every lossy quality in this target's render plan track measured client
 # queueing. The configured qualities remain ceilings. JPEG tiles lower their
 # quality per encode; video streams add the client's paint lag to their existing

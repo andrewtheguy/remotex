@@ -117,7 +117,11 @@ as JPEG in yellow — drawn on the copy handed to the encoder, never on the pixe
 the shadow records, so the mark lives exactly as long as the lossy tile it
 describes, and a colour of its own so it stays readable beside the motion marks.
 
-Two more keys sit across the whole dial rather than on either axis.
+Three more keys sit across the whole dial rather than on either axis.
+`render_chroma` (`"420"`, the default, or `"444"`) is how much colour a *stream*
+carries per pixel — every stream the target has, `video` and a `motion` region alike
+— and is refused on a target that streams nothing; see [the codec](#the-codec) for
+why it, and not the quality, is where a desktop stream's picture goes.
 `render_adaptive = true` lets every lossy quality the target configures track the
 measured link between `render_adaptive_min` (default 20) and its configured value,
 which stays the ceiling — see [what the link will bear](#the-codec) for the signal
@@ -135,10 +139,10 @@ The engines never see the config enums. The axes and the qualities collapse to o
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
 one arm per transport — `Tiles { base, motion, debug, adaptive }` and
-`Video { quality, adaptive }` —
+`Video { quality, adaptive, chroma }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. `motion` is itself
-a `MotionEncode`, `Tile(codec)` or `Stream { quality }`, for the same reason one
+a `MotionEncode`, `Tile(codec)` or `Stream { quality, chroma }`, for the same reason one
 level down: a cheaper still and an inter-frame stream are not two settings of one
 mechanism.
 
@@ -427,8 +431,8 @@ for the region streams above too, which is why they run the same code:
   covers the whole framebuffer, so each covers its predecessor exactly. That is not
   enforced by a check but by the record kinds: a `VIDEO` record never reaches the
   cache or the coverage test, so neither has to know about it.
-- **The picture may be a pixel larger than the region.** The I420 conversion needs
-  even sides — VP9 itself does not and is held to them anyway — so the mirror is
+- **The picture may be a pixel larger than the region.** The 4:2:0 conversion needs
+  even sides — VP9 itself does not, nor 4:4:4, and both are held to them anyway — so the mirror is
   padded up with its edge repeated (black would be a seam the encoder paid for every
   frame). The record header carries the *true* rectangle and the
   client crops — reporting the padded size would push a paint past the framebuffer,
@@ -441,6 +445,43 @@ never leaves the codec module —
 the dial is what everything above it speaks. A constant quantizer *is* variable
 bitrate — bits go where the
 picture needs them, so a motionless desktop costs almost nothing.
+
+**Above the middle of that dial the loss you can see is not the quantizer's; it is
+the chroma sampling's.** VP9 profile 0 carries one colour sample per 2×2 pixels,
+and a one-pixel coloured glyph stem on a dark terminal shares its sample with three
+pixels of background: the luma survives, the colour comes back at a quarter of its
+saturation, and no quantizer can restore what was averaged before the encoder saw
+it. Measured 2026-09-01 on 1280×800 of rendered text — coloured monospace on a dark
+pane, black and coloured proportional on a light one, one-pixel rules, a gradient —
+encoded and decoded through the same libvpx:
+
+| stream                       | keyframe | inter frame | PSNR    | worst pixel |
+|------------------------------|----------|-------------|---------|-------------|
+| 4:2:0, quality 100 (q 8)     | 408 KB   | 52 KB       | 28.4 dB | 136         |
+| 4:2:0, lossless (q 0)        | 640 KB   | 122 KB      | 28.5 dB | 135         |
+| 4:2:0 conversion, no codec   | —        | —           | 28.5 dB | 135         |
+| 4:4:4, quality 100 (q 8)     | 558 KB   | 48 KB       | 42.8 dB | 33          |
+| 4:4:4, lossless (q 0)        | 912 KB   | 70 KB       | 49.5 dB | 4           |
+
+Every 4:2:0 row is the conversion's own floor; speed, loop filter, tuning and
+adaptive quantization moved nothing either. `render_chroma = "444"` selects VP9
+profile 1 — a colour sample per pixel, the same quantizer, a keyframe a third
+larger, inter frames no larger, about a third more encode time — and the codec
+string it announces is `vp09.01.…` instead of `vp09.00.…`. The cost is the
+decoder: no hardware VP9 decoder takes profile 1, so it always decodes in software
+— Chromium does — and a browser with no software VP9 at all, which is iOS and
+iPadOS, refuses the configuration by name the way it would refuse any other. That
+is why it is per target and off by default, and why nothing falls back: the client
+already says exactly which configuration it would not take.
+`a_444_stream_keeps_the_colour_420_averages_away` in `src/vp9.rs` is the round
+trip that pins the difference, through the archive's own decoder.
+
+The keyframe header also *says* the conversion is BT.601 studio swing
+(`VP9E_SET_COLOR_SPACE` / `VP9E_SET_COLOR_RANGE`). libvpx writes *unknown* unless
+told, and a decoder given unknown guesses — Chromium picks BT.709 for anything HD —
+so a 1080p desktop was converted with one matrix and displayed with another, every
+saturated colour a little off. Nothing on the wire carries it; the decoder reads it
+from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
@@ -515,7 +556,7 @@ BSD-3-Clause with a patent grant and present in every browser build, the ones th
 carry no proprietary codecs included. On synthetic screen content at 1080p and
 quality 60 it encodes a frame in **4.7 ms** at **18 KB** — measure with
 `cargo test --release measure_the_encoder -- --ignored --nocapture`; a debug build
-reports nonsense, because the RGB→I420 conversion it also times is scalar Rust and runs
+reports nonsense, because the RGB→YUV conversion it also times is scalar Rust and runs
 66× slower unoptimised.
 
 Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,

@@ -1054,6 +1054,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         render_motion_subtype: None,
         render_motion_quality: None,
         render_motion_debug: false,
+        render_chroma: None,
         render_classify_debug: false,
         render_adaptive: false,
         render_adaptive_min: None,

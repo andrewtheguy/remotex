@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 
-use crate::config::{MotionEncode, RenderPlan, TileCodec};
+use crate::config::{Chroma, MotionEncode, RenderPlan, TileCodec};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ServerMsg, Tile};
 use crate::regions::{Policy, Produced, Regions, Round};
@@ -313,9 +313,15 @@ struct Video {
 }
 
 impl Video {
-    fn new(policy: Policy, quality: u8, mark: Option<video::Mark>, adaptive: Option<u8>) -> Self {
+    fn new(
+        policy: Policy,
+        quality: u8,
+        chroma: Chroma,
+        mark: Option<video::Mark>,
+        adaptive: Option<u8>,
+    ) -> Self {
         Self {
-            regions: Regions::new(policy, quality, mark),
+            regions: Regions::new(policy, quality, chroma, mark),
             congestion: Congestion::new(quality, adaptive),
             due_at: None,
         }
@@ -709,19 +715,24 @@ impl Shared {
         // none still builds a `Video` — never touched, and holding no mirror until
         // something is blitted into it — so that the streaming paths need no
         // unwrapping once they have established which plan they are on.
-        let (policy, quality, mark, adaptive) = match plan {
-            RenderPlan::Video { quality, adaptive } => (Policy::Whole, quality, None, adaptive),
+        let (policy, quality, chroma, mark, adaptive) = match plan {
+            RenderPlan::Video { quality, adaptive, chroma } => {
+                (Policy::Whole, quality, chroma, None, adaptive)
+            }
             RenderPlan::Tiles {
-                motion: Some(MotionEncode::Stream { quality }), debug, adaptive, ..
+                motion: Some(MotionEncode::Stream { quality, chroma }), debug, adaptive, ..
             } => (
                 Policy::Moving,
                 quality,
+                chroma,
                 debug.then_some(video::Mark { colour: MARK_MOTION, px: MARK_PX }),
                 adaptive,
             ),
-            // The quality is unread here: nothing blits into that target's mirror, so
-            // no stream is ever built from it.
-            RenderPlan::Tiles { .. } => (Policy::Whole, NO_STREAM_QUALITY, None, None),
+            // The quality and chroma are unread here: nothing blits into that target's
+            // mirror, so no stream is ever built from them.
+            RenderPlan::Tiles { .. } => {
+                (Policy::Whole, NO_STREAM_QUALITY, Chroma::Subsampled, None, None)
+            }
         };
         // The tiles' half of the same key. On the plan whose motion encode is a
         // stream this and `adaptive` are both live: the regions walk with the
@@ -733,7 +744,7 @@ impl Shared {
         Self {
             failure: Mutex::default(),
             motion: Mutex::default(),
-            video: tokio::sync::Mutex::new(Video::new(policy, quality, mark, adaptive)),
+            video: tokio::sync::Mutex::new(Video::new(policy, quality, chroma, mark, adaptive)),
             round_returned: Notify::new(),
             keyframe_owed: AtomicBool::new(false),
             feedback,
@@ -2790,7 +2801,8 @@ mod tests {
 
     // ---- the video transport ------------------------------------------------
 
-    const VIDEO: RenderPlan = RenderPlan::Video { quality: 60, adaptive: None };
+    const VIDEO: RenderPlan =
+        RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -3156,7 +3168,7 @@ mod tests {
 
     const MOTION_STREAM: RenderPlan = RenderPlan::Tiles {
         base: TileCodec::Png,
-        motion: Some(MotionEncode::Stream { quality: 60 }),
+        motion: Some(MotionEncode::Stream { quality: 60, chroma: Chroma::Subsampled }),
         adaptive: None,
         debug: false,
     };
@@ -3497,7 +3509,7 @@ mod tests {
         let shared = Shared::new(
             RenderPlan::Tiles {
                 base: TileCodec::Jpeg(70),
-                motion: Some(MotionEncode::Stream { quality: 60 }),
+                motion: Some(MotionEncode::Stream { quality: 60, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: Some(25),
             },

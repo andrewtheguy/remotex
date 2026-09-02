@@ -251,7 +251,7 @@ export type ControlMsg =
   // string carries a size-derived level, so one string for the session would be wrong
   // for some of them.
   //
-  // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08`.
+  // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08.01.06.06.06.00`.
   // Nothing here parses a bitstream to find it out; VP9 has no parameter sets to
   // parse.
   | { type: "videoFormat"; stream: number; decode: string }

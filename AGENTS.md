@@ -318,3 +318,14 @@ build. There is no codec key, no probe, no gate, and no fallback path.
 stream's first unit, and a client that cannot decode what arrives says so from its
 own `VideoDecoder`, naming the configuration. See
 [`docs/architecture.md`](docs/architecture.md).
+
+The one per-target choice inside VP9 is chroma, `render_chroma = "420" | "444"`
+(profile 0 or 1), and it is where a desktop stream's visible loss actually is:
+measured 2026-09-01 on rendered text, every 4:2:0 quantizer down to lossless sits at
+the conversion's own 28.5 dB floor (thin coloured text loses most of its colour in
+the 2×2 average), and 4:4:4 at the same quantizer measures 42.8 dB with inter frames
+no larger. Do not look for quality-100 softness in the quantizer, speed or loop
+filter. 4:4:4 always decodes in software — Chromium does; iOS and iPadOS have no
+software VP9 and refuse it by name — so it stays opt-in and there is no fallback.
+Every stream declares BT.601 studio swing in its keyframe header; do not leave the
+colour space unknown, Chromium guesses BT.709 for HD.

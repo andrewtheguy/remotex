@@ -38,7 +38,7 @@
 /**
  * How to decode one stream, from the gateway's `videoFormat` message.
  *
- * `decode` is the exact string to hand `VideoDecoder.configure`: `vp09.00.40.08`. It
+ * `decode` is the exact string to hand `VideoDecoder.configure`: `vp09.00.40.08.01.06.06.06.00`. It
  * is also what an error message names.
  */
 export interface VideoFormat {
