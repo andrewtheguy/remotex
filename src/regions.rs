@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use crate::config::Chroma;
 use crate::protocol::{CELL_H, CELL_W, VideoUnit, batch};
 use crate::tiles::Rect;
 use crate::video::{AccessUnit, Mark, Mirror};
@@ -422,6 +423,9 @@ pub struct Regions {
     /// has moved it. Without that a region appearing on a struggling link would start at
     /// full quality and make the struggle worse.
     quality: u8,
+    /// The chroma sampling every stream is built with — the target's, for its whole
+    /// session; nothing moves it.
+    chroma: Chroma,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -459,10 +463,11 @@ pub struct Regions {
 }
 
 impl Regions {
-    pub fn new(policy: Policy, quality: u8, mark: Option<Mark>) -> Self {
+    pub fn new(policy: Policy, quality: u8, chroma: Chroma, mark: Option<Mark>) -> Self {
         Self {
             policy,
             quality,
+            chroma,
             size: None,
             mirror: None,
             spare: None,
@@ -821,7 +826,7 @@ impl Regions {
         let mirror = self.mirror_mut()?.coded();
         // At `self.quality` rather than the config's: a region that appears while the
         // link is behind starts where the link left off.
-        let stream = Stream::new(rect, mirror, self.quality)?;
+        let stream = Stream::new(rect, mirror, self.quality, self.chroma)?;
         let cells: Vec<(u16, u16)> = rect.cells().map(|cell| cell.cell_key()).collect();
         // Every cell of the region is owed from the moment it is streamed, including
         // the ones that are not moving: the stream codes them lossily whether they
@@ -1526,7 +1531,7 @@ mod tests {
     /// test about two *separate* regions needs a desktop at least three cells wide:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Moving, 60, None);
+        let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, None);
         regions.want(w, h);
         let bytes = usize::from(w) * usize::from(h) * 3;
         regions
@@ -1840,7 +1845,7 @@ mod tests {
 
     /// A whole-desktop target with pixels in it, the pipelined shape.
     fn whole_regions(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Whole, 60, None);
+        let mut regions = Regions::new(Policy::Whole, 60, Chroma::Subsampled, None);
         regions.want(w, h);
         regions
     }

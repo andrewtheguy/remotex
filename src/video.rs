@@ -31,6 +31,7 @@
 //! because every attach injects a repaint, which is one of the moments a stream's
 //! keyframe is forced.
 
+use crate::config::Chroma;
 use crate::tiles::Rect;
 
 /// The 1–100 quality dial, coarsest first.
@@ -265,7 +266,8 @@ impl Mirror {
 /// The rectangle a stream over `rect` actually encodes: `rect` grown to even sides.
 ///
 /// **The evenness of the coded rectangle is a theorem, not a hope, and this is where it
-/// is checked.** I420 subsamples chroma 2×2, so [`I420`] needs even sides. A region is
+/// is checked.** 4:2:0 subsamples chroma 2×2, so [`Yuv`] needs even sides there — and
+/// 4:4:4, which would not, is held to the same ones: one geometry, not two. A region is
 /// a union of whole grid cells
 /// clipped to the desktop, and `CELL_W`/`CELL_H` are both even, so a region's origin is
 /// always even and its size is odd only where its right or bottom edge is the desktop's
@@ -352,34 +354,49 @@ pub fn threads_for(coded: Rect, mirror: (u16, u16)) -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
 
-/// One picture as I420, and the RGB→YUV conversion in front of the encoder.
+/// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
 ///
-/// Scalar integer BT.601 studio-swing arithmetic with 2×2-averaged chroma, owned here
-/// rather than a library's. The planes are the tight `(w, w/2, w/2)` I420
-/// layout libvpx wraps without copying. The conversion's cost is measured separately in
-/// the encoder bench, because if it ever dominates a release encode, *that* is the
-/// number that would justify libyuv.
-pub struct I420 {
+/// Scalar integer BT.601 studio-swing arithmetic, owned here rather than a library's.
+/// The chroma planes are one sample per pixel or one per 2×2 group averaged, as
+/// [`Chroma`] says — the tight `(w, w, w)` I444 or `(w, w/2, w/2)` I420 layout libvpx
+/// wraps without copying. The conversion's cost is measured separately in the encoder
+/// bench, because if it ever dominates a release encode, *that* is the number that
+/// would justify libyuv.
+pub struct Yuv {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
     size: (usize, usize),
+    chroma: Chroma,
 }
 
-impl I420 {
+/// BT.601 studio-swing chroma for one colour, whether that colour is a pixel's own or
+/// a 2×2 group's average. The arithmetic never leaves i16: the largest coefficient
+/// sum is 112 × 255.
+fn chroma_of(r: i16, g: i16, b: i16) -> (u8, u8) {
+    let u = (((-38 * r - 74 * g + 112 * b) >> 8) + 128) as u8;
+    let v = (((112 * r - 94 * g - 18 * b) >> 8) + 128) as u8;
+    (u, v)
+}
+
+impl Yuv {
     /// A buffer for a `w`×`h` picture, both even.
     ///
     /// Reused across frames so a 1080p conversion is not a 3 MB allocation apiece.
-    /// Evenness is [`coded_rect`]'s theorem, and it is what keeps the chroma rows
-    /// below made of whole 2×2 groups.
-    pub fn new(w: u16, h: u16) -> Self {
+    /// Evenness is [`coded_rect`]'s theorem, and it is what keeps the 4:2:0 chroma
+    /// rows below made of whole 2×2 groups.
+    pub fn new(w: u16, h: u16, chroma: Chroma) -> Self {
         let size = (usize::from(w), usize::from(h));
-        Self {
-            y: vec![0; size.0 * size.1],
-            u: vec![0; size.0 * size.1 / 4],
-            v: vec![0; size.0 * size.1 / 4],
-            size,
-        }
+        let samples = match chroma {
+            Chroma::Subsampled => size.0 * size.1 / 4,
+            Chroma::Full => size.0 * size.1,
+        };
+        Self { y: vec![0; size.0 * size.1], u: vec![0; samples], v: vec![0; samples], size, chroma }
+    }
+
+    /// Which sampling this buffer holds, and so which libvpx image format wraps it.
+    pub fn chroma(&self) -> Chroma {
+        self.chroma
     }
 
     /// Convert `rgb` — packed RGB888 for exactly this buffer's picture — in place.
@@ -398,22 +415,31 @@ impl I420 {
                 >> 8)
                 + 16) as u8;
         }
-        // Chroma is one sample per 2×2 pixel group, from the group's average — the
-        // arithmetic never leaves i16: the largest coefficient sum is 112 × 255.
-        let half = w / 2;
-        let rows0 = rgb.chunks_exact(w * 3).step_by(2);
-        let rows1 = rgb.chunks_exact(w * 3).skip(1).step_by(2);
-        let u_rows = self.u.chunks_exact_mut(half);
-        let v_rows = self.v.chunks_exact_mut(half);
-        for (((row0, row1), u_row), v_row) in rows0.zip(rows1).zip(u_rows).zip(v_rows) {
-            for (((pix0, pix1), u), v) in
-                row0.chunks_exact(6).zip(row1.chunks_exact(6)).zip(u_row).zip(v_row)
-            {
-                let r = (i16::from(pix0[0]) + i16::from(pix0[3]) + i16::from(pix1[0]) + i16::from(pix1[3]) + 2) / 4;
-                let g = (i16::from(pix0[1]) + i16::from(pix0[4]) + i16::from(pix1[1]) + i16::from(pix1[4]) + 2) / 4;
-                let b = (i16::from(pix0[2]) + i16::from(pix0[5]) + i16::from(pix1[2]) + i16::from(pix1[5]) + 2) / 4;
-                *u = (((-38 * r - 74 * g + 112 * b) >> 8) + 128) as u8;
-                *v = (((112 * r - 94 * g - 18 * b) >> 8) + 128) as u8;
+        match self.chroma {
+            Chroma::Full => {
+                for (pix, (u, v)) in
+                    rgb.chunks_exact(3).zip(self.u.iter_mut().zip(self.v.iter_mut()))
+                {
+                    (*u, *v) = chroma_of(i16::from(pix[0]), i16::from(pix[1]), i16::from(pix[2]));
+                }
+            }
+            Chroma::Subsampled => {
+                // One sample per 2×2 pixel group, from the group's average.
+                let half = w / 2;
+                let rows0 = rgb.chunks_exact(w * 3).step_by(2);
+                let rows1 = rgb.chunks_exact(w * 3).skip(1).step_by(2);
+                let u_rows = self.u.chunks_exact_mut(half);
+                let v_rows = self.v.chunks_exact_mut(half);
+                for (((row0, row1), u_row), v_row) in rows0.zip(rows1).zip(u_rows).zip(v_rows) {
+                    for (((pix0, pix1), u), v) in
+                        row0.chunks_exact(6).zip(row1.chunks_exact(6)).zip(u_row).zip(v_row)
+                    {
+                        let r = (i16::from(pix0[0]) + i16::from(pix0[3]) + i16::from(pix1[0]) + i16::from(pix1[3]) + 2) / 4;
+                        let g = (i16::from(pix0[1]) + i16::from(pix0[4]) + i16::from(pix1[1]) + i16::from(pix1[4]) + 2) / 4;
+                        let b = (i16::from(pix0[2]) + i16::from(pix0[5]) + i16::from(pix1[2]) + i16::from(pix1[5]) + 2) / 4;
+                        (*u, *v) = chroma_of(r, g, b);
+                    }
+                }
             }
         }
         Ok(())
@@ -426,7 +452,11 @@ impl I420 {
 
     /// The three planes' strides, in the same order as [`Self::planes`].
     pub fn strides(&self) -> (usize, usize, usize) {
-        (self.size.0, self.size.0 / 2, self.size.0 / 2)
+        let chroma = match self.chroma {
+            Chroma::Subsampled => self.size.0 / 2,
+            Chroma::Full => self.size.0,
+        };
+        (self.size.0, chroma, chroma)
     }
 }
 
@@ -515,7 +545,7 @@ mod tests {
     }
 
     /// What the encoder costs on desktop pixels — the measurement that settles VP9's
-    /// `Q_FINEST`, `CPU_USED` and thread count.
+    /// `Q_FINEST`, `CPU_USED` and thread count, and what 4:4:4 costs over 4:2:0.
     ///
     /// `#[ignore]`d because it takes a minute and prints rather than asserts: the numbers
     /// are the output, and a threshold on them would be a test of this machine.
@@ -547,20 +577,24 @@ mod tests {
         const FRAMES: u32 = 60;
         let sizes = [(1280u16, 800u16), (1920, 1080)];
         let qualities = [20u8, 40, 60, 80];
+        let chromas = [Chroma::Subsampled, Chroma::Full];
 
         println!(
-            "\n| size      | quality | KB total | KB keyframe | µs/frame encode \
+            "\n| size      | chroma | quality | KB total | KB keyframe | µs/frame encode \
              | µs/frame convert | kbit/s at 30fps |"
         );
         println!(
-            "|-----------|---------|----------|-------------|-----------------\
+            "|-----------|--------|---------|----------|-------------|-----------------\
              |------------------|-----------------|"
         );
         for (w, h) in sizes {
-            for quality in qualities {
+            for (chroma, quality) in
+                chromas.iter().flat_map(|c| qualities.iter().map(move |q| (*c, *q)))
+            {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
-                let mut stream = crate::vp9::Stream::new(mirror.rect(), mirror.coded(), quality)
-                    .expect("a stream");
+                let mut stream =
+                    crate::vp9::Stream::new(mirror.rect(), mirror.coded(), quality, chroma)
+                        .expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
                 let mut encode = std::time::Duration::ZERO;
@@ -582,7 +616,7 @@ mod tests {
 
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
-                let mut yuv = I420::new(mirror.coded().0, mirror.coded().1);
+                let mut yuv = Yuv::new(mirror.coded().0, mirror.coded().1, chroma);
                 let mut crop = Vec::new();
                 mirror.crop_into(mirror.rect(), &mut crop).expect("a crop");
                 let started = std::time::Instant::now();
@@ -593,8 +627,9 @@ mod tests {
 
                 let bits = total as f64 * 8.0;
                 println!(
-                    "| {:9} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
+                    "| {:9} | {:6} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
                     format!("{w}x{h}"),
+                    chroma.name(),
                     quality,
                     total / 1024,
                     keyframe_bytes / 1024,
@@ -777,7 +812,7 @@ mod tests {
 
     #[test]
     fn a_conversion_refuses_a_crop_that_is_not_its_picture() {
-        let mut i420 = I420::new(64, 32);
+        let mut i420 = Yuv::new(64, 32, Chroma::Subsampled);
         i420.read_rgb(&flat(64, 32, [10, 20, 30])).expect("its own picture");
         assert!(
             i420.read_rgb(&flat(64, 31, [10, 20, 30])).is_err(),
@@ -787,6 +822,13 @@ mod tests {
         let (y, u, v) = i420.planes();
         assert_eq!((y.len(), u.len(), v.len()), (64 * 32, 32 * 16, 32 * 16));
         assert_eq!(i420.strides(), (64, 32, 32));
+        // I444: three full-size planes.
+        let mut i444 = Yuv::new(64, 32, Chroma::Full);
+        i444.read_rgb(&flat(64, 32, [10, 20, 30])).expect("its own picture");
+        assert!(i444.read_rgb(&flat(64, 31, [10, 20, 30])).is_err());
+        let (y, u, v) = i444.planes();
+        assert_eq!((y.len(), u.len(), v.len()), (64 * 32, 64 * 32, 64 * 32));
+        assert_eq!(i444.strides(), (64, 64, 64));
     }
 
     /// The conversion's arithmetic, at the points BT.601 studio swing pins exactly:
@@ -795,7 +837,8 @@ mod tests {
     /// code value, which is the rounding the integer coefficients are allowed.
     #[test]
     fn the_conversion_is_bt601_studio_swing() {
-        let mut i420 = I420::new(2, 2);
+        let mut i420 = Yuv::new(2, 2, Chroma::Subsampled);
+        let mut i444 = Yuv::new(2, 2, Chroma::Full);
         let close = |got: u8, want: u8, what: &str| {
             assert!(got.abs_diff(want) <= 1, "{what}: got {got}, wanted {want}");
         };
@@ -806,14 +849,17 @@ mod tests {
             ([255, 0, 0], 81, 90, 240, "red"),
             ([0, 0, 255], 41, 240, 110, "blue"),
         ] {
-            i420.read_rgb(&flat(2, 2, colour)).expect("a 2x2 picture");
-            let (y, u, v) = i420.planes();
-            close(y[0], y_want, name);
-            close(u[0], u_want, name);
-            close(v[0], v_want, name);
+            for yuv in [&mut i420, &mut i444] {
+                yuv.read_rgb(&flat(2, 2, colour)).expect("a 2x2 picture");
+                let (y, u, v) = yuv.planes();
+                close(y[0], y_want, name);
+                close(u[0], u_want, name);
+                close(v[0], v_want, name);
+            }
         }
-        // The chroma sample is the 2×2 average, not the top-left pixel: a checkerboard
-        // of full red and full blue meets in the middle.
+        // At 4:2:0 the chroma sample is the 2×2 average, not the top-left pixel: a
+        // checkerboard of full red and full blue meets in the middle. At 4:4:4 each
+        // pixel keeps its own.
         let mut quad = Vec::new();
         quad.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
         quad.extend_from_slice(&[0, 0, 255, 255, 0, 0]);
@@ -821,5 +867,11 @@ mod tests {
         let (_, u, v) = i420.planes();
         close(u[0], 165, "checkerboard U");
         close(v[0], 175, "checkerboard V");
+        i444.read_rgb(&quad).expect("a 2x2 picture");
+        let (_, u, v) = i444.planes();
+        close(u[0], 90, "red pixel U");
+        close(v[0], 240, "red pixel V");
+        close(u[1], 240, "blue pixel U");
+        close(v[1], 110, "blue pixel V");
     }
 }

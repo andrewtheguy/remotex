@@ -227,6 +227,51 @@ impl AudioCodec {
     }
 }
 
+/// How much colour a target's video streams carry per pixel, chosen per target
+/// because it is a picture-against-decoder trade and only the operator knows which
+/// browsers a target is watched from.
+///
+/// This is where the picture loss on a desktop stream actually is — not the
+/// quantizer. Measured 2026-09-01 on 1280×800 of rendered text, coloured on a dark
+/// terminal and black on white, encoded and decoded through libvpx: every 4:2:0
+/// quantizer from the dial's finest to mathematically lossless lands at the same
+/// 28.5 dB with a worst pixel 135 code values off, and so does the RGB→I420
+/// conversion with no codec behind it at all. A one-pixel coloured glyph stem
+/// shares its one colour sample with three background pixels and comes back at a
+/// quarter of its saturation, and nothing downstream can put it back. The same
+/// picture at 4:4:4 and the same quantizer measures 42.8 dB with a worst pixel 33
+/// off. `a_444_stream_keeps_the_colour_420_averages_away` in [`crate::vp9`] is the
+/// round trip that pins it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum Chroma {
+    /// 4:2:0 — one colour sample per 2×2 pixels, VP9 profile 0. The default, and
+    /// the one every VP9 decoder takes, hardware ones included.
+    #[default]
+    #[serde(rename = "420")]
+    Subsampled,
+    /// 4:4:4 — a colour sample per pixel, VP9 profile 1. On the picture above:
+    /// a keyframe a third larger, inter frames no larger, a third more encode
+    /// time, and coloured text that is the colour it was.
+    ///
+    /// The trade is the decoder. No hardware VP9 decoder takes profile 1, so
+    /// this always decodes in software — Chromium does (measured headless,
+    /// 2026-09-01), and a browser with no software VP9 at all, which is iOS and
+    /// iPadOS, refuses the stream by name at `VideoDecoder.configure`, the same
+    /// way it would refuse any configuration it lacks. Nothing falls back.
+    #[serde(rename = "444")]
+    Full,
+}
+
+impl Chroma {
+    /// How the config key spells it, for messages that name it back.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Subsampled => "420",
+            Self::Full => "444",
+        }
+    }
+}
+
 /// A target's audio keys as the encoder consumes them, resolved by
 /// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
 /// unit; the config speaks kbit/s because a person does.
@@ -362,8 +407,8 @@ pub enum MotionEncode {
     ///
     /// The quality is the dial rather than a quantizer: turning that into one is
     /// [`crate::vp9`]'s business, and it is the only module that should know what a
-    /// quantizer is.
-    Stream { quality: u8 },
+    /// quantizer is. The chroma is [`TargetConfig::render_chroma`], resolved.
+    Stream { quality: u8, chroma: Chroma },
 }
 
 /// The whole render dial as an engine sees it, and the one place the two ways this
@@ -409,6 +454,8 @@ pub enum RenderPlan {
         /// field of the same name. `None` keeps the congestion walk's historical
         /// shape: pressure-only, floored at 1.
         adaptive: Option<u8>,
+        /// [`TargetConfig::render_chroma`], resolved.
+        chroma: Chroma,
     },
 }
 
@@ -443,9 +490,17 @@ impl RenderPlan {
         fn floor(adaptive: Option<u8>) -> String {
             adaptive.map_or_else(String::new, |floor| format!(" · adaptive ≥{floor}"))
         }
+        // Named only when it is not the default: 4:2:0 is what every stream was
+        // before the key existed, and saying so on each card would be noise.
+        fn chroma(chroma: Chroma) -> &'static str {
+            match chroma {
+                Chroma::Subsampled => "",
+                Chroma::Full => " 4:4:4",
+            }
+        }
         match self {
-            RenderPlan::Video { quality, adaptive } => {
-                format!("video q{quality}{}", floor(*adaptive))
+            RenderPlan::Video { quality, adaptive, chroma: c } => {
+                format!("video q{quality}{}{}", chroma(*c), floor(*adaptive))
             }
             RenderPlan::Tiles { base, motion: None, adaptive, .. } => {
                 // No motion arm at all — plain `tiles`, whatever the base: whether
@@ -455,8 +510,8 @@ impl RenderPlan {
             RenderPlan::Tiles { base, motion: Some(motion), debug, adaptive } => {
                 let moving = match motion {
                     MotionEncode::Tile(codec) => tile(*codec),
-                    MotionEncode::Stream { quality } => {
-                        format!("stream q{quality}")
+                    MotionEncode::Stream { quality, chroma: c } => {
+                        format!("stream q{quality}{}", chroma(*c))
                     }
                 };
                 let debug = if *debug { " (debug outlines)" } else { "" };
@@ -698,6 +753,14 @@ pub struct TargetConfig {
     /// keep the true pixels, and a cleanup erases the outline it replaces.
     #[serde(default)]
     pub render_motion_debug: bool,
+    /// Chroma sampling of this target's video streams — `render_type = "video"`
+    /// and `render_motion_subtype = "stream"` alike; `None` reads as
+    /// [`Chroma::Subsampled`]. `Option` rather than a bare default so that
+    /// setting it on a target that streams nothing is refused at parse time
+    /// instead of accepted and left inert, the same rule as `audio_codec`
+    /// without `audio`.
+    #[serde(default)]
+    pub render_chroma: Option<Chroma>,
     /// Outline every tile the classifier sends as JPEG, in the pixels
     /// themselves, so which regions it reads as photographic is visible on the
     /// screen instead of inferred from how soft something looks. A QA aid for
@@ -801,8 +864,9 @@ impl TargetConfig {
         let adaptive = self
             .render_adaptive
             .then(|| self.render_adaptive_min.unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN));
+        let chroma = self.render_chroma.unwrap_or_default();
         if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_quality) {
-            return RenderPlan::Video { quality, adaptive };
+            return RenderPlan::Video { quality, adaptive, chroma };
         }
         let base = match (self.render_subtype, self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
@@ -814,7 +878,7 @@ impl TargetConfig {
         let motion = match (self.render_type, self.render_motion_quality) {
             (RenderType::Motion, Some(q)) => match self.motion_subtype() {
                 Some(MotionSubtype::Jpeg) => Some(MotionEncode::Tile(TileCodec::Jpeg(q))),
-                Some(MotionSubtype::Stream) => Some(MotionEncode::Stream { quality: q }),
+                Some(MotionSubtype::Stream) => Some(MotionEncode::Stream { quality: q, chroma }),
                 None => None,
             },
             _ => None,
@@ -1324,6 +1388,17 @@ impl ConfigFile {
                 target.height,
                 crate::video::MAX_LONG_SIDE,
                 crate::video::MAX_SHORT_SIDE
+            );
+            // The chroma key describes a video stream, and a target with none has
+            // nothing for it to describe — same rule as audio_codec without audio:
+            // refused rather than accepted and left inert, because the likely
+            // mistake behind it is a render_type that was never changed.
+            anyhow::ensure!(
+                target.render_chroma.is_none() || target.streams_video(),
+                "target {:?} sets render_chroma, which only a video stream has — give this \
+                 target render_type = \"video\" or render_motion_subtype = \"stream\", or \
+                 remove the key",
+                target.name
             );
             // Audio is RDP's alone, and refused elsewhere rather than ignored.
             // MS-RDPEA is the one audio channel this gateway speaks; RFB has no
@@ -2760,11 +2835,107 @@ mod tests {
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
                 base: TileCodec::Classify { quality: 60, debug: false },
-                motion: Some(MotionEncode::Stream { quality: 30 }),
+                motion: Some(MotionEncode::Stream { quality: 30, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None
             }
         );
+    }
+
+    /// The chroma key reaches both kinds of stream and defaults to what every
+    /// stream was before it existed.
+    #[test]
+    fn render_chroma_reaches_the_stream_and_defaults_to_420() {
+        let video = |extra: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "video"
+                render_quality = 100
+                {extra}
+                "#
+            ))
+            .unwrap()
+            .targets[0]
+                .render_plan()
+        };
+        assert_eq!(
+            video(""),
+            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
+        );
+        assert_eq!(
+            video("render_chroma = \"420\""),
+            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
+        );
+        assert_eq!(
+            video("render_chroma = \"444\""),
+            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Full }
+        );
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "stream"
+            render_motion_quality = 30
+            render_chroma = "444"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles {
+                base: TileCodec::Png,
+                motion: Some(MotionEncode::Stream { quality: 30, chroma: Chroma::Full }),
+                debug: false,
+                adaptive: None
+            }
+        );
+    }
+
+    /// A chroma for a target that streams nothing is refused, like a codec for
+    /// audio that was never turned on; and the key takes only the two samplings
+    /// VP9 profiles 0 and 1 are.
+    #[test]
+    fn render_chroma_without_a_stream_is_refused() {
+        for keys in [
+            "",
+            "render_subtype = \"jpeg\"\nrender_quality = 60",
+            "render_type = \"motion\"\nrender_motion_subtype = \"jpeg\"\nrender_motion_quality = 30",
+        ] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                {keys}
+                render_chroma = "444"
+                "#
+            ))
+            .unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("render_chroma"), "{keys:?}: {message}");
+            assert!(message.contains("video stream"), "{keys:?}: {message}");
+        }
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "video"
+            render_quality = 100
+            render_chroma = "422"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("422"), "{err:#}");
     }
 
     /// The outlines are the classifier's own debug aid, and resolve into the
@@ -2854,7 +3025,7 @@ mod tests {
             "#,
         )
         .expect("video with a quality");
-        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60, adaptive: None });
+        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled });
     }
 
     #[test]
@@ -3057,7 +3228,7 @@ mod tests {
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
                 base: TileCodec::Jpeg(60),
-                motion: Some(MotionEncode::Stream { quality: 10 }),
+                motion: Some(MotionEncode::Stream { quality: 10, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None
             }
@@ -3122,6 +3293,16 @@ mod tests {
                 "render_type = \"video\"\nrender_quality = 60",
                 "video q60",
             ),
+            (
+                "the whole desktop as one stream with every pixel's colour",
+                "render_type = \"video\"\nrender_quality = 60\nrender_chroma = \"444\"",
+                "video q60 4:4:4",
+            ),
+            (
+                "a stream per region with every pixel's colour",
+                "render_type = \"motion\"\nrender_motion_subtype = \"stream\"\nrender_motion_quality = 40\nrender_chroma = \"444\"",
+                "motion · base lossless png, moving stream q40 4:4:4",
+            ),
         ];
 
         let mut seen: Vec<String> = Vec::new();
@@ -3169,7 +3350,7 @@ mod tests {
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
-                motion: Some(MotionEncode::Stream { quality: 30 }),
+                motion: Some(MotionEncode::Stream { quality: 30, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None
             }
@@ -4055,7 +4236,7 @@ mod tests {
         let plan = cfg.targets[0].render_plan();
         assert_eq!(
             plan,
-            RenderPlan::Video { quality: 80, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN) }
+            RenderPlan::Video { quality: 80, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }
         );
         assert_eq!(plan.describe(), "video q80 · adaptive ≥20");
 
@@ -4094,7 +4275,7 @@ mod tests {
             .expect("plain video");
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan::Video { quality: 80, adaptive: None }
+            RenderPlan::Video { quality: 80, adaptive: None, chroma: Chroma::Subsampled }
         );
     }
 

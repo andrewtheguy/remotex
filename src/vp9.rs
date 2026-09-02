@@ -4,8 +4,9 @@
 //! which is exactly the property that gets it into every browser build: a Chromium built
 //! without proprietary codecs still decodes it.
 //!
-//! What is not libvpx's — the mirror, the coded rectangle, the RGB→I420 conversion, the
-//! 1–100 dial — is [`crate::video`]'s. This module is only libvpx.
+//! What is not libvpx's — the mirror, the coded rectangle, the RGB→YUV conversion, the
+//! 1–100 dial — is [`crate::video`]'s, and the chroma sampling is the config's
+//! ([`Chroma`]). This module is only libvpx.
 //!
 //! Two things about libvpx's shape are worth knowing before reading:
 //!
@@ -23,9 +24,10 @@ use std::os::raw::{c_int, c_ulong};
 
 use vpx_sys as vpx;
 
+use crate::config::Chroma;
 use crate::tiles::Rect;
 use crate::video::{
-    AccessUnit, I420, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, coded_rect, outline, threads_for,
+    AccessUnit, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, Yuv, coded_rect, outline, threads_for,
 };
 
 /// Turn a libvpx return code into an `anyhow::Error` naming the call and libvpx's own explanation.
@@ -124,8 +126,9 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 
 /// The WebCodecs codec string for a `w`×`h` VP9 stream: `vp09.<profile>.<level>.<depth>`.
 ///
-/// Profile 0 and 8-bit, because that is what this encoder produces — I420 chroma at eight bits —
-/// and the level comes from `LEVELS`. `None` for a picture no VP9 level covers, which
+/// Eight-bit, because that is what this encoder produces, and the profile is the chroma's:
+/// VP9 profile 0 is 4:2:0 and profile 1 is 4:4:4, and a decoder is asked for the one the
+/// bitstream will be. The level comes from `LEVELS`. `None` for a picture no VP9 level covers, which
 /// [`crate::video::coded_rect`] has already refused long before this is reached; it is `Option`
 /// rather than a panic because this runs on the session's own path and the whole module's premise
 /// is that nothing here aborts the process.
@@ -133,7 +136,11 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// This is what `ServerMsg::VideoFormat` carries, and it is derived here rather than in the
 /// client because VP9 has no in-band parameter sets at all: there is nothing in the bitstream for
 /// a client to read a codec string out of.
-pub fn codec_string(w: u16, h: u16) -> Option<String> {
+pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
+    let profile = match chroma {
+        Chroma::Subsampled => "00",
+        Chroma::Full => "01",
+    };
     let size = u32::from(w) * u32::from(h);
     let rate = u64::from(size) * NOMINAL_FPS;
     let breadth = w.max(h);
@@ -143,7 +150,7 @@ pub fn codec_string(w: u16, h: u16) -> Option<String> {
             rate <= *max_rate && size <= *max_size && breadth <= *max_breadth
         })
         .copied()?;
-    Some(format!("vp09.00.{level:02}.08"))
+    Some(format!("vp09.{profile}.{level:02}.08"))
 }
 
 /// One VP9 stream over a fixed rectangle of a [`Mirror`].
@@ -166,7 +173,7 @@ pub struct Stream {
     /// The picture actually encoded: [`Self::rect`] grown to even sides.
     coded: Rect,
     /// The conversion in front of the encoder, reused across frames.
-    yuv: I420,
+    yuv: Yuv,
     /// [`Self::coded`] cropped out of the mirror, reused for the same reason.
     scratch: Vec<u8>,
     /// The 1–100 dial in force, which [`Self::set_quality`] moves and the totals report.
@@ -183,12 +190,13 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// A stream over `rect` of a mirror whose coded size is `mirror`, at `quality` (1–100).
+    /// A stream over `rect` of a mirror whose coded size is `mirror`, at `quality` (1–100)
+    /// and `chroma`.
     ///
     /// The coded rectangle, and the refusal of a picture too large for it, are
     /// [`coded_rect`]'s. VP9 does not need even sides and is held to them anyway — see the note
     /// there.
-    pub fn new(rect: Rect, mirror: (u16, u16), quality: u8) -> anyhow::Result<Self> {
+    pub fn new(rect: Rect, mirror: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
         let coded = coded_rect(rect, mirror)?;
         let q = q_for(quality);
 
@@ -207,6 +215,13 @@ impl Stream {
 
         cfg.g_w = u32::from(coded.w());
         cfg.g_h = u32::from(coded.h());
+        // The profile is the chroma sampling and nothing else at eight bits: 0 is 4:2:0,
+        // 1 is 4:4:4. It has to match the image format handed to `vpx_img_wrap` below, and
+        // `codec_string` tells the decoder the same number.
+        cfg.g_profile = match chroma {
+            Chroma::Subsampled => 0,
+            Chroma::Full => 1,
+        };
         // Milliseconds, so a pts is elapsed wall-clock rather than a frame index: the remote
         // decides when a frame happens, and a counter would tell the encoder they all arrived
         // on schedule.
@@ -280,11 +295,11 @@ impl Stream {
             coded,
             // Even by construction — `coded_rect`'s theorem — which is what keeps the conversion
             // from asserting on an odd chroma plane.
-            yuv: I420::new(coded.w(), coded.h()),
+            yuv: Yuv::new(coded.w(), coded.h(), chroma),
             scratch: Vec::new(),
             quality: quality.clamp(QUALITY_MIN, QUALITY_MAX),
             keyframe_owed: false,
-            decode: codec_string(coded.w(), coded.h()),
+            decode: codec_string(coded.w(), coded.h(), chroma),
             started: std::time::Instant::now(),
         };
 
@@ -304,6 +319,22 @@ impl Stream {
                 "tune_content",
             )?;
             stream.control(vpx::vp8e_enc_control_id_VP8E_SET_CPUUSED, CPU_USED, "cpuused")?;
+            // Say in the bitstream what the conversion did: BT.601 matrix, studio swing.
+            // libvpx writes *unknown* unless told, and a decoder given unknown guesses —
+            // Chromium picks BT.709 for anything HD — so without these two controls a
+            // 1080p desktop is converted with one matrix and displayed with another,
+            // and every saturated colour lands a little off. The decoder reads this off
+            // the keyframe header; nothing on the wire has to carry it.
+            stream.control(
+                vpx::vp8e_enc_control_id_VP9E_SET_COLOR_SPACE,
+                vpx::vpx_color_space_VPX_CS_BT_601 as c_int,
+                "color_space",
+            )?;
+            stream.control(
+                vpx::vp8e_enc_control_id_VP9E_SET_COLOR_RANGE,
+                vpx::vpx_color_range_VPX_CR_STUDIO_RANGE as c_int,
+                "color_range",
+            )?;
             // Off: adaptive quantization would move the quantizer off the dial that was just
             // pinned.
             stream.control(vpx::vp8e_enc_control_id_VP9E_SET_AQ_MODE, 0, "aq_mode")?;
@@ -325,9 +356,13 @@ impl Stream {
             // pointer that is never dereferenced is libvpx's own idiom for "compute the layout,
             // allocate nothing" — ffmpeg passes a literal `1` — and it is why `vpx_img_free` must
             // never be called on this image: the planes it ends up pointing at belong to `yuv`.
+            let fmt = match chroma {
+                Chroma::Subsampled => vpx::vpx_img_fmt_VPX_IMG_FMT_I420,
+                Chroma::Full => vpx::vpx_img_fmt_VPX_IMG_FMT_I444,
+            };
             let wrapped = vpx::vpx_img_wrap(
                 &mut stream.img,
-                vpx::vpx_img_fmt_VPX_IMG_FMT_I420,
+                fmt,
                 cfg.g_w,
                 cfg.g_h,
                 1,
@@ -556,8 +591,116 @@ mod tests {
     /// A mirror and one stream over the whole of it, which is the `video` shape.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.rect(), mirror.coded(), quality).expect("a stream");
+        let stream = Stream::new(mirror.rect(), mirror.coded(), quality, Chroma::Subsampled)
+            .expect("a stream");
         (mirror, stream)
+    }
+
+    /// One decoded picture: the planes as tight rows, and what the header said about them.
+    struct Decoded {
+        y: Vec<u8>,
+        u: Vec<u8>,
+        v: Vec<u8>,
+        /// Width and height of a chroma plane.
+        chroma: (usize, usize),
+        cs: vpx::vpx_color_space_t,
+        range: vpx::vpx_color_range_t,
+    }
+
+    impl Decoded {
+        /// The pixel at `(x, y)` as RGB, undoing the BT.601 studio swing with the chroma
+        /// sample nearest to the pixel — a decoder's plainest reconstruction.
+        fn rgb(&self, w: usize, x: usize, y: usize) -> [u8; 3] {
+            let (cx, cy) = if self.chroma.0 == w { (x, y) } else { (x / 2, y / 2) };
+            let yy = 1.164_383 * (f32::from(self.y[y * w + x]) - 16.0);
+            let u = f32::from(self.u[cy * self.chroma.0 + cx]) - 128.0;
+            let v = f32::from(self.v[cy * self.chroma.0 + cx]) - 128.0;
+            let clamp = |c: f32| c.round().clamp(0.0, 255.0) as u8;
+            [
+                clamp(yy + 1.596_027 * v),
+                clamp(yy - 0.391_762 * u - 0.812_968 * v),
+                clamp(yy + 2.017_232 * u),
+            ]
+        }
+    }
+
+    /// The other half of the archive, so a test's claim is a round trip and not a byte
+    /// count. One decoder per call: every unit these tests decode is a keyframe.
+    fn decode(unit: &AccessUnit) -> Decoded {
+        // SAFETY: the same contract as the encoder's calls — zeroed context written through
+        // by `dec_init_ver`, `unit.data` outlives the decode, and the frame libvpx hands back
+        // is copied out before the context is destroyed.
+        unsafe {
+            let iface = vpx::vpx_codec_vp9_dx();
+            assert!(!iface.is_null(), "this libvpx has no VP9 decoder");
+            let cfg = vpx::vpx_codec_dec_cfg_t { threads: 1, w: 0, h: 0 };
+            let mut ctx: vpx::vpx_codec_ctx_t = std::mem::zeroed();
+            vpx!(
+                vpx::vpx_codec_dec_init_ver(
+                    &mut ctx,
+                    iface,
+                    &cfg,
+                    0,
+                    vpx::VPX_DECODER_ABI_VERSION as c_int
+                ),
+                "dec_init_ver"
+            )
+            .expect("a decoder");
+            vpx!(
+                vpx::vpx_codec_decode(
+                    &mut ctx,
+                    unit.data.as_ptr(),
+                    unit.data.len() as std::os::raw::c_uint,
+                    std::ptr::null_mut(),
+                    0
+                ),
+                "decode"
+            )
+            .expect("a decode");
+            let mut iter: vpx::vpx_codec_iter_t = std::ptr::null();
+            let img = vpx::vpx_codec_get_frame(&mut ctx, &mut iter);
+            assert!(!img.is_null(), "the unit decoded to no frame");
+            let img = &*img;
+            let (w, h) = (img.d_w as usize, img.d_h as usize);
+            let (cw, ch) = (
+                (w + img.x_chroma_shift as usize) >> img.x_chroma_shift,
+                (h + img.y_chroma_shift as usize) >> img.y_chroma_shift,
+            );
+            let plane = |i: usize, w: usize, h: usize| -> Vec<u8> {
+                let stride = img.stride[i] as usize;
+                (0..h)
+                    .flat_map(|row| {
+                        std::slice::from_raw_parts(img.planes[i].add(row * stride), w).to_vec()
+                    })
+                    .collect()
+            };
+            let decoded = Decoded {
+                y: plane(0, w, h),
+                u: plane(1, cw, ch),
+                v: plane(2, cw, ch),
+                chroma: (cw, ch),
+                cs: img.cs,
+                range: img.range,
+            };
+            vpx::vpx_codec_destroy(&mut ctx);
+            decoded
+        }
+    }
+
+    /// A dark terminal with one-pixel coloured glyph stems: the picture 4:2:0 cannot
+    /// carry. Every stem is at an odd column and shares its 2×2 chroma group with three
+    /// pixels of background.
+    fn stems(w: u16, h: u16) -> (Vec<u8>, Vec<(usize, usize)>) {
+        let (w, h) = (usize::from(w), usize::from(h));
+        let mut rgb = flat(w as u16, h as u16, [30, 30, 30]);
+        let mut at = Vec::new();
+        for y in (0..h).filter(|y| y % 2 == 0) {
+            for x in (1..w).step_by(4) {
+                rgb[(y * w + x) * 3..][..3].copy_from_slice(&[255, 121, 198]);
+                at.push((x, y));
+            }
+        }
+        (rgb, at)
     }
 
     /// Blit a moving block and encode, so there is something for the quantizer to be coarse
@@ -665,6 +808,7 @@ mod tests {
     /// announcing a higher one narrows the set of decoders that will accept the stream.
     #[test]
     fn the_codec_string_names_the_lowest_level_that_fits() {
+        let codec_string = |w, h| super::codec_string(w, h, Chroma::Subsampled);
         // 1280x800 at 30: 1_024_000 samples. Level 3.1 allows only 983_040 of them, so this is
         // level 4 — the *picture size* binds here, not the sample rate, which at 30_720_000 is
         // well inside 3.1's 36_864_000. That is the trap in this table: the two limits do not
@@ -684,17 +828,82 @@ mod tests {
         // Small, but not level 1: 76_800 samples is already past level 1.1's 73_728. Level 1 is
         // 256x144, which no desktop is.
         assert_eq!(codec_string(320, 240).as_deref(), Some("vp09.00.20.08"));
-        // Profile and bit depth are fixed: this encoder is I420 at eight bits, whatever the size.
+        // The bit depth is fixed — eight, whatever the size — and the profile is the chroma's:
+        // 4:4:4 is profile 1 at the same level, since a level is about luma samples.
         for (w, h) in [(320u16, 240u16), (1920, 1080), (3840, 2160), (3840, 2400)] {
             let string = codec_string(w, h).expect("a level for a real desktop");
             assert!(string.starts_with("vp09.00."), "not profile 0: {string}");
             assert!(string.ends_with(".08"), "not 8-bit: {string}");
+            let full = super::codec_string(w, h, Chroma::Full).expect("a level for a real desktop");
+            assert_eq!(full, string.replacen("vp09.00.", "vp09.01.", 1), "{w}x{h}");
+        }
+    }
+
+    /// **Where the picture loss on a desktop stream is.** At the dial's finest quantizer
+    /// a 4:2:0 stream returns a one-pixel coloured glyph stem at a fraction of its colour,
+    /// because the stem's one chroma sample is an average with three background pixels
+    /// — and a 4:4:4 stream returns it as it was. The quantizer is the same in both, so
+    /// the difference is the sampling and nothing else. Measured across a whole rendered
+    /// desktop on 2026-09-01: 28.5 dB against 42.8, and lossless 4:2:0 no better than
+    /// its finest quantizer — see `config::Chroma`.
+    #[test]
+    fn a_444_stream_keeps_the_colour_420_averages_away() {
+        let (rgb, at) = stems(64, 64);
+        let worst = |chroma: Chroma| -> u8 {
+            let mut mirror = Mirror::new(64, 64).expect("a mirror");
+            let mut stream = Stream::new(mirror.rect(), mirror.coded(), QUALITY_MAX, chroma)
+                .expect("a stream");
+            mirror.blit(rect(0, 0, 64, 64), &rgb).expect("a full-screen blit");
+            let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+            let decoded = decode(&unit);
+            at.iter()
+                .map(|&(x, y)| {
+                    let got = decoded.rgb(64, x, y);
+                    got.iter().zip([255u8, 121, 198]).map(|(a, b)| a.abs_diff(b)).max().unwrap()
+                })
+                .max()
+                .unwrap()
+        };
+        let (subsampled, full) = (worst(Chroma::Subsampled), worst(Chroma::Full));
+        assert!(
+            subsampled >= 40,
+            "4:2:0 returned the stems within {subsampled} code values — the picture is not \
+             the one this test is about"
+        );
+        assert!(
+            full <= 24,
+            "4:4:4 returned a stem pixel {full} code values off at the finest quantizer"
+        );
+        assert!(full * 2 < subsampled, "4:4:4 ({full}) is not clearly better than 4:2:0 ({subsampled})");
+    }
+
+    /// The keyframe header says which matrix and range the pixels were converted with, so
+    /// a decoder does not guess — and guesses BT.709 for an HD picture, which is not
+    /// what the conversion did.
+    #[test]
+    fn the_bitstream_declares_bt601_studio_swing() {
+        for chroma in [Chroma::Subsampled, Chroma::Full] {
+            let mut mirror = Mirror::new(64, 64).expect("a mirror");
+            let mut stream =
+                Stream::new(mirror.rect(), mirror.coded(), 60, chroma).expect("a stream");
+            mirror.blit(rect(0, 0, 64, 64), &flat(64, 64, [200, 30, 30])).expect("a blit");
+            let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+            let decoded = decode(&unit);
+            assert_eq!(decoded.cs, vpx::vpx_color_space_VPX_CS_BT_601, "{chroma:?}");
+            assert_eq!(decoded.range, vpx::vpx_color_range_VPX_CR_STUDIO_RANGE, "{chroma:?}");
+            let expected = match chroma {
+                Chroma::Subsampled => (32, 32),
+                Chroma::Full => (64, 64),
+            };
+            assert_eq!(decoded.chroma, expected, "{chroma:?}: the profile did not reach the bitstream");
         }
     }
 
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
-        let Err(refused) = Stream::new(rect(0, 0, 5120, 2880), (5120, 2880), 60) else {
+        let Err(refused) =
+            Stream::new(rect(0, 0, 5120, 2880), (5120, 2880), 60, Chroma::Subsampled)
+        else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");
@@ -710,8 +919,8 @@ mod tests {
         let mut mirror = Mirror::new(640, 128).expect("a mirror");
         let left = Rect { left: 0, top: 0, right: 319, bottom: 127 };
         let right = Rect { left: 320, top: 0, right: 639, bottom: 127 };
-        let mut a = Stream::new(left, mirror.coded(), 60).expect("a stream");
-        let mut b = Stream::new(right, mirror.coded(), 60).expect("a stream");
+        let mut a = Stream::new(left, mirror.coded(), 60, Chroma::Subsampled).expect("a stream");
+        let mut b = Stream::new(right, mirror.coded(), 60, Chroma::Subsampled).expect("a stream");
 
         mirror.blit(left, &flat(320, 128, [200, 30, 30])).expect("a blit");
         mirror.blit(right, &flat(320, 128, [30, 30, 200])).expect("a blit");
