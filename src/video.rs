@@ -554,7 +554,7 @@ mod tests {
     /// wrong thing and says so convincingly.** The encoder is C and is optimized
     /// whatever this profile is: libvpx is compiled `-O3` once, into the archive
     /// `libvpx-prebuilt` publishes, and nothing a consumer does can touch it. The
-    /// conversion is *Rust* — [`I420::read_rgb`] — so it is compiled with **this**
+    /// conversion is *Rust* — [`Yuv::read_rgb`] — so it is compiled with **this**
     /// crate's profile, and at
     /// `opt-level = 0` it is per-pixel arithmetic with bounds checks and no vectorization.
     /// Measured: 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
