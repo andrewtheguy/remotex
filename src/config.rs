@@ -570,11 +570,16 @@ pub struct TargetConfig {
     pub port: u16,
     /// Username. Required by RDP, and by a `vnc` target of either Apple subtype,
     /// where it is a *macOS account* and [`Self::password`] is that account's —
-    /// not the Screen Sharing password. A plain `vnc` target has no use for
-    /// either and is refused both, because RFB `VncAuth` cannot carry a name.
+    /// not the Screen Sharing password. On a plain `vnc` target it is the
+    /// account a server checks through RealVNC's RSA-AES security types
+    /// (wayvnc's `enable_auth` username, a RealVNC system account — see
+    /// [`crate::vnc_rsa_aes`]); RFB `VncAuth` cannot carry a name, so a plain
+    /// target that sets it must set [`Self::password`] with it.
     #[serde(default)]
     pub username: String,
-    /// Password for [`Self::username`] (never leaves the server).
+    /// Password for [`Self::username`] (never leaves the server). On a plain
+    /// `vnc` target it may stand alone, for an RSA-AES server that asks for a
+    /// password and no name.
     #[serde(default)]
     pub password: String,
     /// A VNC server's own password — RFB `VncAuth`, which proves knowledge of a
@@ -584,9 +589,10 @@ pub struct TargetConfig {
     /// Screen Sharing password, and it is answered with a login window of the
     /// connection's own (see [`crate::vnc`]).
     ///
-    /// The credential of a plain `vnc` target, and the only one such a server
-    /// takes. Rejected on other protocols and on either Apple [`Subtype`] — see
-    /// [`ConfigFile::parse`].
+    /// A plain `vnc` target's credential for a server offering `VncAuth`; it
+    /// may sit beside [`Self::password`], and the server's offer decides which
+    /// is answered. Rejected on other protocols and on either Apple
+    /// [`Subtype`] — see [`ConfigFile::parse`].
     #[serde(default)]
     pub vnc_password: String,
     /// Optional domain.
@@ -1540,11 +1546,12 @@ impl ConfigFile {
                     target.name
                 );
             }
-            // Which credentials a VNC target may carry is the subtype's to say,
-            // and the two sets do not overlap: an Apple subtype authenticates an
-            // account to a Mac, plain VncAuth proves a secret the machine holds.
-            // Mixing them is how a password ends up authenticating nobody, so each
-            // is refused where it cannot be used rather than quietly ignored.
+            // Which credentials a VNC target may carry is the subtype's to say:
+            // an Apple subtype authenticates an account to a Mac and nothing else,
+            // while a plain target carries an account for RSA-AES, the machine's
+            // secret for VncAuth, or both for the server's offer to decide. A
+            // credential is refused where it cannot be used rather than quietly
+            // ignored, which is how a password ends up authenticating nobody.
             match (target.protocol, target.subtype) {
                 (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
                     let name = subtype.name();
@@ -1574,11 +1581,10 @@ impl ConfigFile {
                 }
                 (Protocol::Vnc, None) => {
                     anyhow::ensure!(
-                        target.username.is_empty() && target.password.is_empty(),
-                        "target {:?} is protocol \"vnc\" and sets username or password, which \
-                         plain VncAuth cannot carry — use vnc_password for the VNC server's \
-                         own password, or subtype = \"ard\" if this is a Mac and those are an \
-                         account's",
+                        target.username.is_empty() || !target.password.is_empty(),
+                        "target {:?} is protocol \"vnc\" and sets username without password — \
+                         RSA-AES carries the two together; a VNC server's own password goes \
+                         in vnc_password, and a Mac account under subtype = \"ard\"",
                         target.name
                     );
                 }
@@ -3814,18 +3820,28 @@ mod tests {
         )
     }
 
-    /// The two VNC credentials are different credentials, and the subtype — not
-    /// which fields happen to be filled — says which one a target carries.
-    /// Neither is silently ignored where it cannot be used: an account password
-    /// answered as VncAuth authenticates nobody, which on a Mac shares a login
-    /// window instead of the screen.
+    /// A plain `vnc` target carries an account for RSA-AES, the machine's
+    /// secret for VncAuth, or both; what it cannot carry is half an account,
+    /// because no security type takes a name without a password.
     #[test]
-    fn each_vnc_credential_is_refused_where_it_cannot_be_used() {
-        let err = ConfigFile::parse(&vnc_toml(r#"password = "hunter2""#)).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("vnc_password") && msg.contains(r#"subtype = "ard""#), "{msg}");
+    fn a_plain_vnc_target_takes_an_account_or_the_servers_own_password() {
         let err = ConfigFile::parse(&vnc_toml(r#"username = "andrew""#)).unwrap_err();
-        assert!(format!("{err:#}").contains("plain VncAuth cannot carry"), "{err:#}");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("username without password") && msg.contains("RSA-AES"), "{msg}");
+
+        let account = ConfigFile::parse(&vnc_toml("username = \"andrew\"\npassword = \"hunter2\""))
+            .unwrap();
+        assert_eq!(account.targets[0].username, "andrew");
+        assert_eq!(account.targets[0].password, "hunter2");
+        assert!(account.targets[0].subtype.is_none());
+        // A password alone is an RSA-AES server that asks for no name.
+        assert!(ConfigFile::parse(&vnc_toml(r#"password = "hunter2""#)).is_ok());
+        // Both credentials at once leave the choice to the server's offer.
+        let both = ConfigFile::parse(&vnc_toml(
+            "username = \"andrew\"\npassword = \"hunter2\"\nvnc_password = \"secret\"",
+        ))
+        .unwrap();
+        assert_eq!(both.targets[0].vnc_password, "secret");
 
         // A plain target takes the server's own password, and nothing at all is
         // still a target: a VNC server may need no credential whatsoever.

@@ -1077,13 +1077,19 @@ decodes whichever encoding a server picks into the packed RGB888 the tile path
 takes, so nothing above it knows which was chosen.
 
 **RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
-(`subtype = "ard"`). It supports None,
-classic VNC authentication, and Apple's Diffie-Hellman security, plus the Cursor
-pseudo-encoding. `ard` selects Apple's authentication and physical-display
-metadata and requires the macOS account username and password; plain VNC uses
-`vnc_password`. The explicit
-subtype prevents an anonymous macOS Screen Sharing connection from landing at a
-separate login-window session rather than the user's screen.
+(`subtype = "ard"`). It supports None, classic VNC authentication, RealVNC's
+RSA-AES security types (5 and 129), and Apple's Diffie-Hellman security, plus the
+Cursor pseudo-encoding. `ard` selects Apple's authentication and physical-display
+metadata and requires the macOS account username and password. Plain VNC carries
+`vnc_password` for classic `VncAuth`, and `username` and `password` for RSA-AES —
+the account a server such as wayvnc (`enable_auth`) or RealVNC checks — taking
+whichever the server offers and the encrypted one when it offers both.
+`src/vnc_rsa_aes.rs` is that exchange and the AES-EAX framed transport every byte
+of such a session then rides in, exposed to the engine the way Apple's record
+layer is: an `AsyncRead` and a per-message sink. The server's RSA key is logged
+by fingerprint, not verified. The explicit subtype prevents an anonymous macOS
+Screen Sharing connection from landing at a separate login-window session rather
+than the user's screen.
 
 Generic `vnc` advertises the standard lossless encodings in preference order —
 CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first it
