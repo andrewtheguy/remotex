@@ -1021,12 +1021,12 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libopus-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260731073637-74aab76#74aab76ebd6dc1ca666afa53e016e3926dadbaec"
+source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260902165321-488bdb1#488bdb12e9bec84b2caf24cd570128fa787299b5"
 
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260812223526-982acae#982acae3d93341f307e3d60d23d8e895c91ba94e"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260902165356-5023c95#5023c9584fbcbb1aaab14de2aa117d501d4951ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1167,7 +1167,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "opus-prebuilt"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260731073637-74aab76#74aab76ebd6dc1ca666afa53e016e3926dadbaec"
+source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260902165321-488bdb1#488bdb12e9bec84b2caf24cd570128fa787299b5"
 dependencies = [
  "libopus-prebuilt-sys",
 ]

@@ -78,7 +78,7 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Encoder and decoder are both in the archive; this gateway only encodes. libvpx
 # asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
 # plain `?` path under `panic = "abort"`.
-vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260812223526-982acae" }
+vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260902165356-5023c95" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
@@ -88,7 +88,7 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # no C build on this path any more, and nothing links a system `libopus.dylib`, so
 # the binary is self-contained on every runner without any env coaxing. The lib is
 # still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731073637-74aab76" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260902165321-488bdb1" }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
