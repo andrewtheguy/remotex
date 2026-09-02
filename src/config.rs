@@ -1396,8 +1396,8 @@ impl ConfigFile {
             anyhow::ensure!(
                 target.render_chroma.is_none() || target.streams_video(),
                 "target {:?} sets render_chroma, which only a video stream has — give this \
-                 target render_type = \"video\" or render_motion_subtype = \"stream\", or \
-                 remove the key",
+                 target render_type = \"video\", or render_type = \"motion\" with \
+                 render_motion_subtype = \"stream\", or remove the key",
                 target.name
             );
             // Audio is RDP's alone, and refused elsewhere rather than ignored.

@@ -124,11 +124,18 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
     (62, 4_706_009_088, 35_651_584, 16_832),
 ];
 
-/// The WebCodecs codec string for a `w`×`h` VP9 stream: `vp09.<profile>.<level>.<depth>`.
+/// The WebCodecs codec string for a `w`×`h` VP9 stream, every field of it:
+/// `vp09.<profile>.<level>.<depth>.<chroma>.<primaries>.<transfer>.<matrix>.<range>`.
 ///
 /// Eight-bit, because that is what this encoder produces, and the profile is the chroma's:
 /// VP9 profile 0 is 4:2:0 and profile 1 is 4:4:4, and a decoder is asked for the one the
-/// bitstream will be. The level comes from `LEVELS`. `None` for a picture no VP9 level covers, which
+/// bitstream will be. The optional fields are spelled out rather than left to their
+/// defaults because the defaults are wrong for this stream on both counts: an omitted
+/// chroma field means 4:2:0, which Chromium reads as 4:2:2 on a profile 1 string since
+/// 4:2:0 is not a profile 1 picture, and omitted colour fields mean BT.709 where the
+/// keyframe header says BT.601 (SMPTE 170M primaries, transfer and matrix — code 6 each,
+/// what Chromium's own VP9 parser maps that header flag to) at studio swing. The level
+/// comes from `LEVELS`. `None` for a picture no VP9 level covers, which
 /// [`crate::video::coded_rect`] has already refused long before this is reached; it is `Option`
 /// rather than a panic because this runs on the session's own path and the whole module's premise
 /// is that nothing here aborts the process.
@@ -137,9 +144,9 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// client because VP9 has no in-band parameter sets at all: there is nothing in the bitstream for
 /// a client to read a codec string out of.
 pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
-    let profile = match chroma {
-        Chroma::Subsampled => "00",
-        Chroma::Full => "01",
+    let (profile, sampling) = match chroma {
+        Chroma::Subsampled => ("00", "01"),
+        Chroma::Full => ("01", "03"),
     };
     let size = u32::from(w) * u32::from(h);
     let rate = u64::from(size) * NOMINAL_FPS;
@@ -150,7 +157,7 @@ pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
             rate <= *max_rate && size <= *max_size && breadth <= *max_breadth
         })
         .copied()?;
-    Some(format!("vp09.{profile}.{level:02}.08"))
+    Some(format!("vp09.{profile}.{level:02}.08.{sampling}.06.06.06.00"))
 }
 
 /// One VP9 stream over a fixed rectangle of a [`Mirror`].
@@ -814,28 +821,36 @@ mod tests {
         // well inside 3.1's 36_864_000. That is the trap in this table: the two limits do not
         // move together, and a level chosen from the frame rate alone is wrong for the default
         // desktop size in this gateway's own config.
-        assert_eq!(codec_string(1280, 800).as_deref(), Some("vp09.00.40.08"));
+        assert_eq!(codec_string(1280, 800).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
         // 1920x1080: 2_073_600 samples, inside level 4's picture size of 2_228_224, and
         // 62_208_000 per second inside its 83_558_400.
-        assert_eq!(codec_string(1920, 1080).as_deref(), Some("vp09.00.40.08"));
+        assert_eq!(codec_string(1920, 1080).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
         // 3840x2160: 8_294_400 samples — past 4.1's picture size, inside 5.0's 8_912_896 — and
         // 248_832_000 per second, inside 5.0's 311_951_360. Level 5.0, not the 5.1 a guess gives.
-        assert_eq!(codec_string(3840, 2160).as_deref(), Some("vp09.00.50.08"));
+        assert_eq!(codec_string(3840, 2160).as_deref(), Some("vp09.00.50.08.01.06.06.06.00"));
         // 3840x2400: 9_216_000 samples, past every level 5's 8_912_896 picture size by the
         // 16:10 panel's extra 240 rows — level 6.0, the first that holds it. The ceiling in
         // `video.rs` admits this picture, so the string has to exist for it.
-        assert_eq!(codec_string(3840, 2400).as_deref(), Some("vp09.00.60.08"));
+        assert_eq!(codec_string(3840, 2400).as_deref(), Some("vp09.00.60.08.01.06.06.06.00"));
         // Small, but not level 1: 76_800 samples is already past level 1.1's 73_728. Level 1 is
         // 256x144, which no desktop is.
-        assert_eq!(codec_string(320, 240).as_deref(), Some("vp09.00.20.08"));
-        // The bit depth is fixed — eight, whatever the size — and the profile is the chroma's:
-        // 4:4:4 is profile 1 at the same level, since a level is about luma samples.
+        assert_eq!(codec_string(320, 240).as_deref(), Some("vp09.00.20.08.01.06.06.06.00"));
+        // The bit depth is fixed — eight, whatever the size — and the profile and chroma
+        // field are the chroma's: 4:4:4 is profile 1 with sampling 03 at the same level,
+        // since a level is about luma samples. The colour fields never move: BT.601 at
+        // studio swing is what every keyframe header declares, and a string that left them
+        // out would be read as BT.709.
         for (w, h) in [(320u16, 240u16), (1920, 1080), (3840, 2160), (3840, 2400)] {
             let string = codec_string(w, h).expect("a level for a real desktop");
             assert!(string.starts_with("vp09.00."), "not profile 0: {string}");
-            assert!(string.ends_with(".08"), "not 8-bit: {string}");
+            assert!(string.ends_with(".08.01.06.06.06.00"), "not 8-bit 4:2:0 BT.601: {string}");
             let full = super::codec_string(w, h, Chroma::Full).expect("a level for a real desktop");
-            assert_eq!(full, string.replacen("vp09.00.", "vp09.01.", 1), "{w}x{h}");
+            assert!(full.ends_with(".08.03.06.06.06.00"), "not 8-bit 4:4:4 BT.601: {full}");
+            assert_eq!(
+                full,
+                string.replacen("vp09.00.", "vp09.01.", 1).replacen(".08.01.", ".08.03.", 1),
+                "{w}x{h}"
+            );
         }
     }
 
