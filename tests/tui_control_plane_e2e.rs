@@ -1,6 +1,8 @@
 //! The native control plane as one process graph: two real gateway children,
 //! private Unix sockets, and one browser-facing TCP port routed by subdomain.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::net::Ipv4Addr;

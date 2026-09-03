@@ -467,7 +467,10 @@ impl Stream {
 
         let (y, u, v) = self.yuv.planes();
         let (sy, su, sv) = self.yuv.strides();
-        let flags = if self.keyframe_owed { i64::from(vpx::VPX_EFLAG_FORCE_KF) } else { 0 };
+        // `vpx_enc_frame_flags_t` is a C `long`: 64 bits on Linux and macOS, 32 on Windows.
+        // A cast rather than `From`, because no `From<u32>` exists for the 32-bit case.
+        let flags: vpx::vpx_enc_frame_flags_t =
+            if self.keyframe_owed { vpx::VPX_EFLAG_FORCE_KF as vpx::vpx_enc_frame_flags_t } else { 0 };
         let pts = self.started.elapsed().as_millis() as i64;
 
         // SAFETY: the three planes outlive this call — they belong to `self.yuv`, which nothing

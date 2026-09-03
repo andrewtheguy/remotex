@@ -9,6 +9,8 @@
 //!
 //! No engine ever connects, so the targets point at a port nothing listens on.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::io::{BufRead as _, BufReader};

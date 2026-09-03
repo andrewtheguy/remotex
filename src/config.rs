@@ -13,7 +13,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use serde::Deserialize;
 
-#[cfg(feature = "embedded-gateway")]
+#[cfg(all(feature = "embedded-gateway", unix))]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
@@ -1819,7 +1819,7 @@ impl ConfigFile {
     /// the way in. `[branding]` is the one thing such a config *may* say about the
     /// gateway itself: it names the instance, and multiple local instances are
     /// easier to tell apart if they can be called different things.
-    #[cfg(feature = "embedded-gateway")]
+    #[cfg(all(feature = "embedded-gateway", unix))]
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
@@ -1937,6 +1937,15 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
             "{UNIX_LISTEN_PREFIX} names no socket — write the path out, as in \
              \"{UNIX_LISTEN_PREFIX}/run/remotex/gateway.sock\""
         );
+        // Refused here, at the one place the address is read, rather than at the
+        // bind: `std::os::unix::net` does not exist on Windows, so a gateway there
+        // has no socket to offer and should say so before it reports a listener.
+        #[cfg(not(unix))]
+        anyhow::bail!(
+            "{UNIX_LISTEN_PREFIX}{path} — Unix sockets are not supported on Windows; \
+             listen on host:port, as in \"{DEFAULT_LISTEN}\""
+        );
+        #[cfg(unix)]
         return Ok(ListenAddr::Unix(PathBuf::from(path)));
     }
     let (host, port) = value.rsplit_once(':').with_context(|| {
@@ -2096,6 +2105,22 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
         });
     }
 
+    // The Windows package installs the same tree under %ProgramFiles%\remotex, and
+    // the tree is relocatable: <root>\bin\remotex.exe beside <root>\share\remotex\web.
+    // Its configuration lives outside that tree, under %ProgramData%, for the
+    // same reason as /etc above — replacing the unpacked release must not touch a
+    // file holding credentials.
+    #[cfg(windows)]
+    if bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin"))
+        && let Some(root) = bin_dir.parent()
+        && let Some(program_data) = std::env::var_os("ProgramData")
+    {
+        return Some(InstalledLayout {
+            config: PathBuf::from(program_data).join("remotex").join("remotex.toml"),
+            static_dir: root.join("share").join("remotex").join("web"),
+        });
+    }
+
     // The fallback quick installer is relocatable. Its launcher resolves to
     // <prefix>/versions/<version>/bin/remotex, while configuration deliberately
     // lives outside the version being replaced.
@@ -2162,15 +2187,34 @@ mod tests {
         assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
         assert_eq!(mac.static_dir, Path::new("/usr/local/share/remotex/web"));
 
-        let quick = installed_layout_for_exe(Path::new(
-            "/srv/remotex/versions/0.0.144/bin/remotex",
-        ))
-        .unwrap();
-        assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
-        assert_eq!(
-            quick.static_dir,
-            Path::new("/srv/remotex/versions/0.0.144/share/remotex/web")
-        );
+        // The quick installer's tree is a Unix one; on Windows any `bin` directory is
+        // the package's tree, which is the arm below.
+        #[cfg(unix)]
+        {
+            let quick = installed_layout_for_exe(Path::new(
+                "/srv/remotex/versions/0.0.144/bin/remotex",
+            ))
+            .unwrap();
+            assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
+            assert_eq!(
+                quick.static_dir,
+                Path::new("/srv/remotex/versions/0.0.144/share/remotex/web")
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let installed = installed_layout_for_exe(Path::new(
+                r"C:\Program Files\remotex\bin\remotex.exe",
+            ))
+            .unwrap();
+            let program_data = PathBuf::from(std::env::var_os("ProgramData").unwrap());
+            assert_eq!(installed.config, program_data.join("remotex").join("remotex.toml"));
+            assert_eq!(
+                installed.static_dir,
+                Path::new(r"C:\Program Files\remotex\share\remotex\web")
+            );
+        }
 
         assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
     }
@@ -2284,6 +2328,7 @@ mod tests {
 
     /// The other kind of address, for a gateway that answers a reverse proxy on
     /// the same machine instead of a browser directly.
+    #[cfg(unix)]
     #[test]
     fn a_unix_socket_is_a_listen_address_too() {
         assert_eq!(
@@ -2312,6 +2357,19 @@ mod tests {
             .and_then(ConfigFile::resolve)
             .expect_err("a prefix is not a path");
         assert!(format!("{err:#}").contains("[server].listen"), "{err:#}");
+    }
+
+    /// Where there are no Unix sockets the address is refused by name, before any
+    /// bind — not reported as a listener that then fails to exist.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_unix_socket_is_refused_where_there_are_none() {
+        let err = ConfigFile::parse(&with_server(r#"listen = "unix:/run/gw.sock""#))
+            .and_then(ConfigFile::resolve)
+            .expect_err("no Unix sockets on this platform");
+        let text = format!("{err:#}");
+        assert!(text.contains("not supported on Windows"), "{text}");
+        assert!(text.contains("unix:/run/gw.sock"), "it names the address: {text}");
     }
 
     #[test]

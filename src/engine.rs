@@ -301,7 +301,11 @@ mod tests {
         let stream = tcp_connect(&dest).await.unwrap();
         let socket = socket2::SockRef::from(&stream);
         assert!(socket.keepalive().unwrap(), "SO_KEEPALIVE is off");
+        // socket2 sets these through `SIO_KEEPALIVE_VALS` on Windows, which has no getter;
+        // the retries one reads back everywhere.
+        #[cfg(not(windows))]
         assert_eq!(socket.tcp_keepalive_time().unwrap(), KEEPALIVE_IDLE);
+        #[cfg(not(windows))]
         assert_eq!(socket.tcp_keepalive_interval().unwrap(), KEEPALIVE_INTERVAL);
         assert_eq!(socket.tcp_keepalive_retries().unwrap(), KEEPALIVE_RETRIES);
         #[cfg(target_os = "linux")]

@@ -92,6 +92,17 @@ sudo installer -pkg remotex-macos-arm64.pkg -target /
 The macOS package is unsigned and not notarized, so fetch it with `curl` as
 shown rather than through a browser. It installs the gateway CLI and web client.
 
+Windows x86-64, from an administrator's PowerShell:
+
+```powershell
+Invoke-WebRequest https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-windows-x86_64.msi -OutFile remotex-windows-x86_64.msi
+msiexec /i remotex-windows-x86_64.msi
+```
+
+The MSI is unsigned, so SmartScreen asks first. It installs the gateway under
+`%ProgramFiles%\remotex`, puts `bin` on the machine `PATH`, and reads
+`%ProgramData%\remotex\remotex.toml`. `remotex tui` is not available on Windows.
+
 Packages do not own the live config because it contains credentials. On Linux,
 create it for the account that will run the gateway:
 
@@ -104,7 +115,9 @@ ${EDITOR:-vi} /etc/remotex/remotex.toml
 ```
 
 On macOS, use `/usr/local/etc/remotex/remotex.toml` and the example under
-`/usr/local/share/doc/remotex/` instead. Paste the generated `admin:$2b$...`
+`/usr/local/share/doc/remotex/` instead; on Windows,
+`%ProgramData%\remotex\remotex.toml` and the example under
+`%ProgramFiles%\remotex\share\doc\remotex\`. Paste the generated `admin:$2b$...`
 value into `[server].site_passwd`, replace the example `[[targets]]` entry, then
 start the server in the foreground:
 
