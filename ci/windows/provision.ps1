@@ -54,22 +54,51 @@ function Set-MachineEnv($name, $value) {
     }
 }
 
-function Get-File($url, $out) {
+# Everything downloaded here is then run or installed, so nothing is trusted until it is
+# checked: a release asset against the SHA-256 GitHub's release API reports for that exact
+# asset (`gh api repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] | .name, .digest'`),
+# and a script that has no fixed digest — dotnet-install.ps1 is republished in place —
+# against the Authenticode signer on the bytes that arrived. The download lands in
+# `<out>.part` and takes its final name only after the check, so an interrupted run leaves
+# nothing a rerun would mistake for a finished file. Every URL names a version; `latest`
+# would make the pinned digest wrong at the next upstream release.
+function Get-File($url, $out, $sha256, $signer) {
     if (Test-Path $out) { return }
+    if (-not $sha256 -and -not $signer) { throw "Get-File ${url}: no digest or signer to check against" }
+    # `name.part.ext`, not `name.ext.part`: Get-AuthenticodeSignature picks its verifier by the
+    # extension and reports UnknownError for one it does not know.
+    $part = [IO.Path]::ChangeExtension($out, 'part' + [IO.Path]::GetExtension($out))
     # A large GitHub release asset drops the connection now and then on this VM;
     # partial files are removed so a retry starts clean.
     for ($attempt = 1; $attempt -le 4; $attempt++) {
         Log "downloading $url (attempt $attempt)"
+        Remove-Item $part -Force -ErrorAction SilentlyContinue
         try {
-            Invoke-WebRequest $url -OutFile $out -UseBasicParsing
-            return
+            Invoke-WebRequest $url -OutFile $part -UseBasicParsing
+            break
         } catch {
             Log "download failed: $($_.Exception.Message)"
-            Remove-Item $out -Force -ErrorAction SilentlyContinue
+            Remove-Item $part -Force -ErrorAction SilentlyContinue
             if ($attempt -eq 4) { throw }
             Start-Sleep -Seconds (15 * $attempt)
         }
     }
+    if ($sha256) {
+        # `-ne` compares strings case-insensitively; Get-FileHash prints upper case.
+        $actual = (Get-FileHash $part -Algorithm SHA256).Hash
+        if ($actual -ne $sha256) {
+            Remove-Item $part -Force
+            throw "${url}: sha256 is $actual, expected $sha256"
+        }
+    }
+    if ($signer) {
+        $sig = Get-AuthenticodeSignature $part
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch "(^|, )CN=$([regex]::Escape($signer))(,|$)") {
+            Remove-Item $part -Force
+            throw "${url}: signature $($sig.Status) by '$($sig.SignerCertificate.Subject)', expected a valid one by CN=$signer"
+        }
+    }
+    Move-Item $part $out
 }
 
 try {
@@ -97,8 +126,9 @@ try {
     # restart of the shell, which is why it runs twice.
     $Msys = 'C:\msys64'
     if (-not (Test-Path "$Msys\usr\bin\bash.exe")) {
-        $sfx = "$Root\msys2-base-x86_64-latest.sfx.exe"
-        Get-File 'https://github.com/msys2/msys2-installer/releases/latest/download/msys2-base-x86_64-latest.sfx.exe' $sfx
+        $sfx = "$Root\msys2-base-x86_64-20260611.sfx.exe"
+        Get-File 'https://github.com/msys2/msys2-installer/releases/download/2026-06-11/msys2-base-x86_64-20260611.sfx.exe' $sfx `
+            -Sha256 'c105946e64e08f099ac0e4647461ce762b95333ad211777666476a9a41451d65'
         Log 'unpacking MSYS2'
         $p = Start-Process $sfx -Wait -PassThru -ArgumentList @('-y', '-oC:\')
         if ($p.ExitCode -ne 0) { throw "msys2 sfx failed with $($p.ExitCode)" }
@@ -140,7 +170,8 @@ try {
     # --- Strawberry Perl, for OpenSSL's Configure ----------------------------
     if (-not (Test-Path 'C:\Strawberry\perl\bin\perl.exe')) {
         $msi = "$Root\strawberry-perl-5.42.3.1-64bit.msi"
-        Get-File 'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit.msi' $msi
+        Get-File 'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit.msi' $msi `
+            -Sha256 'b0adbd4f1b3fc0a91b96cdff647cabcb6d3dd4bf05d9ee6f4f4fb76913ac57cd'
         Log 'installing Strawberry Perl'
         $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', $msi, '/qn', '/norestart')
         if ($p.ExitCode -notin 0, 3010) { throw "strawberry perl msiexec failed with $($p.ExitCode)" }
@@ -155,7 +186,8 @@ try {
     # --- LLVM: libclang for bindgen, llvm-nm/llvm-readobj for build.sh -------
     if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) {
         $exe = "$Root\LLVM-22.1.8-win64.exe"
-        Get-File 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe' $exe
+        Get-File 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe' $exe `
+            -Sha256 '16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c'
         Log 'installing LLVM (silent NSIS)'
         $p = Start-Process $exe -Wait -PassThru -ArgumentList @('/S')
         if ($p.ExitCode -ne 0) { throw "LLVM installer failed with $($p.ExitCode)" }
@@ -167,8 +199,9 @@ try {
 
     # --- bun, for the frontend ------------------------------------------------
     if (-not (Test-Path 'C:\tools\bun\bun.exe')) {
-        $zip = "$Root\bun-windows-x64.zip"
-        Get-File 'https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64.zip' $zip
+        $zip = "$Root\bun-v1.4.0-windows-x64.zip"
+        Get-File 'https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-x64.zip' $zip `
+            -Sha256 'e6f093d39da486b20262ca8cdd5ed6a9e8bc9c2f275b78e6d3a0c5b28cc95901'
         New-Item -ItemType Directory -Force -Path 'C:\tools\bun' | Out-Null
         Expand-Archive -Path $zip -DestinationPath "$Root\bun-unpack" -Force
         $bunExe = Get-ChildItem "$Root\bun-unpack" -Recurse -Filter bun.exe | Select-Object -First 1
@@ -184,7 +217,7 @@ try {
     # from a SYSTEM task with no UI; WiX beside it under C:\tools\wix via --tool-path,
     # so nothing depends on a per-user tools directory.
     if (-not (Test-Path 'C:\dotnet\dotnet.exe')) {
-        Get-File 'https://dot.net/v1/dotnet-install.ps1' "$Root\dotnet-install.ps1"
+        Get-File 'https://dot.net/v1/dotnet-install.ps1' "$Root\dotnet-install.ps1" -Signer 'Microsoft Corporation'
         & "$Root\dotnet-install.ps1" -Channel 10.0 -InstallDir 'C:\dotnet' -NoPath
     } else { Log 'dotnet already present' }
     Add-MachinePath 'C:\dotnet'
