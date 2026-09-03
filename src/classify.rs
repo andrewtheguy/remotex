@@ -86,7 +86,7 @@ pub fn photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
 /// up the count as soon as the answer is known.
 fn colorful(rgb: &[u8]) -> bool {
     let mut seen = std::collections::HashSet::with_capacity(FLAT_COLORS + 1);
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         if seen.insert(u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]))
             && seen.len() > FLAT_COLORS
         {

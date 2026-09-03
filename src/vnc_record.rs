@@ -132,11 +132,10 @@ impl Cbc {
 
     /// CBC-encrypt in place, advancing the chain. `data` must be whole blocks.
     fn encrypt(&mut self, data: &mut [u8]) {
-        for block in data.chunks_exact_mut(BLOCK) {
+        for block in data.as_chunks_mut::<BLOCK>().0 {
             for (b, c) in block.iter_mut().zip(self.chain) {
                 *b ^= c;
             }
-            let block: &mut [u8; BLOCK] = block.try_into().expect("whole AES block");
             self.cipher.encrypt_block(block.into());
             self.chain = *block;
         }
@@ -144,8 +143,7 @@ impl Cbc {
 
     /// CBC-decrypt in place, advancing the chain. `data` must be whole blocks.
     fn decrypt(&mut self, data: &mut [u8]) {
-        for block in data.chunks_exact_mut(BLOCK) {
-            let block: &mut [u8; BLOCK] = block.try_into().expect("whole AES block");
+        for block in data.as_chunks_mut::<BLOCK>().0 {
             let ciphertext = *block;
             self.cipher.decrypt_block(block.into());
             for (b, c) in block.iter_mut().zip(self.chain) {

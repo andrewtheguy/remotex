@@ -373,8 +373,8 @@ fn zrle_tiles(data: &[u8], w: u16, h: u16) -> anyhow::Result<Vec<u8>> {
             match bytes.u8()? {
                 // Raw: the tile's pixels, in order, with no compaction left.
                 0 => {
-                    for px in tile[..pixels * 3].chunks_exact_mut(3) {
-                        px.copy_from_slice(&cpixel(&mut bytes)?);
+                    for px in tile[..pixels * 3].as_chunks_mut::<3>().0 {
+                        *px = cpixel(&mut bytes)?;
                     }
                 }
                 // Solid: one colour for the whole tile.
@@ -415,8 +415,8 @@ fn zrle_tiles(data: &[u8], w: u16, h: u16) -> anyhow::Result<Vec<u8>> {
                             run <= pixels - done,
                             "a zrle run of {run} overruns the {pixels} pixels its tile has left"
                         );
-                        for px in tile[done * 3..(done + run) * 3].chunks_exact_mut(3) {
-                            px.copy_from_slice(&rgb);
+                        for px in tile[done * 3..(done + run) * 3].as_chunks_mut::<3>().0 {
+                            *px = rgb;
                         }
                         done += run;
                     }
@@ -441,8 +441,8 @@ fn zrle_tiles(data: &[u8], w: u16, h: u16) -> anyhow::Result<Vec<u8>> {
                             run <= pixels - done,
                             "a zrle run of {run} overruns the {pixels} pixels its tile has left"
                         );
-                        for px in tile[done * 3..(done + run) * 3].chunks_exact_mut(3) {
-                            px.copy_from_slice(&rgb);
+                        for px in tile[done * 3..(done + run) * 3].as_chunks_mut::<3>().0 {
+                            *px = rgb;
                         }
                         done += run;
                     }
@@ -664,8 +664,8 @@ fn fill(out: &mut [u8], stride: u16, at: (u16, u16), size: (u16, u16), rgb: [u8;
     let (w, h) = (usize::from(size.0), usize::from(size.1));
     for row in y..y + h {
         let start = (row * stride + x) * 3;
-        for px in out[start..start + w * 3].chunks_exact_mut(3) {
-            px.copy_from_slice(&rgb);
+        for px in out[start..start + w * 3].as_chunks_mut::<3>().0 {
+            *px = rgb;
         }
     }
 }
@@ -686,7 +686,7 @@ pub fn bgrx_to_rgb_into(bgrx: &[u8], rgb: &mut Vec<u8>) {
     let pixels = bgrx.len() / BPP;
     rgb.clear();
     rgb.resize(pixels * 3, 0);
-    for (out, px) in rgb.chunks_exact_mut(3).zip(bgrx.chunks_exact(BPP)) {
+    for (out, px) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(bgrx.as_chunks::<BPP>().0) {
         out[0] = px[2];
         out[1] = px[1];
         out[2] = px[0];

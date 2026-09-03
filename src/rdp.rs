@@ -1822,7 +1822,7 @@ fn pack_rgb(frame: &Frame, rect: Rect, buf: &mut Vec<u8>) {
     for (dst, src) in buf.chunks_exact_mut(w * 3).zip(rows) {
         // The literal strides are what let the compiler vectorize the 4-in/3-out
         // shuffle; sized writes rather than per-pixel `extend` for the same reason.
-        for (out, px) in dst.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
+        for (out, px) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<4>().0) {
             out.copy_from_slice(&px[..3]);
         }
     }

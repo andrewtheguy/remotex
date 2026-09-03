@@ -703,7 +703,7 @@ impl CursorCache {
         // uniformly opaque or invisible.
         let (bgrx, alpha) = raw.split_at(pixels * 4);
         let mut rgba = Vec::with_capacity(pixels * 4);
-        for (px, &a) in bgrx.chunks_exact(4).zip(alpha) {
+        for (px, &a) in bgrx.as_chunks::<4>().0.iter().zip(alpha) {
             rgba.extend_from_slice(&[px[2], px[1], px[0], a]);
         }
         // Point-sized: the Mac ships the same pixmap whatever density the display
