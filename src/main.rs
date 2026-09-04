@@ -174,10 +174,10 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             // `127.0.0.1` was refused, and nothing in the log hinted why.
             //
             // Binding each of them is also what makes "both loopbacks" expressible at
-            // all. `::` would do it by accident — a dual-stack wildcard reaches
-            // `127.0.0.1` — but it is `0.0.0.0` and `::/0` together, i.e. every
-            // interface on the machine, which is not what somebody asking for
-            // localhost is asking for.
+            // all. `::` would reach `127.0.0.1` too — `bind_all` binds the wildcard
+            // as `[::]` and `0.0.0.0` on every platform, Windows included — but that
+            // is every interface on the machine, which is not what somebody asking
+            // for localhost is asking for.
             //
             // A literal is unaffected: `127.0.0.1`, `::1` and `0.0.0.0` each resolve
             // to themselves and bind exactly one socket, as before.

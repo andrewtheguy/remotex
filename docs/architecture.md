@@ -1304,7 +1304,11 @@ that has an environment but no argv to edit. An override replaces the address
 whole rather than either half of it, so the running address is always the one
 somebody wrote in one place.
 
-It takes two forms. `host:port` is the one a browser can reach. `unix:<path>`
+It takes two forms. `host:port` is the one a browser can reach; every address the
+host resolves to is bound, and the IPv6 wildcard `[::]` is bound as two sockets,
+`[::]` for IPv6 and `0.0.0.0` beside it, on every platform — rather than as one
+dual-stack socket, which on Windows is IPv6 only by default and, made dual-stack,
+still binds beside another process's `0.0.0.0` on the same port. `unix:<path>`
 binds a socket instead, for a gateway that only ever answers a reverse proxy on
 the same machine: the socket is created `0660` so the filesystem decides who may
 connect, a leftover from a killed gateway is taken over on the next start, one
