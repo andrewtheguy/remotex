@@ -78,7 +78,7 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Encoder and decoder are both in the archive; this gateway only encodes. libvpx
 # asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
 # plain `?` path under `panic = "abort"`.
-vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260902165356-5023c95" }
+vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260904003124-b08e64a" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
@@ -193,7 +193,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260821034409-747ed2f" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260904013141-ea8117e" }
 # RealVNC's RSA-AES security types for VNC (src/vnc_rsa_aes.rs), which is how a
 # plain `vnc` target names a user to a server that is not a Mac — wayvnc with
 # `enable_auth` offers nothing else this client speaks. A fresh RSA key pair per
