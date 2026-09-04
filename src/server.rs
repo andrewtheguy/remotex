@@ -101,8 +101,8 @@ pub fn bind_all(
     use anyhow::Context as _;
 
     let mut listeners = Vec::new();
-    for &socket in addrs {
-        match std::net::TcpListener::bind(socket) {
+    for socket in addrs.iter().copied().flat_map(wildcard_sockets) {
+        match bind_one(socket) {
             Ok(listener) => listeners.push(listener),
             Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
                 warn!(
@@ -130,6 +130,63 @@ pub fn bind_all(
         "none of the addresses {addr} resolves to can be listened on"
     );
     Ok(listeners)
+}
+
+/// The sockets one resolved address stands for: itself — or, for the IPv6
+/// wildcard, two: `[::]` for IPv6 alone and `0.0.0.0` beside it.
+///
+/// `listen = "[::]:52380"` means every interface in both families, and whether one
+/// `[::]` socket covers IPv4 is `IPV6_V6ONLY`, which Linux and macOS default off
+/// and Windows and the BSDs default on: a gateway told `[::]:52380` on Windows
+/// listened on IPv6 alone, refusing every IPv4 client while announcing the
+/// wildcard. Turning the option off would have covered that and missed the other
+/// half of what `bind_all` is for — measured 2026-09-04 on the CI box, Windows
+/// lets a dual-stack `[::]` bind beside another process's `0.0.0.0` on the same
+/// port and gives that process the IPv4 traffic, which is exactly the half-answering
+/// gateway `bind_all` refuses to start as. Two sockets get the in-use check per
+/// family on every platform, and an accepted IPv4 peer stays an IPv4 address
+/// rather than a `::ffff:`-mapped one.
+///
+/// `::1` and every other specific IPv6 address are one socket, as before: which
+/// family a socket covers is a question only the wildcard raises.
+fn wildcard_sockets(socket: std::net::SocketAddr) -> Vec<std::net::SocketAddr> {
+    match socket {
+        std::net::SocketAddr::V6(v6) if v6.ip().is_unspecified() => vec![
+            socket,
+            std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), socket.port()),
+        ],
+        _ => vec![socket],
+    }
+}
+
+/// `std::net::TcpListener::bind`, with the one option std leaves to the OS made
+/// explicit: the IPv6 wildcard is IPv6 only, so that the `0.0.0.0` socket
+/// [`wildcard_sockets`] puts beside it is what answers IPv4 — on Linux, whose
+/// default would otherwise have the two sockets collide, as much as on Windows.
+fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let domain = if socket.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if let std::net::SocketAddr::V6(v6) = socket
+        && v6.ip().is_unspecified()
+    {
+        sock.set_only_v6(true)?;
+    }
+    // What std sets before its own bind, for the same reason: a gateway restarted
+    // seconds after its last connection closed must not wait out `TIME_WAIT`. Not
+    // on Windows, where std leaves it off too — there `SO_REUSEADDR` lets a second
+    // socket bind a port that is already *listening*, which is the exact thing
+    // `bind_all` exists to refuse.
+    #[cfg(not(windows))]
+    sock.set_reuse_address(true)?;
+    sock.bind(&socket.into())?;
+    sock.listen(128)?;
+    Ok(sock.into())
 }
 
 /// Build the axum router.
@@ -707,6 +764,58 @@ mod tests {
             listeners[0].local_addr().unwrap(),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
         );
+    }
+
+    /// `[::]` is every interface in both families, on every platform. Windows
+    /// defaults an IPv6 wildcard to IPv6 only, and a gateway told to listen there
+    /// refused every IPv4 client while announcing the wildcard; this is the test
+    /// that would have caught it.
+    #[test]
+    fn the_ipv6_wildcard_answers_ipv4_too() {
+        if std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_err() {
+            // No IPv6 on this host: there is no wildcard to pair.
+            return;
+        }
+        let port = free_port();
+        let wildcard = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let listeners = bind_all(&[wildcard], "[::]:0").unwrap();
+        let bound: Vec<_> = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap())
+            .collect();
+        assert_eq!(
+            bound,
+            vec![
+                wildcard,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
+            ],
+            "one socket per family, the IPv6 one first"
+        );
+
+        std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .expect("the IPv6 wildcard must take an IPv4 connection");
+        std::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port))
+            .expect("...and still an IPv6 one");
+    }
+
+    /// The other half: a port held on the IPv4 wildcard is in use for `[::]` too,
+    /// and the start is refused rather than half-taken. A single dual-stack socket
+    /// would have passed the first test and failed this one on Windows, which
+    /// binds it happily beside the squatter and hands the squatter the IPv4 side.
+    #[test]
+    fn the_ipv6_wildcard_refuses_a_port_held_on_ipv4() {
+        if std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_err() {
+            return;
+        }
+        let port = free_port();
+        let squatter = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).unwrap();
+
+        let wildcard = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let err = bind_all(&[wildcard], "[::]:0").expect_err("the IPv4 half is taken");
+        assert!(format!("{err:#}").contains("already in use"), "{err:#}");
+
+        drop(squatter);
+        bind_all(&[wildcard], "[::]:0").expect("free again once the squatter is gone");
     }
 
     /// ...unless it leaves nothing at all, which is a gateway nobody can reach.

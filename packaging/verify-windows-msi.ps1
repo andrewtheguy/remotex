@@ -27,6 +27,36 @@ function Test-OnMachinePath([string] $Dir) {
 }
 
 if (Test-Path $root) { throw "$root exists before the install — remove the previous remotex first" }
+
+# The install below is silent, so the wizard is checked in the package itself: an MSI with no
+# UI shows a progress bar and closes, and the finish page is what tells the operator it
+# worked. The tables are read through Windows Installer's own COM object.
+$installer = New-Object -ComObject WindowsInstaller.Installer
+$db = $installer.OpenDatabase($Msi, 0)
+function Read-MsiRows([string] $Sql, [string[]] $Columns) {
+    # COM methods echo their (void) results into the pipeline; only the rows may come out.
+    $view = $db.OpenView($Sql)
+    $null = $view.Execute()
+    while ($true) {
+        $record = $view.Fetch()
+        if ($null -eq $record) { break }
+        $row = [ordered]@{}
+        for ($i = 0; $i -lt $Columns.Count; $i++) { $row[$Columns[$i]] = $record.StringData($i + 1) }
+        [pscustomobject]$row
+    }
+    $null = $view.Close()
+}
+$dialogs = @(Read-MsiRows "SELECT ``Dialog`` FROM ``Dialog``" @('Dialog') | ForEach-Object Dialog)
+foreach ($dialog in 'WelcomeDlg', 'InstallDirDlg', 'VerifyReadyDlg', 'ProgressDlg', 'ExitDialog') {
+    if ($dialogs -notcontains $dialog) { throw "the package has no $dialog page (dialogs: $($dialogs -join ', '))" }
+}
+# The licence page stays in the table — the dialog set defines it — but the welcome page's Next
+# must lead past it: of the NewDialog events on that button the highest-ordered one fires last
+# and wins, and it has to be the one remotex.wxs adds.
+$next = Read-MsiRows "SELECT ``Argument``, ``Ordering`` FROM ``ControlEvent`` WHERE ``Dialog_``='WelcomeDlg' AND ``Control_``='Next' AND ``Event``='NewDialog'" @('Argument', 'Ordering') |
+    Sort-Object { [int]$_.Ordering } | Select-Object -Last 1
+if ($next.Argument -ne 'InstallDirDlg') { throw "the welcome page's Next leads to '$($next.Argument)', not the folder page" }
+Write-Host "   the wizard has its $($dialogs.Count) pages, finish page included, and skips the licence page"
 Write-Host ">> installing $Msi"
 Invoke-Msiexec @('/i', $Msi) 'install'
 foreach ($file in 'bin\remotex.exe', 'VERSION', 'share\doc\remotex\remotex.example.toml', 'share\remotex\web\index.html') {
