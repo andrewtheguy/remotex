@@ -523,7 +523,7 @@ fn differing_bytes(a: &[u8], b: &[u8]) -> (usize, usize) {
     let word = |chunk: &[u8]| u64::from_ne_bytes(chunk.try_into().expect("an 8-byte chunk"));
 
     let mut first = a.len();
-    for (i, (x, y)) in a.chunks_exact(WORD).zip(b.chunks_exact(WORD)).enumerate() {
+    for (i, (x, y)) in a.as_chunks::<WORD>().0.iter().zip(b.as_chunks::<WORD>().0).enumerate() {
         if word(x) != word(y) {
             first = i * WORD + x.iter().zip(y).position(|(p, q)| p != q).unwrap_or(0);
             break;

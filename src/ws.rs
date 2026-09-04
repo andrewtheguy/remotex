@@ -1169,7 +1169,6 @@ async fn session(
 #[cfg(test)]
 mod tests {
     use axum::{Router, routing::any};
-    use futures_util::SinkExt as _;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio_tungstenite::tungstenite::Message as ClientFrame;

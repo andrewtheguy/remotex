@@ -410,7 +410,7 @@ impl Yuv {
             "a video crop came back {} bytes for a {w}x{h} picture",
             rgb.len(),
         );
-        for (pix, y) in rgb.chunks_exact(3).zip(self.y.iter_mut()) {
+        for (pix, y) in rgb.as_chunks::<3>().0.iter().zip(self.y.iter_mut()) {
             *y = (((66 * u32::from(pix[0]) + 129 * u32::from(pix[1]) + 25 * u32::from(pix[2]))
                 >> 8)
                 + 16) as u8;
@@ -418,7 +418,7 @@ impl Yuv {
         match self.chroma {
             Chroma::Full => {
                 for (pix, (u, v)) in
-                    rgb.chunks_exact(3).zip(self.u.iter_mut().zip(self.v.iter_mut()))
+                    rgb.as_chunks::<3>().0.iter().zip(self.u.iter_mut().zip(self.v.iter_mut()))
                 {
                     (*u, *v) = chroma_of(i16::from(pix[0]), i16::from(pix[1]), i16::from(pix[2]));
                 }
@@ -432,7 +432,7 @@ impl Yuv {
                 let v_rows = self.v.chunks_exact_mut(half);
                 for (((row0, row1), u_row), v_row) in rows0.zip(rows1).zip(u_rows).zip(v_rows) {
                     for (((pix0, pix1), u), v) in
-                        row0.chunks_exact(6).zip(row1.chunks_exact(6)).zip(u_row).zip(v_row)
+                        row0.as_chunks::<6>().0.iter().zip(row1.as_chunks::<6>().0).zip(u_row).zip(v_row)
                     {
                         let r = (i16::from(pix0[0]) + i16::from(pix0[3]) + i16::from(pix1[0]) + i16::from(pix1[3]) + 2) / 4;
                         let g = (i16::from(pix0[1]) + i16::from(pix0[4]) + i16::from(pix1[1]) + i16::from(pix1[4]) + 2) / 4;

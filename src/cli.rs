@@ -68,7 +68,7 @@ pub enum Commands {
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
     /// is how it dies with its manager.
-    #[cfg(feature = "embedded-gateway")]
+    #[cfg(all(feature = "embedded-gateway", unix))]
     #[command(hide = true)]
     ServeEmbedded {
         /// The managed instance directory. Nothing outside it is read.
@@ -160,7 +160,7 @@ mod tests {
     /// The managed worker takes the two paths only its supervisor knows — the
     /// instance it owns and the SPA it selected — and nothing else: the socket
     /// path and secret are the gateway's to decide.
-    #[cfg(feature = "embedded-gateway")]
+    #[cfg(all(feature = "embedded-gateway", unix))]
     #[test]
     fn serve_embedded_takes_the_two_paths_the_launcher_knows() {
         let cli = Cli::try_parse_from([

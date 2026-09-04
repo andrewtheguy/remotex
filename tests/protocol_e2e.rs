@@ -264,10 +264,8 @@ async fn serve_scrolling_vnc(
                 let count = usize::from(u16::from_be_bytes([head[1], head[2]]));
                 let mut body = vec![0u8; count * 4];
                 stream.read_exact(&mut body).await?;
-                let advertised: Vec<i32> = body
-                    .chunks_exact(4)
-                    .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
+                let advertised: Vec<i32> =
+                    body.as_chunks::<4>().0.iter().map(|&c| i32::from_be_bytes(c)).collect();
                 let _ = seen.send(ScrollRequest::Encodings {
                     continuous: advertised.contains(&ENCODING_CONTINUOUS_UPDATES),
                     fence: advertised.contains(&ENCODING_FENCE),
@@ -479,8 +477,8 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
         use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
         let cipher = Aes128::new(&key.into());
         let mut plain = credentials;
-        for block in plain.chunks_exact_mut(16) {
-            cipher.decrypt_block(<&mut [u8; 16]>::try_from(block).unwrap().into());
+        for block in plain.as_chunks_mut::<16>().0 {
+            cipher.decrypt_block(block.into());
         }
         let field = |at: usize| {
             let bytes = &plain[at..at + 64];

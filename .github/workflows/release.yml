@@ -108,6 +108,10 @@ jobs:
             target-note: linux-arm64
           - runner: macos-latest
             target-note: macos-arm64
+          # The Windows native package is an MSI: the same tree under %ProgramFiles%\remotex,
+          # reading %ProgramData%\remotex\remotex.toml. No container image.
+          - runner: windows-latest
+            target-note: windows-x86_64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -128,9 +132,27 @@ jobs:
           sudo apt-get install -y rpm
 
       - name: Build release artifacts (${{ matrix.target-note }})
+        if: runner.os != 'Windows'
         run: |
           SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
           bash packaging/build-native-packages.sh
+
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: Build the release installer (${{ matrix.target-note }})
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SKIP_FRONTEND_BUILD: "1"
+        run: pwsh -NoProfile -File packaging/build-windows-msi.ps1
+
+      - name: Install, run and remove the installer (${{ matrix.target-note }})
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File packaging/verify-windows-msi.ps1
 
       - name: Build feature-minimal container gateway (${{ matrix.target-note }})
         if: runner.os == 'Linux'
@@ -170,11 +192,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .pkg is the native macOS gateway package.
+        # release assets. The .pkg is the native macOS gateway package, the .msi
+        # the Windows one.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
-            artifacts/*.tar.gz --clobber
+            artifacts/*.tar.gz artifacts/*.msi --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:

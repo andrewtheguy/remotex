@@ -1,6 +1,8 @@
 use anyhow::Context;
 use clap::Parser;
-use log::{info, warn};
+use log::info;
+#[cfg(unix)]
+use log::warn;
 use remotex::cli::{Cli, Commands};
 use remotex::config::{AppConfig, ListenAddr};
 use remotex::server;
@@ -23,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve_with(listen.as_deref())?;
             serve(config).await?;
         }
-        #[cfg(feature = "embedded-gateway")]
+        #[cfg(all(feature = "embedded-gateway", unix))]
         Commands::Tui {
             port,
             instances_dir,
@@ -39,7 +41,15 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
         }
-        #[cfg(feature = "embedded-gateway")]
+        // The control plane is a Unix process graph — private `AF_UNIX` sockets and a
+        // stdin liveness pipe per worker — and none of it has been ported. On the
+        // command line so `--help` says it exists; honest about the rest.
+        #[cfg(all(feature = "embedded-gateway", not(unix)))]
+        Commands::Tui { .. } => {
+            eprintln!("remotex tui is not supported on Windows yet");
+            std::process::exit(1);
+        }
+        #[cfg(all(feature = "embedded-gateway", unix))]
         Commands::ServeEmbedded {
             instance_dir,
             web_root,
@@ -56,9 +66,15 @@ async fn main() -> anyhow::Result<()> {
             // file. `{:#}` keeps the whole `anyhow` chain, which
             // is what names the target the complaint is about.
             let text = remotex::config::read_candidate(config.as_deref())?;
-            #[cfg(feature = "embedded-gateway")]
+            #[cfg(all(feature = "embedded-gateway", unix))]
             let result = if embedded {
                 remotex::embedded::check(&text)
+            } else {
+                remotex::config::check(&text)
+            };
+            #[cfg(all(feature = "embedded-gateway", not(unix)))]
+            let result = if embedded {
+                Err(anyhow::anyhow!("check-config --embedded is not supported on Windows yet"))
             } else {
                 remotex::config::check(&text)
             };
@@ -102,7 +118,7 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// end of our stdin closing, which happens however the parent ended — see
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
-#[cfg(feature = "embedded-gateway")]
+#[cfg(all(feature = "embedded-gateway", unix))]
 async fn serve_embedded(
     instance: &remotex::embedded::Instance,
     web_root: std::path::PathBuf,
@@ -142,6 +158,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     let mut servers = tokio::task::JoinSet::new();
     // Lives until this function returns, and taking the socket file away is what it
     // is for. `None` for TCP, which leaves nothing behind to clean up.
+    #[cfg(unix)]
     let mut socket_file = None;
 
     match &config.listen {
@@ -184,6 +201,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
                 );
             }
         }
+        #[cfg(unix)]
         ListenAddr::Unix(path) => {
             let listener = bind_unix(path)?;
             // Armed the moment the socket exists, so every way out of this function
@@ -199,6 +217,13 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             // none of it to switch off.
             servers.spawn(axum::serve(listener, app.clone()).into_future());
         }
+        // `parse_listen` refuses `unix:` before anything is bound where there are no
+        // Unix sockets; the arm is for the compiler, not for a reachable state.
+        #[cfg(not(unix))]
+        ListenAddr::Unix(path) => anyhow::bail!(
+            "unix:{} — Unix sockets are not supported on Windows",
+            path.display()
+        ),
     }
 
     info!("{} target(s) available in the post-login picker:", config.targets.len());
@@ -224,6 +249,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
     }
+    #[cfg(unix)]
     drop(socket_file);
     Ok(())
 }
@@ -234,8 +260,10 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
 /// a server that failed and a `?` on the way there. It cannot cover a `SIGKILL` — a
 /// socket file outlives the process that made it — which is why [`bind_unix`] has to
 /// tell a leftover from a live one rather than assume the file is always ours.
+#[cfg(unix)]
 struct SocketFile(std::path::PathBuf);
 
+#[cfg(unix)]
 impl Drop for SocketFile {
     fn drop(&mut self) {
         // A socket that is already gone is the outcome this wanted, not a failure:
@@ -262,6 +290,7 @@ impl Drop for SocketFile {
 /// socket at all is that the filesystem decides who may connect, and world-writable
 /// is not a decision. Owner and group, so a proxy sharing the group can reach it —
 /// which is what the directory it lives in should be arranged around.
+#[cfg(unix)]
 fn bind_unix(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::{UnixListener, UnixStream};
@@ -297,6 +326,7 @@ fn bind_unix(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixL
 /// the standard library, the words "path must be shorter than SUN_LEN". That is a
 /// limit somebody hits by keeping the socket beside the config in a deep home
 /// directory, and it is worth one sentence rather than a search.
+#[cfg(unix)]
 fn unix_bind_error(path: &std::path::Path, e: std::io::Error) -> anyhow::Error {
     let hint = if e.kind() == std::io::ErrorKind::InvalidInput {
         format!(
@@ -359,7 +389,7 @@ async fn shutdown_signal() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

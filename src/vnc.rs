@@ -3382,7 +3382,7 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
     }
     let cipher = Des::new(GenericArray::from_slice(&key));
     let mut response = *challenge;
-    for block in response.chunks_exact_mut(8) {
+    for block in response.as_chunks_mut::<8>().0 {
         cipher.encrypt_block(GenericArray::from_mut_slice(block));
     }
     response
@@ -3598,8 +3598,8 @@ fn ard_encrypt(key: &[u8; 16], credentials: &[u8; ARD_CREDENTIALS_LEN]) -> Vec<u
 
     let cipher = Aes128::new(key.into());
     let mut out = credentials.to_vec();
-    for block in out.chunks_exact_mut(16) {
-        cipher.encrypt_block((&mut *block).try_into().expect("16-byte AES block"));
+    for block in out.as_chunks_mut::<16>().0 {
+        cipher.encrypt_block(block.into());
     }
     out
 }
@@ -3637,7 +3637,7 @@ fn is_macos_server(minor: u32, security_types: &[u8]) -> bool {
 fn masked_bgrx_to_rgba(bgrx: &[u8], mask: &[u8], w: u16) -> Vec<u8> {
     let stride = usize::from(w).div_ceil(8);
     let mut rgba = Vec::with_capacity(bgrx.len());
-    for (i, px) in bgrx.chunks_exact(BPP).enumerate() {
+    for (i, px) in bgrx.as_chunks::<BPP>().0.iter().enumerate() {
         let (row, col) = (i / usize::from(w), i % usize::from(w));
         let opaque = mask
             .get(row * stride + col / 8)
@@ -3902,8 +3902,8 @@ mod tests {
         secret_bytes.splice(..0, std::iter::repeat_n(0, key_len - secret_bytes.len()));
         let cipher = Aes128::new(&Md5::digest(&secret_bytes));
         let mut plain = ciphertext.to_vec();
-        for block in plain.chunks_exact_mut(16) {
-            cipher.decrypt_block((&mut *block).try_into().unwrap());
+        for block in plain.as_chunks_mut::<16>().0 {
+            cipher.decrypt_block(block.into());
         }
         assert_eq!(&plain[..7], b"andrew\0");
         assert_eq!(&plain[64..72], b"hunter2\0");

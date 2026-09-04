@@ -343,8 +343,7 @@ impl AudioListener {
 /// The samples are read as the little-endian 16-bit PCM the rest of this path
 /// already assumes ([`PCM_CD_QUALITY`], [`crate::pcm48`]).
 fn is_silence(pcm: &[u8]) -> bool {
-    pcm.chunks_exact(2)
-        .all(|pair| i16::from_le_bytes([pair[0], pair[1]]).unsigned_abs() <= 2)
+    pcm.as_chunks::<2>().0.iter().all(|&pair| i16::from_le_bytes(pair).unsigned_abs() <= 2)
 }
 
 /// A configured stream, and everything the client needs to play it.

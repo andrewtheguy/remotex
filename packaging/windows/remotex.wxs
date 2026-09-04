@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Windows package: an MSI installing the tree the .deb, .rpm and .pkg install, under
+  %ProgramFiles%\remotex, and like them nothing else. No service, no shortcut, no config: the
+  live config is %ProgramData%\remotex\remotex.toml, created by the operator (docs/install.md)
+  and never touched by the package, for the reason the Unix packages leave /etc/remotex alone.
+  It holds credentials, and an upgrade or a removal must stay away from it.
+
+  Built by packaging/build-windows-msi.ps1 with WiX 5 (`wix build`), which defines
+    Version: Cargo's version with any pre-release suffix removed (an MSI version is x.y.z)
+    Stage:   the assembled release tree (bin\, share\, VERSION)
+  The UpgradeCode is what makes a newer MSI replace an installed older one instead of sitting
+  beside it; it must never change. Component GUIDs derive from the install paths, which do not
+  change either.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="remotex" Manufacturer="andrewtheguy" Version="$(var.Version)"
+           UpgradeCode="ba40aaaf-cf03-4113-a1fc-6817e03b1439" Scope="perMachine">
+    <SummaryInformation Description="Single-user browser remote desktop gateway" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of remotex is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/andrewtheguy/remotex" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="remotex">
+        <Directory Id="BinDir" Name="bin" />
+        <Directory Id="ShareDir" Name="share">
+          <Directory Id="ShareDocDir" Name="doc">
+            <Directory Id="DocDir" Name="remotex" />
+          </Directory>
+          <Directory Id="ShareRemotexDir" Name="remotex">
+            <Directory Id="WebDir" Name="web" />
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="Gateway">
+      <Component Directory="BinDir">
+        <File Source="$(var.Stage)\bin\remotex.exe" />
+        <!-- On every account's PATH, as /usr/bin/remotex is; removed with the package. -->
+        <Environment Id="PathEntry" Name="PATH" Value="[BinDir]" Part="last" Action="set" System="yes" />
+      </Component>
+      <Component Directory="DocDir">
+        <File Source="$(var.Stage)\share\doc\remotex\remotex.example.toml" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(var.Stage)\VERSION" />
+      </Component>
+      <!-- The web client, every file of it: bun's output names carry content hashes. -->
+      <Files Directory="WebDir" Include="$(var.Stage)\share\remotex\web\**" />
+    </ComponentGroup>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Gateway" />
+    </Feature>
+  </Package>
+</Wix>

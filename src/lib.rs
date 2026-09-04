@@ -10,7 +10,9 @@ pub mod classify;
 pub mod cli;
 pub mod config;
 pub mod copies;
-#[cfg(feature = "embedded-gateway")]
+// The control plane is a Unix process graph and has not been ported; see the
+// `tui` arm in src/main.rs.
+#[cfg(all(feature = "embedded-gateway", unix))]
 pub mod embedded;
 pub mod encode;
 pub mod engine;

@@ -69,7 +69,7 @@ pub fn decode_unicode(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let units: Vec<u16> =
-        bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
     // Trailing NULs only. One is the terminator; a peer that pads with several
     // is padding, and a NUL in the middle is the remote's own data.
     let end = units.iter().rposition(|unit| *unit != 0).map_or(0, |last| last + 1);

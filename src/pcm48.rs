@@ -213,7 +213,7 @@ impl Pcm48 {
             };
             left.reserve(pcm.len() / 4);
             right.reserve(pcm.len() / 4);
-            for frame in pcm.chunks_exact(4) {
+            for frame in pcm.as_chunks::<4>().0 {
                 // i16::MIN maps to exactly -1.0; the asymmetry of two's complement
                 // means dividing by 32768 rather than 32767 keeps it in range.
                 left.push(f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32_768.0);

@@ -716,7 +716,7 @@ dependencies = [
 [[package]]
 name = "freerdp"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260821034409-747ed2f#747ed2ff874ecc687b7ecc7747a840956f1fe8b0"
+source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260904013141-ea8117e#ea8117e449f0799acab8a4a7e7b6112fa0eb0d91"
 dependencies = [
  "freerdp-prebuilt-sys",
 ]
@@ -724,7 +724,7 @@ dependencies = [
 [[package]]
 name = "freerdp-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260821034409-747ed2f#747ed2ff874ecc687b7ecc7747a840956f1fe8b0"
+source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260904013141-ea8117e#ea8117e449f0799acab8a4a7e7b6112fa0eb0d91"
 
 [[package]]
 name = "futures-channel"
@@ -1026,7 +1026,7 @@ source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-202609
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260902165356-5023c95#5023c9584fbcbb1aaab14de2aa117d501d4951ab"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260904003124-b08e64a#b08e64a61c3343fbd06427633f2b44415d9deec6"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1378,7 +1378,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.171"
+version = "0.0.172"
 dependencies = [
  "aes",
  "anyhow",

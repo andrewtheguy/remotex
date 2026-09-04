@@ -61,6 +61,29 @@ The package is unsigned and not notarized. A browser download is quarantined,
 so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
 contains the gateway CLI and web client.
 
+### Windows (`.msi`)
+
+Windows x86-64, from an administrator's PowerShell:
+
+```powershell
+Invoke-WebRequest https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-windows-x86_64.msi -OutFile remotex-windows-x86_64.msi
+msiexec /i remotex-windows-x86_64.msi
+```
+
+The package is unsigned, so SmartScreen asks before it runs. It installs the
+same tree the Unix packages do, under `%ProgramFiles%\remotex`, and puts `bin`
+on the machine `PATH`, so `remotex` works in a shell opened after the install:
+
+```text
+C:\Program Files\remotex\bin\remotex.exe
+C:\Program Files\remotex\share\remotex\web\
+C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
+```
+
+The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
+`/qn` for an unattended install. The multi-instance control plane
+(`remotex tui`) is not available on Windows; the command exists and says so.
+
 ## First configuration
 
 The config contains the web-login hash and target credentials. Create it as the
@@ -88,6 +111,17 @@ remotex gen-passwd admin
 ${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml
 ```
 
+On Windows, from a PowerShell opened after the install, where only the account
+that runs the gateway may read the file:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramData\remotex" | Out-Null
+Copy-Item "$env:ProgramFiles\remotex\share\doc\remotex\remotex.example.toml" "$env:ProgramData\remotex\remotex.toml"
+icacls "$env:ProgramData\remotex\remotex.toml" /inheritance:r /grant:r "${env:USERNAME}:F"
+remotex gen-passwd admin
+notepad "$env:ProgramData\remotex\remotex.toml"
+```
+
 Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
 replace the example `[[targets]]` entry with the remote desktop to reach. Start
 the gateway in the foreground:
@@ -108,6 +142,7 @@ Download the new asset and hand it to the same package manager:
 sudo apt install ./remotex-linux-amd64.deb
 sudo dnf upgrade ./remotex-linux-amd64.rpm
 sudo installer -pkg remotex-macos-arm64.pkg -target /
+msiexec /i remotex-windows-x86_64.msi
 ```
 
 Use only the command for the host platform. Package files are replaced in
@@ -148,9 +183,17 @@ sudo rm -rf /usr/local/share/remotex /usr/local/share/doc/remotex
 sudo pkgutil --forget com.andrewtheguy.remotex.gateway
 ```
 
-None of these touch the live config. Remove `/etc/remotex` on Linux or
-`/usr/local/etc/remotex` on macOS separately only when the credentials and
-configuration should be deleted too.
+On Windows, remove remotex from **Apps & features**, or from an administrator's
+PowerShell with the package file or without it:
+
+```powershell
+msiexec /x remotex-windows-x86_64.msi
+Get-Package remotex | Uninstall-Package
+```
+
+None of these touch the live config. Remove `/etc/remotex` on Linux,
+`/usr/local/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
+separately only when the credentials and configuration should be deleted too.
 
 ## Unsupported-package fallback
 

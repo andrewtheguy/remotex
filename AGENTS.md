@@ -38,7 +38,15 @@
   `<instance>/gateway.sock` sockets; workers remain tied to its stdin liveness
   pipes. Container binaries must be built through
   `packaging/build-container-binary.sh`, which disables default features; never
-  put `tui`, `serve-embedded`, or `check-config --embedded` in an image.
+  put `tui`, `serve-embedded`, or `check-config --embedded` in an image. The
+  control plane is Unix-only (`AF_UNIX` sockets, inode identity): on Windows
+  `remotex tui` and `check-config --embedded` exit 1 with a not-supported line,
+  `serve-embedded` is not compiled, and `unix:` listen addresses are refused at
+  config parse. The Windows gateway is `serve`, `check-config` and `gen-passwd`,
+  shipped as an MSI (`packaging/build-windows-msi.ps1`, WiX 5: the package tree
+  under `%ProgramFiles%\remotex` with `bin` on the machine PATH, and like the Unix
+  packages nothing else — no service, no config) and built on the
+  `windows-ci-build` box through `ci/windows/remote.ps1`.
 - Multi-session support is permanently out of scope. Each gateway has one active
   session. A force-claim evicts the current holder (`src/session.rs`) through the
   clients' **Take over** flow. The owner's own reconnect resumes the running

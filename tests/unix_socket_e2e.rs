@@ -8,6 +8,8 @@
 //!
 //! No browser is involved and none could be: a page addresses its gateway by URL.
 
+#![cfg(unix)]
+
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
