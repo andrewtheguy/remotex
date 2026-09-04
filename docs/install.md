@@ -70,8 +70,9 @@ Invoke-WebRequest https://github.com/andrewtheguy/remotex/releases/latest/downlo
 msiexec /i remotex-windows-x86_64.msi
 ```
 
-The package is unsigned, so SmartScreen asks before it runs. It installs the
-same tree the Unix packages do, under `%ProgramFiles%\remotex`, and puts `bin`
+The package is unsigned, so SmartScreen asks before it runs. It opens the usual
+install wizard — folder, confirm, and a finish page once it is done — and
+installs the same tree the Unix packages do, under `%ProgramFiles%\remotex`, and puts `bin`
 on the machine `PATH`, so `remotex` works in a shell opened after the install:
 
 ```text

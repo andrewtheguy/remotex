@@ -12,8 +12,16 @@
   The UpgradeCode is what makes a newer MSI replace an installed older one instead of sitting
   beside it; it must never change. Component GUIDs derive from the install paths, which do not
   change either.
+
+  The UI is WiX's stock InstallDir wizard (WixToolset.UI.wixext): welcome, folder, confirm,
+  progress, and the finish page that says the install succeeded — without it an MSI run by
+  double-click shows a progress bar and simply closes, which reads as "did it work?". Its
+  licence page is skipped, below, because this project ships no licence text to put on it.
+  `msiexec /qn` never shows any of it, so the unattended install and the CI smoke test are
+  unchanged.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="remotex" Manufacturer="andrewtheguy" Version="$(var.Version)"
            UpgradeCode="ba40aaaf-cf03-4113-a1fc-6817e03b1439" Scope="perMachine">
     <SummaryInformation Description="Single-user browser remote desktop gateway" />
@@ -21,7 +29,19 @@
     <MediaTemplate EmbedCab="yes" />
 
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/andrewtheguy/remotex" />
-    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- The dialog set also sets ARPNOMODIFY: no Change button in Apps & features. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UI>
+      <!-- Straight from the welcome page to the folder page: no licence dialog. Order 99 puts
+           these after the dialog set's own transitions, so they are the ones that take. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="99" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="99" />
+    </UI>
+    <!-- The finish page's one line of what to do next: the PATH change reaches only shells
+         opened after the install, and the config is the operator's to create. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+              Value="remotex is on the PATH of every shell opened from now on. Create %ProgramData%\remotex\remotex.toml from the example under share\doc\remotex, then run remotex serve." />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="remotex">

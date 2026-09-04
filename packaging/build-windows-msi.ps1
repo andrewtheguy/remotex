@@ -13,7 +13,8 @@
 #   └── share\remotex\web\
 #
 # Runs on Windows under PowerShell 7 with cargo, the MSVC toolchain and WiX 5 on PATH
-# (`dotnet tool install --global wix --version 5.0.2`); the three C libraries arrive as
+# (`dotnet tool install --global wix --version 5.0.2`; the UI extension the wizard pages
+# come from is fetched below); the three C libraries arrive as
 # prebuilt static archives from their `-prebuilt` crates. SKIP_FRONTEND_BUILD=1 reuses an
 # existing frontend\dist, as the tarball script does. packaging/verify-windows-msi.ps1 then
 # installs the result, runs it and removes it.
@@ -23,6 +24,11 @@ Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
     throw 'wix is not on PATH: dotnet tool install --global wix --version 5.0.2'
 }
+# The stock dialog set lives in an extension pinned to the same WiX version. Adding it again
+# is a no-op, so this needs no state on the machine beyond wix itself.
+$uiExt = 'WixToolset.UI.wixext'
+& wix extension add -g "$uiExt/5.0.2"
+if ($LASTEXITCODE -ne 0) { throw "wix extension add $uiExt failed (exit $LASTEXITCODE)" }
 
 # The version from cargo's own parse of the manifest rather than a regex over it — the same
 # `[workspace.package]` value the tarball script reads with tomllib, without needing a Python.
@@ -83,7 +89,7 @@ try {
     $msi = Join-Path (Resolve-Path dist).Path 'remotex-windows-x86_64.msi'
     if (Test-Path $msi) { Remove-Item -Force $msi }
     Write-Host '>> building the MSI'
-    & wix build -arch x64 -d "Version=$msiVersion" -d "Stage=$stage" -o $msi packaging\windows\remotex.wxs
+    & wix build -arch x64 -ext $uiExt -d "Version=$msiVersion" -d "Stage=$stage" -o $msi packaging\windows\remotex.wxs
     if ($LASTEXITCODE -ne 0) { throw "wix build failed (exit $LASTEXITCODE)" }
     if (-not (Test-Path $msi)) { throw "wix build wrote no $msi" }
     Write-Host ">> wrote dist\remotex-windows-x86_64.msi ($([math]::Round((Get-Item $msi).Length / 1MB, 1)) MB)"
