@@ -526,14 +526,60 @@ configure:` log and from the decrypted packets):
   encrypted; a real receiver should strip a trailing 10-byte tag if suite 7 is
   confirmed on its host.
 
-**Decoding is the catch.** AAC-ELD (MPEG-4 object type 39) is not decodable by
-FFmpeg's native `aac` decoder, nor by any browser's WebCodecs `AudioDecoder`, so
-passthrough to the client is impossible. The open decoder is Fraunhofer **fdk-aac**
-(licence not OSI-approved), and Apple's own **AudioToolbox** (`aac_at`) decodes it
-but only when the gateway process runs on macOS. Whether the Mac can be made to
-answer with a browser-friendly codec instead of AAC-ELD was not tested — the
-`RemoteDesktopSystemAudio` negotiator's settings are hard-wired to AAC-ELD 48 kHz,
-so it is unlikely.
+**Decoding AAC-ELD is a catch — but maybe not a forced one.** AAC-ELD (MPEG-4
+object type 39) is decodable by neither FFmpeg's native `aac` decoder nor any
+browser's WebCodecs `AudioDecoder`, so as long as the stream is AAC-ELD, passthrough
+is impossible and the gateway must decode. The only open decoder is Fraunhofer
+**fdk-aac** (licence not OSI-approved); Apple's own **AudioToolbox** (`aac_at`)
+decodes it too, but only when the gateway runs on macOS.
+
+What is *not* settled is whether the stream has to be AAC-ELD. Editing the captured
+offer's media blob — deleting the `f9 {f1=16, f2=4100}` entry, leaving `{f1=1}` and
+`{f1=4}` — made the agent neither refuse nor fall back; it sent the same
+`0x89ffffff` ELD stream (same 52/~370/400-byte sizes, fresh SRTP keys each run).
+That looked like "ELD is forced," but it does **not** prove it: the negotiation set
+below shows that captured offer advertised only **AAC-ELD** as its audio codec, so
+the test never asked for anything else. Whether a viewer that offers Opus — which
+**is** in AVConference's codec set and *is* WebCodecs-decodable (remotex already runs
+`opus-prebuilt`) — makes the HP audio agent emit Opus instead is **untested**. Until
+that is tried, the fdk-aac dependency is a worst case, not a proven necessity.
+
+### The negotiation codec set
+
+Recovered by disassembling `AVConference` from the macOS 26.6.2 arm64e dyld shared
+cache; the mapping is authoritative, the naming is from the routing functions and
+symbols, not a spec. The `VCMediaNegotiationBlobV2` codec entries carry a
+*negotiation codec type*;
+`+[VCMediaNegotiationBlobV2StreamGroupPayload negotiationCodecTypeWithCodecType:]`
+maps it to an internal codec type, and `isNegotiationCodecTypeAudio:` (mask `0x11b8`)
+marks which are audio:
+
+| neg type | internal | codec | audio? |
+|---|---|---|---|
+| 1 | 100 | (non-audio / screen) | no |
+| 2 | 102 | (non-audio / screen) | no |
+| 3 | 12 | EVS-family | **yes** |
+| 4 | 11 | **AAC-ELD (SBR)** | **yes** |
+| 5 | 16 | **AAC-ELD (non-SBR, 48 kHz stereo)** | **yes** |
+| 6 | 300 | (non-audio) | no |
+| 7 | 8 | audio (Opus / Comfort-Noise family) | **yes** |
+| 8 | 4 | **EVS** | **yes** |
+| 9 | 9 | (non-audio) | no |
+| 10 | 301 | (non-audio) | no |
+| 12 | 20 | audio (Opus / Comfort-Noise family) | **yes** |
+
+So the audio family AVConference can negotiate is **AMR-NB, AMR-WB, EVS, AAC-ELD
+(SBR and non-SBR), Comfort Noise, and Opus** — the FaceTime/telephony set.
+`+[VCPayloadUtils bitrateForCodecType:mode:]` routes internal `1→`AMR-NB, `2→`AMR-WB,
+`3/4/17→`EVS, `11→`AAC-ELD-SBR, `16→`AAC-ELD; the rate-mode mask `0x2001e` marks
+`{1,2,3,4,17}` (AMR/EVS) as bitrate-adaptive. **Opus is definitely present**
+(`codecConfigForOpusWithStreamConfig:`, `createSupportedBitratesForOpus`,
+`opusSamplesPerFrameForSampleRate:blockSize:`, `opusRestrictedLowDelayEnabled`,
+`isOpus4Channel48KhzPayload:`), but its exact internal id among the unpinned audio
+slots (`8`, `12`, `20`) was not isolated. **Codec type 16 = AAC-ELD** is what the HP
+screen-sharing agent (`RemoteDesktopSystemAudio`) actually configured and streamed
+in every capture; whether it will encode any other member of this set for a viewer
+that offers one is the open question above.
 
 ## Still unknown
 
