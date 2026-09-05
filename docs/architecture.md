@@ -1209,11 +1209,16 @@ decoded with none concealed, the decoded signal's level constant through a run
 with music playing on the Mac.
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
-transport's *video* leg (its offer is sent because the audio needs it; its
-payload was never received, and a client must not advertise an encoding it cannot
-decode). The native Apple pasteboard works on both subtypes; 003.889 enables
-monitoring before the rekey and carries the fetch and data messages inside its
-encrypted record layer. See [`roadmap.md`](roadmap.md).
+transport's *video* leg. The rule is that a client must not advertise an encoding
+it cannot decode, and the HEVC offer is the one intentional exception to it: with
+audio enabled the gateway *sends* a screen-video offer inside the `0x1c` message,
+because the Mac refuses an audio-only media stream, yet it never opens the video
+port, never receives the HEVC payload and has no decoder for it. The offer is a
+negotiation input the audio cannot do without, not a promise to render, and the
+zlib rectangles remain the only picture path. Without the `apple-hp-audio`
+feature no such offer is sent at all. The native Apple pasteboard works on both
+subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
+data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 
 ## Clients
 
