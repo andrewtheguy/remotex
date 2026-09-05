@@ -107,11 +107,62 @@ has an answer rather than being rediscovered.
   browser untouched, would remove upstream bytes and a transcode — for a target
   where the operator has already accepted lossy, the transcode is pure loss. The
   cost is a decoder this repo would then own.
-- **Apple Adaptive media.** High Performance supplies its virtual display over zlib
-  rectangles. Apple's HEVC/AAC-over-SRTP path is reverse-engineering work with no
-  specification behind it, on the subtype that is already the least settled — see
-  [`apple-vnc-889.md`](apple-vnc-889.md). Widening standard `ard`, or anything on
-  the path both subtypes share, comes first.
+- **Apple High Performance screen video (HEVC).** High Performance supplies its
+  virtual display over zlib rectangles today. The same media stream that carries
+  system audio (below) can also carry the screen as an HEVC stream over SRTP, which
+  would remove the zlib transcode on that subtype. Only the audio leg has been
+  reverse-engineered; the video leg's payload was never received — see
+  [`apple-vnc-889.md`](apple-vnc-889.md). It is the larger, less certain half, and
+  widening standard `ard` still comes before deepening this subtype.
+
+### Apple High Performance system audio, behind a non-default feature
+
+High Performance mode routes the Mac's **system audio** to the viewer, and the
+whole path has been reverse-engineered and proven end to end: a from-scratch client
+negotiated the stream and decrypted 1,794 live AAC-ELD packets from a Mac that had
+sound playing. [`apple-vnc-889.md`](apple-vnc-889.md) records the wire — the `0x1c`
+negotiation message, the `1010`/`1011` reply encodings, the AVConference offer
+plist, and the SRTP/AAC-ELD stream. This is a genuine capability the product lacks,
+and it is the one thing High Performance does that `ard` cannot, so it is worth
+shipping — but **only behind a Cargo feature that is off by default**, for three
+reasons that are all real costs rather than caution:
+
+- **The decoder licence.** The audio is AAC-ELD (MPEG-4 object type 39), which no
+  browser's WebCodecs and no native FFmpeg decoder will decode, so passthrough is
+  impossible and the gateway must decode to PCM itself. The only portable open
+  decoder is Fraunhofer **fdk-aac**, whose licence is not OSI-approved — the same
+  class of cost that got HE-AAC built and reverted (see
+  [`architecture.md`](architecture.md) on remote audio). Gating the feature keeps
+  that dependency out of the default build and the default binaries entirely.
+  Apple's own AudioToolbox decodes AAC-ELD, but only when the gateway runs on
+  macOS, so it is not a substitute for the general build. **This cost was tested
+  for an escape and there is none.** AVConference's negotiable audio set does include
+  **Opus** (see [`apple-vnc-889.md`](apple-vnc-889.md), "The negotiation codec set"),
+  but the codec the `RemoteDesktopSystemAudio` transmitter emits is decoupled from
+  the negotiation: an offer whose only audio codecs were AMR-NB and EVS was *agreed*
+  by the server (its answer echoed exactly that set, no AAC-ELD) yet it streamed
+  AAC-ELD regardless — 48 kHz, `0x89ffffff` prefix, unchanged. The encoder is a
+  server-side setting the client's offer cannot reach, so the fdk-aac dependency is
+  unavoidable for this feature.
+- **It drags in the HEVC video negotiation.** The Mac refuses an audio-only media
+  stream: the `0x1c` message must also carry a valid HEVC screen-video offer or the
+  agent aborts both legs. So even an audio-only feature has to synthesize and send a
+  video offer it then ignores — extra reverse-engineered surface for a subtype
+  already marked experimental.
+- **It is the least-settled subtype.** Everything here is measurement against one
+  macOS build with no specification behind it, on the `ard-high-performance` path
+  that AGENTS.md already tells readers to prefer widening `ard` over.
+
+The shippable shape, then: a `--features apple-hp-audio` (default-off) build that
+pulls in the fdk-aac decoder and the SRTP/RTP/RTCP receiver, a per-target opt-in key
+that is refused at config parse unless the feature is compiled in (the same rule
+shape as `audio` being refused on non-RDP targets), and — once decoded to PCM — the
+existing `/ws/audio`, bridge, and Opus-or-passthrough path downstream, which is
+protocol-agnostic and needs nothing new. The container and default release binaries
+never compile the feature, so the Fraunhofer dependency and the experimental wire
+stay out of them; an operator who wants Mac audio builds it in deliberately. The
+[`tests/hp_audio_probe.py`](../tests/hp_audio_probe.py) probe is the reference for
+the receive-and-decrypt half.
 
 ### Apple Screen Sharing display modes
 
