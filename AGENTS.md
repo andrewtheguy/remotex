@@ -16,7 +16,7 @@
   `touchPassthrough.ts` is a *touchscreen* (fingers go to the guest as MS-RDPEI
   contacts and the guest interprets them). The second is RDP-only, offered on the
   host's `touchReady` rather than a target key, and decides nothing about what
-  fingers mean — do not add gesture recognition to it. Measured 2026-08-20 against
+  fingers mean — do not add gesture recognition to it. Measured against
   Windows 11 Enterprise 26100 through the gateway from a touch-emulating Chromium
   (`tmp/touch_e2e.mjs`): press-and-hold opens the desktop context menu at the
   contact, a tap on Start opens Start — touch semantics a mouse could not
@@ -80,7 +80,7 @@ CPUID (libvpx's rtcd tables, opus's `MAY_HAVE` dispatch, FreeRDP's primitives
 autodetect). Note the sys crates fetch each repository's *latest* release, so
 the archive floor is set by that release, not by the tag pinned in `Cargo.toml`.
 
-Measured 2026-09-02 on an i5-8500T, this costs nothing where it counts: at
+Measured on an i5-8500T, this costs nothing where it counts: at
 `target-cpu=x86-64-v3` the PNG tile encode was 1.7x *slower* (autovectorized
 `png`/`fdeflate` loops), VP9 encode was within noise of a v3-scalar libvpx,
 and an opus archive with dispatch instead of `PRESUME_AVX2` took 0.73% of a
@@ -115,7 +115,7 @@ fidelity. Producers are RDP `Density` (`src/rdp.rs`) and Apple layout's
 backing/logical ratio (`src/vnc_apple.rs`); neither depends on the viewport.
 What a remote is asked to *render* at is `protocol::render_density`: 1x or 2x
 at the 1.5 midpoint, for RDP and High Performance alike. Never ask a Mac for a
-fractional ratio — measured 2026-08-23 on macOS 26.6, a 1.25x request came back
+fractional ratio — measured on macOS 26.6, a 1.25x request came back
 as a 960×540-point display and a 1.5x one as 960×600 points, each at 2x, which
 is a desktop whose text looks zoomed while the Dock (shrunk to fit) does not.
 
@@ -347,7 +347,7 @@ own `VideoDecoder`, naming the configuration. See
 
 The one per-target choice inside VP9 is chroma, `render_chroma = "420" | "444"`
 (profile 0 or 1), and it is where a desktop stream's visible loss actually is:
-measured 2026-09-01 on rendered text, every 4:2:0 quantizer down to lossless sits at
+measured on rendered text, every 4:2:0 quantizer down to lossless sits at
 the conversion's own 28.5 dB floor (thin coloured text loses most of its colour in
 the 2×2 average), and 4:4:4 at the same quantizer measures 42.8 dB with inter frames
 no larger. Do not look for quality-100 softness in the quantizer, speed or loop
