@@ -153,7 +153,8 @@ existing `/ws/audio`, bridge, and Opus-or-passthrough path downstream, which is
 protocol-agnostic and needs nothing new. The container and default release binaries
 never compile the feature, so the Fraunhofer dependency and the experimental wire
 stay out of them; an operator who wants Mac audio builds it in deliberately. The
-`tmp/hp_audio_probe.py` probe is the reference for the receive-and-decrypt half.
+[`tests/hp_audio_probe.py`](../tests/hp_audio_probe.py) probe is the reference for
+the receive-and-decrypt half.
 
 ### Apple Screen Sharing display modes
 

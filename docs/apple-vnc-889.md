@@ -455,7 +455,7 @@ High Performance carries the Mac's **system audio**, and it does not ride RFB at
 all. The agent (`ScreensharingAgent`'s `SSUDPSender`) opens an AVConference — the
 FaceTime media stack — `AVCAudioStream` over **UDP with SRTP** straight to the
 viewer. RFB only negotiates it. This was measured on macOS 26.6.2 with a
-throwaway Python client (`tmp/hp_audio_probe.py`, gitignored) that speaks the
+throwaway Python client ([`tests/hp_audio_probe.py`](../tests/hp_audio_probe.py)) that speaks the
 whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
 decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
 the mechanism below is documented by Apple.
