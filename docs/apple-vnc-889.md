@@ -454,7 +454,11 @@ without desyncing.
 High Performance carries the Mac's **system audio**, and it does not ride RFB at
 all. The agent (`ScreensharingAgent`'s `SSUDPSender`) opens an AVConference — the
 FaceTime media stack — `AVCAudioStream` over **UDP with SRTP** straight to the
-viewer. RFB only negotiates it. This was measured on macOS 26.6.2 with a
+viewer. RFB only negotiates it. The gateway implements this in
+`src/vnc_apple_audio.rs` (the wire, always built) and `src/aac_eld.rs` (the
+decoder, behind the non-default `apple-hp-audio` feature); the offers Apple's
+client generated are rebuilt there field by field and checked against the
+captured bytes. This was measured on macOS 26.6.2 with a
 throwaway Python client ([`tests/hp_audio_probe.py`](../tests/hp_audio_probe.py)) that speaks the
 whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
 decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
@@ -526,12 +530,22 @@ configure:` log and from the decrypted packets):
   encrypted; a real receiver should strip a trailing 10-byte tag if suite 7 is
   confirmed on its host.
 
+One correction to the probe, found when its RTCP check was ported: it masked the
+second byte to seven bits before testing for 200–207, so the Mac's once-a-second
+RTCP packets (type 200/201, read as RTP payload type 72/73) were decrypted and
+written out as frames — the two "concealed" units fdk-aac reports on the captured
+file are those. RTCP is told apart by the whole byte.
+
 **Decoding AAC-ELD is the catch, and it is forced — the transmitter's codec is
 decoupled from the negotiation.** AAC-ELD (MPEG-4 object type 39) is decodable by
 neither FFmpeg's native `aac` decoder nor any browser's WebCodecs `AudioDecoder`, so
 the stream cannot pass through and the gateway must decode. The only open decoder is
 Fraunhofer **fdk-aac** (licence not OSI-approved); Apple's own **AudioToolbox**
-(`aac_at`) decodes it too, but only when the gateway runs on macOS.
+(`aac_at`) decodes it too, but only when the gateway runs on macOS. The
+AudioSpecificConfig fdk-aac wants is `F8 E6 50 00` — object type 39, 48 kHz,
+stereo, 480-sample frames, no SBR, no resilience tools — which decoded 375 of the
+377 captured units cleanly (the other two were RTCP, above); 512-sample frames
+concealed most of the stream and every other flag combination was refused.
 
 That the codec cannot be moved off AAC-ELD is now **proven, not assumed.** Offering
 a codec set that excludes AAC-ELD does not change the stream. Building a

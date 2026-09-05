@@ -191,16 +191,22 @@ password = "change-me"
 # Performance carries its fetches and data inside the encrypted record transport.
 #clipboard = false
 
-# Remote audio: redirect this target's sound when the client asks for it, with the
-# floating menu's Audio button. RDP only — MS-RDPEA is the one audio channel the
-# gateway speaks and RFB has no equivalent, so it is refused on "vnc" rather than
-# ignored there.
+# Remote audio: carry this target's sound when the client asks for it, with the
+# floating menu's Audio button. RDP carries it over MS-RDPEA. An
+# "ard-high-performance" target carries the Mac's system audio over Apple's media
+# stream — but only in a gateway built by hand with
+# `cargo build --release --features apple-hp-audio`, because that stream is AAC-ELD
+# and the decoder's licence keeps it out of every release binary; any other build
+# refuses the key at startup. RFB itself has no audio, so every other "vnc" target
+# refuses it rather than ignoring it.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
-# sound away while nobody is listening. Only 44100 Hz 16-bit stereo PCM is
-# accepted; a server that offers no matching format sends nothing, and the log
-# says so.
+# sound away while nobody is listening. From RDP only 44100 Hz 16-bit stereo PCM
+# is accepted — a server that offers no matching format sends nothing, and the
+# log says so; the Mac's stream decodes to 48000 Hz 16-bit stereo. The Mac sends
+# by UDP to this gateway's address on a port it chooses, so it must reach the
+# gateway directly.
 #
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
