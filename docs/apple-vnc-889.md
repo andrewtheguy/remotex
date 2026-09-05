@@ -449,6 +449,92 @@ arrived and rendered.
 same way — a `u16` giving how much follows — so one rule steps over all of them
 without desyncing.
 
+## The media stream: High Performance system audio
+
+High Performance carries the Mac's **system audio**, and it does not ride RFB at
+all. The agent (`ScreensharingAgent`'s `SSUDPSender`) opens an AVConference — the
+FaceTime media stack — `AVCAudioStream` over **UDP with SRTP** straight to the
+viewer. RFB only negotiates it. This was measured on macOS 26.6.2 with a
+throwaway Python client (`tmp/hp_audio_probe.py`, gitignored) that speaks the
+whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
+decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
+the mechanism below is documented by Apple.
+
+**The negotiation is one client message and two server rectangles.** After the
+first display layout, the client advertises encoding **1010** (`kSSVideoEncoding_AVCMediaStream`)
+in a second `SetEncodings` and sends message type **`0x1c`**
+(`RFBMediaStreamServerConfiguration`, version 3) inside the record layer:
+
+```text
++0x00 u8   0x1c
++0x01 u8   pad
++0x02 u16  body length (everything after this field)
++0x04 u16  version = 3
++0x06 u32  flags = 0
++0x0a u16  audio offer length
++0x0c u16  video1 offer length
++0x0e u16  video2 offer length
++0x14 16B  session UUID
++0x24 46B  audio SRTP key, viewer -> server
++0x52 46B  audio SRTP key, server -> viewer
++0x80      audio offer, then 46B v1 key v2s + 46B v1 key s2v + video1 offer
+           (video2 likewise, when present)
+```
+
+The server answers with framebuffer rectangles, not record-layer messages:
+encoding **1010** carries message 1 (`u16 type, u16 version, u32 flags, u16 audio
+UDP port` — audio at that port, video1 at port+1, video2 at port+2; **type 3 is a
+media-stream error** with `u32 errorType, u32 subCode`), and encoding **1011**
+carries message 2, the AVC answer with the same three offer lengths at `+0x0a`.
+
+**The offer is a binary plist wrapping a protobuf**, produced by
+`AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):
+`{ avcMediaStreamNegotiatorMode, avcMediaStreamOptionCallID (UUID string),
+avcMediaStreamOptionRemoteEndpointInfo (protobuf: model, build),
+avcMediaStreamNegotiatorMediaBlob (zlib of a protobuf: SSRC, "Viceroy 1.7.0", a
+codec list) }`. A reimplementation that does not link AVConference must synthesize
+these bytes itself. `tmp/probe2.m` (gitignored) generates them on the Mac; a mode-7
+video offer needs `Video{Width,Height,Resolution}` and `TransportProtocolType`
+options set.
+
+**The Mac refuses audio alone.** A `0x1c` message with `video1 offer length 0`
+negotiates the audio successfully (`AVCAudioStream-configure didSucceed=1`) and
+then tears the whole stream down — `unable to create video config`, error type 2 —
+because `startAVCMediaStreams` fails the video1 leg and aborts both. A **valid
+mode-7 video offer has to ride alongside the audio**, even though this gateway has
+no use for the HEVC screen the video port would carry (the zlib rectangles already
+carry the picture). So the audio path structurally pulls in the HEVC video
+negotiation.
+
+**What the Mac then sends** (confirmed from the agent's own `AVCAudioStream
+configure:` log and from the decrypted packets):
+
+- **Codec type 16 = AAC-ELD**, 48 kHz, stereo, 320 kbit/s, RTP payload type 101,
+  `ptime` 10 ms. One RTP packet per 480-sample frame; measured timestamps advance
+  exactly 480 per packet.
+- **RTCP once a second, timeout 3 s.** A viewer that never sends RTCP has its
+  stream stopped by the agent.
+- **SRTP AES-256 counter mode.** RFC 3711 key derivation from the 46-byte master
+  (32-byte key, 14-byte salt); per-packet IV is `(salt << 16) XOR (ssrc << 64) XOR
+  (packetIndex << 16)`. Decrypting the captured packets with the key the client
+  itself sent produced structured AAC-ELD: 1,423 of 1,794 frames share the
+  `0x89ffffff` near-silence prefix, which random output from a wrong key never
+  does. The client binary sets `SRTPCipherSuite = 5`
+  (`AES_256_AUTH_NONE`), yet the agent's negotiated config logged suite **7**
+  (`AES_256_AUTH_SHA1_80`, a 10-byte auth tag appended to each packet). Both
+  readings decrypt the same leading bytes, since the tag is appended rather than
+  encrypted; a real receiver should strip a trailing 10-byte tag if suite 7 is
+  confirmed on its host.
+
+**Decoding is the catch.** AAC-ELD (MPEG-4 object type 39) is not decodable by
+FFmpeg's native `aac` decoder, nor by any browser's WebCodecs `AudioDecoder`, so
+passthrough to the client is impossible. The open decoder is Fraunhofer **fdk-aac**
+(licence not OSI-approved), and Apple's own **AudioToolbox** (`aac_at`) decodes it
+but only when the gateway process runs on macOS. Whether the Mac can be made to
+answer with a browser-friendly codec instead of AAC-ELD was not tested — the
+`RemoteDesktopSystemAudio` negotiator's settings are hard-wired to AAC-ELD 48 kHz,
+so it is unlikely.
+
 ## Still unknown
 
 - **What `screensharingd` does with the first `SetEncodings`**, such that adding,
@@ -461,7 +547,9 @@ without desyncing.
 - Apple's still-image codecs `0x3ea` and `0x3f3`; the document leaves the first's
   rectangle body and the second's command-code table unresolved, and neither was
   advertised here, so nothing was learned.
-- The Adaptive media path (`0x1c`, SRTP, HEVC): not attempted.
+- The media stream's **HEVC screen video** leg (`0x1c` video1/video2, SRTP). Only
+  the audio leg was decoded — see "The media stream" above; the video offer had to
+  be sent for audio to start, but its picture was never received or decoded.
 - Authentication types 33, 35 and 36: not attempted, type 30 being sufficient.
 - Multi-rekey, and whether sequence counters survive a second one.
 
