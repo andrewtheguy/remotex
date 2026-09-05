@@ -555,6 +555,22 @@ server-side setting it does not reach. **Opus is in AVConference's library (both
 transmit path, and no offer can put it there.** The fdk-aac (or macOS AudioToolbox)
 dependency is therefore a proven necessity, not a worst case.
 
+The server-side path was traced to the source in `ScreensharingAgent`
+(`SSUDPSender`, the process that actually runs the sender). Its
+`sendToRemoteAddress:…` builds the transmit config as
+`audioConfig = [audioAnswerNegotiator generateMediaStreamConfigurationWithError:]`
+and hands it to `createAVCAudioStreamWithRemoteAddress:connectedSocket:audioConfig:…`,
+which does `[AVCAudioStream initWithNetworkSockets:options:error:]` + `configure:error:`.
+The offer the viewer sent only ever reaches the *answer* the negotiator echoes back;
+the `audioConfig` that configures the encoder comes from
+`generateMediaStreamConfiguration`, which builds the stream from the audio stream
+group's defaults (`VCMediaNegotiationBlobV2StreamGroupStream defaultsForStreamGroupID:`
+→ `defaultPayloadConfigurationsForStreamGroupID:` → codec type `16`). That default
+function is a plain switch on the stream-group FourCC with no preference, plist, or
+environment read, so there is no server-side setting to flip either — the codec is
+fixed by which stream group the agent opened, and the agent opens the system-audio
+group.
+
 ### The negotiation codec set
 
 Recovered by disassembling `AVConference` from the macOS 26.6.2 arm64e dyld shared
