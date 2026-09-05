@@ -135,14 +135,15 @@ reasons that are all real costs rather than caution:
   [`architecture.md`](architecture.md) on remote audio). Gating the feature keeps
   that dependency out of the default build and the default binaries entirely.
   Apple's own AudioToolbox decodes AAC-ELD, but only when the gateway runs on
-  macOS, so it is not a substitute for the general build. **This cost may be
-  escapable and is worth settling before building the feature:** AVConference's
-  negotiable audio set includes **Opus** (see [`apple-vnc-889.md`](apple-vnc-889.md),
-  "The negotiation codec set"), which WebCodecs decodes and which `opus-prebuilt`
-  already handles. Whether the HP audio agent will encode Opus for a viewer that
-  offers it is untested — the captured offer only ever advertised AAC-ELD, so the
-  earlier "codec is forced" reading was inconclusive. If Opus works, the decoder
-  licence problem disappears and the feature need not be gated for that reason.
+  macOS, so it is not a substitute for the general build. **This cost was tested
+  for an escape and there is none.** AVConference's negotiable audio set does include
+  **Opus** (see [`apple-vnc-889.md`](apple-vnc-889.md), "The negotiation codec set"),
+  but the codec the `RemoteDesktopSystemAudio` transmitter emits is decoupled from
+  the negotiation: an offer whose only audio codecs were AMR-NB and EVS was *agreed*
+  by the server (its answer echoed exactly that set, no AAC-ELD) yet it streamed
+  AAC-ELD regardless — 48 kHz, `0x89ffffff` prefix, unchanged. The encoder is a
+  server-side setting the client's offer cannot reach, so the fdk-aac dependency is
+  unavoidable for this feature.
 - **It drags in the HEVC video negotiation.** The Mac refuses an audio-only media
   stream: the `0x1c` message must also carry a valid HEVC screen-video offer or the
   agent aborts both legs. So even an audio-only feature has to synthesize and send a

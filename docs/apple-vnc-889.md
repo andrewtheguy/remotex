@@ -526,23 +526,34 @@ configure:` log and from the decrypted packets):
   encrypted; a real receiver should strip a trailing 10-byte tag if suite 7 is
   confirmed on its host.
 
-**Decoding AAC-ELD is a catch — but maybe not a forced one.** AAC-ELD (MPEG-4
-object type 39) is decodable by neither FFmpeg's native `aac` decoder nor any
-browser's WebCodecs `AudioDecoder`, so as long as the stream is AAC-ELD, passthrough
-is impossible and the gateway must decode. The only open decoder is Fraunhofer
-**fdk-aac** (licence not OSI-approved); Apple's own **AudioToolbox** (`aac_at`)
-decodes it too, but only when the gateway runs on macOS.
+**Decoding AAC-ELD is the catch, and it is forced — the transmitter's codec is
+decoupled from the negotiation.** AAC-ELD (MPEG-4 object type 39) is decodable by
+neither FFmpeg's native `aac` decoder nor any browser's WebCodecs `AudioDecoder`, so
+the stream cannot pass through and the gateway must decode. The only open decoder is
+Fraunhofer **fdk-aac** (licence not OSI-approved); Apple's own **AudioToolbox**
+(`aac_at`) decodes it too, but only when the gateway runs on macOS.
 
-What is *not* settled is whether the stream has to be AAC-ELD. Editing the captured
-offer's media blob — deleting the `f9 {f1=16, f2=4100}` entry, leaving `{f1=1}` and
-`{f1=4}` — made the agent neither refuse nor fall back; it sent the same
-`0x89ffffff` ELD stream (same 52/~370/400-byte sizes, fresh SRTP keys each run).
-That looked like "ELD is forced," but it does **not** prove it: the negotiation set
-below shows that captured offer advertised only **AAC-ELD** as its audio codec, so
-the test never asked for anything else. Whether a viewer that offers Opus — which
-**is** in AVConference's codec set and *is* WebCodecs-decodable (remotex already runs
-`opus-prebuilt`) — makes the HP audio agent emit Opus instead is **untested**. Until
-that is tried, the fdk-aac dependency is a worst case, not a proven necessity.
+That the codec cannot be moved off AAC-ELD is now **proven, not assumed.** Offering
+a codec set that excludes AAC-ELD does not change the stream. Building a
+round-trip-verified offer whose only audio codecs are AMR-NB (`{f1=1, f2=299}`) and
+EVS (`{f1=4, f2=6500}`) — AAC-ELD (`{f1=16, f2=4100}`) removed cleanly at the
+protobuf level, not byte-hacked — the server:
+
+- **agreed to it**: its message-2 answer echoed back exactly `{1,299}` and `{4,6500}`
+  and carried **no** AAC-ELD entry — the negotiation succeeded on AMR-NB/EVS; yet
+- **streamed AAC-ELD anyway**: `pt=101`, RTCP timestamp stepping 480 samples/packet
+  (48 kHz, 10 ms), ~370–410-byte stereo payloads, the `0x89ffffff` near-silence
+  prefix, and a frame-1 header (`00683400…`) byte-identical to the all-AAC-ELD run.
+
+So the `0x1c` media negotiation reconciles a codec *list* that the actual
+`RemoteDesktopSystemAudio` transmitter then ignores: it encodes the system-audio
+stream group's hardwired default (`defaultPayloadConfigurationsForStreamGroupID:`
+maps that group to codec type `16`, AAC-ELD 48 kHz, unconditionally — there is no
+Opus branch in it). The viewer's offer is a client-side input; the encoder is a
+server-side setting it does not reach. **Opus is in AVConference's library (both
+`_RegisterOpusEncoder` and `_RegisterOpusDecoder` exist) but not in this agent's
+transmit path, and no offer can put it there.** The fdk-aac (or macOS AudioToolbox)
+dependency is therefore a proven necessity, not a worst case.
 
 ### The negotiation codec set
 
@@ -578,8 +589,10 @@ So the audio family AVConference can negotiate is **AMR-NB, AMR-WB, EVS, AAC-ELD
 `isOpus4Channel48KhzPayload:`), but its exact internal id among the unpinned audio
 slots (`8`, `12`, `20`) was not isolated. **Codec type 16 = AAC-ELD** is what the HP
 screen-sharing agent (`RemoteDesktopSystemAudio`) actually configured and streamed
-in every capture; whether it will encode any other member of this set for a viewer
-that offers one is the open question above.
+in every capture. This whole set is what AVConference can *negotiate*; it is **not**
+what this agent will *transmit* — as the AMR-NB/EVS-only test above proved, the
+transmitter emits AAC-ELD whatever the negotiation agrees, so the negotiable set is
+of no help in escaping the AAC-ELD decoder.
 
 ## Still unknown
 
