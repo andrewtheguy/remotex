@@ -194,6 +194,8 @@ Apple display modes:
   Its setup descriptor always enables dynamic resolution. Apple's client can
   choose up to two virtual displays and fixed resolution presets; remotex
   implements neither control.
+  Its **system audio** is the one thing it does that `ard` cannot, and it is
+  behind the non-default `apple-hp-audio` Cargo feature — see "Remote audio".
 
 ## Browser tests
 
@@ -265,6 +267,30 @@ browser without it never reaches a target of either kind.
 does not go through it and must not start: resampling is the thing it exists not
 to do. Do not tie the group size to a packet size either; the ratio is what makes
 882-to-960 exact.
+
+**Apple High Performance system audio** is the third source, and the only one
+behind a Cargo feature: `apple-hp-audio`, off by default, absent from every
+release artifact and container image, built by hand with `cargo build --release
+--features apple-hp-audio`. The Mac's `RemoteDesktopSystemAudio` transmitter
+sends AAC-ELD over SRTP whatever codec the negotiation agrees (proven, see
+`docs/apple-vnc-889.md`), and the only portable decoder is Fraunhofer's fdk-aac
+(`fdk-aac-prebuilt`, the same prebuilt-archive bargain as `opus` and `vpx-sys`),
+whose licence is not OSI-approved — so the default build never links it. The
+*wire* (`src/vnc_apple_audio.rs`: the AVConference offers synthesized field by
+field, the `0x1c` message, the 1010/1011 replies, RFC 3711 key derivation, SRTP
+counter-mode decrypt, RTCP) is always compiled and unit-tested against captured
+bytes; only the decoder (`src/aac_eld.rs`) and the receiver that needs it are
+gated. `audio = true` on an `ard-high-performance` target is refused at config
+parse by any build without the feature, naming the build command. Downstream it is
+the same path as RDP: the decoded 48 kHz stereo PCM goes to the `AudioBridge` two
+10 ms units at a time, and `TargetConfig::audio_source_format` is what lets the
+session build its encoder at the right rate before the stream is up. The Mac
+sends its audio **from its own address to the gateway's address on the UDP port
+it names** (measured: the same number as the VNC port), so the gateway must be
+reachable by UDP from the Mac; a NAT or firewall between them is silence with a
+warning after five seconds. The Mac refuses audio alone, so a screen-video offer
+whose picture is never received rides beside every audio offer. Do not add a
+macOS-only AudioToolbox path beside fdk-aac; one decoder, behind one feature.
 
 Audio has **its own WebSocket and its own queue**, `/ws/audio`. Opening it is the
 subscription — there is no `ClientMsg` for audio, and closing it is the only way to

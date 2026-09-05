@@ -712,7 +712,9 @@ does not reset the table.
 
 ### Audio frames
 
-RDP audio is opt-in, and it has a socket of its own. **Opening
+Remote audio is opt-in per target — `audio = true` on an RDP target, or on an
+Apple High Performance target in a gateway built with the `apple-hp-audio`
+feature (see the VNC engine below) — and it has a socket of its own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.
 
@@ -810,6 +812,16 @@ anything itself: an *encoded* stream goes to WebCodecs, so a codec a browser wil
 not take surfaces as a decoder error naming it rather than as silence. A
 `pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
 `AudioBuffer` and schedules it directly.
+
+An audio-enabled **High Performance** engine has no channel to negotiate; it asks
+the Mac for its system audio over the media stream described under the VNC engine,
+and what reaches the bridge is the AAC-ELD decoder's output — 48 kHz, 16-bit
+stereo PCM, two 10 ms access units per wave buffer. Under `opus` no resampler is
+built for it (48 kHz is already the encoder's rate); under `pcm` the packets are
+48 kHz rather than 44.1, and `audioFormat` says so. The session builds its
+encoder from `TargetConfig::audio_source_format` — the one format each engine's
+wave buffers can be in — when the audio socket opens before the remote's channel
+is up, which is what keeps a 48 kHz stream from being encoded as 44.1.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -1165,12 +1177,48 @@ and a layout payload is two bytes shorter than its own length prefix claims. The
 byte layouts and measured protocol corrections are in
 [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
+**High Performance system audio** is the one thing this mode does that Standard
+mode cannot, and it is behind the `apple-hp-audio` Cargo feature — off by default,
+in no release artifact or container image, built by hand with
+`cargo build --release --features apple-hp-audio`. The Mac's sound does not ride
+RFB: after the first display layout the client advertises encoding 1010 in the
+second `SetEncodings` and sends message `0x1c`, `RFBMediaStreamServerConfiguration`,
+carrying a session UUID, an SRTP master key per direction per stream and an
+AVConference offer per stream; the Mac answers with a rectangle naming a UDP port
+(or an error) and streams AAC-ELD — 48 kHz stereo, one 480-sample access unit per
+RTP packet — over SRTP (AES-256 counter mode, RFC 3711 derivation, an
+HMAC-SHA1-80 tag the receiver strips) from its own address to the gateway's on
+that port, expecting RTCP once a second. `src/vnc_apple_audio.rs` is the whole of
+that wire, always compiled and tested against captured bytes: the offers are
+Apple's own negotiator plists rebuilt field by field (a binary plist around a
+zlib'd protobuf) and checked byte-for-byte against what Apple's client produced.
+What the feature gates is `src/aac_eld.rs`, the decoder, and the receiver that
+needs it: AAC-ELD is decodable by no browser's WebCodecs and no native FFmpeg
+decoder, the Mac's transmitter emits it whatever codec the offer agrees (measured:
+an offer with AAC-ELD removed was accepted and streamed AAC-ELD anyway), and the
+one portable decoder is Fraunhofer's fdk-aac (`fdk-aac-prebuilt`, a downloaded
+static archive like `opus` and `vpx-sys`), whose licence is not OSI-approved. Two
+consequences are worth knowing before enabling it: the Mac refuses an audio-only
+stream, so a screen-video offer whose HEVC picture is never received rides beside
+every audio offer; and the audio arrives by UDP at the gateway's address on the
+port the Mac names (the VNC port's own number, measured), so a gateway the Mac
+cannot reach by UDP gets no sound and a warning after five seconds. A config
+asking for `audio` on this subtype is refused by any build without the feature,
+naming the build command. Measured end to end on macOS 26.6.2: 1000 packets
+decoded with none concealed, the decoded signal's level constant through a run
+with music playing on the Mac.
+
 Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
-transport (the reference leaves their payload formats unresolved, and a client must
-not advertise an encoding it cannot decode). The native Apple pasteboard works on
-both subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
-data messages inside its encrypted record layer. See
-[`roadmap.md`](roadmap.md).
+transport's *video* leg. The rule is that a client must not advertise an encoding
+it cannot decode, and the HEVC offer is the one intentional exception to it: with
+audio enabled the gateway *sends* a screen-video offer inside the `0x1c` message,
+because the Mac refuses an audio-only media stream, yet it never opens the video
+port, never receives the HEVC payload and has no decoder for it. The offer is a
+negotiation input the audio cannot do without, not a promise to render, and the
+zlib rectangles remain the only picture path. Without the `apple-hp-audio`
+feature no such offer is sent at all. The native Apple pasteboard works on both
+subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
+data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 
 ## Clients
 

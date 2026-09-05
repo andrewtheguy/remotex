@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.173"
+version = "0.0.174"
 
 [package]
 name = "remotex"
@@ -29,6 +29,13 @@ edition = "2024"
 # expose process supervision or its private worker surface.
 default = ["embedded-gateway"]
 embedded-gateway = ["dep:crossterm"]
+# Apple High Performance system audio (src/vnc_apple_audio.rs, src/aac_eld.rs).
+# Off by default and never in a release artifact: the Mac streams AAC-ELD, which
+# only Fraunhofer's fdk-aac decodes portably, and its licence is not OSI-approved.
+# An operator who wants a Mac's sound builds the gateway with
+# `cargo build --release --features apple-hp-audio`; a config that asks for
+# `audio = true` on an `ard-high-performance` target is refused by any other build.
+apple-hp-audio = ["dep:fdk-aac"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -89,6 +96,12 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # the binary is self-contained on every runner without any env coaxing. The lib is
 # still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260902165321-488bdb1" }
+# AAC-ELD, for Apple High Performance system audio, behind the `apple-hp-audio`
+# feature above. The same prebuilt bargain as `opus` and `vpx-sys`: a static
+# archive the sys crate downloads from that repository's latest release, no C++
+# toolchain, no cmake. The tag pins the crate; the archives are the release's.
+# `fdk_aac` is the lib name, so `use fdk_aac::dec::…` is what src/aac_eld.rs writes.
+fdk-aac = { package = "fdk-aac-prebuilt", git = "https://github.com/andrewtheguy/fdk-aac-prebuilt", tag = "v2.0.3-20260902193421-5490fe1", optional = true }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing

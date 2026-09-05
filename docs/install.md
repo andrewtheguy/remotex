@@ -234,3 +234,23 @@ bash packaging/build-native-packages.sh
 
 Linux builds both `.deb` and `.rpm`; macOS builds `.pkg`. See
 [`packaging/README.md`](../packaging/README.md) for the release workflow.
+
+## Apple High Performance audio (build it yourself)
+
+The Mac's system audio on an `ard-high-performance` target is behind a Cargo
+feature that no release binary, package or container image includes: the stream is
+AAC-ELD, and the only portable decoder for it is Fraunhofer's fdk-aac, whose licence
+is not OSI-approved. To have it, build the gateway from source with the feature:
+
+```sh
+bun install --cwd frontend
+cargo build --release --features apple-hp-audio
+```
+
+The build downloads a prebuilt static fdk-aac archive the same way it already
+downloads FreeRDP, libopus and libvpx — no C++ toolchain is needed. Then set
+`audio = true` on the target. A gateway built without the feature refuses that
+key at startup and says so. The Mac sends its audio by UDP to the gateway's
+address on a port it chooses (the VNC port's number, as measured), so the gateway
+must be reachable from the Mac by UDP; behind a NAT or a firewall the session runs
+without sound and the log says why.

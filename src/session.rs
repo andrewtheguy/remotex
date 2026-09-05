@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::audio::AudioBridge;
 use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::mic::{MicBridge, MicSignal};
-use crate::config::{Protocol, Subtype, TargetConfig};
+use crate::config::{AudioPlan, Protocol, Subtype, TargetConfig};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, ServerMsg};
 use crate::{rdp, vnc};
@@ -922,7 +922,7 @@ impl SessionManager {
         // goes through (`forward_input`), so the rule this module states for itself is
         // that critical sections stay short. `audio_epoch` is what makes letting go
         // safe.
-        let (bridge, out, audio_id, epoch, plan) = {
+        let (bridge, out, audio_id, epoch, plan, source_format) = {
             let mut st = self.state.lock().unwrap();
             // Unconditional, and first: this is also how "replace the previous pump" is
             // expressed, and it is what tells a build already in flight to stand down.
@@ -941,19 +941,19 @@ impl SessionManager {
             // The target's, not a session setting: the codec and its rate are a
             // property of the link to this desktop, which is what the operator
             // configured them from.
-            let plan = st
+            let (plan, source_format) = st
                 .selected
                 .as_ref()
-                .map(|target| target.audio_plan())
-                .unwrap_or_default();
-            (bridge, out, audio_id, st.audio_epoch, plan)
+                .map(|target| (target.audio_plan(), target.audio_source_format()))
+                .unwrap_or((AudioPlan::default(), crate::audio::PCM_CD_QUALITY));
+            (bridge, out, audio_id, st.audio_epoch, plan, source_format)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
-        // only format this gateway ever advertises — which is not a guess: with one
-        // advertised format that is the only format a wave buffer can be in (see
-        // the RDP audio channel), so the decoder can be configured before any
-        // negotiation has happened.
+        // only format this target's source can produce — which is not a guess: RDP
+        // is asked for exactly one format, and the Mac's decoder emits exactly one
+        // (see [`TargetConfig::audio_source_format`]), so the encoder can be built
+        // before any negotiation has happened.
         //
         // Whether it *has* is worth a line, because it is the only place the
         // difference between a quiet remote and one that will never redirect is
@@ -963,7 +963,7 @@ impl SessionManager {
             "session: arming audio, the remote's audio channel is {}",
             if negotiated.is_some() { "up" } else { "not up yet" }
         );
-        let format = negotiated.unwrap_or(crate::audio::PCM_CD_QUALITY);
+        let format = negotiated.unwrap_or(source_format);
 
         let encoded = match bridge.take_listener().into_packets(format, plan) {
             Ok(encoded) => encoded,
@@ -1437,9 +1437,9 @@ impl SessionManager {
 /// Scalability: this costs one OS thread + one current-thread runtime per
 /// engine — fine here, since multi session is permanently out of scope
 /// (single user, one active session at a time; see CLAUDE.md).
-/// `audio` reaches only the RDP engine, and only when the target opted in: MS-RDPEA
-/// is the one audio channel either of these speaks, which the config file has
-/// already refused the VNC protocol over.
+/// `audio` is `Some` only when the target opted in, which the config file has
+/// already confined to the two engines with a channel to carry it: RDP's MS-RDPEA,
+/// and Apple High Performance's media stream in a build with its decoder.
 // Eight positional handoffs — the engine's whole input surface — rather than a
 // parameter struct that would exist only to be destructured at the one call site.
 #[allow(clippy::too_many_arguments)]
@@ -1465,7 +1465,9 @@ fn spawn_engine(
             Protocol::Rdp => rt.block_on(rdp::run(
                 target, display, input_rx, frame_tx, audio, camera, microphone, feedback,
             )),
-            Protocol::Vnc => rt.block_on(vnc::run(target, display, input_rx, frame_tx, feedback)),
+            Protocol::Vnc => {
+                rt.block_on(vnc::run(target, display, input_rx, frame_tx, audio, feedback))
+            }
         }
     });
 }

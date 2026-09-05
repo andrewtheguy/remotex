@@ -46,6 +46,7 @@ use crate::protocol::{
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
+use crate::vnc_apple_audio::{self, MediaStream};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::vnc_clipboard;
@@ -419,6 +420,11 @@ struct Apple {
     /// 800x600 desktop, on a mode whose framebuffer is a physical screen and can be
     /// far larger than that.
     asked_for_zlib: bool,
+    /// The Mac's system audio, on a High Performance target that asked for it: the
+    /// `0x1c` offer goes out with the first layout's `SetEncodings`, and the Mac's
+    /// encoding-1010 reply starts the receiver. Dropped with the read loop, which
+    /// ends the receiver.
+    media: Option<MediaStream>,
 }
 
 impl Apple {
@@ -427,8 +433,8 @@ impl Apple {
     /// `high_performance` settles one thing only — whether a virtual display was
     /// asked for. It must not reach [`Apple::asked_for_zlib`]: presetting that flag
     /// is how a subtype opts *out* of compression, and neither should.
-    fn new(high_performance: bool) -> Self {
-        Self { virtual_display: high_performance, ..Self::default() }
+    fn new(high_performance: bool, media: Option<MediaStream>) -> Self {
+        Self { virtual_display: high_performance, media, ..Self::default() }
     }
 }
 
@@ -539,10 +545,11 @@ pub async fn run(
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+    audio: Option<Arc<crate::audio::AudioBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("vnc", frame_tx, config.render_plan(), feedback);
-    session(config, display, input_rx, &sink).await;
+    session(config, display, input_rx, audio, &sink).await;
     sink.finish().await;
 }
 
@@ -550,6 +557,7 @@ async fn session(
     config: TargetConfig,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
+    audio: Option<Arc<crate::audio::AudioBridge>>,
     sink: &TileSink,
 ) {
     // The budget covers the RFB handshake, which can stall on a host that accepts
@@ -562,14 +570,21 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, display, stream),
+        // The two addresses are read before the handshake owns the socket: the
+        // Mac's media stream sends its audio from the peer to the local one.
+        |stream| async {
+            let peer = stream.peer_addr()?;
+            let local = stream.local_addr()?;
+            let connected = connect(&config, display, stream).await?;
+            Ok::<_, anyhow::Error>((connected, peer, local))
+        },
     )
     .await
     else {
         return;
     };
 
-    let Connected { downlink, uplink, width, height, macos, apple, poll } = connected;
+    let (Connected { downlink, uplink, width, height, macos, apple, poll }, peer, local) = connected;
     info!("vnc: connected, desktop {width}x{height} (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -586,6 +601,13 @@ async fn session(
         return; // browser already gone
     }
 
+    let high_performance = Dialect::of(config.subtype) == Dialect::Apple889;
+    // Sound on this engine is High Performance's media stream and nothing else —
+    // the config file has already refused `audio` on every other VNC target — so
+    // the bridge the session built becomes that stream's negotiation here.
+    let media = audio
+        .filter(|_| high_performance)
+        .map(|bridge| MediaStream::new(bridge, peer, local));
     if let Err(e) = active_loop(
         downlink,
         uplink,
@@ -597,7 +619,8 @@ async fn session(
             default_size: config.default_size(),
             video: config.streams_video(),
             apple,
-            high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
+            high_performance,
+            media,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
         },
@@ -640,6 +663,10 @@ struct Flags {
     /// during setup and asks for zlib after the first layout; plain `ard` does
     /// neither.
     high_performance: bool,
+    /// The Mac's system audio, when the target asked for it: the negotiation the
+    /// read loop sends after the first display layout, and the receiver it then
+    /// starts ([`vnc_apple_audio`]). `None` on every other target.
+    media: Option<MediaStream>,
     /// The density the virtual display opened at, from the session-open's
     /// screen. Seeding [`DesktopState::host_density`] with it keeps the
     /// client's first `hostDisplay` — an echo of the same screen — from
@@ -1151,6 +1178,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         video,
         apple,
         high_performance,
+        media,
         host_density,
         poll,
     } = flags;
@@ -1192,7 +1220,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(|| Apple::new(high_performance)),
+        apple.then(|| Apple::new(high_performance, media)),
         sink.clone(),
     ));
 
@@ -2458,12 +2486,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
             if let Some(a) = apple.as_mut() {
                 a.asked_for_zlib = true;
             }
+            let media = apple.as_mut().and_then(|a| a.media.as_mut());
             read_display_layout(
                 reader,
                 shared,
                 first,
                 virtual_display,
                 clipboard_enabled && virtual_display,
+                media,
                 sink,
             )
             .await?;
@@ -2516,6 +2546,34 @@ async fn read_rect<R: AsyncRead + Unpin>(
             let image = u64::from(reader.read_u32().await?);
             reader.read_u32().await?; // the image's encoding, which is not read
             discard(reader, image).await?;
+            return Ok(RectEffect::NOTHING);
+        }
+        // The Mac's answer to the media-stream offer ([`vnc_apple_audio`]): message
+        // 1 names the UDP port its audio will arrive at, message 3 says why it will
+        // not. Only advertised on a target that asked for audio, so a reply on any
+        // other session is stepped over — the body is framed by its own `u16` size
+        // either way, and a failure to *act* on it must not end the desktop: sound
+        // is an extra on the session, not the session.
+        vnc_apple_audio::ENCODING_MEDIA_STREAM if apple.is_some() => {
+            let len = reader.read_u16().await?;
+            let mut body = vec![0u8; usize::from(len)];
+            reader.read_exact(&mut body).await?;
+            match apple.as_mut().and_then(|a| a.media.as_mut()) {
+                Some(media) => {
+                    if let Err(e) = media.on_reply(&body) {
+                        warn!("vnc: the Mac's audio could not be started: {e:#}");
+                    }
+                }
+                None => debug!("vnc: ignoring a media-stream reply; this session asked for none"),
+            }
+            return Ok(RectEffect::NOTHING);
+        }
+        // Message 2, the AVConference answer: the codec list the Mac agreed to,
+        // which the transmitter then ignores (see the module doc). Read past it.
+        vnc_apple_audio::ENCODING_MEDIA_STREAM_ANSWER if apple.is_some() => {
+            let len = reader.read_u16().await?;
+            discard(reader, u64::from(len)).await?;
+            debug!("vnc: the Mac answered the media-stream offer ({len} bytes)");
             return Ok(RectEffect::NOTHING);
         }
         // A second rekey. The key could be recovered — the wrap key rotates to the
@@ -2814,6 +2872,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     ask_for_zlib: bool,
     virtual_display: bool,
     rearm_pasteboard: bool,
+    media: Option<&mut MediaStream>,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, .. } = shared;
@@ -2886,8 +2945,17 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // before the re-arm so the update that follows is the compressed one. Both
     // subtypes reach here — a layout is what the upgrade waits on, not a dialect.
     if ask_for_zlib {
-        debug!("vnc: display layout received, asking for zlib");
-        uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
+        // With audio wanted, the same list also advertises the media-stream
+        // encoding the Mac answers the offer below through (see [`vnc_apple_audio`]).
+        if media.is_some() {
+            debug!("vnc: display layout received, asking for zlib and the media stream");
+            uplink
+                .send(&set_encodings(&vnc_apple_audio::encodings_with_media_stream()))
+                .await?;
+        } else {
+            debug!("vnc: display layout received, asking for zlib");
+            uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
+        }
     }
     // The initial virtual-display layout can arrive after the cleartext enable.
     // Repeat it here, after the Mac has answered that setup, and on later layouts
@@ -2905,6 +2973,13 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         size.0, size.1
     );
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
+    // And, once, the request for the Mac's system audio. After the first layout
+    // because that is when the probe sent it and the Mac answered; sized to this
+    // layout because the screen-video offer that has to ride beside the audio
+    // names a display size, and this is the virtual display's.
+    if let Some(offer) = media.and_then(|media| media.offer(size)) {
+        uplink.send(&offer).await?;
+    }
     Ok(resized)
 }
 
@@ -4143,7 +4218,7 @@ mod tests {
     #[test]
     fn both_apple_subtypes_start_out_wanting_zlib() {
         for high_performance in [false, true] {
-            let apple = Apple::new(high_performance);
+            let apple = Apple::new(high_performance, None);
             assert!(
                 !apple.asked_for_zlib,
                 "high_performance={high_performance} skipped the zlib upgrade"
@@ -6202,7 +6277,7 @@ mod tests {
             Some(11),
             &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
         );
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, false, false, &sink)
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, false, false, None, &sink)
             .await
             .unwrap();
         assert!(resized);
@@ -6267,20 +6342,20 @@ mod tests {
 
         // A session opens on the combined view, which is what the Mac sends when
         // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, None, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         // Then a screen, then back again. Each move is a layout, never a request.
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, None, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, None, &sink)
             .await
             .unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, None, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);

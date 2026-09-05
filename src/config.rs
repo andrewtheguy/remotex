@@ -14,6 +14,7 @@ use bytes::Bytes;
 use serde::Deserialize;
 
 #[cfg(all(feature = "embedded-gateway", unix))]
+use crate::audio::PcmFormat;
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
@@ -666,8 +667,12 @@ pub struct TargetConfig {
     /// native pasteboard protocol; RDP uses MS-RDPECLIP `CF_UNICODETEXT`.
     #[serde(default)]
     pub clipboard: bool,
-    /// Negotiate RDP audio at connect. Packets are sent only while the attached
-    /// client subscribes. Rejected for VNC.
+    /// Carry the remote's sound. Packets are sent only while the attached client
+    /// subscribes. RDP negotiates it at connect (MS-RDPEA); an
+    /// `ard-high-performance` target negotiates the Mac's system audio over its
+    /// media stream, and only in a gateway built with the `apple-hp-audio` feature
+    /// — see [`crate::vnc_apple_audio`]. Refused on every other VNC target, which
+    /// has no channel to carry it.
     #[serde(default)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
@@ -933,6 +938,21 @@ impl TargetConfig {
             self.audio_bitrate_min.unwrap_or(DEFAULT_AUDIO_BITRATE_MIN_KBPS) as i32 * 1000
         });
         AudioPlan { codec, bitrate_bps, adaptive_floor_bps }
+    }
+
+    /// The one PCM format this target's wave buffers can be in, known before the
+    /// remote has said anything: what the RDP engine asks a server to redirect
+    /// ([`crate::audio::PCM_CD_QUALITY`]), or what the Mac's AAC-ELD decodes to
+    /// ([`crate::vnc_apple_audio::SOURCE_FORMAT`]). The session builds its encoder
+    /// from this when the audio socket opens before the remote's channel is up, so
+    /// it has to be the source's — an encoder built for the wrong rate plays every
+    /// note at the wrong pitch. Callers gate on [`Self::audio`], as with
+    /// [`Self::audio_plan`].
+    pub fn audio_source_format(&self) -> PcmFormat {
+        match self.protocol {
+            Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
+            Protocol::Vnc => crate::vnc_apple_audio::SOURCE_FORMAT,
+        }
     }
 
     /// Whether this target puts moving pixels on the wire as a video stream — either the whole
@@ -1435,17 +1455,7 @@ impl ConfigFile {
                  render_motion_subtype = \"stream\", or remove the key",
                 target.name
             );
-            // Audio is RDP's alone, and refused elsewhere rather than ignored.
-            // MS-RDPEA is the one audio channel this gateway speaks; RFB has no
-            // equivalent at all, so `audio = true` on a VNC target could only
-            // ever be a mistake about what the protocol carries. Naming that at
-            // parse time is the difference between a config error and a session
-            // that is silent for no stated reason.
-            //
-            // Everything downstream of the channel — the socket, the bridge, the
-            // encoders — is protocol-agnostic, which is why this rule is about
-            // the *engine* and not about any of them.
-            // The graphics pipeline is RDP's alone, the same way: EGFX is an RDP
+            // The graphics pipeline is RDP's alone: EGFX is an RDP
             // channel, so on a VNC target the key could only be a belief about
             // the wrong protocol, and either value would be silently inert.
             anyhow::ensure!(
@@ -1465,14 +1475,39 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
-            anyhow::ensure!(
-                !target.audio || target.protocol == Protocol::Rdp,
-                "target {:?} sets audio on a {} target, and only rdp carries it: MS-RDPEA is \
-                 an RDP channel and RFB has no equivalent. Remove the key to start the \
-                 session without sound.",
-                target.name,
-                target.protocol.name()
-            );
+            // Audio is carried by two engines and refused elsewhere rather than
+            // ignored: MS-RDPEA on RDP, and Apple's media stream on High Performance
+            // mode — the latter only in a build with the AAC-ELD decoder the Mac's
+            // stream needs (the `apple-hp-audio` feature, off by default and absent
+            // from every release binary). RFB itself has no audio at all, so
+            // `audio = true` on any other VNC target could only ever be a mistake
+            // about what the protocol carries. Naming each case at parse time is the
+            // difference between a config error and a session that is silent for no
+            // stated reason.
+            //
+            // Everything downstream of the channel — the socket, the bridge, the
+            // encoders — is protocol-agnostic, which is why this rule is about the
+            // *engine* and the *build* and not about any of them.
+            if target.audio && target.protocol != Protocol::Rdp {
+                anyhow::ensure!(
+                    target.subtype == Some(Subtype::ArdHighPerformance),
+                    "target {:?} sets audio on a {} target, and only rdp and ard-high-performance \
+                     carry it: MS-RDPEA is an RDP channel, and Apple's media stream exists in \
+                     High Performance mode alone. Remove the key to start the session without \
+                     sound.",
+                    target.name,
+                    target.subtype.map_or(target.protocol.name(), Subtype::name)
+                );
+                anyhow::ensure!(
+                    cfg!(feature = "apple-hp-audio"),
+                    "target {:?} sets audio on an ard-high-performance target, and this gateway \
+                     was built without the apple-hp-audio feature: the Mac's system audio is \
+                     AAC-ELD, which needs a decoder that is not in the default build or in any \
+                     release binary. Build it yourself with `cargo build --release --features \
+                     apple-hp-audio`, or remove the key to start the session without sound.",
+                    target.name
+                );
+            }
             // The camera is RDP's alone by the same rule: MS-RDPECAM is an RDP
             // channel and RFB has nothing to redirect a client's camera onto.
             anyhow::ensure!(
@@ -4240,6 +4275,86 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].audio);
+    }
+
+    /// Standard mode has no audio to offer — Apple's media stream is High
+    /// Performance's — so `ard` is refused the same way plain `vnc` is, and the
+    /// error names the subtype that does carry it.
+    #[test]
+    fn audio_is_refused_on_standard_ard_by_subtype_name() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "mac"
+            protocol = "vnc"
+            subtype = "ard"
+            host = "10.0.0.5"
+            username = "andrew"
+            password = "h"
+            audio = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("on a ard target"), "{rendered}");
+        assert!(rendered.contains("ard-high-performance"), "{rendered}");
+    }
+
+    /// High Performance audio is a build decision before it is a config one: the
+    /// key is accepted exactly when the gateway has the AAC-ELD decoder compiled
+    /// in, and otherwise refused by an error that says how to build one. Both
+    /// halves are asserted from the same test, under the same `cfg`, so a build
+    /// with either answer runs the check that applies to it.
+    #[test]
+    fn audio_on_high_performance_follows_the_build() {
+        let parsed = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "mac"
+            protocol = "vnc"
+            subtype = "ard-high-performance"
+            host = "10.0.0.5"
+            username = "andrew"
+            password = "h"
+            audio = true
+            audio_codec = "pcm"
+            "#,
+            site_passwd_line()
+        ));
+        if cfg!(feature = "apple-hp-audio") {
+            let config = parsed.unwrap().resolve().unwrap();
+            let target = &config.targets[0];
+            assert!(target.audio);
+            assert_eq!(target.audio_codec, Some(AudioCodec::Pcm));
+            assert_eq!(target.audio_source_format(), crate::vnc_apple_audio::SOURCE_FORMAT);
+        } else {
+            let rendered = format!("{:#}", parsed.unwrap_err());
+            assert!(rendered.contains("apple-hp-audio"), "{rendered}");
+            assert!(rendered.contains("--features"), "the fix is spelled out: {rendered}");
+        }
+    }
+
+    /// The pre-negotiation format follows the engine: CD quality is what RDP is
+    /// asked for, 48 kHz stereo is what the Mac's AAC-ELD decodes to.
+    #[test]
+    fn the_audio_source_format_is_the_engines() {
+        let rdp = ConfigFile::parse(&format!(
+            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\naudio = true\n",
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert_eq!(rdp.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
+        assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.sample_rate, 48_000);
+        assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.channels, 2);
     }
 
     /// The camera follows audio's rule: MS-RDPECAM is an RDP channel, so the key

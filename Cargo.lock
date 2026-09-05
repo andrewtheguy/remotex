@@ -695,6 +695,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdk-aac-prebuilt"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260902193421-5490fe1#5490fe1fef27b77a0418157c2368e08b1eee7f12"
+dependencies = [
+ "fdk-aac-prebuilt-sys",
+]
+
+[[package]]
+name = "fdk-aac-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260902193421-5490fe1#5490fe1fef27b77a0418157c2368e08b1eee7f12"
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1378,7 +1391,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.173"
+version = "0.0.174"
 dependencies = [
  "aes",
  "anyhow",
@@ -1391,6 +1404,7 @@ dependencies = [
  "des",
  "eax",
  "env_logger",
+ "fdk-aac-prebuilt",
  "flate2",
  "freerdp",
  "futures-util",
