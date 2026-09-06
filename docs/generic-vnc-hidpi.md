@@ -50,10 +50,12 @@ one-to-one, at the CSS size `pixels / scale` like every other 2x desktop.
   `viewport points × density` pixels (held under the video stream's picture
   ceiling where the target streams), and the reply labels the framebuffer with the
   declared scale in `ServerMsg::Resize`. Toggling back asks for the points again.
-- Without resize (the target has `resize = false`, or the server never sent an
-  `ExtendedDesktopSize` rect), the declaration re-labels the pixels the server is
-  already sending and asks for a full repaint: a sharp desktop at half the CSS
-  size, which is the truth about a 2x framebuffer the window cannot grow.
+- Without resize (the target has `resize = false`, or the server has not sent an
+  `ExtendedDesktopSize` rect yet), the declaration re-labels the pixels the server
+  is already sending and asks for a full repaint: a sharp desktop at half the CSS
+  size, which is the truth about a 2x framebuffer the window cannot grow. With
+  `resize = true` the density-adjusted request is stashed as well, and the rect
+  that declares support replays it.
 - A rejected `SetDesktopSize` keeps the size and still takes the label.
 - The button's state is read off the last `resize`, not kept locally, so a
   declaration the server did not honour shows as what actually happened.

@@ -1306,13 +1306,28 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     if !changed {
                         Ok(())
                     } else if relabel {
-                        // The same pixels shown at a new size: the browser
-                        // reallocates its canvas, so the server is asked to paint it
-                        // whole, as after any resize.
-                        match apply_resize(&desktop, &shadow, size, density, &sink).await {
-                            Ok(_) => send(&uplink, &update_request(false, size)).await,
-                            Err(e) => Err(e),
+                        // Where the window drives the size but the server has not
+                        // yet declared SetDesktopSize, stash the density-adjusted
+                        // request so the rect that declares support replays it.
+                        // Before the re-label, deliberately: the ask starts from the
+                        // points the desktop is rendered at, and once the label
+                        // matches the declaration those points at it are the size
+                        // it already has — a no-op with nothing to replay.
+                        let mut result = if resize {
+                            request_resize(&uplink, &desktop, ResizeAsk::Density, high_performance, video).await
+                        } else {
+                            Ok(())
+                        };
+                        if result.is_ok() {
+                            // The same pixels shown at a new size: the browser
+                            // reallocates its canvas, so the server is asked to paint
+                            // it whole, as after any resize.
+                            result = match apply_resize(&desktop, &shadow, size, density, &sink).await {
+                                Ok(_) => send(&uplink, &update_request(false, size)).await,
+                                Err(e) => Err(e),
+                            };
                         }
+                        result
                     } else {
                         request_resize(&uplink, &desktop, ResizeAsk::Density, high_performance, video).await
                     }
@@ -5145,6 +5160,14 @@ mod tests {
         let (uplink, wire) = test_uplink();
         request_resize(&uplink, &desktop, ResizeAsk::Density, false, false).await.unwrap();
         assert_eq!(written(&wire), set_desktop_size((3456, 1766), screen));
+
+        // Before the server declares support, the same ask is stashed in the pixels
+        // the replay will send — and it has to be taken from a desktop still
+        // labelled 1x, since re-labelled first it would resolve to the size it has.
+        let stashed = shared_desktop((1728, 883), None, None);
+        stashed.lock().unwrap().declared_density = 2.0;
+        request_resize(&uplink, &stashed, ResizeAsk::Density, false, false).await.unwrap();
+        assert_eq!(stashed.lock().unwrap().pending, Some((3456, 1766)));
 
         // Back to 1x from a desktop the server granted at 2x.
         let (uplink, wire) = test_uplink();

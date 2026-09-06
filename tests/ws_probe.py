@@ -232,6 +232,13 @@ async def main() -> int:
                     if kind == "resize":
                         if args.key and keys_task is None:
                             keys_task = asyncio.create_task(press_keys())
+                        # A viewport is requested in points and answered in pixels at
+                        # the announced scale: 1728x883 asked at 2x comes back as
+                        # 3456x1766, and is the answer to that request.
+                        answered = (
+                            round(data["w"] / data["scale"]),
+                            round(data["h"] / data["scale"]),
+                        )
                         print(
                             f"  resize  {data['w']}x{data['h']}  scale={data['scale']}"
                             f"   -> {data['w'] / data['scale']:g}x"
@@ -262,7 +269,7 @@ async def main() -> int:
                                     }
                                 )
                             )
-                        elif awaiting_viewport == (data["w"], data["h"]):
+                        elif awaiting_viewport == answered:
                             awaiting_viewport = None
                             if viewports:
                                 awaiting_viewport = viewports.pop(0)
