@@ -53,6 +53,17 @@ def host_display(value: str) -> dict[str, int | bool]:
     return {"w": width, "h": height, "scale": hundredths, "fit": fit}
 
 
+def duration(value: str) -> float:
+    """Parse a non-negative number of seconds."""
+    try:
+        seconds = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected a number of seconds") from error
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("seconds must not be negative")
+    return seconds
+
+
 def coordinates(value: str) -> tuple[int, int]:
     """Parse an X,Y argument."""
     try:
@@ -112,14 +123,14 @@ async def main() -> int:
     )
     parser.add_argument(
         "--key-delay",
-        type=float,
+        type=duration,
         default=8.0,
         help="seconds after the first resize before the --key chord goes down "
         "(Apple Screen Sharing drops input sent in a session's first seconds)",
     )
     parser.add_argument(
         "--key-hold",
-        type=float,
+        type=duration,
         default=0.3,
         help="seconds the --key chord stays down",
     )
