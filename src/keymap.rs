@@ -150,6 +150,22 @@ pub fn scancode(code: &str) -> Option<(u8, bool)> {
 /// (`A`, `!`, `?`); everything else ignores `shift`. The real Shift key event
 /// is still sent separately so the server's modifier state stays consistent
 /// (see the module docs).
+/// The keysym for a DOM code on an Apple Screen Sharing server, which reads the
+/// X11 modifier keysyms by its own table. Measured on macOS 26 through a
+/// Standard-mode session with a key-state watcher in the Mac's GUI session:
+/// `Alt_L`/`Alt_R` *and* `Super_L`/`Super_R` all land on Command, `Meta_L`/`Meta_R`
+/// land on Option (each keeping its side), and `Mode_switch` and
+/// `ISO_Level3_Shift` do nothing. So a keyboard's Alt keys go out as Meta to
+/// reach Option, and the Windows keys stay Super to reach Command. Everything
+/// else is [`keysym`].
+pub fn apple_keysym(code: &str, shift: bool) -> Option<u32> {
+    match code {
+        "AltLeft" => Some(0xFFE7),  // Meta_L: Option
+        "AltRight" => Some(0xFFE8), // Meta_R: right Option
+        _ => keysym(code, shift),
+    }
+}
+
 pub fn keysym(code: &str, shift: bool) -> Option<u32> {
     // Printable keys whose symbol depends on Shift: pick unshifted/shifted.
     let printable = |unshifted: u32, shifted: u32| Some(if shift { shifted } else { unshifted });
@@ -259,7 +275,7 @@ pub fn keysym(code: &str, shift: bool) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{keysym, scancode};
+    use super::{apple_keysym, keysym, scancode};
 
     // The ordinary DOM keyboard codes the browser client expects both engines to
     // accept. Recognizing one in only one engine is a backend conformance bug.
@@ -457,4 +473,16 @@ mod tests {
         assert_eq!(keysym("MediaPlayPause", false), None);
         assert_eq!(keysym("", false), None);
     }
+
+    #[test]
+    fn apple_sends_alt_as_meta_and_leaves_the_rest_alone() {
+        assert_eq!(apple_keysym("AltLeft", false), Some(0xFFE7));
+        assert_eq!(apple_keysym("AltRight", false), Some(0xFFE8));
+        // Super already lands on Command there, and every other key is unchanged.
+        assert_eq!(apple_keysym("MetaLeft", false), keysym("MetaLeft", false));
+        assert_eq!(apple_keysym("MetaRight", false), keysym("MetaRight", false));
+        assert_eq!(apple_keysym("KeyA", true), keysym("KeyA", true));
+        assert_eq!(apple_keysym("ControlRight", false), Some(0xFFE4));
+    }
+
 }

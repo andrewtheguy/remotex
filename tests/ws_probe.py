@@ -111,6 +111,13 @@ async def main() -> int:
         "held together as one chord, pressed in order and released in reverse)",
     )
     parser.add_argument(
+        "--key-delay",
+        type=float,
+        default=8.0,
+        help="seconds after the first resize before the --key chord goes down "
+        "(Apple Screen Sharing drops input sent in a session's first seconds)",
+    )
+    parser.add_argument(
         "--key-hold",
         type=float,
         default=0.3,
@@ -173,7 +180,7 @@ async def main() -> int:
         # live. Codes go down in the given order and up in reverse, the way the
         # browser's soft keyboard sends a combo.
         async def press_keys() -> None:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(args.key_delay)
             for code in args.key:
                 print(f"  -> key down {code}")
                 await socket.send(

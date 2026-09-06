@@ -177,6 +177,14 @@ Apple display modes:
   DH authentication, shares the Mac's physical displays, and refuses `resize`.
   Like High Performance it asks for zlib in the second `SetEncodings`, the one a
   display layout triggers; the first list must stay zlib-free or the layout is lost.
+  Its server reads X11 modifier keysyms by its own table — measured on macOS 26
+  with a key-state watcher in the Mac's GUI session: `Alt_L`/`Alt_R` *and*
+  `Super_L`/`Super_R` all land on Command, `Meta_L`/`Meta_R` land on Option (each
+  keeping its side), `Mode_switch` and `ISO_Level3_Shift` do nothing — so the VNC
+  engine sends a keyboard's Alt codes as Meta on a Mac (`keymap::apple_keysym`)
+  and leaves the Windows keys as Super. The server also drops pointer and key
+  input for the first seconds of a session; `tests/ws_probe.py --key` waits 8 s
+  before injecting for that reason.
 - `ard-high-performance` is **experimental** and the one path built with no
   specification at all — the revision, record layer, control messages and virtual
   display handling are reverse engineered, so treat `docs/apple-vnc-889.md` as
