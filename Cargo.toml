@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.174"
+version = "0.0.175"
 
 [package]
 name = "remotex"
@@ -206,7 +206,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260904013141-ea8117e" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260906003220-a381fb2" }
 # RealVNC's RSA-AES security types for VNC (src/vnc_rsa_aes.rs), which is how a
 # plain `vnc` target names a user to a server that is not a Mac — wayvnc with
 # `enable_auth` offers nothing else this client speaks. A fresh RSA key pair per
@@ -253,9 +253,3 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-
-# Temporary, while the wrapper's "audio off leaves sound on the host" change has no
-# release tag: point `freerdp` at the sibling checkout. Deleted once the tag is cut
-# and pinned above — it breaks any checkout without the sibling beside it.
-[patch."https://github.com/andrewtheguy/libfreerdp-prebuilt"]
-freerdp = { path = "../../libfreerdp-prebuilt/crates/freerdp" }
