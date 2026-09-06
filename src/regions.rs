@@ -625,17 +625,29 @@ impl Regions {
             .filter_map(|bbox| bbox.to_rect(w, h))
             .collect();
 
-        let mut old = std::mem::take(&mut self.live);
-        let mut next: Vec<Live> = Vec::new();
+        // Shrinking is free: a stream whose rectangle already covers the region keeps
+        // going, and the idle margin codes as skipped macroblocks. Growing is not, and
+        // pays for a new encoder and a keyframe. A kept stream carries *every* region
+        // inside it — one rectangle that has split into two keeps one stream, not one
+        // stream and a second built inside it — and a stream a region straddles
+        // cannot be kept at all, because the stream that region needs would overlap
+        // it. So a stream is kept exactly when it touches at least one region and
+        // contains each region it touches, which is what keeps the live rectangles
+        // pairwise disjoint: a built rectangle is a region no kept stream contains,
+        // and so — by that rule — one no kept stream touches.
+        let (mut next, mut old): (Vec<Live>, Vec<Live>) =
+            std::mem::take(&mut self.live).into_iter().partition(|live| {
+                let mut touched = wanted.iter().filter(|rect| live.rect.intersect(rect).is_some());
+                touched.clone().next().is_some() && touched.all(|rect| live.rect.contains(rect))
+            });
+        for live in &mut next {
+            live.moving_at = now;
+        }
         for rect in wanted {
-            // Shrinking is free: a stream whose rectangle already covers the region
-            // keeps going, and the idle margin codes as skipped macroblocks. Growing
-            // is not, and pays for a new encoder and a keyframe.
-            if let Some(at) = old.iter().position(|live| live.rect.contains(&rect)) {
-                let mut live = old.remove(at);
-                live.moving_at = now;
-                next.push(live);
-            } else if next.len() < MAX_STREAMS {
+            if next.iter().any(|live| live.rect.contains(&rect)) {
+                continue;
+            }
+            if next.len() < MAX_STREAMS {
                 // Whatever this replaces is simply not carried over, which is what
                 // keeps live rectangles disjoint: the new one is built from the
                 // mirror, so nothing it swallows is lost.
@@ -657,6 +669,12 @@ impl Regions {
                 next.push(self.build(rect, now, &taken)?);
             }
         }
+        debug_assert!(
+            next.iter().enumerate().all(|(i, a)| {
+                next[i + 1..].iter().all(|b| a.rect.intersect(&b.rect).is_none())
+            }),
+            "two live streams overlap"
+        );
         // A region that has stopped moving keeps its stream for a moment — a video
         // pauses, a pointer comes to rest — and then ends, which is what makes its
         // cells due for a crisp re-send.
@@ -1442,6 +1460,58 @@ mod tests {
 
         regions.retune(&[(0, 0)], t0 + RETUNE).expect("no restart");
         assert_eq!(only_rect(&regions), wide, "a shrinking region paid for a new encoder");
+    }
+
+    /// One rectangle that has split into two regions keeps one stream, carrying
+    /// both. Building a second stream for the second region would put it inside the
+    /// first — two streams over one cell, the delivery rule broken.
+    #[tokio::test]
+    async fn a_kept_stream_carries_every_region_inside_it() {
+        // Three cells across, two down.
+        let mut regions = sized(960, 128).await;
+        let t0 = Instant::now();
+        regions.retune(&block(0, 0, 2, 1), t0).expect("a stream");
+        let whole = only_rect(&regions);
+        let id = regions.live[0].id;
+
+        regions.retune(&[(0, 0), (2, 1)], t0 + RETUNE).expect("the same stream");
+        assert_eq!(only_rect(&regions), whole, "the split rebuilt the stream");
+        assert_eq!(regions.live[0].id, id);
+        assert!(regions.drain_ended().is_empty(), "nothing ended");
+    }
+
+    /// A region that straddles a kept stream's rectangle cannot share the screen
+    /// with it, so the stream ends and the regions get streams of their own — every
+    /// one disjoint from every other.
+    #[tokio::test]
+    async fn a_region_straddling_a_kept_stream_ends_it() {
+        let mut regions = sized(960, 128).await;
+        let t0 = Instant::now();
+        regions.retune(&block(0, 0, 1, 1), t0).expect("a stream");
+        let id = regions.live[0].id;
+
+        // One region inside the old rectangle, and one reaching out of it.
+        regions.retune(&[(0, 0), (1, 1), (2, 1)], t0 + RETUNE).expect("two streams");
+        let rects: Vec<Rect> = regions.live.iter().map(|live| live.rect).collect();
+        assert_eq!(rects.len(), 2, "{rects:?}");
+        assert!(rects[0].intersect(&rects[1]).is_none(), "{rects:?} overlap");
+        assert!(
+            rects.contains(&boxed(1, 1, 2, 1).to_rect(960, 128).expect("a rectangle")),
+            "the straddling region did not get its own stream: {rects:?}"
+        );
+        assert!(
+            regions.live.iter().all(|live| live.keyframe_owed),
+            "a client cannot start on either new picture"
+        );
+        // The old stream ended, unless its id was handed straight back to one of
+        // the new ones — in which case it is not an end, and must not be said as one.
+        let ended = regions.drain_ended();
+        let reused = regions.live.iter().any(|live| live.id == id);
+        assert_eq!(ended.contains(&id), !reused, "ended {ended:?}, reused {reused}");
+        assert!(
+            ended.iter().all(|e| regions.live.iter().all(|live| live.id != *e)),
+            "an id in use was said to have ended: {ended:?}"
+        );
     }
 
     /// Growing is not free, and must not be: the stream's rectangle is fixed for its
