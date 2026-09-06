@@ -2223,6 +2223,13 @@ export function useRemoteDesktop(
       });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
+    // WebKit's page zoom, which it fires as non-standard `gesture*` events that
+    // `touch-action: none` does not always reach. Refused on this element and
+    // not on the document: the desktop is the only surface with a zoom of its
+    // own, and everywhere else the browser's is the way back out of iOS's
+    // focus zoom. These are separate from the touch events the gesture layer
+    // reads, so refusing them costs its pinch nothing.
+    const onGesture = (e: Event) => e.preventDefault();
     // A finger takes keyboard focus exactly as a mouse press does. It cannot
     // arrive through the compatibility mouse events: the gesture layer
     // preventDefaults every touch, so the browser never synthesises them, and
@@ -2300,6 +2307,9 @@ export function useRemoteDesktop(
     window.addEventListener("resize", invalidatePointerRect);
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("contextmenu", onContextMenu);
+    for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+      el.addEventListener(type, onGesture, { passive: false });
+    }
     // Capture phase: the gesture listeners consume touches with
     // stopImmediatePropagation, which would skip a later bubble listener on
     // this same element.
@@ -2327,6 +2337,9 @@ export function useRemoteDesktop(
       window.removeEventListener("resize", invalidatePointerRect);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
+      for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+        el.removeEventListener(type, onGesture);
+      }
       el.removeEventListener("touchstart", onTouchStart, { capture: true });
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("keyup", onKeyUp);

@@ -14,20 +14,6 @@ body,
   height: 100%;
 }
 
-/* The browser's own pinch zoom is never this client's zoom. The desktop has one
-   of its own (touchGestures.ts, on an overlay that takes `touch-action: none`),
-   and every other surface — login, the picker, the floating menu, the soft
-   keyboard — is app chrome that a page zoom only breaks: it scales the whole UI
-   and then lets a finger drag it off-screen. Stated once on the document rather
-   than per surface, because `touch-action` is the intersection of the hit
-   target's value with its ancestors': `pan-x pan-y` drops the pinch (and the
-   double-tap zoom) while keeping every scroll, and the desktop overlay's `none`
-   still wins underneath it. */
-html,
-body {
-  touch-action: pan-x pan-y;
-}
-
 body {
   background: #0d1117;
   color: #e6edf3;
@@ -102,6 +88,14 @@ body {
   will-change: transform;
 }
 
+/* The browser's own pinch zoom is refused on the desktop and nowhere else: this
+   surface has a zoom of its own (touchGestures.ts), so `touch-action: none`
+   here, and WebKit's gesture* events refused on this same element in
+   useRemoteDesktop. The chrome around it keeps the browser's zoom. Blocking it
+   document-wide instead was worse than the page zoom it prevented: iOS scales
+   the page in when a form control takes focus — a zoom `touch-action` has no
+   say over — and with the pinch gone there was no way back out, which stranded
+   the clipboard panel zoomed in. */
 .screen-touch .input-overlay {
   position: fixed;
   inset: 0;
