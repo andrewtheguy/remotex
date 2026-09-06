@@ -1457,6 +1457,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         &mut last_pos,
                         &mut pressed_keys,
                         &mut wheel,
+                        macos,
                     );
                     send_all(&uplink, &msgs).await
                 };
@@ -3161,7 +3162,11 @@ fn translate_input(
     last_pos: &mut (u16, u16),
     pressed_keys: &mut HashMap<String, u32>,
     wheel: &mut Wheel,
+    macos: bool,
 ) -> Vec<Vec<u8>> {
+    // A Mac reads the modifier keysyms by its own table (see
+    // [`keymap::apple_keysym`]); every other server takes the X11 ones.
+    let keysym = if macos { keymap::apple_keysym } else { keymap::keysym };
     match input {
         ClientMsg::MouseMove { x, y } => {
             *last_pos = (clamp_u16(x), clamp_u16(y));
@@ -3220,7 +3225,7 @@ fn translate_input(
                     || pressed_keys.contains_key("ShiftRight");
                 let is_letter = matches!(code.as_bytes(), [b'K', b'e', b'y', b'A'..=b'Z']);
                 let shift = if is_letter { shift_down ^ caps } else { shift_down };
-                match keymap::keysym(&code, shift) {
+                match keysym(&code, shift) {
                     Some(sym) => {
                         pressed_keys.insert(code, sym);
                         vec![key_event(true, sym).to_vec()]
@@ -3235,7 +3240,7 @@ fn translate_input(
                 // keysym for a release with no matching press.
                 match pressed_keys
                     .remove(&code)
-                    .or_else(|| keymap::keysym(&code, false))
+                    .or_else(|| keysym(&code, false))
                 {
                     Some(sym) => vec![key_event(false, sym).to_vec()],
                     None => {
@@ -4423,6 +4428,7 @@ mod tests {
             &mut pos,
             &mut keys,
             &mut wheel,
+            false,
         );
         assert_eq!(bytes, vec![pointer_event(0x01, (10, 20)).to_vec()]);
 
@@ -4434,6 +4440,7 @@ mod tests {
             &mut pos,
             &mut keys,
             &mut wheel,
+            false,
         );
         assert_eq!(bytes, vec![pointer_event(0x01, (30, 40)).to_vec()]);
 
@@ -4446,6 +4453,7 @@ mod tests {
             &mut pos,
             &mut keys,
             &mut wheel,
+            false,
         );
         // Two *separate* messages, not one buffer of both: on the 003.889 wire
         // each has to go in a record of its own or the release is dropped and the
@@ -4469,6 +4477,7 @@ mod tests {
             &mut pos,
             &mut keys,
             &mut wheel,
+            false,
         );
         assert_eq!(bytes, vec![pointer_event(0x00, (30, 40)).to_vec()]);
     }
@@ -4495,6 +4504,7 @@ mod tests {
                     &mut pos,
                     &mut HashMap::new(),
                     &mut Wheel::new(true),
+                    false,
                 );
                 assert_eq!(bytes, vec![pointer_event(bit, (10, 20)).to_vec()]);
             }
@@ -4512,6 +4522,7 @@ mod tests {
                 &mut pos,
                 &mut HashMap::new(),
                 &mut Wheel::new(true),
+                false,
             );
             assert_eq!(bytes, vec![pointer_event(0x01, (10, 20)).to_vec()]);
         }
@@ -5038,6 +5049,17 @@ mod tests {
     /// message or none. Only the wheel produces more than one, and its test asserts
     /// on the list.
     fn key(keys: &mut HashMap<String, u32>, code: &str, pressed: bool, caps: bool) -> Vec<u8> {
+        key_on(false, keys, code, pressed, caps)
+    }
+
+    /// [`key`] against a server that is (or is not) a Mac.
+    fn key_on(
+        macos: bool,
+        keys: &mut HashMap<String, u32>,
+        code: &str,
+        pressed: bool,
+        caps: bool,
+    ) -> Vec<u8> {
         let (mut mask, mut pos) = (0u8, (0u16, 0u16));
         translate_input(
             ClientMsg::Key {
@@ -5050,8 +5072,23 @@ mod tests {
             &mut pos,
             keys,
             &mut Wheel::new(true),
+            macos,
         )
         .concat()
+    }
+
+    #[test]
+    fn a_mac_gets_alt_as_meta_and_releases_what_it_pressed() {
+        let mut keys = HashMap::new();
+        // Alt goes out as Meta_L so Screen Sharing lands it on Option, and the
+        // release is the keysym that was pressed, not a fresh X11 lookup.
+        assert_eq!(key_on(true, &mut keys, "AltLeft", true, false), key_event(true, 0xFFE7));
+        assert_eq!(key_on(true, &mut keys, "AltLeft", false, false), key_event(false, 0xFFE7));
+        assert_eq!(key_on(true, &mut keys, "AltRight", true, false), key_event(true, 0xFFE8));
+        // The Windows key already lands on Command as Super_L, so it is unchanged,
+        // and a generic server still gets Alt_L for Alt.
+        assert_eq!(key_on(true, &mut keys, "MetaLeft", true, false), key_event(true, 0xFFEB));
+        assert_eq!(key_on(false, &mut keys, "AltLeft", true, false), key_event(true, 0xFFE9));
     }
 
     #[test]

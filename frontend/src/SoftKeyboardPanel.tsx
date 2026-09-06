@@ -8,17 +8,22 @@ import {
 import {
   DESKTOP_ARROW_ROW_1,
   DESKTOP_ARROW_ROW_2,
+  DESKTOP_BOTTOM_LEFT,
+  DESKTOP_BOTTOM_RIGHT,
   DESKTOP_FUNCTION_ROW,
   DESKTOP_HOME_ROW,
   DESKTOP_NAV_ROW_1,
   DESKTOP_NAV_ROW_2,
   DESKTOP_NUMBER_ROW,
   DESKTOP_QWERTY_ROW,
+  DESKTOP_SHIFT_LEFT,
+  DESKTOP_SHIFT_RIGHT,
   DESKTOP_SPACE_KEY,
   DESKTOP_ZXCV_ROW,
   FUNCTION_KEY_ROW,
   GUI_COMBO_ROW,
-  MODIFIER_CODES,
+  MODIFIER_KEYS,
+  modifierOf,
   PRIMARY_SCREEN_ROWS,
   type PrintableSoftKey,
   ROW_HOME,
@@ -26,7 +31,7 @@ import {
   type SoftKeyboardScreen,
   type SoftKeyDefinition,
   type SoftKeyModifiers,
-  type SpecialSoftKey,
+  shiftHeld,
 } from "./softKeyboard.ts";
 
 // A held non-modifier key repeats after this initial delay, then at this
@@ -55,18 +60,6 @@ const SCROLL_DRAG_THRESHOLD_PX = 8;
 // change of mind, not tap jitter — abandon the key instead of firing it.
 const VERTICAL_ABANDON_THRESHOLD_PX = 32;
 
-const MODIFIER_LABELS: Record<keyof SoftKeyModifiers, string> = {
-  ctrl: "Ctrl",
-  alt: "Alt",
-  shift: "Shift",
-  super: "Super",
-};
-
-// Labels that mark a modifier-toggle key (vs. a plain special like Tab that
-// happens to share nothing with a modifier). Keeps a stray Ctrl-in-a-combo
-// from being mistaken for the sticky-toggle Ctrl.
-const MODIFIER_KEY_LABELS = new Set(["Shift", "Ctrl", "Alt", "Super"]);
-
 interface SoftKeyboardPanelProps {
   // Presses each DOM code in order then releases in reverse (transient — see
   // useRemoteDesktop.sendKeyCombo). The panel's only channel to the remote.
@@ -80,17 +73,18 @@ interface SoftKeyboardPanelProps {
 
 // ── Helpers ──
 
-// Which sticky modifier a key toggles, or null if it isn't a modifier key.
-function isModifierKey(def: SoftKeyDefinition): keyof SoftKeyModifiers | null {
-  if (def.type !== "special" || !MODIFIER_KEY_LABELS.has(def.label)) {
-    return null;
-  }
-  for (const [mod, code] of Object.entries(MODIFIER_CODES)) {
-    if (def.code === code) {
-      return mod as keyof SoftKeyModifiers;
-    }
-  }
-  return null;
+// React key for a definition: a code is unique within a row and, unlike a
+// label, tells the desktop grid's two Shifts (or Alts, or Ctrls) apart. Combos
+// have no single code, so their label stands in.
+function keyOf(def: SoftKeyDefinition): string {
+  return def.type === "combo" ? def.label : def.code;
+}
+
+// Whether this key is a sticky modifier the panel is currently holding.
+function isHeld(def: SoftKeyDefinition, modifiers: SoftKeyModifiers): boolean {
+  return (
+    modifierOf(def) !== null && def.type !== "combo" && modifiers.has(def.code)
+  );
 }
 
 function getDisplayLabel(def: SoftKeyDefinition, shift: boolean): string {
@@ -104,7 +98,8 @@ function getDisplayLabel(def: SoftKeyDefinition, shift: boolean): string {
 
 interface SoftKeyButtonProps {
   def: SoftKeyDefinition;
-  modifiers: SoftKeyModifiers;
+  // Whether a Shift is held, which decides the glyph shown.
+  shift: boolean;
   onPress: (def: SoftKeyDefinition) => void;
   onRelease: (def: SoftKeyDefinition) => void;
   isActive?: boolean;
@@ -114,7 +109,7 @@ interface SoftKeyButtonProps {
 
 function SoftKeyButton({
   def,
-  modifiers,
+  shift,
   onPress,
   onRelease,
   isActive,
@@ -150,7 +145,7 @@ function SoftKeyButton({
       onPress(def);
 
       // Modifiers toggle (no repeat) and combos fire once.
-      if (isModifierKey(def) || def.type === "combo") {
+      if (modifierOf(def) || def.type === "combo") {
         return;
       }
 
@@ -218,14 +213,14 @@ function SoftKeyButton({
     pointerStartRef.current = null;
   }, []);
 
-  const label = getDisplayLabel(def, modifiers.shift);
+  const label = getDisplayLabel(def, shift);
   const isSingleChar = label.length === 1;
   const widthClass = def.width
     ? `sk-wide-${String(def.width).replace(".", "_")}`
     : "";
   const showShiftHint =
     def.type === "printable" &&
-    !modifiers.shift &&
+    !shift &&
     def.shiftLabel &&
     def.shiftLabel !== def.label.toUpperCase();
 
@@ -307,29 +302,6 @@ export function useDockedHeight(
   }, [isDesktop, onDockedHeightChange, panelRef]);
 }
 
-// ── Desktop modifier key definitions ──
-
-const SHIFT_DEF: SpecialSoftKey = {
-  type: "special",
-  label: "Shift",
-  code: MODIFIER_CODES.shift,
-};
-const CTRL_DEF: SpecialSoftKey = {
-  type: "special",
-  label: "Ctrl",
-  code: MODIFIER_CODES.ctrl,
-};
-const ALT_DEF: SpecialSoftKey = {
-  type: "special",
-  label: "Alt",
-  code: MODIFIER_CODES.alt,
-};
-const SUPER_DEF: SpecialSoftKey = {
-  type: "special",
-  label: "Super",
-  code: MODIFIER_CODES.super,
-};
-
 // ── DesktopKeyboardGrid ──
 
 interface DesktopKeyboardGridProps {
@@ -343,24 +315,18 @@ function DesktopKeyboardGrid({
   onPress,
   onRelease,
 }: DesktopKeyboardGridProps) {
-  const renderKey = (
-    def: SoftKeyDefinition,
-    extraClass?: string,
-    reactKey?: string,
-  ) => {
-    const mod = isModifierKey(def);
-    return (
-      <SoftKeyButton
-        key={reactKey ?? def.label}
-        def={def}
-        modifiers={modifiers}
-        onPress={onPress}
-        onRelease={onRelease}
-        isActive={mod ? modifiers[mod] : false}
-        extraClass={extraClass}
-      />
-    );
-  };
+  const shift = shiftHeld(modifiers);
+  const renderKey = (def: SoftKeyDefinition, extraClass?: string) => (
+    <SoftKeyButton
+      key={keyOf(def)}
+      def={def}
+      shift={shift}
+      onPress={onPress}
+      onRelease={onRelease}
+      isActive={isHeld(def, modifiers)}
+      extraClass={extraClass}
+    />
+  );
 
   return (
     <div className="sk-desktop-layout">
@@ -394,17 +360,14 @@ function DesktopKeyboardGrid({
           )}
         </div>
         <div className="sk-desktop-row">
-          {renderKey(SHIFT_DEF, "sk-dk-shift", "Shift_L")}
+          {renderKey(DESKTOP_SHIFT_LEFT, "sk-dk-shift")}
           {DESKTOP_ZXCV_ROW.map((def) => renderKey(def))}
-          {renderKey(SHIFT_DEF, "sk-dk-shift", "Shift_R")}
+          {renderKey(DESKTOP_SHIFT_RIGHT, "sk-dk-shift")}
         </div>
         <div className="sk-desktop-row">
-          {renderKey(CTRL_DEF, "sk-dk-modifier", "Ctrl_L")}
-          {renderKey(ALT_DEF, "sk-dk-modifier", "Alt_L")}
+          {DESKTOP_BOTTOM_LEFT.map((def) => renderKey(def, "sk-dk-modifier"))}
           {renderKey(DESKTOP_SPACE_KEY, "sk-dk-space")}
-          {renderKey(SUPER_DEF, "sk-dk-modifier")}
-          {renderKey(ALT_DEF, "sk-dk-modifier", "Alt_R")}
-          {renderKey(CTRL_DEF, "sk-dk-modifier", "Ctrl_R")}
+          {DESKTOP_BOTTOM_RIGHT.map((def) => renderKey(def, "sk-dk-modifier"))}
         </div>
       </div>
       <div className="sk-desktop-side">
@@ -440,12 +403,7 @@ export function SoftKeyboardPanel({
   onClose,
   onDockedHeightChange,
 }: SoftKeyboardPanelProps) {
-  const [modifiers, setModifiers] = useState<SoftKeyModifiers>({
-    ctrl: false,
-    alt: false,
-    shift: false,
-    super: false,
-  });
+  const [modifiers, setModifiers] = useState<SoftKeyModifiers>(() => new Set());
   const [screen, setScreen] = useState<SoftKeyboardScreen>("primary");
   const isDesktop = useIsDesktop();
 
@@ -526,15 +484,9 @@ export function SoftKeyboardPanel({
   // "1" with Shift active correctly produces "!" on both RDP and VNC.
   const fireKeyWithModifiers = useCallback(
     (code: string) => {
-      const activeModCodes: string[] = [];
-      for (const [mod, active] of Object.entries(modifiers)) {
-        if (active) {
-          activeModCodes.push(MODIFIER_CODES[mod as keyof SoftKeyModifiers]);
-        }
-      }
-      sendKeyCombo([...activeModCodes, code]);
-      if (activeModCodes.length > 0) {
-        setModifiers({ ctrl: false, alt: false, shift: false, super: false });
+      sendKeyCombo([...modifiers, code]);
+      if (modifiers.size > 0) {
+        setModifiers(new Set());
       }
     },
     [modifiers, sendKeyCombo],
@@ -542,9 +494,15 @@ export function SoftKeyboardPanel({
 
   const handleKeyPress = useCallback(
     (def: SoftKeyDefinition) => {
-      const mod = isModifierKey(def);
-      if (mod) {
-        setModifiers((prev) => ({ ...prev, [mod]: !prev[mod] }));
+      if (def.type === "special" && modifierOf(def)) {
+        const { code } = def;
+        setModifiers((prev) => {
+          const next = new Set(prev);
+          if (!next.delete(code)) {
+            next.add(code);
+          }
+          return next;
+        });
         return;
       }
       if (def.type === "combo") {
@@ -564,6 +522,7 @@ export function SoftKeyboardPanel({
   }, []);
 
   const topRow = screen === "primary" ? GUI_COMBO_ROW : FUNCTION_KEY_ROW;
+  const shift = shiftHeld(modifiers);
   const mainRows =
     screen === "primary" ? PRIMARY_SCREEN_ROWS : SECONDARY_SCREEN_ROWS;
 
@@ -617,11 +576,12 @@ export function SoftKeyboardPanel({
           >
             {topRow.map((def) => (
               <SoftKeyButton
-                key={def.label}
+                key={keyOf(def)}
                 def={def}
-                modifiers={modifiers}
+                shift={shift}
                 onPress={handleKeyPress}
                 onRelease={handleKeyRelease}
+                isActive={isHeld(def, modifiers)}
                 scrollable
               />
             ))}
@@ -633,19 +593,16 @@ export function SoftKeyboardPanel({
               // biome-ignore lint/suspicious/noArrayIndexKey: stable row order
               <div key={rowIndex} className="sk-row">
                 {row === ROW_HOME && <div className="sk-half-spacer" />}
-                {row.map((def) => {
-                  const mod = isModifierKey(def);
-                  return (
-                    <SoftKeyButton
-                      key={def.label}
-                      def={def}
-                      modifiers={modifiers}
-                      onPress={handleKeyPress}
-                      onRelease={handleKeyRelease}
-                      isActive={mod ? modifiers[mod] : false}
-                    />
-                  );
-                })}
+                {row.map((def) => (
+                  <SoftKeyButton
+                    key={keyOf(def)}
+                    def={def}
+                    shift={shift}
+                    onPress={handleKeyPress}
+                    onRelease={handleKeyRelease}
+                    isActive={isHeld(def, modifiers)}
+                  />
+                ))}
                 {row === ROW_HOME && <div className="sk-half-spacer" />}
               </div>
             ))}
@@ -663,14 +620,11 @@ export function SoftKeyboardPanel({
               {screen === "primary" ? "Sym/Nav" : "ABC"}
             </button>
             <div className="sk-modifier-indicators">
-              {(Object.keys(modifiers) as (keyof SoftKeyModifiers)[]).map(
-                (mod) =>
-                  modifiers[mod] && (
-                    <span key={mod} className="sk-modifier-badge">
-                      {MODIFIER_LABELS[mod]}
-                    </span>
-                  ),
-              )}
+              {[...modifiers].map((code) => (
+                <span key={code} className="sk-modifier-badge">
+                  {MODIFIER_KEYS.get(code)?.label ?? code}
+                </span>
+              ))}
             </div>
             <button
               type="button"
