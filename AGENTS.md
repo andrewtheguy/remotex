@@ -253,6 +253,15 @@ carries this sound as raw `audio/L16` at the same 1.41 Mbit/s and does not
 stutter, so compressing harder was never the axis the problem was on, and an
 encoder whose licence is not OSI-approved was a real cost for it.
 
+`audio = false` on an RDP target is mstsc's "play on remote computer", not "do
+not play". The wrapper exposes all three of mstsc's positions as
+`freerdp::AudioMode`; this gateway maps `true` to `Redirect` and `false` to
+`LeaveOnHost` (`src/rdp_audio.rs`) and offers no key for `Mute`, so the host
+keeps its own speakers and a headset paired to it stays usable for the session.
+That is what off already means on every VNC target, which can take nothing away
+from the remote. Windows reads the mode once, from the Client Info PDU, so it
+cannot change mid-session; a target is one mode or the other.
+
 The choice is per target, not per client, and the gateway names it on the wire —
 `ServerMsg::AudioFormat` carries the codec string, the decoder configuration and
 `packetFrames`. The client does not decode anything itself: it hands encoded

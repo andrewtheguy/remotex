@@ -186,7 +186,8 @@ fn connect_budget() -> Duration {
 /// `audio` is `Some` exactly for a target that opted in, and it goes no further
 /// than [`rdp_audio::connect`]: sound leaves this engine by the sink FreeRDP
 /// calls on its own thread, never through the `select!` below. That is the whole
-/// separation — see [`crate::rdp_audio`].
+/// separation — see [`crate::rdp_audio`], which also says what a `None` asks the
+/// host to do with its sound instead.
 // Eight handoffs matching the engine spawner's surface; see spawn_engine.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(

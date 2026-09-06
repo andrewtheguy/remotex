@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use freerdp::{Audio, AudioFormat, AudioSink};
+use freerdp::{Audio, AudioFormat, AudioMode, AudioSink};
 use log::{debug, info, warn};
 
 use crate::audio::{AudioBridge, PCM_CD_QUALITY};
@@ -41,15 +41,22 @@ const WANTED: AudioFormat = AudioFormat {
     bits_per_sample: PCM_CD_QUALITY.bits_per_sample,
 };
 
-/// The `Connect::audio` for a target, or `None` for one that asked for no sound.
+/// The `Connect::audio` for a target: redirected into its bridge, or left on the host.
 ///
-/// The `Option` is already the answer: [`crate::session`] builds an
-/// [`AudioBridge`] only for a target that opted in, so a `None` here is a
-/// session that never registers `rdpsnd` and never asks the server for audio at
-/// all — rather than one that receives it and throws it away.
-pub fn connect(bridge: Option<Arc<AudioBridge>>) -> Option<Audio> {
-    let bridge = bridge?;
-    Some(Audio { format: WANTED, sink: Arc::new(Sink { bridge }) })
+/// [`crate::session`] builds an [`AudioBridge`] only for a target with
+/// `audio = true`, so a target without one never registers `rdpsnd` and never
+/// asks the server for sound at all — rather than receiving it and throwing it
+/// away. Of the wrapper's two silent positions this gateway offers one:
+/// `audio = false` is mstsc's "play on remote computer", so the host keeps its own
+/// speakers and a headset paired to it, the way a VNC target without audio does
+/// because it can do nothing else. `AudioMode::Mute` — the session gets no audio
+/// device anywhere — is deliberately not a config value; nobody has asked a remote
+/// to go quiet.
+pub fn connect(bridge: Option<Arc<AudioBridge>>) -> AudioMode {
+    match bridge {
+        Some(bridge) => AudioMode::Redirect(Audio { format: WANTED, sink: Arc::new(Sink { bridge }) }),
+        None => AudioMode::LeaveOnHost,
+    }
 }
 
 /// The wrapper's sink, which is this gateway's queue with a shape on it.
@@ -132,11 +139,11 @@ mod tests {
     }
 
     /// A target that asked for no sound gets no channel, rather than a channel
-    /// nothing reads.
+    /// nothing reads — and leaves the sound on the host rather than muting it.
     #[test]
-    fn no_bridge_means_no_rdpsnd() {
-        assert!(connect(None).is_none());
-        assert!(connect(Some(Arc::new(AudioBridge::new()))).is_some());
+    fn no_bridge_leaves_sound_on_the_host() {
+        assert!(matches!(connect(None), AudioMode::LeaveOnHost));
+        assert!(matches!(connect(Some(Arc::new(AudioBridge::new()))), AudioMode::Redirect(_)));
     }
 
     /// The queue only reports a negotiated format once the server has one to

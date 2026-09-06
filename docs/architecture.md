@@ -783,6 +783,14 @@ audio this way and only this way (its single encoder emits
 `audio/L16;rate=44100,channels=2`), which is where the option came from — see
 [`rdp-perf-vs-guacamole.md`](rdp-perf-vs-guacamole.md) for the comparison.
 
+An RDP engine without audio still says something about sound. The wrapper's
+`AudioMode` is mstsc's three positions — redirect, leave on the host, mute — each
+one Client Info PDU flag or none; `rdp_audio::connect` picks `LeaveOnHost` for a
+target without audio, so the PDU carries `INFO_REMOTECONSOLEAUDIO` and Windows
+plays the session's sound on the host's own speakers rather than giving the
+session no audio device, which is what `INFO_NOAUDIOPLAYBACK` would do. The mode
+is read once at logon and cannot change mid-session.
+
 An audio-enabled RDP engine negotiates one 44.1 kHz, 16-bit stereo PCM format
 when it connects, and offers no other — MS-RDPEA identifies a buffer's format by
 index, so one advertised format makes the index unambiguous. The gateway does not
