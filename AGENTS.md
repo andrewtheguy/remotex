@@ -30,6 +30,7 @@
   origin root. Every URL the page uses goes through `frontend/src/gateway.ts`.
 - Put temporary files and test config under `tmp/`. Run efficient local Python
   one-offs with `uv` (GitHub Actions excluded).
+- always use uv with python  
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
 - Keep e2e tests under `tests/`. Dummy RDP/VNC servers may use Docker or Podman.
 - The native `embedded-gateway` feature is the `remotex tui` multi-instance
