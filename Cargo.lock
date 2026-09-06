@@ -697,7 +697,7 @@ dependencies = [
 [[package]]
 name = "fdk-aac-prebuilt"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260902193421-5490fe1#5490fe1fef27b77a0418157c2368e08b1eee7f12"
+source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260906161257-b191431#b191431580ba9b307d899c7d35606c4350bdbb68"
 dependencies = [
  "fdk-aac-prebuilt-sys",
 ]
@@ -705,7 +705,7 @@ dependencies = [
 [[package]]
 name = "fdk-aac-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260902193421-5490fe1#5490fe1fef27b77a0418157c2368e08b1eee7f12"
+source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260906161257-b191431#b191431580ba9b307d899c7d35606c4350bdbb68"
 
 [[package]]
 name = "flate2"
@@ -729,7 +729,7 @@ dependencies = [
 [[package]]
 name = "freerdp"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260906003220-a381fb2#a381fb2b4bf59c86290081d1325b0d68397d703c"
+source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260906161258-9a72f07#9a72f0701625643a0ca5987b1bc215049609cd5c"
 dependencies = [
  "freerdp-prebuilt-sys",
 ]
@@ -737,7 +737,7 @@ dependencies = [
 [[package]]
 name = "freerdp-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260906003220-a381fb2#a381fb2b4bf59c86290081d1325b0d68397d703c"
+source = "git+https://github.com/andrewtheguy/libfreerdp-prebuilt?tag=v3.30.0-20260906161258-9a72f07#9a72f0701625643a0ca5987b1bc215049609cd5c"
 
 [[package]]
 name = "futures-channel"
@@ -1034,12 +1034,12 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libopus-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260902165321-488bdb1#488bdb12e9bec84b2caf24cd570128fa787299b5"
+source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
 
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260904003124-b08e64a#b08e64a61c3343fbd06427633f2b44415d9deec6"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260906161241-e55a2da#e55a2da7624cc9c493165375c88079d85e49af5c"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1180,7 +1180,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "opus-prebuilt"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260902165321-488bdb1#488bdb12e9bec84b2caf24cd570128fa787299b5"
+source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
 dependencies = [
  "libopus-prebuilt-sys",
 ]
@@ -1391,7 +1391,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.177"
+version = "0.0.178"
 dependencies = [
  "aes",
  "anyhow",

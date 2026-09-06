@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.177"
+version = "0.0.178"
 
 [package]
 name = "remotex"
@@ -85,7 +85,7 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Encoder and decoder are both in the archive; this gateway only encodes. libvpx
 # asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
 # plain `?` path under `panic = "abort"`.
-vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260904003124-b08e64a" }
+vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260906161241-e55a2da" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
@@ -95,13 +95,13 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # no C build on this path any more, and nothing links a system `libopus.dylib`, so
 # the binary is self-contained on every runner without any env coaxing. The lib is
 # still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260902165321-488bdb1" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260906161304-8dd83e8" }
 # AAC-ELD, for Apple High Performance system audio, behind the `apple-hp-audio`
 # feature above. The same prebuilt bargain as `opus` and `vpx-sys`: a static
 # archive the sys crate downloads from that repository's latest release, no C++
 # toolchain, no cmake. The tag pins the crate; the archives are the release's.
 # `fdk_aac` is the lib name, so `use fdk_aac::dec::…` is what src/aac_eld.rs writes.
-fdk-aac = { package = "fdk-aac-prebuilt", git = "https://github.com/andrewtheguy/fdk-aac-prebuilt", tag = "v2.0.3-20260902193421-5490fe1", optional = true }
+fdk-aac = { package = "fdk-aac-prebuilt", git = "https://github.com/andrewtheguy/fdk-aac-prebuilt", tag = "v2.0.3-20260906161257-b191431", optional = true }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
@@ -206,7 +206,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # `num-bigint`, `md-5`, `aes`, `rand` and `sha1` above are *not* affected — the
 # comments there say they came free behind ironrdp, which is no longer true, but
 # every one of them is a direct dependency of the VNC path in its own right.
-freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260906003220-a381fb2" }
+freerdp = { git = "https://github.com/andrewtheguy/libfreerdp-prebuilt", tag = "v3.30.0-20260906161258-9a72f07" }
 # RealVNC's RSA-AES security types for VNC (src/vnc_rsa_aes.rs), which is how a
 # plain `vnc` target names a user to a server that is not a Mac — wayvnc with
 # `enable_auth` offers nothing else this client speaks. A fresh RSA key pair per
