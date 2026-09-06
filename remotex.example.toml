@@ -211,6 +211,11 @@ password = "change-me"
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound is simply one of the things that work.
+#
+# Off leaves the remote's sound where it is. An RDP target without audio tells
+# Windows to keep playing on the host's own speakers (mstsc's "play on remote
+# computer"), never to mute the session — so a headset paired to the host stays
+# usable — which is also all a VNC target without audio can do.
 #audio = false
 
 # How that audio is carried. Valid only with `audio = true` above; setting it
