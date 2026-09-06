@@ -113,6 +113,13 @@ fit-to-width base scale and pinch zoom.
 pixels. Thus 3840×2160 at `scale: 2.0` is a 1920×1080 desktop at full pixel
 fidelity. Producers are RDP `Density` (`src/rdp.rs`) and Apple layout's
 backing/logical ratio (`src/vnc_apple.rs`); neither depends on the viewport.
+Those are the two protocols that carry density natively: RDP's client declares
+it in the monitor layout's `DesktopScaleFactor` and the host is bound to honour
+it, and Apple's display layout states each screen's scale factor as a double.
+Generic RFB has neither field — `SetDesktopSize` and `ExtendedDesktopSize` are
+pixels only — so the generic VNC engine reports `UNSCALED` and its points are
+its pixels. A density for it can only be *declared* from this side, by whoever
+knows what scale the server renders at; nothing on the wire can confirm it.
 What a remote is asked to *render* at is `protocol::render_density`: 1x or 2x
 at the 1.5 midpoint, for RDP and High Performance alike. Never ask a Mac for a
 fractional ratio — measured on macOS 26.6, a 1.25x request came back
@@ -145,7 +152,14 @@ resize.
 `resize = true` means the window drives the remote's size, continuously, on every
 engine alike. There is **no client-side resize control**: no auto-resize toggle,
 no "Resize to window" button, no remembered preference — the gateway states the
-one policy on `connected` and the client obeys. Standard `ard` refuses `resize`
+one policy on `connected` and the client obeys. The same goes for density on
+the protocols that carry it: on RDP and Apple Screen Sharing the remote's scale
+is what the protocol negotiated or reported, never a client-side choice, because
+a client-picked 1x or 2x there would misstate a density the wire already states.
+Generic VNC is the exception the protocol forces: its density is a declaration
+(see above), and a declaration is the client's or the operator's to make and to
+change mid-session. That is not scaling — the browser still shows every
+framebuffer pixel one-to-one — and it is not what this rule forbids. Standard `ard` refuses `resize`
 outright (config parse rejects it). High Performance's descriptor must keep the
 native fixed 3840×2160 backing ceiling: using its current mode as the maximum
 makes the Mac decline any later request beyond the initial size.
