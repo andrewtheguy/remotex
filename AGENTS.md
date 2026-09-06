@@ -178,7 +178,8 @@ Apple display modes:
   Like High Performance it asks for zlib in the second `SetEncodings`, the one a
   display layout triggers; the first list must stay zlib-free or the layout is lost.
   Its server reads X11 modifier keysyms by its own table — measured on macOS 26
-  with a key-state watcher in the Mac's GUI session: `Alt_L`/`Alt_R` *and*
+  with `tests/mac_keystate.py` running in the Mac's GUI session (its X11 twin is
+  `tests/linux_keystate.py`): `Alt_L`/`Alt_R` *and*
   `Super_L`/`Super_R` all land on Command, `Meta_L`/`Meta_R` land on Option (each
   keeping its side), `Mode_switch` and `ISO_Level3_Shift` do nothing — so the VNC
   engine sends a keyboard's Alt codes as Meta on a Mac (`keymap::apple_keysym`)
