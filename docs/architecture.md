@@ -299,10 +299,13 @@ what makes every consumer answer which of the two it is holding.
   A screen that has stopped changing produces no frame boundary at all, so the
   cleanup tick expires idle streams itself; it may only *end* them, never start one,
   which is what keeps a cell from being delivered twice.
-- **Where a stream's rectangle is.** Exactly the region's cell bounding box, and
-  nothing around it. The still pixels beside a moving region keep whatever crisp
-  tile last painted them and are owed nothing; only the cells inside a stream are
-  streamed lossily and cleaned up afterwards. The trade is on the far end: a
+- **Where a stream's rectangle is.** A stream is built over exactly the region's
+  cell bounding box, and nothing around it. The still pixels beside a moving region
+  keep whatever crisp tile last painted them and are owed nothing; only the cells
+  inside a stream are streamed lossily and cleaned up afterwards. A stream a region
+  has shrunk inside is the exception: it keeps its whole rectangle, and every cell of
+  it — the margin included — stays covered and owed until it ends. The trade is on
+  the far end: a
   decoder is configured for one picture size, a unit at another is a different
   picture, so a region that grows replaces its decoder — and a *hardware* decoder
   answers that by tearing down a platform decode session and asking for another.
@@ -311,9 +314,11 @@ what makes every consumer answer which of the two it is holding.
   sessions back rather than leaving them held.
 
   Two components' cells cannot overlap, but their bounding boxes can — a cell tucked
-  into an L's corner is its own region inside the L's box — and a cell in two live
-  regions is a cell two streams both carry, so `disjoint` merges any overlapping
-  pair into its union.
+  into an L's corner is its own region inside the L's box, or two L's interlock — and
+  a cell in two live regions is a cell two streams both carry, so `coalesce` merges
+  an overlapping pair into its union. A union that adds no cell is always taken; one
+  past the `MERGE_WASTE` veto is refused, and the component with fewer moving cells
+  goes to the still codecs instead.
 - **A stream's end is said, not guessed.** `ServerMsg::VideoEnd { stream }` — the
   counterpart of `VideoFormat`, and about the resource rather than the picture. A
   client keys its decoders by stream id and is otherwise never told one is finished;

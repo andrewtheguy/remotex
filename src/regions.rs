@@ -25,14 +25,16 @@
 //!   Two deliveries of one cell in one frame is how a debt gets discharged by pixels
 //!   that did not discharge it.
 //!
-//! A stream's rectangle is exactly its region's cell bounding box. Nothing outside
-//! what [`coalesce`] chose is streamed: the still pixels beside a moving region keep
-//! whatever crisp tile last painted them, and are owed nothing.
+//! A stream is built over exactly its region's cell bounding box. Nothing outside
+//! what [`coalesce`] chose is streamed when a stream starts: the still pixels beside
+//! a moving region keep whatever crisp tile last painted them, and are owed nothing.
 //!
 //! Geometry moves at most once per `RETUNE`, so a stream is not restarted for
 //! every twitch: a region that shrinks keeps its stream (the idle margin costs
 //! almost nothing to code), and only a region that grows past its stream's rectangle
-//! pays for a new encoder and a keyframe.
+//! pays for a new encoder and a keyframe. A kept stream keeps its whole rectangle,
+//! and every cell of it — the margin the region has left behind included — stays
+//! covered and owed a cleanup until the stream ends.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -207,12 +209,22 @@ struct Component {
 /// Group moving cells into at most `max` rectangles of the cell grid.
 ///
 /// Connected components first (4-connected, so cells that merely touch at a corner
-/// are two regions), then each component's bounding box. If that leaves more boxes
-/// than `max`, the cheapest pair — the one whose merged box adds the fewest cells —
-/// is merged, and so on. A merge whose box would cover more than [`MERGE_WASTE`]
-/// times the cells actually moving inside it is refused; when nothing may be merged
-/// and there are still too many, the region with the fewest moving cells is dropped
-/// and its cells take the still codecs.
+/// are two regions), then each component's bounding box. Two components' *cells*
+/// cannot overlap, but their boxes can — an L and a cell tucked into its corner, or
+/// two L's interlocked — and a cell inside two live regions is a cell two streams
+/// both carry, which is the one delivery rule this module exists to keep. So an
+/// overlapping pair is merged into its union, and that merge is judged like any
+/// other: a union that adds no cell (one box inside the other) is always taken, and
+/// one that would cover more than [`MERGE_WASTE`] times the cells actually moving
+/// inside it is refused, with the component that has fewer moving cells dropped to
+/// the still codecs instead.
+///
+/// If that leaves more boxes than `max`, the cheapest pair — the one whose merged
+/// box adds the fewest cells — is merged, and so on, under the same veto; when
+/// nothing may be merged and there are still too many, the region with the fewest
+/// moving cells is dropped. Every pass removes a component, which is what makes
+/// the loop terminate, and a merge that creates a new overlap is settled on the
+/// next pass. The result is pairwise disjoint.
 ///
 /// Pure, and deliberately: which rectangles a churn map deserves is the one decision
 /// here that can be argued about entirely on paper.
@@ -253,7 +265,41 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
         components.push(Component { bbox, moving });
     }
 
-    while components.len() > max {
+    loop {
+        // Overlaps first, because they are forced rather than chosen: the delivery
+        // rule leaves no option of keeping both boxes as they are.
+        let overlapping = (0..components.len())
+            .flat_map(|i| (i + 1..components.len()).map(move |j| (i, j)))
+            .find(|&(i, j)| components[i].bbox.overlaps(&components[j].bbox));
+        if let Some((i, j)) = overlapping {
+            let merged = components[i].bbox.union(&components[j].bbox);
+            let moving = components[i].moving + components[j].moving;
+            // A nested pair's union is the larger box itself. Refusing that would
+            // drop the inner component to the still codecs while the larger stream
+            // carried its cells anyway — the delivery rule broken from the other
+            // side — so it is always taken.
+            let nested = merged == components[i].bbox || merged == components[j].bbox;
+            if nested || merged.area() <= MERGE_WASTE * moving {
+                components.remove(j);
+                components[i] = Component { bbox: merged, moving };
+            } else {
+                // The union would swallow still cells outside both boxes, so the
+                // smaller component loses its stream instead: its cells inside the
+                // survivor's box are carried by the survivor, and the rest are crisp.
+                let loser = if (components[j].moving, components[j].bbox.area())
+                    < (components[i].moving, components[i].bbox.area())
+                {
+                    j
+                } else {
+                    i
+                };
+                components.remove(loser);
+            }
+            continue;
+        }
+        if components.len() <= max {
+            break;
+        }
         let mut best: Option<(usize, usize, u32)> = None;
         for i in 0..components.len() {
             for j in i + 1..components.len() {
@@ -262,15 +308,9 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
                 if merged.area() > MERGE_WASTE * moving {
                     continue;
                 }
-                // Saturating, because two components' *boxes* may overlap even
-                // though their cells cannot: an L and a cell tucked into its corner
-                // are separate regions whose bounding boxes are nested, and the
-                // merged box is then no larger than the parts. That merge costs
-                // nothing, which is exactly what a zero says.
-                let cost = merged
-                    .area()
-                    .saturating_sub(components[i].bbox.area())
-                    .saturating_sub(components[j].bbox.area());
+                // No two boxes overlap by the time this runs, so the union is at
+                // least the sum of the parts and the subtraction cannot wrap.
+                let cost = merged.area() - components[i].bbox.area() - components[j].bbox.area();
                 if best.is_none_or(|(_, _, at)| cost < at) {
                     best = Some((i, j, cost));
                 }
@@ -299,34 +339,6 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
         }
     }
     components.into_iter().map(|c| c.bbox).collect()
-}
-
-/// Keep [`coalesce`]'s boxes disjoint.
-///
-/// Two components' *cells* cannot overlap, but their bounding boxes can: an L and a
-/// cell tucked into its corner are separate regions whose boxes are nested. That
-/// cannot be allowed to stand: a cell inside two live regions is a cell two streams
-/// both carry, which is the one delivery rule this module exists to keep. So an
-/// overlapping pair is merged into its union — which can meet a third, hence the
-/// loop, which terminates because every pass through it removes a box.
-///
-/// The result is never longer than the input, so [`MAX_STREAMS`] still holds and the
-/// merge veto [`MERGE_WASTE`] applied upstream is not re-opened here: these merges are
-/// forced by the delivery rule rather than chosen to save a stream, and a union of
-/// nested boxes adds no cell that was not already inside the larger one.
-fn disjoint(mut boxes: Vec<CellBox>) -> Vec<CellBox> {
-    'again: loop {
-        for i in 0..boxes.len() {
-            for j in i + 1..boxes.len() {
-                if boxes[i].overlaps(&boxes[j]) {
-                    boxes[i] = boxes[i].union(&boxes[j]);
-                    boxes.remove(j);
-                    continue 'again;
-                }
-            }
-        }
-        return boxes;
-    }
 }
 
 /// The lowest stream id none of `taken` is using, or `None` when the wire has none
@@ -604,9 +616,11 @@ impl Regions {
             }
         }
 
-        // The exact boxes, and nothing around them: a stream covers what is moving
-        // and the still tiles beside it are never re-sent lossily.
-        let wanted: Vec<Rect> = disjoint(coalesce(moving, MAX_STREAMS))
+        // The exact boxes, and nothing around them: a stream built here covers only
+        // what is moving, and the still tiles beside it are never re-sent lossily. A
+        // stream kept from an earlier retune is the exception — it keeps its whole
+        // rectangle, margin included, and every cell of it stays covered and owed.
+        let wanted: Vec<Rect> = coalesce(moving, MAX_STREAMS)
             .into_iter()
             .filter_map(|bbox| bbox.to_rect(w, h))
             .collect();
@@ -1215,7 +1229,7 @@ mod tests {
     /// Two components' cells cannot overlap, but their boxes can: a cell tucked into
     /// an L's corner is its own region inside the L's box. A cell inside two live
     /// regions is a cell two streams both carry, so the overlap is merged away —
-    /// however many boxes it takes — and separated blocks are left exactly as they are.
+    /// whatever the cap — and separated blocks are left exactly as they are.
     #[test]
     fn regions_are_disjoint_even_where_their_boxes_nest() {
         let mut cells = vec![(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 0)];
@@ -1227,27 +1241,55 @@ mod tests {
             })
         };
         for max in 1..=MAX_STREAMS {
-            let chosen = coalesce(&cells, max);
-            let boxes = disjoint(chosen.clone());
+            let boxes = coalesce(&cells, max);
             assert!(boxes.len() <= max, "the merge invented a stream at max {max}");
             for (i, a) in boxes.iter().enumerate() {
                 for b in &boxes[i + 1..] {
                     assert!(!a.overlaps(b), "at max {max}, {a:?} overlaps {b:?}");
                 }
             }
-            // Merging away an overlap must not drop what was in it: every cell the
-            // coalescing chose to stream is still inside a region afterwards. What
-            // `coalesce` itself declined to stream at this cap is its own decision.
-            for cell in cells.iter().copied().filter(|cell| inside(&chosen, *cell)) {
-                assert!(inside(&boxes, cell), "at max {max}, {cell:?} lost its region");
-            }
+            // The corner cell is inside the L's box whichever way the cap goes, so
+            // it is streamed at every cap.
+            assert!(inside(&boxes, (2, 0)), "at max {max}, the corner cell lost its region");
         }
         // And the boxes are exactly the regions' own: the L with its corner cell, and
         // the two blocks, none of them grown by a cell.
-        let boxes = disjoint(coalesce(&cells, MAX_STREAMS));
+        let boxes = coalesce(&cells, MAX_STREAMS);
         assert_eq!(boxes.len(), 3, "{boxes:?}");
         for want in [boxed(0, 0, 2, 2), boxed(4, 0, 5, 1), boxed(0, 8, 1, 9)] {
             assert!(boxes.contains(&want), "{want:?} is not among {boxes:?}");
+        }
+    }
+
+    /// Two boxes that overlap without nesting have a union bigger than either, and
+    /// that union is judged like any other merge. Within the veto it is taken.
+    #[test]
+    fn a_partial_overlap_within_the_waste_veto_merges() {
+        // An L, and a hook whose box reaches into the L's box and past it.
+        let cells = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 0), (3, 0), (3, 1)];
+        assert_eq!(coalesce(&cells, MAX_STREAMS), vec![boxed(0, 0, 3, 2)]);
+    }
+
+    /// And past the veto the smaller component goes to the still codecs, so no cell
+    /// outside both original boxes is streamed — the union would have swallowed a
+    /// screenful of still ones for the sake of a line.
+    #[test]
+    fn a_partial_overlap_past_the_waste_veto_drops_the_smaller_region() {
+        // A T: eleven cells along row 0 and ten down column 5, in a 11×11 box.
+        let mut cells: Vec<(u16, u16)> = (0..=10).map(|c| (c, 0)).collect();
+        cells.extend((1..=10).map(|r| (5, r)));
+        // A line down column 0 from row 2, reaching two rows past the T's box, so
+        // the boxes overlap without either containing the other.
+        cells.extend((2..=12).map(|r| (0, r)));
+        let boxes = coalesce(&cells, MAX_STREAMS);
+        assert_eq!(boxes, vec![boxed(0, 0, 10, 10)], "the union was taken");
+        let inside = |cell: (u16, u16)| {
+            boxes.iter().any(|b| {
+                b.c0 <= cell.0 && cell.0 <= b.c1 && b.r0 <= cell.1 && cell.1 <= b.r1
+            })
+        };
+        for outside in [(1, 11), (10, 11), (10, 12), (0, 11), (0, 12)] {
+            assert!(!inside(outside), "{outside:?} is outside both boxes and was streamed");
         }
     }
 
@@ -1332,23 +1374,18 @@ mod tests {
         assert!(coalesce(&[], MAX_STREAMS).is_empty());
     }
 
-    /// Two components' *cells* cannot overlap, but their bounding boxes can: a cell
-    /// tucked into an L's corner is its own region inside the L's box. The merged box
-    /// is then no bigger than the parts, so the cost of that merge is negative if it
-    /// is worked out by subtraction — which on `u32` is a panic in a debug build and
-    /// a wrapped-around worst-candidate in a release one.
+    /// A cell tucked into an L's corner is its own region inside the L's box, and the
+    /// L's stream would carry it whatever was decided — so the pair is merged at
+    /// every cap, and the veto is never asked about a union that adds no cell.
     #[test]
-    fn components_whose_boxes_overlap_can_still_be_merged() {
+    fn a_nested_box_is_merged_whatever_the_cap() {
         let mut cells = vec![(0, 0), (1, 0), (2, 0), (0, 1), (0, 2)];
         // Diagonally opposite the L's corner, so 4-connected to none of it, and
         // inside its bounding box.
         cells.push((2, 2));
-        assert_eq!(coalesce(&cells, 2).len(), 2, "the two should stay apart at max 2");
-        assert_eq!(
-            coalesce(&cells, 1),
-            vec![boxed(0, 0, 2, 2)],
-            "the cheapest merge is the one that adds no cells at all"
-        );
+        for max in 1..=MAX_STREAMS {
+            assert_eq!(coalesce(&cells, max), vec![boxed(0, 0, 2, 2)], "at max {max}");
+        }
     }
 
     // ---- the live table ------------------------------------------------------
