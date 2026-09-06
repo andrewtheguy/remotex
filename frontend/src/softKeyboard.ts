@@ -40,24 +40,52 @@ export type SoftKeyDefinition =
   | SpecialSoftKey
   | ComboSoftKey;
 
-export interface SoftKeyModifiers {
-  ctrl: boolean;
-  alt: boolean;
-  shift: boolean;
-  super: boolean;
+// The sticky modifiers the panel can hold, one entry per physical key: both
+// sides of Shift, Ctrl, Alt and Super are distinct codes, exactly as a hardware
+// keyboard reports them, and the backend keeps them apart (Alt_R vs Alt_L, the
+// E0-extended scancode) — so a right-hand soft key really is the right-hand key
+// on the remote, where the two differ (AltGr, a Mac's right Option).
+export type ModifierKind = "shift" | "ctrl" | "alt" | "super";
+export type ModifierSide = "left" | "right";
+
+export interface ModifierKey {
+  kind: ModifierKind;
+  side: ModifierSide;
+  // The name a modifier badge shows for it while held.
+  label: string;
+}
+
+export const MODIFIER_KEYS: ReadonlyMap<string, ModifierKey> = new Map([
+  ["ShiftLeft", { kind: "shift", side: "left", label: "Shift" }],
+  ["ShiftRight", { kind: "shift", side: "right", label: "RShift" }],
+  ["ControlLeft", { kind: "ctrl", side: "left", label: "Ctrl" }],
+  ["ControlRight", { kind: "ctrl", side: "right", label: "RCtrl" }],
+  ["AltLeft", { kind: "alt", side: "left", label: "Alt" }],
+  ["AltRight", { kind: "alt", side: "right", label: "RAlt" }],
+  ["MetaLeft", { kind: "super", side: "left", label: "Super" }],
+  ["MetaRight", { kind: "super", side: "right", label: "RSuper" }],
+]);
+
+// The modifier codes currently held sticky, in the order they were toggled on.
+// Sent down in that order ahead of the key and released after it.
+export type SoftKeyModifiers = ReadonlySet<string>;
+
+// Which sticky modifier a key toggles, or null if it is not a modifier key. A
+// modifier inside a combo (Ctrl in Ctrl+C) is not one: only a `special` key
+// whose own code is a modifier is.
+export function modifierOf(def: SoftKeyDefinition): ModifierKey | null {
+  if (def.type !== "special") {
+    return null;
+  }
+  return MODIFIER_KEYS.get(def.code) ?? null;
+}
+
+// Whether either Shift is held — what decides the glyphs the keys display.
+export function shiftHeld(modifiers: SoftKeyModifiers): boolean {
+  return modifiers.has("ShiftLeft") || modifiers.has("ShiftRight");
 }
 
 export type SoftKeyboardScreen = "primary" | "secondary";
-
-// The DOM codes for the four sticky modifiers. Both physical Shift keys (and
-// both Ctrl/Alt) fold onto the left-hand code — one sticky toggle each is all
-// a soft keyboard needs.
-export const MODIFIER_CODES: Record<keyof SoftKeyModifiers, string> = {
-  ctrl: "ControlLeft",
-  alt: "AltLeft",
-  shift: "ShiftLeft",
-  super: "MetaLeft",
-} as const;
 
 // ── Builders ──
 
@@ -199,16 +227,19 @@ const ROW_NAV_ARROWS: SoftKeyDefinition[] = [
   s("→", "ArrowRight", 1.5),
 ];
 
-// The Sym/Nav screen gets its own bottom row leading with a Shift toggle, so
-// the shifted glyphs on the symbol keys (~ _ + { } | : " < > ?) are reachable
-// without switching to the ABC screen. Space/Enter shrink slightly to make
-// room. (The ABC screen's Shift lives in ROW_ZXCV.)
+// The Sym/Nav screen gets its own bottom row, and it carries the *right-hand*
+// modifiers: the ABC screen's Shift, Ctrl and Alt (and the combo row's Super)
+// are the left keys, so this is where the right ones live — the only way a
+// phone reaches AltGr on a Windows or Linux host, or a Mac's right Option, and
+// the Shift here also makes the shifted symbol glyphs (~ _ + { } | : " < > ?)
+// reachable without switching screens. Space/Enter shrink to make room.
 const ROW_BOTTOM_SECONDARY: SoftKeyDefinition[] = [
-  s("Shift", "ShiftLeft", 1.5),
+  s("RShift", "ShiftRight", 1.5),
   s("Tab", "Tab", 1.3),
-  s("Ctrl", "ControlLeft", 1.3),
-  s("Alt", "AltLeft", 1.3),
-  s("Space", "Space", 3),
+  s("RCtrl", "ControlRight", 1.3),
+  s("RAlt", "AltRight", 1.3),
+  s("RSuper", "MetaRight", 1.3),
+  s("Space", "Space", 2),
   s("Enter", "Enter", 2),
 ];
 
@@ -336,4 +367,23 @@ export const DESKTOP_ARROW_ROW_2: SoftKeyDefinition[] = [
   s("◀", "ArrowLeft"),
   s("▼", "ArrowDown"),
   s("▶", "ArrowRight"),
+];
+
+// The bottom row of a PC keyboard, as the hardware has it: Ctrl, Super and Alt
+// left of the space bar, Alt, Super and Ctrl right of it, each with its own
+// side's code. Labels match the keycaps rather than naming the side — the
+// position says it, as on the physical board.
+export const DESKTOP_SHIFT_LEFT: SpecialSoftKey = s("Shift", "ShiftLeft");
+export const DESKTOP_SHIFT_RIGHT: SpecialSoftKey = s("Shift", "ShiftRight");
+
+export const DESKTOP_BOTTOM_LEFT: SpecialSoftKey[] = [
+  s("Ctrl", "ControlLeft"),
+  s("Super", "MetaLeft"),
+  s("Alt", "AltLeft"),
+];
+
+export const DESKTOP_BOTTOM_RIGHT: SpecialSoftKey[] = [
+  s("Alt", "AltRight"),
+  s("Super", "MetaRight"),
+  s("Ctrl", "ControlRight"),
 ];

@@ -103,6 +103,20 @@ async def main() -> int:
         help="viewport WIDTHxHEIGHT in points to request after the display list arrives (repeatable)",
     )
     parser.add_argument(
+        "--key",
+        action="append",
+        default=[],
+        metavar="CODE",
+        help="DOM key code to press once the desktop is up (repeatable: all are "
+        "held together as one chord, pressed in order and released in reverse)",
+    )
+    parser.add_argument(
+        "--key-hold",
+        type=float,
+        default=0.3,
+        help="seconds the --key chord stays down",
+    )
+    parser.add_argument(
         "--burst",
         action="store_true",
         help="send all viewport requests together instead of waiting for each answer",
@@ -154,6 +168,25 @@ async def main() -> int:
         reconnect_task = (
             asyncio.create_task(reconnect()) if args.reconnect_target is not None else None
         )
+
+        # One chord, sent after the first resize so the engine's input path is
+        # live. Codes go down in the given order and up in reverse, the way the
+        # browser's soft keyboard sends a combo.
+        async def press_keys() -> None:
+            await asyncio.sleep(1.0)
+            for code in args.key:
+                print(f"  -> key down {code}")
+                await socket.send(
+                    json.dumps({"type": "key", "code": code, "pressed": True, "caps": False})
+                )
+            await asyncio.sleep(args.key_hold)
+            for code in reversed(args.key):
+                print(f"  -> key up   {code}")
+                await socket.send(
+                    json.dumps({"type": "key", "code": code, "pressed": False, "caps": False})
+                )
+
+        keys_task = None
         try:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
@@ -163,6 +196,8 @@ async def main() -> int:
                     data = json.loads(message)
                     kind = data.get("type")
                     if kind == "resize":
+                        if args.key and keys_task is None:
+                            keys_task = asyncio.create_task(press_keys())
                         print(
                             f"  resize  {data['w']}x{data['h']}  scale={data['scale']}"
                             f"   -> {data['w'] / data['scale']:g}x"
@@ -258,6 +293,8 @@ async def main() -> int:
         finally:
             if reconnect_task is not None:
                 reconnect_task.cancel()
+            if keys_task is not None and not keys_task.done():
+                keys_task.cancel()
         print(f"\n  {tiles} tile frames")
         await socket.send(json.dumps({"type": "disconnect"}))
     return 0
