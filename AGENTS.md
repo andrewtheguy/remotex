@@ -157,9 +157,15 @@ the protocols that carry it: on RDP and Apple Screen Sharing the remote's scale
 is what the protocol negotiated or reported, never a client-side choice, because
 a client-picked 1x or 2x there would misstate a density the wire already states.
 Generic VNC is the exception the protocol forces: its density is a declaration
-(see above), and a declaration is the client's or the operator's to make and to
-change mid-session. That is not scaling — the browser still shows every
-framebuffer pixel one-to-one — and it is not what this rule forbids. Standard `ard` refuses `resize`
+(see above), made from the menu's **Density** toggle (`ClientMsg::Density`,
+per session and never remembered). The engine then asks the server for
+`points × density` pixels where it can resize and labels every generic size
+announcement with the declared scale, a rejected `SetDesktopSize` included.
+That is not scaling — the browser still shows every framebuffer pixel
+one-to-one — and it is not what this rule forbids. The measured how-to, and
+the wayvnc rule that a second client's resize comes back *prohibited* while the
+first client that resized stays connected, are in
+[`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md). Standard `ard` refuses `resize`
 outright (config parse rejects it). High Performance's descriptor must keep the
 native fixed 3840×2160 backing ceiling: using its current mode as the maximum
 makes the Mac decline any later request beyond the initial size.

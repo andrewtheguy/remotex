@@ -276,6 +276,21 @@ pub enum ClientMsg {
     /// size fields matter at session-open, where [`ClientMsg::Connect`]
     /// carries the same shape.
     HostDisplay(HostDisplay),
+    /// Declare the density a generic VNC server renders at, in hundredths like
+    /// [`HostDisplay::scale`] — 100 or 200 once quantized by [`render_density`].
+    ///
+    /// Standard RFB has no field for density: `SetDesktopSize` and
+    /// `ExtendedDesktopSize` are pixels, and nothing on the wire says how large
+    /// they should look. So on a plain VNC target the density is *declared* from
+    /// this side, by whoever knows what scale the server is at, and changed from
+    /// the client's menu mid-session. The engine then asks for `points × density`
+    /// pixels where it can resize and reports the framebuffer at that scale in
+    /// [`ServerMsg::Resize`] either way; the browser still shows every pixel
+    /// one-to-one, so this is a declaration and not a scaling. Dropped by every
+    /// engine whose protocol carries its own density — RDP and both Apple
+    /// subtypes — because a declaration there would contradict what the wire
+    /// already states. Per session, never remembered: a new engine starts at 1x.
+    Density { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone
@@ -1446,6 +1461,13 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
         ));
+        // The declared density for a generic VNC server: hundredths, like the
+        // screen report's, and rejected past the u16 range the same way.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"density","scale":200}"#).unwrap(),
+            ClientMsg::Density { scale: 200 }
+        ));
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"density","scale":70000}"#).is_err());
         // The client's screen: the tag rides beside the struct's own fields.
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(

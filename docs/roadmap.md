@@ -131,6 +131,37 @@ has an answer rather than being rediscovered.
   pointer transforms. High Performance mode is unaffected because it uses one
   virtual display rather than a mosaic of physical displays.
 
+### Automatic density on generic VNC
+
+Today a plain VNC server's density is declared by hand from the menu's Density
+toggle, and the compositor's scale is set by hand beside it
+([`docs/generic-vnc-hidpi.md`](generic-vnc-hidpi.md)). Two manual steps that have
+to agree, for something RDP does with none: it declares the browser's density in
+the monitor layout and the host renders at it. Making generic VNC follow the
+browser the same way — a Retina window gets a 2x desktop on connect, and dragging
+it to a 1x screen gives a 1x one — wants both halves closed, and neither is small:
+
+- **Telling the compositor.** Standard RFB has no field for it, so the density
+  must reach sway some other way: an IPC call the gateway makes on the sway host
+  (`swaymsg output <name> scale <n>`, over SSH or a small agent there), or a
+  wayvnc or neatvnc extension that carries a scale with `SetDesktopSize`, which
+  means patches upstream. Either is a second channel beside the VNC connection,
+  with its own reachability, credentials and failure modes; the gateway has none
+  of that for VNC today.
+- **Learning the answer.** Whatever the compositor was asked, the gateway needs
+  to *know* what it did before labelling the framebuffer, because a label the
+  server did not honour is a desktop shown at the wrong size. RDP and Apple both
+  answer on the wire; standard RFB never will. The label would have to come from
+  the same side channel, and be re-read whenever the desktop changes size.
+- **Per-server semantics.** wayvnc forwards a resize as a headless output's
+  custom mode; other servers (TigerVNC, x11vnc, a KVM console) have no notion of
+  scale at all, and asking one for twice the pixels gives twice the desktop. So
+  the automatic path is really "sway through wayvnc", and belongs behind a
+  per-target opt-in that names the compositor it is talking to.
+
+The value is one click saved per session on one kind of server. Until that costs
+more than the two channels above, the declaration stays manual.
+
 ## Not planned
 
 ### The screen path's remaining queue depths

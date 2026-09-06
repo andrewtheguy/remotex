@@ -38,6 +38,8 @@ export default function RemoteDesktop({
     hostScale,
     renderPlan,
     connection,
+    canDeclareDensity,
+    setDensity,
     canClipboard,
     canAudio,
     audioEnabled,
@@ -149,6 +151,8 @@ export default function RemoteDesktop({
           hostScale={hostScale}
           connection={connection}
           renderPlan={renderPlan}
+          canDeclareDensity={canDeclareDensity}
+          onDensityChange={setDensity}
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}

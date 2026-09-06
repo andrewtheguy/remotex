@@ -59,6 +59,16 @@ export type ClientMsg =
   // size, and a target with no pinned size opens at the gateway's default
   // for it. It does not affect canvas layout.
   | { type: "hostDisplay"; w: number; h: number; scale: number; fit: boolean }
+  // Declare the density a generic VNC server renders at, in hundredths like
+  // hostDisplay's `scale` (100 or 200). Standard RFB has no field for density
+  // — its sizes are pixels and nothing says how large they should look — so on
+  // a plain VNC target it is declared from the menu by whoever knows what scale
+  // the server is at. The engine asks for points × density pixels where it can
+  // resize and labels the framebuffer with it in `resize` either way; the
+  // canvas still shows every pixel one-to-one. Dropped by RDP and both Apple
+  // subtypes, whose protocols state their own density. Per session, never
+  // remembered — the toggle's state is read back off `resize`, not kept here.
+  | { type: "density"; scale: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it. The connect names this window's screen so a target
