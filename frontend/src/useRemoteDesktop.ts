@@ -492,6 +492,12 @@ export function useRemoteDesktop(
   // behaviour hangs off it, because every capability that varies by subtype already
   // arrives as its own flag on the same message. See connectionLabel.ts.
   const [connection, setConnection] = useState("");
+  // Whether this session's density is a declaration: a plain VNC server, whose
+  // protocol cannot carry one. The one behaviour that does hang off the
+  // connection's shape, and it hides the Density section everywhere else — RDP
+  // and both Apple modes state their own density, and a toggle there would
+  // contradict it. See `density` in protocol.ts.
+  const [canDeclareDensity, setCanDeclareDensity] = useState(false);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -1376,6 +1382,7 @@ export function useRemoteDesktop(
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
+      setCanDeclareDensity(msg.protocol === "vnc" && msg.subtype === null);
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
@@ -1543,6 +1550,7 @@ export function useRemoteDesktop(
           // No engine to resize: the next target states its own policy.
           followWindowRef.current = false;
           setCanClipboard(false);
+          setCanDeclareDensity(false);
           // No engine, so no queue to subscribe to: the row goes away rather than
           // offering a control that would be answered with a warning in the log.
           setCanAudio(false);
@@ -1938,6 +1946,15 @@ export function useRemoteDesktop(
     for (let i = codes.length - 1; i >= 0; i -= 1) {
       send({ type: "key", code: codes[i], pressed: false, caps: false });
     }
+  }, []);
+
+  // Declare the density a generic VNC server renders at, from the menu's Density
+  // toggle: 100 or 200. Nothing is kept here — the desktop's `resize` announces
+  // the scale the engine applied, and the toggle reads its state off `size`, so
+  // a declaration the engine dropped shows as exactly that. A no-op while the
+  // socket is down.
+  const setDensity = useCallback((scale: number) => {
+    sendRef.current({ type: "density", scale });
   }, []);
 
   // Ask the server for the remote's clipboard and wait for the answer, which
@@ -2337,6 +2354,9 @@ export function useRemoteDesktop(
     hostScale,
     renderPlan,
     connection,
+    // Whether the Density toggle exists for this target, and what it sends.
+    canDeclareDensity,
+    setDensity,
     canClipboard,
     canAudio,
     audioEnabled,

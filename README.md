@@ -187,6 +187,15 @@ turns the Mac's Dynamic resolution setting back on. Standard `ard` still refuses
 resize, and the one/two-virtual-display control is not implemented.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
+A plain VNC server has no way to say its pixels are HiDPI — standard RFB carries
+sizes in pixels and nothing else — so on those targets the floating menu has a
+**Density** toggle that declares 1x or 2x for the session. With `resize = true`
+the declaration asks the server for the window's points at that density and the
+desktop is shown sharp at 100%; without it, the pixels already arriving are
+re-labelled. See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for
+the sway + wayvnc walkthrough and why a second client's resize can come back
+prohibited.
+
 High Performance mode is **experimental** because it has not been widely tested,
 and it is the one part of remotex built
 entirely without a specification: Apple documents none of the protocol revision,
