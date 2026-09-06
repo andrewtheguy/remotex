@@ -13,8 +13,8 @@ use base64::Engine as _;
 use bytes::Bytes;
 use serde::Deserialize;
 
-#[cfg(all(feature = "embedded-gateway", unix))]
 use crate::audio::PcmFormat;
+#[cfg(all(feature = "embedded-gateway", unix))]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
