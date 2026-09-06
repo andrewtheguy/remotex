@@ -25,6 +25,10 @@
 //!   Two deliveries of one cell in one frame is how a debt gets discharged by pixels
 //!   that did not discharge it.
 //!
+//! A stream's rectangle is exactly its region's cell bounding box. Nothing outside
+//! what [`coalesce`] chose is streamed: the still pixels beside a moving region keep
+//! whatever crisp tile last painted them, and are owed nothing.
+//!
 //! Geometry moves at most once per `RETUNE`, so a stream is not restarted for
 //! every twitch: a region that shrinks keeps its stream (the idle margin costs
 //! almost nothing to code), and only a region that grows past its stream's rectangle
@@ -83,40 +87,6 @@ const STREAM_IDLE: Duration = Duration::from_millis(500);
 /// prevent, one level up: a banner ad in one corner must not put the screen in a
 /// stream because a video is playing in the other.
 const MERGE_WASTE: u32 = 2;
-
-/// The cell spans a streamed region's rectangle is allowed to have, in each axis.
-///
-/// A region's *picture size* is the one thing about it a client cannot absorb
-/// cheaply. A decoder is configured for one size; a unit that arrives at another one
-/// is a different picture, so the decoder is thrown away and a new one built — and
-/// where that decoder is a hardware one, "built" means a new decode session from the
-/// platform, which is a scarce, slow thing to ask for and the thing that fails first
-/// when it is asked for too often. Region geometry, meanwhile, is a bounding box of
-/// whatever happened to be moving half a second ago, and it wobbles by a cell for
-/// reasons the picture on screen would not call a change at all.
-///
-/// So the geometry is snapped to this ladder before anything is built from it: a
-/// region that wobbles keeps one size, and a rebuild it does provoke — because it
-/// moved, or because a merge took it — hands the client a picture the decoder it
-/// already has was configured for. Roughly 1.25× steps keep each size close to the
-/// box that asked for it, against the powers of two that would hold a size still for
-/// longer and cost up to four times the area to do it. The first few rungs are exact
-/// because cells are indivisible; after that they follow the ratio closely.
-///
-/// The margin is not free — those cells are streamed lossily and owed a crisp
-/// re-send like every other cell of a region — but it is the cheap half of the
-/// trade: an idle cell codes as skipped macroblocks, where a decoder rebuilt at
-/// 30 Hz is the fault this whole ladder exists to stop.
-const SPANS: [u16; 17] = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 19, 24, 30, 38, 48, 60, 64];
-
-/// The lowest [`SPANS`] rung that covers `span`, never more than `limit` cells.
-///
-/// `limit` is the grid itself, so a desktop bigger than the ladder's last rung — and
-/// a region that covers such a desktop whole — is described exactly rather than
-/// refused.
-fn span_up(span: u16, limit: u16) -> u16 {
-    SPANS.iter().copied().find(|rung| *rung >= span).unwrap_or(limit).min(limit)
-}
 
 /// Note that the client is owed an end for `id`, once: an end is said once however
 /// many paths notice it before [`Regions::drain_ended`] takes it.
@@ -203,48 +173,6 @@ impl CellBox {
 
     fn overlaps(&self, other: &Self) -> bool {
         self.c0 <= other.c1 && other.c0 <= self.c1 && self.r0 <= other.r1 && other.r0 <= self.r1
-    }
-
-    /// This box snapped out to a [`SPANS`] rung on a grid of that rung, inside a
-    /// `cols`×`rows` cell grid.
-    ///
-    /// Both halves matter and they do different jobs. The **rung** holds the picture
-    /// size still, so a decoder built for one region is the right decoder for the
-    /// next. The **alignment** holds the rectangle itself still, which is worth more:
-    /// a region that drifts a cell down is not contained by a box that merely has the
-    /// right size at the old origin, so the stream is rebuilt for a drift the way it
-    /// would be for a resize — where a box aligned to its own rung does not move at
-    /// all until the region leaves it. Measured over a real scroll (98 retunes of a
-    /// 1920×1080 Windows desktop, `tmp/replay.py`), against exact boxes: 124 streams
-    /// and 56 client decoder builds become 97 and 37, for 14% more streamed cells.
-    ///
-    /// A region straddling a rung boundary takes the next rung up and is tried again,
-    /// which terminates because the grid itself is always the last rung. Any selected
-    /// rung whose aligned block runs off the grid slides back rather than clipping: a
-    /// clipped box would have a span that depended on where it started, which is the
-    /// size churn this exists to remove.
-    fn quantized(self, cols: u16, rows: u16) -> Self {
-        let place = |lo: u16, hi: u16, limit: u16| {
-            let mut span = span_up(hi - lo + 1, limit);
-            loop {
-                debug_assert!(span <= limit, "a rung wider than the grid it is placed on");
-                let start = (lo / span) * span;
-                if start + span > hi {
-                    let start = start.min(limit - span);
-                    return (start, start + span - 1);
-                }
-                let wider = span_up(span + 1, limit);
-                if wider == span {
-                    // Already the whole grid, so there is no boundary left to straddle.
-                    let start = lo.min(limit - span);
-                    return (start, start + span - 1);
-                }
-                span = wider;
-            }
-        };
-        let (c0, c1) = place(self.c0, self.c1, cols);
-        let (r0, r1) = place(self.r0, self.r1, rows);
-        Self { c0, r0, c1, r1 }
     }
 
     /// This box in framebuffer pixels, clipped to a `w`×`h` desktop.
@@ -373,28 +301,25 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
     components.into_iter().map(|c| c.bbox).collect()
 }
 
-/// Put [`coalesce`]'s boxes on the [`SPANS`] ladder, and keep them disjoint once they
-/// are on it.
+/// Keep [`coalesce`]'s boxes disjoint.
 ///
-/// Quantizing grows boxes, and two that shared no cell at their exact sizes can share
-/// one at their ladder sizes. That cannot be allowed to stand: a cell inside two live
-/// regions is a cell two streams both carry, which is the one delivery rule this
-/// module exists to keep. So an overlapping pair is merged and the union quantized in
-/// turn — which can meet a third, hence the loop, which terminates because every pass
-/// through it removes a box.
+/// Two components' *cells* cannot overlap, but their bounding boxes can: an L and a
+/// cell tucked into its corner are separate regions whose boxes are nested. That
+/// cannot be allowed to stand: a cell inside two live regions is a cell two streams
+/// both carry, which is the one delivery rule this module exists to keep. So an
+/// overlapping pair is merged into its union — which can meet a third, hence the
+/// loop, which terminates because every pass through it removes a box.
 ///
 /// The result is never longer than the input, so [`MAX_STREAMS`] still holds and the
 /// merge veto [`MERGE_WASTE`] applied upstream is not re-opened here: these merges are
-/// forced by the delivery rule rather than chosen to save a stream.
-fn stabilize(mut boxes: Vec<CellBox>, cols: u16, rows: u16) -> Vec<CellBox> {
-    for bbox in &mut boxes {
-        *bbox = bbox.quantized(cols, rows);
-    }
+/// forced by the delivery rule rather than chosen to save a stream, and a union of
+/// nested boxes adds no cell that was not already inside the larger one.
+fn disjoint(mut boxes: Vec<CellBox>) -> Vec<CellBox> {
     'again: loop {
         for i in 0..boxes.len() {
             for j in i + 1..boxes.len() {
                 if boxes[i].overlaps(&boxes[j]) {
-                    boxes[i] = boxes[i].union(&boxes[j]).quantized(cols, rows);
+                    boxes[i] = boxes[i].union(&boxes[j]);
                     boxes.remove(j);
                     continue 'again;
                 }
@@ -679,16 +604,12 @@ impl Regions {
             }
         }
 
-        // On the ladder before anything is built from it, so what a client is handed
-        // is a size it has probably already configured a decoder for. See [`SPANS`].
-        let wanted: Vec<Rect> = stabilize(
-            coalesce(moving, MAX_STREAMS),
-            w.div_ceil(CELL_W),
-            h.div_ceil(CELL_H),
-        )
-        .into_iter()
-        .filter_map(|bbox| bbox.to_rect(w, h))
-        .collect();
+        // The exact boxes, and nothing around them: a stream covers what is moving
+        // and the still tiles beside it are never re-sent lossily.
+        let wanted: Vec<Rect> = disjoint(coalesce(moving, MAX_STREAMS))
+            .into_iter()
+            .filter_map(|bbox| bbox.to_rect(w, h))
+            .collect();
 
         let mut old = std::mem::take(&mut self.live);
         let mut next: Vec<Live> = Vec::new();
@@ -758,10 +679,10 @@ impl Regions {
         self.live = next;
         // An id this retune both freed and handed straight back is not an end: the
         // region on it is a different one, and it announces a format and a keyframe of
-        // its own, but the decoder at the far end is still the decoder for that id and
-        // — where the ladder held the size still — still configured for the picture
-        // about to arrive. Telling the client to close it would throw away exactly the
-        // hardware decode session [`SPANS`] exists to keep.
+        // its own, but the decoder at the far end is still the decoder for that id —
+        // and, where the picture size happens to match, still configured for the
+        // picture about to arrive. Telling the client to close it would throw away a
+        // hardware decode session it could have kept.
         self.ended.retain(|id| !self.live.iter().any(|live| live.id == *id));
         self.covered = self.live.iter().flat_map(|live| live.cells.iter().copied()).collect();
         Ok(())
@@ -1291,107 +1212,14 @@ mod tests {
         (c0..=c1).flat_map(|c| (r0..=r1).map(move |r| (c, r))).collect()
     }
 
-    /// A 1920x1080 desktop's cell grid: six columns of 320 and seventeen rows of 64.
-    const GRID: (u16, u16) = (6, 17);
-
-    /// The point of the ladder, stated as the thing a decoder cares about.
-    ///
-    /// A scrolling window's bounding box wobbles by a row or two from one retune to
-    /// the next, for reasons nothing on screen would call a change. Off the ladder
-    /// that is a different picture every time and so a decoder every time; on it a
-    /// wobble inside the block the region already occupies changes nothing at all.
+    /// Two components' cells cannot overlap, but their boxes can: a cell tucked into
+    /// an L's corner is its own region inside the L's box. A cell inside two live
+    /// regions is a cell two streams both carry, so the overlap is merged away —
+    /// however many boxes it takes — and separated blocks are left exactly as they are.
     #[test]
-    fn a_region_that_wobbles_keeps_one_picture_size() {
-        let sizes: HashSet<(u16, u16)> = (0..3)
-            .map(|slop| {
-                let bbox = boxed(1, 2, 3, 12 + slop);
-                let placed = bbox.quantized(GRID.0, GRID.1);
-                assert!(
-                    placed.c0 <= bbox.c0
-                        && placed.r0 <= bbox.r0
-                        && placed.c1 >= bbox.c1
-                        && placed.r1 >= bbox.r1,
-                    "the ladder lost part of the region: {placed:?} for {bbox:?}"
-                );
-                (placed.c1 - placed.c0 + 1, placed.r1 - placed.r0 + 1)
-            })
-            .collect();
-        assert_eq!(sizes.len(), 1, "a wobble inside one aligned block should not move the picture, not {sizes:?}");
-    }
-
-    /// Sliding rather than clipping, which is what makes a rung mean the same size at
-    /// the bottom of the screen as in the middle of it. A box clipped to the grid
-    /// would have a span that depended on where it started — the size churn the
-    /// ladder exists to remove, reintroduced at the edge.
-    #[test]
-    fn a_rung_that_runs_off_the_grid_slides_back_instead_of_shrinking() {
-        // Rows 12..=16 take the six-row rung; aligned it starts at 12 and would end
-        // past the last row, so it slides to 11..=16 rather than losing a row.
-        let bottom = boxed(0, 12, 0, 16).quantized(GRID.0, GRID.1);
-        assert_eq!(bottom.r1 - bottom.r0 + 1, 6, "the rung shrank at the edge");
-        assert_eq!(bottom.r1, GRID.1 - 1, "it should sit against the edge");
-        assert!(bottom.r0 <= 12, "and still cover what was moving");
-    }
-
-    /// The tighter ladder's bound applies before alignment chooses whether a box
-    /// needs the next rung to hold its origin still.
-    #[test]
-    fn the_ladder_adds_at_most_one_quarter_to_each_requested_span() {
-        let limit = *SPANS.last().expect("a ladder");
-        for wanted in 1..=limit {
-            let got = span_up(wanted, limit);
-            assert!(
-                u32::from(got) * 4 <= u32::from(wanted) * 5,
-                "{wanted} cells grew to {got}"
-            );
-        }
-    }
-
-    /// The three things the ladder must never get wrong, over every box a 1920×1080
-    /// desktop has: it covers what it was given, it stays on the grid, and its spans
-    /// come from the ladder. Exhaustive because it is cheap and the placement has a
-    /// loop in it — a box straddling a rung boundary takes the next rung up, and
-    /// "next" has to run out.
-    #[test]
-    fn the_ladder_covers_every_box_it_is_given() {
-        let rungs: HashSet<u16> = SPANS.iter().copied().chain([GRID.0, GRID.1]).collect();
-        for c0 in 0..GRID.0 {
-            for c1 in c0..GRID.0 {
-                for r0 in 0..GRID.1 {
-                    for r1 in r0..GRID.1 {
-                        let want = boxed(c0, r0, c1, r1);
-                        let got = want.quantized(GRID.0, GRID.1);
-                        assert!(
-                            got.c0 <= c0 && got.c1 >= c1 && got.r0 <= r0 && got.r1 >= r1,
-                            "{got:?} does not cover {want:?}"
-                        );
-                        assert!(got.c1 < GRID.0 && got.r1 < GRID.1, "{got:?} left the grid");
-                        assert!(
-                            rungs.contains(&(got.c1 - got.c0 + 1))
-                                && rungs.contains(&(got.r1 - got.r0 + 1)),
-                            "{got:?} is not on the ladder"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// A region bigger than the ladder's last rung is described exactly rather than
-    /// refused: the grid itself is always a legal span.
-    #[test]
-    fn a_region_larger_than_the_ladder_takes_the_whole_grid() {
-        let whole = boxed(0, 0, 5, 16).quantized(GRID.0, GRID.1);
-        assert_eq!(whole, boxed(0, 0, 5, 16));
-    }
-
-    /// Quantizing grows boxes, and two that shared no cell can share one afterwards.
-    /// A cell inside two live regions is a cell two streams both carry, so the
-    /// overlap is merged away — however many boxes it takes.
-    #[test]
-    fn regions_are_still_disjoint_after_the_ladder() {
-        let mut cells = block(0, 0, 1, 1);
-        cells.extend(block(3, 3, 4, 4));
+    fn regions_are_disjoint_even_where_their_boxes_nest() {
+        let mut cells = vec![(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 0)];
+        cells.extend(block(4, 0, 5, 1));
         cells.extend(block(0, 8, 1, 9));
         let inside = |boxes: &[CellBox], cell: (u16, u16)| {
             boxes.iter().any(|b| {
@@ -1400,8 +1228,8 @@ mod tests {
         };
         for max in 1..=MAX_STREAMS {
             let chosen = coalesce(&cells, max);
-            let boxes = stabilize(chosen.clone(), GRID.0, GRID.1);
-            assert!(boxes.len() <= max, "the ladder invented a stream at max {max}");
+            let boxes = disjoint(chosen.clone());
+            assert!(boxes.len() <= max, "the merge invented a stream at max {max}");
             for (i, a) in boxes.iter().enumerate() {
                 for b in &boxes[i + 1..] {
                     assert!(!a.overlaps(b), "at max {max}, {a:?} overlaps {b:?}");
@@ -1413,6 +1241,13 @@ mod tests {
             for cell in cells.iter().copied().filter(|cell| inside(&chosen, *cell)) {
                 assert!(inside(&boxes, cell), "at max {max}, {cell:?} lost its region");
             }
+        }
+        // And the boxes are exactly the regions' own: the L with its corner cell, and
+        // the two blocks, none of them grown by a cell.
+        let boxes = disjoint(coalesce(&cells, MAX_STREAMS));
+        assert_eq!(boxes.len(), 3, "{boxes:?}");
+        for want in [boxed(0, 0, 2, 2), boxed(4, 0, 5, 1), boxed(0, 8, 1, 9)] {
+            assert!(boxes.contains(&want), "{want:?} is not among {boxes:?}");
         }
     }
 
@@ -1587,40 +1422,6 @@ mod tests {
         assert!(regions.live[0].keyframe_owed, "a client cannot start on the new picture");
     }
 
-    /// The ladder where it is actually spent: a region whose bounding box wobbles by
-    /// a few rows from one retune to the next keeps the stream it had, so the client
-    /// keeps the decoder it had — and, where that decoder is a hardware one, the
-    /// decode session behind it.
-    #[tokio::test]
-    async fn a_wobbling_region_keeps_its_stream_across_retunes() {
-        // Seventeen rows, so a region can wobble inside one rung of the ladder.
-        let mut regions = sized(640, 1088).await;
-        let t0 = Instant::now();
-        let column = |rows: std::ops::RangeInclusive<u16>| -> Vec<(u16, u16)> {
-            rows.map(|r| (0u16, r)).collect()
-        };
-        regions.retune(&column(2..=12), t0).expect("a stream");
-        let rect = only_rect(&regions);
-        let id = regions.live[0].id;
-
-        // Carried, so "the stream survived" is a fact about this encoder rather than
-        // about a replacement that happened to be handed the same id.
-        let round = regions.take_round().expect("a stream is dirty from birth");
-        let round = {
-            let mut round = round;
-            round.encode().expect("an encode");
-            round
-        };
-        regions.put_back(round, t0);
-        assert!(!regions.live[0].keyframe_owed, "the first unit should have been the keyframe");
-
-        regions.retune(&column(2..=14), t0 + RETUNE).expect("the same stream");
-        assert_eq!(only_rect(&regions), rect, "the picture size moved under the decoder");
-        assert_eq!(regions.live[0].id, id);
-        assert!(!regions.live[0].keyframe_owed, "the region was restarted for a wobble");
-        assert!(regions.drain_ended().is_empty(), "nothing ended");
-    }
-
     /// A stream is otherwise indistinguishable, from the client's side, from one whose
     /// region is merely still — so the end is said. What it buys is the decoder, and
     /// with it whatever the platform gave the decoder.
@@ -1638,9 +1439,9 @@ mod tests {
         assert!(regions.drain_ended().is_empty(), "an end is said once");
     }
 
-    /// The exception, and the reason the ladder is worth anything: an id this retune
-    /// both freed and handed back is a new region on a decoder that is still the right
-    /// decoder for that id. Ending it would close the session the ladder just saved.
+    /// The exception: an id this retune both freed and handed back is a new region on
+    /// a decoder that is still the right decoder for that id. Ending it would close a
+    /// session the client could have kept.
     #[tokio::test]
     async fn an_id_handed_straight_back_is_not_an_end() {
         let mut regions = regions().await;

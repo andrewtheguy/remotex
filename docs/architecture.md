@@ -299,29 +299,21 @@ what makes every consumer answer which of the two it is holding.
   A screen that has stopped changing produces no frame boundary at all, so the
   cleanup tick expires idle streams itself; it may only *end* them, never start one,
   which is what keeps a cell from being delivered twice.
-- **Where a stream's rectangle is allowed to be.** A region's box is snapped out to a
-  `SPANS` rung — cell spans in roughly 1.25× steps — on a grid of that rung, before any
-  encoder is built from it. The rung holds the *picture size* still and the alignment
-  holds the *rectangle* still, and the second is worth more than the first: a region
-  that drifts one cell down is not contained by a box that merely has the right size
-  at the old origin, so it would be rebuilt for a drift exactly as for a resize. A box
-  straddling a rung boundary takes the next rung up and is tried again. Any selected
-  rung whose aligned block runs off the grid slides back rather than clipping, because
-  a clipped box would have a span that depended on where it started.
+- **Where a stream's rectangle is.** Exactly the region's cell bounding box, and
+  nothing around it. The still pixels beside a moving region keep whatever crisp
+  tile last painted them and are owed nothing; only the cells inside a stream are
+  streamed lossily and cleaned up afterwards. The trade is on the far end: a
+  decoder is configured for one picture size, a unit at another is a different
+  picture, so a region that grows replaces its decoder — and a *hardware* decoder
+  answers that by tearing down a platform decode session and asking for another.
+  What keeps that affordable is that a shrinking region keeps its stream, that
+  geometry moves at most once per `RETUNE`, and that `VideoEnd` hands finished
+  sessions back rather than leaving them held.
 
-  The reason any of this exists is the far end. A decoder is configured for one
-  picture size; a unit at another is a different picture, so the decoder is replaced —
-  and a *hardware* decoder answers that by tearing down a platform decode session and
-  asking for another, which is slow, scarce, and the first thing to fail when it is
-  asked for too often. Region geometry meanwhile is a bounding box of whatever moved
-  half a second ago, and it moves a cell for reasons nothing on screen would call a
-  change. The tighter ladder keeps the snapped picture closer to the requested box,
-  reducing the lossy cells owed a cleanup, while the rung-aligned placement keeps the
-  rectangle itself stable across small movements.
-
-  Quantizing grows boxes, so two that shared no cell can share one afterwards;
-  `stabilize` merges any overlapping pair and re-quantizes the union, because a cell in
-  two live regions is a cell two streams both carry.
+  Two components' cells cannot overlap, but their bounding boxes can — a cell tucked
+  into an L's corner is its own region inside the L's box — and a cell in two live
+  regions is a cell two streams both carry, so `disjoint` merges any overlapping
+  pair into its union.
 - **A stream's end is said, not guessed.** `ServerMsg::VideoEnd { stream }` — the
   counterpart of `VideoFormat`, and about the resource rather than the picture. A
   client keys its decoders by stream id and is otherwise never told one is finished;
@@ -527,7 +519,7 @@ only on macOS (the clause routing it to a local software decoder is compiled
 `#if PLATFORM(MAC)`), Firefox disregards it, and iOS has no software VP9 decoder to
 route to at all, so VP9 there is VideoToolbox or nothing (measured against WebKit
 main, 2026-08-21). What makes a hardware decoder safe on the region dial is the
-gateway rather than a hint: the `SPANS` ladder holding picture sizes still and
+gateway rather than a hint: a stream restarted only when its region outgrows it and
 `VideoEnd` handing finished decode sessions back, above. Verified by fast touchscreen
 scrolling on the region dial and whole-desktop `video` on a Mac and an iPad with no
 decode errors. The stall backstop in `createVideoStream` — silence where a decode

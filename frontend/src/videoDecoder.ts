@@ -534,11 +534,11 @@ export function createVideoStream(
     // of every stall, silence where a decode error belongs and then a failed
     // end-of-stream flush (see `stalled`), where software libvpx answers every chunk
     // on the calling thread, error and all — and what it goes quiet under is churn:
-    // decode sessions built and torn down as regions come and go. The `SPANS` ladder
-    // in src/regions.rs holds a region's picture size still, so an id that comes back
-    // decodes on the session it already had, and `ServerMsg::VideoEnd` hands a
-    // finished stream's session back rather than leaving it held. The stall backstop
-    // above stands whatever ends up decoding.
+    // decode sessions built and torn down as regions come and go. src/regions.rs
+    // restarts a stream only when its region outgrows the rectangle — a shrinking one
+    // keeps the stream it has — and `ServerMsg::VideoEnd` hands a finished stream's
+    // session back rather than leaving it held. The stall backstop above stands
+    // whatever ends up decoding.
   });
 
   return {
