@@ -741,7 +741,7 @@ async fn session(
     };
 
     let (Connected { downlink, uplink, width, height, macos, apple, poll }, peer, local) = connected;
-    info!("vnc: connected, desktop {width}x{height} (macos={macos})");
+    info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
             w: width,
@@ -3122,8 +3122,14 @@ async fn apply_resize(
     // density, so a new size or scale makes every key name somewhere else.
     sink.reset_render();
     info!(
-        "vnc: desktop resized from {}x{} at {}x to {}x{} at {scale}x",
-        was.0.0, was.0.1, was.1, new.0, new.1
+        "vnc: desktop resized from {}x{} px at {}x to {}x{} px at {scale}x ({}x{} pt)",
+        was.0.0,
+        was.0.1,
+        was.1,
+        new.0,
+        new.1,
+        f32::from(new.0) / scale,
+        f32::from(new.1) / scale
     );
     sink.msg(resize_msg).await?;
     Ok(true)
