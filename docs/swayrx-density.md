@@ -28,14 +28,16 @@ protocol = "vnc"
 subtype = "swayrx"
 host = "127.0.0.1"
 port = 5900
-vnc_password = "…"           # swayrx's VncAuth password, as on a plain target
+vnc_password = "…"           # swayrx's VncAuth password; omit for a server without one
 resize = true
 ```
 
 The subtype is explicit because it changes what the gateway asks for on the
 wire, and a plain VNC connection to the same server — or any other server — must
-not. Authentication, clipboard, encodings and everything else are a plain `vnc`
-target's. Against any other server the request goes unanswered, and the session
+not. Clipboard, encodings and everything else are a plain `vnc` target's.
+Authentication is VncAuth, the only security type swayrx offers: `vnc_password`
+is the one credential, and `username` and `password` are refused on this
+subtype until swayrx speaks RSA-AES with an account. Against any other server the request goes unanswered, and the session
 ends with an error on the first framebuffer update: an explicit subtype naming a
 server that is not there is a misconfiguration, not a desktop to show at a
 density the server never confirmed. A plain `vnc` target is how that server is
