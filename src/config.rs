@@ -107,8 +107,9 @@ pub enum Subtype {
     /// one, asks `SetDesktopSize` for points × scale when `resize` is set, and
     /// declares the browser's density to the server. Authentication and
     /// everything else are a plain `vnc` target's. A stock wayvnc never answers
-    /// the request, and the session then stays at 1x like any generic server.
-    /// See docs/swayvnc-density.md.
+    /// the request, and the session ends on its first framebuffer update
+    /// rather than run at a density the server never confirmed. See
+    /// docs/swayvnc-density.md.
     Swayvnc,
 }
 

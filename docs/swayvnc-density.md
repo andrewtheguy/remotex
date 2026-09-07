@@ -39,8 +39,11 @@ resize = true
 The subtype is explicit because it changes what the gateway asks for on the
 wire, and a plain VNC connection to the same server — or any other server — must
 not. Authentication, clipboard, encodings and everything else are a plain `vnc`
-target's. Against a stock wayvnc the request goes unanswered and the session
-continues as generic RFB at 1x, with one warning on stderr.
+target's. Against a stock wayvnc the request goes unanswered, and the session
+ends with an error on the first framebuffer update: an explicit subtype naming a
+server that is not there is a misconfiguration, not a desktop to show at a
+density the server never confirmed. A plain `vnc` target is how that server is
+reached.
 
 ## The wire
 
@@ -104,7 +107,8 @@ Eight bytes.
 
 `src/vnc.rs` keeps the extension's state per connection as `Density`: `Off`
 on every other target, `Asked` from the handshake, `Reported` after the first
-message, `Unanswered` if pixels arrive before any report.
+message. Pixels arriving while still `Asked` end the session, since the patched
+wayvnc answers `SetEncodings` before its first update.
 
 - **Label.** Every generic `DesktopSize` and `ExtendedDesktopSize` rectangle is
   applied with the last reported scale; before the first report, or on any other
@@ -115,20 +119,21 @@ message, `Unanswered` if pixels arrive before any report.
 - **Resize.** With `resize = true` the window's points are asked for as
   `points × scale` pixels, so the logical desktop is the window. The first
   request waits for the report, because a request in the wrong pixels is a
-  desktop redrawn twice; a target the server never answers sends it at 1x on
-  the first framebuffer update. Every report that changes the scale, or answers
-  a declaration, re-asks for the window in the new pixels, unless the report
+  desktop redrawn twice. Every report that changes the scale, or answers a
+  declaration, re-asks for the window in the new pixels, unless the report
   already names them.
 - **Declare and follow.** The browser's density goes to the server on the first
   report and on every change. When it differs from the reported scale, the
-  server is about to set the output to it and report again, and every resize
-  request is held (`DesktopState::following`) until that report — including a
-  window that changes size meanwhile, which replaces the held one. The
-  answering report then re-asks the window in whatever pixels the server
-  settled on: 2x when it followed, the old scale when it refused. The gateway
-  never applies a density the server has not reported, and never re-declares on
-  a report that disagrees with it, so a `swaymsg output … scale` from inside the
-  session is an override the gateway follows rather than fights.
+  declaration is a request: the server answers it with an `OutputScale`, after
+  setting the output to it or at once with the scale unchanged when it refuses,
+  and every resize request is held (`DesktopState::following`) until that
+  report, including a window that changes size meanwhile, which replaces the
+  held one. The answering report then re-asks the window in whatever pixels
+  the server settled on: 2x when it followed, the old scale when it refused.
+  The gateway never applies a density the server has not reported, and never
+  re-declares on a report that disagrees with it, so a `swaymsg output … scale`
+  from inside the session is an override the gateway follows rather than
+  fights.
 
 Measured sequence, a 1728×883-point window on a 2x screen while the output is
 toggled from `scale 1` to `scale 2` and back on the host:

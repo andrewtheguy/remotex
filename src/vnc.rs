@@ -387,17 +387,28 @@ enum Density {
     /// Not a `swayvnc` target: the pseudo-encoding was never sent.
     Off,
     /// Sent, unanswered so far. Resize requests wait here, because a request in
-    /// the wrong pixels is a desktop redrawn twice.
+    /// the wrong pixels is a desktop redrawn twice. Pixels arriving in this
+    /// state end the session: see [`DesktopState::first_update`].
     Asked,
     /// The server answered at least once: [`DesktopState::wire_scale`] is set.
     Reported,
-    /// The first framebuffer update arrived with no report before it. The
-    /// server is not the patched wayvnc; the connection goes on as generic RFB
-    /// at 1x, and the held request is sent at that.
-    Unanswered,
 }
 
 impl DesktopState {
+    /// The density request's deadline, checked on every framebuffer update.
+    /// The patched wayvnc answers `SetEncodings` before it sends a single
+    /// update, so pixels with no report before them mean a server that does
+    /// not speak the extension — not the server `subtype = "swayvnc"` names,
+    /// and not one to show at a density it never confirmed.
+    fn first_update(&self) -> anyhow::Result<()> {
+        if self.density == Density::Asked {
+            anyhow::bail!(
+                "the server sent pixels without reporting its scale: the target is subtype \
+                 \"swayvnc\" but this server is not the patched wayvnc"
+            );
+        }
+        Ok(())
+    }
     /// The size and scale, as a client is told them.
     fn resize_msg(&self) -> ServerMsg {
         ServerMsg::Resize {
@@ -1895,23 +1906,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // FramebufferUpdate
             0 => {
                 reader.read_u8().await?; // padding
-                // The density request's deadline. The patched wayvnc answers
-                // SetEncodings before it sends a single update, so pixels with
-                // no report before them mean a server that does not speak the
-                // extension. Said once, and the held resize goes out at 1x.
-                let unanswered = {
-                    let mut d = desktop.lock().unwrap();
-                    (d.density == Density::Asked).then(|| {
-                        d.density = Density::Unanswered;
-                    })
-                };
-                if unanswered.is_some() {
-                    warn!(
-                        "vnc: the server sent pixels without reporting its scale; the target is \
-                         subtype \"swayvnc\" but this server is not the patched wayvnc, so the \
-                         desktop is shown at 1x like any generic server"
-                    );
-                }
+                desktop.lock().unwrap().first_update()?;
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
                 // an update a server starts sending before it knows how long it
                 // will be. macOS uses it for the metadata burst, so on the Apple
@@ -3041,11 +3036,6 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
     let (relabel, declare, reask) = {
         let mut d = desktop.lock().unwrap();
         let first = d.density != Density::Reported;
-        if d.density == Density::Unanswered {
-            // Late, but the server does speak it after all. Logged because the
-            // held resize already went out at 1x.
-            info!("vnc: the server reported its scale after the first framebuffer update");
-        }
         d.density = Density::Reported;
         let changed = d.wire_scale != Some(report.scale);
         d.wire_scale = Some(report.scale);
@@ -5665,16 +5655,21 @@ mod tests {
         ));
     }
 
-    /// A server that never answers is a generic one: after the read loop gives
-    /// up on the report, requests go out with points as pixels.
+    /// A server that sends pixels before any report is not the patched wayvnc:
+    /// the session ends rather than showing a `swayvnc` target at a density
+    /// the server never confirmed. Once reported, or on a plain target, every
+    /// update passes.
     #[test]
-    fn an_unanswered_density_request_resizes_at_1x() {
-        let screen = Screen { id: 3, flags: 0 };
-        let desktop = shared_desktop((1024, 768), Some(screen), None);
+    fn pixels_before_the_first_report_end_the_session() {
+        let desktop = shared_desktop((1024, 768), None, None);
         let mut d = desktop.lock().unwrap();
-        d.density = Density::Unanswered;
-        assert_eq!(d.generic_resize((1728, 883)), Some(set_desktop_size((1728, 883), screen)));
-        assert_eq!(d.generic_scale(), UNSCALED);
+        d.density = Density::Asked;
+        let err = d.first_update().unwrap_err().to_string();
+        assert!(err.contains("not the patched wayvnc"), "{err}");
+        d.density = Density::Reported;
+        d.first_update().unwrap();
+        d.density = Density::Off;
+        d.first_update().unwrap();
     }
 
     #[tokio::test]
