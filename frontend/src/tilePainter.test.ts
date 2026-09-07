@@ -828,7 +828,7 @@ test("units that arrive before their format are dropped, not reported", async ()
 });
 
 test("each stream id gets its own decoder", async () => {
-  // A target on `render_motion_subtype = "stream"` runs one per moving region, and
+  // A target on `render_type = "motion"` runs one per moving region, and
   // they are separate chains: a unit decoded against the wrong region's history
   // is corruption, not a misplaced picture.
   await announced([0, 1]).draw(
@@ -880,7 +880,7 @@ test("a region that restarts on a new size replaces its decoder", async () => {
 });
 
 test("one region's decoder giving up does not take the others down", async () => {
-  // Under `render_motion_subtype = "stream"` the rest of the desktop is arriving as
+  // Under `render_type = "motion"` the rest of the desktop is arriving as
   // still tiles and the other regions are chains of their own, so a decoder that
   // fails is one region that stops — not the session.
   poison = 0xbd;

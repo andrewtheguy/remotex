@@ -25,9 +25,8 @@ per resize.
   with Apple Remote Desktop authentication.
   `subtype = "ard-high-performance"` selects its High Performance mode over RFB
   003.889 — one virtual display holding every remote window, and the only Apple
-  path that accepts `resize = true`. It is **experimental** because it has not
-  been widely tested — it is also reverse engineered, having no specification.
-  Prefer `ard` unless you need a virtual display.
+  path that accepts `resize = true`. It is reverse engineered, having no
+  specification.
 
 There is one client: the page a browser loads. For desktop use, install that page
 as an app in Chrome or Edge. The app window gives the client the browser-reserved
@@ -167,7 +166,7 @@ show one screen or all of them, reports each screen's pixel density, keeps pixel
 at full fidelity, and supports the native Apple pasteboard. After the initial
 display layout it asks the Mac to switch from raw rectangles to zlib; that second
 encoding request is required in both Apple modes. Apple Screen Sharing High
-Performance mode (`ard-high-performance`, **experimental**) takes the same
+Performance mode (`ard-high-performance`) takes the same
 credentials, requests one virtual display at the pinned `width` and `height` when
 both are set, or at the full resolution and density of the client's screen
 otherwise. Once connected, it disables the remote Mac's physical displays and
@@ -196,15 +195,14 @@ re-labelled. See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for
 the sway + wayvnc walkthrough and why a second client's resize can come back
 prohibited.
 
-High Performance mode is **experimental** because it has not been widely tested,
-and it is the one part of remotex built
-entirely without a specification: Apple documents none of the protocol revision,
+High Performance mode is the one part of remotex built entirely without a
+specification: Apple documents none of the protocol revision,
 its record layer, its control messages or its virtual display handling, so all of
 it is reverse engineered and only as correct as the Macs it has been measured
 against. A macOS update is free to change any of it. The dynamic-resolution
 descriptor has been measured across its arbitrary-size boundary and a burst of
-viewport reports, but remains reverse engineered. Prefer `ard` unless you need a
-virtual display.
+viewport reports, but remains reverse engineered. Its system audio is
+**experimental** and stays behind the non-default `apple-hp-audio` build feature.
 
 ## Container
 
@@ -283,7 +281,7 @@ password = "change-me"
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
 physical displays, or
-`"ard-high-performance"` (experimental) for one virtual display
+`"ard-high-performance"` for one virtual display
 containing all of its windows, with its physical displays disabled for the
 connection, and the Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.

@@ -4,7 +4,7 @@
 //!
 //! Two render dials arrive at a stream and they differ only in how many rectangles
 //! they ask for. `render_type = "video"` asks for one covering the whole desktop.
-//! `render_motion_subtype` asks for one per coalesced moving region, with the still
+//! `render_type = "motion"` asks for one per coalesced moving region, with the still
 //! codecs carrying everything else. Which rectangles, and when they start and stop, is
 //! [`crate::regions`]' business; [`crate::vp9`] knows only how to encode one.
 //!

@@ -103,7 +103,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             render_type: remotex::config::RenderType::Tiles,
             render_subtype: None,
             render_quality: None,
-            render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
             render_chroma: None,

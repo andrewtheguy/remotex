@@ -5731,8 +5731,9 @@ mod tests {
 
     /// The plans a copy is not sound on fall back to what this engine always did:
     /// the source read out of the shadow and encoded as a tile. Under a motion
-    /// strategy a moving cell owes a cleanup from stashed pixels, and copied-in ones
-    /// would be restored away by a debt holding an older picture.
+    /// strategy the client's moving pixels come from a decoder rather than from
+    /// tiles, and the mirror — not the canvas — is what a region is encoded from,
+    /// so there is nothing on the client worth copying from.
     #[tokio::test]
     async fn a_target_with_a_motion_strategy_still_gets_the_pixels() {
         let wire = update(&[
@@ -5747,15 +5748,22 @@ mod tests {
             frame_tx,
             crate::config::RenderPlan::Tiles {
                 base: crate::config::TileCodec::Png,
-                motion: Some(crate::config::MotionEncode::Tile(
-                    crate::config::TileCodec::Jpeg(60),
-                )),
+                motion: Some(crate::config::MotionEncode {
+                    quality: 60,
+                    chroma: crate::config::Chroma::Subsampled,
+                }),
                 debug: false,
                 adaptive: None,
             },
             Arc::new(crate::feedback::LinkFeedback::new()),
         );
         assert!(!sink.copies(), "a motion plan must not be offered copies");
+        // The stream's mirror will not take pixels before it knows how big the
+        // desktop is, which on a live session is the engine's own ServerInit.
+        sink.msg(ServerMsg::Resize { w: 4, h: 2, scale: crate::protocol::UNSCALED })
+            .await
+            .unwrap();
+        sink.flush().await;
         let shared = test_shared(
             uplink,
             shared_desktop((4, 2), None, None),
@@ -5778,6 +5786,7 @@ mod tests {
             match msg {
                 ServerMsg::Tile(tile) => tiles.push(tile),
                 ServerMsg::Copy(_) => panic!("a motion plan was sent a copy record"),
+                ServerMsg::Video(_) => panic!("nothing moved long enough to earn a stream"),
                 _ => {}
             }
         }
