@@ -168,7 +168,7 @@ pub enum RenderType {
     #[default]
     Tiles,
     /// The whole desktop as one video stream, at a fixed quality
-    /// ([`TargetConfig::render_subtype_quality`]).
+    /// ([`TargetConfig::render_stream_quality`]).
     ///
     /// Not a codec on the [`RenderSubtype`] axis, and deliberately not: those are
     /// all *per-tile* codecs, where every tile is independent, reorderable,
@@ -3275,25 +3275,23 @@ mod tests {
         }
     }
 
-    /// The motion keys belong to `render_motion`, and `video` is not a second place to put
-    /// them — its stream has no cells to find in motion. Covered by the guard every
-    /// target without the switch shares, and asserted here because `video` is the
-    /// newest transport and the one most likely to be tried with them.
+    /// The motion keys belong to `render_motion`, and `video` is not a second place
+    /// to put them — its stream has no cells to find in motion. Both of them are
+    /// asserted here because `video` is the newest transport and the one most likely
+    /// to be tried with them. The quality is deliberately absent: since the two
+    /// stream dials merged it is `render_stream_quality`, which `video` requires,
+    /// and `render_stream_quality_is_refused_where_nothing_streams` owns its rule.
     #[test]
     fn video_refuses_the_motion_keys() {
-        let err = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            host = "h"
-            render_type = "video"
-            render_stream_quality = 60
-            render_stream_quality = 10
-            "#,
+        let err =
+            parse_target("render_type = \"video\"\nrender_stream_quality = 60\nrender_motion = true")
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion with render_type"), "{err:#}");
+        let err = parse_target(
+            "render_type = \"video\"\nrender_stream_quality = 60\nrender_motion_debug = true",
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_stream_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("without render_motion"), "{err:#}");
     }
 
     #[test]
