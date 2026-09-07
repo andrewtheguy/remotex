@@ -833,7 +833,13 @@ export function useRemoteDesktop(
     // abandons whatever is pending so a late echo cannot resurrect a size the
     // attachment it belonged to has already left behind.
     let resizeSeq = 0;
-    const pendingResizes = new Map<number, RemoteSize>();
+    // Each queued resize with the lattice its framebuffer is cut at, so the two
+    // are presented together and a rapid pair of resizes never shows the
+    // second's grid over the first's desktop.
+    const pendingResizes = new Map<
+      number,
+      { size: RemoteSize; grid: GridPitch }
+    >();
     // The worker outlives socket reconnects, so a completion can return after
     // the socket that posted its frame has died. A generation travels through
     // the worker with each batch; only the live generation may acknowledge on
@@ -866,7 +872,7 @@ export function useRemoteDesktop(
         const applied = pendingResizes.get(seq);
         if (applied) {
           pendingResizes.delete(seq);
-          presentResize(applied);
+          presentResize(applied.size, applied.grid);
         }
       },
     });
@@ -1318,7 +1324,7 @@ export function useRemoteDesktop(
     // instead would read as a glimpse of the previous desktop: the overlay
     // hides the canvas only while `size` is null, and the worker could still
     // be painting the old attachment's backlog onto the old bitmap.
-    const presentResize = (s: RemoteSize) => {
+    const presentResize = (s: RemoteSize, grid: GridPitch) => {
       applyCanvasCss(
         canvasRef.current,
         gridRef.current,
@@ -1328,18 +1334,18 @@ export function useRemoteDesktop(
       );
       sizeRef.current = s;
       setSize(s);
+      // The lattice this framebuffer is cut at, presented with it rather than
+      // on the message's arrival, so the overlay never draws one resize's grid
+      // over another's desktop.
+      setTileGrid(grid);
       syncCursor();
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
-      // The lattice this framebuffer is cut at. Set here rather than with the
-      // presented size below: the overlay effect draws from both and redraws
-      // when either lands, so it is right once the resize has been presented.
-      setTileGrid(msg.tileGrid);
       if (!painter) {
         // No canvas, so nothing queues either; the state may as well be true.
-        presentResize(s);
+        presentResize(s, msg.tileGrid);
         return;
       }
       // The bitmap belongs to the worker; this command queues behind the
@@ -1347,7 +1353,7 @@ export function useRemoteDesktop(
       // gave a resize — the previous desktop finishes painting before its
       // canvas is replaced and filled black.
       const seq = ++resizeSeq;
-      pendingResizes.set(seq, s);
+      pendingResizes.set(seq, { size: s, grid: msg.tileGrid });
       painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq);
     };
 
