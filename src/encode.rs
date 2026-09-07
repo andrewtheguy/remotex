@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 
-use crate::config::{Chroma, MotionEncode, RenderPlan, TileCodec};
+use crate::config::{Chroma, MotionEncode, RenderPlan, TileCodec, VideoCodec};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ServerMsg, Tile, TileGrid};
 use crate::regions::{Policy, Produced, Regions, Round};
@@ -317,11 +317,12 @@ impl Video {
         policy: Policy,
         quality: u8,
         chroma: Chroma,
+        codec: VideoCodec,
         mark: Option<video::Mark>,
         adaptive: Option<u8>,
     ) -> Self {
         Self {
-            regions: Regions::new(policy, quality, chroma, mark),
+            regions: Regions::new(policy, quality, chroma, codec, mark),
             congestion: Congestion::new(quality, adaptive),
             due_at: None,
         }
@@ -573,7 +574,7 @@ impl Shared {
         TileGrid { w: (packed >> 16) as u16, h: packed as u16 }
     }
 
-    fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>) -> Self {
+    fn new(plan: RenderPlan, codec: VideoCodec, feedback: Arc<LinkFeedback>) -> Self {
         // Which dial produces access units, and at what quality. A plan that produces
         // none still builds a `Video` — never touched, and holding no mirror until
         // something is blitted into it — so that the streaming paths need no
@@ -607,7 +608,9 @@ impl Shared {
         Self {
             failure: Mutex::default(),
             motion: Mutex::default(),
-            video: tokio::sync::Mutex::new(Video::new(policy, quality, chroma, mark, adaptive)),
+            video: tokio::sync::Mutex::new(Video::new(
+                policy, quality, chroma, codec, mark, adaptive,
+            )),
             round_returned: Notify::new(),
             keyframe_owed: AtomicBool::new(false),
             grid: AtomicU32::new(pack_grid(TileGrid::ONE)),
@@ -681,17 +684,19 @@ pub struct TileSink {
 impl TileSink {
     /// Start an encoder for one engine. `engine` prefixes its log lines. `plan` is
     /// the resolved render dial — which of the two ways this gateway can put a
-    /// desktop on a wire the target asked for, and how it is tuned. `feedback` is
-    /// the session's link measurement ([`crate::feedback`]), read only by an
-    /// adaptive plan.
+    /// desktop on a wire the target asked for, and how it is tuned. `codec` is the
+    /// browser's half of the same question: which codec its streams are encoded
+    /// with, unread by a plan that streams nothing. `feedback` is the session's
+    /// link measurement ([`crate::feedback`]), read only by an adaptive plan.
     pub fn new(
         engine: &'static str,
         frame_tx: mpsc::Sender<ServerMsg>,
         plan: RenderPlan,
+        codec: VideoCodec,
         feedback: Arc<LinkFeedback>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(ENCODE_DEPTH);
-        let shared = Arc::new(Shared::new(plan, feedback));
+        let shared = Arc::new(Shared::new(plan, codec, feedback));
         tokio::spawn(order_loop(engine, rx, frame_tx, Arc::clone(&shared), plan));
         Self {
             engine,
@@ -1686,7 +1691,7 @@ mod tests {
     #[tokio::test]
     async fn tiles_reach_the_frame_channel_in_push_order() {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), VideoCodec::Vp9, feedback());
 
         for i in 0..64u16 {
             let (w, h) = (320 - i * 4, 64);
@@ -1709,7 +1714,7 @@ mod tests {
     #[tokio::test]
     async fn a_jpeg_quality_makes_tiles_jpeg() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Jpeg(60)), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Jpeg(60)), VideoCodec::Vp9, feedback());
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
         sink.flush().await;
@@ -1730,6 +1735,7 @@ mod tests {
             "test",
             frame_tx,
             plan(TileCodec::Classify { quality: 60, debug: false }),
+            VideoCodec::Vp9,
             feedback(),
         );
 
@@ -1770,6 +1776,7 @@ mod tests {
                 debug: false,
                 adaptive: None,
             },
+            VideoCodec::Vp9,
             feedback(),
         );
 
@@ -1798,7 +1805,7 @@ mod tests {
     #[tokio::test]
     async fn a_control_message_cannot_overtake_the_tiles_before_it() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), VideoCodec::Vp9, feedback());
 
         for i in 0..8u16 {
             sink.tile(0, i * 64, 320, 64, rgb(320, 64, i as u8)).await.unwrap();
@@ -1824,7 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn flush_waits_for_everything_pushed_before_it() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), VideoCodec::Vp9, feedback());
 
         for i in 0..16u16 {
             sink.tile(0, i * 64, 320, 64, rgb(320, 64, i as u8)).await.unwrap();
@@ -1846,7 +1853,7 @@ mod tests {
     #[tokio::test]
     async fn an_encode_failure_stops_the_sink_and_reports_itself() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), VideoCodec::Vp9, feedback());
 
         // A payload one byte short of the geometry: `Tile::from_rgb` rejects it on
         // its length check rather than handing a short buffer to the PNG encoder.
@@ -1874,7 +1881,7 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_frame_channel_is_reported_as_a_closed_channel() {
         let (frame_tx, frame_rx) = mpsc::channel(1);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png), VideoCodec::Vp9, feedback());
         drop(frame_rx);
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 0)).await.unwrap();
@@ -1957,7 +1964,7 @@ mod tests {
         let mut out = Vec::new();
         for render in [plan(TileCodec::Png), MOTION_STREAM] {
             let (frame_tx, mut frame_rx) = mpsc::channel(256);
-            let sink = TileSink::new("test", frame_tx, render, feedback());
+            let sink = TileSink::new("test", frame_tx, render, VideoCodec::Vp9, feedback());
             sink.msg(ServerMsg::Resize { w: 1280, h: 512, scale: UNSCALED }).await.unwrap();
             sink.flush().await;
             assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
@@ -2063,7 +2070,7 @@ mod tests {
     /// it needs before it will accept any pixels.
     async fn video_sink(w: u16, h: u16) -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, VIDEO, feedback());
+        let sink = TileSink::new("test", frame_tx, VIDEO, VideoCodec::Vp9, feedback());
         sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         // The resize itself, so a test can count what follows.
@@ -2359,7 +2366,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn nothing_is_due_while_the_mirror_is_clean() {
         let (tiles_tx, _tiles_rx) = mpsc::channel(8);
-        let tiles = TileSink::new("test", tiles_tx, plan(TileCodec::Png), feedback());
+        let tiles = TileSink::new("test", tiles_tx, plan(TileCodec::Png), VideoCodec::Vp9, feedback());
         assert!(tiles.due_at().await.is_none(), "a still target has no frame to owe");
 
         let (sink, mut frame_rx) = video_sink(320, 240).await;
@@ -2405,7 +2412,7 @@ mod tests {
     #[tokio::test]
     async fn a_desktop_too_large_fails_on_the_pixel_path_not_the_message_path() {
         let (frame_tx, _frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, VIDEO, feedback());
+        let sink = TileSink::new("test", frame_tx, VIDEO, VideoCodec::Vp9, feedback());
 
         sink.msg(ServerMsg::Resize { w: 5120, h: 2880, scale: UNSCALED })
             .await
@@ -2431,7 +2438,7 @@ mod tests {
     /// A sink whose moving encode is a stream, told how big the desktop is.
     async fn stream_sink(w: u16, h: u16) -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
-        let sink = TileSink::new("test", frame_tx, MOTION_STREAM, feedback());
+        let sink = TileSink::new("test", frame_tx, MOTION_STREAM, VideoCodec::Vp9, feedback());
         sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
@@ -2746,6 +2753,7 @@ mod tests {
                 debug: false,
                 adaptive: Some(25),
             },
+            VideoCodec::Vp9,
             Arc::clone(&feedback),
         );
         // Touch the feedback once so its lazily-initialized epoch is not newer
@@ -2779,6 +2787,7 @@ mod tests {
         // The same lag through a non-adaptive plan moves nothing.
         let fixed = Shared::new(
             RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None },
+            VideoCodec::Vp9,
             Arc::clone(&feedback),
         );
         assert_eq!(
@@ -2799,6 +2808,7 @@ mod tests {
                 debug: false,
                 adaptive: Some(25),
             },
+            VideoCodec::Vp9,
             feedback(),
         );
         let video = shared.video.try_lock().expect("nothing else holds the streams");

@@ -207,7 +207,7 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
 ///   serves the same SPA from its launcher-provided web root.
 pub fn router(config: AppConfig) -> Router {
-    let sessions = Arc::new(SessionManager::new(config.targets.clone()));
+    let sessions = Arc::new(SessionManager::new(config.targets.clone(), config.video_override));
     router_with_sessions(config, sessions)
 }
 
@@ -923,6 +923,7 @@ mod tests {
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
+            video_override: None,
         }
     }
 
@@ -1263,6 +1264,7 @@ mod tests {
                 logo: None,
             },
             dev_hostname: None,
+            video_override: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

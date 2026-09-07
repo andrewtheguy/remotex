@@ -41,11 +41,11 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::config::Chroma;
+use crate::config::{Chroma, VideoCodec};
 use crate::protocol::{TileGrid, VideoUnit, batch};
 use crate::tiles::Rect;
 use crate::video::{AccessUnit, Mark, Mirror};
-use crate::vp9::Stream;
+use crate::video::Stream;
 
 /// The most streams one session runs at once.
 ///
@@ -413,6 +413,9 @@ pub struct Regions {
     /// The chroma sampling every stream is built with — the target's, for its whole
     /// session; nothing moves it.
     chroma: Chroma,
+    /// The codec every stream is built with — the browser's, for its whole session;
+    /// nothing moves it either. See [`VideoCodec`].
+    codec: VideoCodec,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -453,11 +456,26 @@ pub struct Regions {
 }
 
 impl Regions {
-    pub fn new(policy: Policy, quality: u8, chroma: Chroma, mark: Option<Mark>) -> Self {
+    pub fn new(
+        policy: Policy,
+        quality: u8,
+        chroma: Chroma,
+        codec: VideoCodec,
+        mark: Option<Mark>,
+    ) -> Self {
+        // Said once, here, rather than per stream: under `Policy::Moving` streams come
+        // and go with the motion, and the fact is about the session.
+        if chroma == Chroma::Full && codec == VideoCodec::H264 {
+            log::warn!(
+                "video regions: render_chroma = \"444\" is VP9 profile 1, and this browser asked \
+                 for H.264; its streams are 4:2:0"
+            );
+        }
         Self {
             policy,
             quality,
             chroma,
+            codec,
             size: None,
             grid: TileGrid::ONE,
             mirror: None,
@@ -844,7 +862,7 @@ impl Regions {
         let mirror = self.mirror_mut()?.coded();
         // At `self.quality` rather than the config's: a region that appears while the
         // link is behind starts where the link left off.
-        let stream = Stream::new(rect, mirror, self.quality, self.chroma)?;
+        let stream = Stream::new(rect, mirror, self.quality, self.chroma, self.codec)?;
         let grid = self.grid;
         let cells: Vec<(u16, u16)> = rect.cells(grid).map(|cell| cell.cell_key(grid)).collect();
         // Every cell of the region is owed from the moment it is streamed, including
@@ -1571,7 +1589,7 @@ mod tests {
     /// regions needs room for two blocks that size with a quiet cell between:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, None);
+        let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, VideoCodec::Vp9, None);
         regions.want(w, h, TileGrid::ONE);
         let bytes = usize::from(w) * usize::from(h) * 3;
         regions
@@ -1994,7 +2012,7 @@ mod tests {
 
     /// A whole-desktop target with pixels in it, the pipelined shape.
     fn whole_regions(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Whole, 60, Chroma::Subsampled, None);
+        let mut regions = Regions::new(Policy::Whole, 60, Chroma::Subsampled, VideoCodec::Vp9, None);
         regions.want(w, h, TileGrid::ONE);
         regions
     }

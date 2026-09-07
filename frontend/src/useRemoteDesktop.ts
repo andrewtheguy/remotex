@@ -46,6 +46,7 @@ import {
   type Point,
 } from "./touchGestures.ts";
 import { attachTouchPassthrough } from "./touchPassthrough.ts";
+import { videoCodec } from "./videoCodec.ts";
 
 // The WebSocket/claim connection-flow state machine (independent of the
 // picker-vs-desktop `mode` the attached socket carries):
@@ -1084,11 +1085,14 @@ export function useRemoteDesktop(
 
     const open = (sessionId: string) => {
       session = sessionId;
-      // The URL names this window's screen so a takeover's attach can reconnect
-      // the selected target for it — the attach happens before this client
-      // could send anything.
+      // The URL names this window's screen and the codec its decoder takes, so a
+      // takeover's attach can reconnect the selected target for it — the attach
+      // happens before this client could send anything.
       const socket = new WebSocket(
-        gatewaySocketUrl("/ws", sessionId, hostDisplayMsg()),
+        gatewaySocketUrl("/ws", sessionId, {
+          screen: hostDisplayMsg(),
+          video: videoCodec(),
+        }),
       );
       const generation = advancePaintGeneration(paintGenerationRef);
       paintSocket = socket;

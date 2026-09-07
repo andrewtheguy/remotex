@@ -105,6 +105,13 @@ async def main() -> int:
         default=None,
         help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
     )
+    parser.add_argument(
+        "--video",
+        choices=("vp9", "h264"),
+        default="vp9",
+        help="the codec to ask for on the session socket, as a browser states what its "
+        "VideoDecoder takes (default: vp9; h264 is what a browser without VP9 asks for)",
+    )
     parser.add_argument("--mouse-width", type=int, default=None)
     parser.add_argument(
         "--viewport",
@@ -171,7 +178,7 @@ async def main() -> int:
     token = claim.json()["sessionId"]
     print(f"  logged in, session {token[:12]}…")
 
-    url = f"ws://127.0.0.1:{args.port}/ws?session={token}"
+    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&video={args.video}"
     async with websockets.connect(
         url, additional_headers={"Cookie": f"remotex_session={cookie}"}
     ) as socket:
@@ -352,7 +359,7 @@ async def main() -> int:
                         print(f"  !! error: {data['message']}")
                         return 1
                     elif kind == "connected":
-                        print(f"  connected  {data['name']}  resize={data['resize']}")
+                        print(f"  connected  {data['name']}  resize={data['resize']}  render={data['render']!r}")
                     elif kind not in ("cursor", "picker"):
                         print(f"  {kind}: {json.dumps(data)[:120]}")
         except TimeoutError:

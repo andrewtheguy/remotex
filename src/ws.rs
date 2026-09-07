@@ -63,6 +63,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
     camera::{CameraFormat, CameraSignal},
+    config::VideoCodec,
     feedback::LinkFeedback,
     mic::MicSignal,
     protocol::{self, ClientMsg, ServerMsg, WireFrame},
@@ -443,23 +444,36 @@ where
     Ok(())
 }
 
+/// The query string every media socket takes: the claim token and nothing else.
 #[derive(Deserialize)]
 pub struct WsParams {
     session: Option<String>,
-    /// The client's screen, as [`crate::protocol::HostDisplay`] fields. Only the
-    /// session socket reads them, and only a claim-change reconnect acts on them
-    /// ([`SessionManager::attach`]); absent params read as no report, like a
-    /// degenerate one.
+}
+
+/// The session socket's query string: the claim token, the client's screen, and
+/// the codec its video streams are to be encoded with.
+#[derive(Deserialize)]
+pub struct SessionParams {
+    session: Option<String>,
+    /// The client's screen, as [`crate::protocol::HostDisplay`] fields. Only a
+    /// claim-change reconnect acts on them ([`SessionManager::attach`]); absent
+    /// params read as no report, like a degenerate one.
     w: Option<u16>,
     h: Option<u16>,
     scale: Option<u16>,
     /// [`crate::protocol::HostDisplay::fit`]; absent is a pointer client.
     fit: Option<bool>,
+    /// Which codec this browser's `VideoDecoder` takes, asked of it once at page
+    /// load and stated here because the socket is the one thing that is open both
+    /// when it picks a target and when a takeover reconnects the selected one for
+    /// it. Required: a socket that does not say is a client this gateway does not
+    /// speak to, and the upgrade is refused at the door.
+    video: VideoCodec,
 }
 
 pub async fn handler(
     ws: WebSocketUpgrade,
-    Query(params): Query<WsParams>,
+    Query(params): Query<SessionParams>,
     State(state): State<AppState>,
 ) -> Response {
     let display = match (params.w, params.h, params.scale) {
@@ -469,7 +483,7 @@ pub async fn handler(
         _ => None,
     };
     ws.on_upgrade(move |socket| {
-        session(socket, state.sessions, params.session, display, HEARTBEAT_TIMINGS)
+        session(socket, state.sessions, params.session, display, params.video, HEARTBEAT_TIMINGS)
     })
 }
 
@@ -903,10 +917,11 @@ async fn session(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     display: Option<protocol::HostDisplay>,
+    video: VideoCodec,
     heartbeat_timings: HeartbeatTimings,
 ) {
     let attachment = match token {
-        Some(t) => sessions.attach(&t, display).await.ok(),
+        Some(t) => sessions.attach(&t, display, video).await.ok(),
         None => None,
     };
     let Some(attachment) = attachment else {
@@ -1101,7 +1116,7 @@ async fn session(
                 // target from the picker, or tear the session down and go back to
                 // it ("switch target").
                 Ok(ClientMsg::Connect { target, display }) => {
-                    if let Err(e) = sessions.connect(attach_id, &target, display).await {
+                    if let Err(e) = sessions.connect(attach_id, &target, display, video).await {
                         warn!("ws: connect to {target:?} refused: {e}");
                     }
                 }
@@ -1177,6 +1192,34 @@ mod tests {
     use crate::config::{Protocol, TargetConfig};
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
+
+    /// The session socket states its codec in the query string, and one that does not
+    /// is refused at the upgrade — there is no default to fall back to, because a
+    /// gateway guessing at a browser's decoder is exactly what the parameter replaces.
+    /// The media sockets are asked nothing of the kind.
+    #[test]
+    fn the_session_socket_names_its_codec_and_the_media_sockets_do_not() {
+        use axum::extract::Query;
+        use axum::http::Uri;
+        let parse = |query: &str| -> Result<SessionParams, _> {
+            Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
+                .map(|Query(p)| p)
+        };
+        let vp9 = parse("session=t&video=vp9").expect("a VP9 browser");
+        assert_eq!(vp9.video, VideoCodec::Vp9);
+        assert_eq!(vp9.session.as_deref(), Some("t"));
+        let h264 = parse("session=t&w=430&h=932&scale=300&fit=true&video=h264")
+            .expect("a browser without VP9, naming its screen too");
+        assert_eq!(h264.video, VideoCodec::H264);
+        assert_eq!((h264.w, h264.h, h264.scale, h264.fit), (Some(430), Some(932), Some(300), Some(true)));
+        assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
+        assert!(parse("session=t&video=av1").is_err(), "there are two codecs");
+        assert!(parse("session=t&video=VP9").is_err(), "spelled as the wire spells it");
+
+        let media = Query::<WsParams>::try_from_uri(&"/ws/audio?session=t".parse::<Uri>().unwrap())
+            .expect("the media sockets carry the token alone");
+        assert_eq!(media.0.session.as_deref(), Some("t"));
+    }
 
     #[test]
     fn paint_acknowledgments_are_ordered_and_cumulative() {
@@ -1504,7 +1547,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, HEARTBEAT_TIMINGS)
+                        session(socket, sessions, Some(token), None, VideoCodec::Vp9, HEARTBEAT_TIMINGS)
                     })
                 }
             }),
@@ -1564,7 +1607,7 @@ mod tests {
                 let sessions = Arc::clone(&sessions);
                 let token = token.clone();
                 async move {
-                    ws.on_upgrade(move |socket| session(socket, sessions, Some(token), None, timings))
+                    ws.on_upgrade(move |socket| session(socket, sessions, Some(token), None, VideoCodec::Vp9, timings))
                 }
             }),
         );
@@ -1612,7 +1655,7 @@ mod tests {
         let replacement_token = assertions
             .claim(false, None)
             .expect("heartbeat timeout did not release the browser attachment");
-        let mut replacement = assertions.attach(&replacement_token, None).await.unwrap();
+        let mut replacement = assertions.attach(&replacement_token, None, VideoCodec::Vp9).await.unwrap();
         assert!(matches!(
             replacement.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
@@ -1638,12 +1681,12 @@ mod tests {
         let token = sessions.claim(false, None).unwrap();
         // A live desktop, driven in process: this test is about the audio socket, and
         // the session socket only has to exist for `connect` to be legal.
-        let mut att = sessions.attach(&token, None).await.unwrap();
+        let mut att = sessions.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         assert!(matches!(
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
         ));
-        sessions.connect(att.id, "fake", None).await.unwrap();
+        sessions.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         let (input_rx, _frame_tx, bridge) = engine_rx.recv().await.unwrap();
         let bridge = bridge.expect("an audio target's engine is given a bridge");
 

@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { config, listen } => {
+        Commands::Serve { config, listen, force_video_codec } => {
             // The listen address is the one thing a deployment says outside the
             // file — `--listen`, or `REMOTEX_LISTEN` for a container that has an
             // environment but no argv to edit. Everything else comes from the
@@ -22,7 +22,11 @@ async fn main() -> anyhow::Result<()> {
             // target is served; the browser picks one after login.
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
-            let config = file.resolve_with(listen.as_deref())?;
+            let mut config = file.resolve_with(listen.as_deref())?;
+            if let Some(codec) = force_video_codec {
+                warn!("--force-video-codec {}: every session streams {} whatever its browser asked for; this is a QA control", codec.name(), codec.name());
+                config.video_override = Some(codec);
+            }
             serve(config).await?;
         }
         #[cfg(all(feature = "embedded-gateway", unix))]

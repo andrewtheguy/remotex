@@ -125,11 +125,14 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install RPM packaging tools
+      # rpm for the packages; nasm for openh264's x86 SIMD kernels, which its sys
+      # crate assembles at build time (see packaging/README.md) — the arm64 runner
+      # gets a nasm it never uses rather than a second conditional step.
+      - name: Install RPM packaging tools and nasm
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm
+          sudo apt-get install -y rpm nasm
 
       - name: Build release artifacts (${{ matrix.target-note }})
         if: runner.os != 'Windows'

@@ -8,6 +8,8 @@
 ///
 /// Guarded because this module is imported by tests that run outside a browser,
 /// and one that throws on the way in cannot be tested at all.
+import type { VideoCodec } from "./videoCodec.ts";
+
 const DOCUMENT_ORIGIN =
   typeof window === "undefined" ? "" : window.location.origin;
 
@@ -43,16 +45,23 @@ export function gatewayFetch(
 export function gatewaySocketUrl(
   path: string,
   session: string,
-  screen?: { w: number; h: number; scale: number; fit: boolean },
+  client?: {
+    screen: { w: number; h: number; scale: number; fit: boolean };
+    video: VideoCodec;
+  },
 ): string {
   const url = new URL(gatewayUrl(path));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.search = `?session=${encodeURIComponent(session)}`;
-  if (screen) {
-    url.searchParams.set("w", String(screen.w));
-    url.searchParams.set("h", String(screen.h));
-    url.searchParams.set("scale", String(screen.scale));
-    url.searchParams.set("fit", String(screen.fit));
+  if (client) {
+    url.searchParams.set("w", String(client.screen.w));
+    url.searchParams.set("h", String(client.screen.h));
+    url.searchParams.set("scale", String(client.screen.scale));
+    url.searchParams.set("fit", String(client.screen.fit));
+    // Which codec this browser's streams are to be encoded in, for the same reason
+    // the screen is here: a takeover's reconnect happens at attach, before this
+    // client could say anything, and the gateway must not have to guess.
+    url.searchParams.set("video", client.video);
   }
   return url.toString();
 }

@@ -97,7 +97,8 @@ The Linux x86-64 binary targets the baseline x86-64 ISA and dispatches SIMD at
 run time. Neither Cargo configuration nor packaging and CI set `target-cpu`, and
 the prebuilt archives downloaded by the sys crates must use the same baseline
 with their hand-written kernels selected by CPUID: libvpx's rtcd tables, opus's
-`MAY_HAVE` dispatch, and FreeRDP's primitives autodetection. The sys crates fetch
+`MAY_HAVE` dispatch, FreeRDP's primitives autodetection, and openh264's
+`WelsCPUFeatureDetect` over the assembly `openh264-sys2` builds from source. The sys crates fetch
 each dependency repository's latest release, so that release's archives—not the
 tag pinned in this repository's `Cargo.toml`—set the effective CPU floor.
 
@@ -120,6 +121,17 @@ libclang, vcpkg, or system copies of those libraries. Do not restore
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built
 archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
+
+The one exception is H.264: `openh264-sys2` compiles Cisco's openh264 from its
+vendored C++ through `cc` at build time, and assembles the x86 SIMD kernels with
+`nasm` when one is on the path — silently falling back to the C versions when it
+is not, which is a slower encoder rather than a failed build. A builder therefore
+needs a C++ compiler (the toolchain the linker already comes from on every runner)
+and, on x86-64, `nasm`: `apt-get install nasm` on the Linux runners
+(`.github/workflows/release.yml`), and the GitHub Windows image ships it. arm64
+builds assemble their NEON kernels through the C compiler and need no `nasm`. The
+decoder in the `openh264` wrapper is a dev-dependency for `src/h264.rs`'s
+round-trip tests and is not linked into the gateway.
 
 The optional `apple-hp-audio` feature follows the same archive model through
 `fdk-aac-prebuilt`, but its non-OSI-approved license keeps it out of every release

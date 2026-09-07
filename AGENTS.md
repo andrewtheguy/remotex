@@ -62,9 +62,13 @@ documentation.
 
 ## Media paths
 
-- Video streams are VP9 only. There is no codec probe, codec key, or fallback.
-  `render_chroma` is the only per-target codec choice. Preserve the announced
-  configuration and color-space behavior described in
+- Video streams are VP9, with H.264 as the per-session fallback a browser without
+  a VP9 decoder asks for on its socket (`/ws?video=`). There is no codec key: the
+  browser chooses, never the config, and `serve --force-video-codec` is a hidden
+  QA override only. `render_chroma` is the only per-target codec choice and is
+  VP9's; H.264 is 4:2:0. Do not add a third codec, a client-side refusal built on
+  `isConfigSupported`, or a `description` on the decoder config. Preserve the
+  announced configuration and color-space behavior described in
   [The codec](docs/architecture.md#the-codec).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. The supported target

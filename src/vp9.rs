@@ -1,8 +1,10 @@
 //! VP9 encoding: one stream over a rectangle of a [`crate::video::Mirror`].
 //!
-//! The video codec — this gateway streams VP9 only. It is BSD-licensed with a patent grant,
-//! which is exactly the property that gets it into every browser build: a Chromium built
-//! without proprietary codecs still decodes it.
+//! The video codec. It is BSD-licensed with a patent grant, which is exactly the property
+//! that gets it into every browser build: a Chromium built without proprietary codecs
+//! still decodes it. A browser whose decoder has no VP9 at all is served
+//! [`crate::h264`] instead, which presents this module's surface over openh264; which
+//! of the two a session gets is [`crate::config::VideoCodec`]'s story.
 //!
 //! What is not libvpx's — the mirror, the coded rectangle, the RGB→YUV conversion, the
 //! 1–100 dial — is [`crate::video`]'s, and the chroma sampling is the config's

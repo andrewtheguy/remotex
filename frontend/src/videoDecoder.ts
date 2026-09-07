@@ -519,6 +519,12 @@ export function createVideoStream(
     // smaller by up to a pixel in each axis and is not what a decoder should be told.
     codec: format.decode,
     optimizeForLatency: true,
+    // No `description` either, and that is what makes the H.264 fallback the same
+    // configuration: an `avc1.…` stream with no description is Annex B by the
+    // WebCodecs registration, and the gateway's H.264 puts the parameter sets in band
+    // on every keyframe — so a decoder built from the string alone starts from any
+    // keyframe, as the VP9 one does.
+    //
     // `hardwareAcceleration` is deliberately left out, so a browser decodes this
     // however it decodes VP9. Asking for software is a hint by specification — WebKit
     // falls back past it, Firefox disregards it — and on iOS and iPadOS it is a hint

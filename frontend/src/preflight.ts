@@ -59,7 +59,9 @@ const INSECURE: Refusal = {
  * a browser with one and not the other is a browser that plays some targets and not
  * others — which is exactly the half-working session this file exists to refuse.
  * Checked as globals rather than through `isConfigSupported`, because that is
- * asynchronous and per codec, and this is a question about the browser.
+ * asynchronous and per codec, and this is a question about the browser. The one
+ * per-codec question the client does ask — VP9 or the H.264 fallback — comes after
+ * this gate and selects rather than refuses (videoCodec.ts).
  */
 function missingDecoders(): string[] {
   const missing: string[] = [];

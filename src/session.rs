@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::audio::AudioBridge;
 use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::mic::{MicBridge, MicSignal};
-use crate::config::{AudioPlan, Protocol, Subtype, TargetConfig};
+use crate::config::{AudioPlan, Protocol, Subtype, TargetConfig, VideoCodec};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, ServerMsg};
 use crate::{rdp, vnc};
@@ -240,6 +240,7 @@ type EngineSpawner = Box<
     dyn Fn(
             TargetConfig,
             Option<HostDisplay>,
+            VideoCodec,
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
             Option<Arc<AudioBridge>>,
@@ -474,6 +475,9 @@ impl State {
 pub struct SessionManager {
     /// Every target profile the browser may pick from the picker.
     targets: Vec<TargetConfig>,
+    /// `serve --force-video-codec`, applied in [`Self::start_engine`] over whatever
+    /// codec a browser asked for. `None` in every deployment: this is a QA control.
+    video_override: Option<VideoCodec>,
     spawn_engine: EngineSpawner,
     /// The slot's one link-feedback handle, shared between whichever ws bridge is
     /// attached (writer) and whichever engine is running (reader). One rather than
@@ -487,14 +491,22 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(targets: Vec<TargetConfig>) -> Self {
-        Self::with_spawner(targets, Box::new(spawn_engine))
+    /// `video_override` is `serve --force-video-codec`: `Some` makes every session's
+    /// streams that codec whatever its browser asked for. See
+    /// [`crate::config::AppConfig::video_override`].
+    pub fn new(targets: Vec<TargetConfig>, video_override: Option<VideoCodec>) -> Self {
+        Self::with_spawner(targets, video_override, Box::new(spawn_engine))
     }
 
     /// Test seam: run the manager against a scripted engine.
-    fn with_spawner(targets: Vec<TargetConfig>, spawn_engine: EngineSpawner) -> Self {
+    fn with_spawner(
+        targets: Vec<TargetConfig>,
+        video_override: Option<VideoCodec>,
+        spawn_engine: EngineSpawner,
+    ) -> Self {
         Self {
             targets,
+            video_override,
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
             state: Mutex::new(State::default()),
@@ -514,11 +526,12 @@ impl SessionManager {
         + 'static,
     ) -> Self {
         // The scripted engines play the browser-facing role directly and never
-        // read the link or a client screen, so the seam hides both from them.
+        // read the link, a client screen or a codec, so the seam hides all three.
         Self::with_spawner(
             targets,
+            None,
             Box::new(
-                move |target, _display, input_rx, frame_tx, audio, _camera, _microphone, _feedback| {
+                move |target, _display, _video, input_rx, frame_tx, audio, _camera, _microphone, _feedback| {
                     spawn_engine(target, input_rx, frame_tx, audio);
                 },
             ),
@@ -621,6 +634,7 @@ impl SessionManager {
         self: &Arc<Self>,
         token: &str,
         display: Option<HostDisplay>,
+        video: VideoCodec,
     ) -> Result<Attachment, InvalidToken> {
         // The same boundary rule as `connect`: a degenerate screen report is no
         // report, not a request to open a 0×N desktop.
@@ -713,7 +727,7 @@ impl SessionManager {
                 false
             } else if let Some(target) = st.selected.clone().filter(|_| st.engine.is_none()) {
                 info!("session: reconnecting the selected target for the new browser");
-                let status = self.start_engine(&mut st, target, display);
+                let status = self.start_engine(&mut st, target, display, video);
                 // Ordered as in `connect`: under the lock the fresh pump cannot
                 // have queued anything yet, and nothing else feeds this channel.
                 if let Some(client) = &st.client {
@@ -1060,9 +1074,10 @@ impl SessionManager {
     /// remote. The one resume there is belongs to the owner's own reattach
     /// ([`Self::attach`]), never to a connect.
     ///
-    /// Nothing here asks the browser what it can decode. A client that cannot decode what a
-    /// streaming target sends says so from its own `VideoDecoder` rather than being refused
-    /// here on the strength of a probe.
+    /// `video` is the codec the attached browser asked for when it opened its socket
+    /// (`/ws?video=…`), the one thing about the browser's decoders the gateway is
+    /// told — and told, not probed: a browser that turns out unable to decode what it
+    /// asked for says so from its own `VideoDecoder` rather than being refused here.
     /// `display` is the client's screen from [`ClientMsg::Connect`], handed to
     /// the engine at spawn so a High Performance session can open its virtual
     /// display at that screen's full resolution.
@@ -1071,6 +1086,7 @@ impl SessionManager {
         attach_id: u64,
         target_name: &str,
         display: Option<HostDisplay>,
+        video: VideoCodec,
     ) -> Result<(), ConnectError> {
         // This is where a screen report becomes an opening size, so it is where
         // a degenerate one stops counting as a report.
@@ -1103,7 +1119,7 @@ impl SessionManager {
             if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
                 return Err(ConnectError::NotCurrent);
             }
-            let status = self.start_engine(&mut st, target, display);
+            let status = self.start_engine(&mut st, target, display, video);
             // try_send is ordered here: this runs under the state lock before the
             // just-spawned pump can acquire it, so Connected lands before any tile.
             // It can fail only behind frames the *previous* engine left queued,
@@ -1157,8 +1173,23 @@ impl SessionManager {
         st: &mut State,
         target: TargetConfig,
         display: Option<HostDisplay>,
+        video: VideoCodec,
     ) -> ServerMsg {
-        let render = target.render_plan().describe();
+        // The override wins over the browser's answer, and says so: a QA session
+        // reading the log should not have to wonder which codec it is watching.
+        let video = match self.video_override {
+            Some(forced) if forced != video => {
+                info!(
+                    "session: --force-video-codec {} overrides the browser's {}",
+                    forced.name(),
+                    video.name()
+                );
+                forced
+            }
+            Some(forced) => forced,
+            None => video,
+        };
+        let render = target.render_plan().describe_for(video);
         info!("session: connecting to target {:?} ({render})", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, frame_rx) = mpsc::channel(frame_buffer(&target));
@@ -1191,6 +1222,7 @@ impl SessionManager {
         (self.spawn_engine)(
             target.clone(),
             display,
+            video,
             input_rx,
             frame_tx,
             audio,
@@ -1444,12 +1476,13 @@ impl SessionManager {
 /// `audio` is `Some` only when the target opted in, which the config file has
 /// already confined to the two engines with a channel to carry it: RDP's MS-RDPEA,
 /// and Apple High Performance's media stream in a build with its decoder.
-// Eight positional handoffs — the engine's whole input surface — rather than a
+// Nine positional handoffs — the engine's whole input surface — rather than a
 // parameter struct that would exist only to be destructured at the one call site.
 #[allow(clippy::too_many_arguments)]
 fn spawn_engine(
     target: TargetConfig,
     display: Option<HostDisplay>,
+    video: VideoCodec,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -1467,10 +1500,10 @@ fn spawn_engine(
         };
         match target.protocol {
             Protocol::Rdp => rt.block_on(rdp::run(
-                target, display, input_rx, frame_tx, audio, camera, microphone, feedback,
+                target, display, video, input_rx, frame_tx, audio, camera, microphone, feedback,
             )),
             Protocol::Vnc => {
-                rt.block_on(vnc::run(target, display, input_rx, frame_tx, audio, feedback))
+                rt.block_on(vnc::run(target, display, video, input_rx, frame_tx, audio, feedback))
             }
         }
     });
@@ -1620,6 +1653,7 @@ mod tests {
             Box::new(
                 move |_target: TargetConfig,
                       _display,
+                      _video,
                       input_rx,
                       frame_tx,
                       audio,
@@ -1649,7 +1683,7 @@ mod tests {
             // decoder rather than by this connect.
             video_target("video"),
         ];
-        (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
+        (Arc::new(SessionManager::with_spawner(targets, None, spawner)), hook_rx)
     }
 
     async fn recv(events: &mut mpsc::Receiver<AttachEvent>) -> AttachEvent {
@@ -1730,7 +1764,7 @@ mod tests {
         assert_ne!(first, second, "each claim mints a fresh token");
 
         // Attached slot: a plain claim is refused…
-        let _att = mgr.attach(&second, None).await.unwrap();
+        let _att = mgr.attach(&second, None, VideoCodec::Vp9).await.unwrap();
         assert!(mgr.claim(false, None).is_err());
         // …but the holder reclaims with its token, and force takes over.
         mgr.claim(false, Some(&second)).unwrap();
@@ -1740,24 +1774,24 @@ mod tests {
     #[tokio::test]
     async fn attach_requires_the_current_token() {
         let (mgr, _hooks) = manager_with_fake_engine();
-        assert!(mgr.attach("nope", None).await.is_err(), "no claim yet");
+        assert!(mgr.attach("nope", None, VideoCodec::Vp9).await.is_err(), "no claim yet");
         let token = mgr.claim(false, None).unwrap();
-        assert!(mgr.attach("stale", None).await.is_err());
-        assert!(mgr.attach(&token, None).await.is_ok());
+        assert!(mgr.attach("stale", None, VideoCodec::Vp9).await.is_err());
+        assert!(mgr.attach(&token, None, VideoCodec::Vp9).await.is_ok());
     }
 
     #[tokio::test]
     async fn attach_announces_the_picker_and_connect_starts_the_engine() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
 
         // No engine yet: attach lands the browser on the picker.
         expect_picker(&mut att.events).await;
         assert!(hooks.try_recv().is_err(), "attach must not spawn an engine");
 
         // Picking a target starts the engine and confirms with connected.
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut first_input, first_frames, ..) = hooks.try_recv().expect("connect spawns the engine");
 
@@ -1766,7 +1800,7 @@ mod tests {
         // refusing or resuming anything.
         let connect = tokio::spawn({
             let mgr = Arc::clone(&mgr);
-            async move { mgr.connect(att.id, "other", None).await }
+            async move { mgr.connect(att.id, "other", None, VideoCodec::Vp9).await }
         });
         assert!(
             tokio::time::timeout(Duration::from_secs(5), first_input.recv()).await.unwrap().is_none(),
@@ -1789,17 +1823,17 @@ mod tests {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
             Box::new(
-                move |_target, display, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                move |_target, display, _video, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
                     hook_tx.send(display).unwrap();
                 },
             );
-        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
+        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], None, spawner));
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
 
         let screen = HostDisplay { w: 1512, h: 982, scale: 200, fit: false };
-        mgr.connect(att.id, "fake", Some(screen)).await.unwrap();
+        mgr.connect(att.id, "fake", Some(screen), VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert_eq!(
             hook_rx.try_recv().expect("connect spawns the engine"),
@@ -1815,16 +1849,16 @@ mod tests {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
             Box::new(
-                move |_target, display, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                move |_target, display, _video, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
                     hook_tx.send(display).unwrap();
                 },
             );
-        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
+        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], None, spawner));
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
 
-        mgr.connect(att.id, "fake", Some(HostDisplay { w: 0, h: 982, scale: 100, fit: false })).await.unwrap();
+        mgr.connect(att.id, "fake", Some(HostDisplay { w: 0, h: 982, scale: 100, fit: false }), VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert_eq!(
             hook_rx.try_recv().expect("connect spawns the engine"),
@@ -1837,7 +1871,7 @@ mod tests {
     async fn connected_status_carries_the_targets_capability_metadata() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
 
         // An RDP target with resize on: the connect status carries the
@@ -1845,7 +1879,7 @@ mod tests {
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
         let rdp_resize = Meta::of(Protocol::Rdp).resize();
-        mgr.connect(att.id, "rdp-resize", None).await.unwrap();
+        mgr.connect(att.id, "rdp-resize", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
@@ -1855,25 +1889,25 @@ mod tests {
         // same metadata.
         mgr.detach(att.id);
         let token = mgr.claim(false, Some(&token)).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
 
         // The clipboard flag travels the same way, and independently of resize:
         // the vnc-clip fake target has clipboard on and resize off.
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "vnc-clip", None).await.unwrap();
+        mgr.connect(att.id, "vnc-clip", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "vnc-clip", Meta::of(Protocol::Vnc).clipboard()).await;
 
         // And so does audio, which is what tells the browser it may offer the toggle
         // that opens the audio socket.
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-audio", None).await.unwrap();
+        mgr.connect(att.id, "rdp-audio", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
     }
 
@@ -1885,9 +1919,9 @@ mod tests {
         for (name, protocol) in [("vnc-resize", "vnc"), ("rdp-resize", "rdp")] {
             let (mgr, _hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
-            let mut att = mgr.attach(&token, None).await.unwrap();
+            let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
             expect_picker(&mut att.events).await;
-            mgr.connect(att.id, name, None).await.unwrap();
+            mgr.connect(att.id, name, None, VideoCodec::Vp9).await.unwrap();
             match recv(&mut att.events).await {
                 AttachEvent::Msg(ServerMsg::Connected {
                     protocol: got_protocol,
@@ -1906,15 +1940,15 @@ mod tests {
     async fn connect_rejects_unknown_targets_and_stale_attachments() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
 
         assert!(matches!(
-            mgr.connect(att.id, "nope", None).await,
+            mgr.connect(att.id, "nope", None, VideoCodec::Vp9).await,
             Err(ConnectError::UnknownTarget(name)) if name == "nope"
         ));
         // An attachment that is no longer the current client can't connect.
-        assert!(matches!(mgr.connect(att.id + 999, "fake", None).await, Err(ConnectError::NotCurrent)));
+        assert!(matches!(mgr.connect(att.id + 999, "fake", None, VideoCodec::Vp9).await, Err(ConnectError::NotCurrent)));
     }
 
     // ---- the video render dial ------------------------------------------------
@@ -1926,10 +1960,10 @@ mod tests {
     async fn a_video_target_connects_and_names_its_render_plan() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
 
-        mgr.connect(att.id, "video", None).await.unwrap();
+        mgr.connect(att.id, "video", None, VideoCodec::Vp9).await.unwrap();
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
@@ -1943,9 +1977,9 @@ mod tests {
     async fn frames_reach_the_attached_client_and_are_dropped_while_detached() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx, _audio, _camera, _microphone) = hooks.try_recv().expect("engine spawned on connect");
 
@@ -1977,7 +2011,7 @@ mod tests {
         // Reattach to the running engine (the owner's reclaim): it announces
         // connected, then only frames sent after the reattach arrive.
         let token = mgr.claim(false, Some(&token)).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
         frame_tx
@@ -2001,9 +2035,9 @@ mod tests {
             let protocol = meta.protocol.name();
             let (mgr, hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
-            let mut att = mgr.attach(&token, None).await.unwrap();
+            let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
             expect_picker(&mut att.events).await;
-            mgr.connect(att.id, target, None).await.unwrap();
+            mgr.connect(att.id, target, None, VideoCodec::Vp9).await.unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
             let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
@@ -2024,16 +2058,16 @@ mod tests {
         tokio::time::pause();
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
         mgr.detach(att.id);
         tokio::task::yield_now().await;
         tokio::time::advance(REATTACH_GRACE_PERIOD / 2).await;
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
 
@@ -2046,9 +2080,9 @@ mod tests {
     async fn heartbeat_expiry_stops_the_engine_immediately() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
@@ -2060,9 +2094,9 @@ mod tests {
     async fn reattach_asks_the_running_engine_for_a_refresh() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
         assert!(
@@ -2076,7 +2110,7 @@ mod tests {
 
         mgr.detach(att.id);
         let token = mgr.claim(false, Some(&token)).unwrap();
-        let _att = mgr.attach(&token, None).await.unwrap();
+        let _att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
     }
 
@@ -2084,9 +2118,9 @@ mod tests {
     async fn disconnect_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let engine = hooks.try_recv().unwrap();
 
@@ -2099,7 +2133,7 @@ mod tests {
         drop(engine);
 
         // Picking again spawns a fresh engine — a different target this time.
-        mgr.connect(att.id, "other", None).await.unwrap();
+        mgr.connect(att.id, "other", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "other").await;
         assert!(hooks.try_recv().is_ok(), "reconnect spawns a fresh engine");
     }
@@ -2112,9 +2146,9 @@ mod tests {
     async fn logging_out_stops_the_engine_and_the_next_login_lands_on_the_picker() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
@@ -2124,12 +2158,12 @@ mod tests {
         // The attached socket does not stay attached to a slot whose claim is gone.
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Evicted));
         // And the token it attached with is spent, so nothing can reattach on it.
-        assert!(mgr.attach(&token, None).await.is_err(), "the claim is released");
+        assert!(mgr.attach(&token, None, VideoCodec::Vp9).await.is_err(), "the claim is released");
 
         // The whole point: a fresh login gets the picker, not the desktop it just
         // logged out of.
         let next = mgr.claim(false, None).unwrap();
-        let mut again = mgr.attach(&next, None).await.unwrap();
+        let mut again = mgr.attach(&next, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut again.events).await;
         assert!(hooks.try_recv().is_err(), "no engine survived the log out");
     }
@@ -2142,7 +2176,7 @@ mod tests {
         let (mgr, hooks) = manager_with_fake_engine();
         mgr.log_out();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
         // And again while attached but in the picker state.
         mgr.log_out();
@@ -2159,22 +2193,22 @@ mod tests {
     async fn takeover_evicts_the_previous_client_and_reconnects_the_target() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token_a = mgr.claim(false, None).unwrap();
-        let mut att_a = mgr.attach(&token_a, None).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att_a.events).await;
-        mgr.connect(att_a.id, "fake", None).await.unwrap();
+        mgr.connect(att_a.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att_a.events, "fake").await;
         let engine_a = hooks.try_recv().unwrap();
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
         // The old token is superseded, and A's engine ended with A's claim.
-        assert!(mgr.attach(&token_a, None).await.is_err());
+        assert!(mgr.attach(&token_a, None, VideoCodec::Vp9).await.is_err());
         assert!(engine_a.0.is_closed(), "the takeover ends the previous browser's engine");
         drop(engine_a);
 
         // B lands on the same target: connected (not the picker), through a
         // fresh engine rather than A's.
-        let mut att_b = mgr.attach(&token_b, None).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att_b.events, "fake").await;
         let (_input_rx_b, frame_tx_b, _audio, _camera, _microphone) =
             hooks.try_recv().expect("the takeover attach reconnects with a fresh engine");
@@ -2195,22 +2229,22 @@ mod tests {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner =
             Box::new(
-                move |_target, display, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                move |_target, display, _video, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
                     hook_tx.send(display).unwrap();
                 },
             );
-        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
+        let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], None, spawner));
         let token_a = mgr.claim(false, None).unwrap();
-        let mut att_a = mgr.attach(&token_a, None).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att_a.events).await;
         let desktop = HostDisplay { w: 2560, h: 1440, scale: 100, fit: false };
-        mgr.connect(att_a.id, "fake", Some(desktop)).await.unwrap();
+        mgr.connect(att_a.id, "fake", Some(desktop), VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att_a.events, "fake").await;
         assert_eq!(hook_rx.try_recv().unwrap(), Some(desktop));
 
         let token_b = mgr.claim(true, None).unwrap();
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: false };
-        let mut att_b = mgr.attach(&token_b, Some(phone)).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, Some(phone), VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att_b.events, "fake").await;
         assert_eq!(
             hook_rx.try_recv().expect("the takeover attach reconnects"),
@@ -2219,18 +2253,95 @@ mod tests {
         );
     }
 
+    /// The codec a browser states on its socket is the one its engine encodes with —
+    /// on the pick, and on the reconnect a takeover makes for a *different* browser,
+    /// which may take a different codec.
+    #[tokio::test]
+    async fn the_browsers_codec_reaches_the_engine_on_connect_and_on_takeover() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner =
+            Box::new(
+                move |_target, _display, video, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                    hook_tx.send(video).unwrap();
+                },
+            );
+        let mgr = Arc::new(SessionManager::with_spawner(vec![video_target("video")], None, spawner));
+        let token_a = mgr.claim(false, None).unwrap();
+        let mut att_a = mgr.attach(&token_a, None, VideoCodec::Vp9).await.unwrap();
+        expect_picker(&mut att_a.events).await;
+        mgr.connect(att_a.id, "video", None, VideoCodec::Vp9).await.unwrap();
+        match recv(&mut att_a.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
+                assert_eq!(render, "video q60", "VP9 is not named: it is what every card said")
+            }
+            other => panic!("expected connected, got {other:?}"),
+        }
+        assert_eq!(hook_rx.try_recv().unwrap(), VideoCodec::Vp9);
+
+        // A browser with no VP9 takes the session over.
+        let token_b = mgr.claim(true, None).unwrap();
+        let mut att_b = mgr.attach(&token_b, None, VideoCodec::H264).await.unwrap();
+        match recv(&mut att_b.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
+                assert_eq!(render, "video q60 h264", "the fallback is named on the card")
+            }
+            other => panic!("expected connected, got {other:?}"),
+        }
+        assert_eq!(
+            hook_rx.try_recv().expect("the takeover attach reconnects"),
+            VideoCodec::H264,
+            "the reconnect must encode for the new browser, not the old one"
+        );
+    }
+
+    /// `serve --force-video-codec`: the override wins over whatever the browser asked
+    /// for, in either direction, and the card says what is actually being sent.
+    #[tokio::test]
+    async fn the_video_override_wins_over_the_browsers_codec() {
+        for (forced, asked) in [
+            (VideoCodec::H264, VideoCodec::Vp9),
+            (VideoCodec::Vp9, VideoCodec::H264),
+            (VideoCodec::H264, VideoCodec::H264),
+        ] {
+            let (hook_tx, hook_rx) = std_mpsc::channel();
+            let spawner: EngineSpawner = Box::new(
+                move |_target, _display, video, _input_rx, _frame_tx, _audio, _camera, _microphone, _feedback| {
+                    hook_tx.send(video).unwrap();
+                },
+            );
+            let mgr = Arc::new(SessionManager::with_spawner(
+                vec![video_target("video")],
+                Some(forced),
+                spawner,
+            ));
+            let token = mgr.claim(false, None).unwrap();
+            let mut att = mgr.attach(&token, None, asked).await.unwrap();
+            expect_picker(&mut att.events).await;
+            mgr.connect(att.id, "video", None, asked).await.unwrap();
+            assert_eq!(hook_rx.try_recv().unwrap(), forced, "asked {asked:?}, forced {forced:?}");
+            let expected = match forced {
+                VideoCodec::Vp9 => "video q60",
+                VideoCodec::H264 => "video q60 h264",
+            };
+            match recv(&mut att.events).await {
+                AttachEvent::Msg(ServerMsg::Connected { render, .. }) => assert_eq!(render, expected),
+                other => panic!("expected connected, got {other:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn takeover_in_the_picker_lands_the_new_browser_on_the_picker() {
         let (mgr, _hooks) = manager_with_fake_engine();
         // A never connects — it just holds the slot on the picker.
         let token_a = mgr.claim(false, None).unwrap();
-        let mut att_a = mgr.attach(&token_a, None).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att_a.events).await;
 
         // B force-claims and attaches: it inherits the picker state.
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
-        let mut att_b = mgr.attach(&token_b, None).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att_b.events).await;
     }
 
@@ -2242,9 +2353,9 @@ mod tests {
         tokio::time::pause();
         let (mgr, hooks) = manager_with_fake_engine();
         let token_a = mgr.claim(false, None).unwrap();
-        let mut att_a = mgr.attach(&token_a, None).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att_a.events).await;
-        mgr.connect(att_a.id, "fake", None).await.unwrap();
+        mgr.connect(att_a.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att_a.events, "fake").await;
         let _engine = hooks.try_recv().unwrap();
 
@@ -2256,7 +2367,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // A much later attach lands on the picker, not on a resurrected target.
-        let mut att_b = mgr.attach(&token_b, None).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att_b.events).await;
         assert!(hooks.try_recv().is_err(), "a lapsed reconnect must not spawn an engine");
     }
@@ -2265,9 +2376,9 @@ mod tests {
     async fn engine_death_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx, _audio, _camera, _microphone) = hooks.try_recv().unwrap();
 
@@ -2286,7 +2397,7 @@ mod tests {
         expect_picker(&mut att.events).await;
 
         // Picking again (same socket) spawns a fresh engine.
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         tokio::task::spawn_blocking(move || {
             hooks
@@ -2307,9 +2418,9 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<AudioBridge>, EngineEnds) {
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-audio", None).await.unwrap();
+        mgr.connect(att.id, "rdp-audio", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         let ends = hooks.try_recv().unwrap();
         let audio = ends
@@ -2427,9 +2538,9 @@ mod tests {
     async fn a_pcm_target_is_announced_as_the_remotes_own_bytes() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-pcm", None).await.unwrap();
+        mgr.connect(att.id, "rdp-pcm", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(
             &mut att.events,
             "rdp-pcm",
@@ -2541,7 +2652,7 @@ mod tests {
     async fn an_audio_socket_with_no_source_is_accepted_and_silent() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
 
         let sound = mgr.attach_audio(&token).unwrap();
@@ -2551,7 +2662,7 @@ mod tests {
             assert!(st.audio_pump.is_none(), "the picker has no audio to subscribe to");
         }
 
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(
             mgr.state.lock().unwrap().audio_pump.is_none(),
@@ -2599,7 +2710,7 @@ mod tests {
         expect_listeners(&first_bridge, 0).await;
         drop(first_engine);
 
-        mgr.connect(att.id, "rdp-audio", None).await.unwrap();
+        mgr.connect(att.id, "rdp-audio", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         // Held, not dropped: letting the ends go is how a fake engine dies, and this
         // one has to outlive the assertions below.
@@ -2636,7 +2747,7 @@ mod tests {
         mgr.detach(att.id);
         audio.wave(one_frame_of_pcm());
         let token_again = mgr.claim(false, Some(&token)).unwrap();
-        let mut back = mgr.attach(&token_again, None).await.unwrap();
+        let mut back = mgr.attach(&token_again, None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut back.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
 
         // Never interrupted: one listener throughout, and the buffer sent while the
@@ -2677,14 +2788,14 @@ mod tests {
 
         // And it stays gone across a reconnect, which is where a surviving slot would
         // have shown itself.
-        let mut att_b = mgr.attach(&token_b, None).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
         let engine_b = hooks.try_recv().unwrap();
         mgr.disconnect(att_b.id);
         expect_picker(&mut att_b.events).await;
         drop(engine_b);
-        mgr.connect(att_b.id, "rdp-audio", None).await.unwrap();
+        mgr.connect(att_b.id, "rdp-audio", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
         assert!(
@@ -2729,7 +2840,7 @@ mod tests {
         // opened before the attach, on its own claim — is re-armed onto the fresh
         // engine's bridge by that reconnect.
         let mut sound_b = mgr.attach_audio(&token_b).unwrap();
-        let mut att_b = mgr.attach(&token_b, None).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
         let (_input_rx_b, _frame_tx_b, audio_b, _camera_b, _microphone_b) =
@@ -2823,7 +2934,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         expect_listeners(&audio, 0).await;
 
-        mgr.connect(att.id, "rdp-audio", None).await.unwrap();
+        mgr.connect(att.id, "rdp-audio", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         let revived_ends = hooks.try_recv().unwrap();
         let revived = revived_ends
@@ -2874,9 +2985,9 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<CameraBridge>, Arc<CamRecorder>) {
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-camera", None).await.unwrap();
+        mgr.connect(att.id, "rdp-camera", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-camera", Meta::of(Protocol::Rdp).camera())
             .await;
         let ends = hooks.try_recv().unwrap();
@@ -2908,14 +3019,14 @@ mod tests {
         assert!(matches!(mgr.attach_camera("nope"), Err(CameraRefused::InvalidToken)));
 
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
         // The picker: nothing is running, so there is nothing to plug into.
         assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
 
         // A connected target without `camera = true` refuses the same way, which is
         // the "camera disabled means the socket is disabled" rule on the wire.
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let _ends = hooks.try_recv().unwrap();
         assert!(matches!(mgr.attach_camera(&token), Err(CameraRefused::Unsupported)));
@@ -3052,9 +3163,9 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<MicBridge>, Arc<MicRecorder>) {
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-mic", None).await.unwrap();
+        mgr.connect(att.id, "rdp-mic", None, VideoCodec::Vp9).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-mic", Meta::of(Protocol::Rdp).microphone())
             .await;
         let ends = hooks.try_recv().unwrap();
@@ -3079,11 +3190,11 @@ mod tests {
         assert!(matches!(mgr.attach_mic("nope"), Err(MicRefused::InvalidToken)));
 
         let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None).await.unwrap();
+        let mut att = mgr.attach(&token, None, VideoCodec::Vp9).await.unwrap();
         expect_picker(&mut att.events).await;
         assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));
 
-        mgr.connect(att.id, "fake", None).await.unwrap();
+        mgr.connect(att.id, "fake", None, VideoCodec::Vp9).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let _ends = hooks.try_recv().unwrap();
         assert!(matches!(mgr.attach_mic(&token), Err(MicRefused::Unsupported)));

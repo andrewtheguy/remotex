@@ -27,8 +27,10 @@ agree with their own fixtures and disagree with each other. Its frame parser is
 deliberately a second implementation rather than an import of the SPA's, because a
 wrong parser would otherwise agree with itself.
 
-`video-stream.spec.ts` is the video dial read from the same socket. Video is VP9
-only, so everything it asserts is decidable without asking the browser anything. It
+`video-stream.spec.ts` is the video dial read from the same socket. The gateway
+announces every stream's codec string before its first unit, so everything it asserts
+is decidable without asking the browser anything; the string is VP9's from Chromium,
+or H.264's when the gateway runs under `--force-video-codec h264`. It
 parses VIDEO records itself —
 op, keyframe flags byte, the coded rectangle's even sides — and checks that no
 stream's first access unit outran the `videoFormat` that says how to decode it.
@@ -108,7 +110,7 @@ that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
-The video spec needs a local gateway config with a VP9 video target. Put that
+The video spec needs a local gateway config with a video target. Put that
 gitignored config under `tmp/` (for example, `tmp/qa_video.toml`) and name the
 target with `REMOTEX_PLAYWRIGHT_VIDEO_TARGET`:
 

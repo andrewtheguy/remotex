@@ -773,10 +773,13 @@ impl CopyRect {
 /// The contract every client implements:
 ///
 /// - The payload is **one whole access unit** — exactly one frame's worth, never a partial one
-///   and never two: the frame as libvpx emitted it.
+///   and never two: the frame as the encoder emitted it. VP9 or H.264, whichever the
+///   session's browser asked for; an H.264 unit is Annex B with its parameter sets
+///   inside every keyframe.
 /// - **[`ServerMsg::VideoFormat`] arrives first**, before this stream's first record, and names
 ///   the exact WebCodecs configuration string to build the decoder with. Nothing in
-///   the payload can be parsed to find that out — VP9 has no parameter sets at all.
+///   the payload can be parsed to find that out — VP9 has no parameter sets at all,
+///   and H.264's arrive with the first keyframe, after the decoder must already exist.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
 /// - `stream` names which decoder this belongs to. A session may run several at once
 ///   — one per moving region under `render_motion = true`, exactly one
@@ -1166,7 +1169,8 @@ pub enum ServerMsg {
     /// session plus one per resize.
     ///
     /// `decode` is the exact WebCodecs configuration string to hand `VideoDecoder.configure` —
-    /// `vp09.00.40.08.01.06.06.06.00`. It comes from the encoder rather than from a prediction, and it is sent
+    /// `vp09.00.40.08.01.06.06.06.00`, or `avc1.640028` on the H.264 fallback, and never a
+    /// `description` beside it. It comes from the encoder rather than from a prediction, and it is sent
     /// with the round that produced the stream's first unit because that is where the encoder's
     /// answer exists.
     VideoFormat { stream: u8, decode: String },

@@ -86,6 +86,26 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
 # plain `?` path under `panic = "abort"`.
 vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260906161241-e55a2da" }
+# openh264, for H.264 — the fallback video codec, chosen per session for a browser
+# whose `VideoDecoder` reports no VP9 (src/h264.rs, selected in src/video.rs). Cisco's
+# encoder is BSD-2-Clause; the H.264 patent position is the *decoder's* problem and a
+# browser that asks for this stream already ships one.
+#
+# The sys crate rather than the `openh264` wrapper: the wrapper's `Encoder` owns its
+# parameters and never sets the one field the rate-control-off mode reads its
+# quantizer from, and it keeps `InitializeExt` private — so src/h264.rs drives the
+# C vtable itself, the way src/vp9.rs drives libvpx. The wrapper is a dev-dependency
+# below, for the decoder its tests round-trip through.
+#
+# **Not the prebuilt bargain the three archives above strike.** This crate compiles
+# the vendored C++ through `cc` at build time and assembles the x86 SIMD with `nasm`
+# when one is on the path (falling back to C when there is none, silently and slower).
+# So a builder needs a C++ compiler — the same toolchain the linker already comes from
+# on every runner — and, on x86-64, `nasm`; see packaging/README.md. Runtime CPU
+# dispatch (`WelsCPUFeatureDetect`) keeps the baseline-ISA rule: nothing here raises
+# the binary's CPU floor. No `libloading`: that feature downloads Cisco's binary at
+# run time, which a gateway must never do.
+openh264-sys2 = { version = "0.9.8", default-features = false, features = ["source"] }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
@@ -230,6 +250,10 @@ required-features = ["embedded-gateway"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+# The H.264 decoder the src/h264.rs tests round-trip a keyframe through, and the
+# Annex B NAL splitter they check the parameter sets with. The wrapper over the
+# `openh264-sys2` the gateway already links: no second copy of the C++ is built.
+openh264 = { version = "0.9.8", default-features = false, features = ["source"] }
 # Scratch directories for the tests that need a real path on disk: an instance
 # directory to serve from, and the ones behind `Instance::origin_label`, which
 # canonicalizes what it is given and so cannot be tested against a name that does

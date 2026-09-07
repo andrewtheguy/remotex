@@ -20,7 +20,8 @@ axum server ── single session slot ── protocol engine
 ```
 
 RDP and VNC frames are decoded in the gateway and sent as independent image tiles
-or as VP9 streams, according to the target's render plan. Tiles are lossless
+or as video streams — VP9, or H.264 for a browser whose decoder has no VP9 —
+according to the target's render plan. Tiles are lossless
 PNG by default, with JPEG available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the
@@ -51,6 +52,7 @@ passed through to the host over MS-RDPECAM.
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
 | `vp9.rs` | libvpx — the video codec |
+| `h264.rs` | openh264 — the fallback video codec, for a browser without VP9 |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling |
 | `rdp_audio.rs` | the adapter between FreeRDP's `rdpsnd` device and that queue |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
@@ -100,8 +102,9 @@ encode once it settles. It changes nothing about what a tile is or how one trave
 image; only what is moving becomes a stream. It is refused under `video`, which
 streams the whole desktop already and has no settled cells left to discount.
 
-**Nothing on this dial names a video codec, because video is VP9 only** — see
-[the codec](#the-codec).
+**Nothing on this dial names a video codec, because the codec is the browser's
+choice, not the target's** — VP9, or H.264 where the browser has no VP9 decoder;
+see [the codec](#the-codec).
 
 No classifier runs under the `jpeg` subtype: it sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
@@ -195,9 +198,9 @@ render_stream_quality = 10       # moving regions: as cheap as it takes
 
 The moving encode has its own quality because it is not a cheaper version of the
 base: what a settled cell gets is a still picture, and what is moving is not one at
-all. There is no codec key beside it — a moving region is a VP9 stream, the same
-way `render_type = "video"` is, and the only per-target choice inside it is
-`render_chroma`.
+all. There is no codec key beside it — a moving region is a video stream in the
+session's codec, the same way `render_type = "video"` is, and the only per-target
+choice inside it is `render_chroma`.
 
 The switch is protocol-independent and has no subtype restrictions: every engine
 normalizes its damage before it reaches the shared sink that detects and encodes
@@ -460,9 +463,9 @@ for the region streams above too, which is why they run the same code:
   which the renderer drops outright rather than clamps.
 
 `render_stream_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
-0–63 (the floor is where screen content goes visually lossless — mapping past it
-would give a dial whose top third did nothing but spend bandwidth). The quantizer
-never leaves the codec module —
+0–63, and 51 → 12 of H.264's 0–51 (the floor is where screen content goes visually
+lossless — mapping past it would give a dial whose top third did nothing but spend
+bandwidth). The quantizer never leaves the codec module —
 the dial is what everything above it speaks. A constant quantizer *is* variable
 bitrate — bits go where the
 picture needs them, so a motionless desktop costs almost nothing.
@@ -492,8 +495,11 @@ string it announces is `vp09.01.…` instead of `vp09.00.…`. The cost is the
 decoder: no hardware VP9 decoder takes profile 1, so it always decodes in software
 — Chromium does — and a browser with no software VP9 at all, which is iOS and
 iPadOS, refuses the configuration by name the way it would refuse any other. That
-is why it is per target and off by default, and why nothing falls back: the client
-already says exactly which configuration it would not take.
+is why it is per target and off by default, and why nothing falls back *from it*:
+the client already says exactly which configuration it would not take. (The H.264
+fallback is a different question — which codec, not which profile — and a browser
+on it streams 4:2:0 whatever this key says, since openh264 has no 4:4:4; the
+gateway logs that once per session.)
 `a_444_stream_keeps_the_colour_420_averages_away` in `src/vp9.rs` is the round
 trip that pins the difference, through the archive's own decoder.
 
@@ -502,7 +508,8 @@ The keyframe header also *says* the conversion is BT.601 studio swing
 told, and a decoder given unknown guesses — Chromium picks BT.709 for anything HD —
 so a 1080p desktop was converted with one matrix and displayed with another, every
 saturated colour a little off. Nothing on the wire carries it; the decoder reads it
-from the bitstream.
+from the bitstream. The H.264 stream says the same thing in its SPS's VUI, for the
+same reason.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
@@ -572,33 +579,71 @@ would not take.
 
 #### The codec
 
-Video is **VP9 only** (`src/vp9.rs`), and there is no codec key. VP9 is
+Video is **VP9** (`src/vp9.rs`), with **H.264** (`src/h264.rs`) as the fallback for a
+browser whose `VideoDecoder` has no VP9 — older Safari on hardware without a VP9
+block — and nothing else: no codec key, no third codec. VP9 is
 BSD-3-Clause with a patent grant and present in every browser build, the ones that
 carry no proprietary codecs included. On synthetic screen content at 1080p and
-quality 60 it encodes a frame in **4.7 ms** at **18 KB** — measure with
+quality 60 it encodes a frame in **4.7 ms** at **18 KB**; measure both codecs with
 `cargo test --release measure_the_encoder -- --ignored --nocapture`; a debug build
 reports nonsense, because the RGB→YUV conversion it also times is scalar Rust and runs
 66× slower unoptimised.
 
+H.264 comes from Cisco's openh264, compiled from the vendored C++ by its sys crate
+(the one native dependency here that is not a prebuilt archive — see
+[Packaging](../packaging/README.md#prebuilt-native-dependencies)). It is driven the way
+libvpx is: rate control off, the dial pinned to a quantizer, no frame ever skipped,
+keyframes on demand (plus the one openh264's screen-content mode insists on deciding
+itself, on a change big enough to read as a cut), and a quantizer that moves on the
+live encoder without an IDR — the property the congestion loop needs, and the reason the encoder is driven
+through the C vtable rather than the Rust wrapper's `Encoder`, which never sets the
+field that mode reads. High profile with CABAC, at the picture's level from the
+same kind of table VP9's string uses, as Annex B with the SPS and PPS in band on
+every IDR: that is the WebCodecs form that needs no `description`, so a `VideoFormat`
+is still one string — `avc1.640028` for a 1080p desktop — and a client coming back
+mid-stream starts from the keyframe the repaint forced, exactly as on VP9. 4:2:0
+only. Several threads on the whole-desktop stream are several slices, each its own
+NAL inside the one access unit.
+
 Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
 `regions.rs` and the wire carry access units, a keyframe bit and a configuration
-string, and `vp9.rs` is reachable only from `regions.rs`.
+string; `regions.rs` holds a `video::Stream` that is either encoder, and the codec
+modules are reachable only from there.
 
-**The browser is not asked, and that is a deliberate reversal.** The client used to
-probe: `/api/config` published the gateway's ordered codecs with a WebCodecs string for
-each, the client asked `VideoDecoder.isConfigSupported` about them before login, and
-`ClientMsg::Connect` carried the accepted names for `connect` to pick from. It worked,
-and it was removed. It put a round trip and a decoder query in front of every video
-session; `isConfigSupported` is not reliable enough on the same browser twice to build a
-refusal on; and because the refusal was phrased as "this browser accepted neither", any
-fault anywhere near the path — a serde field-name mismatch, for one — surfaced as an
-accusation against the browser and sent the reader to the wrong half of the system.
+**The browser says which, once, and the gateway does not second-guess it.** The
+client asks `VideoDecoder.isConfigSupported` about one representative VP9 string at
+page load (`frontend/src/videoCodec.ts`), before React mounts, and states the answer
+on every session socket it opens — `/ws?video=vp9` or `h264`, beside its screen —
+because the socket is the one thing that is open both when a target is picked and
+when a takeover reconnects the selected target for a different browser, which may
+take a different codec. `ws.rs` refuses a session socket that does not say; the
+media sockets are asked nothing. `SessionManager::start_engine` hands the codec to
+the engine with the render plan, and the `connected` card names it only where it is
+the fallback (`video q60 h264`).
 
-What replaces it is one honest failure. The gateway announces the
+An earlier design asked the browser too, and was removed; this one is shaped by why.
+That probe published the gateway's ordered codecs on `/api/config`, queried each
+before login, and carried the accepted names on `connect` for the gateway to pick
+from — a round trip and a decoder query in front of every session, and a *refusal*
+("this browser accepted neither") built on `isConfigSupported`, which is not
+reliable enough on the same browser twice to build one on, so that any fault near
+the path surfaced as an accusation against the browser. What is different now: one
+question at page load rather than per session; the question *selects* and never
+refuses — a definite "no" asks for H.264, a "yes" or an exception asks for VP9 —
+and a browser that then cannot decode what it asked for is told so by its own
+decoder, as below.
+
+`serve --force-video-codec vp9|h264` overrides every session's choice. It is hidden
+from `--help`, deliberately not a config key, and exists for QA alone: to watch
+either encoder from a browser that decodes both, and to run the Playwright video
+spec against H.264 from Chromium. A deployment has no reason to choose for a
+browser, and a file that could would silently break the browsers that cannot
+decode its choice.
+
+What remains is one honest failure. The gateway announces the
 configuration in `ServerMsg::VideoFormat` before the stream's first unit,
 `VideoDecoder.configure` accepts it or refuses it, and a refusal is reported by name —
 "this browser cannot decode the video this target sends" — with the configuration
-string beside it.
 
 ## Session lifecycle
 
@@ -651,15 +696,16 @@ audio format, and errors. The `connected` message includes `resize`,
 `clipboard`, and `audio` capability flags so clients expose only supported
 controls.
 
-It also carries three things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial; `video`, the codec family or null; and
-`subtype`, the target's `ard` or `ard-high-performance` where it has one. The
-last is there because `protocol` is not an answer on VNC — a plain server, a Mac
-in Standard mode and a Mac in High Performance mode all say `vnc`, and they
-differ in whether there is a display list, whether resize is offered, and
-whether the path beneath is the reverse-engineered one. All three appear on the
-client's session card, which `frontend/src/connectionLabel.ts` and
-`videoLabel.ts` word.
+It also carries two things a client cannot work out and nothing else reveals:
+`render`, the resolved render dial — which names the video codec only where it
+is the H.264 fallback, since VP9 is what every card said before there was a
+second one — and `subtype`, the target's `ard` or `ard-high-performance` where it
+has one. The latter is there because `protocol` is not an answer on VNC — a plain
+server, a Mac in Standard mode and a Mac in High Performance mode all say `vnc`,
+and they differ in whether there is a display list, whether resize is offered,
+and whether the path beneath is the reverse-engineered one. Both appear on the
+client's session card, which `frontend/src/connectionLabel.ts` words, beside the
+exact decoder configuration strings `videoFormat` announced (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
@@ -707,14 +753,15 @@ slot. `TILE_REF` redraws the encoded payload already stored in that slot.
 `NO_SLOT` means the payload must not be retained. Clients keep a fixed
 `SLOT_COUNT` array and never choose eviction themselves.
 
-`VIDEO` carries one VP9 access unit for one region,
+`VIDEO` carries one access unit — VP9 or H.264, whichever the session's browser
+asked for — for one region,
 and is a separate record rather than a fourth tile format because it is not the same
 kind of thing: a tile is a self-contained picture and an access unit is one link in a
 chain. Making it its own record is what keeps the cache and coverage rules above from
 ever having to ask whether they apply — they see tiles only. `stream` names which
 decoder it belongs to, since a session may run several at once, and its keyframe bit
 comes from the encoder rather than from parsing the payload — VP9 carries no parameter
-sets to read one out of. The rectangle is the region's true one, and the decoded picture
+sets to read one out of, and H.264's arrive inside the keyframe rather than beside it. The rectangle is the region's true one, and the decoded picture
 may exceed it by a pixel on either axis (see the render dial).
 
 `COPY` moves pixels the client already holds from `(sx, sy)` to `(x, y)`, both
@@ -1314,9 +1361,11 @@ plain `http://` is the case this refuses,
 by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
 alone, because audio is a target's choice and video is a render dial's: a browser
 with one and not the other would play some targets and not others, which is the
-half-working session the gate exists to prevent. What remains reportable mid-session
-is a *codec* a decoder refuses, which is a different sentence and arrives from the
-decoder itself.
+half-working session the gate exists to prevent. Past the gate, the one thing the
+client asks a decoder is whether it takes VP9, and the answer chooses the codec
+rather than the browser's fate (`videoCodec.ts`; see [the codec](#the-codec)). What
+remains reportable mid-session is a *configuration* a decoder refuses, which is a
+different sentence and arrives from the decoder itself.
 
 There are two ways for this page to be given the six Command chords a browser
 otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** (`appWindow.ts`:

@@ -469,12 +469,14 @@ pub fn init_logging() {
     let _ = env_logger::try_init();
 }
 
-/// Open the session WebSocket with a claim token and the login cookie.
+/// Open the session WebSocket with a claim token and the login cookie, asking for
+/// VP9 the way a browser with a VP9 decoder does: the session socket names its
+/// codec in the query string, and one that does not is refused at the upgrade.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
-    let mut request = format!("ws://{addr}/ws?session={token}")
+    let mut request = format!("ws://{addr}/ws?session={token}&video=vp9")
         .into_client_request()
         .unwrap();
     request

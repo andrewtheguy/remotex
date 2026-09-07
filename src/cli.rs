@@ -34,6 +34,14 @@ pub enum Commands {
         /// connects to. A browser needs the host:port form
         #[arg(short, long, env = "REMOTEX_LISTEN")]
         listen: Option<String>,
+
+        /// QA only: encode every session's video streams with this codec, whatever
+        /// the browser asked for. The gateway otherwise streams VP9 and falls back to
+        /// H.264 for a browser whose decoder has no VP9; this is how to watch the
+        /// other encoder from a browser that decodes both. Hidden from --help
+        /// because it is not a deployment option, and deliberately not a config key.
+        #[arg(long, value_enum, hide = true)]
+        force_video_codec: Option<crate::config::VideoCodec>,
     },
 
     /// Run the local multi-instance control plane. The TUI supervises one gateway
@@ -122,11 +130,53 @@ mod tests {
     #[test]
     fn serve_config_is_optional() {
         let cli = Cli::try_parse_from(["remotex", "serve"]).unwrap();
-        let Commands::Serve { config, listen } = cli.command else {
+        let Commands::Serve { config, listen, force_video_codec } = cli.command else {
             panic!("expected the serve subcommand");
         };
         assert!(config.is_none());
         assert!(listen.is_none(), "unset means the config file decides");
+        assert!(force_video_codec.is_none(), "unset means the browser decides");
+    }
+
+    /// The QA override takes the two codec names the wire uses, is absent from the
+    /// help text, and is `serve`'s alone: an embedded worker serves one desktop
+    /// client and has no QA to do.
+    #[test]
+    fn serve_takes_a_hidden_video_codec_override() {
+        use crate::config::VideoCodec;
+        for (spelled, expected) in [("vp9", VideoCodec::Vp9), ("h264", VideoCodec::H264)] {
+            let cli = Cli::try_parse_from(["remotex", "serve", "--force-video-codec", spelled])
+                .unwrap();
+            let Commands::Serve { force_video_codec, .. } = cli.command else {
+                panic!("expected the serve subcommand");
+            };
+            assert_eq!(force_video_codec, Some(expected));
+        }
+        assert!(
+            Cli::try_parse_from(["remotex", "serve", "--force-video-codec", "av1"]).is_err(),
+            "there are two codecs, and the flag names one of them"
+        );
+        let help = <Cli as clap::CommandFactory>::command()
+            .find_subcommand_mut("serve")
+            .expect("serve")
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("force-video-codec"), "a QA control is not deployment help");
+        #[cfg(all(feature = "embedded-gateway", unix))]
+        assert!(
+            Cli::try_parse_from([
+                "remotex",
+                "serve-embedded",
+                "--instance-dir",
+                "/i",
+                "--web-root",
+                "/w",
+                "--force-video-codec",
+                "h264",
+            ])
+            .is_err(),
+            "the managed worker is not where QA happens"
+        );
     }
 
     /// The listen address is one value on the command line as it is one key in

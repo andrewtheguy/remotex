@@ -356,7 +356,7 @@ password = "change-me"
 # ("jpeg", "classify"), refused when it is "png" — there is no default, because a
 # quality nobody chose is not a quality. Higher is larger and closer to exact. It is
 # the base codec's dial and nothing else's: render_stream_quality, below, is the dial
-# of whatever VP9 stream a target has, and is refused on one that streams nothing.
+# of whatever video stream a target has, and is refused on one that streams nothing.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
@@ -428,11 +428,12 @@ password = "change-me"
 # a link that can carry it you get that quality, and a link that cannot makes the
 # picture coarser until it can. Nothing goes finer than what is set here. It can be
 # very low — motion hides it, and it does not last. There is no codec key beside it:
-# a moving region is VP9, the same as render_type = "video", and render_chroma below
-# is the only choice inside it.
+# a moving region is a video stream, the same as render_type = "video" — VP9, or
+# H.264 for a browser whose decoder has no VP9, which is the browser's choice and not
+# this file's — and render_chroma below is the only choice inside it.
 #
 # It is the same key render_type = "video" uses below, and deliberately: both are the
-# quality of a VP9 stream, they reach the same encoder through the same congestion
+# quality of a video stream, they reach the same encoder through the same congestion
 # walk, and a target can never have both — motion discounts settled tiles and "video"
 # has none. One dial, one name.
 #
@@ -472,7 +473,7 @@ password = "change-me"
 # not the framing.)
 #
 # render_stream_quality is the dial — the same key render_motion uses above, since
-# both name the quality of a VP9 stream. 1-100 as everywhere else, and a *ceiling*: on a
+# both name the quality of a video stream. 1-100 as everywhere else, and a *ceiling*: on a
 # link that can carry it you get exactly that quality, and a link that cannot makes
 # the picture coarser until it can. Nothing ever goes finer than what is set here.
 #
@@ -503,6 +504,10 @@ password = "change-me"
 #           for a keyframe about a third larger and inter frames no larger. It always
 #           decodes in software (no hardware VP9 decoder takes profile 1): Chromium
 #           does; iOS and iPadOS have no software VP9 at all and refuse it by name.
+#
+# This key is VP9's. A browser with no VP9 decoder at all asks the gateway for H.264
+# instead, and H.264 here is 4:2:0 whatever this says — the gateway logs that once
+# when such a browser connects to a "444" target.
 #render_chroma = "420"
 
 # Let every lossy quality in this target's render plan track measured client

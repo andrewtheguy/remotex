@@ -180,7 +180,8 @@ pub enum RenderType {
     ///
     /// It follows that this is a different *transport*, not a different compressor:
     /// no tiles, no cell grid, no per-region decisions, one access unit per remote
-    /// frame. VP9 carries it ([`crate::vp9`]) — so this axis names no codec either.
+    /// frame. VP9 carries it ([`crate::vp9`]), or H.264 for a browser without VP9
+    /// ([`VideoCodec`], the browser's choice) — so this axis names no codec either.
     Video,
 }
 
@@ -247,7 +248,9 @@ pub enum Chroma {
     /// this always decodes in software — Chromium does (measured headless,
     /// 2026-09-01), and a browser with no software VP9 at all, which is iOS and
     /// iPadOS, refuses the stream by name at `VideoDecoder.configure`, the same
-    /// way it would refuse any configuration it lacks. Nothing falls back.
+    /// way it would refuse any configuration it lacks. Nothing falls back from
+    /// this key. A browser that asked for H.264 instead ([`VideoCodec`]) never
+    /// sees it: that encoder is 4:2:0, and the gateway says so once in the log.
     #[serde(rename = "444")]
     Full,
 }
@@ -258,6 +261,39 @@ impl Chroma {
         match self {
             Self::Subsampled => "420",
             Self::Full => "444",
+        }
+    }
+}
+
+/// The codec a session's video streams are encoded with — the browser's choice, not
+/// the target's, which is why it is not a config key and why nothing in a
+/// [`TargetConfig`] names it.
+///
+/// A session says which one it wants when it opens its socket
+/// (`/ws?video=…`), having asked its own `VideoDecoder` about VP9 once at page load.
+/// VP9 is the codec ([`crate::vp9`]): royalty-free and in every browser build. H.264
+/// ([`crate::h264`]) exists for the browser whose WebCodecs has no VP9 decoder —
+/// older Safari, on hardware with no VP9 block — and is asked for by that browser
+/// alone. It carries the same dial through the same congestion loop, at 4:2:0 only:
+/// `render_chroma = "444"` is VP9 profile 1 and has no H.264 counterpart this
+/// encoder speaks, so a 4:4:4 target streams 4:2:0 to a browser on the fallback.
+///
+/// `serve --force-video-codec` overrides the browser's answer for every session —
+/// a QA control for exercising either encoder from a browser that decodes both,
+/// and nothing else (see [`AppConfig::video_override`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoCodec {
+    Vp9,
+    H264,
+}
+
+impl VideoCodec {
+    /// How the wire and the command line spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vp9 => "vp9",
+            Self::H264 => "h264",
         }
     }
 }
@@ -448,6 +484,14 @@ impl RenderPlan {
     /// Every combination the pairing matrix admits has a distinct rendering here, and
     /// `every_render_combination_describes_itself` is what keeps that true.
     pub fn describe(&self) -> String {
+        self.describe_for(VideoCodec::Vp9)
+    }
+
+    /// [`Self::describe`] for a session whose streams are encoded in `video`: the
+    /// codec is named only where it is the fallback and the plan streams at all,
+    /// since VP9 is what every card said before there was a second codec and a
+    /// still-only plan encodes no stream in either.
+    pub fn describe_for(&self, video: VideoCodec) -> String {
         fn tile(codec: TileCodec) -> String {
             match codec {
                 TileCodec::Png => "lossless png".to_owned(),
@@ -465,16 +509,26 @@ impl RenderPlan {
             adaptive.map_or_else(String::new, |floor| format!(" · adaptive ≥{floor}"))
         }
         // Named only when it is not the default: 4:2:0 is what every stream was
-        // before the key existed, and saying so on each card would be noise.
-        fn chroma(chroma: Chroma) -> &'static str {
-            match chroma {
-                Chroma::Subsampled => "",
-                Chroma::Full => " 4:4:4",
+        // before the key existed, and saying so on each card would be noise. And
+        // not at all on the fallback codec, which has no 4:4:4 to name — the
+        // stream is 4:2:0 there whatever the key says.
+        fn chroma(chroma: Chroma, video: VideoCodec) -> &'static str {
+            match (chroma, video) {
+                (Chroma::Full, VideoCodec::Vp9) => " 4:4:4",
+                _ => "",
+            }
+        }
+        // The same rule for the codec: VP9 is what every card said before there
+        // was a second one, so only the fallback is named.
+        fn codec(video: VideoCodec) -> &'static str {
+            match video {
+                VideoCodec::Vp9 => "",
+                VideoCodec::H264 => " h264",
             }
         }
         match self {
             RenderPlan::Video { quality, adaptive, chroma: c } => {
-                format!("video q{quality}{}{}", chroma(*c), floor(*adaptive))
+                format!("video q{quality}{}{}{}", chroma(*c, video), codec(video), floor(*adaptive))
             }
             RenderPlan::Tiles { base, motion: None, adaptive, .. } => {
                 // No motion arm at all — plain `tiles`, whatever the base: whether
@@ -483,7 +537,7 @@ impl RenderPlan {
             }
             RenderPlan::Tiles { base, motion: Some(motion), debug, adaptive } => {
                 let MotionEncode { quality, chroma: c } = motion;
-                let moving = format!("stream q{quality}{}", chroma(*c));
+                let moving = format!("stream q{quality}{}{}", chroma(*c, video), codec(video));
                 let debug = if *debug { " (debug outlines)" } else { "" };
                 format!(
                     "motion · base {}, moving {moving}{debug}{}",
@@ -1324,6 +1378,13 @@ pub struct AppConfig {
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
     pub dev_hostname: Option<String>,
+    /// `serve --force-video-codec`: every session's video streams are encoded with
+    /// this codec, whatever its browser asked for. A QA control and nothing else —
+    /// it exists to watch either encoder from a browser that decodes both, and it
+    /// is deliberately not a config key: a deployment has no reason to choose for
+    /// a browser, and a file that could would be a file that silently broke the
+    /// browsers that cannot decode its choice. `None` everywhere but that flag.
+    pub video_override: Option<VideoCodec>,
 }
 
 impl ConfigFile {
@@ -1862,6 +1923,7 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: None,
+            video_override: None,
         })
     }
 
@@ -1936,6 +1998,8 @@ impl ConfigFile {
                 .map(dev_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
+            // The command line's, set by `main` after this returns; never the file's.
+            video_override: None,
         })
     }
 }
@@ -4511,6 +4575,22 @@ mod tests {
             RenderPlan::Video { quality: 80, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }
         );
         assert_eq!(plan.describe(), "video q80 · adaptive ≥20");
+        // The fallback codec is named, ahead of the floor; VP9 never is, and neither is
+        // a 4:4:4 the fallback cannot carry.
+        assert_eq!(plan.describe_for(VideoCodec::H264), "video q80 h264 · adaptive ≥20");
+        let full = RenderPlan::Video { quality: 80, adaptive: None, chroma: Chroma::Full };
+        assert_eq!(full.describe_for(VideoCodec::Vp9), "video q80 4:4:4");
+        assert_eq!(full.describe_for(VideoCodec::H264), "video q80 h264");
+        let motion = RenderPlan::Tiles {
+            base: TileCodec::Png,
+            motion: Some(MotionEncode { quality: 60, chroma: Chroma::Subsampled }),
+            debug: false,
+            adaptive: None,
+        };
+        assert_eq!(motion.describe_for(VideoCodec::H264), "motion · base lossless png, moving stream q60 h264");
+        // A plan that streams nothing has no codec to name.
+        let stills = RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false, adaptive: None };
+        assert_eq!(stills.describe_for(VideoCodec::H264), stills.describe());
 
         let cfg = parse_target(
             "render_subtype = \"jpeg\"\n\

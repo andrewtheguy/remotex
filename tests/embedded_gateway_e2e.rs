@@ -275,7 +275,9 @@ async fn the_status_route_answers_for_the_token() {
 #[tokio::test]
 async fn the_socket_upgrade_takes_the_cookie() {
     let embedded = Embedded::start(one_target());
-    let url = "ws://embedded.remotex.localhost/ws?session=not-a-claim";
+    // The codec is stated as a browser states it: this test is about the cookie,
+    // and a socket that names no codec is refused for that instead.
+    let url = "ws://embedded.remotex.localhost/ws?session=not-a-claim&video=vp9";
 
     let stream = tokio::net::UnixStream::connect(&embedded.socket).await.unwrap();
     let err = tokio_tungstenite::client_async(url, stream)

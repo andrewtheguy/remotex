@@ -20,6 +20,7 @@ pub mod encode;
 pub mod engine;
 pub mod error;
 pub mod feedback;
+pub mod h264;
 pub mod keymap;
 pub mod mic;
 pub mod opus_stream;

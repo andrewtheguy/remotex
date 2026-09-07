@@ -1,7 +1,11 @@
-// What a `render_type = "video"` target puts on the session socket. Video is VP9
-// only, so everything here is decidable without asking the browser anything: the
-// gateway announces `videoFormat` before a stream's first access unit. Nothing here
-// looks at a pixel; a VIDEO record is a header this file parses for itself.
+// What a `render_type = "video"` target puts on the session socket. The gateway
+// announces `videoFormat` before a stream's first access unit, so everything here is
+// decidable without asking the browser anything about a pixel; a VIDEO record is a
+// header this file parses for itself. The codec is the browser's choice — VP9, or the
+// H.264 fallback for a browser whose decoder has no VP9 — stated on the socket at
+// attach, and the format string is expected in whichever shape that produced.
+// Chromium has VP9, so a run here sees `vp09.…` unless the gateway was started with
+// `--force-video-codec h264`, the QA control for watching the other encoder.
 //
 // It needs a gateway whose local config hard-codes the targets. Keep that
 // gitignored file under `tmp/`, for example `tmp/qa_video.toml`:
@@ -286,7 +290,7 @@ test.describe("a video target", () => {
     await leaveSession(page);
   });
 
-  test("streams announced VP9 access units the client can parse", async ({
+  test("streams announced access units the client can parse", async ({
     page,
   }) => {
     const seen = watchSession(page);
@@ -300,8 +304,11 @@ test.describe("a video target", () => {
     expect(seen.formats.length).toBeGreaterThan(0);
     for (const format of seen.formats) {
       // The exact WebCodecs string, whose level comes from the picture size — which
-      // is why the gateway sends it and the client does not derive it.
-      expect(format.decode).toMatch(/^vp09\.\d{2}\.\d{2}\.\d{2}(\.\d{2}){5}$/);
+      // is why the gateway sends it and the client does not derive it. Every field
+      // of a VP9 string, or the profile/constraints/level of an H.264 one.
+      expect(format.decode).toMatch(
+        /^(vp09\.\d{2}\.\d{2}\.\d{2}(\.\d{2}){5}|avc1\.[0-9A-F]{6})$/,
+      );
     }
     assertTheEnvelopeHolds(seen);
 

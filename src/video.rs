@@ -6,7 +6,9 @@
 //! they ask for. `render_type = "video"` asks for one covering the whole desktop.
 //! `render_motion = true` asks for one per coalesced moving region, with the still
 //! codecs carrying everything else. Which rectangles, and when they start and stop, is
-//! [`crate::regions`]' business; [`crate::vp9`] knows only how to encode one.
+//! [`crate::regions`]' business; [`crate::vp9`] and [`crate::h264`] know only how to
+//! encode one, and [`Stream`] here is the one place the session's codec picks between
+//! them.
 //!
 //! Three things about the shape follow from the rest of the gateway rather than from
 //! any codec:
@@ -31,15 +33,15 @@
 //! because every attach injects a repaint, which is one of the moments a stream's
 //! keyframe is forced.
 
-use crate::config::Chroma;
+use crate::config::{Chroma, VideoCodec};
 use crate::tiles::Rect;
 
 /// The 1–100 quality dial, coarsest first.
 ///
 /// The dial is the gateway's own scale rather than a quantizer: [`crate::vp9`] maps it
-/// onto its 0–63, and that mapping is the only place the two numbers meet. The
-/// congestion loop in [`crate::encode`] walks *this* scale, so a future codec is a new
-/// mapping rather than a new loop.
+/// onto its 0–63 and [`crate::h264`] onto its 0–51, and those mappings are the only
+/// places the numbers meet. The congestion loop in [`crate::encode`] walks *this*
+/// scale, which is what let the second codec be a new mapping rather than a new loop.
 pub const QUALITY_MIN: u8 = 1;
 /// See [`QUALITY_MIN`].
 pub const QUALITY_MAX: u8 = 100;
@@ -94,6 +96,92 @@ pub fn fit_ceiling((w, h): (u32, u32)) -> (u32, u32) {
 pub struct AccessUnit {
     pub data: Vec<u8>,
     pub keyframe: bool,
+}
+
+/// One stream over a fixed rectangle, in whichever codec the session chose.
+///
+/// [`crate::regions`] holds these and never asks which arm it has: both codec modules
+/// present the same surface — the rectangle rule, the dial, keyframe-on-demand, a
+/// quality that moves without a keyframe — and this enum is the one place the choice
+/// is made. VP9 ([`crate::vp9`]) is the codec; H.264 ([`crate::h264`]) is what a
+/// browser with no VP9 decoder asked for ([`VideoCodec`]).
+///
+/// Both arms are boxed: libvpx's configuration struct lives inline in its stream and
+/// is several times the size of openh264's handle, and an enum the size of its largest
+/// arm would be paid on every move of the smaller one. At most four of these exist
+/// per session, so the indirection costs nothing that matters.
+pub enum Stream {
+    Vp9(Box<crate::vp9::Stream>),
+    H264(Box<crate::h264::Stream>),
+}
+
+impl Stream {
+    /// A stream over `rect` of a mirror whose coded size is `mirror`, at `quality`
+    /// (1–100), in `codec`. `chroma` is VP9's: H.264 streams 4:2:0 whatever the
+    /// target says, which [`crate::regions::Regions::new`] has logged once already.
+    pub fn new(
+        rect: Rect,
+        mirror: (u16, u16),
+        quality: u8,
+        chroma: Chroma,
+        codec: VideoCodec,
+    ) -> anyhow::Result<Self> {
+        Ok(match codec {
+            VideoCodec::Vp9 => {
+                Self::Vp9(Box::new(crate::vp9::Stream::new(rect, mirror, quality, chroma)?))
+            }
+            VideoCodec::H264 => Self::H264(Box::new(crate::h264::Stream::new(rect, mirror, quality)?)),
+        })
+    }
+
+    /// The region this stream is for — what a record header reports.
+    pub fn rect(&self) -> Rect {
+        match self {
+            Self::Vp9(s) => s.rect(),
+            Self::H264(s) => s.rect(),
+        }
+    }
+
+    /// The dial this stream is currently encoding at.
+    pub fn quality(&self) -> u8 {
+        match self {
+            Self::Vp9(s) => s.quality(),
+            Self::H264(s) => s.quality(),
+        }
+    }
+
+    /// The WebCodecs codec string for this stream, known from construction.
+    pub fn decode_string(&self) -> Option<&str> {
+        match self {
+            Self::Vp9(s) => s.decode_string(),
+            Self::H264(s) => s.decode_string(),
+        }
+    }
+
+    /// Make the next access unit one a decoder can start from.
+    pub fn force_keyframe(&mut self) {
+        match self {
+            Self::Vp9(s) => s.force_keyframe(),
+            Self::H264(s) => s.force_keyframe(),
+        }
+    }
+
+    /// Move the dial on the live encoder, without a keyframe.
+    pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
+        match self {
+            Self::Vp9(s) => s.set_quality(quality),
+            Self::H264(s) => s.set_quality(quality),
+        }
+    }
+
+    /// Encode this stream's rectangle of `mirror` as it stands. See the codec modules
+    /// for the `None` contract, which both keep.
+    pub fn encode(&mut self, mirror: &Mirror, mark: Option<Mark>) -> anyhow::Result<Option<AccessUnit>> {
+        match self {
+            Self::Vp9(s) => s.encode(mirror, mark),
+            Self::H264(s) => s.encode(mirror, mark),
+        }
+    }
 }
 
 /// A `render_motion_debug` outline drawn round the picture a stream encodes.
@@ -544,8 +632,10 @@ mod tests {
         rgb
     }
 
-    /// What the encoder costs on desktop pixels — the measurement that settles VP9's
-    /// `Q_FINEST`, `CPU_USED` and thread count, and what 4:4:4 costs over 4:2:0.
+    /// What the encoders cost on desktop pixels — the measurement that settles VP9's
+    /// `Q_FINEST`, `CPU_USED` and thread count, H.264's `QP_FINEST`, and what 4:4:4
+    /// costs over 4:2:0. Both codecs, so the fallback's cost is read beside the
+    /// codec's and not remembered.
     ///
     /// `#[ignore]`d because it takes a minute and prints rather than asserts: the numbers
     /// are the output, and a threshold on them would be a test of this machine.
@@ -577,23 +667,28 @@ mod tests {
         const FRAMES: u32 = 60;
         let sizes = [(1280u16, 800u16), (1920, 1080)];
         let qualities = [20u8, 40, 60, 80];
-        let chromas = [Chroma::Subsampled, Chroma::Full];
+        // H.264 is 4:2:0 only, so its 4:4:4 row would be the 4:2:0 row again.
+        let arms = [
+            (VideoCodec::Vp9, Chroma::Subsampled),
+            (VideoCodec::Vp9, Chroma::Full),
+            (VideoCodec::H264, Chroma::Subsampled),
+        ];
 
         println!(
-            "\n| size      | chroma | quality | KB total | KB keyframe | µs/frame encode \
+            "\n| size      | codec | chroma | quality | KB total | KB keyframe | µs/frame encode \
              | µs/frame convert | kbit/s at 30fps |"
         );
         println!(
-            "|-----------|--------|---------|----------|-------------|-----------------\
+            "|-----------|-------|--------|---------|----------|-------------|-----------------\
              |------------------|-----------------|"
         );
         for (w, h) in sizes {
-            for (chroma, quality) in
-                chromas.iter().flat_map(|c| qualities.iter().map(move |q| (*c, *q)))
+            for ((codec, chroma), quality) in
+                arms.iter().flat_map(|a| qualities.iter().map(move |q| (*a, *q)))
             {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
                 let mut stream =
-                    crate::vp9::Stream::new(mirror.rect(), mirror.coded(), quality, chroma)
+                    Stream::new(mirror.rect(), mirror.coded(), quality, chroma, codec)
                         .expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
@@ -627,8 +722,9 @@ mod tests {
 
                 let bits = total as f64 * 8.0;
                 println!(
-                    "| {:9} | {:6} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
+                    "| {:9} | {:5} | {:6} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
                     format!("{w}x{h}"),
+                    codec.name(),
                     chroma.name(),
                     quality,
                     total / 1024,

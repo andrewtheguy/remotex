@@ -46,7 +46,7 @@ use tokio::time::{Duration, Instant};
 use crate::audio::AudioBridge;
 use crate::camera::CameraBridge;
 use crate::mic::MicBridge;
-use crate::config::{Security, TargetConfig};
+use crate::config::{Security, TargetConfig, VideoCodec};
 use crate::copies;
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16};
@@ -188,11 +188,12 @@ fn connect_budget() -> Duration {
 /// calls on its own thread, never through the `select!` below. That is the whole
 /// separation — see [`crate::rdp_audio`], which also says what a `None` asks the
 /// host to do with its sound instead.
-// Eight handoffs matching the engine spawner's surface; see spawn_engine.
+// Nine handoffs matching the engine spawner's surface; see spawn_engine.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
     display: Option<HostDisplay>,
+    video: VideoCodec,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -200,7 +201,7 @@ pub async fn run(
     microphone: Option<Arc<MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, config.render_plan(), feedback);
+    let sink = TileSink::new("rdp", frame_tx, config.render_plan(), video, feedback);
     session(config, display, input_rx, &sink, audio, camera, microphone).await;
     sink.finish().await;
 }
