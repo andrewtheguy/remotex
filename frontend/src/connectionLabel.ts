@@ -30,8 +30,7 @@ export function connectionLabel(
   }
   const known: Record<string, string> = {
     ard: "Apple Screen Sharing, Standard mode",
-    "ard-high-performance":
-      "Apple Screen Sharing, High Performance — experimental",
+    "ard-high-performance": "Apple Screen Sharing, High Performance",
   };
   const described = known[subtype];
   return described

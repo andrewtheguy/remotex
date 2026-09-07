@@ -82,7 +82,7 @@ pub enum Subtype {
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
     /// control messages (see [`crate::vnc_apple`]).
     ///
-    /// **Experimental.** Alone among the subtypes, none of this is documented by
+    /// Alone among the subtypes, none of this is documented by
     /// Apple: the revision, its record layer, its control messages and its virtual
     /// display handling were all reverse engineered, and are only as correct as the
     /// Macs they have been measured against — docs/apple-vnc-889.md records which,

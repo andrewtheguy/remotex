@@ -22,12 +22,9 @@ test("the two Apple modes say which one they are, in the config's own spelling",
     connectionLabel("vnc", "ard"),
     "VNC · Apple Screen Sharing, Standard mode (ard)",
   );
-  // Experimental is part of the name here on purpose: it is the one path built
-  // with no specification behind it, and this card is where somebody looks when it
-  // has behaved oddly.
   assert.equal(
     connectionLabel("vnc", "ard-high-performance"),
-    "VNC · Apple Screen Sharing, High Performance — experimental (ard-high-performance)",
+    "VNC · Apple Screen Sharing, High Performance (ard-high-performance)",
   );
 });
 

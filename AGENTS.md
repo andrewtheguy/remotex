@@ -207,14 +207,12 @@ Apple display modes:
   and leaves the Windows keys as Super. The server also drops pointer and key
   input for the first seconds of a session; `tests/ws_probe.py --key` waits 8 s
   before injecting for that reason.
-- `ard-high-performance` is **experimental** and the one path built with no
-  specification at all — the revision, record layer, control messages and virtual
-  display handling are reverse engineered, so treat `docs/apple-vnc-889.md` as
-  measurement, not contract. Its dynamic-resolution path remains reverse
-  engineered.
-  Prefer widening `ard` over deepening this. It is Apple Screen Sharing's
-  **High Performance mode** over
-  RFB 003.889. It requests one virtual display, disables physical displays, and
+- `ard-high-performance` is the one path built with no specification at all —
+  the revision, record layer, control messages and virtual display handling are
+  reverse engineered, so treat `docs/apple-vnc-889.md` as measurement, not
+  contract. Its dynamic-resolution path remains reverse engineered.
+  It is Apple Screen Sharing's **High Performance mode** over RFB 003.889. It
+  requests one virtual display, disables physical displays, and
   moves all remote windows onto it. It opens at `opening_size` at the client
   screen's density — the client's own screen resolution unless a size is pinned,
   which is how Apple's client opens, and it matters more than any later size:
@@ -224,8 +222,8 @@ Apple display modes:
   Its setup descriptor always enables dynamic resolution. Apple's client can
   choose up to two virtual displays and fixed resolution presets; remotex
   implements neither control.
-  Its **system audio** is the one thing it does that `ard` cannot, and it is
-  behind the non-default `apple-hp-audio` Cargo feature — see "Remote audio".
+  Its **system audio** is the experimental part of this path, behind the
+  non-default `apple-hp-audio` Cargo feature — see "Remote audio".
 
 ## Browser tests
 
@@ -307,8 +305,8 @@ does not go through it and must not start: resampling is the thing it exists not
 to do. Do not tie the group size to a packet size either; the ratio is what makes
 882-to-960 exact.
 
-**Apple High Performance system audio** is the third source, and the only one
-behind a Cargo feature: `apple-hp-audio`, off by default, absent from every
+**Apple High Performance system audio** is the third source, the **experimental**
+one, and the only one behind a Cargo feature: `apple-hp-audio`, off by default, absent from every
 release artifact and container image, built by hand with `cargo build --release
 --features apple-hp-audio`. The Mac's `RemoteDesktopSystemAudio` transmitter
 sends AAC-ELD over SRTP whatever codec the negotiation agrees (proven, see

@@ -14,14 +14,14 @@ no conclusions combine state from the two session types.
 
 ## Summary
 
-`subtype = "ard-high-performance"` is **experimental**. Everything below is
+Everything below is
 measurement, not specification: Apple documents none of RFB 003.889, and the
 confirmations here hold for the Macs and the macOS version named above rather
 than for the protocol. A macOS update is free to invalidate any row. The
 dynamic-resolution descriptor has been exercised against the arbitrary-size
-boundary and a burst of viewport reports, but remains reverse engineered. Prefer
-`subtype = "ard"`, which rides the standard RFB 3.8 wire, where a virtual display
-is not required.
+boundary and a burst of viewport reports, but remains reverse engineered. The
+system audio below is **experimental** and stays behind the non-default
+`apple-hp-audio` feature.
 
 | | |
 |---|---|

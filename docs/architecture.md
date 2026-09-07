@@ -23,7 +23,7 @@ RDP and VNC frames are decoded in the gateway and sent as independent image tile
 or as VP9 streams, according to the target's render plan. Tiles are lossless
 PNG by default, with JPEG available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
-Apple Remote Desktop authentication, or with the experimental
+Apple Remote Desktop authentication, or with the
 `ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
@@ -1129,7 +1129,7 @@ the ordinary byte stream, and asks for zlib in the second `SetEncodings` exactly
 High Performance does — the upgrade waits on a display layout, not on a dialect.
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
-revision, and is **experimental**: none of it is documented by Apple, so every
+revision: none of it is documented by Apple, so every
 claim in this section is measurement rather than specification, holding for the
 Macs in [apple-vnc-889.md](apple-vnc-889.md) rather than for the protocol. The
 dynamic-resolution path behind `resize = true` remains reverse engineered. It
@@ -1165,8 +1165,8 @@ and a layout payload is two bytes shorter than its own length prefix claims. The
 byte layouts and measured protocol corrections are in
 [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
-**High Performance system audio** is the one thing this mode does that Standard
-mode cannot, and it is behind the `apple-hp-audio` Cargo feature — off by default,
+**High Performance system audio** is the **experimental** part of this path, and
+it is behind the `apple-hp-audio` Cargo feature — off by default,
 in no release artifact or container image, built by hand with
 `cargo build --release --features apple-hp-audio`. The Mac's sound does not ride
 RFB: after the first display layout the client advertises encoding 1010 in the
