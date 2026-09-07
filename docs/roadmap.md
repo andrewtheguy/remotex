@@ -157,9 +157,11 @@ one private pseudo-encoding and one message type each way, behind
 `subtype = "sway"` — plus a session daemon on the sway host built from wayvnc,
 a small neatvnc hook and a controller speaking sway IPC. The design, the byte
 layouts, the sway command sequence, the open questions and the staged plan are
-in [`sway-remote-session.md`](sway-remote-session.md). Stage 1 of that plan —
-a resizable headless output beside a live DRM panel — is the whole risk, and
-nothing after it starts until that is measured on macintel.
+in [`sway-remote-session.md`](sway-remote-session.md). Stage 1 of that plan is
+measured on macintel: stock sway 1.10 gives the resizable headless output beside
+the live panel and the restore holds, but wayvnc 0.9.1 crashes on half the
+connects while the output is created beside it. That crash is the risk now, and
+stage 2 starts with its backtrace.
 
 ## Not planned
 

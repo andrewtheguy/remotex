@@ -3,12 +3,13 @@
 Console-style remote control of a physical sway machine: every physical display
 is replaced by one resizable virtual display for the length of the session, the
 gateway renders it at the browser's density with nothing to configure, and the
-person at the keyboard takes control back through a Linux virtual console. This
-is a design, not a measurement: nothing here is implemented, and the claims
-marked *unverified* are the ones the first stage of the plan exists to test.
-The reference host is the Intel Mac running Debian and sway (`ssh macintel`),
-whose headless wayvnc is the measured case in
-[`generic-vnc-hidpi.md`](generic-vnc-hidpi.md).
+person at the keyboard takes control back through a Linux virtual console.
+Stage 1 of the plan, the compositor-side choreography with a stock wayvnc, is
+measured; see [Stage 1, measured on macintel](#stage-1-measured-on-macintel).
+The wire extension and the daemon are still design, and the claims marked
+*unverified* are the ones no measurement has reached. The reference host is the
+Intel Mac running Debian and sway (`ssh macintel`), whose headless wayvnc is the
+measured case in [`generic-vnc-hidpi.md`](generic-vnc-hidpi.md).
 
 ## Decision
 
@@ -192,40 +193,43 @@ except the modifiers and `F1` to `F12`, which carry `XF86Switch_VT_n` under
 Ctrl+Alt. Typed keys reach nothing; the chord still works. The same map can put
 `XF86Switch_VT_3` on a bare `Esc` so that one key is the gesture, as on a Mac.
 wayvnc's virtual keyboard carries its own keymap over the virtual-keyboard
-protocol, so the remote user is unaffected (*unverified on macintel*).
+protocol, so the remote user is unaffected: measured, its layout stays
+`English (US)` while the physical keyboards carry the session map.
 
 **Pointers are disabled** by identifier, from the snapshot taken before the
 virtual pointer existed. A pointer has no part in the escape, and a stray local
 click into the remote session is the one leak the keymap does not close. Never
 disable by `type:pointer`, which would also catch wayvnc's device.
 
-**Restore** re-enables the pointers and removes the session keymap.
-`get_inputs` does not report which file a keyboard's map came from, so the
-keymap is restored by re-issuing the `input` lines of the user's sway config,
-with `swaymsg reload` as the blunt fallback that also re-applies every output
-from config.
+**Restore** re-enables the pointers and removes the session keymap with
+`input <identifier> xkb_file -`, which unsets the file and returns the device
+to the layout the config gives it.
 
 ### Sway commands, in order
 
 ```sh
 # start
 swaymsg -t get_outputs; swaymsg -t get_inputs; swaymsg -t get_workspaces   # snapshot
-swaymsg create_output                                                      # HEADLESS-1
-swaymsg output HEADLESS-1 enable scale 2 mode --custom 3456x1766 position 0 0
-swaymsg 'workspace 1; move workspace to output HEADLESS-1'                 # each workspace, every panel
-swaymsg focus output HEADLESS-1
-swaymsg input 1452:641:Apple_Internal_Keyboard xkb_file /run/user/1000/<daemon>/escape.xkb
-swaymsg input 1452:641:Apple_Internal_Trackpad events disabled             # each physical pointer
-swaymsg output eDP-1 disable                                               # each physical output
+swaymsg create_output                                                      # HEADLESS-n
+swaymsg -- output HEADLESS-n scale 2                                       # one property per command:
+swaymsg -- output HEADLESS-n mode --custom 3456x1766@60Hz                  # combined with enable, sway 1.10
+swaymsg 'workspace 1; move workspace to output HEADLESS-n'                 # reports success and does nothing
+swaymsg focus output HEADLESS-n                                            # each workspace, every panel
+swaymsg input 1452:594:Apple_Inc._Apple_Internal_Keyboard_/_Trackpad xkb_file /run/user/1000/<daemon>/escape.xkb
+swaymsg input 1452:594:bcm5974 events disabled                             # each physical pointer
+wayvncctl output-set HEADLESS-n; until wayvncctl -j output-list shows it captured
+swaymsg output LVDS-1 disable                                              # each physical output
+swaymsg output HEADLESS-n position 0 0
 
 # resize: wayvnc's existing path, wlr-output-management custom mode + scale
 
 # end
-swaymsg output eDP-1 enable mode 2560x1600 scale 2 position 0 0 transform normal   # per snapshot
-swaymsg 'workspace 1; move workspace to output eDP-1'                      # per snapshot
-swaymsg input 1452:641:Apple_Internal_Trackpad events enabled
-swaymsg input 1452:641:Apple_Internal_Keyboard xkb_layout us              # the config's own input lines
-swaymsg output HEADLESS-1 unplug                                           # or disable
+swaymsg output LVDS-1 enable; mode 1280x800@60.223Hz; scale 1; position 0 0; transform normal   # per snapshot, one command each
+swaymsg 'workspace 1; move workspace to output LVDS-1'                     # per snapshot
+swaymsg input 1452:594:bcm5974 events enabled
+swaymsg input 1452:594:Apple_Inc._Apple_Internal_Keyboard_/_Trackpad xkb_file -   # drops the session map
+wayvncctl output-set LVDS-1; until it shows captured
+swaymsg output HEADLESS-n unplug
 swaylock -f                                                                # takeover_lock = true
 ```
 
@@ -346,10 +350,8 @@ escape_key = esc               # esc | none; plain Esc also switches to the cons
 
 Host prerequisites:
 
-- sway started with the headless backend loaded beside DRM, so `create_output`
-  works on a physical machine. The expected form is
-  `WLR_BACKENDS=libinput,drm,headless` in the session's environment
-  (*unverified on macintel*).
+- sway 1.10 or later, which carries a headless backend beside DRM on its own:
+  `create_output` works on the stock session with no `WLR_BACKENDS`.
 - The wlroots protocols wayvnc already needs: screencopy or
   image-copy-capture, virtual keyboard and pointer, data-control,
   output-management. Nothing more; there is no drawing on the physical side.
@@ -396,22 +398,20 @@ path for every VNC dialect.
 
 ## Open questions
 
-- **Headless beside DRM.** Does sway on macintel accept `create_output` when
-  started with both backends, and does the created output behave like the fully
-  headless case wayvnc was measured against? First thing to test, before any
-  code.
-- **The escape keymap.** That sway still performs the VT switch from a
-  per-device `xkb_file` map whose other keys are `NoSymbol`, and that the
-  virtual keyboard's own map is untouched by it. If per-device maps cannot
-  carry the switch, the fallback is leaving the physical keyboard's map alone
-  and accepting that keys typed before the chord reach the remote session.
+- **wayvnc 0.9.1 crashes on the choreography.** Half the connects measured so
+  far killed the server with SIGSEGV while the headless output was being
+  created and configured beside it; see
+  [the blocking finding](#the-blocking-finding-wayvnc-091-crashes-on-the-choreography).
+  Stage 1 with a stock wayvnc is not usable until the backtrace says why.
+- **The escape keymap's switch.** The per-device `xkb_file` map loads and
+  leaves the virtual keyboard's layout alone; whether sway performs the VT
+  switch from it on a physical keypress is unmeasured. If it does not, the
+  fallback is leaving the physical keyboard's map alone and accepting that keys
+  typed before the chord reach the remote session.
 - **Restore on an inactive VT.** Under the vt policy the panels are re-enabled
   while sway does not hold the VT. Expected: wlroots applies the change on
   reactivation. If it is dropped instead, restore re-issues the output commands
   on the return switch, which the watcher also sees.
-- **Unplugging the output.** `output … unplug` exists for headless outputs in
-  recent sway; if macintel's version lacks it, restore falls back to disabling
-  the output and reusing it next session.
 - **Lid and hotplug.** A lid close or a monitor unplugged during a session
   changes the physical set the snapshot describes. Restore should enable what
   is present and skip what is gone, and a panel that appears mid-session should
@@ -429,10 +429,12 @@ path for every VNC dialect.
 
 ## Plan
 
-1. **Controller with stock wayvnc.** Prove headless beside DRM on macintel.
-   Consolidation onto the headless output and the console watcher, driven by
-   wayvnc client connect and disconnect. Snapshot and restore, crash recovery.
-   The existing gateway with the manual density toggle.
+1. **Controller with stock wayvnc.** Headless beside DRM on macintel,
+   consolidation onto the headless output, snapshot and restore, driven by
+   wayvnc client connect and disconnect, through the existing gateway with the
+   manual density toggle. Measured, see below; the console watcher and crash
+   recovery are written and not yet exercised, and the wayvnc crash stands in
+   the way of using it.
 2. **The dialect.** The neatvnc hook and the two messages. Mode and scale
    applied together on request. `subtype = "sway"` in the gateway, density from
    the wire. End reasons shown in the browser.
@@ -440,6 +442,104 @@ path for every VNC dialect.
    and hotplug handling, a swayidle inhibitor. Extended Clipboard on the server.
    Upstream what neatvnc and wayvnc will take.
 
-Stage 1 is the whole risk. If sway cannot give a resizable headless output
-beside a live DRM panel, the design changes shape and nothing in stages 2 and 3
-should be started.
+Stage 1 was the whole risk, and the compositor half of it is retired: sway
+gives a resizable headless output beside a live DRM panel. The risk that
+replaced it is the wayvnc crash, and stage 2 should start with the backtrace.
+
+## Stage 1, measured on macintel
+
+Measured 2026-09-07 on the reference host: Debian 13, sway 1.10.1, wlroots
+0.18.2, wayvnc 0.9.1 and neatvnc 0.9.1 from the distribution, greetd starting
+sway on VT 2, one internal panel `LVDS-1` at 1280×800 scale 1. The controller is
+`sway-remote-session/sway-remote-session` in this repository: a dependency-free
+Python script run through uv, driven by `wayvncctl event-receive`, with a
+control socket for `status`, `end` and `restore`. The host runs it as the
+`sway_remote_session` role of the `ansible-macintel` playbook, a user unit
+beside wayvnc's, with the size, scale and policy on its command line.
+
+### What works
+
+- **Headless beside DRM needs nothing.** sway 1.10 always adds a headless
+  backend to its multi-backend, so `swaymsg create_output` succeeds on the stock
+  session. The output arrives as `HEADLESS-n` at 1920×1080, scale 1, right of
+  the panel, and `output HEADLESS-n unplug` removes it. `n` climbs with every
+  creation for the compositor's lifetime, so the daemon finds the new output by
+  name difference, never by a fixed name.
+- **Custom mode and scale apply, one property per command.** `scale 2` and
+  then `mode --custom 3456x1766@60Hz` give a 1728×883 logical output that
+  wayvnc lists as 3456×1766. Combined into one `enable scale 2 mode --custom …`
+  command, sway 1.10.1 answers success and changes nothing. A refresh in the
+  custom mode is optional; without it the mode reports 0 Hz.
+- **Consolidation.** Workspaces move with `workspace <name>; move workspace to
+  output HEADLESS-n`; after `output LVDS-1 disable` sway reports the panel as
+  inactive with a null mode and scale, and exactly one output is active.
+- **Inputs.** The escape map compiles under xkbcomp and loads through a
+  per-device `xkb_file` on the internal keyboard and on the other keyboard-class
+  devices (IR receiver, power and sleep buttons, video bus); `get_inputs` then
+  names their layout after the map while wayvnc's `0:0:wlr_virtual_keyboard_v1`
+  keeps `English (US)`. `xkb_file -` drops the map. `events disabled` by
+  identifier stops the touchpad; the virtual pointer is
+  `0:0:wlr_virtual_pointer_v1`, so vendor and product `0:0` identify wayvnc's
+  devices and the snapshot excludes them.
+- **wayvnc follows.** `wayvncctl output-set` switches the capture and
+  `wayvncctl -j output-list` shows `captured: true` on the target once it has;
+  `output-set` returns before that, so the controller waits for the flag before
+  it disables the panel and before it unplugs the session output. `wayvncctl -j
+  event-receive` delivers `client-connected` and `client-disconnected` with a
+  `connection_count`, `capture-changed` with an `output` field, and
+  `output-added` and `output-removed`, one JSON object per line.
+- **Through the gateway.** The generic VNC engine on a `resize = true` target
+  followed wayvnc's server-initiated resizes, 1280×800 to 1920×1080 to
+  3456×1766, and showed the session at the manual 1x label. The gateway's first
+  `SetDesktopSize` goes out at connect, while the capture is still on the DRM
+  panel, and wayvnc answers it prohibited because that output is not headless.
+  The deferred start in stage 2 removes the race; in stage 1 it is harmless.
+- **Restore.** Every session end, including the ones wayvnc's crash caused,
+  put the panel back at its mode, scale, position and transform, the workspace
+  on it, the touchpad on and the keyboards on their configured layout, and the
+  controller's comparison against the snapshot found no difference.
+
+### What the host does to a session
+
+- The desktop role's `sway-lid watch` re-enables the internal panel whenever it
+  is inactive with the lid open, within a second of the session disabling it.
+  The role now honours a hold file, `$XDG_RUNTIME_DIR/sway-remote-session/active`,
+  that the controller writes for the session's length.
+- `swayidle` powers every output off after five minutes idle and locks after
+  ten. Remote input counts as activity, so neither fires under a live viewer;
+  when it does, wayvnc pauses its capture of the powered-off output until the
+  next input.
+- The `wayvnc` user unit restarts the server three seconds after any exit, so
+  a crash costs the viewer a reconnect.
+
+### The blocking finding: wayvnc 0.9.1 crashes on the choreography
+
+In three of six connects wayvnc died with SIGSEGV about 200 ms after
+`client-connected`, while the controller was creating the headless output and
+setting its scale and mode, before the capture switch and before the panel was
+touched. The three that survived ran the identical sequence. Each time the
+gateway saw the server close the connection, the controller saw the control
+socket refuse and then `wayvnc-shutdown`, and the restore ran clean. The one
+connect made without an early client `SetDesktopSize` did not crash, which is
+one sample. There is no backtrace yet: the user unit's core limit is zero, so
+`systemd-coredump`, installed on the host for this, logged the signal without a
+core. The next step is `LimitCORE=infinity` on the wayvnc unit plus
+`wayvnc-dbgsym` and `libneatvnc0-dbgsym` from `trixie-debug`, or a source build
+with symbols. The stage-2 daemon is a wayvnc fork, so the fix lands where the
+crash is.
+
+Until then a stock wayvnc cannot carry stage 1: a connect that kills the server
+half the time is not a session. The role stays deployed and enabled on macintel
+with its unit stopped; `systemctl --user start sway-remote-session` re-arms it.
+
+### Not measured
+
+- The VT takeover: `sudo chvt 3` during a session drives the console watcher
+  without a keypress, and `chvt 2` back drives the re-run of the restore on an
+  inactive VT.
+- Controller crash recovery (the unit restarts it and it restores from the
+  snapshot before listening) and `sway-remote-session end`, the login policy's
+  gesture. Both are written and untested.
+- The escape map's VT switch on a physical keypress, and the panel going dark
+  and coming back: eyes only.
+- Fractional scale on the headless output, and any external monitor.
