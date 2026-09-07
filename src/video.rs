@@ -698,12 +698,12 @@ mod tests {
         let mut mirror = Mirror::new(640, 480).expect("a mirror");
         mirror
             .blit(rect(320, 64, 320, 64), &flat(320, 64, [9, 8, 7]))
-            .expect("a cell-sized blit");
+            .expect("a blit");
         let mut out = Vec::new();
-        mirror.crop_into(rect(320, 64, 320, 64), &mut out).expect("a crop of that cell");
+        mirror.crop_into(rect(320, 64, 320, 64), &mut out).expect("a crop of that rectangle");
         assert_eq!(out, flat(320, 64, [9, 8, 7]));
         // Its neighbour is untouched, which is the same statement from the other side.
-        mirror.crop_into(rect(0, 64, 320, 64), &mut out).expect("a crop of the cell beside it");
+        mirror.crop_into(rect(0, 64, 320, 64), &mut out).expect("a crop of the rectangle beside it");
         assert_eq!(out, flat(320, 64, [0, 0, 0]));
         // A rectangle the mirror does not hold is refused rather than indexed.
         assert!(mirror.crop_into(rect(600, 400, 64, 128), &mut out).is_err());
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn a_region_at_the_desktops_odd_edge_grows_into_the_mirrors_pad() {
         let mirror = Mirror::new(1919, 1079).expect("an odd-sized mirror");
-        // The bottom-right region of a 1919x1079 desktop: cells from (320*5, 64*16) to
+        // The bottom-right region of a 1919x1079 desktop: cells from (64*25, 64*16) to
         // the edge, so 319 wide and 55 tall — odd on both axes, and the only way a
         // region can be.
         let edge = Rect { left: 1600, top: 1024, right: 1918, bottom: 1078 };

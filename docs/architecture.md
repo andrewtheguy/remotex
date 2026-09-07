@@ -278,8 +278,17 @@ What the detection hands the moving cells to is an inter-frame video stream per
 coalesced region (`src/regions.rs`, encoding through `src/vp9.rs`), with the base
 codec carrying every cell outside one.
 
-- **Which regions.** `coalesce` in `src/regions.rs` takes the cells in motion,
-  groups them into 4-connected components, and takes each component's bounding box.
+- **Which regions.** `components` and `merge` in `src/regions.rs` — together
+  `coalesce`, the pure pair the tests exercise — take the cells in motion, group
+  them into 4-connected components, and take each component's bounding box.
+  A component of fewer than `MIN_STREAM_CELLS` (5) moving cells — a 2×2 block, the
+  most a spinner up to a cell wide can touch — is not a video and goes to the still
+  codecs before anything else is decided: a spinner in one corner while a video
+  plays in the other stays on `render_subtype`, where it costs a few kilobytes a
+  change, rather than paying for an encoder, a keyframe, a decoder at the far end
+  and a cleanup every time it stops and starts. It counts neither towards the cap
+  nor as a merge partner, so it cannot pull a larger region's box out to meet it;
+  its cells inside some larger region's box are carried by that stream regardless.
   Over `MAX_STREAMS` (4) it merges the pair whose merged box adds the fewest cells;
   a merge that would cover more than twice the cells actually moving inside it is
   refused, and the smallest region goes to the still codecs instead. That last rule
@@ -289,7 +298,10 @@ codec carrying every cell outside one.
   A region that shrinks keeps its stream — the idle margin codes as skipped
   macroblocks, where a restart costs an encoder and a keyframe — and one that grows
   past its rectangle gets a new stream, because an inter-frame stream means nothing
-  if its rectangle moves. A region with nothing moving in it for `STREAM_IDLE` ends.
+  if its rectangle moves. A region with nothing worth a stream moving in it for
+  `STREAM_IDLE` ends — the same `MIN_STREAM_CELLS` gate that starts a stream is
+  what keeps one alive, so a video pausing under a buffering spinner ends its
+  stream and sharpens exactly as a pause with no spinner does.
   A screen that has stopped changing produces no frame boundary at all, so the
   cleanup tick expires idle streams itself; it may only *end* them, never start one,
   which is what keeps a cell from being delivered twice.
@@ -309,7 +321,7 @@ codec carrying every cell outside one.
 
   Two components' cells cannot overlap, but their bounding boxes can — a cell tucked
   into an L's corner is its own region inside the L's box, or two L's interlock — and
-  a cell in two live regions is a cell two streams both carry, so `coalesce` merges
+  a cell in two live regions is a cell two streams both carry, so `merge` joins
   an overlapping pair into its union. A union that adds no cell is always taken; one
   past the `MERGE_WASTE` veto is refused, and the component with fewer moving cells
   goes to the still codecs instead.

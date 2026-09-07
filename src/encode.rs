@@ -1970,9 +1970,9 @@ mod tests {
     async fn a_cell_the_bounding_box_only_reached_over_never_goes_into_motion() {
         let (sink, _frame_rx) = stream_sink(1280, 64).await;
 
-        // One band, four cells. The video is at one end, the banner at the other,
-        // and the two quiet cells between them are only inside the box.
-        let band = rect(0, 0, 320 * 4 - 1, 63);
+        // One band across four cells. The video is at one end, the banner at the
+        // other, and the two quiet cells between them are only inside the box.
+        let band = rect(0, 0, crate::protocol::CELL_W * 4 - 1, 63);
         let report = Changed { rect: band, cells: vec![(0, 0), (3, 0)] };
         for _ in 0..CHURN_WINDOW {
             sink.damage(&report, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
@@ -2016,9 +2016,9 @@ mod tests {
     async fn a_reset_drops_every_history() {
         let (sink, _frame_rx) = stream_sink(640, 128).await;
 
-        let cell = rect(0, 0, 320, 64);
+        let area = rect(0, 0, 320, 64);
         for _ in 0..CHURN_MOVING {
-            sink.damage(&all_of(cell), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+            sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
             tokio::time::advance(CHURN_SLOT).await;
         }
         sink.flush().await;
@@ -2462,6 +2462,37 @@ mod tests {
             frame_rx.try_recv().is_err(),
             "a streamed cell was sent as a tile as well as in its stream"
         );
+    }
+
+    /// A region too small to be a video — a 2×2 block of cells, a spinner's worth —
+    /// is never streamed however long it churns: every change goes out at the base
+    /// encode, and there is nothing to clean up after it. Same clock, same number of
+    /// slots as it takes the strip above to earn its stream.
+    #[tokio::test(start_paused = true)]
+    async fn a_spinner_sized_region_stays_on_the_base_encode() {
+        let (sink, mut frame_rx) = stream_sink(640, 128).await;
+        let spinner = rect(0, 0, 128, 128);
+        for _ in 0..40 {
+            sink.damage(&all_of(spinner), |piece| flat(piece.w(), piece.h(), 40)).await.unwrap();
+            sink.frame().await.unwrap();
+            tokio::time::advance(CHURN_SLOT).await;
+        }
+        sink.flush().await;
+
+        let mut out = Vec::new();
+        while let Ok(msg) = frame_rx.try_recv() {
+            out.push(msg);
+        }
+        assert!(!out.is_empty(), "the spinner's changes were not sent at all");
+        assert!(
+            out.iter().all(|msg| matches!(msg, ServerMsg::Tile(_))),
+            "a spinner got a stream: {:?}",
+            out.iter().find(|msg| !matches!(msg, ServerMsg::Tile(_)))
+        );
+        let video = sink.shared.video.lock().await;
+        for cell in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            assert!(!video.regions.covers(cell), "{cell:?} is under a stream");
+        }
     }
 
     /// And the other half: a quiet cell beside a streamed one is still crisp, and a
