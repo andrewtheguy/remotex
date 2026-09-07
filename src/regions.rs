@@ -193,6 +193,10 @@ impl CellBox {
         self.c0 <= other.c1 && other.c0 <= self.c1 && self.r0 <= other.r1 && other.r0 <= self.r1
     }
 
+    fn contains(&self, (c, r): (u16, u16)) -> bool {
+        self.c0 <= c && c <= self.c1 && self.r0 <= r && r <= self.r1
+    }
+
     /// This box in framebuffer pixels, clipped to a `w`×`h` desktop.
     ///
     /// The clip is the only place a region's size can come out odd, and the only
@@ -247,11 +251,24 @@ struct Component {
 /// next pass. The result is pairwise disjoint.
 ///
 /// Pure, and deliberately: which rectangles a churn map deserves is the one decision
-/// here that can be argued about entirely on paper.
+/// here that can be argued about entirely on paper — which is what the tests do
+/// through this composition. [`Regions::retune`] runs the two halves itself,
+/// because it needs the components for a second question.
+#[cfg(test)]
 fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
-    if cells.is_empty() || max == 0 {
-        return Vec::new();
-    }
+    merge(components(cells), max)
+}
+
+/// The 4-connected components of `cells` worth a stream: each one's bounding box
+/// and how many cells are moving inside it, with every component under
+/// [`MIN_STREAM_CELLS`] already left out.
+///
+/// The first half of [`coalesce`], on its own because [`Regions::retune`] needs the
+/// same answer for a second question — whether a live stream still has motion worth
+/// a stream inside it — and that question must not be asked of the boxes the cap
+/// and the veto have already been at, or a region that lost its stream to the cap
+/// this retune would be read as having stopped.
+fn components(cells: &[(u16, u16)]) -> Vec<Component> {
     let remaining: HashSet<(u16, u16)> = cells.iter().copied().collect();
     let mut sorted: Vec<(u16, u16)> = remaining.iter().copied().collect();
     // Sorted so the component order — and so the merge order, and so which region is
@@ -284,12 +301,20 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
         }
         components.push(Component { bbox, moving });
     }
-    // Before the merging, so a component too small to stream is also too small to
+    // Before any merging, so a component too small to stream is also too small to
     // fill a slot or to pull a larger region's box out to meet it. Its cells inside
     // some larger component's box are carried by that stream whatever is decided
-    // here; the rest go crisp.
+    // later; the rest go crisp.
     components.retain(|c| c.moving >= MIN_STREAM_CELLS);
+    components
+}
 
+/// The second half of [`coalesce`]: at most `max` pairwise disjoint boxes from the
+/// components, merging and dropping under [`MERGE_WASTE`] as described there.
+fn merge(mut components: Vec<Component>, max: usize) -> Vec<CellBox> {
+    if max == 0 {
+        return Vec::new();
+    }
     loop {
         // Overlaps first, because they are forced rather than chosen: the delivery
         // rule leaves no option of keeping both boxes as they are.
@@ -632,9 +657,18 @@ impl Regions {
             return Ok(());
         };
 
-        // A region with anything moving in it is a region still in use, whatever the
-        // coalescing decides to do about it.
-        let busy: HashSet<(u16, u16)> = moving.iter().copied().collect();
+        // A region with motion worth a stream in it is a region still in use, whatever
+        // the cap and the veto decide to do about it. Motion *not* worth a stream is
+        // not: what would not start a stream does not keep one alive either, so a
+        // video that pauses under a buffering spinner ends its stream and sharpens,
+        // exactly as it would with no spinner — and the spinner goes to the tiles,
+        // where the gate would have put it anyway.
+        let worthy = components(moving);
+        let busy: HashSet<(u16, u16)> = moving
+            .iter()
+            .copied()
+            .filter(|cell| worthy.iter().any(|c| c.bbox.contains(*cell)))
+            .collect();
         for live in &mut self.live {
             if live.cells.iter().any(|cell| busy.contains(cell)) {
                 live.moving_at = now;
@@ -645,7 +679,7 @@ impl Regions {
         // what is moving, and the still tiles beside it are never re-sent lossily. A
         // stream kept from an earlier retune is the exception — it keeps its whole
         // rectangle, margin included, and every cell of it stays covered and owed.
-        let wanted: Vec<Rect> = coalesce(moving, MAX_STREAMS)
+        let wanted: Vec<Rect> = merge(worthy, MAX_STREAMS)
             .into_iter()
             .filter_map(|bbox| bbox.to_rect(w, h))
             .collect();
@@ -1565,6 +1599,23 @@ mod tests {
 
         regions.retune(&top_row(), t0 + RETUNE).expect("no restart");
         assert_eq!(only_rect(&regions), tall, "a shrinking region paid for a new encoder");
+    }
+
+    /// The other side of shrinking: motion that would not start a stream does not
+    /// keep one alive. A video that pauses under a spinner ends its stream, its cells
+    /// come due, and the spinner is a tile — the same as a pause with no spinner.
+    #[tokio::test]
+    async fn motion_below_the_gate_does_not_keep_a_stream_alive() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.retune(&both_rows(), t0).expect("a stream");
+        let id = regions.live[0].id;
+
+        // Only a 2×2 block still moving inside it, for as long as a stream may idle.
+        regions.retune(&block(0, 0, 1, 1), t0 + STREAM_IDLE).expect("no work");
+        assert!(regions.live.is_empty(), "a spinner kept a video's stream alive");
+        assert_eq!(regions.drain_ended(), vec![id]);
+        assert!(!regions.covers((0, 0)), "a cell no stream carries is still covered");
     }
 
     /// One rectangle that has split into two regions keeps one stream, carrying
