@@ -55,9 +55,6 @@ fn uat_target(name: &str, strategy: RenderType) -> TargetConfig {
     target.render_type = strategy;
     target.render_subtype = Some(RenderSubtype::Classify);
     target.render_quality = Some(QUALITY);
-    // Under motion the moving encode defaults to jpeg — a still tile either
-    // way, so the batch parser below reads every plan this test drives.
-    target.render_motion_subtype = None;
     target.render_motion_quality =
         (strategy == RenderType::Motion).then_some(MOTION_QUALITY);
     target.render_motion_debug = false;

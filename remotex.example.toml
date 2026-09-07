@@ -381,77 +381,56 @@ password = "change-me"
 # "motion" outlines below.
 #render_classify_debug = false
 
-# render_type = "motion" adds a second, cheaper encode used only for the cells that
-# are currently changing fast, re-sending each one at the base encode once it
-# settles. render_motion_subtype and render_motion_quality are that encode; the base
-# keys above are what a still cell keeps. The motion quality can be very low —
-# motion hides it, and it does not last.
+# render_type = "motion" hands the cells that are currently changing fast to a video
+# stream, re-sending each one at the base encode once it settles. The cells in motion
+# are coalesced into regions and each region gets its own stream, while the base codec
+# carries everything else. A video in a window costs its own pixels; the text beside
+# it stays exactly what render_subtype says, and is never re-encoded at all.
 #
 # "motion" does not replace the base keys, it builds on them: render_subtype and
 # render_quality mean exactly what they mean under "tiles", they just describe the
-# settled cells only. Which keys are required follows from whether that base is
-# lossless:
+# settled cells only. So render_quality is still refused over a "png" base — there is
+# nothing to turn down — and still required over "jpeg" or "classify".
 #
-#   render_subtype = "png"  — render_quality refused (nothing to turn down), and
-#                             render_motion_subtype required, since PNG cannot name
-#                             the motion codec for it.
-#   "jpeg", "classify"      — render_quality required, and render_motion_subtype
-#                             optional: omitted, the motion cells go to JPEG at
-#                             render_motion_quality. (A "classify" base never
-#                             classifies its *moving* cells — a cell changing fast
-#                             is not worth the look, and motion hides the
-#                             artifacts the classifier exists to keep off text.)
-#
-# A lossless base with lossy motion — everything settled is exact:
-#render_type = "motion"
-#render_motion_subtype = "jpeg"
-#render_motion_quality = 10
-#
-# A lossy base with cheaper motion, for a link that cannot afford PNG at all. One
-# codec, two qualities, so render_motion_subtype is left out:
-#render_type = "motion"
-#render_subtype = "jpeg"
-#render_quality = 60
-#render_motion_quality = 10
-#
-# The classifier as the base: settled photos JPEG at 60, settled text lossless,
-# and whatever is moving cheap until it stops:
-#render_type = "motion"
-#render_subtype = "classify"
-#render_quality = 60
-#render_motion_quality = 10
-
-# One pairing "motion" is refused with, in every form it takes including "stream"
-# below: subtype = "ard-high-performance". A resize under both corrupts the desktop
-# until the whole gateway is restarted — a reconnect does not clear it — and which
-# of the two is at fault is not established, so the config is refused at load
-# rather than left to be discovered on a live desktop. Use subtype = "ard" to keep
-# "motion", or any other render_type to keep the virtual display. Every other
-# subtype may use "motion", and that target may use every other render_type.
-
-# render_motion_subtype = "stream" is the third thing the motion axis can be, and
-# the only one that is not a still: the cells in motion are coalesced into regions
-# and each region gets its own video stream, while the base codec carries everything
-# else. A video in a window costs its own pixels; the text beside it stays exactly
-# what render_subtype says, and is never re-encoded at all.
-#
-# It is never a default — "jpeg" falls back to the base codec, this one has
-# to be written out — because it is not a cheaper version of the base but a different
-# transport beside it. render_motion_quality is its dial, and there it is a *ceiling*:
-# on a link that can carry it you get that quality, and a link that cannot makes the
-# picture coarser until it can. Nothing goes finer than what is set here.
+# render_motion_quality is the streams' own dial, and there it is a *ceiling*: on a
+# link that can carry it you get that quality, and a link that cannot makes the
+# picture coarser until it can. Nothing goes finer than what is set here. It can be
+# very low — motion hides it, and it does not last. There is no codec key beside it:
+# a moving region is VP9, the same as render_type = "video", and render_chroma below
+# is the only choice inside it.
 #
 # A region that stops moving ends its stream and is re-sent once at the base encode,
-# so a paused video sharpens by itself — the same promise the still motion encodes
-# make, from the same cleanup pass.
+# so a paused video sharpens by itself.
 #
 # The secure-context note under "video" below applies here too: the access units are
 # decoded with WebCodecs either way. The difference is what a browser that cannot
 # decode them is left with — a desktop with a blank rectangle where the video is,
 # rather than no desktop at all.
+#
+# A lossless base with streaming motion — everything settled is exact:
 #render_type = "motion"
-#render_motion_subtype = "stream"
 #render_motion_quality = 30
+#
+# A lossy base, for a link that cannot afford PNG for the settled cells either:
+#render_type = "motion"
+#render_subtype = "jpeg"
+#render_quality = 60
+#render_motion_quality = 30
+#
+# The classifier as the base: settled photos JPEG at 60, settled text lossless,
+# and whatever is moving in a stream until it stops:
+#render_type = "motion"
+#render_subtype = "classify"
+#render_quality = 60
+#render_motion_quality = 30
+
+# One pairing "motion" is refused with: subtype = "ard-high-performance". A resize
+# under both corrupts the desktop until the whole gateway is restarted — a reconnect
+# does not clear it — and which of the two is at fault is not established, so the
+# config is refused at load rather than left to be discovered on a live desktop. Use
+# subtype = "ard" to keep "motion", or any other render_type to keep the virtual
+# display. Every other subtype may use "motion", and that target may use every other
+# render_type.
 
 # render_type = "video" is not a fourth codec, it is a different transport: the whole
 # desktop as one video stream instead of one encoded image per changed region. Every
@@ -480,8 +459,8 @@ password = "change-me"
 #render_quality = 60
 
 # How much colour a video stream carries per pixel — every stream this target has,
-# render_type = "video" and render_motion_subtype = "stream" alike. Refused on a
-# target that streams nothing.
+# render_type = "video" and render_type = "motion" alike. Refused on a target that
+# streams nothing.
 #
 #   "420" — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
 #           every decoder takes, hardware ones included.
@@ -510,8 +489,7 @@ password = "change-me"
 # in the pixels themselves, so which cells it put in motion is something you read
 # off the screen rather than infer from how blurry a region looks.
 #
-#   magenta — sent at the motion encode. Under render_motion_subtype = "stream" it is
-#             the outline of a streamed region, drawn on the picture the encoder
+#   magenta — the outline of a streamed region, drawn on the picture the encoder
 #             sees rather than on the pixels a cleanup restores. Magenta over
 #             something that is not moving is the detection reaching further than
 #             the movement.

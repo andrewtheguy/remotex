@@ -79,9 +79,9 @@ pairings are validated at config-load time in `ConfigFile::parse_with`:
 - `tiles` — every changed region as an independent still image at the base codec,
   and nothing else. The default; with the default subtype it is byte-identical to
   the PNG-only gateway that preceded the dial.
-- `motion` — the base, plus a much cheaper encode for the cells changing fast
-  (`render_motion_subtype` / `render_motion_quality`), each re-sent at the base
-  once it settles.
+- `motion` — the base, plus a video stream per coalesced region of the cells
+  changing fast (`render_motion_quality`), each cell re-sent at the base once it
+  settles.
 - `video` — the whole desktop as one video stream at `render_quality`.
 
 `render_subtype`, the base codec — any of the three under `tiles` and `motion`
@@ -94,9 +94,9 @@ alike:
 
 `video` is the one strategy with nothing on the subtype axis, and refuses it: it
 sends no tiles at all — one fixed region, the whole desktop, for the whole session
-— so there is no per-tile codec left to name. `motion` under
-`render_motion_subtype = "stream"` still has a base codec, because the base encode
-is still a still image: only what is moving becomes a stream.
+— so there is no per-tile codec left to name. `motion` still has a base codec,
+because the base encode is still a still image: only what is moving becomes a
+stream.
 
 **No strategy names a video codec, because video is VP9 only** — see
 [the codec](#the-codec).
@@ -141,10 +141,9 @@ the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum 
 one arm per transport — `Tiles { base, motion, debug, adaptive }` and
 `Video { quality, adaptive, chroma }` —
 rather than a struct with a flag, because the two share no code path worth sharing
-and the compiler is what stops a consumer handling only the first. `motion` is itself
-a `MotionEncode`, `Tile(codec)` or `Stream { quality, chroma }`, for the same reason one
-level down: a cheaper still and an inter-frame stream are not two settings of one
-mechanism.
+and the compiler is what stops a consumer handling only the first. `motion` is an
+`Option<MotionEncode>`, and the `Option` is the switch that keeps the whole motion
+path off: a target that does not ask for it does not pay for it.
 
 ```text
 render_type / render_subtype / render_quality / render_motion_*
@@ -160,28 +159,26 @@ the session hot path costs no C toolchain and no runtime dependency.
 
 #### `motion`: a discount on what is too busy to notice
 
-`motion` is not a third way to encode every tile. It builds on the base encode a
+`motion` is not a second way to encode every tile. It builds on the base encode a
 target already has and changes nothing about it — the base is read from
-`render_subtype` and `render_quality`, same as under `tiles` — and adds a second,
-much cheaper encode used *only* for cells
-currently changing fast. A lossless base is the configuration a fixed quality cannot
-express at all, and the interesting one: text and flat UI stay perfect, and only
-what moves gets ugly.
+`render_subtype` and `render_quality`, same as under `tiles` — and hands the cells
+currently changing fast to a video stream per coalesced moving region instead. A
+lossless base is the configuration a fixed quality cannot express at all, and the
+interesting one: text and flat UI stay perfect and are never re-encoded, and only
+what moves goes to a stream.
 
 ```toml
 [[targets]]
 render_type           = "motion"
 render_subtype        = "png"    # base: what a settled cell gets
-render_motion_subtype = "jpeg"   # moving cells: need not be the base codec
-render_motion_quality = 10       # moving cells: as cheap as it takes
+render_motion_quality = 10       # moving regions: as cheap as it takes
 ```
 
-The moving encode has its own axis (`MotionSubtype`, which admits no `png` and does
-admit `stream` — see below), not just its own quality: what a settled cell gets is a
-still picture, and what is moving may stop being one at all.
-`render_motion_subtype` defaults to `jpeg` under a lossy base — a `classify` base
-included, since a cell changing fast is not worth classifying — and is required
-when the base is `png`: lossless has no dial to turn down.
+The moving encode has its own quality because it is not a cheaper version of the
+base: what a settled cell gets is a still picture, and what is moving is not one at
+all. There is no codec key beside it — a moving region is a VP9 stream, the same
+way `render_type = "video"` is, and the only per-target choice inside it is
+`render_chroma`.
 
 The strategy is protocol-independent and has no subtype restrictions: every engine
 normalizes its damage before it reaches the shared sink that detects and encodes
@@ -227,31 +224,20 @@ their damage through:
 - **Splitting only where it matters.** A band whose cells are all quiet is sent
   whole and at the base encode, so a target with nothing moving is byte-for-byte
   what the same target sends without `motion` at all. Only a band containing a
-  moving cell is cut at the grid — which is what makes a video in a window cost its
-  own cells their quality and cost the text beside it nothing.
-- **Cleanup.** A piece sent at the motion encode keeps its source pixels, bounded
-  by `MAX_STASH_BYTES`. A cell holds *one* debt, so a debt already standing may only
-  be replaced by a rectangle covering it; anything else takes the base encode
-  instead. Damage is clipped to the cell rather than snapped out to it, so two sends
-  can be two different slivers of one cell, and overwriting the first debt with the
-  second left the first sliver lossy with nothing that knew it was owed. That was the
-  pointer trail on RDP, back when the cursor was composited into the framebuffer, so
-  crossing a cell left a run of small rectangles of which only the last would ever
-  have been cleaned up (the browser draws that pointer now — see `Pointer` in
-  `rdp.rs` — but the case is general, and any small object crossing a cell repeats
-  it). A debt a crisp send only *partly* covers is not cancelled but brought
-  up to date, the newer pixels written over the ones it is holding. A debt holds the
-  frame it was recorded on, and the cleanup restores it faithfully — including
-  whatever has changed underneath it since and already gone out crisp. That is wrong
-  content rather than coarse content, and permanent, since the shadow counts the
-  newer pixels as delivered and nothing sends them twice. A `CLEANUP_TICK` interval in `order_loop`
-  re-sends cells
-  idle past `CLEANUP_IDLE` at the *base* encode, `MAX_CLEANUPS_PER_TICK` at a time
-  and oldest first, so a paused screen sharpens on its own without a client
-  repaint. The timer has to be its own, because the case it exists for is a remote
-  that has stopped sending frames. The debt is timed at dispatch rather than when
-  the encode lands, which is what keeps a cleanup from overtaking fresher pixels: a
-  cell with a tile still in the queue cannot also be idle.
+  streamed cell is cut at the grid — which is what makes a video in a window cost
+  its own cells their quality and cost the text beside it nothing. A cell a live
+  stream carries is not sent as a tile at all: its pixels reach the client through
+  that stream, and sending them twice would discharge a debt the stream has not paid.
+- **Cleanup.** The mirror the streams encode from already holds the exact current
+  source for every pixel, so a cleanup is a crop of it and is the newest truth by
+  construction. The debt is two words — which cell, and when a unit last carried it
+  — and a cell a live stream still covers is never due, so a cleanup can never
+  overtake a stream that is still running. A `CLEANUP_TICK` interval in `order_loop`
+  re-sends cells idle past `CLEANUP_IDLE` at the *base* encode,
+  `MAX_CLEANUPS_PER_TICK` at a time and oldest first, so a paused screen sharpens on
+  its own without a client repaint. The timer has to be its own, because the case it
+  exists for is a remote that has stopped sending frames — which is also the only
+  thing that will ever notice a stream has gone quiet.
 - **Resets.** Motion state is cleared on resize, where the keys no longer name the
   same pixels, and on reattach, where the repaint re-sends every pixel at the base
   encode anyway.
@@ -263,26 +249,20 @@ their damage through:
   something that is not moving, and a stale lossy region nothing is going to
   replace. Under the overlay they are distinct — the first is magenta, the second
   carries no mark at all, since an unmarked region was sent whole at the base
-  encode. The mark goes on the copy handed to the encoder, never on the pixels the
-  shadow recorded or the stash owes, so a cleanup erases the outline it replaces
-  rather than restoring it.
+  encode. The mark goes on the copy handed to the encoder — on the crop a region
+  stream encodes rather than on the mirror — never on the pixels the shadow
+  recorded, so a cleanup erases the outline it replaces rather than restoring it.
 
 Cleanups ride the wire as ordinary tiles; nothing about the record changed. What it
-cost is in the `encode totals` line, where `motion` and `cleanup` are read together:
-every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
-saves in motion shows up as a cleanup byte count rivalling the saving.
+cost is in the `encode totals` line, where `unit` and `cleanup` are read together:
+every cleanup is a region sent again as a still, so a scheme paying more in re-sends
+than it saves in streaming shows up as a cleanup byte count rivalling the saving.
 
-##### `render_motion_subtype = "stream"`: a stream per moving region
+##### The streams themselves
 
-The third thing the motion axis can be, and the only one that is not a still. The
-detection above is unchanged — the same cell grid, the same churn window, the same
-hard switch — but what it hands the moving cells to is an inter-frame video stream
-per coalesced region (`src/regions.rs`, encoding through `src/vp9.rs`), with the
-base codec carrying every cell outside one. A video in a window costs its own pixels;
-the text beside it stays exactly what `render_subtype` says and is never re-encoded.
-
-`RenderPlan`'s `motion` is a `MotionEncode` rather than a codec, so the compiler is
-what makes every consumer answer which of the two it is holding.
+What the detection hands the moving cells to is an inter-frame video stream per
+coalesced region (`src/regions.rs`, encoding through `src/vp9.rs`), with the base
+codec carrying every cell outside one.
 
 - **Which regions.** `coalesce` in `src/regions.rs` takes the cells in motion,
   groups them into 4-connected components, and takes each component's bounding box.
@@ -350,8 +330,7 @@ what makes every consumer answer which of the two it is holding.
   crisp re-send from the moment it is streamed, moving or not — the stream codes
   them lossily either way and nothing else will send them. When the stream ends they
   come due, and the cleanup crops them out of the **mirror**, which holds the exact
-  current source for every pixel. So none of the still path's staleness applies here:
-  no stash, no cap, no partial-cover patching, and no way to restore a frame that has
+  current source for every pixel — so there is no way to restore a frame that has
   been overtaken. A crisp send discharges a cell only if it covered that cell in full.
 - **One mirror, several encoders.** `damage` blits every rectangle into the whole-
   framebuffer mirror whether or not anything is streaming it, which is what lets a
@@ -367,16 +346,19 @@ what makes every consumer answer which of the two it is holding.
 One measurement, so that the shape of the trade is on the record rather than assumed
 — 25 s of the same driven motion on a 1280×800 RDP desktop, release build:
 
-| dial | to the client | encode CPU |
+| encode | to the client | encode CPU |
 |---|---|---|
-| `motion` + a still encode at 10 | 4.5 MB | 0.17 s |
-| `motion` + `stream` 30 | 0.70 MB | 1.39 s |
+| a JPEG still per moving cell, quality 10 | 4.5 MB | 0.17 s |
+| `motion` (a stream per region) at 30 | 0.70 MB | 1.39 s |
 | `video` 60 | 0.45 MB | 5.48 s |
 
-So the regions cost about a sixth of the still motion encode's bytes with the still
-parts left lossless, and a quarter of whole-desktop `video`'s CPU — because only what
-moved was coded, rather than 1280×800 every frame. What it buys over `video` is
-exactness everywhere else; what it costs is bytes.
+So the regions cost about a sixth of what a still per moving cell costs in bytes,
+with the settled parts left lossless, and a quarter of whole-desktop `video`'s CPU —
+because only what moved was coded, rather than 1280×800 every frame. What it buys
+over `video` is exactness everywhere else; what it costs is bytes. The first row is
+the reason the gateway carries one motion encode rather than two: paying more than
+six times the bytes to save CPU is not a trade a desktop link wants, and a still
+per cell has no way to spend that CPU on anything else.
 
 Both dials that stream share `Congestion`, one verdict for one link: the quality dial
 walks down when a round's push blocks and back up to `render_motion_quality`, never
@@ -697,10 +679,11 @@ than the other records carry: everything before it in the batch has to have been
 drawn, so `wire.rs` will not drop a tile that precedes one — coverage reaches back
 only as far as the last `COPY`. A copy is never itself dropped, cached or
 referenced; it is an instruction and not a picture. Only a target whose canvas is
-made entirely of tiles is sent them (`TileSink::copies`): under a motion strategy a
-cell owes a cleanup from stashed pixels that would be restored over anything copied
-in, and under either streaming plan the client's pixels come from a decoder rather
-than from tiles at all. Both fall back to reading the source out of the shadow.
+made entirely of tiles is sent them (`TileSink::copies`): under either streaming
+plan the client's pixels come from a decoder rather than from tiles, and the mirror
+— not the canvas — is what a region is encoded from, so there is nothing on the
+client to copy from that the next access unit will not overwrite anyway. It falls
+back to reading the source out of the shadow.
 
 A client that cannot decode a cached tile or receives a reference to a missing
 slot sends `cacheReset`. This clears the outbound slot table and requests a

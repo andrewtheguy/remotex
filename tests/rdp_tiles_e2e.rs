@@ -91,7 +91,6 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             render_type: remotex::config::RenderType::Tiles,
             render_subtype: None,
             render_quality: None,
-            render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
             render_chroma: None,
@@ -126,6 +125,8 @@ fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> Vec<(u16, 
             // RFB's, and only RFB's: an RDP session never sends a copy, because
             // nothing in that protocol says a region moved.
             common::Painted::Copy { .. } => panic!("an RDP session sent a copy record"),
+            // The target here is on the `tiles` dial, which starts no streams.
+            common::Painted::Video { .. } => panic!("a tiles session sent an access unit"),
         })
         .collect();
     for tile in &tiles {

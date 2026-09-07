@@ -20,7 +20,7 @@ import {
 //
 // A target that streams sends its access units through the same batches as VIDEO
 // records — the whole desktop under `render_type = "video"`, a region at a time
-// under `render_motion_subtype = "stream"` — so the decoders live here too rather
+// under `render_type = "motion"` — so the decoders live here too rather
 // than beside each caller: they belong to exactly what the slot table belongs to,
 // one attachment, and `clear` is the one place that has to end both.
 

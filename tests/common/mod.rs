@@ -177,6 +177,10 @@ pub enum BatchRecord {
         w: u16,
         h: u16,
     },
+    /// One access unit of a moving region's stream, on a `motion` or `video`
+    /// target. Geometry only: the payload is a VP9 bitstream and no test here
+    /// decodes one.
+    Video { x: u16, y: u16, w: u16, h: u16 },
 }
 
 /// One record as a client would *paint* it: pixels that arrived, or pixels it
@@ -184,6 +188,8 @@ pub enum BatchRecord {
 #[allow(dead_code)]
 pub enum Painted {
     Tile(BatchTile),
+    /// Pixels a decoder puts on screen rather than the batch itself.
+    Video { x: u16, y: u16, w: u16, h: u16 },
     Copy {
         sx: u16,
         sy: u16,
@@ -201,6 +207,7 @@ impl Painted {
         match self {
             Painted::Tile(tile) => (tile.x, tile.y, tile.w, tile.h),
             Painted::Copy { x, y, w, h, .. } => (*x, *y, *w, *h),
+            Painted::Video { x, y, w, h } => (*x, *y, *w, *h),
         }
     }
 }
@@ -288,6 +295,25 @@ pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
                 });
                 at += batch::COPY_LEN;
             }
+            // A `motion` target carries its moving regions here rather than as
+            // tiles. The pixels reach the screen all the same, so the geometry
+            // counts toward coverage; the payload is a VP9 access unit and this
+            // stand-in decodes nothing.
+            batch::OP_VIDEO => {
+                let len = u32::from_le_bytes([
+                    frame[at + 11],
+                    frame[at + 12],
+                    frame[at + 13],
+                    frame[at + 14],
+                ]) as usize;
+                records.push(BatchRecord::Video {
+                    x: le(3),
+                    y: le(5),
+                    w: le(7),
+                    h: le(9),
+                });
+                at += batch::VIDEO_HEADER_LEN + len;
+            }
             op => panic!("unknown record op {op}"),
         }
     }
@@ -360,6 +386,9 @@ impl TileStream {
                     self.copies += 1;
                     self.copied_pixels += u64::from(w) * u64::from(h);
                     painted.push(Painted::Copy { sx, sy, x, y, w, h });
+                }
+                BatchRecord::Video { x, y, w, h } => {
+                    painted.push(Painted::Video { x, y, w, h });
                 }
             }
         }

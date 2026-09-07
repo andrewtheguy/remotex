@@ -402,7 +402,7 @@ Don't test camera on windows server because it requires special trial feature to
 
 ## Video codec
 
-Video — `render_type = "video"` and `render_motion_subtype = "stream"` alike — is
+Video — `render_type = "video"` and `render_type = "motion"` alike — is
 **VP9 only** (`src/vp9.rs`): BSD-licensed with a patent grant, and in every browser
 build. There is no codec key, no probe, no gate, and no fallback path.
 `ServerMsg::VideoFormat` announces the exact WebCodecs configuration string before a

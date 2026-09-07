@@ -731,7 +731,7 @@ impl CopyRect {
 ///   the payload can be parsed to find that out — VP9 has no parameter sets at all.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
 /// - `stream` names which decoder this belongs to. A session may run several at once
-///   — one per moving region under `render_motion_subtype = "stream"`, exactly one
+///   — one per moving region under `render_type = "motion"`, exactly one
 ///   under `render_type = "video"` — and ids are reused as regions come and go, so a
 ///   record whose `(w, h)` differs from the last one on the same id means that
 ///   decoder is starting over on a differently sized picture, and a fresh `VideoFormat`
@@ -1086,7 +1086,7 @@ pub enum ServerMsg {
     /// to decode. [`crate::wire`] flushes the pending batch before any text frame, so pushing this
     /// ahead of a round's units is enough to guarantee the order.
     ///
-    /// **Per stream, not per session.** Under `render_motion_subtype = "stream"` a session runs up
+    /// **Per stream, not per session.** Under `render_type = "motion"` a session runs up
     /// to four at once over regions of different sizes, and the configuration string
     /// carries a size-derived level — so one string for the session would be wrong for some of
     /// them. Under `render_type = "video"` there is exactly one stream, and so one of these per
@@ -1102,7 +1102,7 @@ pub enum ServerMsg {
     ///
     /// The counterpart of [`ServerMsg::VideoFormat`], and it exists for the resource
     /// rather than for the picture. A client is otherwise never told a stream ended —
-    /// an id simply goes quiet — so under `render_motion_subtype = "stream"`, where
+    /// an id simply goes quiet — so under `render_type = "motion"`, where
     /// regions come and go with the motion, it accumulates a decoder per id it has
     /// ever seen and holds them for the session. Every one of those is a decode
     /// session on a platform that has few of them, and the ones a hardware decoder has

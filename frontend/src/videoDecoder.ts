@@ -2,7 +2,7 @@
 //
 // Two render dials send access units (see `VideoUnit` in src/protocol.rs).
 // `render_type = "video"` sends the whole desktop as one inter-frame stream;
-// `render_motion_subtype = "stream"` sends one stream per moving region, with the
+// `render_type = "motion"` sends one stream per moving region, with the
 // still codecs carrying everything else — so a session may have several of these
 // running at once, which is what `createVideoStreams` is for. Everything else about
 // that path is ordinary: the units arrive as VIDEO records in the same batches and
@@ -78,7 +78,7 @@ export interface VideoStreams {
    * The gateway says this because it is the only side that knows it — an id that has
    * ended is otherwise indistinguishable from one whose region is merely still. What
    * it buys is a resource: a decoder holds a platform decode session, a hardware one
-   * holds a scarce one, and under `render_motion_subtype = "stream"` regions come and
+   * holds a scarce one, and under `render_type = "motion"` regions come and
    * go all session, so a table that never released anything would hold a session per
    * id it had ever seen.
    *
@@ -171,7 +171,7 @@ export function createVideoStreams(
     }
     let entry: Live | undefined;
     // Bound to this id, so a decoder that gives up takes its own region down and no
-    // others: under `render_motion_subtype = "stream"` the rest of the desktop is still
+    // others: under `render_type = "motion"` the rest of the desktop is still
     // arriving as still tiles and still painting, and the other regions have chains of
     // their own that this one says nothing about. Under `render_type = "video"` there is
     // only ever one, so it is the same outcome.
@@ -198,7 +198,7 @@ export function createVideoStreams(
         {
           onError: failed,
           // Named, because the one thing worth knowing about a stall is which region
-          // it was: under `render_motion_subtype = "stream"` there are several of
+          // it was: under `render_type = "motion"` there are several of
           // these and they stop for their own reasons. A stall is as terminal for
           // the decoder as an error (see `stalled` in `createVideoStream`), so the
           // entry goes the same way — the next unit on this id builds afresh, with
@@ -348,7 +348,7 @@ export interface VideoHandlers {
    * Reported rather than worked around, because there is no fallback to switch to.
    * How much of the desktop that costs depends on the dial — under
    * `render_type = "video"` it is all of it, and under
-   * `render_motion_subtype = "stream"` it is one region, with the still codecs
+   * `render_type = "motion"` it is one region, with the still codecs
    * carrying everything around it — so this says what happened and lets the caller
    * decide how loudly to say it.
    *
