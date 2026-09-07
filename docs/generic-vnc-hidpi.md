@@ -25,12 +25,18 @@ from them:
   browser shows every pixel one-to-one, and the Help card reads
   `1728×883 at 1x` under a browser at 2x.
 
-Density is the wire's word alone. The gateway takes none from the client on any
-protocol: a density nothing on the wire can confirm is a label the server may
-not honour, and a desktop presented at a label the server did not honour is a
-desktop shown at the wrong size. So a generic server is 1x, and stays 1x, until
-its protocol can say otherwise — which is what the
-[sway session dialect](sway-remote-session.md) is for.
+The density a framebuffer is *labelled* with — `Resize.scale` — is the wire's
+word alone. The browser does report its own screen's density (`hostDisplay`),
+and on RDP and Apple High Performance that report is what the remote is *asked*
+to render at; the label still waits on the wire's answer — Apple's display
+layout reports the scale it granted, and RDP, which reports none back, is
+labelled with the declared density only once the resize that carried it comes
+back from the server. Generic VNC has neither answer, so it accepts no
+client-declared density: a label nothing on the wire can confirm is one the
+server may not have honoured, and a desktop presented at it is shown at the
+wrong size. So a generic server is 1x, and stays 1x, until its protocol can say
+otherwise — which is what the [sway session dialect](sway-remote-session.md) is
+for.
 
 The consequence on a sway output at `scale 2` is that it is *worse* than at
 `scale 1`: with `resize = true` the window asks for its 1728×883 points as
