@@ -79,7 +79,7 @@ pairings are validated at config-load time in `ConfigFile::parse_with`:
 - `tiles` — every changed region as an independent still image at the base codec.
   The default; with the default subtype and no `render_motion` it is byte-identical
   to the PNG-only gateway that preceded the dial.
-- `video` — the whole desktop as one video stream at `render_quality`.
+- `video` — the whole desktop as one video stream at `render_stream_quality`.
 
 `render_subtype`, the base codec — any of the three under `tiles`:
 
@@ -94,7 +94,7 @@ sends no tiles at all — one fixed region, the whole desktop, for the whole ses
 
 `render_motion = true` is a switch on `tiles`, not a third transport: it adds a
 video stream per coalesced region of the cells changing fast
-(`render_motion_quality`, which it requires), and re-sends each cell at the base
+(`render_stream_quality`, which it requires), and re-sends each cell at the base
 encode once it settles. It changes nothing about what a tile is or how one travels
 — the base codec is still the base codec, because the base encode is still a still
 image; only what is moving becomes a stream. It is refused under `video`, which
@@ -130,7 +130,7 @@ which stays the ceiling — see [what the link will bear](#the-codec) for the si
 and the walks. It is refused on lossless PNG tiles, the one plan with no quality to
 move — a `png` base with no `render_motion`. The floor is
 one number for the whole plan: whichever dials exist — `render_subtype_quality`,
-`render_motion_quality`, `render_quality` — all stop at it.
+`render_stream_quality` — all stop at it.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
 gateway's 64x64 tile lattice, dashed, over the desktop. It is refused on
@@ -162,7 +162,7 @@ and the compiler is what stops a consumer handling only the first. The plan's `m
 path off: a target that does not ask for it does not pay for it.
 
 ```text
-render_type / render_subtype / render_subtype_quality / render_quality / render_motion_*
+render_type / render_subtype / render_subtype_quality / render_stream_quality / render_motion*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg
@@ -188,7 +188,7 @@ re-encoded, and only what moves goes to a stream.
 [[targets]]
 render_subtype        = "png"    # base: what a settled cell gets
 render_motion         = true
-render_motion_quality = 10       # moving regions: as cheap as it takes
+render_stream_quality = 10       # moving regions: as cheap as it takes
 ```
 
 The moving encode has its own quality because it is not a cheaper version of the
@@ -390,7 +390,7 @@ six times the bytes to save CPU is not a trade a desktop link wants, and a still
 per cell has no way to spend that CPU on anything else.
 
 Both dials that stream share `Congestion`, one verdict for one link: the quality dial
-walks down when a round's push blocks and back up to `render_motion_quality`, never
+walks down when a round's push blocks and back up to `render_stream_quality`, never
 past it. Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
 because the same queue carries its still tiles — so `coarsened` in the totals is a
 less sharp signal, which is worth knowing when reading it.
@@ -446,7 +446,7 @@ for the region streams above too, which is why they run the same code:
   client crops — reporting the padded size would push a paint past the framebuffer,
   which the renderer drops outright rather than clamps.
 
-`render_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
+`render_stream_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
 0–63 (the floor is where screen content goes visually lossless — mapping past it
 would give a dial whose top third did nothing but spend bandwidth). The quantizer
 never leaves the codec module —

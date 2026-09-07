@@ -1584,10 +1584,9 @@ mod tests {
             audio_codec: meta.audio_codec,
             render_type: crate::config::RenderType::Tiles,
             render_subtype: None,
-            render_quality: None,
+            render_stream_quality: None,
             render_subtype_quality: None,
             render_motion: false,
-            render_motion_quality: None,
             render_motion_debug: false,
             render_chroma: None,
             render_classify_debug: false,
@@ -1606,7 +1605,7 @@ mod tests {
     fn video_target(name: &str) -> TargetConfig {
         TargetConfig {
             render_type: crate::config::RenderType::Video,
-            render_quality: Some(60),
+            render_stream_quality: Some(60),
             ..fake_target(name)
         }
     }

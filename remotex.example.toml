@@ -355,9 +355,8 @@ password = "change-me"
 # render_subtype_quality is 1-100 and is *required* whenever the subtype is lossy
 # ("jpeg", "classify"), refused when it is "png" — there is no default, because a
 # quality nobody chose is not a quality. Higher is larger and closer to exact. It is
-# the base codec's dial and nothing else's: render_quality, the whole-desktop stream's
-# under render_type = "video" below, is refused beside tiles, and render_motion_quality
-# is the moving regions' own.
+# the base codec's dial and nothing else's: render_stream_quality, below, is the dial
+# of whatever VP9 stream a target has, and is refused on one that streams nothing.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
@@ -423,14 +422,18 @@ password = "change-me"
 # the settled cells only. So render_subtype_quality is still refused over a "png" base
 # — there is nothing to turn down — and still required over "jpeg" or "classify".
 #
-# render_motion_quality is the streams' own dial, required by render_motion — the
-# switch has no quality of its own and none is invented for it. There it is a
-# *ceiling*: on a
-# link that can carry it you get that quality, and a link that cannot makes the
+# render_stream_quality is the streams' own dial, required by render_motion — the
+# switch has no quality of its own and none is invented for it. It is a *ceiling*: on
+# a link that can carry it you get that quality, and a link that cannot makes the
 # picture coarser until it can. Nothing goes finer than what is set here. It can be
 # very low — motion hides it, and it does not last. There is no codec key beside it:
 # a moving region is VP9, the same as render_type = "video", and render_chroma below
 # is the only choice inside it.
+#
+# It is the same key render_type = "video" uses below, and deliberately: both are the
+# quality of a VP9 stream, they reach the same encoder through the same congestion
+# walk, and a target can never have both — motion discounts settled tiles and "video"
+# has none. One dial, one name.
 #
 # A region that stops moving ends its stream and is re-sent once at the base encode,
 # so a paused video sharpens by itself.
@@ -442,20 +445,20 @@ password = "change-me"
 #
 # A lossless base with streaming motion — everything settled is exact:
 #render_motion = true
-#render_motion_quality = 30
+#render_stream_quality = 30
 #
 # A lossy base, for a link that cannot afford PNG for the settled cells either:
 #render_subtype = "jpeg"
 #render_subtype_quality = 60
 #render_motion = true
-#render_motion_quality = 30
+#render_stream_quality = 30
 #
 # The classifier as the base: settled photos JPEG at 60, settled text lossless,
 # and whatever is moving in a stream until it stops:
 #render_subtype = "classify"
 #render_subtype_quality = 60
 #render_motion = true
-#render_motion_quality = 30
+#render_stream_quality = 30
 
 # render_type = "video" is not a codec on the subtype axis, it is a different
 # transport: the whole
@@ -467,7 +470,8 @@ password = "change-me"
 # carrying the desktop rectangle a client crops to; what goes away is the segmentation,
 # not the framing.)
 #
-# render_quality is the dial, 1-100 as everywhere else, and it is a *ceiling*: on a
+# render_stream_quality is the dial — the same key render_motion uses above, since
+# both name the quality of a VP9 stream. 1-100 as everywhere else, and a *ceiling*: on a
 # link that can carry it you get exactly that quality, and a link that cannot makes
 # the picture coarser until it can. Nothing ever goes finer than what is set here.
 #
@@ -482,7 +486,7 @@ password = "change-me"
 # it costs CPU on the gateway for every frame, including on a screen that is barely
 # changing. The `encode totals` log line is what settles it for a given target.
 #render_type = "video"
-#render_quality = 60
+#render_stream_quality = 60
 
 # How much colour a video stream carries per pixel — every stream this target has,
 # render_type = "video" and render_motion = true alike. Refused on a target that
@@ -490,7 +494,7 @@ password = "change-me"
 #
 #   "420" — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
 #           every decoder takes, hardware ones included.
-#   "444" — a colour sample per pixel (VP9 profile 1). This, not render_quality, is
+#   "444" — a colour sample per pixel (VP9 profile 1). This, not render_stream_quality, is
 #           where a desktop stream's visible loss is: a one-pixel coloured glyph stem
 #           on a dark terminal shares its one 4:2:0 colour sample with three pixels of
 #           background and comes back at a quarter of its saturation, at any quality
