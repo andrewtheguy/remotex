@@ -970,7 +970,8 @@ mod tests {
     // in protocol.rs: the change has to pay for itself measurably, not plausibly.
     #[test]
     fn batching_costs_less_than_one_frame_per_tile() {
-        // A 1600x1000 repaint as eighty tiles: sixteen 64-row bands, each in a few runs.
+        // Eighty full-width 64-row bands stacked in one column — more than any
+        // repaint cuts, which is the point: the frame count, not the geometry.
         let cells = 80;
         let payload = 900;
         let mut wire = Wire::default();

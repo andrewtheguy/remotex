@@ -91,7 +91,9 @@ const CLEANUP_TICK: Duration = Duration::from_millis(250);
 /// than in one burst competing with live motion for the socket. Forty 64-point
 /// cells is a 640×256-point patch per tick: a stopped 720p player sharpens in
 /// about two seconds, and a full 1080p desktop in a little over three, at either
-/// density.
+/// density. Counted in cells rather than pixels, so a 2× desktop's tick is four
+/// times the bytes of a 1× one — as is everything else it sends, the live motion
+/// this competes with included.
 const MAX_CLEANUPS_PER_TICK: usize = 40;
 
 /// Colour of a `render_motion_debug` outline on a piece sent at the motion encode.
@@ -746,7 +748,7 @@ impl TileSink {
 
         let grid = self.shared.grid();
         if motion.is_none() {
-            for band in changed.rect.bands(grid) {
+            for band in changed.rect.bands() {
                 self.encode(band, Arc::new(pack(band)), base).await?;
             }
             return Ok(());
@@ -799,7 +801,7 @@ impl TileSink {
         let now = tokio::time::Instant::now();
         // What went out crisp, to discharge in one critical section at the end.
         let mut crisp: Vec<Rect> = Vec::new();
-        for band in changed.rect.bands(grid) {
+        for band in changed.rect.bands() {
             let cells: Vec<Rect> = band.cells(grid).collect();
             {
                 // Churn is recorded for the cells that *changed*, not for every cell
@@ -2490,7 +2492,7 @@ mod tests {
     /// A region too small to be a video — a 2×2 block of cells, a spinner's worth —
     /// is never streamed however long it churns: every change goes out at the base
     /// encode, and there is nothing to clean up after it. Same clock, same number of
-    /// slots as it takes the strip above to earn its stream.
+    /// slots as it takes the region above to earn its stream.
     #[tokio::test(start_paused = true)]
     async fn a_spinner_sized_region_stays_on_the_base_encode() {
         let (sink, mut frame_rx) = stream_sink(640, 128).await;

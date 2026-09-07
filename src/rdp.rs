@@ -1693,18 +1693,6 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
     }
 }
 
-/// Send whatever part of `rect` the client does not already have, as tiles of at
-/// most one grid cell tall each. How that region is cut, and what
-/// each piece is encoded as, is [`TileSink::damage`]'s business.
-///
-/// Comparing against `shadow` earns its keep on this engine in particular: it
-/// repaints regions that did not change, which nothing upstream filters. They come
-/// back as `None` here and cost nothing but a pack and a `memcmp`.
-///
-/// The framebuffer lock is held for the pack and released before the await, which
-/// is what keeps a slow encoder from stalling FreeRDP's next paint: the engine
-/// crate hands out its frame under a mutex the RDP thread also takes on every
-/// `EndPaint`.
 /// Drain the staged damage: copies first, tiles for the rest.
 ///
 /// Under a plan that takes copies, the flush's damage is searched for regions the
@@ -1756,6 +1744,18 @@ async fn flush_damage(
     Ok(())
 }
 
+/// Send whatever part of `rect` the client does not already have, as tiles of at
+/// most [`crate::tiles::BAND_ROWS`] tall each. How that region is cut, and what
+/// each piece is encoded as, is [`TileSink::damage`]'s business.
+///
+/// Comparing against `shadow` earns its keep on this engine in particular: it
+/// repaints regions that did not change, which nothing upstream filters. They come
+/// back as `None` here and cost nothing but a pack and a `memcmp`.
+///
+/// The framebuffer lock is held for the pack and released before the await, which
+/// is what keeps a slow encoder from stalling FreeRDP's next paint: the engine
+/// crate hands out its frame under a mutex the RDP thread also takes on every
+/// `EndPaint`.
 async fn send_tiles(
     framebuffer: &Framebuffer,
     rect: Rect,

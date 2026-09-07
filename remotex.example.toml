@@ -382,8 +382,9 @@ password = "change-me"
 #render_classify_debug = false
 
 # QA aid for the tiles themselves, off unless asked for: draw the gateway's own
-# 64x64 tile lattice over the desktop as dashed lines, so where damage is cut is
-# something the screen shows rather than something read out of a constant. Valid
+# tile lattice — 64 points, so 64 pixels at 1x and 128 at 2x — over the desktop as
+# dashed lines, so where damage is cut is something the screen shows rather than
+# something read out of a constant. Valid
 # under "tiles" — the transport that sends tiles — and refused under "video", which
 # sends the whole desktop as one stream and has no boundary to draw.
 #
@@ -410,8 +411,8 @@ password = "change-me"
 # cells left to discount.
 #
 # A region has to be big enough to be a video before it is streamed: anything
-# changing in fewer than five 64x64 cells on its own — a spinner, a progress bar, a
-# typing indicator, up to a 128x128 block — stays on render_subtype like everything
+# changing in fewer than five cells on its own — a spinner, a progress bar, a typing
+# indicator, up to a 2x2 block of the grid — stays on render_subtype like everything
 # settled. That is where it is cheapest: a spinner is a few kilobytes a change as a
 # still and compresses well, where a stream would cost an encoder, a keyframe, a
 # decoder in the browser and a crisp re-send every time it stopped and started.

@@ -22,7 +22,9 @@ measurements are what should settle them:
   when the region it wants no longer fits inside the rectangle its stream already
   has. Shrinking is free and so is any change of shape that stays inside it; what
   pays is growing, and a region that ended and came back. One measurement exists —
-  25 s of a pointer swept in a circle on a 1280×800 RDP desktop, which grows and
+  25 s of a pointer swept in a circle on a 1280×800 RDP desktop, with the grid cut
+  at 320×64 pixels, the cell of the time (the cell-count figures below are in those
+  cells, and a 64-point grid grows a box at a different rate), which grows and
   moves the wanted rectangle about as often as anything real would: 12 keyframes
   costing 38 KB of the 140 KB the streams sent, so **27% of the stream went on
   rectangles that had to be replaced**. Whether a longer `RETUNE`, or a rectangle
@@ -59,27 +61,6 @@ how much more would fit. Going further therefore wants richer receiver feedback 
 delivered bytes and arrival timing added to that contract, for example — plus an
 explicit upper-bound policy. It is a separate feature whose value should be argued
 from `video`'s measurements rather than assumed.
-
-### AV1, if it ever measures better than VP9
-
-VP9 shipped and is the codec: `render_type = "video"` and
-`render_motion = true` carry it, and it is licence-free —
-present in every browser build, the proprietary-codec-free ones included. See
-[`architecture.md`](architecture.md) for the mechanism.
-
-AV1 is the codec that might still be worth adding, and it is a measurement rather than
-a preference. It compresses better and costs more to encode, and this gateway encodes
-in real time on whatever machine it is running on — so the case for it is a number
-from `video::measure_the_encoder` against VP9's, on real content, not an argument
-from the format. Adding it would mean an encoder module and a codec choice threaded
-back through `RenderPlan`; it
-would **not** be a default, because
-AV1 is refused by engines with no hardware path for it and a codec nobody can play is
-a worse default than a codec everybody can.
-
-It would not bring the probe back either. The client-side codec negotiation was built
-and removed (see [`architecture.md`](architecture.md)); a second codec is a value
-for a config key, not a reason to ask the browser again.
 
 ### Source payloads the gateway decodes instead of forwarding
 
