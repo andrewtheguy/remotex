@@ -1,6 +1,6 @@
 ## General
 
-- Strict no backward-compatibility or legacy paths since it is a personal project.
+- Strict no backward-compatibility or legacy paths.
 - Require secure contexts and WebCodecs (`VideoDecoder` and `AudioDecoder`) for all web features. The frontend denies startup when either is missing (`frontend/src/preflight.ts`); do not add a second path for a browser without them.
 - Do not run `cargo fmt`.
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
