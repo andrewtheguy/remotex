@@ -910,7 +910,11 @@ impl Regions {
             })
             .map(|(cell, at)| (*cell, *at))
             .collect();
-        ready.sort_unstable_by_key(|(cell, at)| (*at, *cell));
+        // Oldest first, and among cells owed since the same instant — every cell a
+        // stream carried, once it ends — row by row rather than column by column, so
+        // that what the budget cuts off is whole stripes: a stopped video sharpens
+        // top-down a stripe at a time, not left-to-right in slivers a cell wide.
+        ready.sort_unstable_by_key(|((col, row), at)| (*at, *row, *col));
         ready.truncate(max);
         let mut cells: Vec<(u16, u16)> = ready
             .into_iter()
@@ -1937,6 +1941,30 @@ mod tests {
                 .due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16)
                 .is_empty()
         );
+    }
+
+    /// The budget cuts the tickful at a row, not at a column: the cells a stream
+    /// carried all came due at once, and a tick that can pay five of ten must pay
+    /// the top stripe whole rather than the left half of both — which is five
+    /// tiles of a cell each, and a video that sharpens sideways in slivers.
+    #[tokio::test]
+    async fn a_short_budget_takes_whole_stripes_first() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.retune(&both_rows(), t0).expect("a stream over every cell");
+        regions.expire(t0 + STREAM_IDLE);
+        let settled = t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS;
+        assert_eq!(
+            regions.due(settled, CLEANUP_IDLE_FOR_TESTS, 5),
+            vec![Rect { left: 0, top: 0, right: 319, bottom: 63 }],
+            "five of ten cells should be the top stripe"
+        );
+        assert_eq!(
+            regions.due(settled, CLEANUP_IDLE_FOR_TESTS, 5),
+            vec![Rect { left: 0, top: 64, right: 319, bottom: 127 }],
+            "the next five should be the bottom one"
+        );
+        assert!(regions.due(settled, CLEANUP_IDLE_FOR_TESTS, 5).is_empty());
     }
 
     /// What `crate::encode` passes as the cleanup's idle threshold. Its own constant

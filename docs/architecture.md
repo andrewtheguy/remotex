@@ -261,8 +261,9 @@ their damage through:
   — and a cell a live stream still covers is never due, so a cleanup can never
   overtake a stream that is still running. A `CLEANUP_TICK` interval in `order_loop`
   re-sends cells idle past `CLEANUP_IDLE` at the *base* encode,
-  `MAX_CLEANUPS_PER_TICK` at a time and oldest first, so a paused screen sharpens on
-  its own without a client repaint. The timer has to be its own, because the case it
+  `MAX_CLEANUPS_PER_TICK` at a time, oldest first and row by row among cells of one
+  age, so a paused screen sharpens on its own, a whole stripe per tick, without a
+  client repaint. The timer has to be its own, because the case it
   exists for is a remote that has stopped sending frames — which is also the only
   thing that will ever notice a stream has gone quiet.
 - **Resets.** Motion state is cleared on resize, where the keys no longer name the
