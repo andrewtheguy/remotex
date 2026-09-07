@@ -68,7 +68,7 @@ updates in source order even when individual tile encodes finish concurrently.
 
 How a target's pixels reach a client is a per-target choice on two flat axes, plus a
 quality: `render_type` is the *strategy* — what kind of thing goes on the wire —
-and `render_subtype` the codec of the base tiles, with `render_quality` (1–100)
+and `render_subtype` the codec of the base tiles, with `render_subtype_quality` (1–100)
 the fixed quality of that codec's lossy side. Two axes rather
 than one flat mode list because strategy and codec vary independently: every
 tiles-carrying strategy takes every base codec. The legal
@@ -88,9 +88,9 @@ pairings are validated at config-load time in `ConfigFile::parse_with`:
 alike:
 
 - `png` — lossless, no quality key. The default.
-- `jpeg` — every base tile JPEG at `render_quality`.
+- `jpeg` — every base tile JPEG at `render_subtype_quality`.
 - `classify` — per tile, what its own pixels are: photographic content JPEG at
-  `render_quality`, flat UI and text lossless PNG.
+  `render_subtype_quality`, flat UI and text lossless PNG.
 
 `video` is the one strategy with nothing on the subtype axis, and refuses it: it
 sends no tiles at all — one fixed region, the whole desktop, for the whole session
@@ -127,8 +127,8 @@ measured link between `render_adaptive_min` (default 20) and its configured valu
 which stays the ceiling — see [what the link will bear](#the-codec) for the signal
 and the walks. It is refused on lossless PNG tiles, the one plan with no quality to
 move. The floor is
-one number for the whole plan: whichever dials exist — `render_quality`,
-`render_motion_quality`, a stream's — all stop at it.
+one number for the whole plan: whichever dials exist — `render_subtype_quality`,
+`render_motion_quality`, `render_quality` — all stop at it.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
 gateway's 64x64 tile lattice, dashed, over the desktop. It is refused on
@@ -160,7 +160,7 @@ and the compiler is what stops a consumer handling only the first. `motion` is a
 path off: a target that does not ask for it does not pay for it.
 
 ```text
-render_type / render_subtype / render_quality / render_motion_*
+render_type / render_subtype / render_subtype_quality / render_quality / render_motion_*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg
@@ -175,7 +175,7 @@ the session hot path costs no C toolchain and no runtime dependency.
 
 `motion` is not a second way to encode every tile. It builds on the base encode a
 target already has and changes nothing about it — the base is read from
-`render_subtype` and `render_quality`, same as under `tiles` — and hands the cells
+`render_subtype` and `render_subtype_quality`, same as under `tiles` — and hands the cells
 currently changing fast to a video stream per coalesced moving region instead. A
 lossless base is the configuration a fixed quality cannot express at all, and the
 interesting one: text and flat UI stay perfect and are never re-encoded, and only

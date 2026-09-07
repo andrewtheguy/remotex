@@ -64,7 +64,7 @@ toml = "1"
 # session's hot path.
 png = "0.18"
 # JPEG for the lossy tile path: a target with `render_subtype = "jpeg"` encodes
-# every tile at a fixed `render_quality` instead of lossless PNG
+# every tile at a fixed `render_subtype_quality` instead of lossless PNG
 # (`Tile::from_rgb_jpeg` in src/protocol.rs), and `render_subtype = "classify"`
 # encodes the tiles its picture classifier reads as photographic
 # (src/classify.rs) the same way. The format byte

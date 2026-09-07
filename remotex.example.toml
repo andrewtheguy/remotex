@@ -342,16 +342,18 @@ password = "change-me"
 #              the trade of the single knob.
 #   "classify" — per tile, whichever of the two fits: a picture classifier reads
 #              each tile's own pixels, and only what looks photographic — a
-#              photo, a thumbnail, a gradient — goes to JPEG at render_quality;
+#              photo, a thumbnail, a gradient — goes to JPEG at render_subtype_quality;
 #              flat UI and text stay lossless PNG, which for them is smaller
 #              *and* sharp. PNG is also the verdict for every small or ambiguous
 #              tile, because a photo sent lossless only costs bytes while text
 #              sent lossy stays soft until that region next changes. What it
 #              costs is a little gateway CPU per tile, on the encode workers.
 #
-# render_quality is 1-100 and is *required* whenever the subtype is lossy ("jpeg",
-# "classify"), refused when it is "png" — there is no default, because a quality
-# nobody chose is not a quality. Higher is larger and closer to exact.
+# render_subtype_quality is 1-100 and is *required* whenever the subtype is lossy
+# ("jpeg", "classify"), refused when it is "png" — there is no default, because a
+# quality nobody chose is not a quality. Higher is larger and closer to exact. It is
+# the base codec's dial and nothing else's: render_quality, the whole-desktop stream's
+# under render_type = "video" below, is refused beside tiles.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
@@ -360,11 +362,11 @@ password = "change-me"
 #
 # A fixed lossy encode instead — naming "tiles" is optional, it is the default:
 #render_subtype = "jpeg"
-#render_quality = 75
+#render_subtype_quality = 75
 #
 # Or the classifier deciding per tile:
 #render_subtype = "classify"
-#render_quality = 75
+#render_subtype_quality = 75
 #
 # QA aid for "classify", off unless asked for: outline every tile the classifier
 # sent as JPEG in yellow, in the pixels themselves, so which regions it reads as
@@ -408,9 +410,9 @@ password = "change-me"
 # Only a small mover sitting inside a larger moving region's box rides that stream.
 #
 # "motion" does not replace the base keys, it builds on them: render_subtype and
-# render_quality mean exactly what they mean under "tiles", they just describe the
-# settled cells only. So render_quality is still refused over a "png" base — there is
-# nothing to turn down — and still required over "jpeg" or "classify".
+# render_subtype_quality mean exactly what they mean under "tiles", they just describe
+# the settled cells only. So render_subtype_quality is still refused over a "png" base
+# — there is nothing to turn down — and still required over "jpeg" or "classify".
 #
 # render_motion_quality is the streams' own dial, and there it is a *ceiling*: on a
 # link that can carry it you get that quality, and a link that cannot makes the
@@ -434,14 +436,14 @@ password = "change-me"
 # A lossy base, for a link that cannot afford PNG for the settled cells either:
 #render_type = "motion"
 #render_subtype = "jpeg"
-#render_quality = 60
+#render_subtype_quality = 60
 #render_motion_quality = 30
 #
 # The classifier as the base: settled photos JPEG at 60, settled text lossless,
 # and whatever is moving in a stream until it stops:
 #render_type = "motion"
 #render_subtype = "classify"
-#render_quality = 60
+#render_subtype_quality = 60
 #render_motion_quality = 30
 
 # render_type = "video" is not a fourth codec, it is a different transport: the whole

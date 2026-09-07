@@ -54,7 +54,7 @@ fn uat_target(name: &str, strategy: RenderType) -> TargetConfig {
     let mut target = common::uat_target(name);
     target.render_type = strategy;
     target.render_subtype = Some(RenderSubtype::Classify);
-    target.render_quality = Some(QUALITY);
+    target.render_subtype_quality = Some(QUALITY);
     target.render_motion_quality =
         (strategy == RenderType::Motion).then_some(MOTION_QUALITY);
     target.render_motion_debug = false;
