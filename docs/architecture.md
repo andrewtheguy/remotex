@@ -996,7 +996,10 @@ display re-renders the same points at it; the resulting density travels back as
 the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
 Other engines ignore the message. Generic VNC, whose wire carries no density, is
 presented at 1x and takes no density from the client; see
-[HiDPI over generic VNC](generic-vnc-hidpi.md).
+[HiDPI over generic VNC](generic-vnc-hidpi.md). The `swayvnc` subtype is the
+one generic server that reports a scale, over a private extension: the label
+follows its reports and the client's density is declared to it, never applied by
+the gateway itself; see [Pixel density over VNC with swayvnc](swayvnc-density.md).
 
 A client shows the display picker exactly when the target sends it a
 `ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one for both

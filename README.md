@@ -27,6 +27,10 @@ per resize.
   003.889 — one virtual display holding every remote window, and the only Apple
   path that accepts `resize = true`. It is reverse engineered, having no
   specification.
+  `subtype = "swayvnc"` is a sway desktop behind the patched wayvnc from the
+  [swayvnc](https://github.com/andrewtheguy/swayvnc) repository, which reports
+  the output's pixel density over one private RFB extension so a `scale 2`
+  output is shown at 2x.
 
 There is one client: the page a browser loads. For desktop use, install that page
 as an app in Chrome or Edge. The app window gives the client the browser-reserved
@@ -191,7 +195,10 @@ sizes in pixels and nothing else — so those targets are shown at 1x, one CSS
 pixel per framebuffer pixel, and the window's points go to the server as pixels.
 See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
 on a sway output at scale 2 and why a second client's resize can come back
-prohibited.
+prohibited. The one exception is `subtype = "swayvnc"`: the patched wayvnc
+reports its output's scale, the gateway labels the framebuffer with it and asks
+for the window in points × scale, and the browser's density is declared back to
+the server. See [`docs/swayvnc-density.md`](docs/swayvnc-density.md).
 
 High Performance mode is the one part of remotex built entirely without a
 specification: Apple documents none of the protocol revision,

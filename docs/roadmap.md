@@ -143,9 +143,16 @@ the same way — a Retina window gets a 2x desktop on connect, and dragging it t
 
 A client-side declaration is not the answer: a density the wire cannot confirm is
 a label the server may not honour, and the product rule is that density is the
-wire's word alone. Until both channels above exist, generic VNC stays 1x. The
-sway session dialect below is the opt-in that closes it for that one server, by
-putting the scale on the VNC connection itself rather than beside it.
+wire's word alone. Until both channels above exist, generic VNC stays 1x.
+
+The second channel now exists for one server: `subtype = "swayvnc"` puts the
+scale on the VNC connection itself, as a private extension a patched wayvnc
+answers ([`swayvnc-density.md`](swayvnc-density.md)). The server reports its
+output's scale, the gateway labels and resizes by it, and the browser's density
+is declared back. What remains is the first channel's other half: the patched
+wayvnc setting the output's scale to the declared density, so the browser drives
+the desktop's density with nothing to configure. The sway session dialect below
+is the larger design this grew out of, and is independent of it.
 
 ### A virtual-display remote session for sway
 
