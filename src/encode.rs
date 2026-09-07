@@ -957,14 +957,10 @@ impl TileSink {
     /// a copy assumes: that the canvas holds what the client was *sent*, and that
     /// nothing is going to repaint it from somewhere else.
     ///
-    /// Under a `Tile` motion encode a moving cell carries a debt — the exact source
-    /// pixels are stashed and a cleanup tick restores them later. Pixels copied into
-    /// that cell would be restored away by a cleanup that is holding an older
-    /// picture, and permanently, because the shadow has already recorded them as
-    /// delivered. Under either streaming plan the client's pixels come from a
-    /// decoder rather than from tiles, and the mirror — not the canvas — is what a
-    /// region is encoded from, so there is nothing on the client to copy from that
-    /// the next access unit will not overwrite anyway.
+    /// Under either streaming plan the client's pixels come from a decoder rather
+    /// than from tiles, and the mirror — not the canvas — is what a region is
+    /// encoded from, so there is nothing on the client to copy from that the next
+    /// access unit will not overwrite anyway.
     ///
     /// A lossy `base` codec is not an objection: the canvas has always been JPEG's
     /// reading of the shadow there, and moving those pixels is no further

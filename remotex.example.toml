@@ -304,9 +304,6 @@ password = "change-me"
 # display's mode as the window changes. Apple's display-count and fixed-resolution-
 # preset controls are not implemented.
 #
-# It is also the one target that cannot use `render_type = "motion"`, in any of
-# its forms — see the render dial below.
-#
 # `clipboard = true` enables the native Apple pasteboard in both directions.
 # See docs/apple-vnc-889.md.
 # [[targets]]
@@ -423,14 +420,6 @@ password = "change-me"
 #render_subtype = "classify"
 #render_quality = 60
 #render_motion_quality = 30
-
-# One pairing "motion" is refused with: subtype = "ard-high-performance". A resize
-# under both corrupts the desktop until the whole gateway is restarted — a reconnect
-# does not clear it — and which of the two is at fault is not established, so the
-# config is refused at load rather than left to be discovered on a live desktop. Use
-# subtype = "ard" to keep "motion", or any other render_type to keep the virtual
-# display. Every other subtype may use "motion", and that target may use every other
-# render_type.
 
 # render_type = "video" is not a fourth codec, it is a different transport: the whole
 # desktop as one video stream instead of one encoded image per changed region. Every
