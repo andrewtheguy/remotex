@@ -39,7 +39,7 @@ const VIDEO_FRAME_BUFFER: usize = 4;
 
 /// How deep this target's outbound queue should be. See [`VIDEO_FRAME_BUFFER`].
 ///
-/// `render_type = "motion"` keeps the tile depth, deliberately, even though
+/// `render_motion = true` keeps the tile depth, deliberately, even though
 /// it produces access units too: the same queue carries its still tiles, and a
 /// repaint is dozens of them, so four would stall the engine on the ordinary path to
 /// sharpen a signal about the streaming one. Its regions are also a fraction of a
@@ -1584,8 +1584,9 @@ mod tests {
             audio_codec: meta.audio_codec,
             render_type: crate::config::RenderType::Tiles,
             render_subtype: None,
-            render_quality: None,
-            render_motion_quality: None,
+            render_stream_quality: None,
+            render_subtype_quality: None,
+            render_motion: false,
             render_motion_debug: false,
             render_chroma: None,
             render_classify_debug: false,
@@ -1604,7 +1605,7 @@ mod tests {
     fn video_target(name: &str) -> TargetConfig {
         TargetConfig {
             render_type: crate::config::RenderType::Video,
-            render_quality: Some(60),
+            render_stream_quality: Some(60),
             ..fake_target(name)
         }
     }

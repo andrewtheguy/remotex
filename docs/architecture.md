@@ -67,38 +67,40 @@ updates in source order even when individual tile encodes finish concurrently.
 ### The render dial
 
 How a target's pixels reach a client is a per-target choice on two flat axes, plus a
-quality: `render_type` is the *strategy* — what kind of thing goes on the wire —
-and `render_subtype` the codec of the base tiles, with `render_quality` (1–100)
+quality: `render_type` is the *transport* — what kind of thing goes on the wire —
+and `render_subtype` the codec of the base tiles, with `render_subtype_quality` (1–100)
 the fixed quality of that codec's lossy side. Two axes rather
-than one flat mode list because strategy and codec vary independently: every
-tiles-carrying strategy takes every base codec. The legal
+than one flat mode list because transport and codec vary independently: the tiles
+transport takes every base codec. The legal
 pairings are validated at config-load time in `ConfigFile::parse_with`:
 
-`render_type`, the strategy:
+`render_type`, the transport:
 
-- `tiles` — every changed region as an independent still image at the base codec,
-  and nothing else. The default; with the default subtype it is byte-identical to
-  the PNG-only gateway that preceded the dial.
-- `motion` — the base, plus a video stream per coalesced region of the cells
-  changing fast (`render_motion_quality`), each cell re-sent at the base once it
-  settles.
-- `video` — the whole desktop as one video stream at `render_quality`.
+- `tiles` — every changed region as an independent still image at the base codec.
+  The default; with the default subtype and no `render_motion` it is byte-identical
+  to the PNG-only gateway that preceded the dial.
+- `video` — the whole desktop as one video stream at `render_stream_quality`.
 
-`render_subtype`, the base codec — any of the three under `tiles` and `motion`
-alike:
+`render_subtype`, the base codec — any of the three under `tiles`:
 
 - `png` — lossless, no quality key. The default.
-- `jpeg` — every base tile JPEG at `render_quality`.
+- `jpeg` — every base tile JPEG at `render_subtype_quality`.
 - `classify` — per tile, what its own pixels are: photographic content JPEG at
-  `render_quality`, flat UI and text lossless PNG.
+  `render_subtype_quality`, flat UI and text lossless PNG.
 
-`video` is the one strategy with nothing on the subtype axis, and refuses it: it
+`video` is the one transport with nothing on the subtype axis, and refuses it: it
 sends no tiles at all — one fixed region, the whole desktop, for the whole session
-— so there is no per-tile codec left to name. `motion` still has a base codec,
-because the base encode is still a still image: only what is moving becomes a
-stream.
+— so there is no per-tile codec left to name.
 
-**No strategy names a video codec, because video is VP9 only** — see
+`render_motion = true` is a switch on `tiles`, not a third transport: it adds a
+video stream per coalesced region of the cells changing fast
+(`render_stream_quality`, which it requires), and re-sends each cell at the base
+encode once it settles. It changes nothing about what a tile is or how one travels
+— the base codec is still the base codec, because the base encode is still a still
+image; only what is moving becomes a stream. It is refused under `video`, which
+streams the whole desktop already and has no settled cells left to discount.
+
+**Nothing on this dial names a video codec, because video is VP9 only** — see
 [the codec](#the-codec).
 
 No classifier runs under the `jpeg` subtype: it sends *every* tile as
@@ -110,25 +112,25 @@ reads as photographic takes the JPEG; PNG is the verdict for everything flat,
 sharp, small or ambiguous, because a photo sent lossless only costs bytes while
 text sent lossy costs legibility until that region next changes. The decision is
 per tile and stateless, so the same window answers differently as content scrolls
-through it. As a `motion` base it composes: a settled cell is classified, a moving
-one takes the motion encode (which defaults to `jpeg` there — a cell changing fast
-is not worth classifying). `render_classify_debug = true` outlines the tiles sent
+through it. Under `render_motion` it composes: a settled cell is classified, a
+moving one takes the motion encode (which defaults to `jpeg` there — a cell
+changing fast is not worth classifying). `render_classify_debug = true` outlines the tiles sent
 as JPEG in yellow — drawn on the copy handed to the encoder, never on the pixels
 the shadow records, so the mark lives exactly as long as the lossy tile it
 describes, and a colour of its own so it stays readable beside the motion marks.
 
 Three more keys sit across the whole dial rather than on either axis.
 `render_chroma` (`"420"`, the default, or `"444"`) is how much colour a *stream*
-carries per pixel — every stream the target has, `video` and a `motion` region alike
-— and is refused on a target that streams nothing; see [the codec](#the-codec) for
+carries per pixel — every stream the target has, `video` and a `render_motion`
+region alike — and is refused on a target that streams nothing; see [the codec](#the-codec) for
 why it, and not the quality, is where a desktop stream's picture goes.
 `render_adaptive = true` lets every lossy quality the target configures track the
 measured link between `render_adaptive_min` (default 20) and its configured value,
 which stays the ceiling — see [what the link will bear](#the-codec) for the signal
 and the walks. It is refused on lossless PNG tiles, the one plan with no quality to
-move. The floor is
-one number for the whole plan: whichever dials exist — `render_quality`,
-`render_motion_quality`, a stream's — all stop at it.
+move — a `png` base with no `render_motion`. The floor is
+one number for the whole plan: whichever dials exist — `render_subtype_quality`,
+`render_stream_quality` — all stop at it.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
 gateway's 64x64 tile lattice, dashed, over the desktop. It is refused on
@@ -155,12 +157,12 @@ the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum 
 one arm per transport — `Tiles { base, motion, debug, adaptive }` and
 `Video { quality, adaptive, chroma }` —
 rather than a struct with a flag, because the two share no code path worth sharing
-and the compiler is what stops a consumer handling only the first. `motion` is an
+and the compiler is what stops a consumer handling only the first. The plan's `motion` is an
 `Option<MotionEncode>`, and the `Option` is the switch that keeps the whole motion
 path off: a target that does not ask for it does not pay for it.
 
 ```text
-render_type / render_subtype / render_quality / render_motion_*
+render_type / render_subtype / render_subtype_quality / render_stream_quality / render_motion*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg
@@ -171,21 +173,22 @@ and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
 `encode_jpeg` wraps `jpeg-encoder`, built with the target's SIMD, so the encode on
 the session hot path costs no C toolchain and no runtime dependency.
 
-#### `motion`: a discount on what is too busy to notice
+#### `render_motion`: a discount on what is too busy to notice
 
-`motion` is not a second way to encode every tile. It builds on the base encode a
-target already has and changes nothing about it — the base is read from
-`render_subtype` and `render_quality`, same as under `tiles` — and hands the cells
-currently changing fast to a video stream per coalesced moving region instead. A
-lossless base is the configuration a fixed quality cannot express at all, and the
-interesting one: text and flat UI stay perfect and are never re-encoded, and only
-what moves goes to a stream.
+`render_motion` is not a second way to encode every tile, which is why it is a
+switch on `tiles` rather than a `render_type` of its own. It builds on the base
+encode a target already has and changes nothing about it — the base is read from
+`render_subtype` and `render_subtype_quality`, exactly as it is without the switch —
+and hands the cells currently changing fast to a video stream per coalesced moving
+region instead. A lossless base is the configuration a fixed quality cannot express
+at all, and the interesting one: text and flat UI stay perfect and are never
+re-encoded, and only what moves goes to a stream.
 
 ```toml
 [[targets]]
-render_type           = "motion"
 render_subtype        = "png"    # base: what a settled cell gets
-render_motion_quality = 10       # moving regions: as cheap as it takes
+render_motion         = true
+render_stream_quality = 10       # moving regions: as cheap as it takes
 ```
 
 The moving encode has its own quality because it is not a cheaper version of the
@@ -194,7 +197,7 @@ all. There is no codec key beside it — a moving region is a VP9 stream, the sa
 way `render_type = "video"` is, and the only per-target choice inside it is
 `render_chroma`.
 
-The strategy is protocol-independent and has no subtype restrictions: every engine
+The switch is protocol-independent and has no subtype restrictions: every engine
 normalizes its damage before it reaches the shared sink that detects and encodes
 motion.
 
@@ -237,7 +240,7 @@ their damage through:
   about the remote rather than two about the transports.
 - **Splitting only where it matters.** A band whose cells are all quiet is sent
   whole and at the base encode, so a target with nothing moving is byte-for-byte
-  what the same target sends without `motion` at all. Only a band containing a
+  what the same target sends without `render_motion` at all. Only a band containing a
   streamed cell is cut at the grid — which is what makes a video in a window cost
   its own cells their quality and cost the text beside it nothing. A cell a live
   stream carries is not sent as a tile at all: its pixels reach the client through
@@ -375,7 +378,7 @@ One measurement, so that the shape of the trade is on the record rather than ass
 | encode | to the client | encode CPU |
 |---|---|---|
 | a JPEG still per moving cell, quality 10 | 4.5 MB | 0.17 s |
-| `motion` (a stream per region) at 30 | 0.70 MB | 1.39 s |
+| `render_motion` (a stream per region) at 30 | 0.70 MB | 1.39 s |
 | `video` 60 | 0.45 MB | 5.48 s |
 
 So the regions cost about a sixth of what a still per moving cell costs in bytes,
@@ -387,7 +390,7 @@ six times the bytes to save CPU is not a trade a desktop link wants, and a still
 per cell has no way to spend that CPU on anything else.
 
 Both dials that stream share `Congestion`, one verdict for one link: the quality dial
-walks down when a round's push blocks and back up to `render_motion_quality`, never
+walks down when a round's push blocks and back up to `render_stream_quality`, never
 past it. Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
 because the same queue carries its still tiles — so `coarsened` in the totals is a
 less sharp signal, which is worth knowing when reading it.
@@ -443,7 +446,7 @@ for the region streams above too, which is why they run the same code:
   client crops — reporting the padded size would push a paint past the framebuffer,
   which the renderer drops outright rather than clamps.
 
-`render_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
+`render_stream_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
 0–63 (the floor is where screen content goes visually lossless — mapping past it
 would give a dial whose top third did nothing but spend bandwidth). The quantizer
 never leaves the codec module —

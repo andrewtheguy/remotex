@@ -316,7 +316,7 @@ password = "change-me"
 # clipboard = true
 # resize = true
 
-# How this target's pixels are compressed on their way to the browser. A strategy,
+# How this target's pixels are compressed on their way to the browser. A transport,
 # a still-image codec, and a quality dial, all per target and valid for every protocol.
 #
 # All three are per-target keys, so they belong *inside* a [[targets]] table and not
@@ -324,16 +324,19 @@ password = "change-me"
 # [[targets]] block precedes them, which is the "example" one at the top of this file.
 # There is no global render setting.
 #
-# The two axes are independent. render_type is the *strategy* — what kind of
+# The two axes are independent. render_type is the *transport* — what kind of
 # thing goes on the wire:
 #
 #   "tiles"  (the default) — every changed region as an independent still image.
-#   "motion" — the same, plus a much cheaper encode for whatever is changing
-#              fast right now. Its own block below.
 #   "video"  — the whole desktop as one video stream. Its own block below.
 #
+# Motion is not a third value here: it changes nothing about what a tile is or how
+# one travels, it only adds a cheaper encode for whatever is moving on top of the
+# tiles a target already sends. So it is a switch on "tiles" — render_motion, its
+# own block below.
+#
 # render_subtype is the codec of the base tiles, and any of the three pairs with
-# "tiles" and "motion" alike ("video" sends no tiles and refuses the key):
+# "tiles" ("video" sends no tiles and refuses the key):
 #
 #   "png"      (the default) — lossless: exact pixels, and the right answer on
 #              a LAN.
@@ -342,16 +345,18 @@ password = "change-me"
 #              the trade of the single knob.
 #   "classify" — per tile, whichever of the two fits: a picture classifier reads
 #              each tile's own pixels, and only what looks photographic — a
-#              photo, a thumbnail, a gradient — goes to JPEG at render_quality;
+#              photo, a thumbnail, a gradient — goes to JPEG at render_subtype_quality;
 #              flat UI and text stay lossless PNG, which for them is smaller
 #              *and* sharp. PNG is also the verdict for every small or ambiguous
 #              tile, because a photo sent lossless only costs bytes while text
 #              sent lossy stays soft until that region next changes. What it
 #              costs is a little gateway CPU per tile, on the encode workers.
 #
-# render_quality is 1-100 and is *required* whenever the subtype is lossy ("jpeg",
-# "classify"), refused when it is "png" — there is no default, because a quality
-# nobody chose is not a quality. Higher is larger and closer to exact.
+# render_subtype_quality is 1-100 and is *required* whenever the subtype is lossy
+# ("jpeg", "classify"), refused when it is "png" — there is no default, because a
+# quality nobody chose is not a quality. Higher is larger and closer to exact. It is
+# the base codec's dial and nothing else's: render_stream_quality, below, is the dial
+# of whatever VP9 stream a target has, and is refused on one that streams nothing.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
@@ -360,11 +365,11 @@ password = "change-me"
 #
 # A fixed lossy encode instead — naming "tiles" is optional, it is the default:
 #render_subtype = "jpeg"
-#render_quality = 75
+#render_subtype_quality = 75
 #
 # Or the classifier deciding per tile:
 #render_subtype = "classify"
-#render_quality = 75
+#render_subtype_quality = 75
 #
 # QA aid for "classify", off unless asked for: outline every tile the classifier
 # sent as JPEG in yellow, in the pixels themselves, so which regions it reads as
@@ -372,16 +377,15 @@ password = "change-me"
 # they look. PNG tiles are never outlined — sharp-and-unmarked is the quiet
 # majority — and the mark lives exactly as long as the lossy tile it describes:
 # the next change repaints it away. Valid only with render_subtype = "classify",
-# under either strategy; the colour is its own so it stays readable beside the
-# "motion" outlines below.
+# with or without render_motion; the colour is its own so it stays readable beside
+# the render_motion outlines below.
 #render_classify_debug = false
 
 # QA aid for the tiles themselves, off unless asked for: draw the gateway's own
 # 64x64 tile lattice over the desktop as dashed lines, so where damage is cut is
 # something the screen shows rather than something read out of a constant. Valid
-# under "tiles" and "motion" — the two strategies that send tiles — and refused
-# under "video", which sends the whole desktop as one stream and has no boundary
-# to draw.
+# under "tiles" — the transport that sends tiles — and refused under "video", which
+# sends the whole desktop as one stream and has no boundary to draw.
 #
 # Unlike the two outlines above, nothing is painted into the pixels: the browser
 # draws the lattice on a layer over the framebuffer. It has to, and that is worth
@@ -393,11 +397,17 @@ password = "change-me"
 # frame and cost the encoders nothing. It combines with either outline above.
 #render_grid_debug = false
 
-# render_type = "motion" hands the cells that are currently changing fast to a video
+# render_motion = true hands the cells that are currently changing fast to a video
 # stream, re-sending each one at the base encode once it settles. The cells in motion
 # are coalesced into regions and each region gets its own stream, while the base codec
 # carries everything else. A video in a window costs its own pixels; the text beside
 # it stays exactly what render_subtype says, and is never re-encoded at all.
+#
+# It is a switch rather than a render_type because it takes nothing away: a target
+# with it set sends the same tiles it sent without it, and the ones in motion are
+# simply carried by something cheaper while they move. Refused under
+# render_type = "video", which streams the whole desktop already and has no settled
+# cells left to discount.
 #
 # A region has to be big enough to be a video before it is streamed: anything
 # changing in fewer than five 64x64 cells on its own — a spinner, a progress bar, a
@@ -407,17 +417,23 @@ password = "change-me"
 # decoder in the browser and a crisp re-send every time it stopped and started.
 # Only a small mover sitting inside a larger moving region's box rides that stream.
 #
-# "motion" does not replace the base keys, it builds on them: render_subtype and
-# render_quality mean exactly what they mean under "tiles", they just describe the
-# settled cells only. So render_quality is still refused over a "png" base — there is
-# nothing to turn down — and still required over "jpeg" or "classify".
+# render_motion does not replace the base keys, it builds on them: render_subtype and
+# render_subtype_quality mean exactly what they mean without it, they just describe
+# the settled cells only. So render_subtype_quality is still refused over a "png" base
+# — there is nothing to turn down — and still required over "jpeg" or "classify".
 #
-# render_motion_quality is the streams' own dial, and there it is a *ceiling*: on a
-# link that can carry it you get that quality, and a link that cannot makes the
+# render_stream_quality is the streams' own dial, required by render_motion — the
+# switch has no quality of its own and none is invented for it. It is a *ceiling*: on
+# a link that can carry it you get that quality, and a link that cannot makes the
 # picture coarser until it can. Nothing goes finer than what is set here. It can be
 # very low — motion hides it, and it does not last. There is no codec key beside it:
 # a moving region is VP9, the same as render_type = "video", and render_chroma below
 # is the only choice inside it.
+#
+# It is the same key render_type = "video" uses below, and deliberately: both are the
+# quality of a VP9 stream, they reach the same encoder through the same congestion
+# walk, and a target can never have both — motion discounts settled tiles and "video"
+# has none. One dial, one name.
 #
 # A region that stops moving ends its stream and is re-sent once at the base encode,
 # so a paused video sharpens by itself.
@@ -428,23 +444,24 @@ password = "change-me"
 # rather than no desktop at all.
 #
 # A lossless base with streaming motion — everything settled is exact:
-#render_type = "motion"
-#render_motion_quality = 30
+#render_motion = true
+#render_stream_quality = 30
 #
 # A lossy base, for a link that cannot afford PNG for the settled cells either:
-#render_type = "motion"
 #render_subtype = "jpeg"
-#render_quality = 60
-#render_motion_quality = 30
+#render_subtype_quality = 60
+#render_motion = true
+#render_stream_quality = 30
 #
 # The classifier as the base: settled photos JPEG at 60, settled text lossless,
 # and whatever is moving in a stream until it stops:
-#render_type = "motion"
 #render_subtype = "classify"
-#render_quality = 60
-#render_motion_quality = 30
+#render_subtype_quality = 60
+#render_motion = true
+#render_stream_quality = 30
 
-# render_type = "video" is not a fourth codec, it is a different transport: the whole
+# render_type = "video" is not a codec on the subtype axis, it is a different
+# transport: the whole
 # desktop as one video stream instead of one encoded image per changed region. Every
 # frame says what changed since the one before it, so nothing is cut into per-region
 # tiles and the cell grid does not apply — which is why it takes no render_subtype and
@@ -453,7 +470,8 @@ password = "change-me"
 # carrying the desktop rectangle a client crops to; what goes away is the segmentation,
 # not the framing.)
 #
-# render_quality is the dial, 1-100 as everywhere else, and it is a *ceiling*: on a
+# render_stream_quality is the dial — the same key render_motion uses above, since
+# both name the quality of a VP9 stream. 1-100 as everywhere else, and a *ceiling*: on a
 # link that can carry it you get exactly that quality, and a link that cannot makes
 # the picture coarser until it can. Nothing ever goes finer than what is set here.
 #
@@ -468,15 +486,15 @@ password = "change-me"
 # it costs CPU on the gateway for every frame, including on a screen that is barely
 # changing. The `encode totals` log line is what settles it for a given target.
 #render_type = "video"
-#render_quality = 60
+#render_stream_quality = 60
 
 # How much colour a video stream carries per pixel — every stream this target has,
-# render_type = "video" and render_type = "motion" alike. Refused on a target that
+# render_type = "video" and render_motion = true alike. Refused on a target that
 # streams nothing.
 #
 #   "420" — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
 #           every decoder takes, hardware ones included.
-#   "444" — a colour sample per pixel (VP9 profile 1). This, not render_quality, is
+#   "444" — a colour sample per pixel (VP9 profile 1). This, not render_stream_quality, is
 #           where a desktop stream's visible loss is: a one-pixel coloured glyph stem
 #           on a dark terminal shares its one 4:2:0 colour sample with three pixels of
 #           background and comes back at a quarter of its saturation, at any quality
@@ -490,16 +508,16 @@ password = "change-me"
 # queueing. The configured qualities remain ceilings. JPEG tiles lower their
 # quality per encode; video streams add the client's paint lag to their existing
 # send-pressure signal. Refused on lossless PNG tiles — the one plan with no
-# lossy dial to move.
+# lossy dial to move — that is a "png" base with no render_motion.
 #render_adaptive = false
 
 # Floor for that adaptive walk, 1–100 and defaulting to 20. Valid only with
 # `render_adaptive = true`, and it may not exceed any configured render quality.
 #render_adaptive_min = 20
 
-# QA aid for "motion", off unless asked for: outline every piece the strategy emits
-# in the pixels themselves, so which cells it put in motion is something you read
-# off the screen rather than infer from how blurry a region looks.
+# QA aid for render_motion, off unless asked for: outline every piece the motion
+# path emits in the pixels themselves, so which cells it put in motion is something
+# you read off the screen rather than infer from how blurry a region looks.
 #
 #   magenta — the outline of a streamed region, drawn on the picture the encoder
 #             sees rather than on the pixels a cleanup restores. Magenta over
