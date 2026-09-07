@@ -377,7 +377,7 @@ password = "change-me"
 #render_classify_debug = false
 
 # QA aid for the tiles themselves, off unless asked for: draw the gateway's own
-# 320x64 tile lattice over the desktop as dashed lines, so where damage is cut is
+# 64x64 tile lattice over the desktop as dashed lines, so where damage is cut is
 # something the screen shows rather than something read out of a constant. Valid
 # under "tiles" and "motion" — the two strategies that send tiles — and refused
 # under "video", which sends the whole desktop as one stream and has no boundary

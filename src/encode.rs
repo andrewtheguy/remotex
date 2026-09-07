@@ -88,8 +88,10 @@ const CLEANUP_IDLE: Duration = Duration::from_millis(500);
 const CLEANUP_TICK: Duration = Duration::from_millis(250);
 
 /// Cleanups per tick, so a whole stopped video settles over a few ticks rather
-/// than in one burst competing with live motion for the socket.
-const MAX_CLEANUPS_PER_TICK: usize = 8;
+/// than in one burst competing with live motion for the socket. Forty 64×64 cells
+/// is a 640×256 patch per tick: a stopped 720p player sharpens in about two
+/// seconds, and a full 1080p desktop in a little over three.
+const MAX_CLEANUPS_PER_TICK: usize = 40;
 
 /// Colour of a `render_motion_debug` outline on a piece sent at the motion encode.
 ///
@@ -702,7 +704,7 @@ impl TileSink {
     /// - `MARK_MOTION` (magenta) — sent at the motion encode. Magenta over
     ///   something that is not moving is the detection reaching too far.
     /// - `MARK_CRISP` (cyan) — sent at the base encode from inside a split band:
-    ///   a quiet cell beside a moving one. This is the boundary of the split.
+    ///   a run of quiet cells beside a moving one. This is the boundary of the split.
     /// - `MARK_CLEANUP` (green), drawn by `flush_cleanups` — a settled cell
     ///   restored to the base encode.
     ///
@@ -803,17 +805,32 @@ impl TileSink {
                 continue;
             }
 
+            // The quiet cells go out as *runs*: along each row of cells in the band,
+            // every maximal stretch not under a stream is one tile. The cell is the
+            // unit of identity, not of transport — a tile per 64-pixel cell would pay
+            // PNG's fixed cost and a batch record up to thirty times across one 1080p
+            // band, for pixels that differ from a whole band only by the hole the
+            // stream leaves in them.
+            let mut runs: Vec<Rect> = Vec::new();
             for cell in cells {
                 if streamed.contains(&cell.cell_key()) {
                     continue;
                 }
-                let rgb = Arc::new(pack(cell));
+                match runs.last_mut() {
+                    Some(run) if run.top == cell.top && run.right.checked_add(1) == Some(cell.left) => {
+                        run.right = cell.right;
+                    }
+                    _ => runs.push(cell),
+                }
+            }
+            for run in runs {
+                let rgb = Arc::new(pack(run));
                 // Only a *split* band is marked, for the reason the still path gives.
                 // A region's own outline is drawn by its encoder, on the crop rather
                 // than on the mirror — see `video::Mark`.
-                let rgb = if debug { marked(&rgb, cell, MARK_CRISP) } else { rgb };
-                crisp.push(cell);
-                self.encode(cell, rgb, base).await?;
+                let rgb = if debug { marked(&rgb, run, MARK_CRISP) } else { rgb };
+                crisp.push(run);
+                self.encode(run, rgb, base).await?;
             }
         }
 

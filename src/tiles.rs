@@ -922,14 +922,14 @@ mod tests {
     /// without it, the band below would carry the row above's key.
     #[test]
     fn differently_shaped_damage_lands_on_the_same_key() {
-        let wide = rect(600, 100, 700, 110);
-        let tall = rect(650, 70, 660, 120);
+        let wide = rect(120, 100, 140, 110);
+        let tall = rect(130, 70, 132, 120);
         let keys = |r: Rect| r.cells().map(|c| c.cell_key()).collect::<Vec<_>>();
         assert_eq!(keys(wide), vec![(1, 1), (2, 1)]);
         assert_eq!(keys(tall), vec![(2, 1)]);
 
         // A band that straddles y = CELL_H is cut into both rows.
-        let band = rect(0, CELL_H - 1, 99, CELL_H * 2 - 2);
+        let band = rect(0, CELL_H - 1, CELL_W - 1, CELL_H * 2 - 2);
         assert_eq!(keys(band), vec![(0, 0), (0, 1)]);
     }
 
@@ -937,7 +937,7 @@ mod tests {
     /// screen spends nearly all its time in.
     #[test]
     fn a_rectangle_inside_one_cell_is_left_alone() {
-        let small = rect(330, 70, 350, 90);
+        let small = rect(66, 70, 70, 90);
         assert_eq!(small.cells().collect::<Vec<_>>(), vec![small]);
         assert_eq!(small.cell_key(), (1, 1));
     }
@@ -946,19 +946,19 @@ mod tests {
     /// a split band the way it paints an unsplit one.
     #[test]
     fn cells_arrive_left_to_right_then_top_down() {
-        let source = rect(300, 60, 650, 130);
+        let source = rect(60, 60, 130, 130);
         assert_eq!(
             source.cells().collect::<Vec<_>>(),
             vec![
-                rect(300, 60, 319, 63),
-                rect(320, 60, 639, 63),
-                rect(640, 60, 650, 63),
-                rect(300, 64, 319, 127),
-                rect(320, 64, 639, 127),
-                rect(640, 64, 650, 127),
-                rect(300, 128, 319, 130),
-                rect(320, 128, 639, 130),
-                rect(640, 128, 650, 130),
+                rect(60, 60, 63, 63),
+                rect(64, 60, 127, 63),
+                rect(128, 60, 130, 63),
+                rect(60, 64, 63, 127),
+                rect(64, 64, 127, 127),
+                rect(128, 64, 130, 127),
+                rect(60, 128, 63, 130),
+                rect(64, 128, 127, 130),
+                rect(128, 128, 130, 130),
             ]
         );
     }
