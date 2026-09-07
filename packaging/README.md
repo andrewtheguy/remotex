@@ -91,6 +91,42 @@ Arm Linux runners use `arm64` in the asset names. The tarballs retain their
 existing versioned filenames because the quick installer selects and verifies
 them by release version.
 
+## x86-64 CPU compatibility
+
+The Linux x86-64 binary targets the baseline x86-64 ISA and dispatches SIMD at
+run time. Neither Cargo configuration nor packaging and CI set `target-cpu`, and
+the prebuilt archives downloaded by the sys crates must use the same baseline
+with their hand-written kernels selected by CPUID: libvpx's rtcd tables, opus's
+`MAY_HAVE` dispatch, and FreeRDP's primitives autodetection. The sys crates fetch
+each dependency repository's latest release, so that release's archives—not the
+tag pinned in this repository's `Cargo.toml`—set the effective CPU floor.
+
+This policy is measured, not merely conservative. On an i5-8500T,
+`target-cpu=x86-64-v3` made PNG tile encoding 1.7 times slower through changes to
+the autovectorized `png`/`fdeflate` loops. VP9 encoding was within noise of a
+v3-scalar libvpx, while an opus archive using runtime dispatch consumed 0.73% of
+a core against 0.65% with `PRESUME_AVX2`. A global v3 floor also caused `SIGILL`
+at startup on Ivy Bridge. If a Rust hot path benefits from AVX2, guard a separate
+function with `is_x86_feature_detected!` and `#[target_feature]`; never raise the
+binary's global CPU floor.
+
+## Prebuilt native dependencies
+
+Release builds link `opus-prebuilt`, `libvpx-prebuilt`, and
+`libfreerdp-prebuilt`. Their sys crates download static archives instead of
+building vendored C, so this project needs no CMake, assembler, pkg-config,
+libclang, vcpkg, or system copies of those libraries. Do not restore
+`LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
+libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
+with `--enable-realtime-only`; additional features need a separately built
+archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
+
+The optional `apple-hp-audio` feature follows the same archive model through
+`fdk-aac-prebuilt`, but its non-OSI-approved license keeps it out of every release
+artifact. See [Audio frames](../docs/architecture.md#audio-frames) for the media
+design and [Installing remotex](../docs/install.md#apple-high-performance-audio-build-it-yourself)
+for a manual feature build.
+
 ## Releases
 
 `.github/workflows/release.yml` creates a draft, builds the frontend once, then

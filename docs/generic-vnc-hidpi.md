@@ -34,9 +34,10 @@ soft.
 
 Since neither end can measure it, the density of a generic server is **declared**
 from the client — the one place the project's no-client-side-render-controls rule
-does not apply, because the protocol forces it (see `AGENTS.md`, Display
-geometry). It is not scaling: the browser still shows every framebuffer pixel
-one-to-one, at the CSS size `pixels / scale` like every other 2x desktop.
+does not apply, because the protocol forces it (see
+[`architecture.md`](architecture.md#display-geometry)). It is not scaling: the
+browser still shows every framebuffer pixel one-to-one, at the CSS size
+`pixels / scale` like every other 2x desktop.
 
 - The floating ☰ menu has a **Density** section on plain VNC targets only
   (`protocol = "vnc"`, no `subtype`); RDP and both Apple modes hide it, since a

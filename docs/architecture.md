@@ -588,6 +588,13 @@ Authentication and desktop ownership are separate:
 6. Logging out ends the login and session immediately, closes the engine, and
    releases the claim.
 
+Every `connect` first ends any running engine, including one already connected
+to the same target, and the next engine is not spawned until that process exits;
+`ENGINE_EXIT_GRACE` bounds the wait. Switching targets and logging out likewise
+end the engine outright. The sole resume is the owning browser reattaching to
+the same target after its session socket drops. Opening size, density, display
+selection, and connection state do not carry into any other session.
+
 Any claim by a different browser — a forced takeover, or a plain claim while
 nobody is attached — closes the previous WebSocket and its engine but
 preserves the selected target: the new claimant's attach reconnects that
@@ -897,10 +904,23 @@ and the browser is asked for a keyframe, because H.264 cannot resume mid-GOP.
 `src/rdp_camera.rs` adapts that endpoint to the gateway's `CameraBridge`
 (`src/camera.rs`), which is all the session layer sees.
 
+### Display geometry
+
 Client JSON messages cover pointer, wheel, keyboard, clipboard, display
 selection, viewport size, refresh, cache reset, and session control. Pointer
 motion is coalesced while the socket has queued bytes; any non-motion input
 flushes the latest held position first.
+
+Pointer clients present every remote pixel at 100%, scrolling when the desktop
+is larger than the window. The sole presentation-scale exception is a mobile
+client marked `HostDisplay::fit`, gated by `CAN_PINCH_ZOOM`, which starts
+fit-to-width and layers pinch zoom over it. Lack of remote resize support never
+permits a pointer client to scale the canvas to fit.
+
+`ClientMsg::Viewport` is the window's CSS size in points, including immediately
+after a connect when no remote scale has been announced. `ServerMsg::Resize`
+reports framebuffer pixels and the remote density; the browser presents it at
+`w / scale` by `h / scale` CSS pixels. The scale is never a fit factor.
 
 A target's `resize` means the window drives the remote's size, continuously and
 on every engine alike: an engine that has it applies every `viewport` it is
@@ -915,8 +935,11 @@ reset instead of a reactivation; that trade is the operator's, not the client's.
 The opening size is one rule for every engine that can ask for one: the pinned
 `width`/`height` when the config sets both, else the full resolution of the
 client's own screen — carried in the `connect` message so it exists before the
-engine's handshake — else the built-in default. See
-`TargetConfig::opening_size`.
+engine's handshake — else `DEFAULT_SIZE`, 1920×1080 points. A mobile
+`HostDisplay::fit` client has no screen suitable for laying out a desktop, so it
+uses the pinned size or that default while its density still counts. See
+`TargetConfig::opening_size`; `width` and `height` remain options because whether
+the operator specified them is meaningful.
 
 What is engine-specific is the mechanism:
 
@@ -926,6 +949,17 @@ What is engine-specific is the mechanism:
 | Apple Standard VNC | rejects `resize`: it shares physical displays |
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
 | RDP | applies a requested size, and the client's reported display density |
+
+A target that streams video is also held under the gateway's 3840-pixel long
+side by 2400-pixel short side ceiling at the negotiated density. RDP opening and
+layout sizes and generic VNC `SetDesktopSize` requests all pass through
+`video::fit_ceiling`; High Performance separately keeps its native 3840×2160
+backing ceiling. This changes what the remote is asked to render, not how the
+browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
+the remainder bare. Tile targets are not capped. A pinned streaming size already
+over the ceiling at 1x is rejected during config parsing; a physical or
+non-resizable remote may still reach the encoder's refusal because the gateway
+cannot ask it for a smaller desktop.
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only with
@@ -1105,6 +1139,14 @@ by fingerprint, not verified. The explicit subtype prevents an anonymous macOS
 Screen Sharing connection from landing at a separate login-window session rather
 than the user's screen.
 
+Apple Standard mode maps X11 modifiers by its own table. Measured on macOS 26,
+`Alt_L`/`Alt_R` and `Super_L`/`Super_R` all arrive as Command,
+`Meta_L`/`Meta_R` arrive as the corresponding Option key, and `Mode_switch` and
+`ISO_Level3_Shift` do nothing. The engine therefore sends a keyboard's Alt codes
+as Meta on a Mac (`keymap::apple_keysym`) and leaves Windows keys as Super. The
+server also drops pointer and key input during the first seconds of a session;
+`tests/ws_probe.py --key` waits eight seconds before injecting for that reason.
+
 Generic `vnc` advertises the standard lossless encodings in preference order —
 CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first it
 supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
@@ -1280,6 +1322,13 @@ guest recognises the gestures itself: Windows' tap, drag, press-and-hold, pinch,
 two-finger scroll and edge swipes are its own. VNC has no touch and never sends
 `touchReady`; a reattach re-announces it and cancels the contacts of whoever was
 attached before. See `frontend/src/touchPassthrough.ts` and `src/rdp.rs`.
+
+Measured against Windows 11 Enterprise 26100 through the gateway from a
+touch-emulating Chromium, press-and-hold opened the desktop context menu at the
+contact and a tap on Start opened Start—guest touch semantics a mouse path could
+not produce. That host opened the channel about 1.4 seconds after connect. The
+libfreerdp end-to-end binary's `rdpei not offered` result against such a host is
+its own early exit, not a negative answer from the host.
 
 On a Mac host connected to a non-Mac remote, selected Command shortcuts are
 translated to Control. A Mac-keyboard toggle disables translation, and the
