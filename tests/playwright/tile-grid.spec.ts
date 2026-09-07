@@ -19,7 +19,7 @@
 //     npx playwright test tile-grid
 import { expect, type Page, test } from "@playwright/test";
 
-import { logInAndConnectTo, returnToPicker, TARGET } from "./support";
+import { leaveSession, logInAndConnectTo, returnToPicker, TARGET } from "./support";
 
 /// The opt-in, and the target name in one — the same bargain the video and audio
 /// specs make. Its presence is the claim that this gateway has a target with the
@@ -78,6 +78,11 @@ test.describe("the render_grid_debug lattice", () => {
     "set REMOTEX_PLAYWRIGHT_GRID_TARGET to a target with render_grid_debug = true",
   );
 
+  // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
   test("a grid target states its lattice and gets an overlay the size of the desktop", async ({
     page,
   }) => {
@@ -108,8 +113,6 @@ test.describe("the render_grid_debug lattice", () => {
     // And it is scenery: the input overlay above it owns the pointer, and a
     // lattice that swallowed a click would break the desktop it is drawn over.
     expect(grid?.pointerEvents).toBe("none");
-
-    await returnToPicker(page);
   });
 
   test("an ordinary target draws no lattice, and leaves none behind", async ({
@@ -128,7 +131,5 @@ test.describe("the render_grid_debug lattice", () => {
     await expect
       .poll(async () => (await canvases(page)).grid?.bitmap)
       .toEqual({ w: 0, h: 0 });
-
-    await returnToPicker(page);
   });
 });

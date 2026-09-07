@@ -15,7 +15,7 @@
 //     npx playwright test video-stream
 import { expect, type Page, test } from "@playwright/test";
 
-import { logInAndConnectTo, returnToPicker } from "./support";
+import { leaveSession, logInAndConnectTo } from "./support";
 
 /// The opt-in, and the target name in one — the same bargain the audio spec makes.
 /// Its presence is the claim that this gateway has a target which streams video;
@@ -281,6 +281,11 @@ test.describe("a video target", () => {
     "set REMOTEX_PLAYWRIGHT_VIDEO_TARGET=<target> against a gateway with a video target",
   );
 
+  // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
   test("streams announced VP9 access units the client can parse", async ({
     page,
   }) => {
@@ -303,7 +308,5 @@ test.describe("a video target", () => {
     // One stream for the whole desktop is what this dial *is*: `video` sends no
     // per-region streams, so a second id here would mean the motion dial ran.
     expect(new Set(units(seen).map((u) => u.stream))).toEqual(new Set([0]));
-
-    await returnToPicker(page);
   });
 });

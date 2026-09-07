@@ -234,11 +234,32 @@ export async function openClipboardPanel(page: Page): Promise<void> {
 }
 
 // Hand the session back to the picker, so the next spec starts where this one
-// did. Every spec here ends with this for that reason.
+// did. Every spec here does this on the way out, most of them through
+// `leaveSession` below.
 export async function returnToPicker(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Switch target" }).click();
   await expect(
     page.getByRole("heading", { name: "Pick a target" }),
   ).toBeVisible();
+}
+
+// The same thing as cleanup, for an `afterEach`: hand the session back even when a
+// spec threw halfway, so a failing run does not leave the gateway's one slot sitting
+// on a desktop for the next spec to take over.
+//
+// Both steps are conditional, because cleanup runs after failures and a hook that
+// threw would bury the real one under a second. The drawer is closed first for the
+// reason `returnToPicker` opens it: the toggle is one button that reads "Close menu"
+// while the drawer is open, so a spec that failed with it open would send the click
+// below looking for a button that is not there. A docked panel needs nothing — it
+// carries its own close, and the toggle beside it already says "Open menu".
+export async function leaveSession(page: Page): Promise<void> {
+  const drawer = page.getByRole("button", { name: "Close menu" });
+  if (await drawer.isVisible()) {
+    await drawer.click();
+  }
+  if (await page.getByRole("button", { name: "Open menu" }).isVisible()) {
+    await returnToPicker(page);
+  }
 }

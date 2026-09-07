@@ -21,7 +21,7 @@
 //     npx playwright test audio-socket
 import { expect, type Page, test } from "@playwright/test";
 
-import { logInAndConnect, returnToPicker } from "./support";
+import { leaveSession, logInAndConnect } from "./support";
 
 /// The binary frame kinds, copied rather than imported: this spec is the independent
 /// check that the gateway put audio where it said it did, and reading the SPA's own
@@ -76,19 +76,16 @@ const only = (traffic: Traffic[], path: string): Traffic => {
   return matches[0];
 };
 
-/// `returnToPicker` opens the drawer itself, and the toggle is inside it — so a spec
-/// that left it open would fail there looking for a button that currently says
-/// "Close menu".
-async function closeMenu(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Close menu" }).click();
-  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible();
-}
-
 test.describe("the audio socket", () => {
   test.skip(
     !AUDIO_TARGET,
     "set REMOTEX_PLAYWRIGHT_AUDIO_TARGET=<target> against a gateway that serves audio",
   );
+
+  // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
 
   test("carries sound, and the session socket carries none", async ({
     page,
@@ -135,9 +132,6 @@ test.describe("the audio socket", () => {
       only(traffic, "/ws").binaryKinds.filter((k) => k !== BATCH_FRAME_KIND),
       "the session socket must carry batches only",
     ).toEqual([]);
-
-    await closeMenu(page);
-    await returnToPicker(page);
   });
 
   test("closes when audio is turned off, and leaves the session alone", async ({
@@ -167,8 +161,5 @@ test.describe("the audio socket", () => {
     // And the desktop is untouched: a session must survive its sound ending.
     expect(only(traffic, "/ws").closed).toBe(false);
     await expect(page.getByRole("button", { name: "Enable audio" })).toBeVisible();
-
-    await closeMenu(page);
-    await returnToPicker(page);
   });
 });

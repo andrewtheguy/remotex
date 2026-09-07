@@ -59,9 +59,11 @@ is invisible to any one of them.
 
 `support.ts` holds what the specs share: the login/target flow and the SSH hooks
 that read and write the Mac's pasteboard. Two conventions live there. Every spec
-ends by handing the session back to the picker, because the server keeps a target
-session running when its browser goes away; and `logInAndConnect` accepts either
-landing, so a run abandoned on the desktop does not break the next one.
+hands the session back to the picker in an `afterEach` through `leaveSession`,
+because the server keeps a target session running when its browser goes away and a
+spec that failed halfway would otherwise leave it there; and `logInAndConnect`
+accepts either landing, so a run abandoned on the desktop does not break the next
+one.
 
 ## Run
 

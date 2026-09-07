@@ -11,7 +11,7 @@
 // deterministic transport event, and every assertion below is either a byte in a
 // header or a count of records inside one frame.
 import { expect, test } from "@playwright/test";
-import { logInAndConnect, returnToPicker, skipUnlessLiveMac } from "./support";
+import { leaveSession, logInAndConnect, skipUnlessLiveMac } from "./support";
 
 // Must match `batch` in src/protocol.rs.
 const BATCH_FRAME_KIND = 0x02;
@@ -134,6 +134,11 @@ test.describe("v4 batch envelope", () => {
   // its screen arriving through the gateway.
   skipUnlessLiveMac();
 
+  // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
   test("screen updates arrive as batch frames the SPA can parse", async ({
     page,
   }) => {
@@ -232,7 +237,5 @@ test.describe("v4 batch envelope", () => {
       total,
       `${batches.length} frames carried ${total} records; batching should carry more records than frames`,
     ).toBeGreaterThan(batches.length);
-
-    await returnToPicker(page);
   });
 });
