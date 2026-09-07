@@ -314,7 +314,11 @@ function WindowSection({
 // that renders at 2x (a sway output at scale 2, say) the person who knows that
 // says so here, and the engine asks it for twice the points in pixels and labels
 // the desktop 2x. Hidden everywhere else — a toggle on a protocol that states its
-// own density would contradict it.
+// own density would contradict it — and hidden on a plain VNC target that sends
+// tiles: the gateway cuts its tile grid at 64 points of a density the wire
+// stated, and a declared one would make this the one path where that density is
+// the client's word. Only `render_type = "video"`, which cuts no grid, takes it;
+// `connected.density` says which this session is.
 //
 // The button's state is the desktop's, read off the last `resize`, not a
 // remembered preference: a declaration the engine dropped, or a server that
@@ -740,9 +744,10 @@ export default function FloatingMenu({
   connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
-  // Whether this target's density is a declaration (a plain VNC server), which
-  // shows the Density section, and what its toggle sends — 100 or 200. See
-  // DensitySection for why it exists and why it is hidden elsewhere.
+  // Whether this target's density is a declaration — a plain VNC server under
+  // `render_type = "video"`, as `connected` states it — which shows the Density
+  // section, and what its toggle sends — 100 or 200. See DensitySection for why
+  // it exists and why it is hidden elsewhere.
   canDeclareDensity: boolean;
   onDensityChange: (scale: number) => void;
   // Whether this session can carry the remote's sound, which hides the Audio

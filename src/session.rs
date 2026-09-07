@@ -676,7 +676,8 @@ impl SessionManager {
                     camera: target.camera,
                     microphone: target.microphone,
                     render: engine.render.clone(),
-                    tile_grid: target.tile_grid(),
+                    grid_debug: target.render_grid_debug,
+                    density: target.declares_density(),
                 })
             }
             // A target with no engine is a claim change's teardown, and nothing
@@ -1209,7 +1210,8 @@ impl SessionManager {
             camera: target.camera,
             microphone: target.microphone,
             render,
-            tile_grid: target.tile_grid(),
+            grid_debug: target.render_grid_debug,
+            density: target.declares_density(),
         };
         st.selected = Some(target);
         status
@@ -1697,7 +1699,8 @@ mod tests {
                 camera: got_camera,
                 microphone: got_microphone,
                 render: _,
-                tile_grid: _,
+                grid_debug: _,
+                density: _,
             }) => {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");

@@ -1,8 +1,8 @@
 //! Copy detection over the shadow: a scroll becomes `COPY` records instead of image bytes.
 //!
 //! The mechanism is guacamole-server's (`display-plan-search.c`), reshaped for this
-//! gateway's operands. Every dirty 64×64-aligned cell of the *new* frame is hashed into a
-//! 65,536-slot table; a 64×64 window then slides over the *shadow* — the pixels the client
+//! gateway's operands. Every dirty grid-aligned cell of the *new* frame is hashed into a
+//! 65,536-slot table; a cell-sized window then slides over the *shadow* — the pixels the client
 //! already holds, which is the only thing a copy may read — across the damaged region, and
 //! a hash hit that byte-verifies becomes a copy: the client moves pixels on its own canvas
 //! and the image bytes never travel. The search is confined to the damage because a scroll
@@ -22,12 +22,14 @@
 //! holds one cell per distinct content — guacamole-server's documented limitation, shared
 //! knowingly).
 
+use crate::protocol::TileGrid;
 use crate::tiles::{Rect, Shadow};
 
-/// The search granularity, and guacamole-server's: big enough that a match is
-/// overwhelmingly a real move, small enough that a scrolled pane's edge waste is thin.
-const CELL: u16 = 64;
-
+/// The search granularity is the shadow's own grid ([`Shadow::grid`]): 64 points, which
+/// is guacamole-server's 64 pixels on a 1× desktop and 128 on a 2× one. Big enough that
+/// a match is overwhelmingly a real move, small enough that a scrolled pane's edge waste
+/// is thin — and the same number of windows for the same scroll at either density.
+///
 /// Fewer dirty cells than this and the search does not run. A scroll dirties dozens of
 /// cells; a caret, a clock and a hover highlight dirty a few — and the search costs a
 /// walk over the damage's whole bounding box, which two far-apart small updates can
@@ -70,13 +72,14 @@ pub fn plan(
     damage: &[Rect],
     shadow: &Shadow,
 ) -> Vec<PlannedCopy> {
-    if !shadow.all_known() || shadow.size() != (fw, fh) || fw < CELL || fh < CELL {
+    let TileGrid { w: cw, h: ch } = shadow.grid();
+    if !shadow.all_known() || shadow.size() != (fw, fh) || fw < cw || fh < ch {
         return Vec::new();
     }
 
-    // The dirty cells, 64-aligned and fully inside the frame. A partial cell at the right
-    // or bottom edge is skipped rather than special-cased: its pixels still travel as
-    // tiles, and a hash of a 64×64 window can only ever match a full cell anyway.
+    // The dirty cells, grid-aligned and fully inside the frame. A partial cell at the
+    // right or bottom edge is skipped rather than special-cased: its pixels still travel
+    // as tiles, and a hash of a cell-sized window can only ever match a full cell anyway.
     let mut cells: Vec<(u16, u16)> = Vec::new();
     for r in damage {
         let right = r.right.min(fw - 1);
@@ -84,14 +87,14 @@ pub fn plan(
         if r.left > right || r.top > bottom {
             continue;
         }
-        for cy in (r.top / CELL)..=(bottom / CELL) {
-            let top = cy * CELL;
-            if u32::from(top) + u32::from(CELL) > u32::from(fh) {
+        for cy in (r.top / ch)..=(bottom / ch) {
+            let top = cy * ch;
+            if u32::from(top) + u32::from(ch) > u32::from(fh) {
                 break;
             }
-            for cx in (r.left / CELL)..=(right / CELL) {
-                let left = cx * CELL;
-                if u32::from(left) + u32::from(CELL) > u32::from(fw) {
+            for cx in (r.left / cw)..=(right / cw) {
+                let left = cx * cw;
+                if u32::from(left) + u32::from(cw) > u32::from(fw) {
                     break;
                 }
                 cells.push((left, top));
@@ -108,8 +111,8 @@ pub fn plan(
     // guacamole-server does: replacing on collision would let the last cell of a tiled
     // pattern shadow all the others, and keeping the first is as good as any other rule
     // once every hit is verified.
-    let row_out = pow(ROW_BASE, u32::from(CELL));
-    let col_out = pow(COL_BASE, u32::from(CELL));
+    let row_out = pow(ROW_BASE, u32::from(cw));
+    let col_out = pow(COL_BASE, u32::from(ch));
     #[derive(Clone, Copy)]
     struct Slot {
         hash: u64,
@@ -118,10 +121,10 @@ pub fn plan(
     let mut table = vec![Slot { hash: 0, cell: u32::MAX }; TABLE_SLOTS];
     for (i, &(left, top)) in cells.iter().enumerate() {
         let mut h = 0u64;
-        for y in top..top + CELL {
+        for y in top..top + ch {
             let row = &new[usize::from(y) * stride + usize::from(left) * 4..];
             let mut rh = 0u64;
-            for x in 0..usize::from(CELL) {
+            for x in 0..usize::from(cw) {
                 rh = rh.wrapping_mul(ROW_BASE).wrapping_add(px4(&row[x * 4..]));
             }
             h = h.wrapping_mul(COL_BASE).wrapping_add(rh);
@@ -145,50 +148,52 @@ pub fn plan(
     bound.bottom = bound.bottom.min(fh - 1);
     let cols = usize::from(bound.right - bound.left) + 1;
     let rows = usize::from(bound.bottom - bound.top) + 1;
-    if cols < usize::from(CELL) || rows < usize::from(CELL) {
+    let (cw, ch) = (usize::from(cw), usize::from(ch));
+    if cols < cw || rows < ch {
         return Vec::new();
     }
 
-    // Slide the 64×64 window over the shadow: per-row rolling hashes, rolled again down
-    // the columns, so the whole region costs O(pixels) and each window position one probe.
+    // Slide the cell-sized window over the shadow: per-row rolling hashes, rolled again
+    // down the columns, so the whole region costs O(pixels) and each window position one
+    // probe.
     let rgb = shadow.rgb();
     let sw = usize::from(fw);
-    let wcols = cols - usize::from(CELL) + 1;
-    let mut ring: Vec<Vec<u64>> = vec![vec![0; wcols]; usize::from(CELL)];
+    let wcols = cols - cw + 1;
+    let mut ring: Vec<Vec<u64>> = vec![vec![0; wcols]; ch];
     let mut scratch: Vec<u64> = vec![0; wcols];
     let mut colh: Vec<u64> = vec![0; wcols];
     let mut matched: Vec<Option<(u16, u16)>> = vec![None; cells.len()];
     for row_i in 0..rows {
         let y = bound.top + row_i as u16;
-        // This row's 64-wide window hashes.
+        // This row's cell-wide window hashes.
         {
             let base = (usize::from(y) * sw + usize::from(bound.left)) * 3;
             let row = &rgb[base..base + cols * 3];
             let mut rh = 0u64;
             for i in 0..cols {
                 rh = rh.wrapping_mul(ROW_BASE).wrapping_add(px3(&row[i * 3..]));
-                if i >= usize::from(CELL) {
-                    let out = px3(&row[(i - usize::from(CELL)) * 3..]);
+                if i >= cw {
+                    let out = px3(&row[(i - cw) * 3..]);
                     rh = rh.wrapping_sub(out.wrapping_mul(row_out));
                 }
-                if i >= usize::from(CELL) - 1 {
-                    scratch[i - (usize::from(CELL) - 1)] = rh;
+                if i >= cw - 1 {
+                    scratch[i - (cw - 1)] = rh;
                 }
             }
         }
-        // Roll the columns: add this row, retire the row 64 above it.
-        let slot_row = row_i % usize::from(CELL);
+        // Roll the columns: add this row, retire the row one cell above it.
+        let slot_row = row_i % ch;
         for x in 0..wcols {
             colh[x] = colh[x].wrapping_mul(COL_BASE).wrapping_add(scratch[x]);
-            if row_i >= usize::from(CELL) {
+            if row_i >= ch {
                 colh[x] = colh[x].wrapping_sub(ring[slot_row][x].wrapping_mul(col_out));
             }
         }
         std::mem::swap(&mut ring[slot_row], &mut scratch);
-        if row_i < usize::from(CELL) - 1 {
+        if row_i < ch - 1 {
             continue;
         }
-        let win_top = y - (CELL - 1);
+        let win_top = y - (ch as u16 - 1);
         for (xk, &h) in colh.iter().enumerate() {
             let slot = &mut table[fold(h)];
             if slot.cell == u32::MAX || slot.hash != h {
@@ -202,14 +207,14 @@ pub fn plan(
             if src == (dl, dt) {
                 continue;
             }
-            if verified(new, stride, (dl, dt), rgb, sw, src) {
+            if verified(new, stride, (dl, dt), rgb, sw, src, (cw, ch)) {
                 matched[i] = Some(src);
                 slot.cell = u32::MAX;
             }
         }
     }
 
-    merge(&cells, &matched)
+    merge(&cells, &matched, shadow.grid())
 }
 
 /// Merge matched cells into the fewest copies, grouped by displacement, and order each
@@ -217,7 +222,7 @@ pub fn plan(
 /// a downward move emits bottom-up, an upward one top-down, and likewise across. Order is
 /// an economy like the verification: a clobbered source only costs the repaint the tile
 /// pass already owes it.
-fn merge(cells: &[(u16, u16)], matched: &[Option<(u16, u16)>]) -> Vec<PlannedCopy> {
+fn merge(cells: &[(u16, u16)], matched: &[Option<(u16, u16)>], grid: TileGrid) -> Vec<PlannedCopy> {
     let mut by_shift: std::collections::BTreeMap<(i32, i32), Vec<(u16, u16)>> =
         std::collections::BTreeMap::new();
     for (i, m) in matched.iter().enumerate() {
@@ -235,8 +240,13 @@ fn merge(cells: &[(u16, u16)], matched: &[Option<(u16, u16)>]) -> Vec<PlannedCop
         let mut strips: Vec<Rect> = Vec::new();
         for (l, t) in group {
             match strips.last_mut() {
-                Some(s) if s.top == t && s.right + 1 == l => s.right += CELL,
-                _ => strips.push(Rect { left: l, top: t, right: l + CELL - 1, bottom: t + CELL - 1 }),
+                Some(s) if s.top == t && s.right + 1 == l => s.right += grid.w,
+                _ => strips.push(Rect {
+                    left: l,
+                    top: t,
+                    right: l + grid.w - 1,
+                    bottom: t + grid.h - 1,
+                }),
             }
         }
         strips.sort_unstable_by_key(|s| (s.left, s.right, s.top));
@@ -271,9 +281,9 @@ fn merge(cells: &[(u16, u16)], matched: &[Option<(u16, u16)>]) -> Vec<PlannedCop
     out
 }
 
-/// Whether the new frame's cell at `dst` and the shadow's window at `src` hold the same
-/// pixels — the check that turns a hash hit into a copy, across the two layouts (RGBX32
-/// against packed RGB888) without materializing either.
+/// Whether the new frame's `cell`-sized cell at `dst` and the shadow's window at `src`
+/// hold the same pixels — the check that turns a hash hit into a copy, across the two
+/// layouts (RGBX32 against packed RGB888) without materializing either.
 fn verified(
     new: &[u8],
     stride: usize,
@@ -281,11 +291,12 @@ fn verified(
     rgb: &[u8],
     sw: usize,
     src: (u16, u16),
+    cell: (usize, usize),
 ) -> bool {
-    for row in 0..usize::from(CELL) {
+    for row in 0..cell.1 {
         let n = &new[(usize::from(dst.1) + row) * stride + usize::from(dst.0) * 4..];
         let o = &rgb[((usize::from(src.1) + row) * sw + usize::from(src.0)) * 3..];
-        for x in 0..usize::from(CELL) {
+        for x in 0..cell.0 {
             if n[x * 4..x * 4 + 3] != o[x * 3..x * 3 + 3] {
                 return false;
             }
@@ -351,7 +362,7 @@ mod tests {
     }
 
     fn known_shadow(rgb: &[u8]) -> Shadow {
-        let mut shadow = Shadow::new("test", W, H);
+        let mut shadow = Shadow::new("test", W, H, TileGrid::ONE);
         shadow.accept(
             Rect { left: 0, top: 0, right: W - 1, bottom: H - 1 },
             rgb,
@@ -424,7 +435,7 @@ mod tests {
     /// declines rather than reading stale bytes.
     #[test]
     fn an_incomplete_shadow_declines_the_search() {
-        let shadow = Shadow::new("test", W, H);
+        let shadow = Shadow::new("test", W, H, TileGrid::ONE);
         let new = rgbx_frame(|x, y| (x, y + 32));
         assert!(plan(&new, usize::from(W) * 4, W, H, &full_damage(), &shadow).is_empty());
     }

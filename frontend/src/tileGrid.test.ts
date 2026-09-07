@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { tileGridLines } from "./tileGrid.ts";
 
-test("the lattice is the gateway's 64x64 cells, interior lines only", () => {
+test("the lattice is the gateway's cells, interior lines only", () => {
   // A desktop three cells wide and two tall: two vertical boundaries inside it
   // and one horizontal. The framebuffer's own edges are cell boundaries too and
   // are deliberately absent — the desktop's edge already draws them, and half of
@@ -22,6 +22,15 @@ test("a desktop that does not divide evenly keeps every whole boundary", () => {
   assert.equal(xs.at(-1), 1856);
   assert.equal(ys.length, 16);
   assert.equal(ys.at(-1), 1024);
+});
+
+test("a 2x desktop is cut at the pitch the resize states, not at 64", () => {
+  // The same three-by-two cells as above, on a Retina framebuffer: the
+  // gateway cuts 64 points, which is 128 of its pixels, and says so.
+  assert.deepEqual(tileGridLines({ w: 384, h: 256 }, { w: 128, h: 128 }), {
+    xs: [128, 256],
+    ys: [128],
+  });
 });
 
 test("a desktop smaller than one cell has no interior boundary to draw", () => {

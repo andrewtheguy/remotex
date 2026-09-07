@@ -53,7 +53,7 @@ use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay, MAX_CURSOR_DIM,
-    MouseButton, ServerMsg, TouchPhase, UNSCALED,
+    MouseButton, ServerMsg, TileGrid, TouchPhase, UNSCALED,
 };
 use crate::rdp_audio;
 use crate::rdp_camera;
@@ -700,7 +700,9 @@ async fn active_loop(
     let mut desktop = connected_at;
     // The pixels the browser has already been sent. Lives beside the framebuffer
     // it shadows, and is forgotten on a repaint and on a resize.
-    let mut shadow = Shadow::new("rdp", desktop.0, desktop.1);
+    // At 1x, like the `Resize` the connect announced; a density the host later
+    // grants re-cuts it with the desktop it comes with.
+    let mut shadow = Shadow::new("rdp", desktop.0, desktop.1, TileGrid::at(Density::One.scale()));
     shadow.classify_cells(sink.wants_cells());
 
     // Last known pointer position, so button/wheel events (which the browser
@@ -875,9 +877,10 @@ async fn active_loop(
                         // framebuffer that no longer exists.
                         pending_damage.clear();
                         damage_due = None;
-                        shadow.resize(desktop.0, desktop.1);
-                        // The cell grid is anchored at (0,0) in framebuffer pixels, so
-                        // a new size makes every key name somewhere else.
+                        shadow.resize(desktop.0, desktop.1, TileGrid::at(applied.scale()));
+                        // The cell grid is anchored at (0,0) in framebuffer pixels and
+                        // pitched at the density, so a new size or density makes every
+                        // key name somewhere else.
                         sink.reset_render();
                         last_pos = (
                             last_pos.0.min(desktop.0.saturating_sub(1)),
@@ -1691,7 +1694,7 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
 }
 
 /// Send whatever part of `rect` the client does not already have, as tiles of at
-/// most [`crate::protocol::CELL_H`] rows each. How that region is cut, and what
+/// most one grid cell tall each. How that region is cut, and what
 /// each piece is encoded as, is [`TileSink::damage`]'s business.
 ///
 /// Comparing against `shadow` earns its keep on this engine in particular: it

@@ -133,12 +133,14 @@ one number for the whole plan: whichever dials exist — `render_subtype_quality
 `render_stream_quality` — all stop at it.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
-gateway's 64x64 tile lattice, dashed, over the desktop. It is refused on
+gateway's tile lattice, dashed, over the desktop. It is refused on
 `render_type = "video"`, which sends no tiles and so has no boundary to draw, and
 it changes nothing about the encode — no key of `RenderPlan` carries it, because no
-encoder needs to know. The lattice reaches the browser as a pitch on
-`ServerMsg::Connected` (`tileGrid`), and the browser draws it on a canvas of its
-own over the framebuffer (`frontend/src/tileGrid.ts`). That split is forced rather
+encoder needs to know. The switch reaches the browser on `ServerMsg::Connected`
+(`gridDebug`); the pitch rides every `ServerMsg::Resize` (`tileGrid`), because it
+follows the framebuffer's density — 64 points, so 64 pixels at 1x and 128 at 2x —
+and the browser draws it on a canvas of its own over the framebuffer
+(`frontend/src/tileGrid.ts`). That split is forced rather
 than chosen: the other two aids mark a decision made about one tile and so belong
 in that tile's pixels, while the lattice is fixed to the framebuffer and the pixels
 are not — a `COPY` slides them sideways, a cached tile is one bitmap redrawn
@@ -205,8 +207,16 @@ Detection is in `src/encode.rs`, owned by the sink both engines already funnel
 their damage through:
 
 - **Cell identity.** `Shadow` is pixel-exact and has no stable cell identity, so
-  churn is keyed to the fixed 64×64 grid (`CELL_W`/`CELL_H`). `Rect::cells` cuts a
-  rectangle at the grid lines on both axes, and `Rect::cell_key` names the piece.
+  churn is keyed to the tile grid (`TileGrid`): 64 *points* (`CELL_POINTS`) on
+  each axis, which is 64 pixels on a 1x framebuffer and 128 on a 2x one
+  (`TileGrid::at` the announced scale). Points rather than pixels because the
+  grid is a unit of work, and a fixed pixel pitch would give a Retina desktop four
+  times the cells — four times the hashes, keys, copy-search probes and tile
+  records — for the same window doing the same thing. Every consumer learns the
+  grid from the same `ServerMsg::Resize` that states the size: the engine's
+  shadow, the sink, the regions and the copy search, so no two can disagree.
+  `Rect::cells` cuts a rectangle at the grid lines on both axes, and
+  `Rect::cell_key` names the piece.
   Cutting rather than snapping outward matters: RDP and VNC describe the same
   moving region with different rectangles from frame to frame, and a key that moved
   with them would count no churn, but snapping outward would ship pixels that did
@@ -367,7 +377,7 @@ codec carrying every cell outside one.
   the mirror and every stream to one blocking worker: their rectangles are disjoint
   and bounded by the desktop, so a round costs what one whole-desktop frame costs.
 - **A region is even, or the desktop's own edge is odd.** A region is a union of
-  whole grid cells and `CELL_W`/`CELL_H` are both even, so an odd side can only come
+  whole grid cells and both sides of the grid are even (64 or 128), so an odd side can only come
   from the clip at the desktop's right or bottom edge — where the mirror's own
   padding is already the column or row the encoder needs. That is why `Stream::new`
   can assert its geometry rather than pad defensively.
@@ -981,7 +991,10 @@ and its density. Mid-session only the density is acted on, and only with
 `resize`: RDP quantizes it to 1x or 2x at a midpoint, a High Performance virtual
 display re-renders the same points at it; the resulting density travels back as
 the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
-Other engines ignore the message.
+Other engines ignore the message. Generic VNC, whose wire carries no density, takes
+a `density` *declaration* from the client instead — only under
+`render_type = "video"`, and `connected` says so; see
+[HiDPI over generic VNC](generic-vnc-hidpi.md).
 
 A client shows the display picker exactly when the target sends it a
 `ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one for both

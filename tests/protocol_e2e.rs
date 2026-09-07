@@ -1114,7 +1114,14 @@ async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(text, format!(r#"{{"type":"resize","w":{w},"h":{h},"scale":1.0}}"#));
+                        // At 1x the tile grid is its 64 points in pixels, and every
+                        // resize states it.
+                        assert_eq!(
+                            text,
+                            format!(
+                                r#"{{"type":"resize","w":{w},"h":{h},"scale":1.0,"tileGrid":{{"w":64,"h":64}}}}"#
+                            )
+                        );
                         return;
                     }
                 }
@@ -2023,6 +2030,9 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH * 2, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT * 2, "{resize}");
     assert_eq!(resize["scale"], 2.0, "{resize}");
+    // And the grid that framebuffer is cut at: 64 points, which at 2x is 128 of
+    // its pixels — the same number of cells as the 1x desktop, not four times.
+    assert_eq!(resize["tileGrid"], serde_json::json!({ "w": 128, "h": 128 }), "{resize}");
     expect_tile(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,

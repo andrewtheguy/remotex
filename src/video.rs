@@ -269,7 +269,7 @@ impl Mirror {
 /// is checked.** 4:2:0 subsamples chroma 2×2, so [`Yuv`] needs even sides there — and
 /// 4:4:4, which would not, is held to the same ones: one geometry, not two. A region is
 /// a union of whole grid cells
-/// clipped to the desktop, and `CELL_W`/`CELL_H` are both even, so a region's origin is
+/// clipped to the desktop, and both sides of a [`crate::protocol::TileGrid`] are even, so a region's origin is
 /// always even and its size is odd only where its right or bottom edge is the desktop's
 /// own and the desktop is odd there — in which case the mirror's own padding is exactly
 /// the column or row needed. So the coded rectangle is the region grown right and down,

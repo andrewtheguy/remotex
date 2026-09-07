@@ -178,8 +178,19 @@ export type ControlMsg =
   // per point of its *own* desktop (1 for VNC, RDP and a 1x Mac, 2 for a Retina
   // one). The canvas bitmap remains `w` by `h`, while its CSS box is
   // `w / scale` by `h / scale`, preserving every source pixel without changing
-  // the remote desktop's logical size.
-  | { type: "resize"; w: number; h: number; scale: number }
+  // the remote desktop's logical size. `tileGrid` is the gateway's tile lattice
+  // for this framebuffer, in its pixels: 64 points, so 64 at 1x and 128 at 2x.
+  // It rides every resize because it follows the density, and it travels
+  // rather than living here as a constant: an overlay that draws a different
+  // grid from the one damage was cut at still looks like a grid, which is the
+  // one failure nobody would spot. Drawn only under `connected.gridDebug`.
+  | {
+      type: "resize";
+      w: number;
+      h: number;
+      scale: number;
+      tileGrid: { w: number; h: number };
+    }
   // The remote pointer shape, sent only by engines whose server hands the
   // cursor over instead of drawing it into the framebuffer (the VNC Cursor
   // pseudo-encoding). Receiving one at all means the browser owns pointer
@@ -232,13 +243,17 @@ export type ControlMsg =
       // rather than the config keys, which the reader may not have and which take a
       // pairing matrix to collapse into what the encoder is actually doing.
       render: string;
-      // `render_grid_debug`: draw the gateway's tile lattice over the desktop, at
-      // this pitch in framebuffer pixels — null on every target that did not ask
-      // for it, which is all of them by default and `render_type = "video"` always
-      // (it sends no tiles). The pitch travels rather than living here as a
-      // constant: an overlay that draws a different grid from the one damage was
-      // cut at still looks like a grid, which is the one failure nobody would spot.
-      tileGrid: { w: number; h: number } | null;
+      // `render_grid_debug`: draw the gateway's tile lattice over the desktop.
+      // False on every target that did not ask for it, which is all of them by
+      // default and `render_type = "video"` always (it sends no tiles). The pitch
+      // is not here — it rides every `resize`, because it follows the
+      // framebuffer's density and there is no framebuffer yet.
+      gridDebug: boolean;
+      // Whether this session takes a `density` declaration: a plain VNC target
+      // under `render_type = "video"`, and nothing else. Stated by the gateway
+      // because the render dial is the third condition and this client only has
+      // its label. Shows the menu's Density section.
+      density: boolean;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already
