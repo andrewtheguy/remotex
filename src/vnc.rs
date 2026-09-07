@@ -367,6 +367,17 @@ struct DesktopState {
     /// the stream's picture ceiling — see [`Flags::video`]. Kept here because
     /// the read loop sends such requests too.
     video: bool,
+    /// Whether the window drives the desktop size ([`Flags::resize`]). The
+    /// browser's density is declared to a swayvnc server only then: the server
+    /// sets its output's scale to what is declared, and a client that could not
+    /// then re-ask the pixels would be left with half a desktop.
+    resize: bool,
+    /// A `ClientDensity` the reported scale did not match is out, and the
+    /// server has not answered it yet. The server answers every declaration
+    /// with a report, after setting the output's scale or in its place; resize
+    /// requests are held until that report, and it re-asks the window in
+    /// whatever pixels the server settled on — one redraw, not two.
+    following: bool,
 }
 
 /// The swayvnc density extension's state on one connection — see
@@ -424,10 +435,12 @@ impl DesktopState {
     /// carries requests in the order they were decided.
     fn generic_resize(&mut self, points: (u16, u16)) -> Option<[u8; 24]> {
         self.viewport = Some(points);
-        if self.density == Density::Asked {
+        if self.density == Density::Asked || self.following {
             debug!(
-                "vnc: holding a {}x{} point desktop resize until the server reports its scale",
-                points.0, points.1
+                "vnc: holding a {}x{} point desktop resize until the server {}",
+                points.0,
+                points.1,
+                if self.following { "has answered the declared density" } else { "reports its scale" }
             );
             self.pending = Some(points);
             return None;
@@ -461,6 +474,19 @@ impl DesktopState {
         );
         self.pending = None;
         Some(set_desktop_size(pixels, screen))
+    }
+
+    /// The `ClientDensity` declaring `declared` to a swayvnc server, or `None`
+    /// where the window does not drive the desktop size — see
+    /// [`Self::resize`]. A declaration the reported scale does not match opens
+    /// a follow ([`Self::following`]): the server is expected to set the
+    /// output's scale and report, and until it does no resize goes out.
+    fn declare_density(&mut self, declared: f32) -> Option<[u8; 8]> {
+        if !self.resize {
+            return None;
+        }
+        self.following = (self.generic_scale() - declared).abs() > 0.005;
+        Some(client_density(declared))
     }
 }
 
@@ -1336,6 +1362,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         density: if density { Density::Asked } else { Density::Off },
         wire_scale: None,
         video,
+        resize,
+        following: false,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -1412,16 +1440,19 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
                     // On a swayvnc target the report is forwarded as the client's
                     // declared density, once the server has shown it listens.
-                    // Nothing is resized on it: the desktop's scale is the
-                    // server's word, and this version of the server only
-                    // records the declaration.
+                    // Nothing is resized on it here: the server sets its
+                    // output's scale to the declaration and reports, and that
+                    // report re-asks the window in the new pixels — see
+                    // [`DesktopState::declare_density`].
                     ClientMsg::HostDisplay(screen) if density => {
                         let declared = crate::protocol::render_density(screen.scale);
                         let msg = {
                             let mut d = desktop.lock().unwrap();
                             let changed = (d.host_density - declared).abs() > 0.005;
                             d.host_density = declared;
-                            (changed && d.density == Density::Reported).then(|| client_density(declared))
+                            (changed && d.density == Density::Reported)
+                                .then(|| d.declare_density(declared))
+                                .flatten()
                         };
                         if let Some(msg) = msg {
                             debug!("vnc: declaring a client density of {declared}x");
@@ -2985,10 +3016,14 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
 /// current framebuffer's, the label changes now, because the same pixels shown
 /// at a new density are a new canvas. Otherwise the rect carrying the new size
 /// is about to arrive and takes the label then. The first report is also the
-/// server's announcement that it listens: it releases a held resize and
-/// declares the browser's density back. Any report that changes the scale
-/// re-asks for the window in the new pixels, so a desktop toggled to 2x on the
-/// host keeps filling the window rather than shrinking to half of it.
+/// server's announcement that it listens: it declares the browser's density
+/// back and, when the reported scale already matches, releases the held
+/// resize. When it does not match, the server is about to set the output's
+/// scale to the declaration and report again, and the resize stays held for
+/// that report — the desktop is then drawn once, in the right pixels. Any
+/// report that changes the scale, or answers a declaration, re-asks for the
+/// window in the new pixels, so a desktop toggled to 2x on the host keeps
+/// filling the window rather than shrinking to half of it.
 async fn read_output_scale<R: AsyncRead + Unpin>(
     reader: &mut R,
     uplink: &SharedUplink,
@@ -3003,7 +3038,7 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
         "vnc: server reports its {}x{} framebuffer at {}x",
         report.size.0, report.size.1, report.scale
     );
-    let (first, relabel, declared, reask) = {
+    let (relabel, declare, reask) = {
         let mut d = desktop.lock().unwrap();
         let first = d.density != Density::Reported;
         if d.density == Density::Unanswered {
@@ -3015,11 +3050,18 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
         let changed = d.wire_scale != Some(report.scale);
         d.wire_scale = Some(report.scale);
         let relabel = report.size == d.size && d.scale != report.scale;
-        (first, relabel, d.host_density, changed || first)
+        // This report answers an outstanding declaration, if one was out.
+        let answered = std::mem::take(&mut d.following);
+        let declared = d.host_density;
+        let declare = first.then(|| d.declare_density(declared)).flatten();
+        // Not while a declaration is out: the report answering it re-asks in
+        // the pixels the server settles on.
+        let reask = (changed || first || answered) && !d.following;
+        (relabel, declare.map(|msg| (declared, msg)), reask)
     };
-    if first {
+    if let Some((declared, msg)) = declare {
         info!("vnc: the server reports pixel density; declaring the client's {declared}x");
-        send(uplink, &client_density(declared)).await?;
+        send(uplink, &msg).await?;
     }
     if relabel {
         apply_resize(desktop, shadow, report.size, report.scale, sink).await?;
@@ -5036,6 +5078,8 @@ mod tests {
             density: Density::Off,
             wire_scale: None,
             video: false,
+            resize: true,
+            following: false,
         }))
     }
 
@@ -5385,15 +5429,20 @@ mod tests {
     }
 
     /// A swayvnc target holds its first resize until the server has said what
-    /// scale it draws at, then asks for the window in points × that scale, labels
-    /// the framebuffer with it, and declares the browser's density back.
+    /// scale it draws at. When that scale is the browser's, it asks for the
+    /// window in points × scale at once, labels the framebuffer with it, and
+    /// declares the browser's density back.
     #[tokio::test]
     async fn a_swayvnc_resize_waits_for_the_scale_report_and_asks_in_pixels() {
         let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let screen = Screen { id: 3, flags: 0 };
         let desktop = shared_desktop((1024, 768), Some(screen), None);
-        desktop.lock().unwrap().density = Density::Asked;
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Asked;
+            d.host_density = 2.0;
+        }
 
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1728, 883)), false).await.unwrap();
         assert!(written(&wire).is_empty(), "held until the server reports");
@@ -5405,7 +5454,7 @@ mod tests {
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1024, 768)), &sink)
             .await
             .unwrap();
-        let expected = [client_density(1.0).to_vec(), set_desktop_size((3456, 1766), screen).to_vec()].concat();
+        let expected = [client_density(2.0).to_vec(), set_desktop_size((3456, 1766), screen).to_vec()].concat();
         assert_eq!(written(&wire), expected);
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
@@ -5416,6 +5465,156 @@ mod tests {
         assert_eq!(d.wire_scale, Some(2.0));
         assert_eq!(d.pending, None);
         assert_eq!(d.viewport, Some((1728, 883)));
+        assert!(!d.following);
+    }
+
+    /// A reported scale that is not the browser's opens a follow: the density is
+    /// declared, the resize stays held — a window that changes meanwhile is held
+    /// too — and the report answering the declaration releases it in the pixels
+    /// the server settled on.
+    #[tokio::test]
+    async fn a_declared_density_holds_the_resize_until_the_server_has_followed() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1920, 1080), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Asked;
+            d.host_density = 2.0;
+        }
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1728, 883)), false).await.unwrap();
+
+        // Output at 1x, browser at 2x: declare, and ask for nothing yet.
+        let body = output_scale_body((1920, 1080), 1.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density(2.0), "declared, resize held");
+        assert!(forwarded(&sink, &mut rx).await.is_none(), "1x is what the browser already has");
+        {
+            let d = desktop.lock().unwrap();
+            assert!(d.following);
+            assert_eq!(d.pending, Some((1728, 883)));
+        }
+
+        // The window changes while the server is following: still held.
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 900)), false).await.unwrap();
+        assert_eq!(written(&wire), client_density(2.0), "nothing more on the wire");
+        assert_eq!(desktop.lock().unwrap().pending, Some((1600, 900)));
+
+        // The server has set the output to 2x: the same pixels relabelled, and
+        // the newest window asked for in points × 2.
+        let body = output_scale_body((1920, 1080), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        let expected = [client_density(2.0).to_vec(), set_desktop_size((3200, 1800), screen).to_vec()].concat();
+        assert_eq!(written(&wire), expected);
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Resize { w: 1920, h: 1080, scale }) if scale == 2.0
+        ));
+        let d = desktop.lock().unwrap();
+        assert!(!d.following);
+        assert_eq!(d.pending, None);
+        assert_eq!(d.wire_scale, Some(2.0));
+    }
+
+    /// A server that will not follow — resizing disabled, another client owning
+    /// the layout — answers the declaration with the scale as it is, and the held
+    /// resize goes out in those pixels rather than waiting forever.
+    #[tokio::test]
+    async fn a_refused_declaration_is_answered_and_the_resize_goes_out_as_is() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1920, 1080), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Asked;
+            d.host_density = 2.0;
+        }
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1728, 883)), false).await.unwrap();
+
+        let body = output_scale_body((1920, 1080), 1.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density(2.0));
+
+        // Answered with the same 1x: the follow is over, the window is asked
+        // for at 1x, and the browser is told nothing new.
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        let expected = [client_density(2.0).to_vec(), set_desktop_size((1728, 883), screen).to_vec()].concat();
+        assert_eq!(written(&wire), expected);
+        assert!(forwarded(&sink, &mut rx).await.is_none());
+        let d = desktop.lock().unwrap();
+        assert!(!d.following);
+        assert_eq!(d.pending, None);
+    }
+
+    /// A density change mid-session is declared and followed the same way: the
+    /// answering report re-asks the window in the new pixels.
+    #[tokio::test]
+    async fn a_density_change_mid_session_is_followed_by_the_answering_report() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((3456, 1766), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(2.0);
+            d.scale = 2.0;
+            d.host_density = 2.0;
+            d.viewport = Some((1728, 883));
+        }
+
+        // The browser moved to a 1x screen: what the run loop does on HostDisplay.
+        let msg = desktop.lock().unwrap().declare_density(1.0).unwrap();
+        send(&uplink, &msg).await.unwrap();
+        assert!(desktop.lock().unwrap().following);
+
+        let body = output_scale_body((3456, 1766), 1.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((3456, 1766)), &sink)
+            .await
+            .unwrap();
+        let expected = [client_density(1.0).to_vec(), set_desktop_size((1728, 883), screen).to_vec()].concat();
+        assert_eq!(written(&wire), expected);
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Resize { w: 3456, h: 1766, scale }) if scale == UNSCALED
+        ));
+        assert!(!desktop.lock().unwrap().following);
+    }
+
+    /// Where the window does not drive the desktop size, nothing is declared: a
+    /// server following the browser's density would leave the pixels unasked-for.
+    #[tokio::test]
+    async fn a_fixed_size_target_labels_by_the_report_and_declares_nothing() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((1920, 1080), Some(Screen { id: 3, flags: 0 }), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Asked;
+            d.host_density = 2.0;
+            d.resize = false;
+        }
+
+        let body = output_scale_body((1920, 1080), 1.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        assert!(written(&wire).is_empty(), "no declaration, no request");
+        assert!(forwarded(&sink, &mut rx).await.is_none());
+        let d = desktop.lock().unwrap();
+        assert_eq!(d.density, Density::Reported);
+        assert_eq!(d.wire_scale, Some(1.0));
+        assert!(!d.following);
     }
 
     /// A report naming a size the framebuffer does not have yet is the label for

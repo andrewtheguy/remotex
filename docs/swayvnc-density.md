@@ -2,10 +2,13 @@
 
 How a sway desktop behind wayvnc tells the gateway what scale its framebuffer is
 drawn at, so a `scale 2` output is shown as a sharp 2x desktop rather than half a
-desktop stretched up. Standard RFB carries pixels and nothing else
+desktop stretched up — and how the browser's own density becomes that scale, so
+a 2x browser gets a 2x desktop with nothing to configure, as it does over RDP.
+Standard RFB carries pixels and nothing else
 ([`generic-vnc-hidpi.md`](generic-vnc-hidpi.md)); this is one private extension
 on top of it, in the shape Apple's display layout already gives the gateway: the
 *server* reports the density, and the label the browser sees is the wire's word.
+The browser's density is only ever a request to the server, never a label.
 Measured 2026-09-07 against the patched wayvnc 0.9.1 on `workstation-ct`, a
 headless sway with one `HEADLESS-1` output, through `tests/ws_probe.py`.
 
@@ -73,10 +76,21 @@ rectangle that carries the new framebuffer.
 ### Client → server: ClientDensity
 
 Sent once the first `OutputScale` has arrived, and again whenever the client's
-screen changes density (`hostDisplay`). It carries the density the browser
+screen changes density (`hostDisplay`) — only on a target with `resize = true`,
+because the answer changes the output and a client that cannot then re-ask the
+pixels would be left with half a desktop. It carries the density the browser
 would like the desktop rendered at, quantized to 1x or 2x like every other
-engine's request ([`protocol::render_density`]). This version of wayvnc records
-and logs it; acting on it is the next step, below.
+engine's request ([`protocol::render_density`]).
+
+wayvnc sets the captured output's scale to it under the rules its
+`SetDesktopSize` handling already has — a headless output, resizing enabled,
+and the client owns the layout or nobody does yet — and **answers every
+declaration with an `OutputScale`**: after the compositor has applied the
+change, through the same head-scale path as a `swaymsg output … scale`, or at
+once with the scale as it is when nothing is to be changed or nothing can be
+(resizing disabled, another client owning the layout, a density out of the
+0.5–8 range, a configuration the compositor rejects). The gateway relies on
+that answer arriving.
 
 | Offset | Type | Field |
 |---|---|---|
@@ -102,10 +116,19 @@ message, `Unanswered` if pixels arrive before any report.
   `points × scale` pixels, so the logical desktop is the window. The first
   request waits for the report, because a request in the wrong pixels is a
   desktop redrawn twice; a target the server never answers sends it at 1x on
-  the first framebuffer update. Every report that changes the scale re-asks for
-  the window in the new pixels, unless the report already names them.
-- **Declare.** The browser's density goes to the server on the first report and
-  on every change.
+  the first framebuffer update. Every report that changes the scale, or answers
+  a declaration, re-asks for the window in the new pixels, unless the report
+  already names them.
+- **Declare and follow.** The browser's density goes to the server on the first
+  report and on every change. When it differs from the reported scale, the
+  server is about to set the output to it and report again, and every resize
+  request is held (`DesktopState::following`) until that report — including a
+  window that changes size meanwhile, which replaces the held one. The
+  answering report then re-asks the window in whatever pixels the server
+  settled on: 2x when it followed, the old scale when it refused. The gateway
+  never applies a density the server has not reported, and never re-declares on
+  a report that disagrees with it, so a `swaymsg output … scale` from inside the
+  session is an override the gateway follows rather than fights.
 
 Measured sequence, a 1728×883-point window on a 2x screen while the output is
 toggled from `scale 1` to `scale 2` and back on the host:
@@ -119,9 +142,8 @@ resize  1728x883   scale=1.0  -> 1728x883 CSS px      re-asked at points × 1
 ```
 
 The two intermediate lines are the moment between the compositor's scale change
-and the desktop's resize, and are what the next step removes. A plain target
-against the same server stays at `scale=1.0` throughout and never sends the
-pseudo-encoding.
+and the desktop's resize. A plain target against the same server stays at
+`scale=1.0` throughout and never sends the pseudo-encoding.
 
 Reproduce it:
 
@@ -132,13 +154,30 @@ uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> \
 swaymsg output HEADLESS-1 scale 2 ; sleep 7 ; swaymsg output HEADLESS-1 scale 1
 ```
 
-## Next: following the client
+## Following the client, measured
 
-With the declared density on the server, the next version of the wayvnc patch
-sets the captured output's scale to it when the two differ — the live
-`swaymsg output <name> scale <n>` the host's Toggle Display Scale launcher entry
-runs today, applied through wlr-output-management together with the mode the
-resize already sets — and the browser's density then drives the desktop's with
-nothing to configure, as RDP does. Nothing on the gateway side changes for it:
-the report of the new scale and the re-asked size are the path measured above.
-The gateway never applies a density the server has not reported.
+A 2x browser connecting to an output at scale 1, with `resize = true`:
+
+```
+resize  3456x1802  scale=1.0  -> 3456x1802 CSS px     connect: the framebuffer, unlabelled
+resize  3456x1802  scale=2.0  -> 1728x901 CSS px      OutputScale @ 2 answering the declaration: relabel
+resize  3456x1766  scale=2.0  -> 1728x883 CSS px      asked once, at points × 2; the rect follows
+```
+
+The first report says 1x; the gateway declares 2x and holds its resize. wayvnc
+sets the output's scale, the compositor's head change produces the second
+report at 2x for the same pixels, and only then is the window asked for in
+points × 2: one mode change on the host, one desktop drawn. A 1x browser
+against the same output at scale 2 runs the mirror sequence, measured as
+`3456x1766 @ 1` (connect), `@ 2` (first report), `@ 1` (the answer), then
+`1728x883 @ 1` asked once; on a 1x browser the first report's label is a
+canvas the browser holds for one round trip. The Toggle Display
+Scale launcher entry on the host still works and is followed like any other
+scale change; the browser's density is re-declared only when it changes.
+
+Reproduce it with the host at `scale 1`:
+
+```sh
+uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> \
+  --display 1728x1117@200 --viewport 1728x883 --viewport-after-resize --seconds 10
+```

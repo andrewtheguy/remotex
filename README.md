@@ -28,9 +28,10 @@ per resize.
   path that accepts `resize = true`. It is reverse engineered, having no
   specification.
   `subtype = "swayvnc"` is a sway desktop behind the patched wayvnc from the
-  [swayvnc](https://github.com/andrewtheguy/swayvnc) repository, which reports
-  the output's pixel density over one private RFB extension so a `scale 2`
-  output is shown at 2x.
+  [swayvnc](https://github.com/andrewtheguy/swayvnc) repository, which carries
+  pixel density over one private RFB extension: the output's scale is reported
+  and shown as such, and with `resize = true` the output follows the browser's
+  density.
 
 There is one client: the page a browser loads. For desktop use, install that page
 as an app in Chrome or Edge. The app window gives the client the browser-reserved
