@@ -40,9 +40,10 @@
 //!
 //! Standard `ard` refuses resize because it shares physical displays; High
 //! Performance can resize its virtual display. Of the Adaptive media path (HEVC/AAC
-//! over SRTP) only the audio leg is spoken, by [`crate::vnc_apple_audio`] and only
-//! on a High Performance target with `audio = true`; the screen stays on zlib
-//! rectangles. Both Apple subtypes
+//! over SRTP) only the audio leg is spoken, by `crate::vnc_apple_audio`, and only
+//! on a High Performance target with `audio = true` in a gateway built with the
+//! non-default `apple-hp-audio` feature; the screen stays on zlib rectangles in
+//! every build. Both Apple subtypes
 //! use Apple's native pasteboard protocol; High Performance enables monitoring
 //! before the rekey and carries fetches and clipboard data inside the encrypted
 //! transport.

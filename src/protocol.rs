@@ -2328,8 +2328,10 @@ mod tests {
     ///    compress within each stream. The ratio printed here is what a grid costs
     ///    in the case where it wins nothing, so it sets the skip rate the grid has
     ///    to achieve before it is worth having at all. The last row is the cell the
-    ///    gateway cuts at today, 64×64; the ones above it are the widths it was
-    ///    weighed against, kept so the trade stays on the record.
+    ///    gateway cuts at today: 64×64 pixels on a 1× desktop, which on the 2× band
+    ///    this encodes is a 128×128 cell — the rows are pixel sizes, not cells of the
+    ///    grid. The ones above it are the widths it was weighed against, kept so the
+    ///    trade stays on the record.
     ///
     /// Run it in **release**: `png` at `Compression::Fast` is several times slower
     /// in a debug build, which would flatter the hash and slander the grid.

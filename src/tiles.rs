@@ -12,8 +12,10 @@ use crate::protocol::TileGrid;
 /// client decodes as one unit — is bytes, of which a 2× desktop has four times as
 /// many per point. So unlike the cell grid, which is in points because a cell is an
 /// *identity* the same window should occupy at either density, a band stays 64
-/// pixels tall on a Retina framebuffer: half a cell, and the same bytes per record
-/// a 1× band carries. The motion path cuts a band at the grid where it has to
+/// pixels tall on a Retina framebuffer: half a cell. It is still twice the bytes
+/// of a 1× band, since the framebuffer is twice as wide — a full-width Retina band
+/// has measured at six times the slot cache's ceiling — but a band 128 tall would
+/// double that again. The motion path cuts a band at the grid where it has to
 /// ([`Rect::cells`]), and a piece of a cell keys to that cell as the whole would.
 pub const BAND_ROWS: u16 = 64;
 
@@ -979,7 +981,7 @@ mod tests {
         assert_eq!(source.cells(retina).collect::<Vec<_>>(), vec![rect(0, 0, 127, 63), rect(128, 0, 191, 63)]);
         assert_eq!(rect(130, 70, 132, 120).cell_key(retina), (1, 0));
         // A band is a payload bound in pixels, not a cell: four per 256 rows at
-        // either density, so a Retina record carries the bytes a 1× one does.
+        // either density, so a Retina record grows only with the width.
         assert_eq!(rect(0, 0, 99, 255).bands().count(), 4);
         // And a band's pieces under the 2× grid are halves of cells, each keyed
         // to the cell it lies in.
