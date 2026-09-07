@@ -8,6 +8,7 @@
 // catch.
 import { expect, test } from "@playwright/test";
 import {
+  leaveSession,
   logInAndConnect,
   openClipboardPanel,
   readRemoteClipboard,
@@ -26,6 +27,13 @@ const LIMIT = 524_288;
 // so past roughly 540 000 characters the reader declines before any size is
 // taken and the panel shows `LEN 0B`.
 const OVERSIZED = 530_000;
+
+// Cleanup, so it runs even when an assertion below threw: see `leaveSession`. The
+// call at the end of the test stays, because the page-error assertion after it is
+// about the switch back too; this hook is a no-op once that has run.
+test.afterEach(async ({ page }) => {
+  await leaveSession(page);
+});
 
 test("a remote clipboard over the limit is reported, not truncated", async ({
   page,

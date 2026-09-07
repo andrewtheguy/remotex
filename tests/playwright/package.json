@@ -11,6 +11,8 @@
     "test:oversized": "playwright test '/oversized-clipboard\\.spec\\.ts$'",
     "pretest:video": "bun run deps",
     "test:video": "playwright test '/video-stream\\.spec\\.ts$'",
+    "pretest:grid": "bun run deps",
+    "test:grid": "playwright test '/tile-grid\\.spec\\.ts$'",
     "pretypecheck": "bun run deps",
     "typecheck": "tsc --noEmit"
   },

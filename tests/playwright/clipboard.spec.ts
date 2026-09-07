@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  leaveSession,
   logInAndConnect,
   openClipboardPanel,
   readRemoteClipboard,
@@ -27,6 +28,13 @@ function crc32(text: string): string {
   }
   return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
 }
+
+// Cleanup, so it runs even when an assertion below threw: see `leaveSession`. The
+// switch back at the end of the test stays, because the page-error assertion after
+// it is about that too; this hook is a no-op once it has run.
+test.afterEach(async ({ page }) => {
+  await leaveSession(page);
+});
 
 test("clipboard panel reads require explicit Copy while pushes still auto-sync", async ({
   page,

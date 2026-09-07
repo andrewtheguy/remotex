@@ -376,6 +376,23 @@ password = "change-me"
 # "motion" outlines below.
 #render_classify_debug = false
 
+# QA aid for the tiles themselves, off unless asked for: draw the gateway's own
+# 320x64 tile lattice over the desktop as dashed lines, so where damage is cut is
+# something the screen shows rather than something read out of a constant. Valid
+# under "tiles" and "motion" — the two strategies that send tiles — and refused
+# under "video", which sends the whole desktop as one stream and has no boundary
+# to draw.
+#
+# Unlike the two outlines above, nothing is painted into the pixels: the browser
+# draws the lattice on a layer over the framebuffer. It has to, and that is worth
+# knowing rather than a detail — the outlines mark a decision made about one tile
+# and travel with it, while the lattice is fixed to the screen and tiles are not.
+# Pixels get moved sideways when the remote scrolls, a cached tile is redrawn
+# wherever the gateway names, and a corner nothing has changed is never re-sent.
+# So the lines go over the picture, where they are exact everywhere from the first
+# frame and cost the encoders nothing. It combines with either outline above.
+#render_grid_debug = false
+
 # render_type = "motion" hands the cells that are currently changing fast to a video
 # stream, re-sending each one at the base encode once it settles. The cells in motion
 # are coalesced into regions and each region gets its own stream, while the base codec

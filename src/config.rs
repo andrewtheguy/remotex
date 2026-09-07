@@ -17,7 +17,7 @@ use crate::audio::PcmFormat;
 #[cfg(all(feature = "embedded-gateway", unix))]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
-use crate::protocol::HostDisplay;
+use crate::protocol::{CELL_H, CELL_W, HostDisplay, TileGrid};
 
 /// RDP security negotiation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -762,6 +762,19 @@ pub struct TargetConfig {
     /// majority, and outlining it would say nothing.
     #[serde(default)]
     pub render_classify_debug: bool,
+    /// Draw the tile lattice over the desktop as dashed lines, so where the
+    /// gateway cuts damage is something the screen shows rather than something the
+    /// reader works out from a constant. A QA aid for the two strategies that send
+    /// tiles at all — [`RenderType::Tiles`] and [`RenderType::Motion`] — and
+    /// refused for [`RenderType::Video`], which sends none; off unless asked for.
+    ///
+    /// Unlike the other two debug keys nothing is painted into the pixels: the
+    /// lattice is fixed to the framebuffer and the pixels are not, so the client
+    /// draws it over the canvas from the pitch
+    /// [`crate::protocol::ServerMsg::Connected`] carries. See that field for why
+    /// a lattice encoded into tiles would not survive a scroll.
+    #[serde(default)]
+    pub render_grid_debug: bool,
     /// Let quality track the measured link, on every lossy dial this target has.
     ///
     /// The configured qualities stay the *ceiling* — a link with room to spare
@@ -848,6 +861,16 @@ impl TargetConfig {
     /// [`Self::render_subtype`] resolved: lossless PNG unless the operator chose.
     pub fn render_subtype(&self) -> RenderSubtype {
         self.render_subtype.unwrap_or_default()
+    }
+
+    /// The lattice this target's client draws, or `None` where it draws none.
+    ///
+    /// Deliberately not part of [`RenderPlan`]: that is the dial as the *encoders*
+    /// see it, and this changes nothing any encoder does — no tile is cut
+    /// differently, no byte is spent. It is the client's overlay and the wire is
+    /// the only thing it touches.
+    pub fn tile_grid(&self) -> Option<TileGrid> {
+        self.render_grid_debug.then_some(TileGrid { w: CELL_W, h: CELL_H })
     }
 
     /// The tile encoders to use for this target. This is the whole of the render
@@ -1706,6 +1729,17 @@ impl ConfigFile {
                 "target {:?} sets render_classify_debug without render_subtype = \
                  \"classify\" — the outlines show which tiles the classifier sent as JPEG, \
                  and no other subtype makes that decision",
+                target.name
+            );
+            // The lattice is the grid damage is cut at, so it means something under
+            // either strategy that cuts damage — and nothing under the one that does
+            // not cut it at all.
+            anyhow::ensure!(
+                target.render_type != RenderType::Video || !target.render_grid_debug,
+                "target {:?} sets render_grid_debug with render_type = \"video\" — the \
+                 grid is the tile lattice, and \"video\" sends no tiles: it sends the whole \
+                 desktop as one stream, where there is no boundary to draw. Set \
+                 render_type = \"tiles\" or \"motion\" to keep the grid",
                 target.name
             );
             // Both `motion` pairings need this, and neither of the arms above is
@@ -2972,6 +3006,64 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("422"), "{err:#}");
+    }
+
+    /// The grid is the debug aid no encoder can see: it belongs to the two
+    /// strategies that cut damage into tiles, it leaves the render plan alone, and
+    /// it reaches the client as the lattice itself rather than as a bare flag.
+    #[test]
+    fn the_tile_grid_overlay_is_opt_in_and_refused_by_video() {
+        for render in ["render_type = \"tiles\"", "render_type = \"motion\"\nrender_motion_quality = 30"]
+        {
+            let cfg = ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                {render}
+                render_grid_debug = true
+                "#
+            ))
+            .unwrap();
+            let target = &cfg.targets[0];
+            assert_eq!(target.tile_grid(), Some(TileGrid { w: CELL_W, h: CELL_H }), "{render}");
+            // The lattice costs the encoders nothing, so the plan they read is the
+            // plan they would have read without it.
+            let mut plain = target.clone();
+            plain.render_grid_debug = false;
+            assert_eq!(target.render_plan(), plain.render_plan(), "{render}");
+        }
+
+        // Off unless asked for, and then there is no lattice to state either.
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.targets[0].render_grid_debug);
+        assert_eq!(cfg.targets[0].tile_grid(), None);
+
+        // `video` sends no tiles, so it has no boundary to draw.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "video"
+            render_quality = 60
+            render_grid_debug = true
+            "#,
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("render_grid_debug"), "{message}");
+        assert!(message.contains("sends no tiles"), "{message}");
     }
 
     /// The outlines are the classifier's own debug aid, and resolve into the

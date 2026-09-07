@@ -38,6 +38,14 @@ asserts which socket receives the format and packets, and that opening and closi
 that socket is the whole subscription. The deterministic tone harness in
 `src/server.rs` supplies audio without a remote.
 
+`tile-grid.spec.ts` is the `render_grid_debug` lattice, the one render debug aid
+the client draws instead of receiving. It asserts the two halves of that: the
+gateway states the pitch on `connected`, and the overlay canvas the client answers
+with is the framebuffer canvas's twin — same bitmap, same CSS box, no pointer. The
+dashes themselves are pixels and so are the operator's to look at; that the overlay
+sits exactly over the desktop is a decision, and a lattice one box off would point
+at the wrong columns while still looking like a grid.
+
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
 revealing the panel leave the local clipboard untouched until explicit Copy.
@@ -51,9 +59,11 @@ is invisible to any one of them.
 
 `support.ts` holds what the specs share: the login/target flow and the SSH hooks
 that read and write the Mac's pasteboard. Two conventions live there. Every spec
-ends by handing the session back to the picker, because the server keeps a target
-session running when its browser goes away; and `logInAndConnect` accepts either
-landing, so a run abandoned on the desktop does not break the next one.
+hands the session back to the picker in an `afterEach` through `leaveSession`,
+because the server keeps a target session running when its browser goes away and a
+spec that failed halfway would otherwise leave it there; and `logInAndConnect`
+accepts either landing, so a run abandoned on the desktop does not break the next
+one.
 
 ## Run
 
@@ -117,6 +127,21 @@ bun run test:video
 
 That gateway serves the built SPA from `frontend/dist`, so run `bun run build` in
 `frontend/` first; a stale bundle is exactly what these specs cannot see.
+
+The grid spec wants two targets on one such config: one with `render_grid_debug =
+true` and one without, so the overlay is checked for being absent as well as for
+being right. `REMOTEX_PLAYWRIGHT_GRID_TARGET` names the first and is the opt-in;
+`REMOTEX_PLAYWRIGHT_TARGET` names the second.
+
+```sh
+cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52888/' \
+REMOTEX_PLAYWRIGHT_USERNAME='admin' \
+REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
+REMOTEX_PLAYWRIGHT_GRID_TARGET='gridtiles' \
+REMOTEX_PLAYWRIGHT_TARGET='workstationlinux' \
+bun run test:grid
+```
 
 The audio spec uses the test-tone gateway instead of a live target:
 

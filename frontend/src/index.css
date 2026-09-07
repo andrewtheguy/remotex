@@ -46,6 +46,24 @@ body {
   image-rendering: auto;
 }
 
+/* The render_grid_debug lattice: a bitmap the size of the framebuffer, laid
+   over it with the identical CSS box (applyCanvasCss writes both), so a line
+   drawn on a cell boundary stays on that boundary through a density difference
+   and a pinch zoom alike. Transparent everywhere but the lines, and never a
+   target for input — the desktop under it is still the thing being used. */
+.tile-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  image-rendering: auto;
+}
+
+.screen-touch .tile-grid {
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
 .input-overlay {
   position: absolute;
   inset: 0;
