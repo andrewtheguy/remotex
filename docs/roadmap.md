@@ -10,7 +10,7 @@ is the only place they can be read in context.
 
 ### Render dial — what the region streams do not decide yet
 
-`render_type = "motion"` ships: the `motion` detection chooses the regions,
+`render_motion = true` ships: the motion detection chooses the regions,
 a video stream carries each one, and the still codecs carry everything else. Three
 of its numbers are policy that was chosen to be legible rather than measured, and the
 measurements are what should settle them:
@@ -46,7 +46,7 @@ got: a measurement first.
 The congestion loop both streaming dials share can notice a backlog but never find
 headroom: it walks the dial down when the outbound queue says the link is behind
 and back up to the configured quality when it is not, and never past it. Under
-`render_type = "motion"` it is blunter still, because that target's outbound
+`render_motion = true` it is blunter still, because that target's outbound
 queue is sized for its still tiles and so absorbs a backlog before the signal
 appears. Both are sound where they are used — exceeding the operator's setting was
 never a goal — but it means a link with room to spare is never discovered.
@@ -63,7 +63,7 @@ from `video`'s measurements rather than assumed.
 ### AV1, if it ever measures better than VP9
 
 VP9 shipped and is the codec: `render_type = "video"` and
-`render_type = "motion"` carry it, and it is licence-free —
+`render_motion = true` carry it, and it is licence-free —
 present in every browser build, the proprietary-codec-free ones included. See
 [`architecture.md`](architecture.md) for the mechanism.
 

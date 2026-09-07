@@ -30,7 +30,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, RenderSubtype, RenderType, TargetConfig};
+use remotex::config::{AppConfig, RenderSubtype, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -44,19 +44,18 @@ const TILE_FORMAT_JPEG: u8 = 2;
 /// do — the assertions are about formats, not fidelity.
 const QUALITY: u8 = 60;
 
-/// The moving encode's quality when the strategy is `motion`. As arbitrary as
+/// The moving encode's quality when `render_motion` is on. As arbitrary as
 /// [`QUALITY`], and lower for the same reason an operator's would be.
 const MOTION_QUALITY: u8 = 15;
 
-/// Put the operator's `name` target on a classify-base dial under `strategy`
-/// — [`RenderType::Tiles`] or [`RenderType::Motion`].
-fn uat_target(name: &str, strategy: RenderType) -> TargetConfig {
+/// Put the operator's `name` target on a classify-base tiles dial, with or
+/// without the motion discount on top of it.
+fn uat_target(name: &str, motion: bool) -> TargetConfig {
     let mut target = common::uat_target(name);
-    target.render_type = strategy;
     target.render_subtype = Some(RenderSubtype::Classify);
     target.render_subtype_quality = Some(QUALITY);
-    target.render_motion_quality =
-        (strategy == RenderType::Motion).then_some(MOTION_QUALITY);
+    target.render_motion = motion;
+    target.render_motion_quality = motion.then_some(MOTION_QUALITY);
     target.render_motion_debug = false;
     // The outlines are for eyes on a browser; on the wire they would only
     // perturb the payloads this test checks the magic of.
@@ -96,9 +95,9 @@ struct Tally {
 /// Connect to `name` on the classify dial and read tiles until the announced
 /// desktop is fully painted. Every tile's format byte and payload magic are
 /// checked on the way past; the PNG/JPEG split comes back for reporting.
-async fn paint_a_whole_desktop(name: &str, strategy: RenderType) -> Tally {
+async fn paint_a_whole_desktop(name: &str, motion: bool) -> Tally {
     common::init_logging();
-    let addr = spawn_app(uat_target(name, strategy)).await;
+    let addr = spawn_app(uat_target(name, motion)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
@@ -197,23 +196,23 @@ fn check_tile(tile: &common::BatchTile, tally: &mut Tally) {
 #[tokio::test]
 #[ignore = "needs the real Windows RDP host from tmp/test_uat.toml"]
 async fn classify_paints_the_windows_desktop_over_rdp() {
-    paint_a_whole_desktop("windows", RenderType::Tiles).await;
+    paint_a_whole_desktop("windows", false).await;
 }
 
 #[tokio::test]
 #[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
 async fn classify_paints_the_linux_desktop_over_vnc() {
-    paint_a_whole_desktop("workstationlinux", RenderType::Tiles).await;
+    paint_a_whole_desktop("workstationlinux", false).await;
 }
 
 #[tokio::test]
 #[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
 async fn a_classify_base_paints_the_linux_desktop_under_motion() {
-    paint_a_whole_desktop("workstationlinux", RenderType::Motion).await;
+    paint_a_whole_desktop("workstationlinux", true).await;
 }
 
 #[tokio::test]
 #[ignore = "needs the real Mac in High Performance mode from tmp/test_uat.toml"]
 async fn classify_paints_the_mac_desktop_in_high_performance_mode() {
-    paint_a_whole_desktop("sandbox2highperf", RenderType::Tiles).await;
+    paint_a_whole_desktop("sandbox2highperf", false).await;
 }

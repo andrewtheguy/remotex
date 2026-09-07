@@ -930,7 +930,7 @@ mod tests {
         assert!(message.contains("jpeg"), "the message does not say what to do instead");
     }
 
-    /// Two streams over disjoint regions of one mirror, which is the `motion` shape: each sees
+    /// Two streams over disjoint regions of one mirror, which is the motion shape: each sees
     /// its own pixels and neither sees the other's.
     #[test]
     fn two_regions_of_one_mirror_encode_independently() {

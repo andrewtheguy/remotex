@@ -149,7 +149,7 @@ interface Session {
   /**
    * Stream ids the gateway has said are over, in arrival order. A `render_type =
    * "video"` target never ends its one stream, so this is empty there; under
-   * `render_type = "motion"` it is how a client learns it may let a decoder
+   * `render_motion = true` it is how a client learns it may let a decoder
    * — and the platform decode session behind it — go.
    */
   ends: number[];

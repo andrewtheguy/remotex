@@ -263,7 +263,7 @@ export type ControlMsg =
   // whenever it changes — a decoder configured afterwards has already thrown away the
   // frame it was meant to decode. The video counterpart of `audioFormat`.
   //
-  // Per `stream`, not per session: under `render_type = "motion"` a session
+  // Per `stream`, not per session: under `render_motion = true` a session
   // runs up to four at once over regions of different sizes, and the configuration
   // string carries a size-derived level, so one string for the session would be wrong
   // for some of them.
@@ -275,7 +275,7 @@ export type ControlMsg =
   // One stream's region is over: nothing more arrives on this id until it is
   // announced again. The counterpart of `videoFormat`, and it is about the resource
   // rather than the picture — a decoder holds a platform decode session, there are
-  // few of them, and under `render_type = "motion"` regions come and go all
+  // few of them, and under `render_motion = true` regions come and go all
   // session. Without this the browser would keep one decoder per id it had ever seen
   // and hand the next region to start a platform with nothing left to give it.
   | { type: "videoEnd"; stream: number }
@@ -351,7 +351,7 @@ export interface TileRefMsg {
 // one link in a chain, where losing any link decodes wrongly until the next keyframe.
 //
 // `stream` says which decoder it belongs to. A session may run several at once — one
-// per moving region under `render_type = "motion"`, exactly one under
+// per moving region under `render_motion = true`, exactly one under
 // `render_type = "video"` — and ids are reused as regions come and go, so a record
 // whose size differs from the last one on the same id means that decoder is starting
 // over on a differently sized picture.

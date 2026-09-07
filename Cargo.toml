@@ -72,7 +72,7 @@ png = "0.18"
 # so this is a gateway-only encoder. `simd` because it runs on the session hot path.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 # libvpx, for VP9 — the video codec, for either streaming mode: the whole framebuffer
-# under `render_type = "video"`, or moving regions under `render_type = "motion"`
+# under `render_type = "video"`, or moving regions under `render_motion = true`
 # (src/vp9.rs). VP9 is BSD-3-Clause with a patent grant, so every browser
 # build decodes it, proprietary-codec-free ones included.
 #

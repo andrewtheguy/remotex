@@ -1472,6 +1472,7 @@ mod tests {
             render_subtype: None,
             render_quality: None,
             render_subtype_quality: None,
+            render_motion: false,
             render_motion_quality: None,
             render_motion_debug: false,
             render_chroma: None,

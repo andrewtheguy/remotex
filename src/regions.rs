@@ -3,7 +3,7 @@
 //!
 //! Two dials arrive here and they differ only in how many rectangles they ask for.
 //! `render_type = "video"` asks for one covering the whole desktop and never changes
-//! its mind ([`Policy::Whole`]). `render_type = "motion"` asks for one per
+//! its mind ([`Policy::Whole`]). `render_motion = true` asks for one per
 //! coalesced moving region, with the still codecs carrying everything else
 //! ([`Policy::Moving`]). A codec module knows how to encode a rectangle; this module
 //! is every decision about *which*.
@@ -18,7 +18,7 @@
 //! - **A debt is a cell key, not a picture.** A cell whose only delivery was through
 //!   a lossy stream is owed a crisp re-send, because
 //!   [`crate::tiles::Shadow::accept`] already recorded those pixels as delivered and
-//!   nothing else will send them again. The still `motion` path has to *remember the
+//!   nothing else will send them again. The still motion path has to *remember the
 //!   pixels* it approximated, with all the staleness that implies; here the cleanup
 //!   crops the mirror and is the newest truth by construction.
 //! - **Live regions are pairwise disjoint, and a cell in one is never also a tile.**
@@ -120,7 +120,7 @@ pub enum Policy {
     /// `render_type = "video"`: one stream over the whole desktop, for the whole
     /// session. No cells, no debts, no cleanup — nothing else is being sent.
     Whole,
-    /// `render_type = "motion"`: a stream per coalesced moving region, with
+    /// `render_motion = true`: a stream per coalesced moving region, with
     /// the base codec carrying every cell outside one.
     Moving,
 }

@@ -17,7 +17,7 @@
 //! A full queue backpressures the engine because its shadow has already recorded
 //! submitted pixels.
 //!
-//! This is also where the render dial's `motion` strategy lives, because it is the
+//! This is also where the render dial's `render_motion` switch lives, because it is the
 //! one place both engines already funnel their damage through. See `Motion`.
 
 use std::collections::{HashMap, HashSet};
@@ -106,7 +106,7 @@ const MARK_CRISP: [u8; 3] = [0, 255, 255];
 const MARK_CLEANUP: [u8; 3] = [0, 255, 0];
 /// Colour of a `render_classify_debug` outline on a tile the classifier sent
 /// as JPEG. Yellow, its own colour and not one of the motion marks': a
-/// `classify` base pairs with `motion`, so the two aids can run together and a
+/// `classify` base pairs with `render_motion`, so the two aids can run together and a
 /// shared colour would make one decision unreadable as the other. It holds the
 /// same properties the motion trio was chosen for — it survives a low-quality
 /// JPEG and no desktop draws it in a straight line by accident. PNG tiles are
@@ -419,7 +419,7 @@ impl Motion {
     /// history has emptied is dropped outright, so the map stays the size of the
     /// screen's recent activity rather than of the session.
     ///
-    /// Only the region policy asks (`render_type = "motion"`), and only once
+    /// Only the region policy asks (`render_motion = true`), and only once
     /// per retune.
     fn moving(&mut self, now: tokio::time::Instant) -> Vec<(u16, u16)> {
         let Some(origin) = self.origin else {
@@ -579,7 +579,7 @@ impl Shared {
                 (Policy::Whole, NO_STREAM_QUALITY, Chroma::Subsampled, None, None)
             }
         };
-        // The tiles' half of the same key. On a `motion` plan this and `adaptive`
+        // The tiles' half of the same key. On a motion plan this and `adaptive`
         // are both live: the regions walk with the congestion loop, the base and
         // cleanup tiles ride the per-encode curve.
         let tile_floor = match plan {
@@ -736,7 +736,7 @@ impl TileSink {
         self.damage_streaming(changed, pack, base, debug).await
     }
 
-    /// [`Self::damage`] for a target on the `motion` strategy.
+    /// [`Self::damage`] for a target with `render_motion`.
     ///
     /// Bands, and cells only where it matters, with the one rule that decides
     /// everything: a cell a live stream covers is **not sent at all**. Its pixels
@@ -799,7 +799,7 @@ impl TileSink {
             if !cells.iter().any(|cell| streamed.contains(&cell.cell_key())) {
                 // The quiet path, and the great majority of a screen: one whole band
                 // at the base encode, byte for byte what this target would send with
-                // no motion strategy at all.
+                // no motion path at all.
                 crisp.push(band);
                 self.encode(band, Arc::new(pack(band)), base).await?;
                 continue;
@@ -959,7 +959,7 @@ impl TileSink {
         self.shared.round_returned.notified().await;
     }
 
-    /// Whether anything downstream reads [`Changed::cells`]. Only a motion strategy
+    /// Whether anything downstream reads [`Changed::cells`]. Only a motion plan
     /// does; the shadow uses this to skip classifying which cells differ
     /// ([`Shadow::classify_cells`](crate::tiles::Shadow::classify_cells)).
     pub fn wants_cells(&self) -> bool {
@@ -970,7 +970,7 @@ impl TileSink {
     /// [`crate::protocol::CopyRect`] record instead of an encode — when the remote
     /// says a region has moved.
     ///
-    /// True only on the plan with no motion strategy at all, and the reason is what
+    /// True only on the plan with no motion encode at all, and the reason is what
     /// a copy assumes: that the canvas holds what the client was *sent*, and that
     /// nothing is going to repaint it from somewhere else.
     ///
@@ -988,7 +988,7 @@ impl TileSink {
 
     /// Whether this target's moving pixels go out as access units — either the whole
     /// desktop (`render_type = "video"`) or a region at a time
-    /// (`render_type = "motion"`).
+    /// (`render_motion = true`).
     fn streaming(&self) -> bool {
         matches!(
             self.plan,
@@ -1318,7 +1318,7 @@ async fn flush_cleanups(
 }
 
 /// Collect finished encodes in push order and forward them, and — for a target on
-/// the `motion` strategy — settle what has stopped moving.
+/// the motion path — settle what has stopped moving.
 ///
 /// The cleanup timer belongs here rather than anywhere the frames arrive, because
 /// the case it exists for is a screen that has stopped producing them.
@@ -1329,7 +1329,7 @@ async fn order_loop(
     shared: Arc<Shared>,
     plan: RenderPlan,
 ) {
-    // Only the motion strategy has anything to settle, and its two encodes settle
+    // Only a motion plan has anything to settle, and its two encodes settle
     // differently: a still remembers the pixels it approximated, a stream leaves the
     // debt to the mirror. A whole-desktop video stream has no cells and no debts —
     // its next frame carries whatever the last one approximated — and a plain tiles
@@ -1535,7 +1535,7 @@ fn micros(since: Instant) -> u64 {
 ///   for the encoder at all, which is the point of the whole module.
 /// - `bytes` cross-checks against the `ws: outbound totals` line, and must not move
 ///   when the depth does — the same pixels are encoded either way.
-/// - `motion` and `cleanup` are the whole measurement of the `motion` strategy, and
+/// - `motion` and `cleanup` are the whole measurement of the motion path, and
 ///   they are read together. `motion` at zero on a target that has one configured
 ///   is the claim that a still screen is untouched, and it is the number to check
 ///   before believing any saving. `cleanup` against it is what the discount cost:
@@ -1556,7 +1556,7 @@ fn micros(since: Instant) -> u64 {
 ///   is supposed to be unreachable is not.
 ///
 /// `tiles` counts still tiles and `unit` counts access units, so both are comparable
-/// across every dial: a `motion` session's tiles are the same kind of thing as a
+/// across every dial: a motion session's tiles are the same kind of thing as a
 /// plain `tiles` session's, and only `bytes` compares the two transports.
 struct Totals {
     tiles: u64,
@@ -1731,7 +1731,7 @@ mod tests {
     }
 
     /// The same classifier as the base of a motion plan: a quiet cell is
-    /// classified exactly as it would be with no motion strategy at all. (A
+    /// classified exactly as it would be with no motion encode at all. (A
     /// moving cell takes the motion encode instead — that switch is churn's,
     /// tested with the rest of the motion path.)
     #[tokio::test]
@@ -1925,7 +1925,7 @@ mod tests {
     }
 
     /// A motion plan changes nothing about a screen that is not moving: the same
-    /// tiles, byte for byte, as the same target with no motion strategy at all.
+    /// tiles, byte for byte, as the same target with no motion encode at all.
     #[tokio::test(start_paused = true)]
     async fn a_still_screen_is_byte_identical_to_its_base_configuration() {
         let area = rect(37, 41, 900, 200);
@@ -2437,7 +2437,7 @@ mod tests {
         panic!("a region that changed every slot never got a stream");
     }
 
-    /// The claim the whole strategy makes: what moves goes out as a stream, and the
+    /// The claim the whole motion path makes: what moves goes out as a stream, and the
     /// cells beside it are not touched. A cell a stream carries must not *also* be
     /// sent as a tile — that is a second delivery of pixels the stream has not paid
     /// for, and it is what would discharge a debt nothing had settled.
@@ -2497,7 +2497,7 @@ mod tests {
 
     /// And the other half: a quiet cell beside a streamed one is still crisp, and a
     /// band with nothing streamed in it still goes out whole. This is what the
-    /// strategy is *for* — the text beside a video costs nothing and stays exact.
+    /// switch is *for* — the text beside a video costs nothing and stays exact.
     #[tokio::test(start_paused = true)]
     async fn a_quiet_cell_beside_a_streamed_one_is_still_a_crisp_tile() {
         let (sink, mut frame_rx) = stream_sink(640, 128).await;
