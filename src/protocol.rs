@@ -688,8 +688,9 @@ impl Tile {
         out.extend_from_slice(&self.y.to_le_bytes());
         out.extend_from_slice(&self.w.to_le_bytes());
         out.extend_from_slice(&self.h.to_le_bytes());
-        // u32, not u16: a full-width Retina strip has been measured at ~192 KB,
-        // and a length field that cannot describe the payload is not a saving.
+        // u32, not u16: a full-width Retina band (3200×64) has been measured at
+        // ~192 KB, and a length field that cannot describe the payload is not a
+        // saving.
         out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.data);
     }
@@ -2183,7 +2184,7 @@ mod tests {
         assert_eq!(out[1], Tile::FORMAT_JPEG);
     }
 
-    /// A high-entropy, photographic-like strip: PNG cannot compress it, which is
+    /// A high-entropy, photographic-like band: PNG cannot compress it, which is
     /// exactly where a lossy codec earns its keep (a smooth gradient is the
     /// opposite case — PNG wins it, so it is no test of the JPEG path).
     fn noisy_rgb(w: u16, h: u16) -> Vec<u8> {
@@ -2200,7 +2201,7 @@ mod tests {
         rgb
     }
 
-    // The whole point of the dial: a photographic strip is far smaller as JPEG
+    // The whole point of the dial: a photographic band is far smaller as JPEG
     // than as lossless PNG, and a lower quality is smaller still.
     #[test]
     fn jpeg_is_smaller_than_png_on_photographic_content() {
@@ -2230,7 +2231,7 @@ mod tests {
         assert!(Tile::from_rgb_jpeg(0, 0, 2, 2, &[0u8; 11], 60).is_err());
     }
 
-    /// A desktop-like strip: horizontal gradient, repeated rows.
+    /// A desktop-like band: horizontal gradient, repeated rows.
     fn gradient_rgb(w: u16, h: u16) -> Vec<u8> {
         let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
         for _ in 0..h {
@@ -2326,7 +2327,9 @@ mod tests {
     ///    PNG's per-stream overhead more times, and gets less redundancy to
     ///    compress within each stream. The ratio printed here is what a grid costs
     ///    in the case where it wins nothing, so it sets the skip rate the grid has
-    ///    to achieve before it is worth having at all.
+    ///    to achieve before it is worth having at all. The last row is the cell the
+    ///    gateway cuts at today, 64×64; the ones above it are the widths it was
+    ///    weighed against, kept so the trade stays on the record.
     ///
     /// Run it in **release**: `png` at `Compression::Fast` is several times slower
     /// in a debug build, which would flatter the hash and slander the grid.
@@ -2339,7 +2342,7 @@ mod tests {
     fn encode_cost_against_hash_cost() {
         use std::time::Instant;
 
-        // A full-width Retina strip.
+        // A full-width Retina band: BAND_ROWS tall at any density.
         let (sw, sh) = (3200u16, 64u16);
         let runs = 20;
 
@@ -2382,6 +2385,7 @@ mod tests {
                 (320, 32),
                 (256, 64),
                 (128, 64),
+                (64, 64),
             ] {
                 let tiles = usize::from(sw / cw) * usize::from(sh / ch);
                 let cell = make(cw, ch);

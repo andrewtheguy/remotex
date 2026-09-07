@@ -5,6 +5,18 @@
 
 use crate::protocol::TileGrid;
 
+/// Rows per band of [`Rect::bands`], in framebuffer pixels at any density.
+///
+/// A band bounds a *payload*, and what that bound is measured against — the batch
+/// cap and the slot cache's ceiling in [`crate::wire`], the WebSocket frame the
+/// client decodes as one unit — is bytes, of which a 2× desktop has four times as
+/// many per point. So unlike the cell grid, which is in points because a cell is an
+/// *identity* the same window should occupy at either density, a band stays 64
+/// pixels tall on a Retina framebuffer: half a cell, and the same bytes per record
+/// a 1× band carries. The motion path cuts a band at the grid where it has to
+/// ([`Rect::cells`]), and a piece of a cell keys to that cell as the whole would.
+pub const BAND_ROWS: u16 = 64;
+
 /// A rectangle of the framebuffer, in pixels, with **inclusive** edges.
 ///
 /// Inclusive because that is how RFB reports a rectangle, and converting once at
@@ -57,19 +69,19 @@ impl Rect {
         (left <= right && top <= bottom).then_some(Self { left, top, right, bottom })
     }
 
-    /// This rectangle split into pieces at most one cell of `grid` tall, top down.
+    /// This rectangle split into pieces at most [`BAND_ROWS`] tall, top down.
     ///
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
     /// useful unit of progress nor a comfortable WebSocket frame — and a client
     /// draws the pieces exactly as it draws any other tiles.
-    pub fn bands(&self, grid: TileGrid) -> impl Iterator<Item = Rect> + '_ {
+    pub fn bands(&self) -> impl Iterator<Item = Rect> + '_ {
         (self.top..=self.bottom)
-            .step_by(usize::from(grid.h))
+            .step_by(usize::from(BAND_ROWS))
             .map(move |top| Rect {
                 left: self.left,
                 top,
                 right: self.right,
-                bottom: self.bottom.min(top.saturating_add(grid.h - 1)),
+                bottom: self.bottom.min(top.saturating_add(BAND_ROWS - 1)),
             })
     }
 
@@ -78,10 +90,11 @@ impl Rect {
     /// only pixels this rectangle already covered.
     ///
     /// Both axes are cut, and the vertical one is not redundant with
-    /// [`Self::bands`]: bands are anchored to the rectangle's own `top`, so a
-    /// band starting at y=37 straddles the grid line at y=64 and has to be cut in
-    /// two here. The point of the cut is that no piece straddles a line, which is
-    /// what makes [`Self::cell_key`] answerable for every piece.
+    /// [`Self::bands`]: bands are anchored to the rectangle's own `top` and are
+    /// [`BAND_ROWS`] tall whatever the grid, so a band starting at y=37 straddles
+    /// the grid line at y=64 and has to be cut in two here. The point of the cut is
+    /// that no piece straddles a line, which is what makes [`Self::cell_key`]
+    /// answerable for every piece.
     pub fn cells(&self, grid: TileGrid) -> impl Iterator<Item = Rect> + '_ {
         let start = |v: u16, step: u16| v - v % step;
         (start(self.top, grid.h)..=self.bottom)
@@ -863,14 +876,14 @@ mod tests {
     #[test]
     fn bands_split_tall_rectangles_and_leave_short_ones_alone() {
         let short = rect(10, 10, 20, 20);
-        assert_eq!(short.bands(GRID).collect::<Vec<_>>(), vec![short]);
+        assert_eq!(short.bands().collect::<Vec<_>>(), vec![short]);
 
-        let tall = rect(0, 0, 99, CELL_H * 2);
-        let bands: Vec<_> = tall.bands(GRID).collect();
+        let tall = rect(0, 0, 99, BAND_ROWS * 2);
+        let bands: Vec<_> = tall.bands().collect();
         assert_eq!(bands.len(), 3, "{bands:?}");
-        assert_eq!(bands[0], rect(0, 0, 99, CELL_H - 1));
-        assert_eq!(bands[1], rect(0, CELL_H, 99, CELL_H * 2 - 1));
-        assert_eq!(bands[2], rect(0, CELL_H * 2, 99, CELL_H * 2));
+        assert_eq!(bands[0], rect(0, 0, 99, BAND_ROWS - 1));
+        assert_eq!(bands[1], rect(0, BAND_ROWS, 99, BAND_ROWS * 2 - 1));
+        assert_eq!(bands[2], rect(0, BAND_ROWS * 2, 99, BAND_ROWS * 2));
         // No gaps, no overlap, and the whole rectangle is covered.
         assert_eq!(bands.iter().map(|b| usize::from(b.h())).sum::<usize>(), usize::from(tall.h()));
     }
@@ -965,7 +978,14 @@ mod tests {
         assert_eq!(source.cells(GRID).count(), 3);
         assert_eq!(source.cells(retina).collect::<Vec<_>>(), vec![rect(0, 0, 127, 63), rect(128, 0, 191, 63)]);
         assert_eq!(rect(130, 70, 132, 120).cell_key(retina), (1, 0));
-        assert_eq!(rect(0, 0, 99, 255).bands(retina).count(), 2);
+        // A band is a payload bound in pixels, not a cell: four per 256 rows at
+        // either density, so a Retina record carries the bytes a 1× one does.
+        assert_eq!(rect(0, 0, 99, 255).bands().count(), 4);
+        // And a band's pieces under the 2× grid are halves of cells, each keyed
+        // to the cell it lies in.
+        let band = rect(0, 64, 255, 127);
+        assert_eq!(band.cells(retina).collect::<Vec<_>>(), vec![rect(0, 64, 127, 127), rect(128, 64, 255, 127)]);
+        assert_eq!(band.cells(retina).map(|c| c.cell_key(retina)).collect::<Vec<_>>(), vec![(0, 0), (1, 0)]);
 
         // And the shadow classifies against the grid it was given: a pixel at
         // (100, 100) is cell (1, 1) at 1× and (0, 0) at 2×.

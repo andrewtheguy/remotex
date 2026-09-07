@@ -383,7 +383,9 @@ codec carrying every cell outside one.
   can assert its geometry rather than pad defensively.
 
 One measurement, so that the shape of the trade is on the record rather than assumed
-— 25 s of the same driven motion on a 1280×800 RDP desktop, release build:
+— 25 s of the same driven motion on a 1280×800 RDP desktop, release build, with the
+grid cut at 320×64 pixels, the cell of the time (a still per moving cell is now a
+still per 64×64 cell, so that row's tile count and per-tile overhead differ today):
 
 | encode | to the client | encode CPU |
 |---|---|---|
