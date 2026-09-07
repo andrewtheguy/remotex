@@ -2464,6 +2464,37 @@ mod tests {
         );
     }
 
+    /// A region too small to be a video — a 2×2 block of cells, a spinner's worth —
+    /// is never streamed however long it churns: every change goes out at the base
+    /// encode, and there is nothing to clean up after it. Same clock, same number of
+    /// slots as it takes the strip above to earn its stream.
+    #[tokio::test(start_paused = true)]
+    async fn a_spinner_sized_region_stays_on_the_base_encode() {
+        let (sink, mut frame_rx) = stream_sink(640, 128).await;
+        let spinner = rect(0, 0, 128, 128);
+        for _ in 0..40 {
+            sink.damage(&all_of(spinner), |piece| flat(piece.w(), piece.h(), 40)).await.unwrap();
+            sink.frame().await.unwrap();
+            tokio::time::advance(CHURN_SLOT).await;
+        }
+        sink.flush().await;
+
+        let mut out = Vec::new();
+        while let Ok(msg) = frame_rx.try_recv() {
+            out.push(msg);
+        }
+        assert!(!out.is_empty(), "the spinner's changes were not sent at all");
+        assert!(
+            out.iter().all(|msg| matches!(msg, ServerMsg::Tile(_))),
+            "a spinner got a stream: {:?}",
+            out.iter().find(|msg| !matches!(msg, ServerMsg::Tile(_)))
+        );
+        let video = sink.shared.video.lock().await;
+        for cell in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            assert!(!video.regions.covers(cell), "{cell:?} is under a stream");
+        }
+    }
+
     /// And the other half: a quiet cell beside a streamed one is still crisp, and a
     /// band with nothing streamed in it still goes out whole. This is what the
     /// strategy is *for* — the text beside a video costs nothing and stays exact.

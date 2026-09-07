@@ -399,6 +399,14 @@ password = "change-me"
 # carries everything else. A video in a window costs its own pixels; the text beside
 # it stays exactly what render_subtype says, and is never re-encoded at all.
 #
+# A region has to be big enough to be a video before it is streamed: anything
+# changing in fewer than five 64x64 cells on its own — a spinner, a progress bar, a
+# typing indicator, up to a 128x128 block — stays on render_subtype like everything
+# settled. That is where it is cheapest: a spinner is a few kilobytes a change as a
+# still and compresses well, where a stream would cost an encoder, a keyframe, a
+# decoder in the browser and a crisp re-send every time it stopped and started.
+# Only a small mover sitting inside a larger moving region's box rides that stream.
+#
 # "motion" does not replace the base keys, it builds on them: render_subtype and
 # render_quality mean exactly what they mean under "tiles", they just describe the
 # settled cells only. So render_quality is still refused over a "png" base — there is

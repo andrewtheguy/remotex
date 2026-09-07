@@ -90,6 +90,22 @@ const STREAM_IDLE: Duration = Duration::from_millis(500);
 /// stream because a video is playing in the other.
 const MERGE_WASTE: u32 = 2;
 
+/// The fewest moving cells a component needs before it is worth a stream.
+///
+/// Five, so a 2×2 block of the grid — 128×128 pixels, the most anything up to a
+/// cell wide can touch however it straddles the lines — is never streamed on its
+/// own. What churns in that few cells is a spinner, a progress bar, a typing
+/// indicator, a blinking badge: not a video, and small enough that the base codec
+/// carries it for a few kilobytes a change, where a stream costs an encoder, a
+/// keyframe, a decoder at the far end and a cleanup when it stops — and a spinner
+/// stops and starts with every page load, so all of that is spent and torn down
+/// again each time. A component this small goes to the still codecs the way one the
+/// cap dropped does, and for the same reason: crisp and merely expensive is the
+/// safe direction. It is not the same as being out of a stream altogether — a
+/// larger component whose box covers its cells carries them, as any box carries
+/// every cell inside it.
+const MIN_STREAM_CELLS: u32 = 5;
+
 /// Note that the client is owed an end for `id`, once: an end is said once however
 /// many paths notice it before [`Regions::drain_ended`] takes it.
 fn record_end(ended: &mut Vec<u8>, id: u8) {
@@ -209,7 +225,11 @@ struct Component {
 /// Group moving cells into at most `max` rectangles of the cell grid.
 ///
 /// Connected components first (4-connected, so cells that merely touch at a corner
-/// are two regions), then each component's bounding box. Two components' *cells*
+/// are two regions), then each component's bounding box. A component with fewer
+/// than [`MIN_STREAM_CELLS`] moving cells is not a video and is left to the still
+/// codecs before anything else is decided: it neither takes a stream of its own nor
+/// counts towards the cap, so a spinner in one corner does not cost the video in the
+/// other a merge or a slot. Two components' *cells*
 /// cannot overlap, but their boxes can — an L and a cell tucked into its corner, or
 /// two L's interlocked — and a cell inside two live regions is a cell two streams
 /// both carry, which is the one delivery rule this module exists to keep. So an
@@ -264,6 +284,11 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
         }
         components.push(Component { bbox, moving });
     }
+    // Before the merging, so a component too small to stream is also too small to
+    // fill a slot or to pull a larger region's box out to meet it. Its cells inside
+    // some larger component's box are carried by that stream whatever is decided
+    // here; the rest go crisp.
+    components.retain(|c| c.moving >= MIN_STREAM_CELLS);
 
     loop {
         // Overlaps first, because they are forced rather than chosen: the delivery
@@ -1265,8 +1290,8 @@ mod tests {
     #[test]
     fn regions_are_disjoint_even_where_their_boxes_nest() {
         let mut cells = vec![(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 0)];
-        cells.extend(block(4, 0, 5, 1));
-        cells.extend(block(0, 8, 1, 9));
+        cells.extend(block(4, 0, 5, 2));
+        cells.extend(block(0, 8, 2, 9));
         let inside = |boxes: &[CellBox], cell: (u16, u16)| {
             boxes.iter().any(|b| {
                 b.c0 <= cell.0 && cell.0 <= b.c1 && b.r0 <= cell.1 && cell.1 <= b.r1
@@ -1288,7 +1313,7 @@ mod tests {
         // the two blocks, none of them grown by a cell.
         let boxes = coalesce(&cells, MAX_STREAMS);
         assert_eq!(boxes.len(), 3, "{boxes:?}");
-        for want in [boxed(0, 0, 2, 2), boxed(4, 0, 5, 1), boxed(0, 8, 1, 9)] {
+        for want in [boxed(0, 0, 2, 2), boxed(4, 0, 5, 2), boxed(0, 8, 2, 9)] {
             assert!(boxes.contains(&want), "{want:?} is not among {boxes:?}");
         }
     }
@@ -1298,8 +1323,9 @@ mod tests {
     #[test]
     fn a_partial_overlap_within_the_waste_veto_merges() {
         // An L, and a hook whose box reaches into the L's box and past it.
-        let cells = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 0), (3, 0), (3, 1)];
-        assert_eq!(coalesce(&cells, MAX_STREAMS), vec![boxed(0, 0, 3, 2)]);
+        let mut cells = vec![(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)];
+        cells.extend([(2, 0), (3, 0), (4, 0), (4, 1), (4, 2)]);
+        assert_eq!(coalesce(&cells, MAX_STREAMS), vec![boxed(0, 0, 4, 2)]);
     }
 
     /// And past the veto the smaller component goes to the still codecs, so no cell
@@ -1336,21 +1362,25 @@ mod tests {
     /// the desktop inside it.
     #[test]
     fn two_separated_blocks_stay_two_regions() {
-        let mut cells = block(0, 0, 1, 1);
-        cells.extend(block(10, 12, 11, 13));
+        let mut cells = block(0, 0, 2, 1);
+        cells.extend(block(10, 12, 12, 13));
         let regions = coalesce(&cells, MAX_STREAMS);
         assert_eq!(regions.len(), 2, "{regions:?}");
-        assert!(regions.contains(&boxed(0, 0, 1, 1)));
-        assert!(regions.contains(&boxed(10, 12, 11, 13)));
+        assert!(regions.contains(&boxed(0, 0, 2, 1)));
+        assert!(regions.contains(&boxed(10, 12, 12, 13)));
     }
 
     /// Touching at a corner is not touching: 4-connectivity, so a diagonal pair is
     /// two regions rather than one box twice their size.
     #[test]
     fn cells_that_only_touch_at_a_corner_are_two_regions() {
-        assert_eq!(coalesce(&[(0, 0), (1, 1)], MAX_STREAMS).len(), 2);
+        let mut cells = block(0, 0, 4, 0);
+        cells.extend(block(5, 1, 9, 1));
+        assert_eq!(coalesce(&cells, MAX_STREAMS).len(), 2);
         // Side by side is one, which is the same statement from the other direction.
-        assert_eq!(coalesce(&[(0, 0), (1, 0)], MAX_STREAMS), vec![boxed(0, 0, 1, 0)]);
+        let mut cells = block(0, 0, 4, 0);
+        cells.extend(block(5, 0, 9, 0));
+        assert_eq!(coalesce(&cells, MAX_STREAMS), vec![boxed(0, 0, 9, 0)]);
     }
 
     /// Over the cap, the pair that wastes least is merged — here the two neighbours,
@@ -1372,13 +1402,53 @@ mod tests {
     #[test]
     fn a_merge_that_would_swallow_the_screen_drops_the_smallest_region_instead() {
         let mut cells = block(0, 0, 2, 2);
-        cells.push((30, 20));
+        cells.extend(block(30, 20, 34, 20));
         let regions = coalesce(&cells, 1);
         assert_eq!(
             regions,
             vec![boxed(0, 0, 2, 2)],
-            "one far cell took the whole screen into a stream"
+            "one far strip took the whole screen into a stream"
         );
+    }
+
+    /// Fewer than `MIN_STREAM_CELLS` moving cells is a spinner, not a video: it stays
+    /// on the still codecs however far it is from anything else, and a cap that has
+    /// room for it does not change that.
+    #[test]
+    fn a_component_too_small_to_be_a_video_is_not_streamed() {
+        // A 2×2 block is the biggest thing the gate holds back.
+        assert!(coalesce(&block(0, 0, 1, 1), MAX_STREAMS).is_empty());
+        assert!(coalesce(&[(0, 0), (1, 0), (2, 0), (3, 0)], MAX_STREAMS).is_empty());
+        // One more cell and it is a region.
+        assert_eq!(coalesce(&block(0, 0, 4, 0), MAX_STREAMS), vec![boxed(0, 0, 4, 0)]);
+    }
+
+    /// The case the gate exists for: a spinner in one corner while a video plays in
+    /// the other. The video streams, the spinner is a tile, and however many spinners
+    /// there are they neither fill the cap nor drag the video's box out to meet them.
+    #[test]
+    fn spinners_beside_a_video_cost_it_neither_a_slot_nor_a_merge() {
+        let video = block(0, 0, 4, 2);
+        let mut cells = video.clone();
+        for spinner in [(20, 0), (20, 10), (0, 20), (20, 20), (10, 10)] {
+            cells.extend(block(spinner.0, spinner.1, spinner.0 + 1, spinner.1 + 1));
+        }
+        for max in 1..=MAX_STREAMS {
+            assert_eq!(coalesce(&cells, max), vec![boxed(0, 0, 4, 2)], "at max {max}");
+        }
+    }
+
+    /// A spinner inside a video's box is carried by the video's stream, exactly as a
+    /// still cell there would be: the gate leaves it out of the decision, and the box
+    /// that covers it is the same box either way.
+    #[test]
+    fn a_small_component_inside_a_larger_box_is_carried_by_that_box() {
+        // A hollow frame, and a spinner in the hole.
+        let mut cells: Vec<(u16, u16)> = block(0, 0, 5, 0);
+        cells.extend(block(0, 4, 5, 4));
+        cells.extend([(0, 1), (0, 2), (0, 3), (5, 1), (5, 2), (5, 3)]);
+        cells.push((2, 2));
+        assert_eq!(coalesce(&cells, MAX_STREAMS), vec![boxed(0, 0, 5, 4)]);
     }
 
     /// Whatever the cap does, the result is a set of disjoint boxes — which is what
@@ -1387,7 +1457,7 @@ mod tests {
     fn regions_never_overlap_each_other() {
         let mut cells = Vec::new();
         for (c, r) in [(0, 0), (5, 1), (6, 9), (12, 3), (13, 3), (2, 7)] {
-            cells.extend(block(c, r, c + 1, r + 1));
+            cells.extend(block(c, r, c + 1, r + 2));
         }
         for max in 1..=MAX_STREAMS {
             let regions = coalesce(&cells, max);
@@ -1411,12 +1481,13 @@ mod tests {
     /// every cap, and the veto is never asked about a union that adds no cell.
     #[test]
     fn a_nested_box_is_merged_whatever_the_cap() {
-        let mut cells = vec![(0, 0), (1, 0), (2, 0), (0, 1), (0, 2)];
-        // Diagonally opposite the L's corner, so 4-connected to none of it, and
+        let mut cells = block(0, 0, 6, 0);
+        cells.extend(block(0, 1, 0, 6));
+        // A strip a cell in from the L's arms, so 4-connected to none of it, and
         // inside its bounding box.
-        cells.push((2, 2));
+        cells.extend(block(2, 2, 6, 2));
         for max in 1..=MAX_STREAMS {
-            assert_eq!(coalesce(&cells, max), vec![boxed(0, 0, 2, 2)], "at max {max}");
+            assert_eq!(coalesce(&cells, max), vec![boxed(0, 0, 6, 6)], "at max {max}");
         }
     }
 
@@ -1425,14 +1496,34 @@ mod tests {
     // Every instant below is made up rather than waited for, so nothing here changes
     // if the machine is twice as slow.
 
-    /// A 128×128 desktop — two cells across, two down — with its mirror already
-    /// built, which is what a first blit does.
+    /// A 320×128 desktop — five cells across, two down — with its mirror already
+    /// built, which is what a first blit does. Five across because a row of it is
+    /// the smallest region the gate lets stream.
     async fn regions() -> Regions {
-        sized(128, 128).await
+        sized(320, 128).await
     }
 
-    /// The same, at whatever size a test needs cells for. A cell is 64×64, so a
-    /// test about two *separate* regions needs a desktop at least three cells wide:
+    /// The top row of [`regions`]: one region, the smallest there is.
+    fn top_row() -> Vec<(u16, u16)> {
+        block(0, 0, 4, 0)
+    }
+
+    /// Both rows of [`regions`]: the same region grown to the whole desktop.
+    fn both_rows() -> Vec<(u16, u16)> {
+        block(0, 0, 4, 1)
+    }
+
+    /// Two 3×2 blocks with a gap between them on a 1600×128 desktop, so they
+    /// coalesce as two regions rather than one.
+    fn two_blocks() -> Vec<(u16, u16)> {
+        let mut cells = block(0, 0, 2, 1);
+        cells.extend(block(5, 0, 7, 1));
+        cells
+    }
+
+    /// The same, at whatever size a test needs cells for. A cell is 64×64 and a
+    /// region needs `MIN_STREAM_CELLS` of them, so a test about two *separate*
+    /// regions needs room for two blocks that size with a quiet cell between:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
         let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, None);
@@ -1454,11 +1545,11 @@ mod tests {
     async fn geometry_does_not_move_inside_the_retune_interval() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("a stream for the moving cell");
+        regions.retune(&top_row(), t0).expect("a stream for the moving cells");
         let first = only_rect(&regions);
 
         // Twice as much is moving, but not yet.
-        regions.retune(&[(0, 0), (1, 0)], t0 + RETUNE / 2).expect("no work");
+        regions.retune(&both_rows(), t0 + RETUNE / 2).expect("no work");
         assert_eq!(only_rect(&regions), first, "geometry moved inside the interval");
     }
 
@@ -1468,12 +1559,12 @@ mod tests {
     async fn a_shrinking_region_keeps_its_stream() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0), (1, 0)], t0).expect("a stream");
-        let wide = only_rect(&regions);
-        assert_eq!(wide.w(), 128);
+        regions.retune(&both_rows(), t0).expect("a stream");
+        let tall = only_rect(&regions);
+        assert_eq!(tall.h(), 128);
 
-        regions.retune(&[(0, 0)], t0 + RETUNE).expect("no restart");
-        assert_eq!(only_rect(&regions), wide, "a shrinking region paid for a new encoder");
+        regions.retune(&top_row(), t0 + RETUNE).expect("no restart");
+        assert_eq!(only_rect(&regions), tall, "a shrinking region paid for a new encoder");
     }
 
     /// One rectangle that has split into two regions keeps one stream, carrying
@@ -1481,14 +1572,17 @@ mod tests {
     /// first — two streams over one cell, the delivery rule broken.
     #[tokio::test]
     async fn a_kept_stream_carries_every_region_inside_it() {
-        // Three cells across, two down.
-        let mut regions = sized(192, 128).await;
+        // Five cells across, three down.
+        let mut regions = sized(320, 192).await;
         let t0 = Instant::now();
-        regions.retune(&block(0, 0, 2, 1), t0).expect("a stream");
+        regions.retune(&block(0, 0, 4, 2), t0).expect("a stream");
         let whole = only_rect(&regions);
         let id = regions.live[0].id;
 
-        regions.retune(&[(0, 0), (2, 1)], t0 + RETUNE).expect("the same stream");
+        // The middle row goes quiet, leaving a region in each of the outer rows.
+        let mut split = block(0, 0, 4, 0);
+        split.extend(block(0, 2, 4, 2));
+        regions.retune(&split, t0 + RETUNE).expect("the same stream");
         assert_eq!(only_rect(&regions), whole, "the split rebuilt the stream");
         assert_eq!(regions.live[0].id, id);
         assert!(regions.drain_ended().is_empty(), "nothing ended");
@@ -1499,18 +1593,22 @@ mod tests {
     /// one disjoint from every other.
     #[tokio::test]
     async fn a_region_straddling_a_kept_stream_ends_it() {
-        let mut regions = sized(192, 128).await;
+        // Ten cells across, three down; the first stream covers the top two rows.
+        let mut regions = sized(640, 192).await;
         let t0 = Instant::now();
-        regions.retune(&block(0, 0, 1, 1), t0).expect("a stream");
+        regions.retune(&block(0, 0, 9, 1), t0).expect("a stream");
         let id = regions.live[0].id;
 
-        // One region inside the old rectangle, and one reaching out of it.
-        regions.retune(&[(0, 0), (1, 1), (2, 1)], t0 + RETUNE).expect("two streams");
+        // One region inside the old rectangle, and one reaching out of it into the
+        // third row, with a quiet column between them.
+        let mut split = block(0, 0, 4, 0);
+        split.extend(block(6, 1, 9, 2));
+        regions.retune(&split, t0 + RETUNE).expect("two streams");
         let rects: Vec<Rect> = regions.live.iter().map(|live| live.rect).collect();
         assert_eq!(rects.len(), 2, "{rects:?}");
         assert!(rects[0].intersect(&rects[1]).is_none(), "{rects:?} overlap");
         assert!(
-            rects.contains(&boxed(1, 1, 2, 1).to_rect(192, 128).expect("a rectangle")),
+            rects.contains(&boxed(6, 1, 9, 2).to_rect(640, 192).expect("a rectangle")),
             "the straddling region did not get its own stream: {rects:?}"
         );
         assert!(
@@ -1534,12 +1632,12 @@ mod tests {
     async fn a_growing_region_starts_a_new_stream() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("a stream");
-        assert_eq!(only_rect(&regions).w(), 64);
+        regions.retune(&top_row(), t0).expect("a stream");
+        assert_eq!(only_rect(&regions).h(), 64);
 
-        regions.retune(&[(0, 0), (1, 0)], t0 + RETUNE).expect("a wider stream");
+        regions.retune(&both_rows(), t0 + RETUNE).expect("a taller stream");
         let grown = only_rect(&regions);
-        assert_eq!(grown.w(), 128, "the stream kept a rectangle its region outgrew");
+        assert_eq!(grown.h(), 128, "the stream kept a rectangle its region outgrew");
         assert!(regions.live[0].keyframe_owed, "a client cannot start on the new picture");
     }
 
@@ -1550,7 +1648,7 @@ mod tests {
     async fn a_stream_that_ends_names_its_id() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("a stream");
+        regions.retune(&top_row(), t0).expect("a stream");
         let id = regions.live[0].id;
         assert!(regions.drain_ended().is_empty(), "a stream that just started has not ended");
 
@@ -1567,11 +1665,11 @@ mod tests {
     async fn an_id_handed_straight_back_is_not_an_end() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("a stream");
+        regions.retune(&top_row(), t0).expect("a stream");
         let id = regions.live[0].id;
         regions.drain_ended();
 
-        regions.retune(&[(0, 0), (0, 1)], t0 + RETUNE).expect("a taller stream");
+        regions.retune(&both_rows(), t0 + RETUNE).expect("a taller stream");
         assert_eq!(regions.live.len(), 1);
         assert_eq!(regions.live[0].id, id, "the replacement took the id back");
         assert!(regions.drain_ended().is_empty(), "the client was told to close a live decoder");
@@ -1585,7 +1683,7 @@ mod tests {
     async fn a_resize_names_the_streams_it_dropped() {
         let mut regions = sized(1600, 128).await;
         // Two blocks with a gap, so they coalesce as two regions rather than one.
-        regions.retune(&[(0, 0), (0, 1), (3, 0), (3, 1)], Instant::now()).expect("two streams");
+        regions.retune(&two_blocks(),Instant::now()).expect("two streams");
         let mut ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
         assert_eq!(ids.len(), 2);
         regions.drain_ended();
@@ -1604,7 +1702,7 @@ mod tests {
     async fn a_resize_over_a_round_in_flight_names_that_round_s_streams() {
         let mut regions = sized(1600, 128).await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0), (0, 1), (3, 0), (3, 1)], t0).expect("two streams");
+        regions.retune(&two_blocks(),t0).expect("two streams");
         regions.drain_ended();
         let round = regions.take_round().expect("dirty streams");
         let mut ids: Vec<u8> = round.live.iter().map(|live| live.id).collect();
@@ -1627,7 +1725,7 @@ mod tests {
     async fn two_regions_born_in_one_retune_get_different_ids() {
         let mut regions = sized(1600, 128).await;
         // Two blocks with a gap between them, so they coalesce as two regions.
-        regions.retune(&[(0, 0), (0, 1), (3, 0), (3, 1)], Instant::now()).expect("two streams");
+        regions.retune(&two_blocks(),Instant::now()).expect("two streams");
         let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
         assert_eq!(regions.live.len(), 2, "expected two regions, got {ids:?}");
         assert_ne!(ids[0], ids[1], "both regions were sent as the same stream");
@@ -1641,7 +1739,7 @@ mod tests {
     #[tokio::test]
     async fn a_round_with_two_streams_produces_both_units_in_stream_order() {
         let mut regions = sized(1600, 128).await;
-        regions.retune(&[(0, 0), (0, 1), (3, 0), (3, 1)], Instant::now()).expect("two streams");
+        regions.retune(&two_blocks(),Instant::now()).expect("two streams");
         let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
         assert_eq!(ids.len(), 2, "expected two regions, got {ids:?}");
 
@@ -1664,12 +1762,12 @@ mod tests {
     async fn a_carried_stream_keeps_its_id_when_another_is_built_beside_it() {
         let mut regions = sized(1600, 128).await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("one stream");
+        regions.retune(&block(0, 0, 2, 1), t0).expect("one stream");
         let first = regions.live[0].id;
 
         // The first region keeps moving and its rectangle still fits; the second is
         // new, and must not be handed the id the first is still using.
-        regions.retune(&[(0, 0), (3, 1)], t0 + RETUNE).expect("a second stream");
+        regions.retune(&two_blocks(), t0 + RETUNE).expect("a second stream");
         let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
         assert_eq!(ids.len(), 2, "{ids:?}");
         assert!(ids.contains(&first), "the surviving region was renumbered");
@@ -1682,7 +1780,7 @@ mod tests {
     async fn a_region_that_stops_moving_ends_and_its_cells_come_due() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("a stream");
+        regions.retune(&top_row(), t0).expect("a stream");
         assert!(regions.covers((0, 0)));
         assert!(
             regions.due(t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8).is_empty(),
@@ -1696,7 +1794,7 @@ mod tests {
         assert!(!regions.covers((0, 0)));
         let due = regions.due(later, CLEANUP_IDLE_FOR_TESTS, 8);
         assert_eq!(due.len(), 1, "the cells it streamed are owed nothing");
-        assert_eq!(due[0], Rect { left: 0, top: 0, right: 63, bottom: 63 });
+        assert_eq!(due[0], Rect { left: 0, top: 0, right: 319, bottom: 63 });
     }
 
     /// Only in full. Damage is clipped to what changed rather than snapped out to the
@@ -1705,25 +1803,26 @@ mod tests {
     async fn only_a_whole_cell_discharges_what_that_cell_owes() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&[(0, 0)], t0).expect("a stream");
+        regions.retune(&top_row(), t0).expect("a stream");
         regions.expire(t0 + STREAM_IDLE);
         let later = t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS;
 
+        // The whole row is owed, first cell included: a run from the left edge.
         regions.discharge(Rect { left: 0, top: 0, right: 15, bottom: 15 });
         assert_eq!(
-            regions.due(later, CLEANUP_IDLE_FOR_TESTS, 8).len(),
-            1,
+            regions.due(later, CLEANUP_IDLE_FOR_TESTS, 8),
+            vec![Rect { left: 0, top: 0, right: 319, bottom: 63 }],
             "a sliver discharged the whole cell's debt"
         );
 
-        // And a send that covers the cell outright does discharge it.
-        regions.retune(&[(0, 0)], later).expect("a stream again");
+        // And a send that covers the cell outright does discharge it: the run now
+        // starts one cell in.
+        regions.retune(&top_row(), later).expect("a stream again");
         regions.expire(later + STREAM_IDLE);
         regions.discharge(Rect { left: 0, top: 0, right: 63, bottom: 63 });
-        assert!(
-            regions
-                .due(later + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8)
-                .is_empty(),
+        assert_eq!(
+            regions.due(later + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8),
+            vec![Rect { left: 64, top: 0, right: 319, bottom: 63 }],
             "a whole cell went out crisp and is still owed"
         );
     }
@@ -1735,13 +1834,24 @@ mod tests {
     async fn a_still_cell_swept_into_a_region_is_owed_too() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        // Two cells moving with one between them, so the box covers a cell that never
-        // moved at all.
-        regions.retune(&[(0, 0), (0, 1)], t0).expect("a stream");
+        // The top row and one cell of the bottom row, so the box covers four cells
+        // that never moved at all.
+        let mut cells = top_row();
+        cells.push((4, 1));
+        regions.retune(&cells, t0).expect("a stream");
         assert_eq!(only_rect(&regions).h(), 128);
         regions.expire(t0 + STREAM_IDLE);
-        let due = regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8);
-        assert_eq!(due.len(), 2, "a cell inside the stream's rectangle was owed nothing");
+        let mut due =
+            regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
+        due.sort_unstable_by_key(|rect| rect.top);
+        assert_eq!(
+            due,
+            vec![
+                Rect { left: 0, top: 0, right: 319, bottom: 63 },
+                Rect { left: 0, top: 64, right: 319, bottom: 127 },
+            ],
+            "a cell inside the stream's rectangle was owed nothing"
+        );
     }
 
     /// Cells that come due together and sit side by side in one row are one
@@ -1750,20 +1860,25 @@ mod tests {
     async fn due_cells_in_one_row_are_restored_as_a_run() {
         let mut regions = regions().await;
         let t0 = Instant::now();
-        regions.retune(&block(0, 0, 1, 1), t0).expect("a stream over every cell");
-        assert_eq!(only_rect(&regions), Rect { left: 0, top: 0, right: 127, bottom: 127 });
+        regions.retune(&both_rows(), t0).expect("a stream over every cell");
+        assert_eq!(only_rect(&regions), Rect { left: 0, top: 0, right: 319, bottom: 127 });
         regions.expire(t0 + STREAM_IDLE);
-        let mut due = regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8);
+        let mut due =
+            regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
         due.sort_unstable_by_key(|rect| rect.top);
         assert_eq!(
             due,
             vec![
-                Rect { left: 0, top: 0, right: 127, bottom: 63 },
-                Rect { left: 0, top: 64, right: 127, bottom: 127 },
+                Rect { left: 0, top: 0, right: 319, bottom: 63 },
+                Rect { left: 0, top: 64, right: 319, bottom: 127 },
             ],
-            "four cells in two rows should be two stripes"
+            "ten cells in two rows should be two stripes"
         );
-        assert!(regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8).is_empty());
+        assert!(
+            regions
+                .due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16)
+                .is_empty()
+        );
     }
 
     /// What `crate::encode` passes as the cleanup's idle threshold. Its own constant

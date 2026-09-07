@@ -280,6 +280,14 @@ codec carrying every cell outside one.
 
 - **Which regions.** `coalesce` in `src/regions.rs` takes the cells in motion,
   groups them into 4-connected components, and takes each component's bounding box.
+  A component of fewer than `MIN_STREAM_CELLS` (5) moving cells — a 2×2 block, the
+  most a spinner up to a cell wide can touch — is not a video and goes to the still
+  codecs before anything else is decided: a spinner in one corner while a video
+  plays in the other stays on `render_subtype`, where it costs a few kilobytes a
+  change, rather than paying for an encoder, a keyframe, a decoder at the far end
+  and a cleanup every time it stops and starts. It counts neither towards the cap
+  nor as a merge partner, so it cannot pull a larger region's box out to meet it;
+  its cells inside some larger region's box are carried by that stream regardless.
   Over `MAX_STREAMS` (4) it merges the pair whose merged box adds the fewest cells;
   a merge that would cover more than twice the cells actually moving inside it is
   refused, and the smallest region goes to the still codecs instead. That last rule
