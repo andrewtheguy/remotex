@@ -417,7 +417,11 @@ impl DesktopState {
     /// server has declared SetDesktopSize support and, on a swayvnc target,
     /// answered the density request — a request in the wrong pixels is a
     /// desktop redrawn twice. `None` also when the desktop already has the
-    /// size, which clears any stale hold.
+    /// size. Both that and a request sent clear any older hold: a replay must
+    /// never ask for a window the browser has since left.
+    ///
+    /// Called with the uplink held — see [`send_generic_resize`] — so the wire
+    /// carries requests in the order they were decided.
     fn generic_resize(&mut self, points: (u16, u16)) -> Option<[u8; 24]> {
         self.viewport = Some(points);
         if self.density == Density::Asked {
@@ -455,7 +459,28 @@ impl DesktopState {
             points.1,
             self.generic_scale()
         );
+        self.pending = None;
         Some(set_desktop_size(pixels, screen))
+    }
+}
+
+/// Decide a generic resize from the desktop's state and send it, with the
+/// uplink held from the decision to the write. Every resize request leaves
+/// through here or [`request_resize`], which takes the same lock first, so the
+/// wire's order is the decisions' order: a request decided from newer state is
+/// never followed by one decided from older. The read loop's replays go through
+/// this after their awaits rather than before, so they read the state as it is
+/// when they send, not as it was when the rect arrived.
+async fn send_generic_resize(
+    uplink: &SharedUplink,
+    desktop: &SharedDesktop,
+    decide: impl FnOnce(&mut DesktopState) -> Option<[u8; 24]>,
+) -> anyhow::Result<()> {
+    let mut up = uplink.lock().await;
+    let msg = decide(&mut desktop.lock().unwrap());
+    match msg {
+        Some(msg) => up.send(&msg).await,
+        None => Ok(()),
     }
 }
 
@@ -1647,6 +1672,8 @@ async fn request_resize(
     ask: ResizeAsk,
     high_performance: bool,
 ) -> anyhow::Result<()> {
+    // The uplink first, then the decision — see [`send_generic_resize`].
+    let mut up = uplink.lock().await;
     let msg = {
         let mut d = desktop.lock().unwrap();
         let want = match ask {
@@ -1683,7 +1710,7 @@ async fn request_resize(
         }
         msg
     };
-    send(uplink, &msg).await
+    up.send(&msg).await
 }
 
 /// A generic resize request held under the video stream's picture ceiling, in
@@ -2898,16 +2925,13 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
     debug!(
         "vnc: ExtendedDesktopSize reason={reason} status={status} {w}x{h}, {screens} screen(s)"
     );
-    let pending = {
+    if first.is_some() {
         let mut d = desktop.lock().unwrap();
-        if first.is_some() {
-            if d.screen.is_none() {
-                info!("vnc: server declared SetDesktopSize support");
-            }
-            d.screen = first;
+        if d.screen.is_none() {
+            info!("vnc: server declared SetDesktopSize support");
         }
-        d.pending.take()
-    };
+        d.screen = first;
+    }
 
     let resized = if reason == 1 && status != 0 {
         // Our SetDesktopSize did not take effect here, so the size stays what it
@@ -2937,14 +2961,19 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
         apply_resize(desktop, shadow, (w, h), scale, sink).await?
     };
 
-    // Replay a viewport report that arrived before support was declared.
-    if let Some(want) = pending {
-        let msg = desktop.lock().unwrap().generic_resize(want);
-        if let Some(msg) = msg {
+    // Replay a viewport report that arrived before support was declared. The
+    // stash is read here, after the browser has been told the new size, so a
+    // window that moved on meanwhile — a request sent from the input side while
+    // that message was on its way — leaves nothing stale to replay.
+    send_generic_resize(uplink, desktop, |d| {
+        let want = d.pending.take()?;
+        let msg = d.generic_resize(want);
+        if msg.is_some() {
             debug!("vnc: desktop resize to {}x{} points replayed", want.0, want.1);
-            send(uplink, &msg).await?;
         }
-    }
+        msg
+    })
+    .await?;
     Ok(resized)
 }
 
@@ -2986,16 +3015,7 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
         let changed = d.wire_scale != Some(report.scale);
         d.wire_scale = Some(report.scale);
         let relabel = report.size == d.size && d.scale != report.scale;
-        // The window's size, asked for again in the new pixels — or for the
-        // first time, if the request was held for this report.
-        // Not when the report already names the pixels the window wants: that
-        // rect is on its way, and asking again would only redraw it.
-        let reask = (changed || first)
-            .then(|| d.pending.take().or(d.viewport))
-            .flatten()
-            .filter(|&points| d.generic_pixels(points) != report.size)
-            .and_then(|points| d.generic_resize(points));
-        (first, relabel, d.host_density, reask)
+        (first, relabel, d.host_density, changed || first)
     };
     if first {
         info!("vnc: the server reports pixel density; declaring the client's {declared}x");
@@ -3004,8 +3024,21 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
     if relabel {
         apply_resize(desktop, shadow, report.size, report.scale, sink).await?;
     }
-    if let Some(msg) = reask {
-        send(uplink, &msg).await?;
+    if reask {
+        // The window's size, asked for again in the new pixels — or for the
+        // first time, if the request was held for this report. Decided under
+        // the uplink, after the browser has its new canvas, from whatever the
+        // window wants by then. Not when the report already names the pixels
+        // the window wants: that rect is on its way, and asking again would
+        // only redraw it.
+        send_generic_resize(uplink, desktop, |d| {
+            d.pending
+                .take()
+                .or(d.viewport)
+                .filter(|&points| d.generic_pixels(points) != report.size)
+                .and_then(|points| d.generic_resize(points))
+        })
+        .await?;
     }
     Ok(())
 }
@@ -5121,6 +5154,92 @@ mod tests {
         desktop.lock().unwrap().screen = Some(screen);
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), false).await.unwrap();
         assert_eq!(written(&wire), set_desktop_size((800, 600), screen));
+    }
+
+    /// A request that goes out supersedes any older stash, so the rect that
+    /// answers it finds nothing to replay: the desktop the browser left is
+    /// never asked for again behind the one it wants.
+    #[tokio::test]
+    async fn a_sent_request_clears_the_stash_so_its_rect_replays_nothing() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 7, flags: 0 };
+        // Stashed while support was still undeclared, then the window moved on.
+        let desktop = shared_desktop((1024, 768), Some(screen), Some((800, 600)));
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((640, 480)), false).await.unwrap();
+        assert_eq!(written(&wire), set_desktop_size((640, 480), screen));
+        assert_eq!(desktop.lock().unwrap().pending, None, "the sent request supersedes the stash");
+
+        // The server answers with the new size: the browser is told, and the
+        // stale 800x600 is not sent after the 640x480 the window asked for.
+        let payload = eds_payload(screen);
+        read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &uplink,
+            &desktop,
+            &test_shadow((1024, 768)),
+            (1, 0, 640, 480),
+            &sink,
+        )
+        .await
+        .unwrap();
+        let resize = forwarded(&sink, &mut rx).await;
+        assert!(matches!(resize, Some(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
+        assert_eq!(written(&wire), set_desktop_size((640, 480), screen), "nothing replayed");
+        assert_eq!(desktop.lock().unwrap().viewport, Some((640, 480)));
+    }
+
+    /// The viewport changes while the read loop's replay is blocked behind the
+    /// uplink: both requests go out, in the order they were decided, and the
+    /// window's newest size is the last word on the wire.
+    #[tokio::test]
+    async fn a_viewport_change_while_the_replay_is_blocked_lands_last() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1024, 768), None, Some((800, 600)));
+
+        // Something else holds the uplink while the declaring rect arrives.
+        let held = uplink.lock().await;
+        let replay = tokio::spawn({
+            let (uplink, desktop, shadow) = (Arc::clone(&uplink), Arc::clone(&desktop), test_shadow((1024, 768)));
+            let payload = eds_payload(screen);
+            async move {
+                read_extended_desktop_size(
+                    &mut payload.as_slice(),
+                    &uplink,
+                    &desktop,
+                    &shadow,
+                    (0, 0, 1024, 768),
+                    &sink,
+                )
+                .await
+            }
+        });
+        // Support is recorded before the replay waits for the uplink; with no
+        // size change there is no other await between the two.
+        while desktop.lock().unwrap().screen.is_none() {
+            tokio::task::yield_now().await;
+        }
+        // The browser's window changes meanwhile; the input side queues behind
+        // the replay for the same lock.
+        let input = tokio::spawn({
+            let (uplink, desktop) = (Arc::clone(&uplink), Arc::clone(&desktop));
+            async move { request_resize(&uplink, &desktop, ResizeAsk::Viewport((640, 480)), false).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(written(&wire).is_empty(), "nothing goes out while the uplink is held");
+        drop(held);
+        replay.await.unwrap().unwrap();
+        input.await.unwrap().unwrap();
+
+        let mut expect = set_desktop_size((800, 600), screen).to_vec();
+        expect.extend_from_slice(&set_desktop_size((640, 480), screen));
+        assert_eq!(written(&wire), expect, "decided order, newest last");
+        let d = desktop.lock().unwrap();
+        assert_eq!(d.pending, None);
+        assert_eq!(d.viewport, Some((640, 480)));
     }
 
     /// A streaming target never asks a generic server for a desktop the encoder
