@@ -8,6 +8,7 @@ documentation.
 
 - Strict no backward-compatibility or legacy paths.
 - Do not run `cargo fmt`.
+- No squash merges
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
   `cargo test`.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
