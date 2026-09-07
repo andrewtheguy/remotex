@@ -91,8 +91,8 @@ Browser SPA ──► Gateway ──────────► Session daemon o
 The gateway reaches the daemon the way it reaches wayvnc today: a TCP port on
 the host, tunnelled over SSH for macintel. Authentication stays RSA-AES against
 the daemon's key, which the gateway already speaks. Nothing changes between
-browser and gateway except that the density label is now true without a manual
-toggle, and a session can end with a reason the browser can show.
+browser and gateway except that the density label is now the server's word
+rather than a fixed 1x, and a session can end with a reason the browser can show.
 
 The daemon is one process because the session controller must act on connect
 and disconnect and must know whether a resize was granted. Splitting it from the
@@ -364,10 +364,10 @@ Host prerequisites:
 
 | Where | Change |
 |---|---|
-| `src/config.rs` | Accept `subtype = "sway"` under `protocol = "vnc"`. `width` and `height` are points and pin the session size when `resize = false`. The density declaration is not offered on this subtype, because the wire answers. |
+| `src/config.rs` | Accept `subtype = "sway"` under `protocol = "vnc"`. `width` and `height` are points and pin the session size when `resize = false`. |
 | `src/vnc.rs` | Add the pseudo-encoding to `SetEncodings`. Hold framebuffer requests until the idle `SessionLayout` arrives, the way the engine already holds them until wayvnc declares resize support. Refuse the session with a clear error if the first framebuffer update arrives without the ack: the server is not the daemon. Send `SetSessionDisplay` from the viewport instead of `SetDesktopSize`. Take `Resize.scale` from the latest `SessionLayout`. |
 | `src/protocol.rs` | Carry the end reason to the browser so it can say "The person at the machine took control" rather than a generic disconnect. Reuse the existing session-ended shape if it already has a reason slot. |
-| frontend | Copy for the end reasons. No new controls: no density toggle on this subtype, no resize toggle anywhere, per the product rules. |
+| frontend | Copy for the end reasons. No new controls: no density or resize toggle, per the product rules. |
 
 Nothing touches the tile path, the shadow, the encoders, or the audio and
 camera sockets. The engine keeps its one read loop, one input path and one tile
@@ -431,8 +431,8 @@ path for every VNC dialect.
 
 1. **Controller with stock wayvnc.** Headless beside DRM on macintel,
    consolidation onto the headless output, snapshot and restore, driven by
-   wayvnc client connect and disconnect, through the existing gateway with the
-   manual density toggle. Measured, see below; the console watcher and crash
+   wayvnc client connect and disconnect, through the existing gateway at 1x.
+   Measured, see below; the console watcher and crash
    recovery are written and not yet exercised, and the wayvnc crash stands in
    the way of using it.
 2. **The dialect.** The neatvnc hook and the two messages. Mode and scale

@@ -308,56 +308,6 @@ function WindowSection({
   );
 }
 
-// The declared density of a plain VNC server, which is the one target whose
-// protocol cannot say it: RDP's monitor layout and Apple's display layout both
-// carry a scale, standard RFB carries pixels and nothing else. So on a server
-// that renders at 2x (a sway output at scale 2, say) the person who knows that
-// says so here, and the engine asks it for twice the points in pixels and labels
-// the desktop 2x. Hidden everywhere else — a toggle on a protocol that states its
-// own density would contradict it — and hidden on a plain VNC target that sends
-// tiles: the gateway cuts its tile grid at 64 points of a density the wire
-// stated, and a declared one would make this the one path where that density is
-// the client's word. Only `render_type = "video"`, which cuts no grid, takes it;
-// `connected.density` says which this session is.
-//
-// The button's state is the desktop's, read off the last `resize`, not a
-// remembered preference: a declaration the engine dropped, or a server that
-// refused the resize, shows as what actually happened. Per session, every
-// session — a new engine starts at 1x.
-function DensitySection({
-  available,
-  size,
-  onChange,
-}: {
-  available: boolean;
-  size: RemoteSize | null;
-  onChange: (scale: number) => void;
-}) {
-  if (!available) {
-    return null;
-  }
-  const declared2x = size !== null && size.scale >= 1.5;
-  return (
-    <div className="toolbar-section">
-      <span className="toolbar-label">Density</span>
-      <button
-        type="button"
-        className="toolbar-btn"
-        onClick={() => onChange(declared2x ? 100 : 200)}
-        disabled={!size}
-        aria-pressed={declared2x}
-        title="Declare that this VNC server renders at 2x (HiDPI); the protocol cannot say so itself"
-      >
-        {size
-          ? declared2x
-            ? "Remote is 2x (HiDPI)"
-            : "Remote is 1x"
-          : "Waiting for desktop size"}
-      </button>
-    </div>
-  );
-}
-
 // What the remote is drawing against what this browser is, at the top of the Help
 // card so the two can be read off one another.
 //
@@ -680,8 +630,6 @@ export default function FloatingMenu({
   hostScale,
   connection,
   renderPlan,
-  canDeclareDensity,
-  onDensityChange,
   canAudio,
   audioEnabled,
   audioError,
@@ -744,12 +692,6 @@ export default function FloatingMenu({
   connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
-  // Whether this target's density is a declaration — a plain VNC server under
-  // `render_type = "video"`, as `connected` states it — which shows the Density
-  // section, and what its toggle sends — 100 or 200. See DensitySection for why
-  // it exists and why it is hidden elsewhere.
-  canDeclareDensity: boolean;
-  onDensityChange: (scale: number) => void;
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
@@ -1141,12 +1083,6 @@ export default function FloatingMenu({
               setOpen(false);
               togglePanel("display");
             }}
-          />
-
-          <DensitySection
-            available={canDeclareDensity}
-            size={size}
-            onChange={onDensityChange}
           />
 
           <div className="toolbar-section">

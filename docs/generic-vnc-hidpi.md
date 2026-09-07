@@ -1,12 +1,12 @@
 # HiDPI over generic VNC
 
-How a plain VNC server — wayvnc on sway is the measured case — is shown at 2x,
-why that takes a declaration the other protocols do not need, and the one wayvnc
-rule that makes a resize come back *prohibited*. Measured 2026-09-05 against
-wayvnc (server name `WayVNC`) on a sway `HEADLESS-1` output through the gateway,
-with `tests/ws_probe.py` reading the control messages a browser sees.
+Why a plain VNC server — wayvnc on sway is the measured case — is shown at 1x
+whatever scale its compositor renders at, and the one wayvnc rule that makes a
+resize come back *prohibited*. Measured 2026-09-05 against wayvnc (server name
+`WayVNC`) on a sway `HEADLESS-1` output through the gateway, with
+`tests/ws_probe.py` reading the control messages a browser sees.
 
-## Why a generic server is 1x until told otherwise
+## Why a generic server is 1x
 
 Two of the three protocols carry pixel density on the wire, and remotex reads it
 from them:
@@ -25,126 +25,29 @@ from them:
   browser shows every pixel one-to-one, and the Help card reads
   `1728×883 at 1x` under a browser at 2x.
 
-Left there, a sway output at `scale 2` is *worse* than at `scale 1`: the window
-asks for its 1728×883 points as 1728×883 pixels, sway makes that an 864×441
-logical desktop, and the browser stretches it back up. Half the workspace, still
-soft.
+Density is the wire's word alone. The gateway takes none from the client on any
+protocol: a density nothing on the wire can confirm is a label the server may
+not honour, and a desktop presented at a label the server did not honour is a
+desktop shown at the wrong size. So a generic server is 1x, and stays 1x, until
+its protocol can say otherwise — which is what the
+[sway session dialect](sway-remote-session.md) is for.
 
-## The declaration
+The consequence on a sway output at `scale 2` is that it is *worse* than at
+`scale 1`: with `resize = true` the window asks for its 1728×883 points as
+1728×883 pixels, sway makes that an 864×441 logical desktop, and the browser
+stretches it back up. Half the workspace, still soft. Run the output wayvnc
+captures at `scale 1` for a generic target. Applying that is live and keeps every
+window — `swaymsg output HEADLESS-1 scale 1` over the IPC socket, which a headless
+sway started by a user service leaves at `/run/user/<uid>/sway-ipc.*.sock` — so
+there is no reason to re-render the sway config and restart the service for it.
 
-Since neither end can measure it, the density of a generic server is **declared**
-from the client — the one place the project's no-client-side-render-controls rule
-does not apply, because the protocol forces it (see
-[`architecture.md`](architecture.md#display-geometry)). It is not scaling: the
-browser still shows every framebuffer pixel one-to-one, at the CSS size
-`pixels / scale` like every other 2x desktop.
-
-The declaration is taken only under `render_type = "video"`. Every tile plan cuts
-damage at a 64-*point* grid of the framebuffer's density, and on RDP and both
-Apple subtypes that density is the wire's own word. A declaration would make plain
-VNC the one path where it is the client's word instead, and rather than carry that
-case through every consumer of the grid, a plain VNC target on tiles stays 1x and
-its grid 64 pixels; `video` sends no tiles, cuts no grid, and takes the
-declaration at no cost. `TargetConfig::declares_density` is the rule, stated to
-the browser as `density` on `connected`.
-
-- The floating ☰ menu has a **Density** section on plain VNC targets under
-  `render_type = "video"` only (`protocol = "vnc"`, no `subtype`); RDP and both
-  Apple modes hide it, since a declaration there would contradict what their wire
-  already states, and a plain target on tiles hides it for the grid's sake. Its
-  one button reads `Remote is 1x` or `Remote is 2x (HiDPI)` and sends
-  `ClientMsg::Density { scale: 100 | 200 }`. The engine drops a declaration on any
-  other target with a warning.
-- The engine keeps the declared density per session, 1x until declared, never
-  remembered — a new engine starts at 1x.
-- With `resize = true` and a server that has declared `SetDesktopSize` support,
-  the declaration is a resize: every generic `SetDesktopSize` asks for
-  `viewport points × density` pixels (held under the video stream's picture
-  ceiling where the target streams), and the reply labels the framebuffer with the
-  declared scale in `ServerMsg::Resize`. Toggling back asks for the points again.
-- Without resize (the target has `resize = false`, or the server has not sent an
-  `ExtendedDesktopSize` rect yet), the declaration re-labels the pixels the server
-  is already sending and asks for a full repaint: a sharp desktop at half the CSS
-  size, which is the truth about a 2x framebuffer the window cannot grow. With
-  `resize = true` the density-adjusted request is stashed as well, and the rect
-  that declares support replays it.
-- A rejected `SetDesktopSize` keeps the size and still takes the label.
-- The button's state is read off the last `resize`, not kept locally, so a
-  declaration the server did not honour shows as what actually happened.
-
-## Manually: sway + wayvnc at 2x, live
-
-Both halves change at run time, and neither ends the session: sway applies an
-output's scale over its IPC socket with every window kept, and remotex's Density
-toggle is a resize on the running engine. Do **not** re-render the sway config
-and restart the sway service to flip scale — that tears the desktop down and
-closes every window in it, which is the one thing this walkthrough avoids.
-
-1. Set the scale on the output wayvnc captures, over IPC, from any shell on the
-   sway host. A headless sway started by a user service has no `SWAYSOCK` in an
-   SSH shell, so name the socket:
-
-   ```sh
-   export SWAYSOCK=$(ls /run/user/$(id -u)/sway-ipc.*.sock | head -1)
-   swaymsg output HEADLESS-1 scale 2
-   swaymsg -t get_outputs | jq '.[] | {name, scale, current_mode, rect}'
-   ```
-
-   The output reports `scale: 2` at once; its pixel mode is unchanged, so the
-   logical desktop halves (a 1728×883 framebuffer is now 864×441 logical) and the
-   browser shows it stretched until step 3. Only the *scale* is set here; the
-   pixel mode is the client's to ask for — wayvnc forwards `SetDesktopSize` to the
-   compositor as a custom output mode, which a headless output accepts.
-
-   To make it survive the next sway start, also put `output HEADLESS-1 scale 2`
-   in the sway config and apply that with `swaymsg reload`, which re-reads the
-   config in place. Still no restart.
-
-2. The remotex target is a generic VNC target with resize on and the video
-   plan, which is the one that takes a declaration:
-
-   ```toml
-   [[targets]]
-   name = "sway"
-   protocol = "vnc"
-   host = "127.0.0.1"
-   port = 5900
-   resize = true
-   render_type = "video"
-   render_stream_quality = 60
-   ```
-
-   Nothing to change here between 1x and 2x; the density is declared per session
-   from the client.
-
-3. In the connected browser, open ☰ and click **Remote is 1x** under Density.
-   The engine asks wayvnc for the window's points at 2x — a 1728×883 window
-   becomes a 3456×1766 request — sway makes that a 1728×883 logical desktop at
-   scale 2, and the browser shows it sharp at 100%. The Help card then reads
-   `3456×1766 at 2x (192 dpi)` beside `This browser: 2x`. Windows on the desktop
-   keep their logical size and position; only the pixels behind them double.
-
-   The order of steps 1 and 3 does not matter — the toggle first gives a 2x
-   request against a 1x output, which is a large desktop with tiny text until the
-   scale follows — but doing the scale first keeps the in-between state short.
-
-4. Back to 1x, also live:
-
-   ```sh
-   swaymsg output HEADLESS-1 scale 1
-   ```
-
-   then click **Remote is 2x (HiDPI)** to declare 1x and ask for the points back.
-   remotex cannot see the output's scale change either way, so the toggle is
-   always needed beside the `swaymsg`.
-
-Without a browser, the probe drives the same path and prints the scale each
-`resize` announces:
+Without a browser, the probe drives the resize path and prints the size and scale
+each `resize` announces:
 
 ```sh
 uv run --with websockets --with requests tests/ws_probe.py \
   --port <gateway port> --target sway --user <user> \
-  --viewport 1728x883 --viewport-after-resize --density 200
+  --viewport 1728x883 --viewport-after-resize
 ```
 
 `--viewport-after-resize` is needed on a generic server, which never sends the

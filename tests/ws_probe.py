@@ -145,15 +145,6 @@ async def main() -> int:
         help="send the first --viewport after the first resize instead of after the "
         "display list, which a generic VNC server never sends",
     )
-    parser.add_argument(
-        "--density",
-        type=int,
-        default=None,
-        metavar="HUNDREDTHS",
-        help="declare a generic VNC server's density (100 or 200) after the first "
-        "resize, the way the menu's Density toggle does; the next resize shows "
-        "the scale the engine applied",
-    )
     args = parser.parse_args()
 
     password = args.password or getpass.getpass("Gateway password: ")
@@ -185,7 +176,6 @@ async def main() -> int:
         awaiting_viewport = None
         burst_sent = False
         mouse_sent = False
-        density_sent = False
         tiles = 0
 
         # The second connect runs on its own clock, beside the receive loop: a
@@ -245,12 +235,6 @@ async def main() -> int:
                             f"   -> {data['w'] / data['scale']:g}x"
                             f"{data['h'] / data['scale']:g} CSS px"
                         )
-                        if args.density is not None and not density_sent:
-                            density_sent = True
-                            print(f"  -> density {args.density}")
-                            await socket.send(
-                                json.dumps({"type": "density", "scale": args.density})
-                            )
                         if (
                             args.viewport_after_resize
                             and viewports

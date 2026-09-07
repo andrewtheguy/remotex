@@ -114,14 +114,14 @@ has an answer rather than being rediscovered.
 
 ### Automatic density on generic VNC
 
-Today a plain VNC server's density is declared by hand from the menu's Density
-toggle — offered only under `render_type = "video"`, so the tile grid is never
-cut at a client's word — and the compositor's scale is set by hand beside it
-([`docs/generic-vnc-hidpi.md`](generic-vnc-hidpi.md)). Two manual steps that have
-to agree, for something RDP does with none: it declares the browser's density in
-the monitor layout and the host renders at it. Making generic VNC follow the
-browser the same way — a Retina window gets a 2x desktop on connect, and dragging
-it to a 1x screen gives a 1x one — wants both halves closed, and neither is small:
+Today a plain VNC server is shown at 1x: standard RFB carries pixels and nothing
+else, so the gateway has no density to read and takes none from the client, and a
+sway output at scale 2 behind wayvnc comes out as half a logical desktop
+stretched back up ([`docs/generic-vnc-hidpi.md`](generic-vnc-hidpi.md)). RDP
+does this with nothing to configure: it declares the browser's density in the
+monitor layout and the host renders at it. Making generic VNC follow the browser
+the same way — a Retina window gets a 2x desktop on connect, and dragging it to a
+1x screen gives a 1x one — wants both halves closed, and neither is small:
 
 - **Telling the compositor.** Standard RFB has no field for it, so the density
   must reach sway some other way: an IPC call the gateway makes on the sway host
@@ -141,9 +141,10 @@ it to a 1x screen gives a 1x one — wants both halves closed, and neither is sm
   the automatic path is really "sway through wayvnc", and belongs behind a
   per-target opt-in that names the compositor it is talking to.
 
-The value is one click saved per session on one kind of server. Until that costs
-more than the two channels above, the declaration stays manual. The sway
-session dialect below is the opt-in that closes it for that one server, by
+A client-side declaration is not the answer: a density the wire cannot confirm is
+a label the server may not honour, and the product rule is that density is the
+wire's word alone. Until both channels above exist, generic VNC stays 1x. The
+sway session dialect below is the opt-in that closes it for that one server, by
 putting the scale on the VNC connection itself rather than beside it.
 
 ### A virtual-display remote session for sway
