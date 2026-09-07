@@ -970,7 +970,7 @@ mod tests {
     // in protocol.rs: the change has to pay for itself measurably, not plausibly.
     #[test]
     fn batching_costs_less_than_one_frame_per_tile() {
-        // A 1600x1000 repaint at 320x64 is 5 x 16 = 80 cells.
+        // A 1600x1000 repaint as eighty tiles: sixteen 64-row bands, each in a few runs.
         let cells = 80;
         let payload = 900;
         let mut wire = Wire::default();

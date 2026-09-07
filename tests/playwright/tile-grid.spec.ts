@@ -30,7 +30,7 @@ const GRID_TARGET = process.env.REMOTEX_PLAYWRIGHT_GRID_TARGET;
 /// `protocol::CELL_W` / `CELL_H`, copied rather than imported: this spec is the
 /// check that the gateway states the grid it actually cuts damage at, and reading
 /// the client's own copy of the number to decide that would be asking the accused.
-const CELL = { w: 320, h: 64 };
+const CELL = { w: 64, h: 64 };
 
 /// The `connected` status for the session this page ends up in, collected from the
 /// socket rather than from the SPA's state — the control-plane JSON is the thing

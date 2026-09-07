@@ -1970,9 +1970,9 @@ mod tests {
     async fn a_cell_the_bounding_box_only_reached_over_never_goes_into_motion() {
         let (sink, _frame_rx) = stream_sink(1280, 64).await;
 
-        // One band, four cells. The video is at one end, the banner at the other,
-        // and the two quiet cells between them are only inside the box.
-        let band = rect(0, 0, 320 * 4 - 1, 63);
+        // One band across four cells. The video is at one end, the banner at the
+        // other, and the two quiet cells between them are only inside the box.
+        let band = rect(0, 0, crate::protocol::CELL_W * 4 - 1, 63);
         let report = Changed { rect: band, cells: vec![(0, 0), (3, 0)] };
         for _ in 0..CHURN_WINDOW {
             sink.damage(&report, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
@@ -2016,9 +2016,9 @@ mod tests {
     async fn a_reset_drops_every_history() {
         let (sink, _frame_rx) = stream_sink(640, 128).await;
 
-        let cell = rect(0, 0, 320, 64);
+        let area = rect(0, 0, 320, 64);
         for _ in 0..CHURN_MOVING {
-            sink.damage(&all_of(cell), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+            sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
             tokio::time::advance(CHURN_SLOT).await;
         }
         sink.flush().await;
