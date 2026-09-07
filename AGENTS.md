@@ -6,7 +6,7 @@ documentation.
 
 ## Workflow
 
-- Do not add backward-compatibility or legacy paths.
+- Strict no backward-compatibility or legacy paths.
 - Do not run `cargo fmt`.
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
   `cargo test`.
