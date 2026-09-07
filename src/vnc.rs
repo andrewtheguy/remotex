@@ -41,7 +41,7 @@ use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
     self, ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, DisplayInfo, HostDisplay,
-    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED, WheelUnit,
     clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
@@ -628,6 +628,7 @@ async fn session(
             clipboard: config.clipboard,
             default_size: config.default_size(),
             video: config.streams_video(),
+            density: config.declares_density(),
             apple,
             high_performance,
             media,
@@ -665,6 +666,11 @@ struct Flags {
     /// ([`TargetConfig::streams_video`]): a generic `SetDesktopSize` is then
     /// held under the stream's picture ceiling — see [`request_resize`].
     video: bool,
+    /// Whether this target takes a [`ClientMsg::Density`] declaration
+    /// ([`TargetConfig::declares_density`]): plain VNC under `render_type =
+    /// "video"`. Everywhere else the declaration is dropped, so a tile grid is only
+    /// ever cut at a density the wire itself stated.
+    density: bool,
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
     /// subtypes negotiate them; only one uses the 003.889 record transport.
@@ -1186,6 +1192,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         clipboard: clipboard_enabled,
         default_size,
         video,
+        density: takes_density,
         apple,
         high_performance,
         media,
@@ -1206,7 +1213,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
     let shadow: SharedShadow = Arc::new(std::sync::Mutex::new({
-        let mut shadow = Shadow::new("vnc", size.0, size.1);
+        // At 1x, like the `Resize` the connect announced; a layout or a
+        // declaration that says otherwise re-cuts it with the desktop it comes with.
+        let mut shadow = Shadow::new("vnc", size.0, size.1, TileGrid::ONE);
         shadow.classify_cells(sink.wants_cells());
         shadow
     }));
@@ -1292,11 +1301,18 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // drive the size and the server has declared SetDesktopSize — the
                     // resize carries the label, in the ExtendedDesktopSize reply.
                     // Dropped on both Apple dialects, whose layout states the real
-                    // density and would be contradicted by a declared one.
+                    // density and would be contradicted by a declared one, and on a
+                    // plain target that sends tiles, whose grid is cut at a density
+                    // the wire stated — `Flags::density`, which the session told the
+                    // client on `connected` so a compliant one never sends this here.
                     let density = crate::protocol::render_density(scale);
+                    if !takes_density {
+                        warn!("vnc: dropping a density declaration this target does not take");
+                    }
                     let (changed, relabel, size) = {
                         let mut d = desktop.lock().unwrap();
-                        let changed = !apple && (d.declared_density - density).abs() > 0.005;
+                        let changed =
+                            takes_density && !apple && (d.declared_density - density).abs() > 0.005;
                         if changed {
                             d.declared_density = density;
                         }
@@ -2924,9 +2940,9 @@ async fn apply_resize(
     };
     // The old pixels describe a framebuffer that no longer exists, and the
     // browser is about to reallocate its canvas.
-    shadow.lock().unwrap().resize(new.0, new.1);
-    // The cell grid is anchored at (0,0) in framebuffer pixels, so a new size makes
-    // every key name somewhere else.
+    shadow.lock().unwrap().resize(new.0, new.1, TileGrid::at(scale));
+    // The cell grid is anchored at (0,0) in framebuffer pixels and pitched at the
+    // density, so a new size or scale makes every key name somewhere else.
     sink.reset_render();
     info!(
         "vnc: desktop resized from {}x{} at {}x to {}x{} at {scale}x",
@@ -4830,7 +4846,7 @@ mod tests {
     /// A shadow of whatever size the test's desktop is; most of these tests never
     /// put a pixel through it.
     fn test_shadow(size: (u16, u16)) -> SharedShadow {
-        Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)))
+        Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1, TileGrid::ONE)))
     }
 
     /// A sink and the frame channel behind it.

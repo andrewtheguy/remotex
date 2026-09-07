@@ -51,8 +51,9 @@ documentation.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. `resize = true` means the window continuously
   drives the remote size; do not add a client resize toggle or remembered resize
-  preference. Generic VNC's per-session density declaration is the wire-forced
-  exception, not client-side scaling. Read
+  preference. Generic VNC's per-session density declaration, taken only under
+  `render_type = "video"`, is the wire-forced exception, not client-side
+  scaling. Read
   [Display geometry](docs/architecture.md#display-geometry) and
   [HiDPI over generic VNC](docs/generic-vnc-hidpi.md) before changing geometry.
 - Read [Apple RFB 003.889, as measured](docs/apple-vnc-889.md) before changing

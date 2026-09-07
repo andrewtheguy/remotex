@@ -429,6 +429,9 @@ export function useRemoteDesktop(
   // The `render_grid_debug` lattice this session was told to draw, or null for
   // every ordinary target. State rather than a ref because the overlay is
   // redrawn from it, and the redraw is the effect below.
+  // The two halves of the `render_grid_debug` overlay: whether this session
+  // draws it (`connected`) and the pitch of the current framebuffer (`resize`).
+  const [gridDebug, setGridDebug] = useState(false);
   const [tileGrid, setTileGrid] = useState<GridPitch | null>(null);
   // This screen's density, kept in state only so the menu can show it beside the
   // remote's. Nothing about how the desktop is presented reads it — see
@@ -830,7 +833,13 @@ export function useRemoteDesktop(
     // abandons whatever is pending so a late echo cannot resurrect a size the
     // attachment it belonged to has already left behind.
     let resizeSeq = 0;
-    const pendingResizes = new Map<number, RemoteSize>();
+    // Each queued resize with the lattice its framebuffer is cut at, so the two
+    // are presented together and a rapid pair of resizes never shows the
+    // second's grid over the first's desktop.
+    const pendingResizes = new Map<
+      number,
+      { size: RemoteSize; grid: GridPitch }
+    >();
     // The worker outlives socket reconnects, so a completion can return after
     // the socket that posted its frame has died. A generation travels through
     // the worker with each batch; only the live generation may acknowledge on
@@ -863,7 +872,7 @@ export function useRemoteDesktop(
         const applied = pendingResizes.get(seq);
         if (applied) {
           pendingResizes.delete(seq);
-          presentResize(applied);
+          presentResize(applied.size, applied.grid);
         }
       },
     });
@@ -1315,7 +1324,7 @@ export function useRemoteDesktop(
     // instead would read as a glimpse of the previous desktop: the overlay
     // hides the canvas only while `size` is null, and the worker could still
     // be painting the old attachment's backlog onto the old bitmap.
-    const presentResize = (s: RemoteSize) => {
+    const presentResize = (s: RemoteSize, grid: GridPitch) => {
       applyCanvasCss(
         canvasRef.current,
         gridRef.current,
@@ -1325,6 +1334,10 @@ export function useRemoteDesktop(
       );
       sizeRef.current = s;
       setSize(s);
+      // The lattice this framebuffer is cut at, presented with it rather than
+      // on the message's arrival, so the overlay never draws one resize's grid
+      // over another's desktop.
+      setTileGrid(grid);
       syncCursor();
     };
 
@@ -1332,7 +1345,7 @@ export function useRemoteDesktop(
       const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
       if (!painter) {
         // No canvas, so nothing queues either; the state may as well be true.
-        presentResize(s);
+        presentResize(s, msg.tileGrid);
         return;
       }
       // The bitmap belongs to the worker; this command queues behind the
@@ -1340,7 +1353,7 @@ export function useRemoteDesktop(
       // gave a resize — the previous desktop finishes painting before its
       // canvas is replaced and filled black.
       const seq = ++resizeSeq;
-      pendingResizes.set(seq, s);
+      pendingResizes.set(seq, { size: s, grid: msg.tileGrid });
       painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq);
     };
 
@@ -1408,9 +1421,12 @@ export function useRemoteDesktop(
       // The operator's QA overlay, stated per session like everything else on
       // `connected`: this browser holds no preference for it and offers no
       // toggle, the same way it offers none for `resize`.
-      setTileGrid(msg.tileGrid);
+      setGridDebug(msg.gridDebug);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
-      setCanDeclareDensity(msg.protocol === "vnc" && msg.subtype === null);
+      // Whether the Density section shows is the gateway's word too: plain VNC
+      // under `render_type = "video"`, which this client cannot tell from the
+      // protocol and subtype alone.
+      setCanDeclareDensity(msg.density);
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
@@ -1602,9 +1618,10 @@ export function useRemoteDesktop(
           setRenderPlan("");
           setConnection("");
           // The lattice belongs to the session that stated it. Said here rather
-          // than left for the cleared framebuffer to imply, so the two halves of
-          // the overlay — the pitch and the desktop it is drawn over — are always
-          // dropped by the same message.
+          // than left for the cleared framebuffer to imply, so the halves of
+          // the overlay — the switch, the pitch and the desktop it is drawn over
+          // — are always dropped by the same message.
+          setGridDebug(false);
           setTileGrid(null);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
@@ -2079,24 +2096,25 @@ export function useRemoteDesktop(
     };
   }, [mode, canClipboard]);
 
-  // Paint the tile lattice, and repaint it whenever either half of what it is
-  // made of changes. It takes both — `connected` states the pitch, the first
-  // `resize` states the framebuffer — and they arrive in that order on a fresh
-  // connect but not on a reattach, so this waits for the pair instead of drawing
-  // from whichever handler happened to run second. A session without the overlay
-  // clears it, which is also how a switch from a `render_grid_debug` target to an
-  // ordinary one leaves no lattice behind.
+  // Paint the tile lattice, and repaint it whenever any part of what it is made
+  // of changes. It takes all three — `connected` says whether to draw it, every
+  // `resize` states the pitch, and the presented size says what to draw it over —
+  // and they land in that order on a fresh connect but not on a reattach, so this
+  // waits for the set instead of drawing from whichever handler happened to run
+  // last. A session without the overlay clears it, which is also how a switch
+  // from a `render_grid_debug` target to an ordinary one leaves no lattice
+  // behind.
   useEffect(() => {
     const grid = gridRef.current;
     if (!grid) {
       return;
     }
-    if (tileGrid && size) {
+    if (gridDebug && tileGrid && size) {
       drawTileGrid(grid, size, tileGrid);
     } else {
       clearTileGrid(grid);
     }
-  }, [gridRef, size, tileGrid]);
+  }, [gridRef, size, gridDebug, tileGrid]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is

@@ -241,6 +241,7 @@ async def main() -> int:
                         )
                         print(
                             f"  resize  {data['w']}x{data['h']}  scale={data['scale']}"
+                            f"  tileGrid={data['tileGrid']['w']}x{data['tileGrid']['h']}"
                             f"   -> {data['w'] / data['scale']:g}x"
                             f"{data['h'] / data['scale']:g} CSS px"
                         )

@@ -39,11 +39,22 @@ does not apply, because the protocol forces it (see
 browser still shows every framebuffer pixel one-to-one, at the CSS size
 `pixels / scale` like every other 2x desktop.
 
-- The floating ☰ menu has a **Density** section on plain VNC targets only
-  (`protocol = "vnc"`, no `subtype`); RDP and both Apple modes hide it, since a
-  declaration there would contradict what their wire already states. Its one
-  button reads `Remote is 1x` or `Remote is 2x (HiDPI)` and sends
-  `ClientMsg::Density { scale: 100 | 200 }`.
+The declaration is taken only under `render_type = "video"`. Every tile plan cuts
+damage at a 64-*point* grid of the framebuffer's density, and on RDP and both
+Apple subtypes that density is the wire's own word. A declaration would make plain
+VNC the one path where it is the client's word instead, and rather than carry that
+case through every consumer of the grid, a plain VNC target on tiles stays 1x and
+its grid 64 pixels; `video` sends no tiles, cuts no grid, and takes the
+declaration at no cost. `TargetConfig::declares_density` is the rule, stated to
+the browser as `density` on `connected`.
+
+- The floating ☰ menu has a **Density** section on plain VNC targets under
+  `render_type = "video"` only (`protocol = "vnc"`, no `subtype`); RDP and both
+  Apple modes hide it, since a declaration there would contradict what their wire
+  already states, and a plain target on tiles hides it for the grid's sake. Its
+  one button reads `Remote is 1x` or `Remote is 2x (HiDPI)` and sends
+  `ClientMsg::Density { scale: 100 | 200 }`. The engine drops a declaration on any
+  other target with a warning.
 - The engine keeps the declared density per session, 1x until declared, never
   remembered — a new engine starts at 1x.
 - With `resize = true` and a server that has declared `SetDesktopSize` support,
@@ -89,7 +100,8 @@ closes every window in it, which is the one thing this walkthrough avoids.
    in the sway config and apply that with `swaymsg reload`, which re-reads the
    config in place. Still no restart.
 
-2. The remotex target is an ordinary generic VNC target with resize on:
+2. The remotex target is a generic VNC target with resize on and the video
+   plan, which is the one that takes a declaration:
 
    ```toml
    [[targets]]
@@ -98,6 +110,8 @@ closes every window in it, which is the one thing this walkthrough avoids.
    host = "127.0.0.1"
    port = 5900
    resize = true
+   render_type = "video"
+   render_stream_quality = 60
    ```
 
    Nothing to change here between 1x and 2x; the density is declared per session

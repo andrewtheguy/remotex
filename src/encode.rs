@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,7 +34,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::{Chroma, MotionEncode, RenderPlan, TileCodec};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{ServerMsg, Tile};
+use crate::protocol::{ServerMsg, Tile, TileGrid};
 use crate::regions::{Policy, Produced, Regions, Round};
 use crate::tiles::{Changed, Rect};
 use crate::video;
@@ -88,9 +88,10 @@ const CLEANUP_IDLE: Duration = Duration::from_millis(500);
 const CLEANUP_TICK: Duration = Duration::from_millis(250);
 
 /// Cleanups per tick, so a whole stopped video settles over a few ticks rather
-/// than in one burst competing with live motion for the socket. Forty 64×64 cells
-/// is a 640×256 patch per tick: a stopped 720p player sharpens in about two
-/// seconds, and a full 1080p desktop in a little over three.
+/// than in one burst competing with live motion for the socket. Forty 64-point
+/// cells is a 640×256-point patch per tick: a stopped 720p player sharpens in
+/// about two seconds, and a full 1080p desktop in a little over three, at either
+/// density.
 const MAX_CLEANUPS_PER_TICK: usize = 40;
 
 /// Colour of a `render_motion_debug` outline on a piece sent at the motion encode.
@@ -515,6 +516,11 @@ struct Shared {
     /// call sites are already awaiting other things, and none of them should have to
     /// wait out an encode to say "the client needs to start again".
     keyframe_owed: AtomicBool,
+    /// The lattice damage is cut at, [`TileGrid::at`] the scale of the last
+    /// [`ServerMsg::Resize`] through [`TileSink::msg`] — the same announcement that
+    /// tells the regions their size, and the same rule the engine's shadow keys its
+    /// cells by. Packed `w << 16 | h` so a band cut on the tile path costs no lock.
+    grid: AtomicU32,
     /// The link as the attached browser's paint window measures it — see
     /// [`crate::feedback`]. Read at two kinds of moment: [`TileSink::adjust`]
     /// hands its lag to the congestion walk beside the push-blocked signal, and
@@ -554,7 +560,17 @@ struct Shared {
     stalled_micros: AtomicU64,
 }
 
+/// [`Shared::grid`]'s packing.
+fn pack_grid(grid: TileGrid) -> u32 {
+    u32::from(grid.w) << 16 | u32::from(grid.h)
+}
+
 impl Shared {
+    fn grid(&self) -> TileGrid {
+        let packed = self.grid.load(Ordering::Relaxed);
+        TileGrid { w: (packed >> 16) as u16, h: packed as u16 }
+    }
+
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>) -> Self {
         // Which dial produces access units, and at what quality. A plan that produces
         // none still builds a `Video` — never touched, and holding no mirror until
@@ -592,6 +608,7 @@ impl Shared {
             video: tokio::sync::Mutex::new(Video::new(policy, quality, chroma, mark, adaptive)),
             round_returned: Notify::new(),
             keyframe_owed: AtomicBool::new(false),
+            grid: AtomicU32::new(pack_grid(TileGrid::ONE)),
             feedback,
             tile_floor,
             tiles: AtomicU64::new(0),
@@ -727,13 +744,14 @@ impl TileSink {
             RenderPlan::Tiles { base, motion, debug, .. } => (base, motion, debug),
         };
 
+        let grid = self.shared.grid();
         if motion.is_none() {
-            for band in changed.rect.bands() {
+            for band in changed.rect.bands(grid) {
                 self.encode(band, Arc::new(pack(band)), base).await?;
             }
             return Ok(());
         }
-        self.damage_streaming(changed, pack, base, debug).await
+        self.damage_streaming(changed, pack, base, debug, grid).await
     }
 
     /// [`Self::damage`] for a target with `render_motion`.
@@ -760,6 +778,7 @@ impl TileSink {
         pack: F,
         base: TileCodec,
         debug: bool,
+        grid: TileGrid,
     ) -> anyhow::Result<()>
     where
         F: Fn(Rect) -> Vec<u8>,
@@ -769,8 +788,8 @@ impl TileSink {
             video.regions.blit(changed.rect, &pack(changed.rect))?;
             changed
                 .rect
-                .cells()
-                .map(|cell| cell.cell_key())
+                .cells(grid)
+                .map(|cell| cell.cell_key(grid))
                 .filter(|key| video.regions.covers(*key))
                 .collect()
         };
@@ -780,8 +799,8 @@ impl TileSink {
         let now = tokio::time::Instant::now();
         // What went out crisp, to discharge in one critical section at the end.
         let mut crisp: Vec<Rect> = Vec::new();
-        for band in changed.rect.bands() {
-            let cells: Vec<Rect> = band.cells().collect();
+        for band in changed.rect.bands(grid) {
+            let cells: Vec<Rect> = band.cells(grid).collect();
             {
                 // Churn is recorded for the cells that *changed*, not for every cell
                 // the band covers — `Changed::rect` is one box round everything that
@@ -789,14 +808,14 @@ impl TileSink {
                 // cell, because that is what keeps the stream alive.
                 let mut motion = self.shared.motion.lock().unwrap();
                 for cell in &cells {
-                    let key = cell.cell_key();
+                    let key = cell.cell_key(grid);
                     if changed.has(key) {
                         motion.observe(key, now);
                     }
                 }
             }
 
-            if !cells.iter().any(|cell| streamed.contains(&cell.cell_key())) {
+            if !cells.iter().any(|cell| streamed.contains(&cell.cell_key(grid))) {
                 // The quiet path, and the great majority of a screen: one whole band
                 // at the base encode, byte for byte what this target would send with
                 // no motion path at all.
@@ -807,13 +826,13 @@ impl TileSink {
 
             // The quiet cells go out as *runs*: along each row of cells in the band,
             // every maximal stretch not under a stream is one tile. The cell is the
-            // unit of identity, not of transport — a tile per 64-pixel cell would pay
-            // PNG's fixed cost and a batch record up to thirty times across one 1080p
-            // band, for pixels that differ from a whole band only by the hole the
-            // stream leaves in them.
+            // unit of identity, not of transport — a tile per cell would pay PNG's
+            // fixed cost and a batch record up to thirty times across one 1080p band,
+            // for pixels that differ from a whole band only by the hole the stream
+            // leaves in them.
             let mut runs: Vec<Rect> = Vec::new();
             for cell in cells {
-                if streamed.contains(&cell.cell_key()) {
+                if streamed.contains(&cell.cell_key(grid)) {
                     continue;
                 }
                 match runs.last_mut() {
@@ -1106,11 +1125,12 @@ impl TileSink {
 
     /// Queue anything that is not a tile, keeping it behind the tiles it follows.
     ///
-    /// A resize is also how the streams learn how big the desktop is. That is one
-    /// interception rather than a size threaded through every place a stream has to be
-    /// rebuilt, and it cannot be forgotten by a fifth such place added later: telling
-    /// the client its framebuffer changed and telling the encoder are the same event,
-    /// and the first already happens everywhere the second must.
+    /// A resize is also how the streams learn how big the desktop is, and how the
+    /// tile path learns the lattice to cut it at — [`TileGrid::at`] the announced
+    /// scale. That is one interception rather than a size threaded through every place
+    /// a stream has to be rebuilt, and it cannot be forgotten by a fifth such place
+    /// added later: telling the client its framebuffer changed and telling the encoder
+    /// are the same event, and the first already happens everywhere the second must.
     ///
     /// Bookkeeping only — nothing here can fail, deliberately. This method's error is
     /// read by every caller as "the browser has gone", answered by returning without
@@ -1119,10 +1139,12 @@ impl TileSink {
     /// waits for [`Self::damage`] or [`Self::frame`], which are on the engines' `?`
     /// path and end the session with the message attached.
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
-        if let ServerMsg::Resize { w, h, .. } = &msg
-            && self.streaming()
-        {
-            self.shared.video.lock().await.regions.want(*w, *h);
+        if let ServerMsg::Resize { w, h, scale } = &msg {
+            let grid = TileGrid::at(*scale);
+            self.shared.grid.store(pack_grid(grid), Ordering::Relaxed);
+            if self.streaming() {
+                self.shared.video.lock().await.regions.want(*w, *h, grid);
+            }
         }
         self.push(Pending::Msg(msg)).await
     }
@@ -1874,7 +1896,8 @@ mod tests {
     /// A report that every cell of `rect` really did change — damage whose bounding
     /// box is hiding nothing, which is what most tests here mean by a rectangle.
     fn all_of(rect: Rect) -> Changed {
-        let mut cells: Vec<(u16, u16)> = rect.cells().map(|c| c.cell_key()).collect();
+        let mut cells: Vec<(u16, u16)> =
+            rect.cells(TileGrid::ONE).map(|c| c.cell_key(TileGrid::ONE)).collect();
         cells.sort_unstable();
         cells.dedup();
         Changed { rect, cells }
@@ -1972,7 +1995,7 @@ mod tests {
 
         // One band across four cells. The video is at one end, the banner at the
         // other, and the two quiet cells between them are only inside the box.
-        let band = rect(0, 0, crate::protocol::CELL_W * 4 - 1, 63);
+        let band = rect(0, 0, TileGrid::ONE.w * 4 - 1, 63);
         let report = Changed { rect: band, cells: vec![(0, 0), (3, 0)] };
         for _ in 0..CHURN_WINDOW {
             sink.damage(&report, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
@@ -2430,7 +2453,7 @@ mod tests {
                 .unwrap();
             sink.frame().await.unwrap();
             tokio::time::advance(CHURN_SLOT).await;
-            if sink.shared.video.lock().await.regions.covers(area.cell_key()) {
+            if sink.shared.video.lock().await.regions.covers(area.cell_key(TileGrid::ONE)) {
                 return;
             }
         }

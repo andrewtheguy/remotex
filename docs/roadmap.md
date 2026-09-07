@@ -134,7 +134,8 @@ has an answer rather than being rediscovered.
 ### Automatic density on generic VNC
 
 Today a plain VNC server's density is declared by hand from the menu's Density
-toggle, and the compositor's scale is set by hand beside it
+toggle — offered only under `render_type = "video"`, so the tile grid is never
+cut at a client's word — and the compositor's scale is set by hand beside it
 ([`docs/generic-vnc-hidpi.md`](generic-vnc-hidpi.md)). Two manual steps that have
 to agree, for something RDP does with none: it declares the browser's density in
 the monitor layout and the host renders at it. Making generic VNC follow the

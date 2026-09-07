@@ -1,6 +1,7 @@
 // The `render_grid_debug` lattice: the one render debug aid the browser draws
 // rather than receives. Nothing here looks at a pixel — what is asserted is that
-// the gateway states the lattice on `connected` and that the overlay canvas the
+// the gateway states the switch on `connected` and the pitch on every `resize`,
+// at 64 points of the framebuffer's density, and that the overlay canvas the
 // client answers with is exactly the framebuffer canvas's twin, which is the whole
 // of the claim. Whether the dashes are visible is the operator's eyes; whether the
 // overlay is the right size and in the right place is a decision, and decisions
@@ -27,17 +28,28 @@ import { leaveSession, logInAndConnectTo, returnToPicker, TARGET } from "./suppo
 /// correctly empty, and pass for the wrong reason.
 const GRID_TARGET = process.env.REMOTEX_PLAYWRIGHT_GRID_TARGET;
 
-/// `protocol::CELL_W` / `CELL_H`, copied rather than imported: this spec is the
-/// check that the gateway states the grid it actually cuts damage at, and reading
-/// the client's own copy of the number to decide that would be asking the accused.
-const CELL = { w: 64, h: 64 };
+/// `protocol::CELL_POINTS` and the `TileGrid::at` rule, copied rather than
+/// imported: this spec is the check that the gateway states the grid it actually
+/// cuts damage at, and reading the client's own copy of the number to decide that
+/// would be asking the accused. 64 points, so 64 pixels under the 1.5 midpoint
+/// and 128 from it up.
+const CELL_POINTS = 64;
+function pitchAt(scale: number): { w: number; h: number } {
+  const pixels = CELL_POINTS * (scale >= 1.5 ? 2 : 1);
+  return { w: pixels, h: pixels };
+}
 
-/// The `connected` status for the session this page ends up in, collected from the
-/// socket rather than from the SPA's state — the control-plane JSON is the thing
-/// under test. Registered before the page is opened, because the socket is opened
-/// by the login and a listener attached afterwards would miss the first session.
-function connectedStatuses(page: Page): Array<Record<string, unknown>> {
-  const seen: Array<Record<string, unknown>> = [];
+/// The `connected` and `resize` control messages for the session this page ends
+/// up in, collected from the socket rather than from the SPA's state — the
+/// control-plane JSON is the thing under test. Registered before the page is
+/// opened, because the socket is opened by the login and a listener attached
+/// afterwards would miss the first session.
+function controlMessages(page: Page): {
+  connected: Array<Record<string, unknown>>;
+  resizes: Array<{ scale: number; tileGrid: { w: number; h: number } }>;
+} {
+  const connected: Array<Record<string, unknown>> = [];
+  const resizes: Array<{ scale: number; tileGrid: { w: number; h: number } }> = [];
   page.on("websocket", (ws) => {
     ws.on("framereceived", ({ payload }) => {
       if (typeof payload !== "string" || !payload.startsWith("{")) {
@@ -45,11 +57,13 @@ function connectedStatuses(page: Page): Array<Record<string, unknown>> {
       }
       const msg = JSON.parse(payload) as Record<string, unknown>;
       if (msg.type === "connected") {
-        seen.push(msg);
+        connected.push(msg);
+      } else if (msg.type === "resize") {
+        resizes.push(msg as { scale: number; tileGrid: { w: number; h: number } });
       }
     });
   });
-  return seen;
+  return { connected, resizes };
 }
 
 /// The two canvases as the DOM has them: bitmap dimensions and the CSS box each
@@ -86,14 +100,18 @@ test.describe("the render_grid_debug lattice", () => {
   test("a grid target states its lattice and gets an overlay the size of the desktop", async ({
     page,
   }) => {
-    const statuses = connectedStatuses(page);
+    const { connected, resizes } = controlMessages(page);
     await logInAndConnectTo(page, GRID_TARGET as string);
 
-    // The gateway's half: the pitch itself rather than a bare flag, so the client
-    // cannot draw a grid that merely looks like the one damage was cut at.
-    await expect
-      .poll(() => statuses.at(-1)?.tileGrid)
-      .toEqual({ w: CELL.w, h: CELL.h });
+    // The gateway's half: the switch on `connected`, and on every `resize` the
+    // pitch itself rather than a bare flag, so the client cannot draw a grid that
+    // merely looks like the one damage was cut at. The pitch is 64 points of the
+    // density the same message announces, whatever that density turned out to be.
+    await expect.poll(() => connected.at(-1)?.gridDebug).toBe(true);
+    await expect.poll(() => resizes.length).toBeGreaterThan(0);
+    for (const resize of resizes) {
+      expect(resize.tileGrid).toEqual(pitchAt(resize.scale));
+    }
 
     // The client's half, asserted as the *relationship* between the two canvases
     // rather than as a size: a desktop is whatever this window asked the remote
@@ -118,16 +136,16 @@ test.describe("the render_grid_debug lattice", () => {
   test("an ordinary target draws no lattice, and leaves none behind", async ({
     page,
   }) => {
-    const statuses = connectedStatuses(page);
+    const { connected } = controlMessages(page);
     // Through the grid target first, so this also covers the switch: the overlay
     // is cleared by the session that does not want it rather than surviving into
     // it from the session that did.
     await logInAndConnectTo(page, GRID_TARGET as string);
-    await expect.poll(() => statuses.at(-1)?.tileGrid).not.toBeNull();
+    await expect.poll(() => connected.at(-1)?.gridDebug).toBe(true);
     await returnToPicker(page);
 
     await logInAndConnectTo(page, TARGET);
-    await expect.poll(() => statuses.at(-1)?.tileGrid).toBeNull();
+    await expect.poll(() => connected.at(-1)?.gridDebug).toBe(false);
     await expect
       .poll(async () => (await canvases(page)).grid?.bitmap)
       .toEqual({ w: 0, h: 0 });

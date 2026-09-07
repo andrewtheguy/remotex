@@ -8,11 +8,6 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Transport policy shared by all engines: a dirty rectangle taller than this
-/// is split into strips before being sent, so a full-screen repaint doesn't
-/// produce one huge WebSocket message.
-pub const STRIP_ROWS: u16 = 64;
-
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
 /// Text over this is refused, not truncated: a truncated paste looks exactly
@@ -69,7 +64,15 @@ pub fn scale_ratio(scale: u16) -> f32 {
 /// desktop on each of them. A value in `scale` that no screen has reads as 1×,
 /// through [`scale_ratio`].
 pub fn render_density(scale: u16) -> f32 {
-    if scale_ratio(scale) >= 1.5 { 2.0 } else { 1.0 }
+    f32::from(density_steps(scale_ratio(scale)))
+}
+
+/// A ratio of pixels per point as the whole number of pixels the remote is drawing
+/// per point: 1 or 2, decided at the 1.5 midpoint. The one quantization behind
+/// [`render_density`] and [`TileGrid::at`], so a density a remote is asked for and
+/// the grid its framebuffer is cut at can never disagree about where 2× starts.
+fn density_steps(ratio: f32) -> u16 {
+    if ratio >= 1.5 { 2 } else { 1 }
 }
 
 /// The client's screen, as [`ClientMsg::HostDisplay`] and
@@ -286,10 +289,19 @@ pub enum ClientMsg {
     /// the client's menu mid-session. The engine then asks for `points × density`
     /// pixels where it can resize and reports the framebuffer at that scale in
     /// [`ServerMsg::Resize`] either way; the browser still shows every pixel
-    /// one-to-one, so this is a declaration and not a scaling. Dropped by every
-    /// engine whose protocol carries its own density — RDP and both Apple
-    /// subtypes — because a declaration there would contradict what the wire
-    /// already states. Per session, never remembered: a new engine starts at 1x.
+    /// one-to-one, so this is a declaration and not a scaling.
+    ///
+    /// Taken only under `render_type = "video"`, the one plan with no tile grid.
+    /// Everywhere else the grid is cut at [`CELL_POINTS`] of the framebuffer's
+    /// *known* density — the density RDP negotiated or the Mac reported — and a
+    /// declaration would be the one path where that density is a client's word
+    /// rather than the wire's. Rather than carry that case through every consumer
+    /// of the grid, a plain VNC target on tiles is 1× and its grid 64 pixels.
+    /// Dropped by every engine whose protocol carries its own density — RDP and
+    /// both Apple subtypes — because a declaration there would contradict what the
+    /// wire already states, and dropped on a plain VNC target that sends tiles.
+    /// [`ServerMsg::Connected`]'s `density` says which a session is. Per session,
+    /// never remembered: a new engine starts at 1x.
     Density { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
@@ -536,7 +548,19 @@ pub mod camera {
     }
 }
 
-/// Canonical 64×64 tile grid in framebuffer pixels, anchored at (0,0).
+/// The tile grid's pitch in *points*: 64 on each axis.
+///
+/// Points rather than pixels because the grid is a unit of work, and work on a
+/// desktop scales with what is on it, not with how densely it is drawn. A 2×
+/// framebuffer holds four times the pixels of the same desktop at 1×, and a fixed
+/// 64-pixel grid would cut it into four times the cells — four times the cell
+/// hashes, the motion keys, the copy-search probes and the tile records for the same
+/// window scrolling the same distance. Cut at 64 points, a cell is 128×128 pixels on
+/// a 2× desktop, and the cell count is the same on both. [`TileGrid::at`] is where
+/// points become pixels.
+pub const CELL_POINTS: u16 = 64;
+
+/// The tile lattice: the canonical grid in framebuffer pixels, anchored at (0,0).
 ///
 /// Damage is still reported by RDP and VNC in their own rectangles and is still
 /// *sent* in those rectangles — nothing snaps outward to the grid, which would
@@ -546,23 +570,31 @@ pub mod camera {
 /// [`crate::tiles::Rect::cell_key`], however differently the two protocols happen
 /// to describe it from one frame to the next. That identity is what the render
 /// dial's `render_motion` switch counts churn against.
-pub const CELL_W: u16 = 64;
-/// See [`CELL_W`].
-pub const CELL_H: u16 = STRIP_ROWS;
-
-/// The tile lattice, stated on the wire so a client can draw it.
 ///
-/// Sent only for `render_grid_debug` ([`TargetConfig::tile_grid`]), and it carries
-/// [`CELL_W`]/[`CELL_H`] rather than letting the browser hold a copy of them:
-/// the grid a debug overlay draws is worth nothing unless it is the grid the
-/// gateway actually cut damage at, and a duplicated constant is one edit away
-/// from being a different grid that still looks plausible.
-///
-/// [`TargetConfig::tile_grid`]: crate::config::TargetConfig::tile_grid
+/// A runtime value rather than a constant because its pitch follows the
+/// framebuffer's density: [`CELL_POINTS`] on each axis, in the pixels of the
+/// desktop announced by [`ServerMsg::Resize`]. Every announcement carries it, so a
+/// client draws the grid the gateway actually cut damage at rather than a copy of
+/// the number: a duplicated constant is one edit away from being a different grid
+/// that still looks plausible. Both sides are always even — 64 or 128 — which is
+/// what [`crate::video::coded_rect`]'s evenness rests on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TileGrid {
     pub w: u16,
     pub h: u16,
+}
+
+impl TileGrid {
+    /// The grid of a 1× framebuffer, where a point is a pixel.
+    pub const ONE: Self = Self { w: CELL_POINTS, h: CELL_POINTS };
+
+    /// The grid for a framebuffer whose pixels are `scale` per point — the
+    /// `scale` on [`ServerMsg::Resize`], quantized like [`render_density`]: 64×64
+    /// pixels below the 1.5 midpoint, 128×128 from it up.
+    pub fn at(scale: f32) -> Self {
+        let pitch = CELL_POINTS * density_steps(scale);
+        Self { w: pitch, h: pitch }
+    }
 }
 
 /// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
@@ -967,6 +999,10 @@ pub enum ServerMsg {
     /// resample that to its own display, which is what keeps a remote the same
     /// physical size on a 1x screen and a Retina one. A size that arrived without
     /// its density would be presented at the wrong size until the next message.
+    ///
+    /// On the wire the announcement also carries the tile lattice for this
+    /// framebuffer, [`TileGrid::at`] its `scale`, for the client's
+    /// `render_grid_debug` overlay.
     Resize { w: u16, h: u16, scale: f32 },
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
@@ -1023,8 +1059,10 @@ pub enum ServerMsg {
         /// this slow" began with reading the operator's config file, which the person
         /// looking at the screen generally does not have.
         render: String,
-        /// Draw the tile lattice over the desktop, and at what pitch — `Some` only
-        /// where the operator set `render_grid_debug`, `None` otherwise.
+        /// Draw the tile lattice over the desktop: the operator's
+        /// `render_grid_debug`. The pitch is not here — it rides every
+        /// [`ServerMsg::Resize`], because it follows the framebuffer's density and a
+        /// session has no framebuffer yet when this is sent.
         ///
         /// A debug aid the *client* draws, unlike the two that mark encode
         /// decisions in the pixels themselves (`render_motion_debug`,
@@ -1035,7 +1073,13 @@ pub enum ServerMsg {
         /// all — so a lattice painted into tiles would drift with the first scroll
         /// and stop short at the first still corner. Drawn over the canvas it is
         /// exact everywhere, always complete, and costs the encoders nothing.
-        tile_grid: Option<TileGrid>,
+        grid_debug: bool,
+        /// Whether this session takes a [`ClientMsg::Density`] declaration: a plain
+        /// VNC target under `render_type = "video"`, and nothing else. Stated by
+        /// the gateway rather than worked out from `protocol` and `subtype` by the
+        /// client, because the render dial is the third condition and the client
+        /// only has its label.
+        density: bool,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -1189,7 +1233,13 @@ pub enum WireFrame {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ControlMsg<'a> {
-    Resize { w: u16, h: u16, scale: f32 },
+    Resize {
+        w: u16,
+        h: u16,
+        scale: f32,
+        #[serde(rename = "tileGrid")]
+        tile_grid: TileGrid,
+    },
     /// `image` is a base64 PNG (the browser wraps it in a `data:` URL), null
     /// when the remote hid the pointer.
     Cursor {
@@ -1213,8 +1263,9 @@ enum ControlMsg<'a> {
         camera: bool,
         microphone: bool,
         render: &'a str,
-        #[serde(rename = "tileGrid")]
-        tile_grid: Option<TileGrid>,
+        #[serde(rename = "gridDebug")]
+        grid_debug: bool,
+        density: bool,
     },
     RemoteOs { macos: bool },
     TouchReady,
@@ -1296,6 +1347,7 @@ impl ServerMsg {
                 w: *w,
                 h: *h,
                 scale: *scale,
+                tile_grid: TileGrid::at(*scale),
             }),
             ServerMsg::Cursor(shape) => control(&match shape {
                 Some(c) => ControlMsg::Cursor {
@@ -1327,7 +1379,8 @@ impl ServerMsg {
                 camera,
                 microphone,
                 render,
-                tile_grid,
+                grid_debug,
+                density,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -1338,7 +1391,8 @@ impl ServerMsg {
                 camera: *camera,
                 microphone: *microphone,
                 render,
-                tile_grid: *tile_grid,
+                grid_debug: *grid_debug,
+                density: *density,
             }),
             ServerMsg::CameraStart {
                 width,
@@ -1731,7 +1785,10 @@ mod tests {
     fn control_messages_encode_to_tagged_camelcase_text() {
         match (ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).text_frame() {
             Some(json) => {
-                assert_eq!(json, r#"{"type":"resize","w":1280,"h":800,"scale":1.0}"#)
+                assert_eq!(
+                    json,
+                    r#"{"type":"resize","w":1280,"h":800,"scale":1.0,"tileGrid":{"w":64,"h":64}}"#
+                )
             }
             None => panic!("resize must be a text frame"),
         }
@@ -1751,13 +1808,14 @@ mod tests {
             camera: false,
             microphone: false,
             render: "tiles · lossless png".to_owned(),
-            tile_grid: None,
+            grid_debug: false,
+            density: false,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","tileGrid":null}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false,"density":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1773,15 +1831,19 @@ mod tests {
             camera: true,
             microphone: true,
             render: "video q60".to_owned(),
-            tile_grid: None,
+            grid_debug: false,
+            density: true,
         })
         .text_frame()
         {
-            Some(json) => assert!(json.contains(r#""subtype":null"#), "{json}"),
+            Some(json) => {
+                assert!(json.contains(r#""subtype":null"#), "{json}");
+                assert!(json.contains(r#""density":true"#), "{json}");
+            }
             None => panic!("connected must be a text frame"),
         }
-        // `render_grid_debug`: the lattice itself rather than a bare flag, because
-        // the client draws it and nothing else on the wire says how wide a tile is.
+        // `render_grid_debug` is a flag here; the lattice's pitch rides the resize,
+        // because it follows the framebuffer's density and there is none yet.
         match (ServerMsg::Connected {
             name: "desk".to_owned(),
             protocol: "rdp",
@@ -1792,12 +1854,19 @@ mod tests {
             camera: false,
             microphone: false,
             render: "tiles · lossless png".to_owned(),
-            tile_grid: Some(TileGrid { w: CELL_W, h: CELL_H }),
+            grid_debug: true,
+            density: false,
         })
         .text_frame()
         {
-            Some(json) => assert!(json.contains(r#""tileGrid":{"w":64,"h":64}"#), "{json}"),
+            Some(json) => assert!(json.contains(r#""gridDebug":true"#), "{json}"),
             None => panic!("connected must be a text frame"),
+        }
+        // A 2x framebuffer is cut at 64 points, which is 128 of its pixels, and the
+        // announcement says so.
+        match (ServerMsg::Resize { w: 2560, h: 1600, scale: 2.0 }).text_frame() {
+            Some(json) => assert!(json.contains(r#""tileGrid":{"w":128,"h":128}"#), "{json}"),
+            None => panic!("resize must be a text frame"),
         }
         // How to decode one stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's

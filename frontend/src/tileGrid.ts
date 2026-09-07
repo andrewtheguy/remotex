@@ -18,7 +18,10 @@
 
 import type { CanvasSize } from "./desktopCanvas.ts";
 
-/** The lattice pitch in framebuffer pixels, as `connected` states it. */
+/**
+ * The lattice pitch in framebuffer pixels, as each `resize` states it: 64
+ * points, so 64 pixels on a 1x desktop and 128 on a 2x one.
+ */
 export interface GridPitch {
   w: number;
   h: number;
@@ -26,7 +29,7 @@ export interface GridPitch {
 
 // Dash and gap in framebuffer pixels at density 1. Long enough to read as a
 // deliberate line rather than as noise, short enough that a dash and the gap
-// beside it both fall inside one 64x64 cell edge.
+// beside it both fall inside one cell edge.
 const DASH = 8;
 
 // Every line is drawn twice, dark then light, each in the other's gaps, so one

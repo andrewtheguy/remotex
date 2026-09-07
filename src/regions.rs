@@ -42,7 +42,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::config::Chroma;
-use crate::protocol::{CELL_H, CELL_W, VideoUnit, batch};
+use crate::protocol::{TileGrid, VideoUnit, batch};
 use crate::tiles::Rect;
 use crate::video::{AccessUnit, Mark, Mirror};
 use crate::vp9::Stream;
@@ -92,7 +92,7 @@ const MERGE_WASTE: u32 = 2;
 
 /// The fewest moving cells a component needs before it is worth a stream.
 ///
-/// Five, so a 2×2 block of the grid — 128×128 pixels, the most anything up to a
+/// Five, so a 2×2 block of the grid — 128×128 points, the most anything up to a
 /// cell wide can touch however it straddles the lines — is never streamed on its
 /// own. What churns in that few cells is a spinner, a progress bar, a typing
 /// indicator, a blinking badge: not a video, and small enough that the base codec
@@ -197,23 +197,23 @@ impl CellBox {
         self.c0 <= c && c <= self.c1 && self.r0 <= r && r <= self.r1
     }
 
-    /// This box in framebuffer pixels, clipped to a `w`×`h` desktop.
+    /// This box in framebuffer pixels, clipped to a `w`×`h` desktop cut at `grid`.
     ///
     /// The clip is the only place a region's size can come out odd, and the only
-    /// place it may: a cell column starts at a multiple of [`CELL_W`] and a row at a
-    /// multiple of [`CELL_H`], both even, so an interior box is even on both axes and
-    /// an edge one is odd exactly where the desktop is.
-    fn to_rect(self, w: u16, h: u16) -> Option<Rect> {
-        let left = self.c0.checked_mul(CELL_W)?;
-        let top = self.r0.checked_mul(CELL_H)?;
+    /// place it may: a cell column starts at a multiple of `grid.w` and a row at a
+    /// multiple of `grid.h`, both even ([`TileGrid`]), so an interior box is even on
+    /// both axes and an edge one is odd exactly where the desktop is.
+    fn to_rect(self, w: u16, h: u16, grid: TileGrid) -> Option<Rect> {
+        let left = self.c0.checked_mul(grid.w)?;
+        let top = self.r0.checked_mul(grid.h)?;
         if left >= w || top >= h {
             return None;
         }
         Some(Rect {
             left,
             top,
-            right: (self.c1.saturating_mul(CELL_W).saturating_add(CELL_W - 1)).min(w - 1),
-            bottom: (self.r1.saturating_mul(CELL_H).saturating_add(CELL_H - 1)).min(h - 1),
+            right: (self.c1.saturating_mul(grid.w).saturating_add(grid.w - 1)).min(w - 1),
+            bottom: (self.r1.saturating_mul(grid.h).saturating_add(grid.h - 1)).min(h - 1),
         })
     }
 }
@@ -416,6 +416,9 @@ pub struct Regions {
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
+    /// The lattice every cell key here is on, learned with `size` from the same
+    /// announcement: [`TileGrid::at`] its scale.
+    grid: TileGrid,
     mirror: Option<Mirror>,
     /// The mirror's double buffer. While a round is away being encoded it holds that
     /// round's mirror's *twin*: [`Self::take_round`] hands the up-to-date mirror to
@@ -456,6 +459,7 @@ impl Regions {
             quality,
             chroma,
             size: None,
+            grid: TileGrid::ONE,
             mirror: None,
             spare: None,
             staged: Vec::new(),
@@ -476,10 +480,12 @@ impl Regions {
     /// drops everything: every cell key means somewhere else on a new framebuffer,
     /// and an encoder cannot change picture size without starting over anyway. The
     /// debts go with them because the shadow is resized in the same breath — nothing
-    /// is owed on a framebuffer that no longer exists.
-    pub fn want(&mut self, w: u16, h: u16) {
-        if self.size != Some((w, h)) {
+    /// is owed on a framebuffer that no longer exists. A new `grid` at the same size
+    /// is the same event: a density change re-keys every cell.
+    pub fn want(&mut self, w: u16, h: u16, grid: TileGrid) {
+        if self.size != Some((w, h)) || self.grid != grid {
             self.size = Some((w, h));
+            self.grid = grid;
             self.mirror = None;
             self.spare = None;
             self.staged.clear();
@@ -681,7 +687,7 @@ impl Regions {
         // rectangle, margin included, and every cell of it stays covered and owed.
         let wanted: Vec<Rect> = merge(worthy, MAX_STREAMS)
             .into_iter()
-            .filter_map(|bbox| bbox.to_rect(w, h))
+            .filter_map(|bbox| bbox.to_rect(w, h, self.grid))
             .collect();
 
         // Shrinking is free: a stream whose rectangle already covers the region keeps
@@ -839,7 +845,8 @@ impl Regions {
         // At `self.quality` rather than the config's: a region that appears while the
         // link is behind starts where the link left off.
         let stream = Stream::new(rect, mirror, self.quality, self.chroma)?;
-        let cells: Vec<(u16, u16)> = rect.cells().map(|cell| cell.cell_key()).collect();
+        let grid = self.grid;
+        let cells: Vec<(u16, u16)> = rect.cells(grid).map(|cell| cell.cell_key(grid)).collect();
         // Every cell of the region is owed from the moment it is streamed, including
         // the ones that are not moving: the stream codes them lossily whether they
         // change or not, and nothing else is going to send them.
@@ -876,9 +883,9 @@ impl Regions {
         let Some((w, h)) = self.size else {
             return;
         };
-        for piece in sent.cells() {
-            let key = piece.cell_key();
-            if CellBox::of(key).to_rect(w, h).is_some_and(|cell| sent.contains(&cell)) {
+        for piece in sent.cells(self.grid) {
+            let key = piece.cell_key(self.grid);
+            if CellBox::of(key).to_rect(w, h, self.grid).is_some_and(|cell| sent.contains(&cell)) {
                 self.debts.remove(&key);
             }
         }
@@ -924,7 +931,7 @@ impl Regions {
                 _ => runs.push(CellBox::of((col, row))),
             }
         }
-        runs.into_iter().filter_map(|run| run.to_rect(w, h)).collect()
+        runs.into_iter().filter_map(|run| run.to_rect(w, h, self.grid)).collect()
     }
 
     /// Take the mirror and every stream, for an encode on a blocking worker.
@@ -1555,13 +1562,13 @@ mod tests {
         cells
     }
 
-    /// The same, at whatever size a test needs cells for. A cell is 64×64 and a
+    /// The same, at whatever size a test needs cells for. A cell is 64×64 at 1× and a
     /// region needs `MIN_STREAM_CELLS` of them, so a test about two *separate*
     /// regions needs room for two blocks that size with a quiet cell between:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
         let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, None);
-        regions.want(w, h);
+        regions.want(w, h, TileGrid::ONE);
         let bytes = usize::from(w) * usize::from(h) * 3;
         regions
             .blit(Rect { left: 0, top: 0, right: w - 1, bottom: h - 1 }, &vec![0; bytes])
@@ -1659,7 +1666,7 @@ mod tests {
         assert_eq!(rects.len(), 2, "{rects:?}");
         assert!(rects[0].intersect(&rects[1]).is_none(), "{rects:?} overlap");
         assert!(
-            rects.contains(&boxed(6, 1, 9, 2).to_rect(640, 192).expect("a rectangle")),
+            rects.contains(&boxed(6, 1, 9, 2).to_rect(640, 192, TileGrid::ONE).expect("a rectangle")),
             "the straddling region did not get its own stream: {rects:?}"
         );
         assert!(
@@ -1739,7 +1746,7 @@ mod tests {
         assert_eq!(ids.len(), 2);
         regions.drain_ended();
 
-        regions.want(1600, 256);
+        regions.want(1600, 256, TileGrid::ONE);
         assert!(regions.live.is_empty(), "the resize kept a stream on the old framebuffer");
         ids.sort_unstable();
         let mut said = regions.drain_ended();
@@ -1759,7 +1766,7 @@ mod tests {
         let mut ids: Vec<u8> = round.live.iter().map(|live| live.id).collect();
         assert_eq!(ids.len(), 2);
 
-        regions.want(1600, 256);
+        regions.want(1600, 256, TileGrid::ONE);
         assert!(regions.drain_ended().is_empty(), "the resize saw a live table it did not have");
         regions.put_back(round, t0 + RETUNE);
         ids.sort_unstable();
@@ -1940,23 +1947,27 @@ mod tests {
     /// whose origin is on the grid and whose size is odd only where the desktop is.
     #[test]
     fn a_region_is_even_unless_the_desktop_is_odd_at_that_edge() {
-        let interior = boxed(1, 1, 2, 2).to_rect(1919, 1079).expect("a rectangle");
+        let interior = boxed(1, 1, 2, 2).to_rect(1919, 1079, TileGrid::ONE).expect("a rectangle");
         assert_eq!((interior.left, interior.top), (64, 64));
         assert_eq!((interior.w() % 2, interior.h() % 2), (0, 0));
 
-        let edge = boxed(29, 16, 29, 16).to_rect(1919, 1079).expect("a rectangle");
+        let edge = boxed(29, 16, 29, 16).to_rect(1919, 1079, TileGrid::ONE).expect("a rectangle");
         assert_eq!((edge.right, edge.bottom), (1918, 1078), "clipped to the desktop");
         assert_eq!((edge.w() % 2, edge.h() % 2), (1, 1), "odd exactly where the desktop is");
 
         // A box entirely off the desktop is not a rectangle at all, which is what a
         // stale churn key after a resize would produce.
-        assert!(boxed(40, 0, 40, 0).to_rect(1919, 1079).is_none());
+        assert!(boxed(40, 0, 40, 0).to_rect(1919, 1079, TileGrid::ONE).is_none());
+
+        // The same theorem at 2x: the grid is 128 pixels and still even.
+        let retina = boxed(1, 1, 2, 2).to_rect(3839, 2159, TileGrid::at(2.0)).expect("a rectangle");
+        assert_eq!((retina.left, retina.top, retina.w(), retina.h()), (128, 128, 256, 256));
     }
 
     /// A whole-desktop target with pixels in it, the pipelined shape.
     fn whole_regions(w: u16, h: u16) -> Regions {
         let mut regions = Regions::new(Policy::Whole, 60, Chroma::Subsampled, None);
-        regions.want(w, h);
+        regions.want(w, h, TileGrid::ONE);
         regions
     }
 
@@ -2010,7 +2021,7 @@ mod tests {
         let mut regions = whole_regions(64, 64);
         regions.blit(placed(0, 0, 64, 64), &flat(64, 64, 10)).expect("a blit");
         let stale = regions.take_round().expect("a round");
-        regions.want(32, 32);
+        regions.want(32, 32, TileGrid::ONE);
         regions.put_back(stale, Instant::now());
         assert!(regions.take_round().is_none(), "a stale round was restored");
 

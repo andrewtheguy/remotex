@@ -3,7 +3,7 @@
 //! The shadow is cleared before a repaint for a new attachment so it never
 //! claims that client has pixels it did not receive.
 
-use crate::protocol::{CELL_H, CELL_W};
+use crate::protocol::TileGrid;
 
 /// A rectangle of the framebuffer, in pixels, with **inclusive** edges.
 ///
@@ -57,57 +57,57 @@ impl Rect {
         (left <= right && top <= bottom).then_some(Self { left, top, right, bottom })
     }
 
-    /// This rectangle split into pieces at most [`CELL_H`] rows tall, top down.
+    /// This rectangle split into pieces at most one cell of `grid` tall, top down.
     ///
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
     /// useful unit of progress nor a comfortable WebSocket frame — and a client
     /// draws the pieces exactly as it draws any other tiles.
-    pub fn bands(&self) -> impl Iterator<Item = Rect> + '_ {
+    pub fn bands(&self, grid: TileGrid) -> impl Iterator<Item = Rect> + '_ {
         (self.top..=self.bottom)
-            .step_by(usize::from(CELL_H))
+            .step_by(usize::from(grid.h))
             .map(move |top| Rect {
                 left: self.left,
                 top,
                 right: self.right,
-                bottom: self.bottom.min(top.saturating_add(CELL_H - 1)),
+                bottom: self.bottom.min(top.saturating_add(grid.h - 1)),
             })
     }
 
-    /// This rectangle cut at the [`CELL_W`]×[`CELL_H`] grid lines, left to right
-    /// within each row of cells, top down. Clipped to itself, never snapped
-    /// outward — a piece covers only pixels this rectangle already covered.
+    /// This rectangle cut at `grid`'s lines, left to right within each row of
+    /// cells, top down. Clipped to itself, never snapped outward — a piece covers
+    /// only pixels this rectangle already covered.
     ///
     /// Both axes are cut, and the vertical one is not redundant with
     /// [`Self::bands`]: bands are anchored to the rectangle's own `top`, so a
     /// band starting at y=37 straddles the grid line at y=64 and has to be cut in
     /// two here. The point of the cut is that no piece straddles a line, which is
     /// what makes [`Self::cell_key`] answerable for every piece.
-    pub fn cells(&self) -> impl Iterator<Item = Rect> + '_ {
+    pub fn cells(&self, grid: TileGrid) -> impl Iterator<Item = Rect> + '_ {
         let start = |v: u16, step: u16| v - v % step;
-        (start(self.top, CELL_H)..=self.bottom)
-            .step_by(usize::from(CELL_H))
+        (start(self.top, grid.h)..=self.bottom)
+            .step_by(usize::from(grid.h))
             .flat_map(move |row| {
                 let top = self.top.max(row);
-                let bottom = self.bottom.min(row.saturating_add(CELL_H - 1));
-                (start(self.left, CELL_W)..=self.right)
-                    .step_by(usize::from(CELL_W))
+                let bottom = self.bottom.min(row.saturating_add(grid.h - 1));
+                (start(self.left, grid.w)..=self.right)
+                    .step_by(usize::from(grid.w))
                     .map(move |col| Rect {
                         left: self.left.max(col),
                         top,
-                        right: self.right.min(col.saturating_add(CELL_W - 1)),
+                        right: self.right.min(col.saturating_add(grid.w - 1)),
                         bottom,
                     })
             })
     }
 
-    /// The grid cell this rectangle lies in, as `(column, row)`.
+    /// The cell of `grid` this rectangle lies in, as `(column, row)`.
     ///
     /// Meaningful for a piece [`Self::cells`] produced, which by construction lies
     /// wholly inside one cell however far from its corner it starts. A rectangle
     /// that straddles a grid line answers for the cell its top-left is in, which
     /// is not wrong so much as not a question worth asking.
-    pub fn cell_key(&self) -> (u16, u16) {
-        (self.left / CELL_W, self.top / CELL_H)
+    pub fn cell_key(&self, grid: TileGrid) -> (u16, u16) {
+        (self.left / grid.w, self.top / grid.h)
     }
 }
 
@@ -125,10 +125,11 @@ impl Rect {
 pub struct Changed {
     /// Bounding box of every differing pixel.
     pub rect: Rect,
-    /// Grid cells ([`Rect::cell_key`]) holding at least one differing pixel,
-    /// sorted and deduplicated. Always a subset of the cells `rect` covers, and
-    /// never empty when `rect` is present — unless the shadow was told nothing
-    /// reads them ([`Shadow::classify_cells`]), in which case it is always empty.
+    /// Grid cells ([`Rect::cell_key`], under the shadow's [`Shadow::grid`])
+    /// holding at least one differing pixel, sorted and deduplicated. Always a
+    /// subset of the cells `rect` covers, and never empty when `rect` is present —
+    /// unless the shadow was told nothing reads them ([`Shadow::classify_cells`]),
+    /// in which case it is always empty.
     pub cells: Vec<(u16, u16)>,
 }
 
@@ -165,6 +166,9 @@ pub struct Shadow {
     engine: &'static str,
     w: u16,
     h: u16,
+    /// The lattice [`Changed::cells`] are keyed to: [`TileGrid::at`] the scale the
+    /// framebuffer was announced with, resized along with the pixels.
+    grid: TileGrid,
     pixels: Vec<u8>,
     /// One flag per pixel: whether `pixels` says anything about it. `[bool]`
     /// rather than a bitset because scanning it for a `false` is a `memchr`.
@@ -187,12 +191,13 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    /// A shadow for a `w`×`h` framebuffer, knowing nothing.
-    pub fn new(engine: &'static str, w: u16, h: u16) -> Self {
+    /// A shadow for a `w`×`h` framebuffer cut at `grid`, knowing nothing.
+    pub fn new(engine: &'static str, w: u16, h: u16, grid: TileGrid) -> Self {
         Self {
             engine,
             w,
             h,
+            grid,
             pixels: vec![0; usize::from(w) * usize::from(h) * 3],
             known: vec![false; usize::from(w) * usize::from(h)],
             unknown: usize::from(w) * usize::from(h),
@@ -214,11 +219,20 @@ impl Shadow {
         (self.w, self.h)
     }
 
-    /// Adopt a new framebuffer size, keeping the tally but nothing else.
-    pub fn resize(&mut self, w: u16, h: u16) {
+    /// The lattice this shadow keys cells to.
+    pub fn grid(&self) -> TileGrid {
+        self.grid
+    }
+
+    /// Adopt a new framebuffer size and grid, keeping the tally but nothing else.
+    ///
+    /// The grid comes with the size because the two change together: a density
+    /// change re-announces the framebuffer, and every cell key means somewhere else
+    /// on the new lattice just as it would on a new size.
+    pub fn resize(&mut self, w: u16, h: u16, grid: TileGrid) {
         let counts = (self.examined, self.unchanged, self.trimmed);
         let classify = self.classify;
-        *self = Self::new(self.engine, w, h);
+        *self = Self::new(self.engine, w, h, grid);
         (self.examined, self.unchanged, self.trimmed) = counts;
         self.classify = classify;
     }
@@ -257,7 +271,7 @@ impl Shadow {
             // Nothing here can be compared, so nothing can be ruled out: every cell
             // it touches counts as changed.
             let mut cells: Vec<(u16, u16)> = if self.classify {
-                rect.cells().map(|c| c.cell_key()).collect()
+                rect.cells(self.grid).map(|c| c.cell_key(self.grid)).collect()
             } else {
                 Vec::new()
             };
@@ -312,7 +326,7 @@ impl Shadow {
                 continue;
             }
             let mine = self.row(rect.left, y, row_bytes);
-            let (row_cell, left, cw) = (y / CELL_H, u32::from(rect.left), u32::from(CELL_W));
+            let (row_cell, left, cw) = (y / self.grid.h, u32::from(rect.left), u32::from(self.grid.w));
             let (span_lo, span_hi) = (left + (lo / 3) as u32, left + (hi / 3) as u32);
             let mut col = span_lo / cw;
             while col * cw <= span_hi {
@@ -563,6 +577,12 @@ fn differing_bytes(a: &[u8], b: &[u8]) -> (usize, usize) {
 mod tests {
     use super::*;
 
+    /// The 1× lattice, which is what every test here cuts at unless it is about
+    /// the 2× one.
+    const GRID: TileGrid = TileGrid::ONE;
+    const CELL_W: u16 = GRID.w;
+    const CELL_H: u16 = GRID.h;
+
     /// Packed RGB for a solid-colour rectangle.
     fn solid(rect: Rect, value: u8) -> Vec<u8> {
         vec![value; usize::from(rect.w()) * usize::from(rect.h()) * 3]
@@ -587,7 +607,7 @@ mod tests {
     /// What CopyRect reads back, and the one thing it must refuse.
     #[test]
     fn copy_out_returns_known_pixels_and_nothing_else() {
-        let mut shadow = Shadow::new("test", 8, 4);
+        let mut shadow = Shadow::new("test", 8, 4, GRID);
         let painted = rect(2, 1, 5, 2);
         shadow.accept_rect(painted, &solid(painted, 9));
 
@@ -602,7 +622,7 @@ mod tests {
     /// browser refresh has nothing to read and asks for a repaint instead.
     #[test]
     fn copy_out_refuses_everything_a_forget_has_disclaimed() {
-        let mut shadow = Shadow::new("test", 8, 4);
+        let mut shadow = Shadow::new("test", 8, 4, GRID);
         let r = rect(0, 0, 7, 3);
         shadow.accept_rect(r, &solid(r, 9));
         assert!(shadow.copy_out(r).is_some());
@@ -612,7 +632,7 @@ mod tests {
 
     #[test]
     fn the_first_send_of_anything_but_black_is_new() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let r = rect(0, 0, 15, 15);
         assert_eq!(shadow.accept_rect(r, &solid(r, 9)), Some(r));
     }
@@ -624,7 +644,7 @@ mod tests {
     /// attached would stay on screen for the rest of the session.
     #[test]
     fn black_on_a_fresh_shadow_is_still_sent() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let r = rect(0, 0, 15, 15);
         assert_eq!(shadow.accept_rect(r, &solid(r, 0)), Some(r));
         assert_eq!(shadow.accept_rect(r, &solid(r, 0)), None, "but only once");
@@ -634,7 +654,7 @@ mod tests {
     /// has been forgotten, and must still be sent.
     #[test]
     fn a_region_that_went_black_while_forgotten_is_sent() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let r = rect(0, 0, 31, 31);
         shadow.accept_rect(r, &solid(r, 200));
 
@@ -647,7 +667,7 @@ mod tests {
     /// trim even where their bytes happen to match, or they would never be sent.
     #[test]
     fn unknown_pixels_widen_the_trim() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let whole = rect(0, 0, 63, 63);
         shadow.accept_rect(whole, &solid(whole, 5));
         assert_eq!(shadow.accept_rect(whole, &solid(whole, 5)), None);
@@ -665,7 +685,7 @@ mod tests {
     /// because a video is playing at the other end of the same screen.
     #[test]
     fn changed_cells_do_not_span_a_bounding_box() {
-        let mut shadow = Shadow::new("test", CELL_W * 4, CELL_H * 2);
+        let mut shadow = Shadow::new("test", CELL_W * 4, CELL_H * 2, GRID);
         let whole = rect(0, 0, CELL_W * 4 - 1, CELL_H * 2 - 1);
         shadow.accept_rect(whole, &solid(whole, 1));
 
@@ -694,7 +714,7 @@ mod tests {
     /// narrowing above cannot be hiding real change.
     #[test]
     fn a_wholly_repainted_region_reports_every_cell() {
-        let mut shadow = Shadow::new("test", CELL_W * 2, CELL_H * 2);
+        let mut shadow = Shadow::new("test", CELL_W * 2, CELL_H * 2, GRID);
         let whole = rect(0, 0, CELL_W * 2 - 1, CELL_H * 2 - 1);
 
         // The first acceptance is all-unknown, which differs by definition.
@@ -709,7 +729,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_repeat_is_dropped_whole() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let r = rect(8, 8, 23, 23);
         assert_eq!(shadow.accept_rect(r, &solid(r, 5)), Some(r));
         assert_eq!(shadow.accept_rect(r, &solid(r, 5)), None);
@@ -720,7 +740,7 @@ mod tests {
     /// rectangle is sent as the part that actually moved.
     #[test]
     fn an_over_reported_rectangle_is_trimmed_to_what_changed() {
-        let mut shadow = Shadow::new("test", 200, 200);
+        let mut shadow = Shadow::new("test", 200, 200, GRID);
         let whole = rect(0, 0, 199, 199);
         shadow.accept_rect(whole, &solid(whole, 1));
 
@@ -734,7 +754,7 @@ mod tests {
 
     #[test]
     fn a_trim_keeps_every_changed_pixel_inside_it() {
-        let mut shadow = Shadow::new("test", 100, 100);
+        let mut shadow = Shadow::new("test", 100, 100, GRID);
         let whole = rect(0, 0, 99, 99);
         shadow.accept_rect(whole, &solid(whole, 1));
 
@@ -754,7 +774,7 @@ mod tests {
     /// would go on suppressing it forever.
     #[test]
     fn what_the_trim_sent_is_what_the_shadow_remembers() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let whole = rect(0, 0, 63, 63);
         shadow.accept_rect(whole, &solid(whole, 1));
 
@@ -776,7 +796,7 @@ mod tests {
     /// rectangle gets wrong, and the reason this holds pixels instead.
     #[test]
     fn a_small_send_inside_a_larger_one_does_not_strand_it() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let big = rect(0, 0, 31, 31);
         let small = rect(4, 4, 7, 7);
         shadow.accept_rect(big, &solid(big, 1));
@@ -793,7 +813,7 @@ mod tests {
 
     #[test]
     fn forgetting_sends_everything_again() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let r = rect(0, 0, 31, 31);
         assert_eq!(shadow.accept_rect(r, &solid(r, 3)), Some(r));
         assert_eq!(shadow.accept_rect(r, &solid(r, 3)), None);
@@ -809,11 +829,11 @@ mod tests {
 
     #[test]
     fn a_resize_forgets_and_regrids() {
-        let mut shadow = Shadow::new("test", 64, 64);
+        let mut shadow = Shadow::new("test", 64, 64, GRID);
         let r = rect(0, 0, 31, 31);
         shadow.accept_rect(r, &solid(r, 3));
 
-        shadow.resize(128, 96);
+        shadow.resize(128, 96, GRID);
 
         assert_eq!(shadow.size(), (128, 96));
         assert_eq!(shadow.accept_rect(r, &solid(r, 3)), Some(r));
@@ -825,7 +845,7 @@ mod tests {
     /// remembered. Wasting bytes is recoverable; a stale region is not.
     #[test]
     fn a_rectangle_outside_the_shadow_is_always_sent() {
-        let mut shadow = Shadow::new("test", 32, 32);
+        let mut shadow = Shadow::new("test", 32, 32, GRID);
         let outside = rect(16, 16, 47, 47);
         assert_eq!(shadow.accept_rect(outside, &solid(outside, 1)), Some(outside));
         assert_eq!(shadow.accept_rect(outside, &solid(outside, 1)), Some(outside));
@@ -835,7 +855,7 @@ mod tests {
     /// into a comparison that would read the wrong rows.
     #[test]
     fn a_mismatched_payload_length_is_not_compared() {
-        let mut shadow = Shadow::new("test", 32, 32);
+        let mut shadow = Shadow::new("test", 32, 32, GRID);
         let r = rect(0, 0, 15, 15);
         assert_eq!(shadow.accept_rect(r, &[1, 2, 3]), Some(r));
     }
@@ -843,10 +863,10 @@ mod tests {
     #[test]
     fn bands_split_tall_rectangles_and_leave_short_ones_alone() {
         let short = rect(10, 10, 20, 20);
-        assert_eq!(short.bands().collect::<Vec<_>>(), vec![short]);
+        assert_eq!(short.bands(GRID).collect::<Vec<_>>(), vec![short]);
 
         let tall = rect(0, 0, 99, CELL_H * 2);
-        let bands: Vec<_> = tall.bands().collect();
+        let bands: Vec<_> = tall.bands(GRID).collect();
         assert_eq!(bands.len(), 3, "{bands:?}");
         assert_eq!(bands[0], rect(0, 0, 99, CELL_H - 1));
         assert_eq!(bands[1], rect(0, CELL_H, 99, CELL_H * 2 - 1));
@@ -888,7 +908,7 @@ mod tests {
             rect(0, 0, CELL_W * 3 - 1, CELL_H * 3 - 1),
         ] {
             let mut seen = std::collections::HashSet::new();
-            for cell in source.cells() {
+            for cell in source.cells(GRID) {
                 assert!(source.contains(&cell), "{cell:?} escaped {source:?}");
                 for y in cell.top..=cell.bottom {
                     for x in cell.left..=cell.right {
@@ -906,13 +926,13 @@ mod tests {
     #[test]
     fn no_cell_straddles_a_grid_line() {
         let source = rect(37, 41, 900, 200);
-        for cell in source.cells() {
+        for cell in source.cells(GRID) {
             assert_eq!(
                 (cell.left / CELL_W, cell.top / CELL_H),
                 (cell.right / CELL_W, cell.bottom / CELL_H),
                 "{cell:?} spans two cells"
             );
-            assert_eq!(cell.cell_key(), (cell.left / CELL_W, cell.top / CELL_H));
+            assert_eq!(cell.cell_key(GRID), (cell.left / CELL_W, cell.top / CELL_H));
         }
     }
 
@@ -924,7 +944,7 @@ mod tests {
     fn differently_shaped_damage_lands_on_the_same_key() {
         let wide = rect(120, 100, 140, 110);
         let tall = rect(130, 70, 132, 120);
-        let keys = |r: Rect| r.cells().map(|c| c.cell_key()).collect::<Vec<_>>();
+        let keys = |r: Rect| r.cells(GRID).map(|c| c.cell_key(GRID)).collect::<Vec<_>>();
         assert_eq!(keys(wide), vec![(1, 1), (2, 1)]);
         assert_eq!(keys(tall), vec![(2, 1)]);
 
@@ -933,13 +953,40 @@ mod tests {
         assert_eq!(keys(band), vec![(0, 0), (0, 1)]);
     }
 
+    /// The grid is 64 points, so a 2× framebuffer is cut every 128 pixels: the
+    /// same window scrolling the same distance touches the same number of cells
+    /// on a Retina desktop as on a 1× one, and a rectangle that is three cells
+    /// at 1× is one at 2×.
+    #[test]
+    fn a_2x_framebuffer_is_cut_at_128_pixels() {
+        let retina = TileGrid::at(2.0);
+        assert_eq!(retina, TileGrid { w: 128, h: 128 });
+        let source = rect(0, 0, 191, 63);
+        assert_eq!(source.cells(GRID).count(), 3);
+        assert_eq!(source.cells(retina).collect::<Vec<_>>(), vec![rect(0, 0, 127, 63), rect(128, 0, 191, 63)]);
+        assert_eq!(rect(130, 70, 132, 120).cell_key(retina), (1, 0));
+        assert_eq!(rect(0, 0, 99, 255).bands(retina).count(), 2);
+
+        // And the shadow classifies against the grid it was given: a pixel at
+        // (100, 100) is cell (1, 1) at 1× and (0, 0) at 2×.
+        let mut shadow = Shadow::new("test", 256, 256, retina);
+        let whole = rect(0, 0, 255, 255);
+        shadow.accept_rect(whole, &solid(whole, 1));
+        let mut pixels = solid(whole, 1);
+        pixels[(100 * 256 + 100) * 3] = 2;
+        assert_eq!(shadow.accept(whole, &pixels).expect("one pixel changed").cells, vec![(0, 0)]);
+        shadow.resize(256, 256, GRID);
+        assert_eq!(shadow.grid(), GRID);
+        assert_eq!(shadow.accept(whole, &pixels).expect("nothing is known").cells.len(), 16);
+    }
+
     /// A rectangle inside one cell is one piece, unchanged — the case a still
     /// screen spends nearly all its time in.
     #[test]
     fn a_rectangle_inside_one_cell_is_left_alone() {
         let small = rect(66, 70, 70, 90);
-        assert_eq!(small.cells().collect::<Vec<_>>(), vec![small]);
-        assert_eq!(small.cell_key(), (1, 1));
+        assert_eq!(small.cells(GRID).collect::<Vec<_>>(), vec![small]);
+        assert_eq!(small.cell_key(GRID), (1, 1));
     }
 
     /// The pieces arrive in the order the engines emit tiles, so a client paints
@@ -948,7 +995,7 @@ mod tests {
     fn cells_arrive_left_to_right_then_top_down() {
         let source = rect(60, 60, 130, 130);
         assert_eq!(
-            source.cells().collect::<Vec<_>>(),
+            source.cells(GRID).collect::<Vec<_>>(),
             vec![
                 rect(60, 60, 63, 63),
                 rect(64, 60, 127, 63),

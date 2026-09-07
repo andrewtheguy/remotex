@@ -883,12 +883,12 @@ mod tests {
 
     /// A shadow for the encodings that never look at one.
     fn unused_shadow() -> std::sync::Mutex<Shadow> {
-        std::sync::Mutex::new(Shadow::new("test", 1, 1))
+        std::sync::Mutex::new(Shadow::new("test", 1, 1, crate::protocol::TileGrid::ONE))
     }
 
     /// A shadow that knows `rgb` as its whole contents.
     fn shadow_of(w: u16, h: u16, rgb: &[u8]) -> std::sync::Mutex<Shadow> {
-        let mut shadow = Shadow::new("test", w, h);
+        let mut shadow = Shadow::new("test", w, h, crate::protocol::TileGrid::ONE);
         shadow.accept(Rect::from_size(0, 0, w, h).unwrap(), rgb);
         std::sync::Mutex::new(shadow)
     }
@@ -1408,7 +1408,7 @@ mod tests {
         // known for the reading after it.
         let rgb: Vec<u8> = (0..4u8).flat_map(|i| [i * 0x10, 0x20, 0x30]).collect();
         let half = || {
-            let mut shadow = Shadow::new("test", 8, 1);
+            let mut shadow = Shadow::new("test", 8, 1, crate::protocol::TileGrid::ONE);
             shadow.accept(Rect::from_size(0, 0, 4, 1).unwrap(), &rgb);
             std::sync::Mutex::new(shadow)
         };
