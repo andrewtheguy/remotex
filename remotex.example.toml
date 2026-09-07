@@ -260,19 +260,18 @@ password = "change-me"
 # host = "10.0.0.2"
 # vnc_password = "change-me"
 
-# A sway desktop behind the patched wayvnc from the swayvnc repository reports the
-# pixel density of its output over one private RFB extension, so a `scale 2`
-# output is shown at 2x and a resizing window is asked for in points × scale.
-# The subtype is explicit because it changes what goes on the wire; a plain
-# "vnc" target to the same server stays at 1x. Credentials are the plain
-# target's: wayvnc's RSA-AES login here. See docs/swayvnc-density.md.
+# A sway desktop behind the swayrx VNC server reports the pixel density of its
+# output over one private RFB extension, so a `scale 2` output is shown at 2x
+# and a resizing window is asked for in points × scale. The subtype is explicit
+# because it changes what goes on the wire; a plain "vnc" target to the same
+# server stays at 1x. Credentials are the plain target's: swayrx's VncAuth
+# password here. See docs/swayrx-density.md.
 # [[targets]]
 # name = "workstation-sway"
 # protocol = "vnc"
-# subtype = "swayvnc"
+# subtype = "swayrx"
 # host = "127.0.0.1"
-# username = "andrew"
-# password = "the-account-password"
+# vnc_password = "the-swayrx-password"
 # resize = true
 
 # A Mac uses its built-in Screen Sharing service through this same path, with no

@@ -130,16 +130,16 @@ const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
 /// ServerFence and ClientFence share a message type in the two directions.
 const MSG_FENCE: u8 = 248;
 
-/// The swayvnc density extension's pseudo-encoding, the ASCII bytes `SVNC`. Listed
-/// in `SetEncodings` on a `subtype = "swayvnc"` target and nowhere else; the
-/// patched wayvnc answers it with an [`MSG_SWAYVNC_DENSITY`] report, and a stock
-/// server ignores it like any encoding it does not know. See
-/// docs/swayvnc-density.md.
-const ENCODING_SWAYVNC_DENSITY: i32 = 0x5356_4E43;
+/// The swayrx density extension's pseudo-encoding, the ASCII bytes `SWRX`. Listed
+/// in `SetEncodings` on a `subtype = "swayrx"` target and nowhere else; swayrx
+/// answers it with an [`MSG_SWAYRX_DENSITY`] report, and any other server
+/// ignores it like any encoding it does not know. See
+/// docs/swayrx-density.md.
+const ENCODING_SWAYRX_DENSITY: i32 = 0x5357_5258;
 /// The extension's one message type, used in both directions: the server's
 /// `OutputScale` report and the client's `ClientDensity` declaration. Outside
 /// every registered RFB message type.
-const MSG_SWAYVNC_DENSITY: u8 = 0xE0;
+const MSG_SWAYRX_DENSITY: u8 = 0xE0;
 /// A fence the server wants echoed. Nothing else in the flags word obliges a
 /// client, and the two it may keep are [`FENCE_BLOCK_BEFORE`] and
 /// [`FENCE_BLOCK_AFTER`].
@@ -178,7 +178,7 @@ impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
             Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
-            Some(Subtype::Ard | Subtype::Swayvnc) | None => Dialect::Rfb38,
+            Some(Subtype::Ard | Subtype::Swayrx) | None => Dialect::Rfb38,
         }
     }
 
@@ -357,7 +357,7 @@ struct DesktopState {
     /// ask for the same window again in the new pixels. `None` until the first
     /// generic resize request.
     viewport: Option<(u16, u16)>,
-    /// Where the swayvnc density extension stands on this connection.
+    /// Where the swayrx density extension stands on this connection.
     density: Density,
     /// The scale the server reported for its framebuffer, which labels every
     /// generic rect from then on. `None` on every other server and until the
@@ -368,7 +368,7 @@ struct DesktopState {
     /// the read loop sends such requests too.
     video: bool,
     /// Whether the window drives the desktop size ([`Flags::resize`]). The
-    /// browser's density is declared to a swayvnc server only then: the server
+    /// browser's density is declared to a swayrx server only then: the server
     /// sets its output's scale to what is declared, and a client that could not
     /// then re-ask the pixels would be left with half a desktop.
     resize: bool,
@@ -391,11 +391,11 @@ struct DesktopState {
     repaint_owed: bool,
 }
 
-/// The swayvnc density extension's state on one connection — see
-/// [`ENCODING_SWAYVNC_DENSITY`] and docs/swayvnc-density.md.
+/// The swayrx density extension's state on one connection — see
+/// [`ENCODING_SWAYRX_DENSITY`] and docs/swayrx-density.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Density {
-    /// Not a `swayvnc` target: the pseudo-encoding was never sent.
+    /// Not a `swayrx` target: the pseudo-encoding was never sent.
     Off,
     /// Sent, unanswered so far. Resize requests wait here, because a request in
     /// the wrong pixels is a desktop redrawn twice. Pixels arriving in this
@@ -407,15 +407,15 @@ enum Density {
 
 impl DesktopState {
     /// The density request's deadline, checked on every framebuffer update.
-    /// The patched wayvnc answers `SetEncodings` before it sends a single
-    /// update, so pixels with no report before them mean a server that does
-    /// not speak the extension — not the server `subtype = "swayvnc"` names,
-    /// and not one to show at a density it never confirmed.
+    /// swayrx answers `SetEncodings` before it sends a single update, so
+    /// pixels with no report before them mean a server that does not speak the
+    /// extension — not the server `subtype = "swayrx"` names, and not one to
+    /// show at a density it never confirmed.
     fn first_update(&self) -> anyhow::Result<()> {
         if self.density == Density::Asked {
             anyhow::bail!(
                 "the server sent pixels without reporting its scale: the target is subtype \
-                 \"swayvnc\" but this server is not the patched wayvnc"
+                 \"swayrx\" but this server is not swayrx"
             );
         }
         Ok(())
@@ -430,7 +430,7 @@ impl DesktopState {
     }
 
     /// The scale a generic rect is labelled with: the server's reported one on
-    /// a swayvnc target, [`UNSCALED`] everywhere else.
+    /// a swayrx target, [`UNSCALED`] everywhere else.
     fn generic_scale(&self) -> f32 {
         self.wire_scale.unwrap_or(UNSCALED)
     }
@@ -447,7 +447,7 @@ impl DesktopState {
 
     /// The generic resize request for a window of `points`, or `None` when
     /// nothing should go out yet: the request is held in `pending` until the
-    /// server has declared SetDesktopSize support and, on a swayvnc target,
+    /// server has declared SetDesktopSize support and, on a swayrx target,
     /// answered the density request — a request in the wrong pixels is a
     /// desktop redrawn twice. `None` also when the desktop already has the
     /// size. Both that and a request sent clear any older hold: a replay must
@@ -498,7 +498,7 @@ impl DesktopState {
         Some(set_desktop_size(pixels, screen))
     }
 
-    /// The `ClientDensity` declaring `declared` to a swayvnc server, or `None`
+    /// The `ClientDensity` declaring `declared` to a swayrx server, or `None`
     /// where the window does not drive the desktop size — see
     /// [`Self::resize`]. A declaration the reported scale does not match opens
     /// a follow ([`Self::following`]): the server is expected to set the
@@ -869,7 +869,7 @@ struct Flags {
     host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
-    /// Whether the target is `subtype = "swayvnc"`, whose density extension
+    /// Whether the target is `subtype = "swayrx"`, whose density extension
     /// was requested in the handshake — see [`Density`].
     density: bool,
 }
@@ -1218,9 +1218,9 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, density: bool
         encodings.push(vnc_clipboard::ENCODING);
     }
     if density {
-        // The one request a swayvnc target adds. Its answer, when it comes, is
+        // The one request a swayrx target adds. Its answer, when it comes, is
         // the scale every framebuffer from then on is labelled with.
-        encodings.push(ENCODING_SWAYVNC_DENSITY);
+        encodings.push(ENCODING_SWAYRX_DENSITY);
     }
     encodings
 }
@@ -1478,7 +1478,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
-                    // On a swayvnc target the report is forwarded as the client's
+                    // On a swayrx target the report is forwarded as the client's
                     // declared density, once the server has shown it listens
                     // and not while an earlier declaration is unanswered — see
                     // [`DesktopState::host_density_changed`]. Decided and
@@ -2123,10 +2123,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // a disable, which this client never sends, so the honest reading is that
             // the server has stopped pushing; polling resumes and one request is sent
             // to restart the cycle it had replaced.
-            // The swayvnc OutputScale report: the framebuffer's density, from the one
+            // The swayrx OutputScale report: the framebuffer's density, from the one
             // generic server that can say. Only a target that asked reads it; on
             // any other, 0xE0 is as unknown as it was.
-            MSG_SWAYVNC_DENSITY if desktop.lock().unwrap().density != Density::Off => {
+            MSG_SWAYRX_DENSITY if desktop.lock().unwrap().density != Density::Off => {
                 read_output_scale(&mut reader, uplink, desktop, &shared.shadow, &sink).await?;
             }
             MSG_END_OF_CONTINUOUS_UPDATES => {
@@ -3043,8 +3043,8 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
     Ok(resized)
 }
 
-/// Handle the swayvnc `OutputScale` report — see [`MSG_SWAYVNC_DENSITY`] and
-/// docs/swayvnc-density.md.
+/// Handle the swayrx `OutputScale` report — see [`MSG_SWAYRX_DENSITY`] and
+/// docs/swayrx-density.md.
 ///
 /// The report names the framebuffer size it describes and the scale it is drawn
 /// at. The scale labels every generic rect from here on; when the size is the
@@ -3770,12 +3770,12 @@ fn set_desktop_size(size: (u16, u16), screen: Screen) -> [u8; 24] {
     msg
 }
 
-/// The bytes after the type of a swayvnc `OutputScale` report: padding, width,
+/// The bytes after the type of a swayrx `OutputScale` report: padding, width,
 /// height, then the scale.
 const OUTPUT_SCALE_BODY: usize = 9;
 
-/// A swayvnc `OutputScale` report: the server's framebuffer in pixels and the
-/// scale it is drawn at — see docs/swayvnc-density.md.
+/// A swayrx `OutputScale` report: the server's framebuffer in pixels and the
+/// scale it is drawn at — see docs/swayrx-density.md.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct OutputScale {
     size: (u16, u16),
@@ -3799,13 +3799,13 @@ impl OutputScale {
     }
 }
 
-/// The swayvnc `ClientDensity` declaration: the browser's density as 16.16
+/// The swayrx `ClientDensity` declaration: the browser's density as 16.16
 /// unsigned fixed point, after three bytes of padding. Sent once the server has
 /// reported, and again whenever the client's screen changes density.
 fn client_density(scale: f32) -> [u8; 8] {
     let fixed = (f64::from(scale) * 65536.0).round().clamp(1.0, f64::from(u32::MAX)) as u32;
     let mut msg = [0u8; 8];
-    msg[0] = MSG_SWAYVNC_DENSITY;
+    msg[0] = MSG_SWAYRX_DENSITY;
     // msg[1..4]: padding
     msg[4..8].copy_from_slice(&fixed.to_be_bytes());
     msg
@@ -4260,8 +4260,8 @@ mod tests {
         assert_eq!(Dialect::of(None), Dialect::Rfb38);
         assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
         // The density extension rides the standard wire; only the encoding list
-        // and one message type tell a swayvnc session from a plain one.
-        assert_eq!(Dialect::of(Some(Subtype::Swayvnc)), Dialect::Rfb38);
+        // and one message type tell a swayrx session from a plain one.
+        assert_eq!(Dialect::of(Some(Subtype::Swayrx)), Dialect::Rfb38);
         assert_eq!(
             Dialect::of(Some(Subtype::ArdHighPerformance)),
             Dialect::Apple889
@@ -4826,12 +4826,12 @@ mod tests {
     }
 
     /// The density extension's wire, checked byte by byte against
-    /// docs/swayvnc-density.md rather than through the encoder's own eyes.
+    /// docs/swayrx-density.md rather than through the encoder's own eyes.
     #[test]
-    fn the_density_extension_is_asked_for_only_on_a_swayvnc_target() {
-        assert_eq!(ENCODING_SWAYVNC_DENSITY, i32::from_be_bytes(*b"SVNC"));
-        assert!(rfb38_encoding_list(false, true, true, true).contains(&ENCODING_SWAYVNC_DENSITY));
-        assert!(!rfb38_encoding_list(false, true, true, false).contains(&ENCODING_SWAYVNC_DENSITY));
+    fn the_density_extension_is_asked_for_only_on_a_swayrx_target() {
+        assert_eq!(ENCODING_SWAYRX_DENSITY, i32::from_be_bytes(*b"SWRX"));
+        assert!(rfb38_encoding_list(false, true, true, true).contains(&ENCODING_SWAYRX_DENSITY));
+        assert!(!rfb38_encoding_list(false, true, true, false).contains(&ENCODING_SWAYRX_DENSITY));
     }
 
     #[test]
@@ -5506,12 +5506,12 @@ mod tests {
         body
     }
 
-    /// A swayvnc target holds its first resize until the server has said what
+    /// A swayrx target holds its first resize until the server has said what
     /// scale it draws at. When that scale is the browser's, it asks for the
     /// window in points × scale at once, labels the framebuffer with it, and
     /// declares the browser's density back.
     #[tokio::test]
-    async fn a_swayvnc_resize_waits_for_the_scale_report_and_asks_in_pixels() {
+    async fn a_swayrx_resize_waits_for_the_scale_report_and_asks_in_pixels() {
         let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let screen = Screen { id: 3, flags: 0 };
@@ -5878,8 +5878,8 @@ mod tests {
         ));
     }
 
-    /// A server that sends pixels before any report is not the patched wayvnc:
-    /// the session ends rather than showing a `swayvnc` target at a density
+    /// A server that sends pixels before any report is not swayrx:
+    /// the session ends rather than showing a `swayrx` target at a density
     /// the server never confirmed. Once reported, or on a plain target, every
     /// update passes.
     #[test]
@@ -5888,7 +5888,7 @@ mod tests {
         let mut d = desktop.lock().unwrap();
         d.density = Density::Asked;
         let err = d.first_update().unwrap_err().to_string();
-        assert!(err.contains("not the patched wayvnc"), "{err}");
+        assert!(err.contains("not swayrx"), "{err}");
         d.density = Density::Reported;
         d.first_update().unwrap();
         d.density = Density::Off;

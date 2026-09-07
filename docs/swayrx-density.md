@@ -1,6 +1,6 @@
-# Pixel density over VNC with swayvnc
+# Pixel density over VNC with swayrx
 
-How a sway desktop behind wayvnc tells the gateway what scale its framebuffer is
+How a sway desktop behind swayrx tells the gateway what scale its framebuffer is
 drawn at, so a `scale 2` output is shown as a sharp 2x desktop rather than half a
 desktop stretched up — and how the browser's own density becomes that scale, so
 a 2x browser gets a 2x desktop with nothing to configure, as it does over RDP.
@@ -9,18 +9,15 @@ Standard RFB carries pixels and nothing else
 on top of it, in the shape Apple's display layout already gives the gateway: the
 *server* reports the density, and the label the browser sees is the wire's word.
 The browser's density is only ever a request to the server, never a label.
-Measured 2026-09-07 against the patched wayvnc 0.9.1 on `workstation-ct`, a
-headless sway with one `HEADLESS-1` output, through `tests/ws_probe.py`.
+Measured 2026-09-07 on `workstation-ct`, a headless sway with one `HEADLESS-1`
+output, through `tests/ws_probe.py`.
 
-The server side lives in the [swayvnc](https://github.com/andrewtheguy/swayvnc)
-repository: patches on the Debian source packages of neatvnc 0.9.1 and wayvnc
-0.9.1, built as `.deb` files for amd64 and arm64 and published as GitHub releases
-tagged `trixie-<YYYYMMDD>-<N>`, the packages keeping Debian's versions with a
-`+swayvnc<YYYYMMDD>.<N>` suffix. neatvnc gains three application hooks
-(the client's `SetEncodings` list as sent, a handler for message types the
-library does not dispatch, and a call to write one message to one client);
-wayvnc uses them for the extension below and tracks each output's scale from
-wlr-output-management, with `wl_output.scale` as the fallback.
+The server side is [swayrx](https://github.com/andrewtheguy/swayrx), a VNC
+server written for this: RFB 3.8 with ZRLE as its one pixel encoding,
+wlr-screencopy capture, and this extension built in. It tracks each output's
+exact scale from wlr-output-management, with `wl_output.scale` as the fallback,
+and sets the output's scale and mode through the same protocol. It replaced a
+patch series on neatvnc and wayvnc that carried the same wire.
 
 ## Configuration
 
@@ -28,18 +25,17 @@ wlr-output-management, with `wl_output.scale` as the fallback.
 [[targets]]
 name = "workstation"
 protocol = "vnc"
-subtype = "swayvnc"
+subtype = "swayrx"
 host = "127.0.0.1"
 port = 5900
-username = "andrew"          # wayvnc's RSA-AES login, as on a plain target
-password = "…"
+vnc_password = "…"           # swayrx's VncAuth password, as on a plain target
 resize = true
 ```
 
 The subtype is explicit because it changes what the gateway asks for on the
 wire, and a plain VNC connection to the same server — or any other server — must
 not. Authentication, clipboard, encodings and everything else are a plain `vnc`
-target's. Against a stock wayvnc the request goes unanswered, and the session
+target's. Against any other server the request goes unanswered, and the session
 ends with an error on the first framebuffer update: an explicit subtype naming a
 server that is not there is a misconfiguration, not a desktop to show at a
 density the server never confirmed. A plain `vnc` target is how that server is
@@ -49,7 +45,7 @@ reached.
 
 One pseudo-encoding and one message type, private and unregistered.
 
-- **Pseudo-encoding** `0x53564E43`, the ASCII bytes `SVNC`, listed in the
+- **Pseudo-encoding** `0x53575258`, the ASCII bytes `SWRX`, listed in the
   client's `SetEncodings` beside the standard ones. A server that does not know
   it ignores it, as RFB requires.
 - **Message type** `0xE0` in both directions, outside every registered client
@@ -72,9 +68,10 @@ another output. The size is the framebuffer's, in pixels.
 | 4 | U16 | height, pixels |
 | 6 | U32 | scale, 16.16 fixed |
 
-Ten bytes. wayvnc sends it from `on_output_dimension_change` *before* it restarts
-the capture, so on a resize the report precedes the `ExtendedDesktopSize`
-rectangle that carries the new framebuffer.
+Ten bytes. swayrx sends it as soon as the compositor reports the output's new
+scale or mode, before the frame at the new size has been captured, so on a resize
+the report precedes the `ExtendedDesktopSize` rectangle that carries the new
+framebuffer.
 
 ### Client → server: ClientDensity
 
@@ -85,7 +82,7 @@ pixels would be left with half a desktop. It carries the density the browser
 would like the desktop rendered at, quantized to 1x or 2x like every other
 engine's request ([`protocol::render_density`]).
 
-wayvnc sets the captured output's scale to it under the rules its
+swayrx sets the captured output's scale to it under the rules its
 `SetDesktopSize` handling already has — a headless output, resizing enabled,
 and the client owns the layout or nobody does yet — and **answers every
 declaration with an `OutputScale`**: after the compositor has applied the
@@ -93,7 +90,7 @@ change, through the same head-scale path as a `swaymsg output … scale`, or at
 once with the scale as it is when nothing is to be changed or nothing can be
 (resizing disabled, another client owning the layout, a density out of the
 0.5–8 range, a configuration the compositor rejects). A configuration the
-compositor accepts without changing the head's scale is answered too: wayvnc
+compositor accepts without changing the head's scale is answered too: swayrx
 follows the `succeeded` with one round trip and reports the scale as it is
 when no head change arrived by then. The gateway relies on that answer
 arriving.
@@ -110,8 +107,8 @@ Eight bytes.
 
 `src/vnc.rs` keeps the extension's state per connection as `Density`: `Off`
 on every other target, `Asked` from the handshake, `Reported` after the first
-message. Pixels arriving while still `Asked` end the session, since the patched
-wayvnc answers `SetEncodings` before its first update.
+message. Pixels arriving while still `Asked` end the session, since swayrx
+answers `SetEncodings` before its first update.
 
 - **Label.** Every generic `DesktopSize` and `ExtendedDesktopSize` rectangle is
   applied with the last reported scale; before the first report, or on any other
@@ -181,7 +178,7 @@ resize  3456x1802  scale=2.0  -> 1728x901 CSS px      OutputScale @ 2 answering 
 resize  3456x1766  scale=2.0  -> 1728x883 CSS px      asked once, at points × 2; the rect follows
 ```
 
-The first report says 1x; the gateway declares 2x and holds its resize. wayvnc
+The first report says 1x; the gateway declares 2x and holds its resize. swayrx
 sets the output's scale, the compositor's head change produces the second
 report at 2x for the same pixels, and only then is the window asked for in
 points × 2: one mode change on the host, one desktop drawn. A 1x browser

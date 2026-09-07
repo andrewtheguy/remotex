@@ -52,13 +52,13 @@ documentation.
   pixel density, not a fit factor. `resize = true` means the window continuously
   drives the remote size; do not add a client resize toggle or remembered resize
   preference. Density is the wire's word alone: RDP negotiates it, Apple
-  reports it, `subtype = "swayvnc"` reports it over its private extension, and
+  reports it, `subtype = "swayrx"` reports it over its private extension, and
   generic VNC, whose wire carries none, is presented at 1x. Do not add a
   client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
   [Display geometry](docs/architecture.md#display-geometry),
   [HiDPI over generic VNC](docs/generic-vnc-hidpi.md) and
-  [Pixel density over VNC with swayvnc](docs/swayvnc-density.md) before
+  [Pixel density over VNC with swayrx](docs/swayrx-density.md) before
   changing geometry.
 - Read [Apple RFB 003.889, as measured](docs/apple-vnc-889.md) before changing
   either Apple Screen Sharing subtype. Treat High Performance behavior as
