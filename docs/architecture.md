@@ -131,7 +131,7 @@ one number for the whole plan: whichever dials exist — `render_quality`,
 `render_motion_quality`, a stream's — all stop at it.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
-gateway's 320x64 tile lattice, dashed, over the desktop. It is refused on
+gateway's 64x64 tile lattice, dashed, over the desktop. It is refused on
 `render_type = "video"`, which sends no tiles and so has no boundary to draw, and
 it changes nothing about the encode — no key of `RenderPlan` carries it, because no
 encoder needs to know. The lattice reaches the browser as a pitch on
@@ -202,7 +202,7 @@ Detection is in `src/encode.rs`, owned by the sink both engines already funnel
 their damage through:
 
 - **Cell identity.** `Shadow` is pixel-exact and has no stable cell identity, so
-  churn is keyed to the fixed 320×64 grid (`CELL_W`/`CELL_H`). `Rect::cells` cuts a
+  churn is keyed to the fixed 64×64 grid (`CELL_W`/`CELL_H`). `Rect::cells` cuts a
   rectangle at the grid lines on both axes, and `Rect::cell_key` names the piece.
   Cutting rather than snapping outward matters: RDP and VNC describe the same
   moving region with different rectangles from frame to frame, and a key that moved

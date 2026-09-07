@@ -825,8 +825,9 @@ impl Regions {
         }
     }
 
-    /// Take up to `max` cells that have been owed for `idle`, oldest first, for the
-    /// caller to re-encode at the base quality.
+    /// Take up to `max` cells that have been owed for `idle`, oldest first, as
+    /// rectangles for the caller to re-encode at the base quality — one per run of
+    /// neighbouring cells in a row, not one per cell.
     ///
     /// A cell a live stream still covers is never due: its stream is carrying it, and
     /// a crisp copy would be overwritten by the next access unit anyway.
@@ -845,13 +846,26 @@ impl Regions {
             .collect();
         ready.sort_unstable_by_key(|(cell, at)| (*at, *cell));
         ready.truncate(max);
-        ready
+        let mut cells: Vec<(u16, u16)> = ready
             .into_iter()
-            .filter_map(|(cell, _)| {
+            .map(|(cell, _)| {
                 self.debts.remove(&cell);
-                CellBox::of(cell).to_rect(w, h)
+                cell
             })
-            .collect()
+            .collect();
+        // The tickful goes out as runs: consecutive columns of one row are one
+        // rectangle, so a stopped video is restored a stripe at a time rather than a
+        // cell at a time, and pays PNG's fixed cost once per stripe. Age chose the
+        // cells; it does not also have to order the tiles, which all leave together.
+        cells.sort_unstable_by_key(|(col, row)| (*row, *col));
+        let mut runs: Vec<CellBox> = Vec::new();
+        for (col, row) in cells {
+            match runs.last_mut() {
+                Some(run) if run.r0 == row && run.c1.checked_add(1) == Some(col) => run.c1 = col,
+                _ => runs.push(CellBox::of((col, row))),
+            }
+        }
+        runs.into_iter().filter_map(|run| run.to_rect(w, h)).collect()
     }
 
     /// Take the mirror and every stream, for an encode on a blocking worker.
@@ -1411,13 +1425,13 @@ mod tests {
     // Every instant below is made up rather than waited for, so nothing here changes
     // if the machine is twice as slow.
 
-    /// A 640×128 desktop — two cells across, two down — with its mirror already
+    /// A 128×128 desktop — two cells across, two down — with its mirror already
     /// built, which is what a first blit does.
     async fn regions() -> Regions {
-        sized(640, 128).await
+        sized(128, 128).await
     }
 
-    /// The same, at whatever size a test needs cells for. A cell is 320×64, so a
+    /// The same, at whatever size a test needs cells for. A cell is 64×64, so a
     /// test about two *separate* regions needs a desktop at least three cells wide:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
@@ -1456,7 +1470,7 @@ mod tests {
         let t0 = Instant::now();
         regions.retune(&[(0, 0), (1, 0)], t0).expect("a stream");
         let wide = only_rect(&regions);
-        assert_eq!(wide.w(), 640);
+        assert_eq!(wide.w(), 128);
 
         regions.retune(&[(0, 0)], t0 + RETUNE).expect("no restart");
         assert_eq!(only_rect(&regions), wide, "a shrinking region paid for a new encoder");
@@ -1468,7 +1482,7 @@ mod tests {
     #[tokio::test]
     async fn a_kept_stream_carries_every_region_inside_it() {
         // Three cells across, two down.
-        let mut regions = sized(960, 128).await;
+        let mut regions = sized(192, 128).await;
         let t0 = Instant::now();
         regions.retune(&block(0, 0, 2, 1), t0).expect("a stream");
         let whole = only_rect(&regions);
@@ -1485,7 +1499,7 @@ mod tests {
     /// one disjoint from every other.
     #[tokio::test]
     async fn a_region_straddling_a_kept_stream_ends_it() {
-        let mut regions = sized(960, 128).await;
+        let mut regions = sized(192, 128).await;
         let t0 = Instant::now();
         regions.retune(&block(0, 0, 1, 1), t0).expect("a stream");
         let id = regions.live[0].id;
@@ -1496,7 +1510,7 @@ mod tests {
         assert_eq!(rects.len(), 2, "{rects:?}");
         assert!(rects[0].intersect(&rects[1]).is_none(), "{rects:?} overlap");
         assert!(
-            rects.contains(&boxed(1, 1, 2, 1).to_rect(960, 128).expect("a rectangle")),
+            rects.contains(&boxed(1, 1, 2, 1).to_rect(192, 128).expect("a rectangle")),
             "the straddling region did not get its own stream: {rects:?}"
         );
         assert!(
@@ -1521,11 +1535,11 @@ mod tests {
         let mut regions = regions().await;
         let t0 = Instant::now();
         regions.retune(&[(0, 0)], t0).expect("a stream");
-        assert_eq!(only_rect(&regions).w(), 320);
+        assert_eq!(only_rect(&regions).w(), 64);
 
         regions.retune(&[(0, 0), (1, 0)], t0 + RETUNE).expect("a wider stream");
         let grown = only_rect(&regions);
-        assert_eq!(grown.w(), 640, "the stream kept a rectangle its region outgrew");
+        assert_eq!(grown.w(), 128, "the stream kept a rectangle its region outgrew");
         assert!(regions.live[0].keyframe_owed, "a client cannot start on the new picture");
     }
 
@@ -1682,7 +1696,7 @@ mod tests {
         assert!(!regions.covers((0, 0)));
         let due = regions.due(later, CLEANUP_IDLE_FOR_TESTS, 8);
         assert_eq!(due.len(), 1, "the cells it streamed are owed nothing");
-        assert_eq!(due[0], Rect { left: 0, top: 0, right: 319, bottom: 63 });
+        assert_eq!(due[0], Rect { left: 0, top: 0, right: 63, bottom: 63 });
     }
 
     /// Only in full. Damage is clipped to what changed rather than snapped out to the
@@ -1705,7 +1719,7 @@ mod tests {
         // And a send that covers the cell outright does discharge it.
         regions.retune(&[(0, 0)], later).expect("a stream again");
         regions.expire(later + STREAM_IDLE);
-        regions.discharge(Rect { left: 0, top: 0, right: 319, bottom: 63 });
+        regions.discharge(Rect { left: 0, top: 0, right: 63, bottom: 63 });
         assert!(
             regions
                 .due(later + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8)
@@ -1730,6 +1744,28 @@ mod tests {
         assert_eq!(due.len(), 2, "a cell inside the stream's rectangle was owed nothing");
     }
 
+    /// Cells that come due together and sit side by side in one row are one
+    /// rectangle: the cell is the unit of debt, not of the tile that pays it.
+    #[tokio::test]
+    async fn due_cells_in_one_row_are_restored_as_a_run() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.retune(&block(0, 0, 1, 1), t0).expect("a stream over every cell");
+        assert_eq!(only_rect(&regions), Rect { left: 0, top: 0, right: 127, bottom: 127 });
+        regions.expire(t0 + STREAM_IDLE);
+        let mut due = regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8);
+        due.sort_unstable_by_key(|rect| rect.top);
+        assert_eq!(
+            due,
+            vec![
+                Rect { left: 0, top: 0, right: 127, bottom: 63 },
+                Rect { left: 0, top: 64, right: 127, bottom: 127 },
+            ],
+            "four cells in two rows should be two stripes"
+        );
+        assert!(regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8).is_empty());
+    }
+
     /// What `crate::encode` passes as the cleanup's idle threshold. Its own constant
     /// lives there, with the rest of the cleanup policy.
     const CLEANUP_IDLE_FOR_TESTS: Duration = Duration::from_millis(500);
@@ -1739,10 +1775,10 @@ mod tests {
     #[test]
     fn a_region_is_even_unless_the_desktop_is_odd_at_that_edge() {
         let interior = boxed(1, 1, 2, 2).to_rect(1919, 1079).expect("a rectangle");
-        assert_eq!((interior.left, interior.top), (320, 64));
+        assert_eq!((interior.left, interior.top), (64, 64));
         assert_eq!((interior.w() % 2, interior.h() % 2), (0, 0));
 
-        let edge = boxed(5, 16, 5, 16).to_rect(1919, 1079).expect("a rectangle");
+        let edge = boxed(29, 16, 29, 16).to_rect(1919, 1079).expect("a rectangle");
         assert_eq!((edge.right, edge.bottom), (1918, 1078), "clipped to the desktop");
         assert_eq!((edge.w() % 2, edge.h() % 2), (1, 1), "odd exactly where the desktop is");
 

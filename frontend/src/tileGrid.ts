@@ -26,7 +26,7 @@ export interface GridPitch {
 
 // Dash and gap in framebuffer pixels at density 1. Long enough to read as a
 // deliberate line rather than as noise, short enough that a dash and the gap
-// beside it both fall inside one 320x64 cell edge.
+// beside it both fall inside one 64x64 cell edge.
 const DASH = 8;
 
 // Every line is drawn twice, dark then light, each in the other's gaps, so one

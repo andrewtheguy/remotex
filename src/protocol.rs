@@ -536,7 +536,7 @@ pub mod camera {
     }
 }
 
-/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0).
+/// Canonical 64×64 tile grid in framebuffer pixels, anchored at (0,0).
 ///
 /// Damage is still reported by RDP and VNC in their own rectangles and is still
 /// *sent* in those rectangles — nothing snaps outward to the grid, which would
@@ -546,7 +546,7 @@ pub mod camera {
 /// [`crate::tiles::Rect::cell_key`], however differently the two protocols happen
 /// to describe it from one frame to the next. That identity is what the render
 /// dial's `motion` type counts churn against.
-pub const CELL_W: u16 = 320;
+pub const CELL_W: u16 = 64;
 /// See [`CELL_W`].
 pub const CELL_H: u16 = STRIP_ROWS;
 
@@ -1796,7 +1796,7 @@ mod tests {
         })
         .text_frame()
         {
-            Some(json) => assert!(json.contains(r#""tileGrid":{"w":320,"h":64}"#), "{json}"),
+            Some(json) => assert!(json.contains(r#""tileGrid":{"w":64,"h":64}"#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         // How to decode one stream, which is the message a client cannot work out for
