@@ -159,16 +159,14 @@ Console-style remote control of a physical sway machine, the way Apple's High
 Performance mode and the Windows console session work: every physical display
 is folded into one resizable headless output for the length of the session, the
 gateway renders it at the browser's density, and the person at the keyboard
-takes control back through a virtual console switch. It is a VNC dialect —
-one private pseudo-encoding and one message type each way, behind
-`subtype = "sway"` — plus a session daemon on the sway host built from wayvnc,
-a small neatvnc hook and a controller speaking sway IPC. The design, the byte
-layouts, the sway command sequence, the open questions and the staged plan are
-in [`sway-remote-session.md`](sway-remote-session.md). Stage 1 of that plan is
-measured on macintel: stock sway 1.10 gives the resizable headless output beside
-the live panel and the restore holds, but wayvnc 0.9.1 crashes on half the
-connects while the output is created beside it. That crash is the risk now, and
-stage 2 starts with its backtrace.
+takes control back through a virtual console switch. The wire half has shipped
+as `subtype = "swayvnc"`, one private pseudo-encoding and one message type each
+way, documented in [`swayvnc-density.md`](swayvnc-density.md). What remains is
+the session daemon on the sway host, a controller speaking sway IPC beside the
+patched wayvnc. A stage 1 prototype of it was measured on macintel: stock sway
+1.10 gives the resizable headless output beside the live panel and the restore
+holds, but wayvnc 0.9.1 crashes on half the connects while the output is created
+beside it. That crash is the risk now, and stage 2 starts with its backtrace.
 
 ## Not planned
 
