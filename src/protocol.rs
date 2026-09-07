@@ -279,30 +279,6 @@ pub enum ClientMsg {
     /// size fields matter at session-open, where [`ClientMsg::Connect`]
     /// carries the same shape.
     HostDisplay(HostDisplay),
-    /// Declare the density a generic VNC server renders at, in hundredths like
-    /// [`HostDisplay::scale`] — 100 or 200 once quantized by [`render_density`].
-    ///
-    /// Standard RFB has no field for density: `SetDesktopSize` and
-    /// `ExtendedDesktopSize` are pixels, and nothing on the wire says how large
-    /// they should look. So on a plain VNC target the density is *declared* from
-    /// this side, by whoever knows what scale the server is at, and changed from
-    /// the client's menu mid-session. The engine then asks for `points × density`
-    /// pixels where it can resize and reports the framebuffer at that scale in
-    /// [`ServerMsg::Resize`] either way; the browser still shows every pixel
-    /// one-to-one, so this is a declaration and not a scaling.
-    ///
-    /// Taken only under `render_type = "video"`, the one plan with no tile grid.
-    /// Everywhere else the grid is cut at [`CELL_POINTS`] of the framebuffer's
-    /// *known* density — the density RDP negotiated or the Mac reported — and a
-    /// declaration would be the one path where that density is a client's word
-    /// rather than the wire's. Rather than carry that case through every consumer
-    /// of the grid, a plain VNC target on tiles is 1× and its grid 64 pixels.
-    /// Dropped by every engine whose protocol carries its own density — RDP and
-    /// both Apple subtypes — because a declaration there would contradict what the
-    /// wire already states, and dropped on a plain VNC target that sends tiles.
-    /// [`ServerMsg::Connected`]'s `density` says which a session is. Per session,
-    /// never remembered: a new engine starts at 1x.
-    Density { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone
@@ -1075,12 +1051,6 @@ pub enum ServerMsg {
         /// and stop short at the first still corner. Drawn over the canvas it is
         /// exact everywhere, always complete, and costs the encoders nothing.
         grid_debug: bool,
-        /// Whether this session takes a [`ClientMsg::Density`] declaration: a plain
-        /// VNC target under `render_type = "video"`, and nothing else. Stated by
-        /// the gateway rather than worked out from `protocol` and `subtype` by the
-        /// client, because the render dial is the third condition and the client
-        /// only has its label.
-        density: bool,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -1266,7 +1236,6 @@ enum ControlMsg<'a> {
         render: &'a str,
         #[serde(rename = "gridDebug")]
         grid_debug: bool,
-        density: bool,
     },
     RemoteOs { macos: bool },
     TouchReady,
@@ -1381,7 +1350,6 @@ impl ServerMsg {
                 microphone,
                 render,
                 grid_debug,
-                density,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -1393,7 +1361,6 @@ impl ServerMsg {
                 microphone: *microphone,
                 render,
                 grid_debug: *grid_debug,
-                density: *density,
             }),
             ServerMsg::CameraStart {
                 width,
@@ -1548,13 +1515,6 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
         ));
-        // The declared density for a generic VNC server: hundredths, like the
-        // screen report's, and rejected past the u16 range the same way.
-        assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"density","scale":200}"#).unwrap(),
-            ClientMsg::Density { scale: 200 }
-        ));
-        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"density","scale":70000}"#).is_err());
         // The client's screen: the tag rides beside the struct's own fields.
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
@@ -1810,13 +1770,12 @@ mod tests {
             microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: false,
-            density: false,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false,"density":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1833,14 +1792,10 @@ mod tests {
             microphone: true,
             render: "video q60".to_owned(),
             grid_debug: false,
-            density: true,
         })
         .text_frame()
         {
-            Some(json) => {
-                assert!(json.contains(r#""subtype":null"#), "{json}");
-                assert!(json.contains(r#""density":true"#), "{json}");
-            }
+            Some(json) => assert!(json.contains(r#""subtype":null"#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         // `render_grid_debug` is a flag here; the lattice's pitch rides the resize,
@@ -1856,7 +1811,6 @@ mod tests {
             microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: true,
-            density: false,
         })
         .text_frame()
         {

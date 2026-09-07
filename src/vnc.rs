@@ -320,22 +320,12 @@ struct DesktopState {
     /// Pixels per point: how large `size` should be *shown*, as opposed to how
     /// many pixels it has.
     ///
-    /// On non-Apple RFB a framebuffer is just its pixels and no server says
-    /// otherwise, so this is [`declared_density`](Self::declared_density) —
-    /// [`UNSCALED`] until a client declares one. Apple's display layout does say
-    /// otherwise — a Retina screen renders at twice its logical size — and
-    /// reporting only the pixel count there would give the browser a canvas at
-    /// half the size the Mac thinks it is.
+    /// Always [`UNSCALED`] on non-Apple RFB, where a framebuffer is just its pixels
+    /// and no server says otherwise. Apple's display layout does say otherwise —
+    /// a Retina screen renders at twice its logical size — and reporting only the
+    /// pixel count there would give the browser a canvas at half the size the Mac
+    /// thinks it is.
     scale: f32,
-    /// The density a client declared for a generic server ([`ClientMsg::Density`]):
-    /// the pixels it renders per point, which nothing on a standard RFB wire can
-    /// say. [`UNSCALED`] until declared, and never read on the Apple dialects,
-    /// whose layout states the real one. A generic `SetDesktopSize` asks for
-    /// `points × declared_density` pixels, and every generic size announcement is
-    /// labelled with it — so `scale` and this disagree exactly while a
-    /// declaration is in flight, the way `scale` and `host_density` do on a High
-    /// Performance display.
-    declared_density: f32,
     /// The density of the screen the client's window is on, from
     /// [`ClientMsg::HostDisplay`], seeded from the session-open's screen.
     ///
@@ -628,7 +618,6 @@ async fn session(
             clipboard: config.clipboard,
             default_size: config.default_size(),
             video: config.streams_video(),
-            density: config.declares_density(),
             apple,
             high_performance,
             media,
@@ -666,11 +655,6 @@ struct Flags {
     /// ([`TargetConfig::streams_video`]): a generic `SetDesktopSize` is then
     /// held under the stream's picture ceiling — see [`request_resize`].
     video: bool,
-    /// Whether this target takes a [`ClientMsg::Density`] declaration
-    /// ([`TargetConfig::declares_density`]): plain VNC under `render_type =
-    /// "video"`. Everywhere else the declaration is dropped, so a tile grid is only
-    /// ever cut at a density the wire itself stated.
-    density: bool,
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
     /// subtypes negotiate them; only one uses the 003.889 record transport.
@@ -1192,7 +1176,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         clipboard: clipboard_enabled,
         default_size,
         video,
-        density: takes_density,
         apple,
         high_performance,
         media,
@@ -1206,15 +1189,14 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         size,
         scale: UNSCALED,
         host_density,
-        declared_density: UNSCALED,
         screen: None,
         pending: None,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
     let shadow: SharedShadow = Arc::new(std::sync::Mutex::new({
-        // At 1x, like the `Resize` the connect announced; a layout or a
-        // declaration that says otherwise re-cuts it with the desktop it comes with.
+        // At 1x, like the `Resize` the connect announced; a layout that says
+        // otherwise re-cuts it with the desktop it comes with.
         let mut shadow = Shadow::new("vnc", size.0, size.1, TileGrid::ONE);
         shadow.classify_cells(sink.wants_cells());
         shadow
@@ -1292,62 +1274,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     _ => None,
                 };
-                let sent = if let ClientMsg::Density { scale } = input {
-                    // A client declaring what a generic server renders at — see
-                    // [`ClientMsg::Density`]. Not one of the asks above, because it
-                    // is not gated on `resize`: the pixels the server already sends
-                    // can be re-labelled at the new density whether or not more can
-                    // be asked for. Where they can — the target lets the window
-                    // drive the size and the server has declared SetDesktopSize — the
-                    // resize carries the label, in the ExtendedDesktopSize reply.
-                    // Dropped on both Apple dialects, whose layout states the real
-                    // density and would be contradicted by a declared one, and on a
-                    // plain target that sends tiles, whose grid is cut at a density
-                    // the wire stated — `Flags::density`, which the session told the
-                    // client on `connected` so a compliant one never sends this here.
-                    let density = crate::protocol::render_density(scale);
-                    if !takes_density {
-                        warn!("vnc: dropping a density declaration this target does not take");
-                    }
-                    let (changed, relabel, size) = {
-                        let mut d = desktop.lock().unwrap();
-                        let changed =
-                            takes_density && !apple && (d.declared_density - density).abs() > 0.005;
-                        if changed {
-                            d.declared_density = density;
-                        }
-                        let can_resize = resize && d.screen.is_some();
-                        (changed, changed && !can_resize, d.size)
-                    };
-                    if !changed {
-                        Ok(())
-                    } else if relabel {
-                        // Where the window drives the size but the server has not
-                        // yet declared SetDesktopSize, stash the density-adjusted
-                        // request so the rect that declares support replays it.
-                        // Before the re-label, deliberately: the ask starts from the
-                        // points the desktop is rendered at, and once the label
-                        // matches the declaration those points at it are the size
-                        // it already has — a no-op with nothing to replay.
-                        let mut result = if resize {
-                            request_resize(&uplink, &desktop, ResizeAsk::Density, high_performance, video).await
-                        } else {
-                            Ok(())
-                        };
-                        if result.is_ok() {
-                            // The same pixels shown at a new size: the browser
-                            // reallocates its canvas, so the server is asked to paint
-                            // it whole, as after any resize.
-                            result = match apply_resize(&desktop, &shadow, size, density, &sink).await {
-                                Ok(_) => send(&uplink, &update_request(false, size)).await,
-                                Err(e) => Err(e),
-                            };
-                        }
-                        result
-                    } else {
-                        request_resize(&uplink, &desktop, ResizeAsk::Density, high_performance, video).await
-                    }
-                } else if let Some(ask) = ask {
+                let sent = if let Some(ask) = ask {
                     if resize {
                         request_resize(&uplink, &desktop, ask, high_performance, video).await
                     } else {
@@ -1557,9 +1484,8 @@ enum ResizeAsk {
     Viewport((u16, u16)),
     /// The target-defined default size: logical points.
     Points((u16, u16)),
-    /// No new size — the density changed, so the current size is re-expressed at
-    /// the new one: [`DesktopState::host_density`] on a High Performance display,
-    /// [`DesktopState::declared_density`] on a generic server.
+    /// No new size — the client's screen changed density, so the current size is
+    /// re-expressed at the new [`DesktopState::host_density`].
     Density,
 }
 
@@ -1570,9 +1496,8 @@ enum ResizeAsk {
 /// the resolved points at the client screen's density, which is how moving the
 /// window to a Retina display re-renders the same desktop at 2x. Generic VNC uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
-/// rect; until then, its report is stashed for replay. The wire gives it no
-/// density, so its points become pixels at the one a client declared
-/// ([`DesktopState::declared_density`], 1x until then) — and when the target streams `video`,
+/// rect; until then, its report is stashed for replay. It has no density to
+/// apply, so its points are its pixels — and when the target streams `video`,
 /// they are held under the stream's picture ceiling ([`crate::video::fit_ceiling`])
 /// before anything is sent or stashed, so the desktop asked for is one the encoder
 /// takes. A High Performance display needs no such hold: the Mac's own 3840×2160
@@ -1605,10 +1530,6 @@ async fn request_resize(
             }
             vnc_apple::set_display_configuration(mode)
         } else {
-            // Points become pixels at the declared density: 1x until a client
-            // declares otherwise, and then the one place a generic server is asked
-            // for more pixels than the window has points.
-            let want = pixels_at(want, d.declared_density);
             let want = if video { held_under_ceiling(want) } else { want };
             if want == d.size {
                 // The browser is back at the current size; drop any stale stash
@@ -1637,26 +1558,11 @@ async fn request_resize(
             if high_performance { "Apple virtual-display" } else { "desktop" },
             want.0,
             want.1,
-            if high_performance { d.host_density } else { d.declared_density },
+            if high_performance { d.host_density } else { UNSCALED },
         );
         msg
     };
     send(uplink, &msg).await
-}
-
-/// Points rendered at a density, in the pixels a `SetDesktopSize` states.
-/// Saturating: a `u16` of points at 2x can name more pixels than a `u16` holds,
-/// and the video ceiling or the server then says what it will actually give.
-fn pixels_at(points: (u16, u16), density: f32) -> (u16, u16) {
-    let px = |v: u16| (f32::from(v) * density).round().clamp(1.0, f32::from(u16::MAX)) as u16;
-    (px(points.0), px(points.1))
-}
-
-/// The scale a generic size announcement is labelled with: the density a client
-/// declared, or 1x. Generic RFB says nothing here itself — see
-/// [`DesktopState::declared_density`].
-fn declared_scale(desktop: &SharedDesktop) -> f32 {
-    desktop.lock().unwrap().declared_density
 }
 
 /// A generic resize request held under the video stream's picture ceiling, in
@@ -2571,8 +2477,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 debug!("vnc: ignoring a DesktopSize rect; the display layout is authoritative");
                 return Ok(RectEffect::NOTHING);
             }
-            let scale = declared_scale(desktop);
-            return apply_resize(desktop, shadow, (w, h), scale, sink).await.map(RectEffect::resized);
+            return apply_resize(desktop, shadow, (w, h), UNSCALED, sink).await.map(RectEffect::resized);
         }
         ENCODING_EXTENDED_DESKTOP_SIZE if apple.is_none() => {
             return read_extended_desktop_size(reader, uplink, desktop, shadow, (x, y, w, h), sink)
@@ -2859,15 +2764,9 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
         d.pending.take()
     };
 
-    let (scale, current) = {
-        let d = desktop.lock().unwrap();
-        (d.declared_density, d.size)
-    };
     let resized = if reason == 1 && status != 0 {
         // Our SetDesktopSize did not take effect here, so the size stays what it
-        // was — the rect's own dimensions are not trusted for it. A declared
-        // density still applies to the pixels the server keeps sending, so the
-        // label is corrected even though the size is not.
+        // was — the rect's own dimensions are not trusted for it.
         //
         // The statuses are the extension's — 1 prohibited, 2 out of resources, 3
         // invalid layout — plus neatvnc's own 4, "request forwarded": wayvnc has
@@ -2887,9 +2786,9 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
             3 => warn!("vnc: server rejected SetDesktopSize: invalid layout"),
             _ => warn!("vnc: server rejected SetDesktopSize (status {status})"),
         }
-        apply_resize(desktop, shadow, current, scale, sink).await?
+        false
     } else {
-        apply_resize(desktop, shadow, (w, h), scale, sink).await?
+        apply_resize(desktop, shadow, (w, h), UNSCALED, sink).await?
     };
 
     // Replay a viewport report that arrived before support was declared.
@@ -3386,9 +3285,8 @@ fn translate_input(
                 }
             }
         }
-        // Intercepted by the input loop (request_resize, and the declared
-        // density that is a resize or a relabel there) before translation.
-        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize | ClientMsg::Density { .. } => Vec::new(),
+        // Intercepted by the input loop (request_resize) before translation.
+        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Intercepted by the input loop (the clipboard bridge, which needs the
@@ -4821,7 +4719,6 @@ mod tests {
             size,
             scale: UNSCALED,
             host_density: 1.0,
-            declared_density: UNSCALED,
             screen,
             pending,
         }))
@@ -5155,115 +5052,6 @@ mod tests {
         assert_eq!(desktop.lock().unwrap().size, (1024, 768));
         assert!(forwarded(&sink, &mut rx).await.is_none(), "no resize reported to the browser");
         assert!(written(&wire).is_empty());
-    }
-
-    /// A declared density is the one way a generic server is asked for more pixels
-    /// than the window has points: a 2x declaration doubles the `SetDesktopSize`,
-    /// whether the ask is the window's size or the density change itself, and
-    /// declaring 1x again asks for the points back.
-    #[tokio::test]
-    async fn a_declared_density_asks_a_generic_server_for_pixels_at_it() {
-        let (uplink, wire) = test_uplink();
-        let screen = Screen { id: 7, flags: 0 };
-        let desktop = shared_desktop((1728, 883), Some(screen), None);
-        desktop.lock().unwrap().declared_density = 2.0;
-
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1728, 883)), false, false).await.unwrap();
-        assert_eq!(written(&wire), set_desktop_size((3456, 1766), screen));
-
-        // The declaration alone, against a desktop still labelled 1x: the same
-        // request, from the pixels the desktop has.
-        let (uplink, wire) = test_uplink();
-        request_resize(&uplink, &desktop, ResizeAsk::Density, false, false).await.unwrap();
-        assert_eq!(written(&wire), set_desktop_size((3456, 1766), screen));
-
-        // Before the server declares support, the same ask is stashed in the pixels
-        // the replay will send — and it has to be taken from a desktop still
-        // labelled 1x, since re-labelled first it would resolve to the size it has.
-        let stashed = shared_desktop((1728, 883), None, None);
-        stashed.lock().unwrap().declared_density = 2.0;
-        request_resize(&uplink, &stashed, ResizeAsk::Density, false, false).await.unwrap();
-        assert_eq!(stashed.lock().unwrap().pending, Some((3456, 1766)));
-
-        // Back to 1x from a desktop the server granted at 2x.
-        let (uplink, wire) = test_uplink();
-        {
-            let mut d = desktop.lock().unwrap();
-            d.size = (3456, 1766);
-            d.scale = 2.0;
-            d.declared_density = UNSCALED;
-        }
-        request_resize(&uplink, &desktop, ResizeAsk::Density, false, false).await.unwrap();
-        assert_eq!(written(&wire), set_desktop_size((1728, 883), screen));
-
-        // A streaming target holds the doubled pixels under the ceiling, not the points.
-        let (uplink, wire) = test_uplink();
-        let desktop = shared_desktop((1024, 768), Some(screen), None);
-        desktop.lock().unwrap().declared_density = 2.0;
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((2560, 1440)), false, true).await.unwrap();
-        assert_eq!(written(&wire), set_desktop_size((3840, 2400), screen));
-    }
-
-    /// Every generic size announcement carries the declared density as its scale —
-    /// the granted resize, and a rejected one, where the pixels stay and only the
-    /// label changes.
-    #[tokio::test]
-    async fn a_generic_size_announcement_is_labelled_with_the_declared_density() {
-        let (uplink, wire) = test_uplink();
-        let (sink, mut rx) = test_sink();
-        let desktop = shared_desktop((1728, 883), Some(Screen { id: 1, flags: 0 }), None);
-        desktop.lock().unwrap().declared_density = 2.0;
-
-        let payload = eds_payload(Screen { id: 1, flags: 0 });
-        let resized = read_extended_desktop_size(
-            &mut payload.as_slice(),
-            &uplink,
-            &desktop,
-            &test_shadow((1728, 883)),
-            (1, 0, 3456, 1766),
-            &sink,
-        )
-        .await
-        .unwrap();
-        assert!(resized);
-        let resize = forwarded(&sink, &mut rx).await;
-        assert!(matches!(resize, Some(ServerMsg::Resize { w: 3456, h: 1766, scale }) if scale == 2.0));
-        assert!(written(&wire).is_empty());
-
-        // Rejected: the size is left alone, the label is not.
-        let (sink, mut rx) = test_sink();
-        let desktop = shared_desktop((1728, 883), Some(Screen { id: 1, flags: 0 }), None);
-        desktop.lock().unwrap().declared_density = 2.0;
-        let resized = read_extended_desktop_size(
-            &mut payload.as_slice(),
-            &uplink,
-            &desktop,
-            &test_shadow((1728, 883)),
-            (1, 1, 640, 480),
-            &sink,
-        )
-        .await
-        .unwrap();
-        assert!(resized, "a scale change with no size change is still a new canvas");
-        assert_eq!(desktop.lock().unwrap().size, (1728, 883));
-        let resize = forwarded(&sink, &mut rx).await;
-        assert!(matches!(resize, Some(ServerMsg::Resize { w: 1728, h: 883, scale }) if scale == 2.0));
-
-        // Undeclared, the label stays 1x.
-        let (sink, mut rx) = test_sink();
-        let desktop = shared_desktop((1024, 768), None, None);
-        read_extended_desktop_size(
-            &mut payload.as_slice(),
-            &uplink,
-            &desktop,
-            &test_shadow((1024, 768)),
-            (1, 0, 800, 600),
-            &sink,
-        )
-        .await
-        .unwrap();
-        let resize = forwarded(&sink, &mut rx).await;
-        assert!(matches!(resize, Some(ServerMsg::Resize { w: 800, h: 600, scale: UNSCALED })));
     }
 
     #[tokio::test]

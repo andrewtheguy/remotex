@@ -1615,9 +1615,6 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
         ClientMsg::Viewport { .. } | ClientMsg::DefaultSize | ClientMsg::HostDisplay { .. } => {
             Vec::new()
         }
-        // A declared density is for a protocol that cannot carry one. RDP's
-        // `DesktopScaleFactor` already states it, so there is nothing to declare.
-        ClientMsg::Density { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Handled by the active loop (MS-RDPECLIP, a static virtual channel)

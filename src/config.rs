@@ -888,23 +888,6 @@ impl TargetConfig {
         self.render_subtype.unwrap_or_default()
     }
 
-    /// Whether this target takes a client's density declaration
-    /// ([`crate::protocol::ClientMsg::Density`]): plain VNC — the one protocol whose
-    /// wire says nothing about density — and only under `render_type = "video"`.
-    ///
-    /// The render dial is the third condition because of the tile grid. Every tile
-    /// plan cuts damage at 64 *points* of the framebuffer's density, and on RDP and
-    /// both Apple subtypes that density is the wire's own word. A declaration would
-    /// make plain VNC the one path where it is the client's word instead, and rather
-    /// than carry that case through every consumer of the grid, a plain VNC target
-    /// on tiles stays 1× and takes no declaration. `video` sends no tiles and has no
-    /// grid, so the declaration costs it nothing.
-    pub fn declares_density(&self) -> bool {
-        self.protocol == Protocol::Vnc
-            && self.subtype.is_none()
-            && self.render_type == RenderType::Video
-    }
-
     /// The tile encoders to use for this target. This is the whole of the render
     /// dial as the engines see it: the axes and the qualities collapse to one
     /// [`RenderPlan`], so `rdp::run` / `vnc::run` need not know the config enums.
@@ -3039,44 +3022,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("422"), "{err:#}");
-    }
-
-    /// A density declaration is plain VNC's alone, and only where nothing is cut
-    /// at a grid: under `video`. Both Apple subtypes and RDP state their density on
-    /// the wire, and a plain target on tiles keeps its grid at the wire's 1x.
-    #[test]
-    fn only_plain_vnc_under_video_takes_a_density_declaration() {
-        let target = |body: &str| {
-            ConfigFile::parse(&format!(
-                r#"
-                [[targets]]
-                name = "a"
-                host = "h"
-                {body}
-                "#
-            ))
-            .unwrap()
-            .targets
-            .remove(0)
-        };
-        assert!(target("protocol = \"vnc\"\nrender_type = \"video\"\nrender_stream_quality = 60").declares_density());
-        assert!(!target("protocol = \"vnc\"").declares_density(), "tiles cut a grid");
-        assert!(
-            !target("protocol = \"vnc\"\nrender_motion = true\nrender_stream_quality = 60").declares_density(),
-            "motion is still tiles"
-        );
-        assert!(
-            !target(
-                "protocol = \"vnc\"\nsubtype = \"ard\"\nusername = \"u\"\npassword = \"p\"\n\
-                 render_type = \"video\"\nrender_stream_quality = 60"
-            )
-            .declares_density(),
-            "Apple states its own"
-        );
-        assert!(
-            !target("protocol = \"rdp\"\nrender_type = \"video\"\nrender_stream_quality = 60").declares_density(),
-            "RDP negotiates its own"
-        );
     }
 
     /// The grid is the debug aid no encoder can see: it belongs to the two

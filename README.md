@@ -187,12 +187,10 @@ resize, and the one/two-virtual-display control is not implemented.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 A plain VNC server has no way to say its pixels are HiDPI — standard RFB carries
-sizes in pixels and nothing else — so on those targets the floating menu has a
-**Density** toggle that declares 1x or 2x for the session. With `resize = true`
-the declaration asks the server for the window's points at that density and the
-desktop is shown sharp at 100%; without it, the pixels already arriving are
-re-labelled. See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for
-the sway + wayvnc walkthrough and why a second client's resize can come back
+sizes in pixels and nothing else — so those targets are shown at 1x, one CSS
+pixel per framebuffer pixel, and the window's points go to the server as pixels.
+See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
+on a sway output at scale 2 and why a second client's resize can come back
 prohibited.
 
 High Performance mode is the one part of remotex built entirely without a
