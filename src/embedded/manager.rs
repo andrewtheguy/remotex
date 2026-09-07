@@ -128,8 +128,8 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
 
         tokio::select! {
             _ = ticks.tick() => {
-                if supervisor.poll_exits().await? {
-                    message = "a gateway exited; see its gateway.log".to_owned();
+                if let Some(ended) = supervisor.poll_exits().await? {
+                    message = ended;
                 }
             }
             result = &mut interrupt => {
@@ -699,6 +699,11 @@ pub enum InstanceStatus {
     Stopped,
     Starting,
     Running,
+    /// The gateway ended cleanly without this manager asking: exit code 0, or a
+    /// SIGINT/SIGTERM/SIGHUP from outside. Nothing about it failed.
+    Exited,
+    /// The gateway could not start, exited with a non-zero code, or died on a
+    /// crash signal.
     Failed,
 }
 
@@ -708,6 +713,7 @@ impl InstanceStatus {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Exited => "exited",
             Self::Failed => "failed",
         }
     }
@@ -730,7 +736,7 @@ impl InstanceInfo {
         super::Instance::new(&self.dir).config_path()
     }
 
-    /// Where a failed gateway said why.
+    /// Where a gateway that ended said why.
     pub fn log_path(&self) -> PathBuf {
         self.dir.join("gateway.log")
     }
@@ -740,6 +746,8 @@ enum InstanceState {
     Stopped,
     Starting,
     Running(RunningGateway),
+    /// A clean exit this manager did not request; the string says how it ended.
+    Exited(String),
     Failed(String),
 }
 
@@ -792,6 +800,7 @@ impl Supervisor {
                     InstanceState::Stopped => (InstanceStatus::Stopped, None),
                     InstanceState::Starting => (InstanceStatus::Starting, None),
                     InstanceState::Running(_) => (InstanceStatus::Running, None),
+                    InstanceState::Exited(how) => (InstanceStatus::Exited, Some(how.clone())),
                     InstanceState::Failed(error) => (InstanceStatus::Failed, Some(error.clone())),
                 };
                 InstanceInfo {
@@ -909,24 +918,30 @@ impl Supervisor {
         self.start(name).await
     }
 
-    pub async fn poll_exits(&mut self) -> anyhow::Result<bool> {
-        let mut changed = false;
+    /// Notice gateways that ended without being asked. Returns a one-line
+    /// account of the last one for the status line, or `None` when nothing
+    /// changed.
+    pub async fn poll_exits(&mut self) -> anyhow::Result<Option<String>> {
+        let mut ended = None;
         for instance in &mut self.instances {
             let InstanceState::Running(gateway) = &mut instance.state else {
                 continue;
             };
             if let Some(status) = gateway.child.try_wait().context("cannot inspect gateway child")? {
-                instance.state = InstanceState::Failed(format!(
-                    "gateway exited with {status}; see {}",
-                    instance.dir.join("gateway.log").display()
-                ));
-                changed = true;
+                let exit = ExitKind::of(status);
+                let detail = format!("{exit}; see {}", instance.dir.join("gateway.log").display());
+                ended = Some(format!("{}: {exit}", instance.name));
+                instance.state = if exit.is_clean() {
+                    InstanceState::Exited(detail)
+                } else {
+                    InstanceState::Failed(detail)
+                };
             }
         }
-        if changed {
+        if ended.is_some() {
             self.publish().await;
         }
-        Ok(changed)
+        Ok(ended)
     }
 
     pub async fn shutdown(&mut self) {
@@ -952,6 +967,7 @@ impl Supervisor {
             let (status, target) = match &instance.state {
                 InstanceState::Stopped => (InstanceStatus::Stopped, None),
                 InstanceState::Starting => (InstanceStatus::Starting, None),
+                InstanceState::Exited(_) => (InstanceStatus::Exited, None),
                 InstanceState::Failed(_) => (InstanceStatus::Failed, None),
                 InstanceState::Running(gateway) => (
                     InstanceStatus::Running,
@@ -964,6 +980,85 @@ impl Supervisor {
             published.insert(instance.name.clone(), PublishedInstance { status, target });
         }
         *self.routes.inner.write().await = published;
+    }
+}
+
+/// How a gateway this manager did not stop came to end.
+///
+/// The gateway exits 0 on SIGINT or SIGTERM after logging "shutdown signal
+/// received", and on its stdin closing; a `pkill` aimed at some other remotex
+/// therefore shows up here as a clean exit, not a crash. Only a non-zero code
+/// or a crash signal is a failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitKind {
+    /// Exit code 0.
+    Clean,
+    /// Exit code other than 0.
+    Code(i32),
+    /// Killed by a signal someone sends on purpose: SIGINT, SIGTERM, SIGHUP.
+    Stopped(i32),
+    /// Killed by any other signal: SIGSEGV, SIGABRT, SIGKILL, and so on.
+    Crashed(i32),
+}
+
+impl ExitKind {
+    fn of(status: std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt as _;
+        match (status.code(), status.signal()) {
+            (Some(0), _) => Self::Clean,
+            (Some(code), _) => Self::Code(code),
+            (None, Some(signal)) if [libc::SIGINT, libc::SIGTERM, libc::SIGHUP].contains(&signal) => {
+                Self::Stopped(signal)
+            }
+            (None, Some(signal)) => Self::Crashed(signal),
+            (None, None) => Self::Crashed(0),
+        }
+    }
+
+    fn is_clean(self) -> bool {
+        matches!(self, Self::Clean | Self::Stopped(_))
+    }
+}
+
+fn signal_name(signal: i32) -> &'static str {
+    match signal {
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGINT => "SIGINT",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGTRAP => "SIGTRAP",
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGALRM => "SIGALRM",
+        libc::SIGTERM => "SIGTERM",
+        _ => "an uncommon signal",
+    }
+}
+
+impl std::fmt::Display for ExitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Clean => write!(
+                f,
+                "the gateway shut down cleanly (exit code 0) without this control plane asking; \
+                 something else sent it SIGINT or SIGTERM, such as a pkill matching 'remotex serve'"
+            ),
+            Self::Code(code) => write!(f, "the gateway failed with exit code {code}"),
+            Self::Stopped(signal) => write!(
+                f,
+                "the gateway was stopped from outside by signal {signal} ({})",
+                signal_name(signal)
+            ),
+            Self::Crashed(signal) => write!(
+                f,
+                "the gateway died on signal {signal} ({})",
+                signal_name(signal)
+            ),
+        }
     }
 }
 
@@ -1502,6 +1597,38 @@ mod tests {
         let page = describe_instance(&instance, 52380).join("\n");
         assert!(page.contains("will not start"), "{page}");
         assert!(page.contains("[server]"), "it names what is wrong: {page}");
+    }
+
+    /// A clean exit this manager did not request is not a failure, and the
+    /// account of it says which it was, so a `pkill` aimed at some other remotex
+    /// is not read as a crash.
+    #[test]
+    fn an_unrequested_exit_is_only_a_failure_when_the_gateway_says_so() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = |raw: i32| std::process::ExitStatus::from_raw(raw);
+
+        let clean = ExitKind::of(status(0));
+        assert_eq!(clean, ExitKind::Clean);
+        assert!(clean.is_clean());
+        assert!(clean.to_string().contains("exit code 0"), "{clean}");
+
+        let code = ExitKind::of(status(2 << 8));
+        assert_eq!(code, ExitKind::Code(2));
+        assert!(!code.is_clean());
+        assert!(code.to_string().contains("exit code 2"), "{code}");
+
+        let term = ExitKind::of(status(libc::SIGTERM));
+        assert_eq!(term, ExitKind::Stopped(libc::SIGTERM));
+        assert!(term.is_clean());
+        assert!(term.to_string().contains("SIGTERM"), "{term}");
+        assert!(ExitKind::of(status(libc::SIGINT)).is_clean());
+        assert!(ExitKind::of(status(libc::SIGHUP)).is_clean());
+
+        let segv = ExitKind::of(status(libc::SIGSEGV));
+        assert_eq!(segv, ExitKind::Crashed(libc::SIGSEGV));
+        assert!(!segv.is_clean());
+        assert!(segv.to_string().contains("SIGSEGV"), "{segv}");
+        assert!(!ExitKind::of(status(libc::SIGKILL)).is_clean());
     }
 
     #[test]

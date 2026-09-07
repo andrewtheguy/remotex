@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.185"
+version = "0.0.186"
 
 [package]
 name = "remotex"
@@ -28,7 +28,7 @@ edition = "2024"
 # explicitly disable default features: a remotely deployed gateway must not
 # expose process supervision or its private worker surface.
 default = ["embedded-gateway"]
-embedded-gateway = ["dep:crossterm"]
+embedded-gateway = ["dep:crossterm", "dep:libc"]
 # Apple High Performance system audio (src/vnc_apple_audio.rs, src/aac_eld.rs).
 # Off by default and never in a release artifact: the Mac streams AAC-ELD, which
 # only Fraunhofer's fdk-aac decodes portably, and its licence is not OSI-approved.
@@ -48,6 +48,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = { version = "0.29", features = ["event-stream"], optional = true }
+libc = { version = "0.2", optional = true }
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
