@@ -100,6 +100,17 @@ pub enum Subtype {
     /// replace the virtual display's one advertised mode and the Mac answers with
     /// its new layout. See docs/apple-vnc-889.md.
     ArdHighPerformance,
+    /// A sway desktop behind the patched wayvnc from the `swayvnc` repository:
+    /// standard RFB 3.8 plus one private extension that reports the captured
+    /// output's pixel density, which plain RFB has no word for. The engine asks
+    /// for the reports in `SetEncodings`, labels every framebuffer with the last
+    /// one, asks `SetDesktopSize` for points × scale when `resize` is set, and
+    /// declares the browser's density to the server. Authentication and
+    /// everything else are a plain `vnc` target's. A stock wayvnc never answers
+    /// the request, and the session ends on its first framebuffer update
+    /// rather than run at a density the server never confirmed. See
+    /// docs/swayvnc-density.md.
+    Swayvnc,
 }
 
 impl Subtype {
@@ -108,6 +119,7 @@ impl Subtype {
         match self {
             Subtype::Ard => "ard",
             Subtype::ArdHighPerformance => "ard-high-performance",
+            Subtype::Swayvnc => "swayvnc",
         }
     }
 
@@ -117,7 +129,14 @@ impl Subtype {
     pub fn apple_authentication(self) -> bool {
         match self {
             Subtype::Ard | Subtype::ArdHighPerformance => true,
+            Subtype::Swayvnc => false,
         }
+    }
+
+    /// Whether this subtype negotiates the swayvnc density extension: the one
+    /// generic-RFB server that can say what scale its framebuffer is drawn at.
+    pub fn reports_density(self) -> bool {
+        self == Subtype::Swayvnc
     }
 }
 
@@ -1590,7 +1609,11 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (Protocol::Vnc, None) => {
+                // A swayvnc target authenticates like any plain VNC server —
+                // wayvnc offers RSA-AES with an account, or VncAuth — so it shares
+                // the plain target's credential rule; the subtype only adds the
+                // density extension on the wire.
+                (Protocol::Vnc, None | Some(Subtype::Swayvnc)) => {
                     anyhow::ensure!(
                         target.username.is_empty() || !target.password.is_empty(),
                         "target {:?} is protocol \"vnc\" and sets username without password — \
