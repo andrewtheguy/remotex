@@ -92,8 +92,11 @@ declaration with an `OutputScale`**: after the compositor has applied the
 change, through the same head-scale path as a `swaymsg output … scale`, or at
 once with the scale as it is when nothing is to be changed or nothing can be
 (resizing disabled, another client owning the layout, a density out of the
-0.5–8 range, a configuration the compositor rejects). The gateway relies on
-that answer arriving.
+0.5–8 range, a configuration the compositor rejects). A configuration the
+compositor accepts without changing the head's scale is answered too: wayvnc
+follows the `succeeded` with one round trip and reports the scale as it is
+when no head change arrived by then. The gateway relies on that answer
+arriving.
 
 | Offset | Type | Field |
 |---|---|---|
@@ -121,7 +124,11 @@ wayvnc answers `SetEncodings` before its first update.
   request waits for the report, because a request in the wrong pixels is a
   desktop redrawn twice. Every report that changes the scale, or answers a
   declaration, re-asks for the window in the new pixels, unless the report
-  already names them.
+  already names them. A relabel empties the browser's canvas, and the resize
+  request's rect is what repaints it; when no request goes out, or the server
+  refuses it, the gateway asks for the whole framebuffer instead, since the
+  report arrives outside any `FramebufferUpdate` and an idle desktop would
+  otherwise stay blank.
 - **Declare and follow.** The browser's density goes to the server on the first
   report and on every change. When it differs from the reported scale, the
   declaration is a request: the server answers it with an `OutputScale`, after
@@ -130,10 +137,15 @@ wayvnc answers `SetEncodings` before its first update.
   report, including a window that changes size meanwhile, which replaces the
   held one. The answering report then re-asks the window in whatever pixels
   the server settled on: 2x when it followed, the old scale when it refused.
-  The gateway never applies a density the server has not reported, and never
-  re-declares on a report that disagrees with it, so a `swaymsg output … scale`
-  from inside the session is an override the gateway follows rather than
-  fights.
+  One declaration is out at a time: a density that changes while one is
+  unanswered is recorded, and the answering report declares it then, so the
+  server is walked through one transition at a time and ends at the browser's
+  newest density rather than the one it passed through. Declarations are
+  decided and written under the same lock as resize requests, so the wire
+  carries them in the order they were decided. The gateway never applies a
+  density the server has not reported, and never re-declares on a report that
+  disagrees with it, so a `swaymsg output … scale` from inside the session is
+  an override the gateway follows rather than fights.
 
 Measured sequence, a 1728×883-point window on a 2x screen while the output is
 toggled from `scale 1` to `scale 2` and back on the host:

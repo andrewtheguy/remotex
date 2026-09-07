@@ -378,6 +378,17 @@ struct DesktopState {
     /// requests are held until that report, and it re-asks the window in
     /// whatever pixels the server settled on — one redraw, not two.
     following: bool,
+    /// The density last declared to the server, followed or not; `None` before
+    /// the first declaration. The report answering a declaration is compared
+    /// with it: a browser whose density moved on while that declaration was out
+    /// is declared again then, so one transition is in flight at a time and the
+    /// server's last word is the browser's newest.
+    declared: Option<f32>,
+    /// A scale report relabelled the current pixels, which cleared the browser's
+    /// canvas, and nothing since has asked the server for them again. Cleared
+    /// by the full update a resize's rect earns, or by the one requested in a
+    /// resize's place — see [`read_output_scale`].
+    repaint_owed: bool,
 }
 
 /// The swayvnc density extension's state on one connection — see
@@ -442,7 +453,7 @@ impl DesktopState {
     /// size. Both that and a request sent clear any older hold: a replay must
     /// never ask for a window the browser has since left.
     ///
-    /// Called with the uplink held — see [`send_generic_resize`] — so the wire
+    /// Called with the uplink held — see [`send_decided`] — so the wire
     /// carries requests in the order they were decided.
     fn generic_resize(&mut self, points: (u16, u16)) -> Option<[u8; 24]> {
         self.viewport = Some(points);
@@ -497,27 +508,43 @@ impl DesktopState {
             return None;
         }
         self.following = (self.generic_scale() - declared).abs() > 0.005;
+        self.declared = Some(declared);
         Some(client_density(declared))
+    }
+
+    /// The `ClientDensity` for a `HostDisplay` report mid-session, or `None`.
+    /// The density is recorded whatever happens; it is declared only once the
+    /// server has reported, only when it changed, and not while a declaration
+    /// is out — the report answering that one declares the newest density
+    /// then, so a browser that changes twice while the server is busy ends up
+    /// followed to where it is, not to where it passed through.
+    fn host_density_changed(&mut self, declared: f32) -> Option<[u8; 8]> {
+        let changed = (self.host_density - declared).abs() > 0.005;
+        self.host_density = declared;
+        (changed && self.density == Density::Reported && !self.following)
+            .then(|| self.declare_density(declared))
+            .flatten()
     }
 }
 
-/// Decide a generic resize from the desktop's state and send it, with the
-/// uplink held from the decision to the write. Every resize request leaves
-/// through here or [`request_resize`], which takes the same lock first, so the
-/// wire's order is the decisions' order: a request decided from newer state is
-/// never followed by one decided from older. The read loop's replays go through
-/// this after their awaits rather than before, so they read the state as it is
-/// when they send, not as it was when the rect arrived.
-async fn send_generic_resize(
+/// Decide a message from the desktop's state and send it, with the uplink held
+/// from the decision to the write. Every generic resize request and every
+/// density declaration leaves through here or [`request_resize`], which takes
+/// the same lock first, so the wire's order is the decisions' order: a message
+/// decided from newer state is never followed by one decided from older. The
+/// read loop's replays go through this after their awaits rather than before,
+/// so they read the state as it is when they send, not as it was when the rect
+/// arrived. Returns whether anything went out.
+async fn send_decided<M: AsRef<[u8]>>(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
-    decide: impl FnOnce(&mut DesktopState) -> Option<[u8; 24]>,
-) -> anyhow::Result<()> {
+    decide: impl FnOnce(&mut DesktopState) -> Option<M>,
+) -> anyhow::Result<bool> {
     let mut up = uplink.lock().await;
     let msg = decide(&mut desktop.lock().unwrap());
     match msg {
-        Some(msg) => up.send(&msg).await,
-        None => Ok(()),
+        Some(msg) => up.send(msg.as_ref()).await.map(|()| true),
+        None => Ok(false),
     }
 }
 
@@ -1375,6 +1402,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         video,
         resize,
         following: false,
+        declared: None,
+        repaint_owed: false,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -1450,24 +1479,19 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
                     // On a swayvnc target the report is forwarded as the client's
-                    // declared density, once the server has shown it listens.
+                    // declared density, once the server has shown it listens
+                    // and not while an earlier declaration is unanswered — see
+                    // [`DesktopState::host_density_changed`]. Decided and
+                    // written under the uplink, like a resize, so a declaration
+                    // decided from newer state never trails one from older.
                     // Nothing is resized on it here: the server sets its
                     // output's scale to the declaration and reports, and that
                     // report re-asks the window in the new pixels — see
                     // [`DesktopState::declare_density`].
                     ClientMsg::HostDisplay(screen) if density => {
                         let declared = crate::protocol::render_density(screen.scale);
-                        let msg = {
-                            let mut d = desktop.lock().unwrap();
-                            let changed = (d.host_density - declared).abs() > 0.005;
-                            d.host_density = declared;
-                            (changed && d.density == Density::Reported)
-                                .then(|| d.declare_density(declared))
-                                .flatten()
-                        };
-                        if let Some(msg) = msg {
-                            debug!("vnc: declaring a client density of {declared}x");
-                            send(&uplink, &msg).await?;
+                        if send_decided(&uplink, &desktop, |d| d.host_density_changed(declared)).await? {
+                            debug!("vnc: declared a client density of {declared}x");
                         }
                         None
                     }
@@ -1714,7 +1738,7 @@ async fn request_resize(
     ask: ResizeAsk,
     high_performance: bool,
 ) -> anyhow::Result<()> {
-    // The uplink first, then the decision — see [`send_generic_resize`].
+    // The uplink first, then the decision — see [`send_decided`].
     let mut up = uplink.lock().await;
     let msg = {
         let mut d = desktop.lock().unwrap();
@@ -1941,7 +1965,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // has. After the loop rather than inside it, so a `LastRect` breaking
                 // out still reaches it.
                 sink.frame().await?;
-                let size = desktop.lock().unwrap().size;
+                let size = {
+                    let mut d = desktop.lock().unwrap();
+                    if resized {
+                        // The full update a resize earns below repaints whatever a
+                        // scale report cleared — see [`read_output_scale`].
+                        d.repaint_owed = false;
+                    }
+                    d.size
+                };
                 // The enabled region is part of the request, so a resize invalidates
                 // it: without this the server would go on pushing updates for a
                 // rectangle the desktop no longer has.
@@ -2981,6 +3013,14 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
             3 => warn!("vnc: server rejected SetDesktopSize: invalid layout"),
             _ => warn!("vnc: server rejected SetDesktopSize (status {status})"),
         }
+        // A scale report may have cleared the browser's canvas on the strength
+        // of this request's rect repainting it — see [`read_output_scale`].
+        // Refused, it repaints nothing, so the pixels are asked for as they are.
+        if status != 4 && std::mem::take(&mut desktop.lock().unwrap().repaint_owed) {
+            let size = desktop.lock().unwrap().size;
+            debug!("vnc: asking for the whole framebuffer; the relabelled canvas is still blank");
+            send(uplink, &update_request(false, size)).await?;
+        }
         false
     } else {
         let scale = desktop.lock().unwrap().generic_scale();
@@ -2991,7 +3031,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
     // stash is read here, after the browser has been told the new size, so a
     // window that moved on meanwhile — a request sent from the input side while
     // that message was on its way — leaves nothing stale to replay.
-    send_generic_resize(uplink, desktop, |d| {
+    send_decided(uplink, desktop, |d| {
         let want = d.pending.take()?;
         let msg = d.generic_resize(want);
         if msg.is_some() {
@@ -3018,7 +3058,12 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
 /// that report — the desktop is then drawn once, in the right pixels. Any
 /// report that changes the scale, or answers a declaration, re-asks for the
 /// window in the new pixels, so a desktop toggled to 2x on the host keeps
-/// filling the window rather than shrinking to half of it.
+/// filling the window rather than shrinking to half of it. A report answering
+/// a declaration the browser's density has since left behind declares the new
+/// density instead, so one transition is in flight at a time. And a relabel
+/// that no resize request follows asks for the whole framebuffer: the relabel
+/// cleared the browser's canvas, and outside a `FramebufferUpdate` nothing
+/// else would paint the parts of the desktop that never change.
 async fn read_output_scale<R: AsyncRead + Unpin>(
     reader: &mut R,
     uplink: &SharedUplink,
@@ -3033,29 +3078,43 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
         "vnc: server reports its {}x{} framebuffer at {}x",
         report.size.0, report.size.1, report.scale
     );
-    let (relabel, declare, reask) = {
-        let mut d = desktop.lock().unwrap();
-        let first = d.density != Density::Reported;
-        d.density = Density::Reported;
-        let changed = d.wire_scale != Some(report.scale);
-        d.wire_scale = Some(report.scale);
-        let relabel = report.size == d.size && d.scale != report.scale;
-        // This report answers an outstanding declaration, if one was out.
-        let answered = std::mem::take(&mut d.following);
-        let declared = d.host_density;
-        let declare = first.then(|| d.declare_density(declared)).flatten();
-        // Not while a declaration is out: the report answering it re-asks in
-        // the pixels the server settles on.
-        let reask = (changed || first || answered) && !d.following;
-        (relabel, declare.map(|msg| (declared, msg)), reask)
+    let (relabel, reask) = {
+        // The uplink first, then the decision — see [`send_decided`] — so a
+        // declaration the input side decides from this report's state cannot
+        // reach the wire ahead of the one decided here.
+        let mut up = uplink.lock().await;
+        let (relabel, declare, reask) = {
+            let mut d = desktop.lock().unwrap();
+            let first = d.density != Density::Reported;
+            d.density = Density::Reported;
+            let changed = d.wire_scale != Some(report.scale);
+            d.wire_scale = Some(report.scale);
+            let relabel = report.size == d.size && d.scale != report.scale;
+            // This report answers an outstanding declaration, if one was out.
+            let answered = std::mem::take(&mut d.following);
+            let declared = d.host_density;
+            // Declared on the first report, and again when the declaration
+            // just answered is no longer the browser's density: a change that
+            // arrived while the server was busy waited its turn here.
+            let moved_on =
+                answered && d.declared.is_some_and(|was| (was - declared).abs() > 0.005);
+            let declare = (first || moved_on).then(|| d.declare_density(declared)).flatten();
+            // Not while a declaration is out: the report answering it re-asks in
+            // the pixels the server settles on.
+            let reask = (changed || first || answered) && !d.following;
+            (relabel, declare.map(|msg| (declared, msg)), reask)
+        };
+        if let Some((declared, msg)) = declare {
+            info!("vnc: the server reports pixel density; declaring the client's {declared}x");
+            up.send(&msg).await?;
+        }
+        (relabel, reask)
     };
-    if let Some((declared, msg)) = declare {
-        info!("vnc: the server reports pixel density; declaring the client's {declared}x");
-        send(uplink, &msg).await?;
-    }
     if relabel {
         apply_resize(desktop, shadow, report.size, report.scale, sink).await?;
+        desktop.lock().unwrap().repaint_owed = true;
     }
+    let mut resized = false;
     if reask {
         // The window's size, asked for again in the new pixels — or for the
         // first time, if the request was held for this report. Decided under
@@ -3063,7 +3122,7 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
         // window wants by then. Not when the report already names the pixels
         // the window wants: that rect is on its way, and asking again would
         // only redraw it.
-        send_generic_resize(uplink, desktop, |d| {
+        resized = send_decided(uplink, desktop, |d| {
             d.pending
                 .take()
                 .or(d.viewport)
@@ -3071,6 +3130,27 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
                 .and_then(|points| d.generic_resize(points))
         })
         .await?;
+    }
+    // A relabel emptied the browser's canvas, and this message is outside any
+    // `FramebufferUpdate`, so no request follows it by itself. A resize request
+    // repaints through its rect, and a declaration through the report that
+    // answers it, which decides here again; with neither out, the whole
+    // framebuffer is asked for now, or the parts of the desktop that never
+    // change would stay blank.
+    let repaint = {
+        let mut d = desktop.lock().unwrap();
+        let repaint = d.repaint_owed && !resized && !d.following;
+        if repaint {
+            d.repaint_owed = false;
+        }
+        repaint
+    };
+    if repaint {
+        debug!(
+            "vnc: asking for the whole {}x{} framebuffer again at its new density",
+            report.size.0, report.size.1
+        );
+        send(uplink, &update_request(false, report.size)).await?;
     }
     Ok(())
 }
@@ -5076,6 +5156,8 @@ mod tests {
             video: false,
             resize: true,
             following: false,
+            declared: None,
+            repaint_owed: false,
         }))
     }
 
@@ -5570,8 +5652,7 @@ mod tests {
         }
 
         // The browser moved to a 1x screen: what the run loop does on HostDisplay.
-        let msg = desktop.lock().unwrap().declare_density(1.0).unwrap();
-        send(&uplink, &msg).await.unwrap();
+        assert!(send_decided(&uplink, &desktop, |d| d.host_density_changed(1.0)).await.unwrap());
         assert!(desktop.lock().unwrap().following);
 
         let body = output_scale_body((3456, 1766), 1.0);
@@ -5585,6 +5666,148 @@ mod tests {
             Some(ServerMsg::Resize { w: 3456, h: 1766, scale }) if scale == UNSCALED
         ));
         assert!(!desktop.lock().unwrap().following);
+    }
+
+    /// A density that changes while a declaration is unanswered waits: the
+    /// answering report finds the browser elsewhere and declares that, so the
+    /// server is asked for one transition at a time and ends where the browser
+    /// is, not where it passed through.
+    #[tokio::test]
+    async fn a_density_changed_while_a_declaration_is_out_is_declared_by_the_answer() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1920, 1080), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(1.0);
+            d.host_density = 1.0;
+            d.viewport = Some((1728, 883));
+        }
+
+        // To a 2x screen: declared, and the server is now busy following.
+        assert!(send_decided(&uplink, &desktop, |d| d.host_density_changed(2.0)).await.unwrap());
+        assert_eq!(written(&wire), client_density(2.0));
+        assert!(desktop.lock().unwrap().following);
+
+        // Back to 1x before the answer: recorded, not declared.
+        assert!(!send_decided(&uplink, &desktop, |d| d.host_density_changed(1.0)).await.unwrap());
+        assert_eq!(written(&wire), client_density(2.0), "nothing more while the first is out");
+        assert_eq!(desktop.lock().unwrap().host_density, 1.0);
+
+        // The server followed to 2x: the same pixels relabelled, the resize still
+        // held, and the browser's current 1x declared in the answer's place.
+        let body = output_scale_body((1920, 1080), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), [client_density(2.0).to_vec(), client_density(1.0).to_vec()].concat());
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Resize { w: 1920, h: 1080, scale }) if scale == 2.0
+        ));
+        {
+            let d = desktop.lock().unwrap();
+            assert!(d.following, "the second declaration is out");
+            assert_eq!(d.declared, Some(1.0));
+        }
+
+        // The answer to that one: 1x again, and only now is the window asked for.
+        let body = output_scale_body((1920, 1080), 1.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        let expected = [
+            client_density(2.0).to_vec(),
+            client_density(1.0).to_vec(),
+            set_desktop_size((1728, 883), screen).to_vec(),
+        ]
+        .concat();
+        assert_eq!(written(&wire), expected);
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Resize { w: 1920, h: 1080, scale }) if scale == UNSCALED
+        ));
+        let d = desktop.lock().unwrap();
+        assert!(!d.following);
+        assert_eq!(d.wire_scale, Some(1.0));
+    }
+
+    /// A report that relabels the current pixels clears the browser's canvas.
+    /// When the window already has the pixels the report names, no resize
+    /// follows to repaint it, so the whole framebuffer is asked for instead.
+    #[tokio::test]
+    async fn a_relabel_with_no_resize_to_send_asks_for_the_whole_framebuffer() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((3456, 1766), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(1.0);
+            d.host_density = 2.0;
+            d.declared = Some(2.0);
+            d.viewport = Some((1728, 883));
+        }
+
+        // The host toggles the output to 2x: 3456×1766 is already points × 2.
+        let body = output_scale_body((3456, 1766), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((3456, 1766)), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Resize { w: 3456, h: 1766, scale }) if scale == 2.0
+        ));
+        assert_eq!(written(&wire), update_request(false, (3456, 1766)), "a full update, no resize");
+        let d = desktop.lock().unwrap();
+        assert!(!d.repaint_owed);
+        assert!(!d.following);
+    }
+
+    /// The resize a relabel sends is what repaints the canvas. Refused, it
+    /// repaints nothing, and the refusal asks for the pixels as they are.
+    #[tokio::test]
+    async fn a_refused_resize_after_a_relabel_asks_for_the_whole_framebuffer() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1920, 1080), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(1.0);
+            d.host_density = 2.0;
+            d.declared = Some(2.0);
+            d.viewport = Some((1728, 883));
+        }
+
+        let body = output_scale_body((1920, 1080), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        assert!(forwarded(&sink, &mut rx).await.is_some(), "relabelled");
+        let resize = set_desktop_size((3456, 1766), screen).to_vec();
+        assert_eq!(written(&wire), resize, "the resize is what will repaint");
+        assert!(desktop.lock().unwrap().repaint_owed);
+
+        // Prohibited: another client owns the layout. The canvas is still blank.
+        let payload = eds_payload(screen);
+        read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &uplink,
+            &desktop,
+            &test_shadow((1920, 1080)),
+            (1, 1, 1920, 1080),
+            &sink,
+        )
+        .await
+        .unwrap();
+        let expected = [resize, update_request(false, (1920, 1080)).to_vec()].concat();
+        assert_eq!(written(&wire), expected);
+        assert!(!desktop.lock().unwrap().repaint_owed);
     }
 
     /// Where the window does not drive the desktop size, nothing is declared: a
