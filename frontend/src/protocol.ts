@@ -232,6 +232,13 @@ export type ControlMsg =
       // rather than the config keys, which the reader may not have and which take a
       // pairing matrix to collapse into what the encoder is actually doing.
       render: string;
+      // `render_grid_debug`: draw the gateway's tile lattice over the desktop, at
+      // this pitch in framebuffer pixels — null on every target that did not ask
+      // for it, which is all of them by default and `render_type = "video"` always
+      // (it sends no tiles). The pitch travels rather than living here as a
+      // constant: an overlay that draws a different grid from the one damage was
+      // cut at still looks like a grid, which is the one failure nobody would spot.
+      tileGrid: { w: number; h: number } | null;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already

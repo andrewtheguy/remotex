@@ -38,6 +38,7 @@ import {
   wheelUnitFromEvent,
 } from "./protocol.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
+import { clearTileGrid, drawTileGrid, type GridPitch } from "./tileGrid.ts";
 import {
   attachTouchGestures,
   MAX_ZOOM,
@@ -203,8 +204,16 @@ const pointerRectCache = createRectCache((clear) =>
 // sized here, in the remote's own points. This is the same high-density canvas
 // split used by ordinary DPR-aware renderers, except the guest has already drawn
 // the high-density pixels, so the 2D context needs no scale transform.
+//
+// `grid` is the `render_grid_debug` overlay (tileGrid.ts), which is not a second
+// thing to lay out but the same one: it holds the framebuffer's bitmap like the
+// desktop canvas does, so it is right exactly when it wears the identical box.
+// Sizing it here rather than in CSS is what keeps that true through the touch
+// transform, where the box is a computed scale and a translate and there is
+// nothing for a stylesheet to inherit.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
+  grid: HTMLCanvasElement | null,
   size: RemoteSize | null,
   view: TouchViewState,
   bottomInset = 0,
@@ -212,6 +221,18 @@ function applyCanvasCss(
   if (!canvas || !size) {
     return;
   }
+  const box = (w: number, h: number, transform?: string) => {
+    for (const el of [canvas, grid]) {
+      if (!el) {
+        continue;
+      }
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+      if (transform !== undefined) {
+        el.style.transform = transform;
+      }
+    }
+  };
   // Every write below moves or resizes the canvas box, and a pointer event in
   // the same frame must not map through the box it replaced.
   pointerRectCache.invalidate();
@@ -234,9 +255,7 @@ function applyCanvasCss(
       x: Math.min(Math.max(view.pan.x, Math.min(0, vw - w)), 0),
       y: Math.min(Math.max(view.pan.y, Math.min(0, vh - h)), 0),
     };
-    canvas.style.width = `${w}px`;
-    canvas.style.height = `${h}px`;
-    canvas.style.transform = `translate3d(${view.pan.x}px, ${view.pan.y}px, 0)`;
+    box(w, h, `translate3d(${view.pan.x}px, ${view.pan.y}px, 0)`);
     return;
   }
   let { w, h } = desktopCanvasGeometry(size, size.scale).layout;
@@ -249,8 +268,7 @@ function applyCanvasCss(
     w = vw;
     h = vh;
   }
-  canvas.style.width = `${w}px`;
-  canvas.style.height = `${h}px`;
+  box(w, h);
 }
 
 // Push the pointer state to the DOM: the CSS cursor on the input overlay (it
@@ -401,12 +419,17 @@ function viewportMsg(size: {
 // because it participates in the connection effects.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  gridRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
+  // The `render_grid_debug` lattice this session was told to draw, or null for
+  // every ordinary target. State rather than a ref because the overlay is
+  // redrawn from it, and the redraw is the effect below.
+  const [tileGrid, setTileGrid] = useState<GridPitch | null>(null);
   // This screen's density, kept in state only so the menu can show it beside the
   // remote's. Nothing about how the desktop is presented reads it — see
   // applyCanvasCss. Seeded from the screen rather than left null, so the readout
@@ -1295,6 +1318,7 @@ export function useRemoteDesktop(
     const presentResize = (s: RemoteSize) => {
       applyCanvasCss(
         canvasRef.current,
+        gridRef.current,
         s,
         viewRef.current,
         bottomInsetRef.current,
@@ -1381,6 +1405,10 @@ export function useRemoteDesktop(
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
+      // The operator's QA overlay, stated per session like everything else on
+      // `connected`: this browser holds no preference for it and offers no
+      // toggle, the same way it offers none for `resize`.
+      setTileGrid(msg.tileGrid);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       setCanDeclareDensity(msg.protocol === "vnc" && msg.subtype === null);
       lastViewport = null;
@@ -1573,6 +1601,11 @@ export function useRemoteDesktop(
           setVideoError(null);
           setRenderPlan("");
           setConnection("");
+          // The lattice belongs to the session that stated it. Said here rather
+          // than left for the cleared framebuffer to imply, so the two halves of
+          // the overlay — the pitch and the desktop it is drawn over — are always
+          // dropped by the same message.
+          setTileGrid(null);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1626,6 +1659,7 @@ export function useRemoteDesktop(
       resizeTimer = setTimeout(() => {
         applyCanvasCss(
           canvasRef.current,
+          gridRef.current,
           sizeRef.current,
           viewRef.current,
           bottomInsetRef.current,
@@ -1689,6 +1723,7 @@ export function useRemoteDesktop(
     };
   }, [
     canvasRef,
+    gridRef,
     onUnauthorized,
     syncCursor,
     settleClipboardWaiters,
@@ -2044,6 +2079,25 @@ export function useRemoteDesktop(
     };
   }, [mode, canClipboard]);
 
+  // Paint the tile lattice, and repaint it whenever either half of what it is
+  // made of changes. It takes both — `connected` states the pitch, the first
+  // `resize` states the framebuffer — and they arrive in that order on a fresh
+  // connect but not on a reattach, so this waits for the pair instead of drawing
+  // from whichever handler happened to run second. A session without the overlay
+  // clears it, which is also how a switch from a `render_grid_debug` target to an
+  // ordinary one leaves no lattice behind.
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) {
+      return;
+    }
+    if (tileGrid && size) {
+      drawTileGrid(grid, size, tileGrid);
+    } else {
+      clearTileGrid(grid);
+    }
+  }, [gridRef, size, tileGrid]);
+
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
   // excluded: the desktop can pan up above it and the gesture cursor won't
@@ -2053,13 +2107,14 @@ export function useRemoteDesktop(
       bottomInsetRef.current = Math.max(0, px);
       applyCanvasCss(
         canvasRef.current,
+        gridRef.current,
         sizeRef.current,
         viewRef.current,
         bottomInsetRef.current,
       );
       syncCursor();
     },
-    [canvasRef, syncCursor],
+    [canvasRef, gridRef, syncCursor],
   );
 
   // The toolbar took a chord that had Command in it. Stable, so the handler that
@@ -2125,6 +2180,7 @@ export function useRemoteDesktop(
       viewRef.current.pan = { x: 0, y: 0 };
       applyCanvasCss(
         canvasRef.current,
+        gridRef.current,
         sizeRef.current,
         viewRef.current,
         bottomInsetRef.current,
@@ -2153,6 +2209,7 @@ export function useRemoteDesktop(
               viewRef.current.pan = pan;
               applyCanvasCss(
                 canvasRef.current,
+                gridRef.current,
                 sizeRef.current,
                 viewRef.current,
                 bottomInsetRef.current,
@@ -2345,7 +2402,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, syncCursor, touchActive]);
+  }, [overlayRef, canvasRef, gridRef, syncCursor, touchActive]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth

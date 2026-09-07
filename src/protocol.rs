@@ -550,6 +550,21 @@ pub const CELL_W: u16 = 320;
 /// See [`CELL_W`].
 pub const CELL_H: u16 = STRIP_ROWS;
 
+/// The tile lattice, stated on the wire so a client can draw it.
+///
+/// Sent only for `render_grid_debug` ([`TargetConfig::tile_grid`]), and it carries
+/// [`CELL_W`]/[`CELL_H`] rather than letting the browser hold a copy of them:
+/// the grid a debug overlay draws is worth nothing unless it is the grid the
+/// gateway actually cut damage at, and a duplicated constant is one edit away
+/// from being a different grid that still looks plausible.
+///
+/// [`TargetConfig::tile_grid`]: crate::config::TargetConfig::tile_grid
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TileGrid {
+    pub w: u16,
+    pub h: u16,
+}
+
 /// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
 /// [`batch`] frame. The payload is an image stream the client decodes natively —
 /// PNG or JPEG, named by the `format` byte so `createImageBitmap` gets the
@@ -1008,6 +1023,19 @@ pub enum ServerMsg {
         /// this slow" began with reading the operator's config file, which the person
         /// looking at the screen generally does not have.
         render: String,
+        /// Draw the tile lattice over the desktop, and at what pitch — `Some` only
+        /// where the operator set `render_grid_debug`, `None` otherwise.
+        ///
+        /// A debug aid the *client* draws, unlike the two that mark encode
+        /// decisions in the pixels themselves (`render_motion_debug`,
+        /// `render_classify_debug`). It has to be: the lattice is fixed to the
+        /// framebuffer, and pixels are not. A `COPY` record slides pixels across
+        /// the screen, a cached tile is a bitmap redrawn wherever the server names,
+        /// and a region nothing has changed since the last repaint is never sent at
+        /// all — so a lattice painted into tiles would drift with the first scroll
+        /// and stop short at the first still corner. Drawn over the canvas it is
+        /// exact everywhere, always complete, and costs the encoders nothing.
+        tile_grid: Option<TileGrid>,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -1185,6 +1213,8 @@ enum ControlMsg<'a> {
         camera: bool,
         microphone: bool,
         render: &'a str,
+        #[serde(rename = "tileGrid")]
+        tile_grid: Option<TileGrid>,
     },
     RemoteOs { macos: bool },
     TouchReady,
@@ -1297,6 +1327,7 @@ impl ServerMsg {
                 camera,
                 microphone,
                 render,
+                tile_grid,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -1307,6 +1338,7 @@ impl ServerMsg {
                 camera: *camera,
                 microphone: *microphone,
                 render,
+                tile_grid: *tile_grid,
             }),
             ServerMsg::CameraStart {
                 width,
@@ -1719,12 +1751,13 @@ mod tests {
             camera: false,
             microphone: false,
             render: "tiles · lossless png".to_owned(),
+            tile_grid: None,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","tileGrid":null}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1740,10 +1773,30 @@ mod tests {
             camera: true,
             microphone: true,
             render: "video q60".to_owned(),
+            tile_grid: None,
         })
         .text_frame()
         {
             Some(json) => assert!(json.contains(r#""subtype":null"#), "{json}"),
+            None => panic!("connected must be a text frame"),
+        }
+        // `render_grid_debug`: the lattice itself rather than a bare flag, because
+        // the client draws it and nothing else on the wire says how wide a tile is.
+        match (ServerMsg::Connected {
+            name: "desk".to_owned(),
+            protocol: "rdp",
+            subtype: None,
+            resize: true,
+            clipboard: false,
+            audio: false,
+            camera: false,
+            microphone: false,
+            render: "tiles · lossless png".to_owned(),
+            tile_grid: Some(TileGrid { w: CELL_W, h: CELL_H }),
+        })
+        .text_frame()
+        {
+            Some(json) => assert!(json.contains(r#""tileGrid":{"w":320,"h":64}"#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         // How to decode one stream, which is the message a client cannot work out for

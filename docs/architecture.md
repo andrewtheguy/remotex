@@ -130,6 +130,20 @@ move. The floor is
 one number for the whole plan: whichever dials exist — `render_quality`,
 `render_motion_quality`, a stream's — all stop at it.
 
+`render_grid_debug = true` is the third QA aid and the one the *client* draws: the
+gateway's 320x64 tile lattice, dashed, over the desktop. It is refused on
+`render_type = "video"`, which sends no tiles and so has no boundary to draw, and
+it changes nothing about the encode — no key of `RenderPlan` carries it, because no
+encoder needs to know. The lattice reaches the browser as a pitch on
+`ServerMsg::Connected` (`tileGrid`), and the browser draws it on a canvas of its
+own over the framebuffer (`frontend/src/tileGrid.ts`). That split is forced rather
+than chosen: the other two aids mark a decision made about one tile and so belong
+in that tile's pixels, while the lattice is fixed to the framebuffer and the pixels
+are not — a `COPY` slides them sideways, a cached tile is one bitmap redrawn
+wherever the server names it, and a corner nothing has touched since the last
+repaint is never sent again. Baked into tiles the grid would shear off with the
+first scroll and never reach the still parts at all.
+
 The still dial costs no wire change. A tile record's first byte is already its format
 (`Tile::FORMAT_PNG` / `FORMAT_JPEG`) and the client decodes both
 through `createImageBitmap` from a MIME type. What streams costs one: a
