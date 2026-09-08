@@ -117,6 +117,14 @@ async def main() -> int:
         "motion a damage tape of pointer movement is recorded from",
     )
     parser.add_argument(
+        "--page",
+        type=duration,
+        default=None,
+        help="after the first resize, tap Home, then PageDown for two seconds and "
+        "PageUp for two, about six taps a second, for this many seconds — the scroll a damage "
+        "tape of paging through a long document is recorded from",
+    )
+    parser.add_argument(
         "--viewport",
         type=dimensions,
         action="append",
@@ -237,8 +245,29 @@ async def main() -> int:
                 await asyncio.sleep(1 / 60)
             print("  <- sweep done")
 
+        # PageDown and PageUp in alternating two-second runs, tapped the way a
+        # held key repeats: the focused window pages through its document and
+        # back, so the same content keeps moving for the whole run.
+        async def page() -> None:
+            for pressed in (True, False):
+                await socket.send(
+                    json.dumps({"type": "key", "code": "Home", "pressed": pressed, "caps": False})
+                )
+                await asyncio.sleep(1 / 12)
+            started = time.monotonic()
+            print(f"  -> paging for {args.page:g}s")
+            while (elapsed := time.monotonic() - started) < args.page:
+                code = "PageDown" if int(elapsed // 2) % 2 == 0 else "PageUp"
+                for pressed in (True, False):
+                    await socket.send(
+                        json.dumps({"type": "key", "code": code, "pressed": pressed, "caps": False})
+                    )
+                    await asyncio.sleep(1 / 12)
+            print("  <- paging done")
+
         keys_task = None
         sweep_task = None
+        page_task = None
         try:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
@@ -268,6 +297,8 @@ async def main() -> int:
                             keys_task = asyncio.create_task(press_keys())
                         if args.sweep is not None and sweep_task is None:
                             sweep_task = asyncio.create_task(sweep(data["w"], data["h"]))
+                        if args.page is not None and page_task is None:
+                            page_task = asyncio.create_task(page())
                         # A viewport is requested in points and answered in pixels at
                         # the announced scale: 1728x883 asked at 2x comes back as
                         # 3456x1766, and is the answer to that request.
@@ -394,6 +425,8 @@ async def main() -> int:
                 keys_task.cancel()
             if sweep_task is not None and not sweep_task.done():
                 sweep_task.cancel()
+            if page_task is not None and not page_task.done():
+                page_task.cancel()
         print(f"\n  {tiles} tile frames")
         await socket.send(json.dumps({"type": "disconnect"}))
     return 0

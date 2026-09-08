@@ -25,43 +25,55 @@ measurements are what should settle them:
   damage tape (`src/tape.rs`: record a session with `REMOTEX_MOTION_TAPE=<path>`)
   replayed through the detector, the regions and the encoder at each pair of values
   (`encode::tests::replay_a_motion_tape`, `--release`), so every row of a table is
-  the same pixels under a different number. One tape exists on the 64-point grid:
-  40 s of a video playing in a 1331×749 window on a 1920×1080 Windows RDP desktop,
-  base `png`, stream quality 40. At 500/500 it sent 26 keyframes for 469 KB of a
-  2549 KB stream, **18% of the stream on rectangles that had to be replaced**, and
-  33.8 MB of lossless tiles beside it. Two mechanisms account for nearly all of it:
+  the same pixels under a different number. Two tapes exist on the 64-point grid,
+  both on a 1920×1080 Windows RDP desktop with base `png` and stream quality 40:
+  40 s of a video playing in a 1331×749 window, and 44 s of a document paged with
+  PageDown and PageUp tapped six times a second (`tests/ws_probe.py --page`), whose
+  moving region is a steady 768×896 body. At 500/500 the video sent 26 keyframes
+  for 469 KB of a 2549 KB stream, **18% of the stream on rectangles that had to be
+  replaced**, and 33.8 MB of lossless tiles beside it; the scroll sent 13 keyframes
+  for 276 KB of a 5530 KB stream (5%) and 91 MB of tiles. Two mechanisms account for
+  nearly all of it:
   - *The cleanup tick expires a playing stream.* A stream's "last moving" stamp is
     refreshed only by a retune, every 500–533 ms at frame boundaries, and the 250 ms
     cleanup tick ends a stream idle for `STREAM_IDLE`. With the two numbers equal, a
     tick landing between a retune plus 500 ms and the next retune ends a stream
     whose region is still moving, and the retune milliseconds later rebuilds it with
-    a keyframe. On the tape this happened every 5–6 s, at the beat of the two
-    clocks: at 500/1000 the same tape costs 11 keyframes and 223 KB (9.3%), no
-    cleanups instead of 57, 10% more streamed cells, and 24.4 MB of tiles instead of
-    33.8 — a value of `STREAM_IDLE` well clear of `RETUNE` plus a tick, or a stamp
-    refreshed by the damage path when a covered cell is seen moving, removes the
-    race whatever the two numbers are.
+    a keyframe. On both tapes this happened every 5–6 s, at the beat of the two
+    clocks; on the scroll it is the whole story, seven of the thirteen keyframes
+    being restarts of the same 768×896 rectangle within 50 ms of its expiry. At
+    500/1000 the video costs 11 keyframes and 223 KB (9.3%), no cleanups instead of
+    57, 10% more streamed cells, and 24.4 MB of tiles instead of 33.8; the scroll
+    costs 9 keyframes and 156 KB (2.8%), 24 cleanups instead of 32, 5 MB fewer tiles,
+    and **3% more streamed cells** — not the 76% the old grid measured, because a
+    64-point region holds little that is not moving. Both tapes want `STREAM_IDLE`
+    at 1 s. A value well clear of `RETUNE` plus a tick, or a stamp refreshed by the
+    damage path when a covered cell is seen moving, removes the race whatever the
+    two numbers are.
   - *The box grows a column per retune.* A video's edge cells cross the churn
     threshold later than its middle, so after every scene change the wanted box
     widens by one cell at successive retunes — 1024, 1088, 1216, 1280, 1344, 1408
     wide — and each step is a restart. Six of the eleven keyframes at 500/1000 are
     this ramp; the rest of `RETUNE`'s range does little to it (250 ms: 13 keyframes,
     8 streams; 1000 ms: 11 and 6) because the ramp is paced by the detector, not the
-    retune. This is the case for a rectangle grown past what is moving, or for the
-    detector admitting a cell sooner when its neighbours are already streaming.
+    retune. The scroll, whose body moves as one, has no ramp. This is the case for a
+    rectangle grown past what is moving, or for the detector admitting a cell sooner
+    when its neighbours are already streaming.
   - *`RETUNE` longer than `STREAM_IDLE` is ruinous*: the stream expires before it may
-    be rebuilt and the video goes to the still codec meanwhile — 401 MB of lossless
-    tiles at 1000/500 against 24 MB at 500/1000. Whatever the values, keep
-    `STREAM_IDLE` the larger.
-  The older figures were on the 320×64 grid and are kept for the shape of the
-  question: 25 s of a pointer swept in a circle on a 1280×800 RDP desktop cost 12
-  keyframes and 38 KB of a 140 KB stream (27%), and replaying 98 retunes of a real
-  1920×1080 scroll with `STREAM_IDLE` at 1 s instead of 500 ms took the client's
-  decoder builds from 37 to 31 for 76% more streamed cells. A scroll tape on the
-  64-point grid is what is missing before `STREAM_IDLE` moves: the video says 1 s,
-  the old scroll said 1 s costs lossy cells, and the two have to be weighed on the
-  same grid. A pointer sweep over RDP moves nothing — the cursor is drawn by the
-  client — so the pointer case is no longer a content kind worth taping there.
+    be rebuilt and the content goes to the still codec meanwhile — 401 MB of lossless
+    tiles at 1000/500 for the video against 24 MB at 500/1000, 233 MB against 86 for
+    the scroll. Whatever the values, keep `STREAM_IDLE` the larger.
+  The tile column is the encode, before the wire's tile cache: the scroll session
+  encoded 87 MB of tiles and sent 25 MB of them. Even so, tiles cost both sessions
+  several times what the stream did, the edge cells that flicker in and out of the
+  moving set and the seconds before a stream starts — the cost the growth case above
+  would cut. The older figures were on the 320×64 grid and are kept for the shape of
+  the question: 25 s of a pointer swept in a circle on a 1280×800 RDP desktop cost
+  12 keyframes and 38 KB of a 140 KB stream (27%), and replaying 98 retunes of a
+  real 1920×1080 scroll with `STREAM_IDLE` at 1 s instead of 500 ms took the
+  client's decoder builds from 37 to 31 for 76% more streamed cells. A pointer sweep
+  over RDP moves nothing — the cursor is drawn by the client — so the pointer case is
+  no longer a content kind worth taping there.
 - **A component's own bounding box is not checked against `MERGE_WASTE`.** Only
   merges are. A single diagonal streak of moving cells therefore streams a box mostly
   full of still ones — safe, since every cell inside is owed a cleanup, but wasteful
