@@ -621,11 +621,27 @@ impl Regions {
 
     /// Note that `rect` now differs between the current mirror and the spare.
     ///
+    /// A rectangle that continues the last one is merged into it rather than pushed.
+    /// Exactly, not approximately: same left and right, and starting on the row after
+    /// it ends, so the pair covers what the two covered and nothing else. This is what
+    /// a caller reporting one rectangle in bands looks like from here — the bands of a
+    /// [`Rect::bands`] walk arrive in order and meet edge to edge — and it means how a
+    /// report was cut up on the way in does not decide how much slop the sync below
+    /// copies.
+    ///
     /// Capped: past [`STAGED_CAP`] the list collapses to one bounding box, so the
     /// sync copies some slop that did not change — bounded by what the shadow
     /// already paid to compare — where an unbounded list on a target that never
     /// takes a round (streams configured, nothing ever moving) would grow forever.
     fn stage(&mut self, rect: Rect) {
+        if let Some(last) = self.staged.last_mut()
+            && last.left == rect.left
+            && last.right == rect.right
+            && last.bottom.checked_add(1) == Some(rect.top)
+        {
+            last.bottom = rect.bottom;
+            return;
+        }
         if self.staged.len() >= STAGED_CAP {
             let mut whole = rect;
             for r in &self.staged {
@@ -2014,6 +2030,46 @@ mod tests {
 
     fn placed(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// Cutting a report into bands must not cost the staged list anything.
+    ///
+    /// `damage_streaming` blits a band at a time so it can send the buffer it packed,
+    /// and the bands of one rectangle meet edge to edge — so they merge back into the
+    /// rectangle they came from, and the spare-mirror sync copies what it copied when
+    /// the whole rectangle arrived in one blit.
+    #[tokio::test]
+    async fn bands_of_one_rectangle_stage_as_that_rectangle() {
+        let mut regions = sized(320, 256).await;
+        regions.staged.clear();
+        let whole = placed(0, 0, 320, 256);
+        for band in whole.bands() {
+            regions.blit(band, &flat(band.w(), band.h(), 7)).expect("a band blit");
+        }
+        assert_eq!(regions.staged, vec![whole], "four bands are the one rectangle");
+    }
+
+    /// And so the cap still counts reports rather than bands.
+    ///
+    /// [`STAGED_CAP`] reports that each straddle a band line: without the merge these
+    /// would be sixty-four entries and the list would have collapsed to a bounding box
+    /// spanning the whole desktop, syncing a screenful of pixels that never changed.
+    #[tokio::test]
+    async fn banding_a_report_does_not_spend_the_staged_cap() {
+        let mut regions = sized(64, 4096).await;
+        regions.staged.clear();
+        let reports: Vec<Rect> =
+            (0..STAGED_CAP).map(|k| placed(0, 32 + k as u16 * 128, 64, 96)).collect();
+        for report in &reports {
+            // Taller than one band, so `bands` cuts it in two — 64 rows and then 32.
+            // A rectangle 64 tall is one band wherever it starts: the walk steps from
+            // the rectangle's own top, not from a lattice line.
+            assert_eq!(report.bands().count(), 2, "a report that straddles a band line");
+            for band in report.bands() {
+                regions.blit(band, &flat(band.w(), band.h(), 7)).expect("a band blit");
+            }
+        }
+        assert_eq!(regions.staged, reports, "one entry per report, none of them collapsed");
     }
 
     /// The double buffer, end to end: rounds stay serial, damage that lands while a

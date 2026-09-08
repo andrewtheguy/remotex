@@ -763,9 +763,14 @@ impl TileSink {
     /// reach the client through that stream, and sending them as a tile as well
     /// would discharge a debt the stream has not paid.
     ///
-    /// Everything goes into the mirror first, moving or not. That copy is what a
+    /// Everything goes into the mirror, moving or not — a band at a time, as the loop
+    /// reaches it, out of the same buffer that band is sent from. That copy is what a
     /// stream starting later reads and what a cleanup crops, so it has to be the whole
-    /// truth rather than the parts that happened to be busy.
+    /// truth rather than the parts that happened to be busy. Whole, not instantaneous:
+    /// a cleanup tick landing between two bands crops a mirror holding the earlier one
+    /// and not the later, which is the staleness that already sits between two reports
+    /// and settles the same way — the band that follows sends those pixels crisp, and
+    /// behind the cleanup's tile in the order.
     ///
     /// Which cells are streamed is read once, here. A stream can only ever *end*
     /// underneath this — the cleanup tick expires idle ones and never starts any, and
@@ -786,8 +791,7 @@ impl TileSink {
         F: Fn(Rect) -> Vec<u8>,
     {
         let streamed: HashSet<(u16, u16)> = {
-            let mut video = self.shared.video.lock().await;
-            video.regions.blit(changed.rect, &pack(changed.rect))?;
+            let video = self.shared.video.lock().await;
             // Asked of the whole table first. With no stream running, no cell can be
             // covered and every band below takes the quiet path, so the walk would
             // only hash a cell per 64 points of the damage to build an empty set —
@@ -804,6 +808,10 @@ impl TileSink {
                 HashSet::new()
             }
         };
+        // Read before the mirror is written rather than after, which the blits below
+        // now require and nothing minds: under [`Policy::Moving`] a blit marks live
+        // streams dirty and starts none, so the set it would have been read after is
+        // the set it is read before.
 
         // One reading for the whole rectangle: the pieces of one report of damage
         // arrived together and belong in the same slot.
@@ -811,6 +819,16 @@ impl TileSink {
         // What went out crisp, to discharge in one critical section at the end.
         let mut crisp: Vec<Rect> = Vec::new();
         for band in changed.rect.bands() {
+            // The band is packed once and used twice: blitted into the mirror here,
+            // and — on the quiet path, which is most of a screen — handed to the
+            // encoder as it stands. The whole changed rectangle used to be packed on
+            // its own for the mirror before this loop packed it again a band at a
+            // time, so a report's pixels were copied twice where the still path copies
+            // them once. Every rectangle goes in whether or not a stream carries it:
+            // the mirror is what a cleanup crops and what a later stream reads, and
+            // both want the truth rather than the parts that happened to be moving.
+            let rgb = Arc::new(pack(band));
+            self.shared.video.lock().await.regions.blit(band, &rgb)?;
             let cells: Vec<Rect> = band.cells(grid).collect();
             {
                 // Churn is recorded for the cells that *changed*, not for every cell
@@ -829,9 +847,10 @@ impl TileSink {
             if !cells.iter().any(|cell| streamed.contains(&cell.cell_key(grid))) {
                 // The quiet path, and the great majority of a screen: one whole band
                 // at the base encode, byte for byte what this target would send with
-                // no motion path at all.
+                // no motion path at all — and out of the buffer the mirror already
+                // took, so the band is not packed a second time to send it.
                 crisp.push(band);
-                self.encode(band, Arc::new(pack(band)), base).await?;
+                self.encode(band, rgb, base).await?;
                 continue;
             }
 
@@ -2638,6 +2657,32 @@ mod tests {
         assert_eq!(tile.format, Tile::FORMAT_PNG, "a cleanup is the base encode");
         let newest = Tile::from_rgb(0, 0, 320, 64, &flat(320, 64, 200)).unwrap();
         assert_eq!(tile.data, newest.data, "the cleanup restored a frame that was overtaken");
+    }
+
+    /// A band is packed once, and the mirror takes the buffer the wire takes.
+    ///
+    /// The motion path used to pack the whole changed rectangle to blit the mirror
+    /// and then pack it again a band at a time to send it, so a report's pixels were
+    /// copied twice where the still path copies them once — a caller's `pack` is a
+    /// crop, and the rows come out either way. Asked of a sink with no stream
+    /// running, which is the shape of an ordinary `render_motion` desktop and the one
+    /// where every band takes the quiet path.
+    #[tokio::test(start_paused = true)]
+    async fn a_motion_report_packs_each_band_once() {
+        let (sink, _frame_rx) = stream_sink(320, 192).await;
+        let asked = std::sync::Mutex::new(Vec::new());
+        sink.damage(&all_of(rect(0, 0, 320, 192)), |piece| {
+            asked.lock().unwrap().push(piece);
+            flat(piece.w(), piece.h(), 7)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![rect(0, 0, 320, 64), rect(0, 64, 320, 64), rect(0, 128, 320, 64)],
+            "three bands, each asked for once, and the whole rectangle never asked for"
+        );
     }
 
     /// A cleanup is a payload like any other, so it is cut at [`BAND_ROWS`] however
