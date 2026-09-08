@@ -772,13 +772,23 @@ impl TileSink {
     /// and settles the same way — the band that follows sends those pixels crisp, and
     /// behind the cleanup's tile in the order.
     ///
-    /// Which cells are streamed is read once, here. A stream can only ever *end*
-    /// underneath this — the cleanup tick expires idle ones and never starts any, and
-    /// starting is [`Self::frame`]'s job on this same task. That direction is the safe
-    /// one: a cell whose stream ended after the reading is simply not sent this frame,
-    /// its debt still stands, and the cleanup carries it from the mirror. The other
-    /// direction would be a cell delivered twice, once crisp and once inside a
-    /// keyframe, with the crisp one discharging a debt the stream had not paid.
+    /// A band's blit and the question of which of its cells a stream covers happen in
+    /// one critical section, and that pairing is the whole of this method's safety.
+    /// The cleanup tick takes the same lock to do three things at once: expire idle
+    /// streams, take the debts of the cells they were carrying, and crop those cells
+    /// out of the mirror. Asked once for the whole rectangle, a tick landing between
+    /// two bands could expire a stream, take a cell's debt and send that cell from a
+    /// mirror this report had not reached yet — and the band would then skip it on a
+    /// reading that was true when it was taken, leaving the client stale with no
+    /// stream and no debt left to notice. Asked per band, the tick either runs before
+    /// the band, and the band sends the cell crisp behind the cleanup's stale tile, or
+    /// after it, and crops the pixels the band has just written.
+    ///
+    /// Coverage can only ever *shrink* underneath this — the tick expires streams and
+    /// never starts any, and starting is [`Self::frame`]'s job on this same task — so
+    /// re-asking can only turn a cell from carried to owed, never the reverse. The
+    /// reverse would be a cell delivered twice, once crisp and once inside a keyframe,
+    /// with the crisp one discharging a debt the stream had not paid.
     async fn damage_streaming<F>(
         &self,
         changed: &Changed,
@@ -790,31 +800,8 @@ impl TileSink {
     where
         F: Fn(Rect) -> Vec<u8>,
     {
-        let streamed: HashSet<(u16, u16)> = {
-            let video = self.shared.video.lock().await;
-            // Asked of the whole table first. With no stream running, no cell can be
-            // covered and every band below takes the quiet path, so the walk would
-            // only hash a cell per 64 points of the damage to build an empty set —
-            // about five hundred of them across a 1080p repaint, on the ordinary case
-            // of a `render_motion` desktop with nothing playing.
-            if video.regions.covering() {
-                changed
-                    .rect
-                    .cells(grid)
-                    .map(|cell| cell.cell_key(grid))
-                    .filter(|key| video.regions.covers(*key))
-                    .collect()
-            } else {
-                HashSet::new()
-            }
-        };
-        // Read before the mirror is written rather than after, which the blits below
-        // now require and nothing minds: under [`Policy::Moving`] a blit marks live
-        // streams dirty and starts none, so the set it would have been read after is
-        // the set it is read before.
-
-        // One reading for the whole rectangle: the pieces of one report of damage
-        // arrived together and belong in the same slot.
+        // One reading of the clock for the whole rectangle: the pieces of one report of
+        // damage arrived together and belong in the same slot.
         let now = tokio::time::Instant::now();
         // What went out crisp, to discharge in one critical section at the end.
         let mut crisp: Vec<Rect> = Vec::new();
@@ -828,8 +815,27 @@ impl TileSink {
             // the mirror is what a cleanup crops and what a later stream reads, and
             // both want the truth rather than the parts that happened to be moving.
             let rgb = Arc::new(pack(band));
-            self.shared.video.lock().await.regions.blit(band, &rgb)?;
             let cells: Vec<Rect> = band.cells(grid).collect();
+            let streamed: HashSet<(u16, u16)> = {
+                let mut video = self.shared.video.lock().await;
+                video.regions.blit(band, &rgb)?;
+                // The table is asked as a whole first. With no stream running no cell
+                // can be covered and this band takes the quiet path, so the walk would
+                // only hash a cell per 64 points to build an empty set — about five
+                // hundred of them across a 1080p repaint, on the ordinary case of a
+                // `render_motion` desktop with nothing playing. The band's own cells
+                // rather than the rectangle's, which is one walk over the report
+                // instead of the two it used to take.
+                if video.regions.covering() {
+                    cells
+                        .iter()
+                        .map(|cell| cell.cell_key(grid))
+                        .filter(|key| video.regions.covers(*key))
+                        .collect()
+                } else {
+                    HashSet::new()
+                }
+            };
             {
                 // Churn is recorded for the cells that *changed*, not for every cell
                 // the band covers — `Changed::rect` is one box round everything that
@@ -2659,38 +2665,45 @@ mod tests {
         assert_eq!(tile.data, newest.data, "the cleanup restored a frame that was overtaken");
     }
 
-    /// A stream that ends *between two bands* of one report loses nothing.
+    /// A cleanup tick landing between two bands cannot strand a cell.
     ///
-    /// The set of streamed cells is read once, before the loop, so a band reached
-    /// after the cleanup tick expired a stream still treats that stream's cells as
-    /// carried and does not send them. This is the direction the reading is allowed
-    /// to be stale in, and this test is why: the cells were blitted into the mirror
-    /// with the rest of their band, their debt was never discharged because nothing
-    /// crisp covered them, and the cleanup carries them from the mirror at the base
-    /// encode. Re-reading coverage per band would send them one tick sooner and cost
-    /// the walk every band; nothing is lost by not doing it.
+    /// The tick does three things under one lock: expires idle streams, takes the
+    /// debts of the cells they carried, and crops those cells out of the mirror. Land
+    /// it in the middle of a report and the crop reads a mirror the report has not
+    /// finished writing, so the pixels it sends are stale — and with the stream gone
+    /// and the debt taken, nothing is left that knows better. The only thing that can
+    /// still send them is the band they are in, which is why the band asks about
+    /// coverage in the same critical section it blits in rather than trusting a
+    /// reading taken before the loop.
+    ///
+    /// The tick is driven from inside `pack`, which is where the gap is: a band is
+    /// packed before it is blitted, so the lock is free and this is exactly the window
+    /// the real tick would take. Its rectangles are dropped rather than sent, which is
+    /// the harsher half of the race — if the band does not send these pixels, nothing
+    /// will.
     #[tokio::test(start_paused = true)]
-    async fn a_stream_expiring_between_two_bands_leaves_its_cells_to_the_cleanup() {
-        // Three bands. The stream sits in the last one, so the expiry below lands
-        // after the loop has already passed the first.
+    async fn a_cleanup_landing_between_two_bands_cannot_strand_a_cell() {
+        // Three bands, with the stream in the last, so the tick below fires while the
+        // loop is still on the first.
         let (sink, mut frame_rx) = stream_sink(640, 192).await;
         let moving = rect(0, 128, 320, 64);
         until_streamed(&sink, moving, 40).await;
         sink.flush().await;
         while frame_rx.try_recv().is_ok() {}
 
-        let packed = std::sync::Mutex::new(0usize);
+        let ticked = std::sync::Mutex::new(0usize);
         sink.damage(&all_of(rect(0, 0, 640, 192)), |piece| {
-            let mut n = packed.lock().unwrap();
+            let mut n = ticked.lock().unwrap();
             *n += 1;
             if *n == 1 {
-                // Between the first band and the second, on the cleanup tick's
-                // behalf: the lock is free here because a band is packed before it
-                // is blitted.
                 let mut video = sink.shared.video.try_lock().expect("the lock is free at pack");
-                // A second is well past `STREAM_IDLE`, whatever it is set to.
-                video.regions.expire(tokio::time::Instant::now() + Duration::from_secs(1));
+                // A second is well past `STREAM_IDLE` and `CLEANUP_IDLE`, whatever
+                // they are set to, so the stream expires and its cells all come due.
+                let now = tokio::time::Instant::now() + Duration::from_secs(1);
+                video.regions.expire(now);
+                let taken = video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
                 assert!(!video.regions.covering(), "the stream should have expired");
+                assert!(!taken.is_empty(), "its cells should have come due");
             }
             flat(piece.w(), piece.h(), 55)
         })
@@ -2699,34 +2712,23 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
 
-        // Nothing crisp covered the expired stream's cells this report.
-        let mut out = Vec::new();
-        while let Ok(msg) = frame_rx.try_recv() {
-            out.push(msg);
-        }
-        assert!(
-            !out.iter().any(|msg| matches!(msg, ServerMsg::Tile(t) if t.y == 128 && t.x == 0)),
-            "a band read stale coverage and sent the cells anyway: {out:?}"
-        );
-
-        // The cleanup does, from the mirror, with the pixels that band carried.
-        for _ in 0..12 {
-            tokio::time::advance(CLEANUP_TICK).await;
-            tokio::task::yield_now().await;
-        }
-        sink.flush().await;
         let mut tiles = Vec::new();
         while let Ok(msg) = frame_rx.try_recv() {
             if let ServerMsg::Tile(tile) = msg {
                 tiles.push(tile);
             }
         }
-        let restored = tiles
+        let sent = tiles
             .iter()
-            .find(|t| (t.x, t.y, t.w, t.h) == (0, 128, 320, 64))
-            .expect("the expired stream's cells were never cleaned up");
-        let fresh = Tile::from_rgb(0, 128, 320, 64, &flat(320, 64, 55)).unwrap();
-        assert_eq!(restored.data, fresh.data, "the cleanup restored stale pixels");
+            .find(|t| t.y == 128 && t.x == 0)
+            .unwrap_or_else(|| panic!("the cells of the expired stream were stranded: {tiles:?}"));
+        assert_eq!(
+            (sent.x, sent.y, sent.w, sent.h),
+            (0, 128, 640, 64),
+            "the whole band was quiet by then, so it goes out as one tile"
+        );
+        let fresh = Tile::from_rgb(0, 128, 640, 64, &flat(640, 64, 55)).unwrap();
+        assert_eq!(sent.data, fresh.data, "the band sent stale pixels");
     }
 
     /// A band is packed once, and the mirror takes the buffer the wire takes.
