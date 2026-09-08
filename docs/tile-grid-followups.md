@@ -37,6 +37,28 @@ neither side of it has a number yet.
 
 ## Watched, not planned
 
+### The JPEG size floor is not scaled, and now equals one cell
+
+`MIN_PHOTO_PIXELS = 4096` (`src/classify.rs`) is the area below which a tile is
+never offered to JPEG. It is in pixels because what it guards is JPEG's fixed
+header and table bytes, which do not shrink on a 2× desktop — so unlike the grid
+it does not move with density, and a 2× tile clears it at a quarter of the screen
+area a 1× tile needs.
+
+It was chosen against the 320×64 grid, where it was a fifth of a cell and caught
+only sub-cell damage. It now equals a 64×64 cell exactly, which is a coincidence
+and not a link. The smallest whole-cell tile the encoder is handed is 64×64 =
+4096 at 1×, which clears the floor by a single pixel, and 128×64 = 8192 at 2×,
+because a band stays 64 rows at either density. Only a cell clipped by the
+framebuffer's bottom edge falls under it — 64×56 on a 1080-tall desktop.
+
+What actually drifts is the floor's second job. Keeping small sharp furniture out
+of the lossy arm is a claim about points, and a 2× widget sliver four times this
+size now reaches the content tests. The palette gate refuses flat chrome there,
+so the exposure is narrow: colourful, gradient-heavy fragments that are neither
+photographs nor text. Scaling the floor by density would fix the second job and
+break the first, and there is no measurement saying the second one is failing.
+
 ### `merge` is cubic in components
 
 `merge` (`src/regions.rs`) is O(n²) per pass and removes one component per pass.
