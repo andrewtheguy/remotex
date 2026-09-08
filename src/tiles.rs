@@ -76,7 +76,7 @@ impl Rect {
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
     /// useful unit of progress nor a comfortable WebSocket frame — and a client
     /// draws the pieces exactly as it draws any other tiles.
-    pub fn bands(&self) -> impl Iterator<Item = Rect> + '_ {
+    pub fn bands(self) -> impl Iterator<Item = Rect> {
         (self.top..=self.bottom)
             .step_by(usize::from(BAND_ROWS))
             .map(move |top| Rect {
