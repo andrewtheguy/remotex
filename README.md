@@ -27,11 +27,11 @@ per resize.
   003.889 — one virtual display holding every remote window, and the only Apple
   path that accepts `resize = true`. It is reverse engineered, having no
   specification.
-  `subtype = "wlshare"` is a wlroots-based Wayland desktop behind
-  [wlshare](https://github.com/andrewtheguy/wlshare), a VNC server that carries
-  pixel density over one private RFB extension: the output's scale is reported
-  and shown as such, and with `resize = true` the output follows the browser's
-  density.
+  A wlroots-based Wayland desktop behind
+  [wlshare](https://github.com/andrewtheguy/wlshare) is a plain `vnc` target:
+  that server carries pixel density over one private RFB extension the gateway
+  asks every generic server for, so the output's scale is reported and shown as
+  such, and with `resize = true` the output follows the browser's density.
 
 There is one client: the page a browser loads. For desktop use, install that page
 as an app in Chrome or Edge. The app window gives the client the browser-reserved
@@ -196,10 +196,11 @@ sizes in pixels and nothing else — so those targets are shown at 1x, one CSS
 pixel per framebuffer pixel, and the window's points go to the server as pixels.
 See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
 on a sway output at scale 2 and why a second client's resize can come back
-prohibited. The one exception is `subtype = "wlshare"`: the wlshare server
-reports its output's scale, the gateway labels the framebuffer with it and asks
-for the window in points × scale, and the browser's density is declared back to
-the server. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
+prohibited. The one exception is a server that answers the density request the
+gateway puts in every generic `SetEncodings`, which today is wlshare: it reports
+its output's scale, the gateway labels the framebuffer with it and asks for the
+window in points × scale, and the browser's density is declared back to the
+server. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
 High Performance mode is the one part of remotex built entirely without a
 specification: Apple documents none of the protocol revision,

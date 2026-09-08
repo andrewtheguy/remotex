@@ -131,9 +131,10 @@ const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
 const MSG_FENCE: u8 = 248;
 
 /// The wlshare density extension's pseudo-encoding, the ASCII bytes `WLSH`. Listed
-/// in `SetEncodings` on a `subtype = "wlshare"` target and nowhere else; wlshare
-/// answers it with an [`MSG_WLSHARE_DENSITY`] report, and any other server
-/// ignores it like any encoding it does not know. See
+/// in `SetEncodings` on every plain `vnc` target, the way ContinuousUpdates and
+/// Fence are: wlshare answers it with an [`MSG_WLSHARE_DENSITY`] report before
+/// its first update, and any other server ignores it like any encoding it does
+/// not know, which is how the extension is discovered. See
 /// docs/wlshare-density.md.
 const ENCODING_WLSHARE_DENSITY: i32 = 0x574c_5348;
 /// The extension's one message type, used in both directions: the server's
@@ -178,7 +179,7 @@ impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
             Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
-            Some(Subtype::Ard | Subtype::Wlshare) | None => Dialect::Rfb38,
+            Some(Subtype::Ard) | None => Dialect::Rfb38,
         }
     }
 
@@ -368,7 +369,7 @@ struct DesktopState {
     /// the read loop sends such requests too.
     video: bool,
     /// Whether the window drives the desktop size ([`Flags::resize`]). The
-    /// browser's density is declared to a wlshare server only then: the server
+    /// browser's density is declared to a reporting server only then: the server
     /// sets its output's scale to what is declared, and a client that could not
     /// then re-ask the pixels would be left with half a desktop.
     resize: bool,
@@ -392,15 +393,22 @@ struct DesktopState {
 }
 
 /// The wlshare density extension's state on one connection — see
-/// [`ENCODING_WLSHARE_DENSITY`] and docs/wlshare-density.md.
+/// [`ENCODING_WLSHARE_DENSITY`] and docs/wlshare-density.md. The extension is
+/// discovered, not configured: every plain `vnc` target asks, and the server's
+/// first update decides whether it was answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Density {
-    /// Not a `wlshare` target: the pseudo-encoding was never sent.
+    /// An Apple dialect: the pseudo-encoding was never sent, because Apple's
+    /// display layout carries the density its own way.
     Off,
     /// Sent, unanswered so far. Resize requests wait here, because a request in
     /// the wrong pixels is a desktop redrawn twice. Pixels arriving in this
-    /// state end the session: see [`DesktopState::first_update`].
+    /// state settle it: see [`DesktopState::first_update`].
     Asked,
+    /// The server sent pixels before any report, so it does not speak the
+    /// extension: generic RFB, presented at [`UNSCALED`]. A report arriving
+    /// after all is still taken, since the label is the wire's word.
+    Unanswered,
     /// The server answered at least once: [`DesktopState::wire_scale`] is set.
     Reported,
 }
@@ -409,16 +417,14 @@ impl DesktopState {
     /// The density request's deadline, checked on every framebuffer update.
     /// wlshare answers `SetEncodings` before it sends a single update, so
     /// pixels with no report before them mean a server that does not speak the
-    /// extension — not the server `subtype = "wlshare"` names, and not one to
-    /// show at a density it never confirmed.
-    fn first_update(&self) -> anyhow::Result<()> {
+    /// extension: the desktop is generic RFB at 1x from here, and the resize a
+    /// report would have released goes out with the rect that declares
+    /// SetDesktopSize support instead.
+    fn first_update(&mut self) {
         if self.density == Density::Asked {
-            anyhow::bail!(
-                "the server sent pixels without reporting its scale: the target is subtype \
-                 \"wlshare\" but this server is not wlshare"
-            );
+            debug!("vnc: the server does not report pixel density; presenting it at 1x");
+            self.density = Density::Unanswered;
         }
-        Ok(())
     }
     /// The size and scale, as a client is told them.
     fn resize_msg(&self) -> ServerMsg {
@@ -429,8 +435,8 @@ impl DesktopState {
         }
     }
 
-    /// The scale a generic rect is labelled with: the server's reported one on
-    /// a wlshare target, [`UNSCALED`] everywhere else.
+    /// The scale a generic rect is labelled with: the server's reported one
+    /// where it has reported, [`UNSCALED`] everywhere else.
     fn generic_scale(&self) -> f32 {
         self.wire_scale.unwrap_or(UNSCALED)
     }
@@ -447,9 +453,9 @@ impl DesktopState {
 
     /// The generic resize request for a window of `points`, or `None` when
     /// nothing should go out yet: the request is held in `pending` until the
-    /// server has declared SetDesktopSize support and, on a wlshare target,
-    /// answered the density request — a request in the wrong pixels is a
-    /// desktop redrawn twice. `None` also when the desktop already has the
+    /// server has declared SetDesktopSize support and either answered the
+    /// density request or sent pixels without it — a request in the wrong
+    /// pixels is a desktop redrawn twice. `None` also when the desktop already has the
     /// size. Both that and a request sent clear any older hold: a replay must
     /// never ask for a window the browser has since left.
     ///
@@ -498,7 +504,7 @@ impl DesktopState {
         Some(set_desktop_size(pixels, screen))
     }
 
-    /// The `ClientDensity` declaring `declared` to a wlshare server, or `None`
+    /// The `ClientDensity` declaring `declared` to a reporting server, or `None`
     /// where the window does not drive the desktop size — see
     /// [`Self::resize`]. A declaration the reported scale does not match opens
     /// a follow ([`Self::following`]): the server is expected to set the
@@ -817,7 +823,6 @@ async fn session(
             media,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
-            density: config.subtype.is_some_and(Subtype::reports_density),
         },
         input_rx,
         sink.clone(),
@@ -869,9 +874,6 @@ struct Flags {
     host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
-    /// Whether the target is `subtype = "wlshare"`, whose density extension
-    /// was requested in the handshake — see [`Density`].
-    density: bool,
 }
 
 /// What the read loop needs to know about the dialect it is reading. Two bools
@@ -1136,12 +1138,7 @@ async fn rfb38_preface(
     }
     uplink.send(&set_pixel_format()).await?;
     uplink
-        .send(&set_encodings(&rfb38_encoding_list(
-            apple,
-            config.resize,
-            config.clipboard,
-            config.subtype.is_some_and(Subtype::reports_density),
-        )))
+        .send(&set_encodings(&rfb38_encoding_list(apple, config.resize, config.clipboard)))
         .await?;
     if apple && config.clipboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
@@ -1158,7 +1155,7 @@ async fn rfb38_preface(
     })
 }
 
-fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, density: bool) -> Vec<i32> {
+fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
         // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
@@ -1217,9 +1214,11 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, density: bool
         // in use.
         encodings.push(vnc_clipboard::ENCODING);
     }
-    if density {
-        // The one request a wlshare target adds. Its answer, when it comes, is
-        // the scale every framebuffer from then on is labelled with.
+    if !apple {
+        // The density request, asked of every generic server and last so it
+        // never weighs on encoding preference. Its answer, when it comes, is the
+        // scale every framebuffer from then on is labelled with; a Mac reports
+        // its densities in its display layout and is not asked.
         encodings.push(ENCODING_WLSHARE_DENSITY);
     }
     encodings
@@ -1385,7 +1384,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         media,
         host_density,
         poll,
-        density,
     } = flags;
     // The uplink is shared: the read loop answers the server (update requests,
     // re-arming), the input side sends pointer/key/display messages.
@@ -1397,7 +1395,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         screen: None,
         pending: None,
         viewport: None,
-        density: if density { Density::Asked } else { Density::Off },
+        density: if apple { Density::Off } else { Density::Asked },
         wire_scale: None,
         video,
         resize,
@@ -1478,7 +1476,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
-                    // On a wlshare target the report is forwarded as the client's
+                    // On a generic target the report is forwarded as the client's
                     // declared density, once the server has shown it listens
                     // and not while an earlier declaration is unanswered — see
                     // [`DesktopState::host_density_changed`]. Decided and
@@ -1488,7 +1486,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // output's scale to the declaration and reports, and that
                     // report re-asks the window in the new pixels — see
                     // [`DesktopState::declare_density`].
-                    ClientMsg::HostDisplay(screen) if density => {
+                    ClientMsg::HostDisplay(screen) if !apple => {
                         let declared = crate::protocol::render_density(screen.scale);
                         if send_decided(&uplink, &desktop, |d| d.host_density_changed(declared)).await? {
                             debug!("vnc: declared a client density of {declared}x");
@@ -1930,7 +1928,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // FramebufferUpdate
             0 => {
                 reader.read_u8().await?; // padding
-                desktop.lock().unwrap().first_update()?;
+                desktop.lock().unwrap().first_update();
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
                 // an update a server starts sending before it knows how long it
                 // will be. macOS uses it for the metadata burst, so on the Apple
@@ -2124,8 +2122,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // the server has stopped pushing; polling resumes and one request is sent
             // to restart the cycle it had replaced.
             // The wlshare OutputScale report: the framebuffer's density, from the one
-            // generic server that can say. Only a target that asked reads it; on
-            // any other, 0xE0 is as unknown as it was.
+            // generic server that can say. Only a session that asked reads it; on
+            // the Apple dialects, 0xE0 is as unknown as it was.
             MSG_WLSHARE_DENSITY if desktop.lock().unwrap().density != Density::Off => {
                 read_output_scale(&mut reader, uplink, desktop, &shared.shadow, &sink).await?;
             }
@@ -3906,12 +3904,6 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 /// screen you get — see [`ard_authenticate`] — so a subtype the server cannot
 /// answer is an error rather than a silent fall back to the anonymous path.
 ///
-/// `Wlshare` is the same declaration about a wlroots-based Wayland desktop: the
-/// credentials are the account wlshare runs as, carried by RSA-AES (see
-/// [`crate::vnc_rsa_aes`]) at its 256-bit width over its 128-bit one, and a
-/// server that does not offer it is not the wlshare this target names. wlshare
-/// may list VncAuth beside it for a plain `vnc` target; this one never takes it.
-///
 /// A plain `vnc` target has two credentials for two kinds of server, and takes
 /// whichever the server can answer: `username` and `password` are an account
 /// for RSA-AES, the encrypted type and so the one preferred when both are
@@ -3942,16 +3934,6 @@ fn choose_security(
     ]
     .into_iter()
     .find(|t| types.contains(t));
-    if subtype == Some(Subtype::Wlshare) {
-        let Some(rsa_aes) = rsa_aes else {
-            anyhow::bail!(
-                "the target is subtype \"wlshare\", whose account login (RSA-AES) this \
-                 server does not offer (types {types:?}) — it is not wlshare with its \
-                 [pam] table set"
-            );
-        };
-        return Ok(rsa_aes);
-    }
     if !password.is_empty()
         && let Some(rsa_aes) = rsa_aes
     {
@@ -4275,9 +4257,6 @@ mod tests {
     fn the_dialect_follows_the_subtype() {
         assert_eq!(Dialect::of(None), Dialect::Rfb38);
         assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
-        // The density extension rides the standard wire; only the encoding list
-        // and one message type tell a wlshare session from a plain one.
-        assert_eq!(Dialect::of(Some(Subtype::Wlshare)), Dialect::Rfb38);
         assert_eq!(
             Dialect::of(Some(Subtype::ArdHighPerformance)),
             Dialect::Apple889
@@ -4328,17 +4307,12 @@ mod tests {
         // The Apple subtype still wants Apple's type, whatever else is offered.
         let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), "pw", "").unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
-        // And the wlshare subtype wants RSA-AES: at its widest when wlshare lists
-        // VncAuth beside it, and as an error — not VncAuth, not None — when the
-        // server has no account login to offer.
+        // wlshare offers RSA-AES at both widths and nothing else; an account
+        // takes the widest.
         assert_eq!(
-            choose_security(&[SECURITY_RSA_AES_256, SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], Some(Subtype::Wlshare), "pw", "").unwrap(),
+            choose_security(&[SECURITY_RSA_AES_256, SECURITY_RSA_AES_128], None, "pw", "").unwrap(),
             SECURITY_RSA_AES_256
         );
-        for offer in [&[SECURITY_VNC_AUTH][..], &[SECURITY_NONE][..]] {
-            let err = choose_security(offer, Some(Subtype::Wlshare), "pw", "").unwrap_err();
-            assert!(format!("{err:#}").contains("not wlshare with its [pam] table"), "{err:#}");
-        }
         // And the refusal says which credential is missing.
         let err = choose_security(&WAYVNC_TYPES, None, "", "vncpw").unwrap_err();
         assert!(format!("{err:#}").contains("username and password"), "{err:#}");
@@ -4622,7 +4596,7 @@ mod tests {
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
         assert_eq!(
-            rfb38_encoding_list(false, false, false, false),
+            rfb38_encoding_list(false, false, false),
             vec![
                 ENCODING_COPY_RECT,
                 ENCODING_ZRLE,
@@ -4633,6 +4607,7 @@ mod tests {
                 ENCODING_CURSOR,
                 ENCODING_CONTINUOUS_UPDATES,
                 ENCODING_FENCE,
+                ENCODING_WLSHARE_DENSITY,
             ]
         );
 
@@ -4640,12 +4615,14 @@ mod tests {
         // header alone is enough to prove it: an unrecognised encoding bails with
         // "not advertised" before any payload is read, and the promised ones do not.
         //
-        // Pixel encodings are the non-negative ones. The pseudo-encodings are
-        // excluded because a server never sends one as a rectangle at all — the
-        // clipboard's arrives as a ServerCutText, not here.
-        let pixel_encodings = rfb38_encoding_list(false, true, true, false)
+        // Pixel encodings are the non-negative ones, the density request aside:
+        // spelt in ASCII it is positive, and a pseudo-encoding all the same. The
+        // pseudo-encodings are excluded because a server never sends one as a
+        // rectangle at all — the clipboard's arrives as a ServerCutText, the
+        // density report as its own message, not here.
+        let pixel_encodings = rfb38_encoding_list(false, true, true)
             .into_iter()
-            .filter(|encoding| *encoding >= 0);
+            .filter(|encoding| *encoding >= 0 && *encoding != ENCODING_WLSHARE_DENSITY);
         for encoding in pixel_encodings {
             let mut wire = vec![0u8, 0];
             wire.extend_from_slice(&1u16.to_be_bytes());
@@ -4697,7 +4674,7 @@ mod tests {
     /// see [`both_apple_subtypes_start_out_wanting_zlib`].
     #[test]
     fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
-        let encodings = rfb38_encoding_list(true, false, true, false);
+        let encodings = rfb38_encoding_list(true, false, true);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
         assert!(!encodings.contains(&ENCODING_ZLIB));
@@ -4853,12 +4830,15 @@ mod tests {
     }
 
     /// The density extension's wire, checked byte by byte against
-    /// docs/wlshare-density.md rather than through the encoder's own eyes.
+    /// docs/wlshare-density.md rather than through the encoder's own eyes. It
+    /// is asked of every generic server, last in the list, and of no Mac.
     #[test]
-    fn the_density_extension_is_asked_for_only_on_a_wlshare_target() {
+    fn the_density_extension_is_asked_of_every_generic_server_and_no_mac() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
-        assert!(rfb38_encoding_list(false, true, true, true).contains(&ENCODING_WLSHARE_DENSITY));
-        assert!(!rfb38_encoding_list(false, true, true, false).contains(&ENCODING_WLSHARE_DENSITY));
+        for (resize, clipboard) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(rfb38_encoding_list(false, resize, clipboard).last(), Some(&ENCODING_WLSHARE_DENSITY));
+            assert!(!rfb38_encoding_list(true, resize, clipboard).contains(&ENCODING_WLSHARE_DENSITY));
+        }
     }
 
     #[test]
@@ -5533,12 +5513,12 @@ mod tests {
         body
     }
 
-    /// A wlshare target holds its first resize until the server has said what
+    /// A generic target holds its first resize until the server has said what
     /// scale it draws at. When that scale is the browser's, it asks for the
     /// window in points × scale at once, labels the framebuffer with it, and
     /// declares the browser's density back.
     #[tokio::test]
-    async fn a_wlshare_resize_waits_for_the_scale_report_and_asks_in_pixels() {
+    async fn a_resize_waits_for_the_scale_report_and_asks_in_pixels() {
         let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let screen = Screen { id: 3, flags: 0 };
@@ -5905,21 +5885,57 @@ mod tests {
         ));
     }
 
-    /// A server that sends pixels before any report is not wlshare:
-    /// the session ends rather than showing a `wlshare` target at a density
-    /// the server never confirmed. Once reported, or on a plain target, every
-    /// update passes.
-    #[test]
-    fn pixels_before_the_first_report_end_the_session() {
-        let desktop = shared_desktop((1024, 768), None, None);
+    /// A server that sends pixels before any report does not speak the
+    /// extension: the request is settled as unanswered, a held resize is no
+    /// longer held on it, and the desktop is generic RFB at 1x. A report that
+    /// arrives after all is still the wire's word and is taken. Once settled
+    /// either way, later updates change nothing.
+    #[tokio::test]
+    async fn pixels_before_the_first_report_settle_the_request_as_unanswered() {
+        let (uplink, wire) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1024, 768), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Asked;
+            d.host_density = 2.0;
+        }
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1728, 883)), false).await.unwrap();
+        assert!(written(&wire).is_empty(), "held until the server reports or sends pixels");
+
+        desktop.lock().unwrap().first_update();
+        assert_eq!(desktop.lock().unwrap().density, Density::Unanswered);
+        assert_eq!(desktop.lock().unwrap().generic_scale(), UNSCALED);
+        // The hold is off: the stashed window goes out in points, at 1x.
+        let replayed = send_decided(&uplink, &desktop, |d| d.pending.take().and_then(|p| d.generic_resize(p)))
+            .await
+            .unwrap();
+        assert!(replayed);
+        assert_eq!(written(&wire), set_desktop_size((1728, 883), screen).to_vec());
+
+        // A late report is still taken, as a first one: the current pixels are
+        // relabelled, the browser's density declared, and the window re-asked
+        // in points × scale.
+        let before = written(&wire).len();
+        let body = output_scale_body((1024, 768), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1024, 768)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(desktop.lock().unwrap().density, Density::Reported);
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Resize { w: 1024, h: 768, scale }) if scale == 2.0
+        ));
+        let expected = [client_density(2.0).to_vec(), set_desktop_size((3456, 1766), screen).to_vec()].concat();
+        assert_eq!(written(&wire)[before..], expected[..]);
+
         let mut d = desktop.lock().unwrap();
-        d.density = Density::Asked;
-        let err = d.first_update().unwrap_err().to_string();
-        assert!(err.contains("not wlshare"), "{err}");
-        d.density = Density::Reported;
-        d.first_update().unwrap();
+        d.first_update();
+        assert_eq!(d.density, Density::Reported);
         d.density = Density::Off;
-        d.first_update().unwrap();
+        d.first_update();
+        assert_eq!(d.density, Density::Off);
     }
 
     #[tokio::test]

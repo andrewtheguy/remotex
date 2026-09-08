@@ -26,7 +26,6 @@ patch series on neatvnc and wayvnc that carried the same wire.
 [[targets]]
 name = "workstation"
 protocol = "vnc"
-subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"              # the account wlshare runs as; its [pam] table checks the login
@@ -34,20 +33,20 @@ password = "…"
 resize = true
 ```
 
-The subtype is explicit because it changes what the gateway asks for on the
-wire, and a plain VNC connection to the same server — or any other server — must
-not. Clipboard, encodings and everything else are a plain `vnc` target's, the
-credentials excepted: a wlshare target is an account, the one wlshare runs as,
-carried by RSA-AES and checked through PAM on the server, the way an `ard` target
-is a Mac account. wlshare may offer VncAuth with a password of its own beside
-that, as a Mac offers its VNC password beside the account login; that password
-goes in a plain `vnc` target's `vnc_password`, which reaches the same server at
-1x. `vnc_password` on a wlshare target is refused, and so is a server that does
-not offer RSA-AES. Against any other server the request goes unanswered, and the session
-ends with an error on the first framebuffer update: an explicit subtype naming a
-server that is not there is a misconfiguration, not a desktop to show at a
-density the server never confirmed. A plain `vnc` target is how that server is
-reached.
+Nothing names the server: wlshare is a plain `vnc` target, and the extension is
+discovered the way ContinuousUpdates and Fence are. The gateway lists the
+pseudo-encoding in every generic `SetEncodings`, last so it never weighs on
+encoding preference; wlshare answers it before its first framebuffer update, and
+any other server ignores it, as RFB requires of an encoding it does not know,
+and sends pixels. Pixels before any report settle the request as unanswered:
+the desktop is generic RFB at 1x from there, and a report that arrives after all
+is still taken, since the label is the wire's word. The Apple subtypes are not
+asked; a Mac reports its densities in its display layout.
+
+The credentials are the account wlshare runs as, carried by RSA-AES and checked
+through PAM on the server, the way an `ard` target is a Mac account; wlshare
+offers RSA-AES or None and nothing else, so a plain target with `username` and
+`password` takes the encrypted login by the ordinary rule.
 
 ## The wire
 
@@ -115,9 +114,11 @@ Eight bytes.
 ## What the gateway does with it
 
 `src/vnc.rs` keeps the extension's state per connection as `Density`: `Off`
-on every other target, `Asked` from the handshake, `Reported` after the first
-message. Pixels arriving while still `Asked` end the session, since wlshare
-answers `SetEncodings` before its first update.
+on the Apple dialects, `Asked` from the handshake, `Reported` after the first
+message, and `Unanswered` once pixels have arrived while still `Asked`, since
+wlshare answers `SetEncodings` before its first update and any other server
+never will. `Unanswered` releases a held resize at 1x and still takes a late
+report.
 
 - **Label.** Every generic `DesktopSize` and `ExtendedDesktopSize` rectangle is
   applied with the last reported scale; before the first report, or on any other
@@ -127,8 +128,11 @@ answers `SetEncodings` before its first update.
   for the rectangle about to arrive.
 - **Resize.** With `resize = true` the window's points are asked for as
   `points × scale` pixels, so the logical desktop is the window. The first
-  request waits for the report, because a request in the wrong pixels is a
-  desktop redrawn twice. Every report that changes the scale, or answers a
+  request waits for the report, or for the first update that shows none is
+  coming, because a request in the wrong pixels is a desktop redrawn twice; on
+  a server without the extension nothing is lost by the wait, since the
+  request also needs the `ExtendedDesktopSize` rect that update carries. Every
+  report that changes the scale, or answers a
   declaration, re-asks for the window in the new pixels, unless the report
   already names them. A relabel empties the browser's canvas, and the resize
   request's rect is what repaints it; when no request goes out, or the server
@@ -165,8 +169,8 @@ resize  1728x883   scale=1.0  -> 1728x883 CSS px      re-asked at points × 1
 ```
 
 The two intermediate lines are the moment between the compositor's scale change
-and the desktop's resize. A plain target against the same server stays at
-`scale=1.0` throughout and never sends the pseudo-encoding.
+and the desktop's resize. Any other server against the same target stays at
+`scale=1.0` throughout, never having answered the pseudo-encoding.
 
 Reproduce it:
 
