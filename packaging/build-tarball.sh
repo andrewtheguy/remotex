@@ -2,7 +2,8 @@
 # Build a distro-agnostic release tarball for the current OS/arch.
 #
 # Produces dist/remotex-<version>-<os>-<arch>.tar.gz containing a relocatable
-# tree that install.sh lays down under <prefix>/versions/<version>:
+# tree. Homebrew consumes the macOS arm64 archive; install.sh lays the Linux
+# fallback archive down under <prefix>/versions/<version>:
 #
 #   remotex-<version>/
 #   ├── VERSION

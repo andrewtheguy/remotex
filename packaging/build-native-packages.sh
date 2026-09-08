@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# Build the native installer(s) for the current platform from the release
-# tarball produced by build-tarball.sh.
+# Build the Linux native installers from the release tarball produced by
+# build-tarball.sh.
 #
 # Linux produces both package formats from the same payload:
 #   dist/remotex-linux-amd64.deb
 #   dist/remotex-linux-amd64.rpm
 #
-# macOS produces:
-#   dist/remotex-macos-arm64.pkg
-#
 # Native packages use package-manager-owned paths directly. There is no
 # versioned tree, active-version symlink, rollback copy, or package wrapper:
 #
 #   Linux: /usr/bin/remotex, /usr/share/remotex/web
-#   macOS: /usr/local/bin/remotex, /usr/local/share/remotex/web
 #
 # The live config is not package-owned. It contains credentials, so the operator
 # creates it from the packaged example with the ownership of the account that
@@ -33,11 +29,11 @@ if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", v
 print(version)
 ')"
 
-case "$(uname -s)" in
-  Linux)  os=linux ;;
-  Darwin) os=macos ;;
-  *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
-esac
+[ "$(uname -s)" = Linux ] || {
+  echo "native packages are built only on Linux; macOS installs the release tarball through Homebrew" >&2
+  exit 1
+}
+os=linux
 
 case "$(uname -m)" in
   x86_64|amd64)
@@ -76,29 +72,6 @@ reported="$("$release/bin/remotex" --version)"
   echo "release binary reports '$reported', expected 'remotex $version'" >&2
   exit 1
 }
-
-if [ "$os" = macos ]; then
-  command -v pkgbuild >/dev/null 2>&1 || { echo "pkgbuild is required" >&2; exit 1; }
-  payload="$stage/payload"
-  mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex" "$payload/usr/local/share/remotex"
-  cp "$release/bin/remotex" "$payload/usr/local/bin/remotex"
-  cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/local/share/doc/remotex/remotex.example.toml"
-  cp -R "$release/share/remotex/web" "$payload/usr/local/share/remotex/web"
-  output="dist/remotex-macos-${asset_arch}.pkg"
-  pkgbuild \
-    --root "$payload" \
-    --identifier com.andrewtheguy.remotex.gateway \
-    --version "$version" \
-    --install-location / \
-    "$output"
-
-  pkgutil --payload-files "$output" > "$stage/pkg-contents"
-  grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
-  grep -qx './usr/local/share/remotex/web/index.html' "$stage/pkg-contents"
-  grep -qx './usr/local/share/doc/remotex/remotex.example.toml' "$stage/pkg-contents"
-  echo ">> wrote $output"
-  exit 0
-fi
 
 command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required" >&2; exit 1; }
 command -v rpmbuild >/dev/null 2>&1 || { echo "rpmbuild is required" >&2; exit 1; }

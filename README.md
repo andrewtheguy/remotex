@@ -68,8 +68,10 @@ than re-investigating.
 The complete annotated configuration is
 [`remotex.example.toml`](remotex.example.toml).
 
-Native packages are the supported install method. Download the matching asset
-from the [latest release](https://github.com/andrewtheguy/remotex/releases/latest).
+Use the platform package manager. Linux and Windows consume native assets from
+the [latest release](https://github.com/andrewtheguy/remotex/releases/latest);
+macOS consumes the arm64 release tarball through this repository as an opt-in
+Homebrew tap.
 
 Debian or Ubuntu, on x86-64 (use the `arm64` asset on arm64):
 
@@ -89,12 +91,14 @@ sudo dnf install ./remotex-linux-amd64.rpm
 macOS arm64:
 
 ```sh
-curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-macos-arm64.pkg
-sudo installer -pkg remotex-macos-arm64.pkg -target /
+brew trust --formula andrewtheguy/remotex/remotex
+brew tap andrewtheguy/remotex https://github.com/andrewtheguy/remotex
+brew install andrewtheguy/remotex/remotex
 ```
 
-The macOS package is unsigned and not notarized, so fetch it with `curl` as
-shown rather than through a browser. It installs the gateway CLI and web client.
+The formula creates a starter config under `$(brew --prefix)/etc/remotex` and
+defines the non-TUI gateway as a Homebrew service. It remains stopped until the
+config is edited and the operator starts it.
 
 Windows x86-64, from an administrator's PowerShell:
 
@@ -107,8 +111,8 @@ The MSI is unsigned, so SmartScreen asks first. It installs the gateway under
 `%ProgramFiles%\remotex`, puts `bin` on the machine `PATH`, and reads
 `%ProgramData%\remotex\remotex.toml`. `remotex tui` is not available on Windows.
 
-Packages do not own the live config because it contains credentials. On Linux,
-create it for the account that will run the gateway:
+Linux packages do not own the live config because it contains credentials.
+Create it for the account that will run the gateway:
 
 ```sh
 sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex
@@ -118,24 +122,26 @@ remotex gen-passwd admin
 ${EDITOR:-vi} /etc/remotex/remotex.toml
 ```
 
-On macOS, use `/usr/local/etc/remotex/remotex.toml` and the example under
-`/usr/local/share/doc/remotex/` instead; on Windows,
-`%ProgramData%\remotex\remotex.toml` and the example under
-`%ProgramFiles%\remotex\share\doc\remotex\`. Paste the generated `admin:$2b$...`
-value into `[server].site_passwd`, replace the example `[[targets]]` entry, then
-start the server in the foreground:
+On macOS, run `remotex gen-passwd admin`, edit
+`$(brew --prefix)/etc/remotex/remotex.toml`, then run
+`brew services start andrewtheguy/remotex/remotex` to start `remotex serve` at
+login. On Windows, use `%ProgramData%\remotex\remotex.toml` and the example
+under `%ProgramFiles%\remotex\share\doc\remotex\`. Paste the generated
+`admin:$2b$...` value into `[server].site_passwd`, replace the example
+`[[targets]]` entry, then start the server in the foreground on Linux or
+Windows:
 
 ```sh
 remotex serve
 ```
 
-See [`docs/install.md`](docs/install.md) for package upgrades, removal, macOS
-config setup, and the quick-install fallback for Linux distributions that
-support neither `.deb` nor `.rpm`.
+See [`docs/install.md`](docs/install.md) for upgrades, removal, Homebrew service
+management, and the quick-install fallback for Linux distributions that support
+neither `.deb` nor `.rpm`.
 
 ## Local instances
 
-Native installs also include a multi-instance terminal control plane:
+Platform installs also include a multi-instance terminal control plane:
 
 ```sh
 remotex tui
@@ -270,8 +276,9 @@ The main directories are:
 
 remotex reads one TOML file. Native packages default to
 `/etc/remotex/remotex.toml` on Linux and
-`/usr/local/etc/remotex/remotex.toml` on macOS. The quick-installer fallback
-uses `<prefix>/etc/remotex.toml`; a checkout should pass `--config`.
+`%ProgramData%\remotex\remotex.toml` on Windows. The macOS Homebrew formula uses
+`$(brew --prefix)/etc/remotex/remotex.toml`. The quick-installer fallback uses
+`<prefix>/etc/remotex.toml`; a checkout should pass `--config`.
 
 ```toml
 [server]
@@ -337,9 +344,10 @@ resolved for the tests' direct RDP and VNC connections.
 bun install --cwd frontend
 cargo build --release
 bash packaging/build-tarball.sh
+# Linux only:
 bash packaging/build-native-packages.sh
 ```
 
 Local Cargo builds automatically rebuild the frontend when its sources change.
-The native package builder consumes the tarball so every artifact contains the
-same gateway binary and built frontend.
+The Linux native package builder and macOS Homebrew formula consume the release
+tarball, so every install contains the same gateway binary and built frontend.

@@ -1412,7 +1412,8 @@ gateway protocol implementation.
 The entire substrate is behind the default `embedded-gateway` Cargo feature:
 the module, token authentication, config audience, CLI commands, and their
 `check-config --embedded` validation mode compile out together. Native packages
-retain it. Container artifacts are built separately with
+and the macOS Homebrew formula retain it. Container artifacts are built
+separately with
 `--no-default-features`; the build script and Dockerfile reject a
 binary that exposes any embedded CLI surface.
 

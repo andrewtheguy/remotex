@@ -2,7 +2,7 @@
 #
 # The same tree the tarball carries (packaging/build-tarball.sh), installed by Windows
 # Installer under %ProgramFiles%\remotex with bin on the machine PATH — and nothing else,
-# like the .deb, .rpm and .pkg: no service, no config. The gateway finds its config at
+# like the Linux native packages: no service, no config. The gateway finds its config at
 # %ProgramData%\remotex\remotex.toml and the web client at ..\share\remotex\web beside the
 # exe (`installed_layout_for_exe` in src/config.rs):
 #

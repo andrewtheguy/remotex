@@ -1,12 +1,12 @@
 # Installing remotex
 
-## Native packages
+## Platform packages
 
-Install a native package from the
-[latest release](https://github.com/andrewtheguy/remotex/releases/latest). The
-package manager owns the gateway executable, frontend bundle, and config
-example. It does not own the live config, so an upgrade or removal never
-replaces or deletes credentials.
+Linux and Windows install a native package from the
+[latest release](https://github.com/andrewtheguy/remotex/releases/latest).
+macOS installs the same release binary and frontend through the Homebrew formula
+in this repository. The live config remains outside the versioned payload, so
+an upgrade or removal never replaces or deletes credentials.
 
 ### Debian and Ubuntu (`.deb`)
 
@@ -40,26 +40,29 @@ Use the `arm64` filename on an arm64 host. The package uses the same `/usr/bin`
 and `/usr/share` layout as the `.deb`. `sudo rpm -i` and a distribution's other
 RPM frontend work too, but `dnf` is preferred because it resolves dependencies.
 
-### macOS (`.pkg`)
+### macOS (Homebrew)
 
-The gateway package is arm64:
+The macOS release and formula are arm64-only. This repository is an opt-in tap;
+it does not need to be listed in Homebrew's official formula index:
 
 ```sh
-curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-macos-arm64.pkg
-sudo installer -pkg remotex-macos-arm64.pkg -target /
+brew trust --formula andrewtheguy/remotex/remotex
+brew tap andrewtheguy/remotex https://github.com/andrewtheguy/remotex
+brew install andrewtheguy/remotex/remotex
 ```
 
-It installs:
+The first command grants trust to this formula alone. It does not trust other
+formulae or commands that may be added to the repository.
+
+The formula installs the gateway CLI and web client into its Homebrew keg. Its
+post-install step creates a starter config once at:
 
 ```text
-/usr/local/bin/remotex
-/usr/local/share/remotex/web/
-/usr/local/share/doc/remotex/remotex.example.toml
+$(brew --prefix)/etc/remotex/remotex.toml
 ```
 
-The package is unsigned and not notarized. A browser download is quarantined,
-so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
-contains the gateway CLI and web client.
+The formula also defines a Homebrew service that runs `remotex serve`, not the
+multi-instance TUI. Installation does not start it.
 
 ### Windows (`.msi`)
 
@@ -87,9 +90,11 @@ The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
 
 ## First configuration
 
-The config contains the web-login hash and target credentials. Create it as the
-account that will run `remotex serve`, mode `0600`. The package ships only the
-public [`remotex.example.toml`](../remotex.example.toml) from which to create it.
+The config contains the web-login hash and target credentials. Keep it mode
+`0600` and owned by the account that runs `remotex serve`. Linux and Windows
+packages ship only the public [`remotex.example.toml`](../remotex.example.toml)
+from which to create it; the macOS formula copies that example once during its
+post-install step.
 
 On Linux:
 
@@ -104,12 +109,8 @@ ${EDITOR:-vi} /etc/remotex/remotex.toml
 On macOS:
 
 ```sh
-sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /usr/local/etc/remotex
-sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
-  /usr/local/share/doc/remotex/remotex.example.toml \
-  /usr/local/etc/remotex/remotex.toml
 remotex gen-passwd admin
-${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml
+${EDITOR:-vi} "$(brew --prefix)/etc/remotex/remotex.toml"
 ```
 
 On Windows, from a PowerShell opened after the install, where only the account
@@ -124,11 +125,29 @@ notepad "$env:ProgramData\remotex\remotex.toml"
 ```
 
 Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
-replace the example `[[targets]]` entry with the remote desktop to reach. Start
-the gateway in the foreground:
+replace the example `[[targets]]` entry with the remote desktop to reach. On
+Linux or Windows, start the gateway in the foreground:
 
 ```sh
 remotex serve
+```
+
+On macOS, start the non-TUI gateway now and at each login:
+
+```sh
+brew services start andrewtheguy/remotex/remotex
+brew services info andrewtheguy/remotex/remotex
+```
+
+The service logs to `$(brew --prefix)/var/log/remotex/stdout.log` and
+`stderr.log`. Run `brew services run andrewtheguy/remotex/remotex` instead when
+the gateway should run now without being registered for future logins.
+Without `sudo`, Homebrew registers a per-user LaunchAgent. To run at boot while
+still dropping to the current account, use this start command instead:
+
+```sh
+sudo brew services start --sudo-service-user="$(id -un)" \
+  andrewtheguy/remotex/remotex
 ```
 
 For a Mac target, configure `protocol = "vnc"`, `subtype = "ard"`, and the Mac
@@ -137,18 +156,19 @@ Sharing; nothing is installed on the target Mac.
 
 ## Upgrade
 
-Download the new asset and hand it to the same package manager:
+Update through the platform package manager:
 
 ```sh
 sudo apt install ./remotex-linux-amd64.deb
 sudo dnf upgrade ./remotex-linux-amd64.rpm
-sudo installer -pkg remotex-macos-arm64.pkg -target /
+brew upgrade andrewtheguy/remotex/remotex
+brew services restart andrewtheguy/remotex/remotex
 msiexec /i remotex-windows-x86_64.msi
 ```
 
-Use only the command for the host platform. Package files are replaced in
-place. The live config remains untouched because it is outside every package
-manifest.
+Use only the commands for the host platform. The live config remains untouched.
+The stable release workflow updates the formula's release URL and SHA-256 after
+it publishes the matching macOS tarball; `brew update` receives that commit.
 
 ## Uninstall
 
@@ -164,25 +184,17 @@ On an RPM distribution:
 sudo dnf remove remotex
 ```
 
-On macOS there is no package manager to ask, so the repository ships an
-uninstaller that reads the installed receipt and removes exactly what the
-package wrote:
+On macOS, stop and unregister the LaunchAgent before removing the formula:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/andrewtheguy/remotex/main/packaging/uninstall-macos-pkg.sh
-sudo bash uninstall-macos-pkg.sh
+brew services stop andrewtheguy/remotex/remotex
+brew uninstall andrewtheguy/remotex/remotex
+brew untap andrewtheguy/remotex
+brew untrust --formula andrewtheguy/remotex/remotex
 ```
 
-`--dry-run` prints the removals without making them and needs no `sudo`. The
-script forgets the receipt afterwards, and keeps any payload directory that
-still holds a file the operator put there. Doing it by hand is the same three
-steps against the current layout:
-
-```sh
-sudo rm -f /usr/local/bin/remotex
-sudo rm -rf /usr/local/share/remotex /usr/local/share/doc/remotex
-sudo pkgutil --forget com.andrewtheguy.remotex.gateway
-```
+If the service was started at boot with `sudo`, stop it with the same command
+prefix: `sudo brew services stop andrewtheguy/remotex/remotex`.
 
 On Windows, remove remotex from **Apps & features**, or from an administrator's
 PowerShell with the package file or without it:
@@ -193,7 +205,7 @@ Get-Package remotex | Uninstall-Package
 ```
 
 None of these touch the live config. Remove `/etc/remotex` on Linux,
-`/usr/local/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
+`$(brew --prefix)/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
 separately only when the credentials and configuration should be deleted too.
 
 ## Unsupported-package fallback
@@ -221,19 +233,26 @@ curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
 ```
 
 The quick installer keeps its own versioned layout and rollback mechanism. It
-is not part of the native package upgrade or removal flow.
+is not part of a platform package manager's upgrade or removal flow.
 
-## Build release packages
+## Build release artifacts
 
-Build the tarball input, then the native package for the current host:
+Build the tarball for the current host:
 
 ```sh
 bash packaging/build-tarball.sh
+```
+
+On Linux, turn that tarball into both native packages:
+
+```sh
 bash packaging/build-native-packages.sh
 ```
 
-Linux builds both `.deb` and `.rpm`; macOS builds `.pkg`. See
-[`packaging/README.md`](../packaging/README.md) for the release workflow.
+The macOS tarball is the Homebrew formula's payload; the stable release workflow
+updates `Formula/remotex.rb` with its exact release URL and SHA-256 after
+publishing it. See [`packaging/README.md`](../packaging/README.md) for the release
+workflow.
 
 ## Apple High Performance audio (build it yourself)
 

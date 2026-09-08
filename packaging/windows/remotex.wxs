@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The Windows package: an MSI installing the tree the .deb, .rpm and .pkg install, under
+  The Windows package: an MSI installing the same gateway/web tree as the Unix packages, under
   %ProgramFiles%\remotex, and like them nothing else. No service, no shortcut, no config: the
   live config is %ProgramData%\remotex\remotex.toml, created by the operator (docs/install.md)
   and never touched by the package, for the reason the Unix packages leave /etc/remotex alone.

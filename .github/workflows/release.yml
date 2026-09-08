@@ -135,7 +135,9 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
-          bash packaging/build-native-packages.sh
+          if [ "${{ runner.os }}" = Linux ]; then
+            bash packaging/build-native-packages.sh
+          fi
 
       - name: Install WiX
         if: runner.os == 'Windows'
@@ -177,6 +179,10 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -192,18 +198,44 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .pkg is the native macOS gateway package, the .msi
-        # the Windows one.
+        # release assets. The macOS tarball is consumed directly by the Homebrew
+        # formula; the .msi is the Windows native package.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
-            artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
-            artifacts/*.tar.gz artifacts/*.msi --clobber
+            artifacts/*.deb artifacts/*.rpm artifacts/*.tar.gz \
+            artifacts/*.msi --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
+
+      # This repository is also the opt-in Homebrew tap. A stable release is
+      # published first so the formula can never point at a draft asset, then
+      # one bot commit advances its exact release URL and checksum. Prereleases do
+      # not replace the stable formula.
+      - name: Point the Homebrew formula at the stable macOS release
+        if: needs.prepare.outputs.is_prerelease == 'false'
+        env:
+          BRANCH: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          archive="artifacts/remotex-${VERSION}-macos-arm64.tar.gz"
+          checksum="$(sha256sum "$archive" | awk '{print $1}')"
+          ruby packaging/update-homebrew-formula.rb "$VERSION" "$checksum"
+          ruby -c Formula/remotex.rb
+          git diff --check
+          git add Formula/remotex.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew formula already points at ${VERSION}"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Point Homebrew formula at v${VERSION}"
+          git pull --rebase origin "$BRANCH"
+          git push origin "HEAD:${BRANCH}"
 
   # Container images, built only once the release is published so a pushed image
   # tag always corresponds to a real release. Nothing is compiled here: each

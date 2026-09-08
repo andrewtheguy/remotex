@@ -1,12 +1,13 @@
 # Packaging
 
-Native packages are the release install contract. Linux ships both `.deb` and
-`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout and
-frontend input for container builds and the payload used by the
-unsupported-platform quick installer. Containers replace its native binary with
-a build that excludes the `embedded-gateway` default feature.
+Platform package managers are the release install contract. Linux ships both
+`.deb` and `.rpm`, macOS installs its arm64 release tarball through the opt-in
+Homebrew formula in `Formula/remotex.rb`, and Windows ships `.msi`. The tarball
+also remains the layout and frontend input for container builds and the payload
+used by the unsupported-platform Linux quick installer. Containers replace its
+native binary with a build that excludes the `embedded-gateway` default feature.
 
-## Native layouts
+## Installed layouts
 
 Linux package managers own the conventional FHS paths directly:
 
@@ -16,12 +17,12 @@ Linux package managers own the conventional FHS paths directly:
 /usr/share/doc/remotex/remotex.example.toml
 ```
 
-The macOS package owns the corresponding local prefix:
+Homebrew owns a versioned macOS keg and links its CLI into the Homebrew prefix:
 
 ```text
-/usr/local/bin/remotex
-/usr/local/share/remotex/web/
-/usr/local/share/doc/remotex/remotex.example.toml
+<homebrew-prefix>/Cellar/remotex/<version>/bin/remotex
+<homebrew-prefix>/Cellar/remotex/<version>/share/remotex/web/
+<homebrew-prefix>/Cellar/remotex/<version>/share/doc/remotex/remotex.example.toml
 ```
 
 The Windows package (`.msi`) owns the same tree under the 64-bit Program Files
@@ -33,26 +34,27 @@ C:\Program Files\remotex\share\remotex\web\
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 ```
 
-There is no package wrapper, version directory, active-version symlink, or
-package-managed rollback. The package manager replaces and removes its files.
+There is no package wrapper or remotex-managed version symlink. Each platform
+package manager owns replacement, rollback, and removal.
 
-The live config is deliberately outside the manifests:
+The live config is outside every versioned payload:
 `/etc/remotex/remotex.toml` on Linux,
-`/usr/local/etc/remotex/remotex.toml` on macOS and
-`%ProgramData%\remotex\remotex.toml` on Windows. The operator creates it from the
-example with mode `0600` and ownership of the account that runs the gateway.
-That keeps both upgrades and removals away from stored credentials.
+`<homebrew-prefix>/etc/remotex/remotex.toml` on macOS and
+`%ProgramData%\remotex\remotex.toml` on Windows. Linux and Windows operators
+create it from the example. The Homebrew formula creates its copy once in
+`post_install_steps`, mode `0600`, and never replaces it. Upgrades and removals
+therefore stay away from stored credentials.
 
 ## Scripts
 
 | Path | Purpose |
 |---|---|
 | `build-tarball.sh` | build the gateway and assemble the common release payload |
-| `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
+| `build-native-packages.sh` | consume the Linux payload and build `.deb` + `.rpm` |
+| `update-homebrew-formula.rb` | point the macOS formula at a published tarball URL and SHA-256 |
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with all default features disabled |
-| `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `install.sh` | install the tarball fallback under a relocatable prefix |
 | `uninstall.sh` | remove that fallback installation or one fallback version |
 | `Dockerfile` | build an image from an extracted release tarball |
@@ -66,11 +68,12 @@ Linux distribution that supports neither native package format.
 ```sh
 cd frontend && bun install --frozen-lockfile && cd ..
 bash packaging/build-tarball.sh
+# Linux only:
 bash packaging/build-native-packages.sh
 ```
 
-The native builder requires `dpkg-deb` and `rpmbuild` on Linux, or `pkgbuild` on
-macOS. On Windows, in PowerShell 7 with WiX on `PATH`
+The native builder requires `dpkg-deb` and `rpmbuild` on Linux. On Windows, in
+PowerShell 7 with WiX on `PATH`
 (`dotnet tool install --global wix --version 5.0.2`):
 
 ```powershell
@@ -83,13 +86,13 @@ Outputs are:
 ```text
 dist/remotex-linux-amd64.deb
 dist/remotex-linux-amd64.rpm
-dist/remotex-macos-arm64.pkg
+dist/remotex-<version>-macos-arm64.tar.gz
 dist/remotex-windows-x86_64.msi
 ```
 
 Arm Linux runners use `arm64` in the asset names. The tarballs retain their
-existing versioned filenames because the quick installer selects and verifies
-them by release version.
+versioned filenames because the macOS formula and Linux quick installer select
+and verify them by release version.
 
 ## x86-64 CPU compatibility
 
@@ -130,13 +133,16 @@ for a manual feature build.
 ## Releases
 
 `.github/workflows/release.yml` creates a draft, builds the frontend once, then
-builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
-arm64, and the MSI for Windows x86-64. The release is published only after the packages and common artifacts
-succeed.
+builds native packages and tarballs for Linux x86-64 and Linux arm64, the
+Homebrew payload tarball for macOS arm64, and the MSI for Windows x86-64. The
+release is published only after those artifacts succeed. After a stable release
+is public, the workflow calculates the macOS tarball's SHA-256 and commits the
+new release URL and checksum to `Formula/remotex.rb`. Prereleases never move the
+stable formula.
 
 Container images take their layout and frontend from the Linux tarballs, then
 replace `bin/remotex` with the separately built container gateway. The build
 script, release smoke test, and Dockerfile all reject a binary that exposes
-`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
-build plumbing and fallback payloads even though native packages are what users
-are directed to install.
+`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore
+remain Homebrew, build-plumbing, and fallback payloads while each platform's
+package manager owns the installation.

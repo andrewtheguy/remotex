@@ -2107,12 +2107,23 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
         });
     }
 
-    // The macOS package is the same direct layout under the locally managed
-    // prefix. Its configuration follows that prefix as well.
-    if bin_dir == Path::new("/usr/local/bin") {
+    // Homebrew resolves its public `bin/remotex` and `opt/remotex` symlinks to
+    // <brew-prefix>/Cellar/remotex/<version>/bin/remotex before `current_exe`
+    // reaches us. The keg owns the matching web bundle; the operator's config
+    // stays under the stable Homebrew prefix so an upgrade can replace the keg
+    // without replacing credentials. This is macOS-only: the tap intentionally
+    // publishes no Linux Homebrew package or layout.
+    #[cfg(target_os = "macos")]
+    if let Some(version_root) = bin_dir.parent()
+        && let Some(rack) = version_root.parent()
+        && rack.file_name() == Some(std::ffi::OsStr::new("remotex"))
+        && let Some(cellar) = rack.parent()
+        && cellar.file_name() == Some(std::ffi::OsStr::new("Cellar"))
+        && let Some(homebrew_prefix) = cellar.parent()
+    {
         return Some(InstalledLayout {
-            config: "/usr/local/etc/remotex/remotex.toml".into(),
-            static_dir: "/usr/local/share/remotex/web".into(),
+            config: homebrew_prefix.join("etc/remotex/remotex.toml"),
+            static_dir: version_root.join("share/remotex/web"),
         });
     }
 
@@ -2194,9 +2205,18 @@ mod tests {
         assert_eq!(linux.config, Path::new("/etc/remotex/remotex.toml"));
         assert_eq!(linux.static_dir, Path::new("/usr/share/remotex/web"));
 
-        let mac = installed_layout_for_exe(Path::new("/usr/local/bin/remotex")).unwrap();
-        assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
-        assert_eq!(mac.static_dir, Path::new("/usr/local/share/remotex/web"));
+        #[cfg(target_os = "macos")]
+        {
+            let mac = installed_layout_for_exe(Path::new(
+                "/opt/homebrew/Cellar/remotex/0.0.194/bin/remotex",
+            ))
+            .unwrap();
+            assert_eq!(mac.config, Path::new("/opt/homebrew/etc/remotex/remotex.toml"));
+            assert_eq!(
+                mac.static_dir,
+                Path::new("/opt/homebrew/Cellar/remotex/0.0.194/share/remotex/web")
+            );
+        }
 
         // The quick installer's tree is a Unix one; on Windows any `bin` directory is
         // the package's tree, which is the arm below.
