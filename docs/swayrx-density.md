@@ -40,7 +40,8 @@ not. Clipboard, encodings and everything else are a plain `vnc` target's, the
 credentials included: swayrx offers RSA-AES when it checks logins through PAM,
 which takes `username` and `password` and encrypts the session, or VncAuth when
 it has a password of its own, which takes `vnc_password`; the target may carry
-both and the server's offer decides. Against any other server the request goes unanswered, and the session
+both and the server's offer decides. Half an account is refused either way,
+since swayrx never asks for a password alone. Against any other server the request goes unanswered, and the session
 ends with an error on the first framebuffer update: an explicit subtype naming a
 server that is not there is a misconfiguration, not a desktop to show at a
 density the server never confirmed. A plain `vnc` target is how that server is
