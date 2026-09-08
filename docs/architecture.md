@@ -308,12 +308,16 @@ codec carrying every cell outside one.
   refused, and the smallest region goes to the still codecs instead. That last rule
   is `Changed::cells`' fault one level up: a banner ad in one corner must not put the
   screen in a stream because a video is playing in the other.
-- **When one starts and stops.** Geometry moves at most once per `RETUNE` (500 ms).
+- **When one starts and stops.** While a stream is live, geometry moves at most once
+  per `RETUNE` (500 ms); while none is, the first region streams at the frame it
+  qualifies on, since there is nothing a wait could save and every frame of it
+  meanwhile is lossless tiles.
   A region that shrinks keeps its stream — the idle margin codes as skipped
   macroblocks, where a restart costs an encoder and a keyframe — and one that grows
   past its rectangle gets a new stream, because an inter-frame stream means nothing
   if its rectangle moves. A region with nothing worth a stream moving in it for
-  `STREAM_IDLE` ends — the same `MIN_STREAM_CELLS` gate that starts a stream is
+  `STREAM_IDLE` (1 s, well clear of `RETUNE` plus a cleanup tick, so the tick cannot
+  end a stream between the retune that saw it moving and the next) ends — the same `MIN_STREAM_CELLS` gate that starts a stream is
   what keeps one alive, so a video pausing under a buffering spinner ends its
   stream and sharpens exactly as a pause with no spinner does.
   A screen that has stopped changing produces no frame boundary at all, so the
