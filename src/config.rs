@@ -61,7 +61,7 @@ pub enum Protocol {
 /// Generic by design — a protocol with more than one flavour of server names
 /// which one it is talking to here, rather than each protocol growing a key of
 /// its own. Which subtypes a protocol accepts is [`ConfigFile::parse`]'s
-/// business; both of today's are `vnc`'s and describe the same Mac.
+/// business; all current subtypes are `vnc`'s, and two describe the same Mac.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Subtype {
@@ -100,17 +100,17 @@ pub enum Subtype {
     /// replace the virtual display's one advertised mode and the Mac answers with
     /// its new layout. See docs/apple-vnc-889.md.
     ArdHighPerformance,
-    /// A sway desktop behind swayrx, the VNC server from the `swayrx`
-    /// repository: standard RFB 3.8 plus one private extension that reports the
-    /// captured output's pixel density, which plain RFB has no word for. The
+    /// A wlroots-based Wayland desktop behind the wlshare VNC server: standard
+    /// RFB 3.8 plus one private extension that reports the captured output's
+    /// pixel density, which plain RFB has no word for. The
     /// engine asks for the reports in `SetEncodings`, labels every framebuffer
     /// with the last one, asks `SetDesktopSize` for points × scale when
     /// `resize` is set, and declares the browser's density to the server.
     /// Authentication and everything else are a plain `vnc` target's. Any other
     /// server never answers the request, and the session ends on its first
     /// framebuffer update rather than run at a density the server never
-    /// confirmed. See docs/swayrx-density.md.
-    Swayrx,
+    /// confirmed. See docs/wlshare-density.md.
+    Wlshare,
 }
 
 impl Subtype {
@@ -119,7 +119,7 @@ impl Subtype {
         match self {
             Subtype::Ard => "ard",
             Subtype::ArdHighPerformance => "ard-high-performance",
-            Subtype::Swayrx => "swayrx",
+            Subtype::Wlshare => "wlshare",
         }
     }
 
@@ -129,14 +129,14 @@ impl Subtype {
     pub fn apple_authentication(self) -> bool {
         match self {
             Subtype::Ard | Subtype::ArdHighPerformance => true,
-            Subtype::Swayrx => false,
+            Subtype::Wlshare => false,
         }
     }
 
-    /// Whether this subtype negotiates the swayrx density extension: the one
+    /// Whether this subtype negotiates the wlshare density extension: the one
     /// generic-RFB server that can say what scale its framebuffer is drawn at.
     pub fn reports_density(self) -> bool {
-        self == Subtype::Swayrx
+        self == Subtype::Wlshare
     }
 }
 
@@ -1609,24 +1609,24 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                // The swayrx subtype is the Apple shape: an account, checked by
-                // PAM over RSA-AES, and nothing else. swayrx also offers VncAuth
+                // The wlshare subtype is the Apple shape: an account, checked by
+                // PAM over RSA-AES, and nothing else. wlshare also offers VncAuth
                 // with the machine's password beside it, the way a Mac offers its
                 // VNC password beside the account login, and that is what a plain
                 // `vnc` target to the same server carries — at 1x, without the
                 // density extension.
-                (Protocol::Vnc, Some(Subtype::Swayrx)) => {
+                (Protocol::Vnc, Some(Subtype::Wlshare)) => {
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
-                        "target {:?} is subtype \"swayrx\" but has no username and password — \
-                         both are needed, and they are the account swayrx runs as; a server \
+                        "target {:?} is subtype \"wlshare\" but has no username and password — \
+                         both are needed, and they are the account wlshare runs as; a server \
                          reached by its vnc_password alone is a plain \"vnc\" target",
                         target.name
                     );
                     anyhow::ensure!(
                         target.vnc_password.is_empty(),
-                        "target {:?} is subtype \"swayrx\" but sets vnc_password, which only a \
-                         plain \"vnc\" target uses — swayrx's RSA-AES carries the account \
+                        "target {:?} is subtype \"wlshare\" but sets vnc_password, which only a \
+                         plain \"vnc\" target uses — wlshare's RSA-AES carries the account \
                          credentials above instead",
                         target.name
                     );
@@ -4030,22 +4030,22 @@ mod tests {
         }
     }
 
-    /// A swayrx target is an account, like an Apple one: username and password
+    /// A wlshare target is an account, like an Apple one: username and password
     /// for RSA-AES, checked by PAM on the server. The server's own VncAuth
     /// password belongs to a plain `vnc` target, so `vnc_password` is refused
     /// here rather than left to decide nothing.
     #[test]
-    fn a_swayrx_target_is_an_account_and_nothing_else() {
-        let swayrx = |extra: &str| ConfigFile::parse(&vnc_toml(&format!("subtype = \"swayrx\"\n{extra}")));
-        let account = swayrx("username = \"andrew\"\npassword = \"hunter2\"").unwrap();
-        assert_eq!(account.targets[0].subtype, Some(Subtype::Swayrx));
+    fn a_wlshare_target_is_an_account_and_nothing_else() {
+        let wlshare = |extra: &str| ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\n{extra}")));
+        let account = wlshare("username = \"andrew\"\npassword = \"hunter2\"").unwrap();
+        assert_eq!(account.targets[0].subtype, Some(Subtype::Wlshare));
         assert_eq!(account.targets[0].username, "andrew");
         for half in ["", r#"username = "andrew""#, r#"password = "hunter2""#, r#"vnc_password = "hunter2""#] {
-            let msg = format!("{:#}", swayrx(half).unwrap_err());
-            assert!(msg.contains("swayrx") && msg.contains("no username and password"), "{half}: {msg}");
+            let msg = format!("{:#}", wlshare(half).unwrap_err());
+            assert!(msg.contains("wlshare") && msg.contains("no username and password"), "{half}: {msg}");
         }
-        let msg = format!("{:#}", swayrx("username = \"andrew\"\npassword = \"hunter2\"\nvnc_password = \"secret\"").unwrap_err());
-        assert!(msg.contains("swayrx") && msg.contains("sets vnc_password"), "{msg}");
+        let msg = format!("{:#}", wlshare("username = \"andrew\"\npassword = \"hunter2\"\nvnc_password = \"secret\"").unwrap_err());
+        assert!(msg.contains("wlshare") && msg.contains("sets vnc_password"), "{msg}");
         // The same server by its own password is a plain vnc target.
         let plain = ConfigFile::parse(&vnc_toml(r#"vnc_password = "hunter2""#)).unwrap();
         assert_eq!(plain.targets[0].subtype, None);
