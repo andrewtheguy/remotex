@@ -29,10 +29,11 @@
 //! what [`coalesce`] chose is streamed when a stream starts: the still pixels beside
 //! a moving region keep whatever crisp tile last painted them, and are owed nothing.
 //!
-//! Geometry moves at most once per `RETUNE`, so a stream is not restarted for
-//! every twitch: a region that shrinks keeps its stream (the idle margin costs
-//! almost nothing to code), and only a region that grows past its stream's rectangle
-//! pays for a new encoder and a keyframe. A kept stream keeps its whole rectangle,
+//! While a stream is live, geometry moves at most once per `RETUNE`, so a stream is
+//! not restarted for every twitch: a region that shrinks keeps its stream (the idle
+//! margin costs almost nothing to code), and only a region that grows past its
+//! stream's rectangle pays for a new encoder and a keyframe. While none is, the
+//! first region streams at the frame it qualifies on. A kept stream keeps its whole rectangle,
 //! and every cell of it — the margin the region has left behind included — stays
 //! covered and owed a cleanup until the stream ends.
 
@@ -77,7 +78,16 @@ const RETUNE: Duration = Duration::from_millis(500);
 /// debt due for a crisp re-send. Long enough that a paused frame of video, or a
 /// pointer that stops for a moment, does not tear the stream down and pay for a new
 /// keyframe a moment later.
-const STREAM_IDLE: Duration = Duration::from_millis(500);
+///
+/// Twice [`RETUNE`], and it has to be well clear of it. A stream's [`Live::moving_at`]
+/// is refreshed only by a retune, which runs at the first frame boundary past
+/// `RETUNE`, and the cleanup timer that ends idle streams ticks on a clock of its
+/// own. With the two equal, a tick landing after a retune plus `STREAM_IDLE` and
+/// before the next retune ended a stream whose region was still moving, and that
+/// retune rebuilt it with a keyframe — every 5–6 s on both tapes in `roadmap.md`,
+/// which put a second against half a second at 3% more lossily carried cells on a
+/// paged document and 10% on a video, for half the keyframes.
+const STREAM_IDLE: Duration = Duration::from_millis(1000);
 
 /// The most idle cells a merge may sweep up, as a multiple of the moving cells it
 /// joins.
@@ -489,6 +499,18 @@ impl Regions {
         self
     }
 
+    /// When the last retune ran, for the replay's trace.
+    #[cfg(test)]
+    pub fn retuned_at(&self) -> Option<Instant> {
+        self.retuned_at
+    }
+
+    /// The rectangles streaming right now, for the replay's trace.
+    #[cfg(test)]
+    pub fn live_rects(&self) -> Vec<Rect> {
+        self.live.iter().map(|live| live.rect).collect()
+    }
+
     /// Adopt the desktop the client is about to be told about.
     ///
     /// Cannot fail, and is all that happens on the message path. A different size
@@ -690,12 +712,20 @@ impl Regions {
 
     /// Choose the regions to stream, given the cells currently in motion.
     ///
-    /// A no-op under [`Policy::Whole`], and at most once per `RETUNE` otherwise.
+    /// A no-op under [`Policy::Whole`]. Otherwise at most once per `RETUNE` while a
+    /// stream is live — the interval exists to keep a live stream's geometry from
+    /// following the churn map frame by frame — and at every frame while none is:
+    /// with nothing to restart there is nothing for waiting to save, and every frame
+    /// of a video that has qualified but has no stream yet goes out as lossless
+    /// tiles, the better part of a megabyte each at 1080p.
     pub fn retune(&mut self, moving: &[(u16, u16)], now: Instant) -> anyhow::Result<()> {
         if self.policy == Policy::Whole {
             return Ok(());
         }
-        if self.retuned_at.is_some_and(|at| now.saturating_duration_since(at) < self.retune_every) {
+        let streaming = !self.live.is_empty() || self.round_out;
+        if streaming
+            && self.retuned_at.is_some_and(|at| now.saturating_duration_since(at) < self.retune_every)
+        {
             return Ok(());
         }
         self.retuned_at = Some(now);
@@ -1637,6 +1667,24 @@ mod tests {
         // Twice as much is moving, but not yet.
         regions.retune(&both_rows(), t0 + RETUNE / 2).expect("no work");
         assert_eq!(only_rect(&regions), first, "geometry moved inside the interval");
+    }
+
+    /// The interval guards a live stream's geometry. With none live there is nothing
+    /// to guard, and a region that has just qualified streams at the next frame
+    /// rather than at the next tick of a clock started when nothing was moving.
+    #[tokio::test]
+    async fn a_first_region_does_not_wait_for_the_retune_interval() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.retune(&[], t0).expect("nothing to do");
+        assert!(regions.live.is_empty());
+
+        regions.retune(&top_row(), t0 + RETUNE / 4).expect("a stream for the moving cells");
+        assert_eq!(only_rect(&regions).h(), 64, "the first region waited for the interval");
+
+        // Now something is live, and the interval holds again.
+        regions.retune(&both_rows(), t0 + RETUNE / 2).expect("no work");
+        assert_eq!(only_rect(&regions).h(), 64, "geometry moved inside the interval");
     }
 
     /// Shrinking is free: the idle margin codes as skipped macroblocks, where a

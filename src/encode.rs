@@ -876,14 +876,23 @@ impl TileSink {
             }
 
             // The quiet cells go out as *runs*: along each row of cells in the band,
-            // every maximal stretch not under a stream is one tile. The cell is the
-            // unit of identity, not of transport — a tile per cell would pay PNG's
-            // fixed cost and a batch record up to thirty times across one 1080p band,
-            // for pixels that differ from a whole band only by the hole the stream
-            // leaves in them.
+            // every maximal stretch of cells that changed and are not under a stream
+            // is one tile. The cell is the unit of identity, not of transport — a
+            // tile per cell would pay PNG's fixed cost and a batch record up to
+            // thirty times across one 1080p band, for pixels that differ from a
+            // whole band only by the hole the stream leaves in them.
+            //
+            // Changed, because a split band is the one place a report's box is
+            // known cell by cell and the box is loose here by construction: a
+            // stream in the middle of a window and a scrollbar at its edge put every
+            // still cell between them in one box, and a whole band would send them
+            // all, lossless, at the frame rate — where the pixels the client holds
+            // for a cell that did not change are already right, or owed by a debt
+            // the cleanup pays.
             let mut runs: Vec<Rect> = Vec::new();
             for cell in cells {
-                if streamed.contains(&cell.cell_key(grid)) {
+                let key = cell.cell_key(grid);
+                if streamed.contains(&key) || !changed.has(key) {
                     continue;
                 }
                 match runs.last_mut() {
@@ -2643,6 +2652,43 @@ mod tests {
         );
     }
 
+    /// A split band is the one place a report's box is known cell by cell, and a
+    /// cell in the box that did not change is not sent: the client's pixels there
+    /// are already right, or owed by a debt the cleanup pays.
+    #[tokio::test(start_paused = true)]
+    async fn a_still_cell_beside_a_streamed_one_is_not_re_sent() {
+        let (sink, mut frame_rx) = stream_sink(640, 128).await;
+        let moving = rect(0, 0, 320, 64);
+        until_streamed(&sink, moving, 40).await;
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        // One box across the whole band — the streamed cells and every quiet one —
+        // in which only the first and last quiet cells differ.
+        let report = Changed { rect: rect(0, 0, 640, 64), cells: vec![(0, 0), (5, 0), (9, 0)] };
+        sink.damage(&report, |piece| flat(piece.w(), piece.h(), 90)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 3).await;
+        let tiles: Vec<(u16, u16, u16, u16)> = out
+            .iter()
+            .filter_map(|msg| match msg {
+                ServerMsg::Tile(tile) => Some((tile.x, tile.y, tile.w, tile.h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tiles,
+            vec![(320, 0, 64, 64), (576, 0, 64, 64)],
+            "the split band should send only the quiet cells that changed"
+        );
+        assert!(
+            out.iter().any(|msg| matches!(msg, ServerMsg::Video(_))),
+            "the streamed cell was not carried at all"
+        );
+    }
+
     /// The answer to what happens when a region stops moving while its stream is
     /// still the truth on screen — and the reason the debt holds no pixels.
     ///
@@ -3104,26 +3150,30 @@ mod tests {
             "|--------|------|---------|-----------|--------|-----------|-----------\
              |-------------|----------|------------|----------|----------|----------|"
         );
+        let mut settings = Vec::new();
         for &retune in &retunes {
             for &idle in &idles {
-                let r = replay(&header, &records, retune, idle);
-                println!(
-                    "| {:>6} | {:>4} | {:7} | {:9} | {:6} | {:9} | {:8.1}% | {:11} | {:8} | {:10} | {:8} | {:8} | {:8} |",
-                    format!("{}ms", retune.as_millis()),
-                    format!("{}ms", idle.as_millis()),
-                    r.streams,
-                    r.keyframes,
-                    r.keyframe_bytes / 1024,
-                    r.stream_bytes / 1024,
-                    100.0 * r.keyframe_bytes as f64 / r.stream_bytes.max(1) as f64,
-                    r.cell_rounds,
-                    r.cleanups,
-                    r.cleanup_bytes / 1024,
-                    r.tile_bytes / 1024,
-                    (r.stream_bytes + r.cleanup_bytes + r.tile_bytes) / 1024,
-                    r.decoders,
-                );
+                settings.push((retune, idle));
             }
+        }
+        for (retune, idle) in settings {
+            let r = replay(&header, &records, retune, idle);
+            println!(
+                "| {:>6} | {:>4} | {:7} | {:9} | {:6} | {:9} | {:8.1}% | {:11} | {:8} | {:10} | {:8} | {:8} | {:8} |",
+                format!("{}ms", retune.as_millis()),
+                format!("{}ms", idle.as_millis()),
+                r.streams,
+                r.keyframes,
+                r.keyframe_bytes / 1024,
+                r.stream_bytes / 1024,
+                100.0 * r.keyframe_bytes as f64 / r.stream_bytes.max(1) as f64,
+                r.cell_rounds,
+                r.cleanups,
+                r.cleanup_bytes / 1024,
+                r.tile_bytes / 1024,
+                (r.stream_bytes + r.cleanup_bytes + r.tile_bytes) / 1024,
+                r.decoders,
+            );
         }
         println!(
             "\n  streams: stream starts (a `VideoFormat` announced). keyframes and KB key: \
@@ -3176,6 +3226,16 @@ mod tests {
         let mut sizes: HashMap<u8, (u16, u16)> = HashMap::new();
         let mut out = Replayed::default();
         let trace = std::env::var_os("REMOTEX_TAPE_TRACE").is_some();
+        // Where the tile bytes go, for the trace: per cell of the grid, and per
+        // second of tape beside whether anything was streaming at its end.
+        let mut tile_by_cell: HashMap<(u16, u16), (u64, u64)> = HashMap::new();
+        let mut seen_by_cell: HashMap<(u16, u16), (u64, u32)> = HashMap::new();
+        // REMOTEX_TAPE_DUMP=FROM,TO prints every record between those seconds.
+        let dump: Option<(f64, f64)> = std::env::var("REMOTEX_TAPE_DUMP").ok().and_then(|v| {
+            let (from, to) = v.split_once(',')?;
+            Some((from.trim().parse().ok()?, to.trim().parse().ok()?))
+        });
+        let mut tile_by_second: Vec<(u64, u64, usize)> = Vec::new();
         let png_len = |rect: Rect, rgb: &[u8]| -> u64 {
             Tile::from_rgb(rect.left, rect.top, rect.w(), rect.h(), rgb)
                 .expect("a PNG of a piece")
@@ -3202,6 +3262,23 @@ mod tests {
         };
 
         for record in records {
+            if let Some((from, to)) = dump {
+                let t = record.t_us() as f64 / 1e6;
+                if t >= from && t <= to {
+                    match record {
+                        Record::Resize { w, h, scale, .. } => println!("  {t:7.3}s resize {w}x{h} @{scale}"),
+                        Record::Damage { rect, cells, .. } => println!(
+                            "  {t:7.3}s damage {}x{} at ({},{}), {} cell(s)",
+                            rect.w(),
+                            rect.h(),
+                            rect.left,
+                            rect.top,
+                            cells.len()
+                        ),
+                        Record::Frame { .. } => println!("  {t:7.3}s frame"),
+                    }
+                }
+            }
             while next_tick <= record.t_us() {
                 tick(&mut regions, &mut out, at(next_tick));
                 next_tick += CLEANUP_TICK.as_micros() as u64;
@@ -3213,10 +3290,15 @@ mod tests {
                     motion.clear();
                     due_at = None;
                 }
-                Record::Damage { t_us, rect, cells, rgb } => {
+                Record::Damage { t_us, rect, cells: changed, rgb } => {
                     let now = at(*t_us);
-                    for cell in cells {
-                        motion.observe(*cell, now);
+                    for cell in changed {
+                        let churn = motion.observe(*cell, now);
+                        if trace {
+                            let (n, peak) = seen_by_cell.entry(*cell).or_default();
+                            *n += 1;
+                            *peak = (*peak).max(churn);
+                        }
                     }
                     regions.blit(*rect, rgb).expect("a blit inside the desktop");
                     // What `damage_streaming` sends crisp — every piece of the report
@@ -3233,16 +3315,34 @@ mod tests {
                             })
                             .collect()
                     };
+                    let mut weigh = |piece: Rect, bytes: u64, out: &mut Replayed| {
+                        out.tile_bytes += bytes;
+                        if trace {
+                            let keys: Vec<(u16, u16)> =
+                                piece.cells(grid).map(|cell| cell.cell_key(grid)).collect();
+                            for key in &keys {
+                                let (b, n) = tile_by_cell.entry(*key).or_default();
+                                *b += bytes / keys.len() as u64;
+                                *n += 1;
+                            }
+                            let second = *t_us / 1_000_000;
+                            match tile_by_second.last_mut() {
+                                Some((s, b, _)) if *s == second => *b += bytes,
+                                _ => tile_by_second.push((second, bytes, 0)),
+                            }
+                        }
+                    };
                     for band in rect.bands() {
                         let cells: Vec<Rect> = band.cells(grid).collect();
                         if !cells.iter().any(|cell| regions.covers(cell.cell_key(grid))) {
-                            out.tile_bytes += png_len(band, &crop(band));
+                            weigh(band, png_len(band, &crop(band)), &mut out);
                             regions.discharge(band);
                             continue;
                         }
                         let mut runs: Vec<Rect> = Vec::new();
                         for cell in cells {
-                            if regions.covers(cell.cell_key(grid)) {
+                            let key = cell.cell_key(grid);
+                            if regions.covers(key) || !changed.contains(&key) {
                                 continue;
                             }
                             match runs.last_mut() {
@@ -3256,7 +3356,7 @@ mod tests {
                             }
                         }
                         for run in runs {
-                            out.tile_bytes += png_len(run, &crop(run));
+                            weigh(run, png_len(run, &crop(run)), &mut out);
                             regions.discharge(run);
                         }
                     }
@@ -3267,7 +3367,24 @@ mod tests {
                         continue;
                     }
                     let moving = motion.moving(now);
+                    if trace && !regions.covering() && moving.len() >= 5 {
+                        println!("  {:7.3}s {} moving, nothing streaming", *t_us as f64 / 1e6, moving.len());
+                    }
+                    let retuned_before = regions.retuned_at();
                     regions.retune(&moving, now).expect("a retune inside the desktop");
+                    if trace && regions.retuned_at() != retuned_before {
+                        let rects: Vec<String> = regions
+                            .live_rects()
+                            .iter()
+                            .map(|r| format!("{}x{} at ({},{})", r.w(), r.h(), r.left, r.top))
+                            .collect();
+                        println!(
+                            "  {:7.3}s retune {} moving -> [{}]",
+                            *t_us as f64 / 1e6,
+                            moving.len(),
+                            rects.join(", ")
+                        );
+                    }
                     for id in regions.drain_ended() {
                         if trace {
                             println!("  {:7.3}s end   stream {id}", *t_us as f64 / 1e6);
@@ -3305,8 +3422,33 @@ mod tests {
                         }
                     }
                     regions.put_back(round, now);
+                    if trace && let Some((s, _, streams)) = tile_by_second.last_mut()
+                        && *s == *t_us / 1_000_000
+                    {
+                        *streams = (*streams).max(usize::from(regions.covering()));
+                    }
                 }
             }
+        }
+        if trace {
+            println!("  tile KB by second (1: something was streaming at its end):");
+            let line: Vec<String> = tile_by_second
+                .iter()
+                .map(|(s, b, streams)| format!("{s}:{}({streams})", b / 1024))
+                .collect();
+            println!("  {}", line.join(" "));
+            let mut cells: Vec<((u16, u16), (u64, u64))> = tile_by_cell.into_iter().collect();
+            cells.sort_unstable_by_key(|(_, (b, _))| std::cmp::Reverse(*b));
+            println!("  tile KB/pieces/times seen/peak churn by cell, largest 24:");
+            let line: Vec<String> = cells
+                .iter()
+                .take(24)
+                .map(|((c, r), (b, n))| {
+                    let (seen, peak) = seen_by_cell.get(&(*c, *r)).copied().unwrap_or_default();
+                    format!("({c},{r}):{}/{n}/{seen}/{peak}", b / 1024)
+                })
+                .collect();
+            println!("  {}", line.join(" "));
         }
         out
     }

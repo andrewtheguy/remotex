@@ -44,11 +44,3 @@ second on integers and is not worth changing at `RETUNE = 500 ms` and
 0.2 ms for the 45 components a 1080p grid can hold and 4.6 ms for the 170 a 4K
 grid can, in a release build. It is written down so it is not a surprise if either
 moves.
-
-### `RETUNE` and `STREAM_IDLE` are calibrated against the old grid
-
-Both are 500 ms, and the keyframe-waste measurement behind them is explicitly in
-320×64 cells — see [`roadmap.md`](roadmap.md), which owns this question. The
-figure does not carry across: a 64-point grid grows a region's bounding box at a
-different rate, so the share of the stream spent on replaced rectangles has to be
-measured again before either number moves.

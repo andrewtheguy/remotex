@@ -18,7 +18,7 @@ measurements are what should settle them:
 - **`MAX_STREAMS` is four**, and the merge that keeps the count under it is judged by
   one ratio (`MERGE_WASTE`). A desktop with five genuinely independent moving regions
   is not obviously a desktop where merging beats dropping the smallest to stills.
-- **`RETUNE` and `STREAM_IDLE` are both 500 ms**, and a retune costs a keyframe only
+- **`RETUNE` is 500 ms and `STREAM_IDLE` 1 s**, and a retune costs a keyframe only
   when the region it wants no longer fits inside the rectangle its stream already
   has. Shrinking is free and so is any change of shape that stays inside it; what
   pays is growing, and a region that ended and came back. The measurement is a
@@ -29,51 +29,66 @@ measurements are what should settle them:
   both on a 1920×1080 Windows RDP desktop with base `png` and stream quality 40:
   40 s of a video playing in a 1331×749 window, and 44 s of a document paged with
   PageDown and PageUp tapped six times a second (`tests/ws_probe.py --page`), whose
-  moving region is a steady 768×896 body. At 500/500 the video sent 26 keyframes
-  for 469 KB of a 2549 KB stream, **18% of the stream on rectangles that had to be
-  replaced**, and 33.8 MB of lossless tiles beside it; the scroll sent 13 keyframes
-  for 276 KB of a 5530 KB stream (5%) and 91 MB of tiles. Two mechanisms account for
-  nearly all of it:
-  - *The cleanup tick expires a playing stream.* A stream's "last moving" stamp is
+  moving region is a steady 768×896 body. At 500/1000 the video costs 12 keyframes
+  and 238 KB of a 2453 KB stream (9.7%) with 9.2 MB of lossless tiles beside it; the
+  scroll 11 keyframes and 166 KB of 5515 KB (3%) with 16.5 MB of tiles. Before the
+  tapes, at 500/500, they cost 26 keyframes, 18% and 33.8 MB, and 13 keyframes, 5%
+  and 91 MB. Three mechanisms made up the difference, and each is worth knowing
+  because each is the kind of thing that comes back:
+  - *The cleanup tick expired a playing stream.* A stream's "last moving" stamp is
     refreshed only by a retune, every 500–533 ms at frame boundaries, and the 250 ms
     cleanup tick ends a stream idle for `STREAM_IDLE`. With the two numbers equal, a
-    tick landing between a retune plus 500 ms and the next retune ends a stream
-    whose region is still moving, and the retune milliseconds later rebuilds it with
-    a keyframe. On both tapes this happened every 5–6 s, at the beat of the two
-    clocks; on the scroll it is the whole story, seven of the thirteen keyframes
-    being restarts of the same 768×896 rectangle within 50 ms of its expiry. At
-    500/1000 the video costs 11 keyframes and 223 KB (9.3%), no cleanups instead of
-    57, 10% more streamed cells, and 24.4 MB of tiles instead of 33.8; the scroll
-    costs 9 keyframes and 156 KB (2.8%), 24 cleanups instead of 32, 5 MB fewer tiles,
-    and **3% more streamed cells** — not the 76% the old grid measured, because a
-    64-point region holds little that is not moving. Both tapes want `STREAM_IDLE`
-    at 1 s. A value well clear of `RETUNE` plus a tick, or a stamp refreshed by the
-    damage path when a covered cell is seen moving, removes the race whatever the
-    two numbers are.
+    tick landing between a retune plus 500 ms and the next retune ended a stream
+    whose region was still moving, and the retune milliseconds later rebuilt it with
+    a keyframe — every 5–6 s on both tapes, at the beat of the two clocks, and the
+    whole of the scroll's keyframe waste. A second's `STREAM_IDLE` costs 3% more
+    lossily carried cells on the scroll and 10% on the video, not the 76% the old
+    grid measured, because a 64-point region holds little that is not moving. A stamp
+    refreshed by the damage path when a covered cell is seen moving would remove the
+    race whatever the two numbers are; the values do it for now.
+  - *Nothing streamed for a second after the video qualified.* The retune interval
+    was measured from the last retune whether or not anything was live, so a region
+    qualifying just after one waited for the next — and on the video tape a 500 ms
+    gap in the frame boundaries, the engine stalled behind the PNG encode of those
+    very frames, let the detector forget and cost a second interval. 23 MB of the
+    session's 24 MB of tiles were the two seconds before the first keyframe. The
+    interval now holds only while a stream is live.
+  - *A split band re-sent every still cell in the report's box.* The scroll's box
+    ran from the text column to the scrollbar, and the cells between went out as PNG
+    at the frame rate, changed or not — some 67 MB of the 86 MB the replay encoded,
+    for cells the tape saw change three times in 44 s. On the wire most of it had
+    become cache references; all of it had been encoded. A split band now sends only
+    the quiet cells that changed.
+  What is left is measured, and not taken or not yet:
   - *The box grows a column per retune.* A video's edge cells cross the churn
     threshold later than its middle, so after every scene change the wanted box
-    widens by one cell at successive retunes — 1024, 1088, 1216, 1280, 1344, 1408
-    wide — and each step is a restart. Six of the eleven keyframes at 500/1000 are
-    this ramp; the rest of `RETUNE`'s range does little to it (250 ms: 13 keyframes,
-    8 streams; 1000 ms: 11 and 6) because the ramp is paced by the detector, not the
-    retune. The scroll, whose body moves as one, has no ramp. This is the case for a
-    rectangle grown past what is moving, or for the detector admitting a cell sooner
-    when its neighbours are already streaming.
+    widens by one cell at successive retunes — 960, 1024, 1088, 1216, 1280, 1344,
+    1408 wide — and each step is a restart, six of the video's twelve keyframes.
+    `RETUNE` does little to it because the ramp is paced by the detector. A ring of
+    one still cell round every built stream was tried on the tapes: on the video,
+    keyframes 11 → 9 and decoder builds 6 → 3 for 20% more lossily carried cells,
+    15% more keyframe bytes and 2% fewer tiles; two rings, 8 keyframes for 39% more
+    cells. Not worth it. What would pay is the detector admitting an edge cell sooner
+    when its neighbours already stream.
+  - *`STREAM_IDLE` at 2 s* costs the video nothing more and takes the scroll's tiles
+    from 16.5 MB to 9.7 for 12% more lossily carried cells, because a run of paging
+    pauses between PageDown and PageUp; a paused video would sharpen a second later.
+    Not taken.
+  - *The detector's own latency* — a cell needs `CHURN_MOVING` of `CHURN_SLOT`,
+    400 ms, before it moves — is what remains of the startup cost: the video's
+    frames in that time are most of its 9.2 MB of tiles, the scroll's 5 MB of 16.5.
   - *`RETUNE` longer than `STREAM_IDLE` is ruinous*: the stream expires before it may
-    be rebuilt and the content goes to the still codec meanwhile — 401 MB of lossless
-    tiles at 1000/500 for the video against 24 MB at 500/1000, 233 MB against 86 for
-    the scroll. Whatever the values, keep `STREAM_IDLE` the larger.
+    be rebuilt and the content goes to the still codec meanwhile — 37 MB of tiles at
+    1000/500 for the video against 9 at 500/1000, 30 against 16.5 for the scroll.
+    Whatever the values, keep `STREAM_IDLE` the larger.
   The tile column is the encode, before the wire's tile cache: the scroll session
-  encoded 87 MB of tiles and sent 25 MB of them. Even so, tiles cost both sessions
-  several times what the stream did, the edge cells that flicker in and out of the
-  moving set and the seconds before a stream starts — the cost the growth case above
-  would cut. The older figures were on the 320×64 grid and are kept for the shape of
-  the question: 25 s of a pointer swept in a circle on a 1280×800 RDP desktop cost
-  12 keyframes and 38 KB of a 140 KB stream (27%), and replaying 98 retunes of a
-  real 1920×1080 scroll with `STREAM_IDLE` at 1 s instead of 500 ms took the
-  client's decoder builds from 37 to 31 for 76% more streamed cells. A pointer sweep
-  over RDP moves nothing — the cursor is drawn by the client — so the pointer case is
-  no longer a content kind worth taping there.
+  encoded 87 MB of tiles and sent 25 MB of them. The older figures were on the 320×64
+  grid and are kept for the shape of the question: 25 s of a pointer swept in a
+  circle on a 1280×800 RDP desktop cost 12 keyframes and 38 KB of a 140 KB stream
+  (27%), and replaying 98 retunes of a real 1920×1080 scroll with `STREAM_IDLE` at
+  1 s instead of 500 ms took the client's decoder builds from 37 to 31 for 76% more
+  streamed cells. A pointer sweep over RDP moves nothing — the cursor is drawn by the
+  client — so the pointer case is no longer a content kind worth taping there.
 - **A component's own bounding box is not checked against `MERGE_WASTE`.** Only
   merges are. A single diagonal streak of moving cells therefore streams a box mostly
   full of still ones — safe, since every cell inside is owed a cleanup, but wasteful
