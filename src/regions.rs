@@ -712,18 +712,20 @@ impl Regions {
 
     /// Choose the regions to stream, given the cells currently in motion.
     ///
-    /// A no-op under [`Policy::Whole`]. Otherwise at most once per `RETUNE` while a
-    /// stream is live — the interval exists to keep a live stream's geometry from
-    /// following the churn map frame by frame — and at every frame while none is:
-    /// with nothing to restart there is nothing for waiting to save, and every frame
-    /// of a video that has qualified but has no stream yet goes out as lossless
-    /// tiles, the better part of a megabyte each at 1080p.
+    /// A no-op under [`Policy::Whole`], and while a round is out: the live table is
+    /// away on the worker, and a stream built into the empty one left behind would
+    /// be dropped when [`Self::put_back`] restores it, with the id it took and the
+    /// debts it recorded. Otherwise at most once per `RETUNE` while a stream is live
+    /// — the interval exists to keep a live stream's geometry from following the
+    /// churn map frame by frame — and at every frame while none is: with nothing to
+    /// restart there is nothing for waiting to save, and every frame of a video that
+    /// has qualified but has no stream yet goes out as lossless tiles, the better
+    /// part of a megabyte each at 1080p.
     pub fn retune(&mut self, moving: &[(u16, u16)], now: Instant) -> anyhow::Result<()> {
-        if self.policy == Policy::Whole {
+        if self.policy == Policy::Whole || self.round_out {
             return Ok(());
         }
-        let streaming = !self.live.is_empty() || self.round_out;
-        if streaming
+        if !self.live.is_empty()
             && self.retuned_at.is_some_and(|at| now.saturating_duration_since(at) < self.retune_every)
         {
             return Ok(());
@@ -1685,6 +1687,27 @@ mod tests {
         // Now something is live, and the interval holds again.
         regions.retune(&both_rows(), t0 + RETUNE / 2).expect("no work");
         assert_eq!(only_rect(&regions).h(), 64, "geometry moved inside the interval");
+    }
+
+    /// While a round is away the live table is on the worker. A stream built into the
+    /// empty one left behind would be dropped when the round came back — with the id
+    /// it took and the debts it recorded — so a retune waits for the return.
+    #[tokio::test]
+    async fn nothing_is_retuned_while_a_round_is_out() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.retune(&top_row(), t0).expect("a stream");
+        let first = only_rect(&regions);
+        let round = regions.take_round().expect("a new stream is dirty");
+
+        regions.retune(&both_rows(), t0 + RETUNE).expect("no work");
+        assert!(regions.live.is_empty(), "a stream was built beside a round that is out");
+        assert_eq!(regions.retuned_at, Some(t0), "the retune counted");
+
+        regions.put_back(round, t0 + RETUNE);
+        assert_eq!(only_rect(&regions), first, "the round did not bring its stream back");
+        regions.retune(&both_rows(), t0 + RETUNE).expect("a taller stream");
+        assert_eq!(only_rect(&regions).h(), 128, "the retune after the return was skipped");
     }
 
     /// Shrinking is free: the idle margin codes as skipped macroblocks, where a

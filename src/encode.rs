@@ -609,9 +609,11 @@ impl Shared {
             RenderPlan::Tiles { adaptive, .. } => adaptive,
             RenderPlan::Video { .. } => None,
         };
-        let tape = match policy {
-            Policy::Moving => Tape::from_env(crate::tape::Header { quality, chroma }),
-            Policy::Whole => None,
+        let tape = match plan {
+            RenderPlan::Tiles { base, motion: Some(_), .. } => {
+                Tape::from_env(crate::tape::Header { quality, chroma }, base)
+            }
+            _ => None,
         };
         Self {
             failure: Mutex::default(),
@@ -3105,12 +3107,14 @@ mod tests {
     ///
     /// What is replayed is the engine's side of a session: every damage report is
     /// blitted and its changed cells observed, every frame boundary is a
-    /// [`TileSink::frame`] under the same interval, and the cleanup timer ticks on
-    /// tape time. Two things differ from the live session by construction. A round
-    /// here encodes synchronously, so a boundary that arrived while the live round
-    /// was still out is a boundary the replay may act on — at most one round per
-    /// interval either way. And the congestion loop is absent: every stream runs at
-    /// the tape's quality, since the link is not what is being measured.
+    /// [`TileSink::frame`] under the same interval, every resize is also the
+    /// [`TileSink::reset_render`] the engines pair it with, and the cleanup timer
+    /// ticks on tape time from the moment the tape opened, which is when the sink's
+    /// interval started. Two things differ from the live session by construction. A
+    /// round here encodes synchronously, so a boundary that arrived while the live
+    /// round was still out is a boundary the replay may act on — at most one round
+    /// per interval either way. And the congestion loop is absent: every stream runs
+    /// at the tape's quality, since the link is not what is being measured.
     #[test]
     #[ignore = "manual: replays a damage tape and prints a table"]
     fn replay_a_motion_tape() {
@@ -3133,6 +3137,13 @@ mod tests {
         let idles = list("REMOTEX_TAPE_IDLE_MS", &[500, 1000, 2000]);
 
         let seconds = records.last().map_or(0, |r| r.t_us()) as f64 / 1e6;
+        if let Some(crate::tape::Record::Cut { t_us }) = records.last() {
+            println!(
+                "\n  ** the recorder fell behind at {:.3} s and cut the tape there: the session \
+                 went on, the numbers below do not. **",
+                *t_us as f64 / 1e6
+            );
+        }
         let damage = records.iter().filter(|r| matches!(r, crate::tape::Record::Damage { .. })).count();
         let frames = records.iter().filter(|r| matches!(r, crate::tape::Record::Frame { .. })).count();
         println!(
@@ -3181,7 +3192,8 @@ mod tests {
              cells carried lossily, summed over rounds.\n  cleanups: crisp tiles owed when \
              streams ended, with their PNG bytes. KB tiles: the base encode of every\n  changed \
              piece outside a stream, as lossless PNG — where a region goes when it has no stream.\n  \
-             decoders: client decoder builds, one per stream id per picture size.\n  \
+             decoders: client decoder builds — a stream id's first unit, a picture size it has \
+             not had,\n  or a return after the client retired the decoder its ended stream left.\n  \
              REMOTEX_TAPE_TRACE=1 prints every stream start and end of the last row.\n"
         );
         if cfg!(debug_assertions) {
@@ -3222,8 +3234,17 @@ mod tests {
             .with_timing(retune, idle);
         let mut grid = TileGrid::ONE;
         let mut due_at: Option<tokio::time::Instant> = None;
-        let mut next_tick = records.first().map_or(0, |r| r.t_us()) + CLEANUP_TICK.as_micros() as u64;
-        let mut sizes: HashMap<u8, (u16, u16)> = HashMap::new();
+        // The order loop's interval starts with the sink, which is when the tape
+        // opens — seconds before the first resize, on a slow handshake — and fires
+        // at once and then every tick.
+        let mut next_tick: u64 = 0;
+        // The client's decoder table: per stream id, the picture size its decoder is
+        // built for and when the stream on it ended, if it has. An ended stream's
+        // decoder is kept for `CLIENT_RETIRE` — `RETIRE_MS` in
+        // `frontend/src/videoDecoder.ts` — so a region that comes back on the same
+        // id and size inside that reuses it, and one that comes back later builds.
+        const CLIENT_RETIRE: Duration = Duration::from_secs(4);
+        let mut held: HashMap<u8, ((u16, u16), Option<tokio::time::Instant>)> = HashMap::new();
         let mut out = Replayed::default();
         let trace = std::env::var_os("REMOTEX_TAPE_TRACE").is_some();
         // Where the tile bytes go, for the trace: per cell of the grid, and per
@@ -3243,9 +3264,15 @@ mod tests {
                 .len() as u64
         };
 
-        let tick = |regions: &mut Regions, out: &mut Replayed, now: tokio::time::Instant| {
+        let tick = |regions: &mut Regions,
+                    out: &mut Replayed,
+                    held: &mut HashMap<u8, ((u16, u16), Option<tokio::time::Instant>)>,
+                    now: tokio::time::Instant| {
             regions.expire(now);
             for id in regions.drain_ended() {
+                if let Some((_, ended)) = held.get_mut(&id) {
+                    ended.get_or_insert(now);
+                }
                 if trace {
                     println!("  {:7.3}s idle  stream {id}", (now - base).as_secs_f64());
                 }
@@ -3276,20 +3303,27 @@ mod tests {
                             cells.len()
                         ),
                         Record::Frame { .. } => println!("  {t:7.3}s frame"),
+                        Record::Cut { .. } => println!("  {t:7.3}s cut"),
                     }
                 }
             }
             while next_tick <= record.t_us() {
-                tick(&mut regions, &mut out, at(next_tick));
+                tick(&mut regions, &mut out, &mut held, at(next_tick));
                 next_tick += CLEANUP_TICK.as_micros() as u64;
             }
             match record {
                 Record::Resize { w, h, scale, .. } => {
                     grid = TileGrid::at(*scale);
                     regions.want(*w, *h, grid);
+                    // Every `Resize` an engine sends follows its `reset_render` — a
+                    // resize, a repaint, a reattach — so the tape's resize is both:
+                    // the churn is cleared, and a stream that survives it (a
+                    // same-size repaint) owes a format and a keyframe, at once.
                     motion.clear();
+                    regions.force_keyframes();
                     due_at = None;
                 }
+                Record::Cut { .. } => {}
                 Record::Damage { t_us, rect, cells: changed, rgb } => {
                     let now = at(*t_us);
                     for cell in changed {
@@ -3386,6 +3420,9 @@ mod tests {
                         );
                     }
                     for id in regions.drain_ended() {
+                        if let Some((_, ended)) = held.get_mut(&id) {
+                            ended.get_or_insert(now);
+                        }
                         if trace {
                             println!("  {:7.3}s end   stream {id}", *t_us as f64 / 1e6);
                         }
@@ -3417,9 +3454,17 @@ mod tests {
                         }
                         out.cell_rounds += u64::from(unit.w.div_ceil(grid.w))
                             * u64::from(unit.h.div_ceil(grid.h));
-                        if sizes.insert(unit.stream, (unit.w, unit.h)) != Some((unit.w, unit.h)) {
+                        let size = (unit.w, unit.h);
+                        let kept = held.get(&unit.stream).is_some_and(|(had, ended)| {
+                            *had == size
+                                && ended.is_none_or(|at| {
+                                    now.saturating_duration_since(at) < CLIENT_RETIRE
+                                })
+                        });
+                        if !kept {
                             out.decoders += 1;
                         }
+                        held.insert(unit.stream, (size, None));
                     }
                     regions.put_back(round, now);
                     if trace && let Some((s, _, streams)) = tile_by_second.last_mut()

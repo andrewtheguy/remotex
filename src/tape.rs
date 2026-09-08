@@ -14,7 +14,9 @@
 //!
 //! Set `REMOTEX_MOTION_TAPE=<path>` on `remotex serve` to record one; the file is
 //! written from the moment the session's encoder starts until it finishes. Only a
-//! `render_motion = true` target records anything.
+//! `render_motion = true` target with the PNG base records anything: the replay
+//! weighs every tile as PNG, and a tape of a JPEG or classified target would be
+//! weighed wrong.
 //!
 //! ## Format
 //!
@@ -30,24 +32,34 @@
 //!   1 damage  u16 left u16 top u16 right u16 bottom
 //!             u32 n  (u16 col u16 row) × n   u32 len  byte[len] png
 //!   2 frame   (nothing)
+//!   3 cut     (nothing)  — always the last record, when present
 //! ```
 //!
 //! `t_us` is microseconds since the tape opened. Writing happens on a thread of
-//! its own behind an unbounded channel, so the engine's task pays one extra copy
-//! of the rectangle and nothing else; the encode and the disk are the thread's.
+//! its own, so the engine's task pays one extra copy of the rectangle and nothing
+//! else; the encode and the disk are the thread's. The copies waiting for it are
+//! bounded: past [`BACKLOG_LIMIT`] of pixels the recorder writes a `cut` and
+//! records nothing more, so a writer that cannot keep up — 1080p repainting twenty
+//! times a second is over a hundred megabytes of pixels a second before the PNG —
+//! costs the tape its tail rather than the gateway its memory. The replay says so.
 
 use std::io::Write;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use anyhow::Context;
 use log::{info, warn};
 
-use crate::config::Chroma;
+use crate::config::{Chroma, TileCodec};
 use crate::protocol::Tile;
 use crate::tiles::{Changed, Rect};
 
 const MAGIC: &[u8; 8] = b"RXTAPE01";
+
+/// The most packed RGB the recorder holds for its writer at once — about two
+/// seconds of a 1080p desktop repainting whole at twenty frames a second.
+const BACKLOG_LIMIT: usize = 256 << 20;
 
 /// The environment variable naming the file a session records to.
 pub const ENV: &str = "REMOTEX_MOTION_TAPE";
@@ -58,14 +70,26 @@ pub enum Record {
     Resize { t_us: u64, w: u16, h: u16, scale: f32 },
     Damage { t_us: u64, rect: Rect, cells: Vec<(u16, u16)>, rgb: Vec<u8> },
     Frame { t_us: u64 },
+    /// The recorder's writer fell behind by [`BACKLOG_LIMIT`] here, and the tape
+    /// ends. What follows it on the session was not recorded.
+    Cut { t_us: u64 },
 }
 
 impl Record {
     pub fn t_us(&self) -> u64 {
         match self {
-            Record::Resize { t_us, .. } | Record::Damage { t_us, .. } | Record::Frame { t_us } => {
-                *t_us
-            }
+            Record::Resize { t_us, .. }
+            | Record::Damage { t_us, .. }
+            | Record::Frame { t_us }
+            | Record::Cut { t_us } => *t_us,
+        }
+    }
+
+    /// The pixels this record holds for the writer.
+    fn pixel_bytes(&self) -> usize {
+        match self {
+            Record::Damage { rgb, .. } => rgb.len(),
+            _ => 0,
         }
     }
 }
@@ -82,6 +106,11 @@ pub struct Tape {
     tx: Option<mpsc::Sender<Record>>,
     writer: Option<std::thread::JoinHandle<()>>,
     opened: Instant,
+    /// Pixels queued for the writer and not yet written, against `backlog_limit`.
+    backlog: Arc<AtomicUsize>,
+    backlog_limit: usize,
+    /// Set once the backlog overflowed. Nothing is recorded after the cut.
+    cut: AtomicBool,
 }
 
 impl Drop for Tape {
@@ -98,10 +127,20 @@ impl Drop for Tape {
 impl Tape {
     /// Start recording to the file [`ENV`] names, or `None` when it is unset. A file
     /// that cannot be opened is a warning and no tape — a measurement aid must not
-    /// end a session.
-    pub fn from_env(header: Header) -> Option<Self> {
+    /// end a session. So is a `base` other than PNG: the replay weighs every tile
+    /// as the PNG it re-encodes, and a tape whose session sent JPEG would come back
+    /// with tile columns that describe neither.
+    pub fn from_env(header: Header, base: TileCodec) -> Option<Self> {
         let path = std::env::var_os(ENV)?;
-        match Self::create(&path, header) {
+        if base != TileCodec::Png {
+            warn!(
+                "not recording a motion tape to {}: the replay weighs tiles as PNG and this \
+                 target's base encode is {base:?}",
+                path.to_string_lossy()
+            );
+            return None;
+        }
+        match Self::create(&path, header, BACKLOG_LIMIT) {
             Ok(tape) => {
                 info!("recording a motion tape to {}", path.to_string_lossy());
                 Some(tape)
@@ -113,18 +152,22 @@ impl Tape {
         }
     }
 
-    fn create(path: &std::ffi::OsStr, header: Header) -> anyhow::Result<Self> {
+    fn create(path: &std::ffi::OsStr, header: Header, backlog_limit: usize) -> anyhow::Result<Self> {
         let mut file = std::io::BufWriter::new(
             std::fs::File::create(path).with_context(|| "create the tape file")?,
         );
         file.write_all(MAGIC)?;
         file.write_all(&[header.quality, chroma_byte(header.chroma)])?;
         let (tx, rx) = mpsc::channel::<Record>();
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::clone(&backlog);
         let writer = std::thread::Builder::new()
             .name("motion-tape".into())
             .spawn(move || {
                 for record in rx {
-                    if let Err(e) = write_record(&mut file, &record) {
+                    let written = write_record(&mut file, &record);
+                    queued.fetch_sub(record.pixel_bytes(), Ordering::Relaxed);
+                    if let Err(e) = written {
                         warn!("motion tape: {e:#}; stopping");
                         return;
                     }
@@ -134,13 +177,37 @@ impl Tape {
                 }
             })
             .context("spawn the tape writer")?;
-        Ok(Self { tx: Some(tx), writer: Some(writer), opened: Instant::now() })
+        Ok(Self {
+            tx: Some(tx),
+            writer: Some(writer),
+            opened: Instant::now(),
+            backlog,
+            backlog_limit,
+            cut: AtomicBool::new(false),
+        })
     }
 
     fn send(&self, record: Record) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(record);
+        if self.cut.load(Ordering::Relaxed) {
+            return;
         }
+        let Some(tx) = &self.tx else {
+            return;
+        };
+        let bytes = record.pixel_bytes();
+        if self.backlog.fetch_add(bytes, Ordering::Relaxed) + bytes > self.backlog_limit {
+            self.backlog.fetch_sub(bytes, Ordering::Relaxed);
+            self.cut.store(true, Ordering::Relaxed);
+            let t_us = record.t_us();
+            warn!(
+                "motion tape: the writer is {} MB of pixels behind at {:.3} s; the tape is cut there",
+                self.backlog_limit >> 20,
+                t_us as f64 / 1e6
+            );
+            let _ = tx.send(Record::Cut { t_us });
+            return;
+        }
+        let _ = tx.send(record);
     }
 
     fn now_us(&self) -> u64 {
@@ -203,6 +270,10 @@ fn write_record(out: &mut impl Write, record: &Record) -> anyhow::Result<()> {
             out.write_all(&[2])?;
             out.write_all(&t_us.to_le_bytes())?;
         }
+        Record::Cut { t_us } => {
+            out.write_all(&[3])?;
+            out.write_all(&t_us.to_le_bytes())?;
+        }
     }
     Ok(())
 }
@@ -258,6 +329,7 @@ pub fn read(path: impl AsRef<std::path::Path>) -> anyhow::Result<(Header, Vec<Re
                 Record::Damage { t_us, rect, cells, rgb }
             }
             2 => Record::Frame { t_us },
+            3 => Record::Cut { t_us },
             other => anyhow::bail!("unknown record kind {other}"),
         };
         records.push(record);
@@ -300,8 +372,12 @@ mod tests {
             .collect();
         let changed = Changed { rect, cells: vec![(0, 0), (1, 0)] };
         {
-            let tape = Tape::create(path.as_os_str(), Header { quality: 40, chroma: Chroma::Full })
-                .unwrap();
+            let tape = Tape::create(
+                path.as_os_str(),
+                Header { quality: 40, chroma: Chroma::Full },
+                BACKLOG_LIMIT,
+            )
+            .unwrap();
             tape.resize(1280, 800, 1.0);
             tape.damage(&changed, rgb.clone());
             tape.frame();
@@ -321,5 +397,32 @@ mod tests {
         }
         assert!(matches!(records[2], Record::Frame { .. }));
         assert!(records.windows(2).all(|w| w[0].t_us() <= w[1].t_us()));
+    }
+
+    /// A recorder whose writer cannot keep up ends the tape with a cut where the
+    /// backlog overflowed, and records nothing after it — bounded memory, and a
+    /// tape that says where it stops being the session.
+    #[test]
+    fn a_tape_that_outruns_its_writer_is_cut() {
+        let dir = std::env::temp_dir().join(format!("remotex-tape-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cut.tape");
+        let rect = Rect::from_size(0, 0, 8, 8).unwrap();
+        let changed = Changed { rect, cells: vec![(0, 0)] };
+        {
+            // No room for a single pixel: the first damage report is the overflow.
+            let tape =
+                Tape::create(path.as_os_str(), Header { quality: 40, chroma: Chroma::Full }, 0)
+                    .unwrap();
+            tape.resize(64, 64, 1.0);
+            tape.damage(&changed, vec![0; 8 * 8 * 3]);
+            tape.frame();
+            tape.damage(&changed, vec![0; 8 * 8 * 3]);
+        }
+        let (_, records) = read(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(records[0], Record::Resize { .. }));
+        assert!(matches!(records[1], Record::Cut { .. }), "{:?}", records[1]);
+        assert_eq!(records.len(), 2, "something was recorded after the cut");
     }
 }

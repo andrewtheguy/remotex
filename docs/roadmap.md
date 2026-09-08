@@ -31,7 +31,7 @@ measurements are what should settle them:
   PageDown and PageUp tapped six times a second (`tests/ws_probe.py --page`), whose
   moving region is a steady 768×896 body. At 500/1000 the video costs 12 keyframes
   and 238 KB of a 2453 KB stream (9.7%) with 9.2 MB of lossless tiles beside it; the
-  scroll 11 keyframes and 166 KB of 5515 KB (3%) with 16.5 MB of tiles. Before the
+  scroll 11 keyframes and 166 KB of 5522 KB (3%) with 15.7 MB of tiles. Before the
   tapes, at 500/500, they cost 26 keyframes, 18% and 33.8 MB, and 13 keyframes, 5%
   and 91 MB. Three mechanisms made up the difference, and each is worth knowing
   because each is the kind of thing that comes back:
@@ -41,8 +41,8 @@ measurements are what should settle them:
     tick landing between a retune plus 500 ms and the next retune ended a stream
     whose region was still moving, and the retune milliseconds later rebuilt it with
     a keyframe — every 5–6 s on both tapes, at the beat of the two clocks, and the
-    whole of the scroll's keyframe waste. A second's `STREAM_IDLE` costs 3% more
-    lossily carried cells on the scroll and 10% on the video, not the 76% the old
+    whole of the scroll's keyframe waste. A second's `STREAM_IDLE` costs 4% more
+    lossily carried cells on the scroll and 13% on the video, not the 76% the old
     grid measured, because a 64-point region holds little that is not moving. A stamp
     refreshed by the damage path when a covered cell is seen moving would remove the
     race whatever the two numbers are; the values do it for now.
@@ -71,15 +71,15 @@ measurements are what should settle them:
     cells. Not worth it. What would pay is the detector admitting an edge cell sooner
     when its neighbours already stream.
   - *`STREAM_IDLE` at 2 s* costs the video nothing more and takes the scroll's tiles
-    from 16.5 MB to 9.7 for 12% more lossily carried cells, because a run of paging
+    from 15.7 MB to 9.4 for 12% more lossily carried cells, because a run of paging
     pauses between PageDown and PageUp; a paused video would sharpen a second later.
     Not taken.
   - *The detector's own latency* — a cell needs `CHURN_MOVING` of `CHURN_SLOT`,
     400 ms, before it moves — is what remains of the startup cost: the video's
-    frames in that time are most of its 9.2 MB of tiles, the scroll's 5 MB of 16.5.
+    frames in that time are most of its 9.2 MB of tiles, the scroll's 5 MB of 15.7.
   - *`RETUNE` longer than `STREAM_IDLE` is ruinous*: the stream expires before it may
-    be rebuilt and the content goes to the still codec meanwhile — 37 MB of tiles at
-    1000/500 for the video against 9 at 500/1000, 30 against 16.5 for the scroll.
+    be rebuilt and the content goes to the still codec meanwhile — 44 MB of tiles at
+    1000/500 for the video against 9 at 500/1000, 28 against 15.7 for the scroll.
     Whatever the values, keep `STREAM_IDLE` the larger.
   The tile column is the encode, before the wire's tile cache: the scroll session
   encoded 87 MB of tiles and sent 25 MB of them. The older figures were on the 320×64
