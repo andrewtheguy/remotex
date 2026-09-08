@@ -12,20 +12,6 @@ compete with them. What is left in this file is what is left to do.
 
 ## Open
 
-### Cleanups bypass the payload bound at 2×
-
-`Regions::due` (`src/regions.rs`) returns runs of whole grid cells, and
-`flush_cleanups` (`src/encode.rs`) hands them to `encode_tile` directly. At 2× a
-cell is 128 pixels tall, so a cleanup is twice `BAND_ROWS` — the bound that exists
-so one record stays inside `MAX_BATCH_BYTES` and inside the slot cache's ceiling
-(`src/wire.rs`). A full-width 2× cleanup is 3840×128.
-
-The motion path already does this correctly: it bands first and cuts at the grid
-only inside a band, which is why a piece of a cell keying to that cell is spelled
-out in `BAND_ROWS`'s comment. The cleanup path is the one place that skipped it.
-
-Wants an integrated 2× cleanup test; there is none.
-
 ### `Shadow::accept` re-compares a cell once per row it spans
 
 The classification loop in `Shadow::accept` (`src/tiles.rs`) walks the cells of each
@@ -42,18 +28,28 @@ skips the comparison for a cell already marked and pushes each cell once.
 `differing_bytes` still runs per row: the bounding box needs it, and it is a
 `memcmp` over the whole row rather than per cell.
 
-### The motion path packs every pixel twice
+### The motion path copies the changed rectangle twice
 
 `TileSink::damage_streaming` (`src/encode.rs`) calls `pack(changed.rect)` to blit
-the mirror, then `pack(band)` or `pack(run)` again for what it sends. `pack` is a
-fresh `Vec` and a `tiles::crop` per call (`src/vnc.rs`, `src/rdp.rs`), so the
-rectangle is copied twice per damage report. The split path went from at most six
-crops per 1080p band to at most thirty, each with its own allocation.
+the mirror, then `pack(band)` or `pack(run)` again for what it sends, so the
+rectangle's pixels are copied twice per damage report where the plain tiles path
+copies them once.
 
-Packing `changed.rect` once and cropping sub-rectangles out of that buffer removes
-the second pass and the per-run allocation. The callback stays a callback for the
-reason `damage` gives — the two engines hold their pixels differently — it is only
-called once.
+Cropping the bands out of that first pack instead of calling `pack` again saves
+nothing, which is the trap this entry exists to name: `pack` is *already* a
+`tiles::crop` on both engines (`src/rdp.rs`, `src/vnc.rs`), out of a buffer each
+has already packed once, so the same rows are copied either way. What the finer
+grid changed here is only the *number* of allocations — up to thirty crops per
+1080p band where there were six — and not the bytes.
+
+What would remove the second copy is packing each band once and blitting *that*
+into the mirror, so the whole-rectangle pack goes away. It is not free.
+`Regions::blit` stages every rectangle it is handed, and a full-screen damage
+report would stage seventeen bands where it stages one, reaching `STAGED_CAP`
+seventeen times sooner; past that the staged list collapses to a bounding box and
+the spare mirror's sync copies slop the single blit did not. One fewer copy of the
+changed rectangle against a coarser sync is a measurement, not an argument, and
+neither side of it has a number yet.
 
 ### `streamed` is built when no stream is live
 
