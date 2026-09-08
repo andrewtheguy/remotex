@@ -40,7 +40,10 @@ break the first, and there is no measurement saying the second one is failing.
 Components are bounded by moving cells over `MIN_STREAM_CELLS`, which at 1080p went
 from about 20 to about 102 — roughly 130× the work per retune. It runs twice a
 second on integers and is not worth changing at `RETUNE = 500 ms` and
-`MAX_STREAMS = 4`. It is written down so it is not a surprise if either moves.
+`MAX_STREAMS = 4`: a synthetic worst case of disjoint five-cell bars measures
+0.2 ms for the 45 components a 1080p grid can hold and 4.6 ms for the 170 a 4K
+grid can, in a release build. It is written down so it is not a surprise if either
+moves.
 
 ### `RETUNE` and `STREAM_IDLE` are calibrated against the old grid
 

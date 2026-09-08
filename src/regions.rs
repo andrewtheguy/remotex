@@ -447,6 +447,10 @@ pub struct Regions {
     /// holds only a lossy copy of, and the gateway owes a crisp re-send.
     debts: HashMap<(u16, u16), Instant>,
     retuned_at: Option<Instant>,
+    /// [`RETUNE`] and [`STREAM_IDLE`], held per table so a replay can sweep them
+    /// ([`Self::with_timing`]); nothing in a session moves them.
+    retune_every: Duration,
+    idle_after: Duration,
     /// The debug outline, painted on the crop handed to the encoder and never on the
     /// mirror.
     mark: Option<Mark>,
@@ -470,8 +474,19 @@ impl Regions {
             covered: HashSet::new(),
             debts: HashMap::new(),
             retuned_at: None,
+            retune_every: RETUNE,
+            idle_after: STREAM_IDLE,
             mark,
         }
+    }
+
+    /// The same table with [`RETUNE`] and [`STREAM_IDLE`] replaced, for a replay
+    /// that measures what either number costs before it is moved.
+    #[cfg(test)]
+    pub fn with_timing(mut self, retune: Duration, idle: Duration) -> Self {
+        self.retune_every = retune;
+        self.idle_after = idle;
+        self
     }
 
     /// Adopt the desktop the client is about to be told about.
@@ -680,7 +695,7 @@ impl Regions {
         if self.policy == Policy::Whole {
             return Ok(());
         }
-        if self.retuned_at.is_some_and(|at| now.saturating_duration_since(at) < RETUNE) {
+        if self.retuned_at.is_some_and(|at| now.saturating_duration_since(at) < self.retune_every) {
             return Ok(());
         }
         self.retuned_at = Some(now);
@@ -769,7 +784,7 @@ impl Regions {
         // pauses, a pointer comes to rest — and then ends, which is what makes its
         // cells due for a crisp re-send.
         for live in old {
-            let idle = now.saturating_duration_since(live.moving_at) >= STREAM_IDLE;
+            let idle = now.saturating_duration_since(live.moving_at) >= self.idle_after;
             let overlaps = next.iter().any(|kept| kept.rect.intersect(&live.rect).is_some());
             if !idle && !overlaps && next.len() < MAX_STREAMS {
                 debug_assert!(
@@ -826,8 +841,9 @@ impl Regions {
     pub fn expire(&mut self, now: Instant) {
         let before = self.live.len();
         let ended = &mut self.ended;
+        let idle_after = self.idle_after;
         self.live.retain(|live| {
-            let keep = now.saturating_duration_since(live.moving_at) < STREAM_IDLE;
+            let keep = now.saturating_duration_since(live.moving_at) < idle_after;
             if !keep {
                 record_end(ended, live.id);
             }

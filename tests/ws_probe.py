@@ -20,8 +20,10 @@ import argparse
 import asyncio
 import getpass
 import json
+import math
 import os
 import sys
+import time
 
 import requests
 import websockets
@@ -106,6 +108,14 @@ async def main() -> int:
         help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
     )
     parser.add_argument("--mouse-width", type=int, default=None)
+    parser.add_argument(
+        "--sweep",
+        type=duration,
+        default=None,
+        help="after the first resize, sweep the pointer in a circle around the "
+        "desktop's centre for this many seconds (about 60 moves a second) — the "
+        "motion a damage tape of pointer movement is recorded from",
+    )
     parser.add_argument(
         "--viewport",
         type=dimensions,
@@ -210,18 +220,54 @@ async def main() -> int:
                     json.dumps({"type": "key", "code": code, "pressed": False, "caps": False})
                 )
 
+        # A pointer swept round a circle a third of the desktop's shorter side in
+        # radius, a full turn every four seconds: motion whose bounding box grows
+        # and moves the way a dragged window's does, without needing anything on
+        # the desktop to cooperate.
+        async def sweep(width: int, height: int) -> None:
+            cx, cy = width / 2, height / 2
+            radius = min(width, height) / 3
+            started = time.monotonic()
+            print(f"  -> sweeping the pointer for {args.sweep:g}s")
+            while (elapsed := time.monotonic() - started) < args.sweep:
+                angle = elapsed * math.tau / 4
+                x = int(cx + radius * math.cos(angle))
+                y = int(cy + radius * math.sin(angle))
+                await socket.send(json.dumps({"type": "mouseMove", "x": x, "y": y}))
+                await asyncio.sleep(1 / 60)
+            print("  <- sweep done")
+
         keys_task = None
+        sweep_task = None
         try:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
                     if isinstance(message, bytes):
                         tiles += 1
+                        # Acknowledge the batch at once, as a client that painted it
+                        # instantly would: the gateway's paint window holds the next
+                        # batch when too many are owed, and a probe that never acked
+                        # would stall the engine behind a window that never opens.
+                        if len(message) >= 8 and message[0] == 0x02:
+                            sequence = int.from_bytes(message[4:8], "little")
+                            await socket.send(
+                                json.dumps(
+                                    {
+                                        "type": "paintAck",
+                                        "sequence": sequence,
+                                        "queuedMs": 0,
+                                        "drawMs": 0,
+                                    }
+                                )
+                            )
                         continue
                     data = json.loads(message)
                     kind = data.get("type")
                     if kind == "resize":
                         if args.key and keys_task is None:
                             keys_task = asyncio.create_task(press_keys())
+                        if args.sweep is not None and sweep_task is None:
+                            sweep_task = asyncio.create_task(sweep(data["w"], data["h"]))
                         # A viewport is requested in points and answered in pixels at
                         # the announced scale: 1728x883 asked at 2x comes back as
                         # 3456x1766, and is the answer to that request.
@@ -346,6 +392,8 @@ async def main() -> int:
                 reconnect_task.cancel()
             if keys_task is not None and not keys_task.done():
                 keys_task.cancel()
+            if sweep_task is not None and not sweep_task.done():
+                sweep_task.cancel()
         print(f"\n  {tiles} tile frames")
         await socket.send(json.dumps({"type": "disconnect"}))
     return 0

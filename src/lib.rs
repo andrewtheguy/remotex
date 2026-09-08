@@ -34,6 +34,7 @@ pub mod rdp_mic;
 pub mod regions;
 pub mod server;
 pub mod session;
+pub mod tape;
 pub mod tiles;
 pub mod video;
 pub mod vnc;

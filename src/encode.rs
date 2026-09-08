@@ -36,6 +36,7 @@ use crate::config::{Chroma, MotionEncode, RenderPlan, TileCodec};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ServerMsg, Tile, TileGrid};
 use crate::regions::{Policy, Produced, Regions, Round};
+use crate::tape::Tape;
 use crate::tiles::{Changed, Rect};
 use crate::video;
 
@@ -532,6 +533,10 @@ struct Shared {
     /// adaptive; `None` keeps every tile at its configured quality. The streams'
     /// floor lives in [`Congestion`] — same config key, two mechanisms.
     tile_floor: Option<u8>,
+    /// The damage tape a `render_motion` session records when
+    /// [`crate::tape::ENV`] is set — see [`crate::tape`]. `None` otherwise, and on
+    /// every other plan.
+    tape: Option<Tape>,
     tiles: AtomicU64,
     encoded_bytes: AtomicU64,
     /// Of [`Self::tiles`], those that are a settled cell being re-sent crisp.
@@ -604,6 +609,10 @@ impl Shared {
             RenderPlan::Tiles { adaptive, .. } => adaptive,
             RenderPlan::Video { .. } => None,
         };
+        let tape = match policy {
+            Policy::Moving => Tape::from_env(crate::tape::Header { quality, chroma }),
+            Policy::Whole => None,
+        };
         Self {
             failure: Mutex::default(),
             motion: Mutex::default(),
@@ -613,6 +622,7 @@ impl Shared {
             grid: AtomicU32::new(pack_grid(TileGrid::ONE)),
             feedback,
             tile_floor,
+            tape,
             tiles: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
             cleanups: AtomicU64::new(0),
@@ -752,6 +762,11 @@ impl TileSink {
                 self.encode(band, Arc::new(pack(band)), base).await?;
             }
             return Ok(());
+        }
+        if let Some(tape) = &self.shared.tape {
+            // One extra pack of the whole rectangle, only while taping: the bands
+            // below are packed as they are sent, and the tape wants the report.
+            tape.damage(changed, pack(changed.rect));
         }
         self.damage_streaming(changed, pack, base, debug, grid).await
     }
@@ -924,6 +939,11 @@ impl TileSink {
     pub async fn frame(&self) -> anyhow::Result<()> {
         if !self.streaming() {
             return Ok(());
+        }
+        if let Some(tape) = &self.shared.tape {
+            // Before the round-out and interval checks, so the replay makes the
+            // same pacing decisions from the same boundaries.
+            tape.frame();
         }
         let mut video = self.shared.video.lock().await;
         if video.regions.round_out() {
@@ -1180,6 +1200,9 @@ impl TileSink {
             self.shared.grid.store(pack_grid(grid), Ordering::Relaxed);
             if self.streaming() {
                 self.shared.video.lock().await.regions.want(*w, *h, grid);
+            }
+            if let Some(tape) = &self.shared.tape {
+                tape.resize(*w, *h, *scale);
             }
         }
         self.push(Pending::Msg(msg)).await
@@ -3015,5 +3038,276 @@ mod tests {
         assert_eq!(video.congestion.floor, 25);
         assert_eq!(video.congestion.quality, 60, "the walk starts on the motion dial");
         assert_eq!(shared.tile_floor, Some(25));
+    }
+
+    /// Replay a damage tape ([`crate::tape`]) through the motion detector, the
+    /// regions and the encoder, once per `RETUNE` × `STREAM_IDLE` pair, and print
+    /// what each pair cost — the measurement `docs/roadmap.md` asks for before
+    /// either number moves.
+    ///
+    /// `#[ignore]`d because it wants a tape and takes a while: it prints a table
+    /// rather than asserting, and a threshold on it would be a test of the tape.
+    /// **`--release`**, for the reason `video::tests::measure_the_encoder` gives.
+    ///
+    /// ```sh
+    /// REMOTEX_MOTION_TAPE=tmp/sweep.tape \
+    ///   cargo test --release --lib encode::tests::replay_a_motion_tape -- --ignored --nocapture
+    /// ```
+    ///
+    /// `REMOTEX_TAPE_RETUNE_MS` and `REMOTEX_TAPE_IDLE_MS` are comma-separated lists
+    /// that replace the default sweep.
+    ///
+    /// What is replayed is the engine's side of a session: every damage report is
+    /// blitted and its changed cells observed, every frame boundary is a
+    /// [`TileSink::frame`] under the same interval, and the cleanup timer ticks on
+    /// tape time. Two things differ from the live session by construction. A round
+    /// here encodes synchronously, so a boundary that arrived while the live round
+    /// was still out is a boundary the replay may act on — at most one round per
+    /// interval either way. And the congestion loop is absent: every stream runs at
+    /// the tape's quality, since the link is not what is being measured.
+    #[test]
+    #[ignore = "manual: replays a damage tape and prints a table"]
+    fn replay_a_motion_tape() {
+        let path = std::env::var_os(crate::tape::ENV)
+            .expect("REMOTEX_MOTION_TAPE names the tape to replay");
+        let (header, records) = crate::tape::read(&path).expect("a readable tape");
+        let list = |name: &str, default: &[u64]| -> Vec<Duration> {
+            std::env::var(name)
+                .map(|v| {
+                    v.split(',')
+                        .map(|ms| ms.trim().parse::<u64>().expect("a number of milliseconds"))
+                        .collect()
+                })
+                .unwrap_or_else(|_| default.to_vec())
+                .into_iter()
+                .map(Duration::from_millis)
+                .collect()
+        };
+        let retunes = list("REMOTEX_TAPE_RETUNE_MS", &[250, 500, 1000, 2000]);
+        let idles = list("REMOTEX_TAPE_IDLE_MS", &[500, 1000, 2000]);
+
+        let seconds = records.last().map_or(0, |r| r.t_us()) as f64 / 1e6;
+        let damage = records.iter().filter(|r| matches!(r, crate::tape::Record::Damage { .. })).count();
+        let frames = records.iter().filter(|r| matches!(r, crate::tape::Record::Frame { .. })).count();
+        println!(
+            "\n{}: {seconds:.1} s, {damage} damage reports, {frames} frame boundaries, \
+             quality {} {}",
+            path.to_string_lossy(),
+            header.quality,
+            header.chroma.name()
+        );
+        println!(
+            "\n| retune | idle | streams | keyframes | KB key | KB stream | key share \
+             | cell-rounds | cleanups | KB cleanup | KB tiles | KB total | decoders |"
+        );
+        println!(
+            "|--------|------|---------|-----------|--------|-----------|-----------\
+             |-------------|----------|------------|----------|----------|----------|"
+        );
+        for &retune in &retunes {
+            for &idle in &idles {
+                let r = replay(&header, &records, retune, idle);
+                println!(
+                    "| {:>6} | {:>4} | {:7} | {:9} | {:6} | {:9} | {:8.1}% | {:11} | {:8} | {:10} | {:8} | {:8} | {:8} |",
+                    format!("{}ms", retune.as_millis()),
+                    format!("{}ms", idle.as_millis()),
+                    r.streams,
+                    r.keyframes,
+                    r.keyframe_bytes / 1024,
+                    r.stream_bytes / 1024,
+                    100.0 * r.keyframe_bytes as f64 / r.stream_bytes.max(1) as f64,
+                    r.cell_rounds,
+                    r.cleanups,
+                    r.cleanup_bytes / 1024,
+                    r.tile_bytes / 1024,
+                    (r.stream_bytes + r.cleanup_bytes + r.tile_bytes) / 1024,
+                    r.decoders,
+                );
+            }
+        }
+        println!(
+            "\n  streams: stream starts (a `VideoFormat` announced). keyframes and KB key: \
+             what the starts and restarts cost.\n  key share: KB key / KB stream. cell-rounds: \
+             cells carried lossily, summed over rounds.\n  cleanups: crisp tiles owed when \
+             streams ended, with their PNG bytes. KB tiles: the base encode of every\n  changed \
+             piece outside a stream, as lossless PNG — where a region goes when it has no stream.\n  \
+             decoders: client decoder builds, one per stream id per picture size.\n  \
+             REMOTEX_TAPE_TRACE=1 prints every stream start and end of the last row.\n"
+        );
+        if cfg!(debug_assertions) {
+            println!("  ** debug build: re-run with --release before believing the bytes. **\n");
+        }
+    }
+
+    #[derive(Default)]
+    struct Replayed {
+        streams: u64,
+        keyframes: u64,
+        keyframe_bytes: u64,
+        stream_bytes: u64,
+        cell_rounds: u64,
+        cleanups: u64,
+        cleanup_bytes: u64,
+        /// Bytes of the base encode — lossless PNG, as the tape's target used — for
+        /// every changed piece a stream did not carry, cut as `damage_streaming` cuts
+        /// it: a band whole when none of its cells is covered, else runs of the
+        /// uncovered cells.
+        tile_bytes: u64,
+        decoders: u64,
+    }
+
+    /// One pass of [`replay_a_motion_tape`] at one setting.
+    fn replay(
+        header: &crate::tape::Header,
+        records: &[crate::tape::Record],
+        retune: Duration,
+        idle: Duration,
+    ) -> Replayed {
+        use crate::tape::Record;
+
+        let base = tokio::time::Instant::now();
+        let at = |t_us: u64| base + Duration::from_micros(t_us);
+        let mut motion = Motion::default();
+        let mut regions = Regions::new(Policy::Moving, header.quality, header.chroma, None)
+            .with_timing(retune, idle);
+        let mut grid = TileGrid::ONE;
+        let mut due_at: Option<tokio::time::Instant> = None;
+        let mut next_tick = records.first().map_or(0, |r| r.t_us()) + CLEANUP_TICK.as_micros() as u64;
+        let mut sizes: HashMap<u8, (u16, u16)> = HashMap::new();
+        let mut out = Replayed::default();
+        let trace = std::env::var_os("REMOTEX_TAPE_TRACE").is_some();
+        let png_len = |rect: Rect, rgb: &[u8]| -> u64 {
+            Tile::from_rgb(rect.left, rect.top, rect.w(), rect.h(), rgb)
+                .expect("a PNG of a piece")
+                .data
+                .len() as u64
+        };
+
+        let tick = |regions: &mut Regions, out: &mut Replayed, now: tokio::time::Instant| {
+            regions.expire(now);
+            for id in regions.drain_ended() {
+                if trace {
+                    println!("  {:7.3}s idle  stream {id}", (now - base).as_secs_f64());
+                }
+            }
+            let rects = regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
+            for rect in rects.into_iter().flat_map(|rect| rect.bands()) {
+                let mut rgb = Vec::new();
+                regions.crop(rect, &mut rgb).expect("a crop of the mirror");
+                let tile = Tile::from_rgb(rect.left, rect.top, rect.w(), rect.h(), &rgb)
+                    .expect("a PNG of the crop");
+                out.cleanups += 1;
+                out.cleanup_bytes += tile.data.len() as u64;
+            }
+        };
+
+        for record in records {
+            while next_tick <= record.t_us() {
+                tick(&mut regions, &mut out, at(next_tick));
+                next_tick += CLEANUP_TICK.as_micros() as u64;
+            }
+            match record {
+                Record::Resize { w, h, scale, .. } => {
+                    grid = TileGrid::at(*scale);
+                    regions.want(*w, *h, grid);
+                    motion.clear();
+                    due_at = None;
+                }
+                Record::Damage { t_us, rect, cells, rgb } => {
+                    let now = at(*t_us);
+                    for cell in cells {
+                        motion.observe(*cell, now);
+                    }
+                    regions.blit(*rect, rgb).expect("a blit inside the desktop");
+                    // What `damage_streaming` sends crisp — every piece of the report
+                    // outside a live stream — discharges its cell's debt, and is
+                    // encoded here only to be weighed.
+                    let stride = usize::from(rect.w()) * 3;
+                    let crop = |piece: Rect| -> Vec<u8> {
+                        let x0 = usize::from(piece.left - rect.left) * 3;
+                        let width = usize::from(piece.w()) * 3;
+                        (piece.top..=piece.bottom)
+                            .flat_map(|y| {
+                                let row = usize::from(y - rect.top) * stride;
+                                rgb[row + x0..row + x0 + width].iter().copied()
+                            })
+                            .collect()
+                    };
+                    for band in rect.bands() {
+                        let cells: Vec<Rect> = band.cells(grid).collect();
+                        if !cells.iter().any(|cell| regions.covers(cell.cell_key(grid))) {
+                            out.tile_bytes += png_len(band, &crop(band));
+                            regions.discharge(band);
+                            continue;
+                        }
+                        let mut runs: Vec<Rect> = Vec::new();
+                        for cell in cells {
+                            if regions.covers(cell.cell_key(grid)) {
+                                continue;
+                            }
+                            match runs.last_mut() {
+                                Some(run)
+                                    if run.top == cell.top
+                                        && run.right.checked_add(1) == Some(cell.left) =>
+                                {
+                                    run.right = cell.right;
+                                }
+                                _ => runs.push(cell),
+                            }
+                        }
+                        for run in runs {
+                            out.tile_bytes += png_len(run, &crop(run));
+                            regions.discharge(run);
+                        }
+                    }
+                }
+                Record::Frame { t_us } => {
+                    let now = at(*t_us);
+                    if due_at.is_some_and(|due| now < due) {
+                        continue;
+                    }
+                    let moving = motion.moving(now);
+                    regions.retune(&moving, now).expect("a retune inside the desktop");
+                    for id in regions.drain_ended() {
+                        if trace {
+                            println!("  {:7.3}s end   stream {id}", *t_us as f64 / 1e6);
+                        }
+                    }
+                    let Some(mut round) = regions.take_round() else {
+                        continue;
+                    };
+                    due_at = Some(now + VIDEO_FRAME_INTERVAL);
+                    let produced = round.encode().expect("an encode");
+                    out.streams += produced.formats.len() as u64;
+                    for unit in &produced.units {
+                        let bytes = unit.data.len() as u64;
+                        out.stream_bytes += bytes;
+                        if unit.keyframe {
+                            out.keyframes += 1;
+                            out.keyframe_bytes += bytes;
+                            if trace {
+                                println!(
+                                    "  {:7.3}s key   stream {} {}x{} at ({},{}) {bytes} bytes, {} moving",
+                                    *t_us as f64 / 1e6,
+                                    unit.stream,
+                                    unit.w,
+                                    unit.h,
+                                    unit.x,
+                                    unit.y,
+                                    moving.len()
+                                );
+                            }
+                        }
+                        out.cell_rounds += u64::from(unit.w.div_ceil(grid.w))
+                            * u64::from(unit.h.div_ceil(grid.h));
+                        if sizes.insert(unit.stream, (unit.w, unit.h)) != Some((unit.w, unit.h)) {
+                            out.decoders += 1;
+                        }
+                    }
+                    regions.put_back(round, now);
+                }
+            }
+        }
+        out
     }
 }
