@@ -145,13 +145,15 @@ A client-side declaration is not the answer: a density the wire cannot confirm i
 a label the server may not honour, and the product rule is that density is the
 wire's word alone. Until both channels above exist, generic VNC stays 1x.
 
-Both channels now exist for one server: `subtype = "swayvnc"` puts the
-scale on the VNC connection itself, as a private extension a patched wayvnc
-answers ([`swayvnc-density.md`](swayvnc-density.md)). The server reports its
+Both channels now exist for one server: `subtype = "swayrx"` puts the
+scale on the VNC connection itself, as a private extension the swayrx server
+answers ([`swayrx-density.md`](swayrx-density.md)). The server reports its
 output's scale, the gateway labels and resizes by it, the browser's density is
-declared back, and the patched wayvnc sets the output's scale to it, so the
-browser drives the desktop's density with nothing to configure. The sway session
-dialect below is the larger design this grew out of, and is independent of it.
+declared back, and swayrx sets the output's scale to it, so the browser drives
+the desktop's density with nothing to configure. swayrx is a server of its own
+rather than a patch on wayvnc, so the extension no longer rides on a fragile
+patch series. The sway session dialect below is the larger design this grew out
+of, and is independent of it.
 
 ### A virtual-display remote session for sway
 
@@ -160,10 +162,10 @@ Performance mode and the Windows console session work: every physical display
 is folded into one resizable headless output for the length of the session, the
 gateway renders it at the browser's density, and the person at the keyboard
 takes control back through a virtual console switch. The wire half has shipped
-as `subtype = "swayvnc"`, one private pseudo-encoding and one message type each
-way, documented in [`swayvnc-density.md`](swayvnc-density.md). What remains is
-the session daemon on the sway host, a controller speaking sway IPC beside the
-patched wayvnc. A stage 1 prototype of it was measured on macintel: stock sway
+as `subtype = "swayrx"`, one private pseudo-encoding and one message type each
+way, documented in [`swayrx-density.md`](swayrx-density.md). What remains is
+the session daemon on the sway host, a controller speaking sway IPC beside
+swayrx. A stage 1 prototype of it was measured on macintel: stock sway
 1.10 gives the resizable headless output beside the live panel and the restore
 holds, but wayvnc 0.9.1 crashes on half the connects while the output is created
 beside it. That crash is the risk now, and stage 2 starts with its backtrace.
