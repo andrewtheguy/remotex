@@ -178,6 +178,17 @@ fn check_tile_frame(
     area
 }
 
+/// A `resize` control message names the desktop the client is to show: its
+/// pixels, and the density they are labelled with, which generic VNC never
+/// has, so `scale` is 1x. The tile grid that travels beside them is the
+/// renderer's business and not asserted here.
+fn assert_resize(text: &str, w: u32, h: u32, what: &str) {
+    let msg: serde_json::Value = serde_json::from_str(text).expect("resize message is JSON");
+    assert_eq!(msg["w"], w, "{what}: {text}");
+    assert_eq!(msg["h"], h, "{what}: {text}");
+    assert_eq!(msg["scale"], 1.0, "{what}: {text}");
+}
+
 /// Validate a `cursor` control message. Either shape is legitimate: a
 /// decodable PNG with its hotspot inside it, or a null image — the server
 /// saying it has hidden the pointer, which is what Xtigervnc reports for a
@@ -257,10 +268,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         assert_eq!(covered, 0, "resize arrived after tiles");
                         // The size announced must be the VNC server's actual
                         // desktop, not the (RDP-oriented) configured 1280x800.
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{DESKTOP_W},"h":{DESKTOP_H},"scale":1.0}}"#)
-                        );
+                        assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
                         got_resize = true;
                     }
                     if text.contains(r#""type":"cursor""#) {
@@ -315,10 +323,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H},"scale":1.0}}"#)
-                        );
+                        assert_resize(&text, VIEWPORT_W, VIEWPORT_H, "the viewport's size");
                         resized = true;
                     }
                 }
@@ -363,11 +368,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{DEFAULT_W},"h":{DEFAULT_H},"scale":1.0}}"#),
-                            "defaultSize must resolve to the target's configured size"
-                        );
+                        assert_resize(&text, DEFAULT_W, DEFAULT_H, "defaultSize must resolve to the target's configured size");
                         restored = true;
                     }
                 }
@@ -419,11 +420,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{DEFAULT_W},"h":{DEFAULT_H},"scale":1.0}}"#),
-                            "reattach must announce the session's current size"
-                        );
+                        assert_resize(&text, DEFAULT_W, DEFAULT_H, "reattach must announce the session's current size");
                         reannounced = true;
                     }
                     if text.contains(r#""type":"cursor""#) {
