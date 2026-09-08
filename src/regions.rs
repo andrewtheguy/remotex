@@ -568,6 +568,15 @@ impl Regions {
         self.covered.contains(&cell)
     }
 
+    /// Whether any cell at all is under a stream.
+    ///
+    /// The question [`Self::covers`] answers for a whole rectangle at once, and the
+    /// only cheap answer available before a walk: no live stream means no cell can
+    /// be covered, so a caller about to ask cell by cell may stop here.
+    pub fn covering(&self) -> bool {
+        !self.covered.is_empty()
+    }
+
     /// The mirror, built if it is not there yet.
     ///
     /// Construction is deferred to the pixel path — rather than done where the size

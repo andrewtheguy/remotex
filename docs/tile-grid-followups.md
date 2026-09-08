@@ -12,22 +12,6 @@ compete with them. What is left in this file is what is left to do.
 
 ## Open
 
-### `Shadow::accept` re-compares a cell once per row it spans
-
-The classification loop in `Shadow::accept` (`src/tiles.rs`) walks the cells of each
-row's differing span and `memcmp`s each one. A cell is 64 rows tall, so a cell
-already known to differ is compared up to 63 more times for an answer that cannot
-change, and `cells` is pushed to once per row rather than once per cell — a
-full-screen 1080p change reaches roughly 32,000 entries before the `sort_unstable`
-and `dedup`, against about 510 distinct answers.
-
-At 320 wide both numbers were a fifth of that, which is why this was never worth
-saying. A column bitmap for the current cell row, cleared when the row changes,
-skips the comparison for a cell already marked and pushes each cell once.
-
-`differing_bytes` still runs per row: the bounding box needs it, and it is a
-`memcmp` over the whole row rather than per cell.
-
 ### The motion path copies the changed rectangle twice
 
 `TileSink::damage_streaming` (`src/encode.rs`) calls `pack(changed.rect)` to blit
@@ -50,14 +34,6 @@ seventeen times sooner; past that the staged list collapses to a bounding box an
 the spare mirror's sync copies slop the single blit did not. One fewer copy of the
 changed rectangle against a coarser sync is a measurement, not an argument, and
 neither side of it has a number yet.
-
-### `streamed` is built when no stream is live
-
-`damage_streaming` hashes every cell of the changed rectangle and looks it up in
-`covered` before the band loop, whether or not any region exists. On a
-`render_motion` target with nothing playing — the ordinary case for a text desktop —
-that is now about 510 lookups per damage report to build an empty set. An empty
-`covered` means the quiet path for every band, and can be read before the walk.
 
 ## Watched, not planned
 

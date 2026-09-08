@@ -788,12 +788,21 @@ impl TileSink {
         let streamed: HashSet<(u16, u16)> = {
             let mut video = self.shared.video.lock().await;
             video.regions.blit(changed.rect, &pack(changed.rect))?;
-            changed
-                .rect
-                .cells(grid)
-                .map(|cell| cell.cell_key(grid))
-                .filter(|key| video.regions.covers(*key))
-                .collect()
+            // Asked of the whole table first. With no stream running, no cell can be
+            // covered and every band below takes the quiet path, so the walk would
+            // only hash a cell per 64 points of the damage to build an empty set —
+            // about five hundred of them across a 1080p repaint, on the ordinary case
+            // of a `render_motion` desktop with nothing playing.
+            if video.regions.covering() {
+                changed
+                    .rect
+                    .cells(grid)
+                    .map(|cell| cell.cell_key(grid))
+                    .filter(|key| video.regions.covers(*key))
+                    .collect()
+            } else {
+                HashSet::new()
+            }
         };
 
         // One reading for the whole rectangle: the pieces of one report of damage
