@@ -10,31 +10,6 @@ Each item names the mechanism and the cost. An item that lands is deleted from t
 file: the commit and its test are the record, and a done-list here would only
 compete with them. What is left in this file is what is left to do.
 
-## Open
-
-### The motion path copies the changed rectangle twice
-
-`TileSink::damage_streaming` (`src/encode.rs`) calls `pack(changed.rect)` to blit
-the mirror, then `pack(band)` or `pack(run)` again for what it sends, so the
-rectangle's pixels are copied twice per damage report where the plain tiles path
-copies them once.
-
-Cropping the bands out of that first pack instead of calling `pack` again saves
-nothing, which is the trap this entry exists to name: `pack` is *already* a
-`tiles::crop` on both engines (`src/rdp.rs`, `src/vnc.rs`), out of a buffer each
-has already packed once, so the same rows are copied either way. What the finer
-grid changed here is only the *number* of allocations — up to thirty crops per
-1080p band where there were six — and not the bytes.
-
-What would remove the second copy is packing each band once and blitting *that*
-into the mirror, so the whole-rectangle pack goes away. It is not free.
-`Regions::blit` stages every rectangle it is handed, and a full-screen damage
-report would stage seventeen bands where it stages one, reaching `STAGED_CAP`
-seventeen times sooner; past that the staged list collapses to a bounding box and
-the spare mirror's sync copies slop the single blit did not. One fewer copy of the
-changed rectangle against a coarser sync is a measurement, not an argument, and
-neither side of it has a number yet.
-
 ## Watched, not planned
 
 ### The JPEG size floor is not scaled, and now equals one cell
