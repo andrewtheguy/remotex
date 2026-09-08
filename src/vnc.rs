@@ -3906,12 +3906,17 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 /// screen you get — see [`ard_authenticate`] — so a subtype the server cannot
 /// answer is an error rather than a silent fall back to the anonymous path.
 ///
+/// `Swayrx` is the same declaration about a sway desktop: the credentials are the
+/// account swayrx runs as, carried by RSA-AES (see [`crate::vnc_rsa_aes`]) at its
+/// 256-bit width over its 128-bit one, and a server that does not offer it is not
+/// the swayrx this target names. swayrx may list VncAuth beside it for a plain
+/// `vnc` target; this one never takes it.
+///
 /// A plain `vnc` target has two credentials for two kinds of server, and takes
 /// whichever the server can answer: `username` and `password` are an account
-/// for RSA-AES (see [`crate::vnc_rsa_aes`]), the encrypted type and so the one
-/// preferred when both are possible, at its 256-bit width over its 128-bit one;
-/// `vnc_password` is a secret belonging to the *machine* for `VncAuth`, which
-/// tells the server nothing about who is connecting.
+/// for RSA-AES, the encrypted type and so the one preferred when both are
+/// possible; `vnc_password` is a secret belonging to the *machine* for
+/// `VncAuth`, which tells the server nothing about who is connecting.
 fn choose_security(
     types: &[u8],
     subtype: Option<Subtype>,
@@ -3931,13 +3936,24 @@ fn choose_security(
         );
         return Ok(SECURITY_ARD);
     }
+    let rsa_aes = [
+        vnc_rsa_aes::SECURITY_RSA_AES_256,
+        vnc_rsa_aes::SECURITY_RSA_AES_128,
+    ]
+    .into_iter()
+    .find(|t| types.contains(t));
+    if subtype == Some(Subtype::Swayrx) {
+        let Some(rsa_aes) = rsa_aes else {
+            anyhow::bail!(
+                "the target is subtype \"swayrx\", whose account login (RSA-AES) this \
+                 server does not offer (types {types:?}) — it is not swayrx with its \
+                 [pam] table set"
+            );
+        };
+        return Ok(rsa_aes);
+    }
     if !password.is_empty()
-        && let Some(rsa_aes) = [
-            vnc_rsa_aes::SECURITY_RSA_AES_256,
-            vnc_rsa_aes::SECURITY_RSA_AES_128,
-        ]
-        .into_iter()
-        .find(|t| types.contains(t))
+        && let Some(rsa_aes) = rsa_aes
     {
         return Ok(rsa_aes);
     }
@@ -4312,6 +4328,17 @@ mod tests {
         // The Apple subtype still wants Apple's type, whatever else is offered.
         let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), "pw", "").unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
+        // And the swayrx subtype wants RSA-AES: at its widest when swayrx lists
+        // VncAuth beside it, and as an error — not VncAuth, not None — when the
+        // server has no account login to offer.
+        assert_eq!(
+            choose_security(&[SECURITY_RSA_AES_256, SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], Some(Subtype::Swayrx), "pw", "").unwrap(),
+            SECURITY_RSA_AES_256
+        );
+        for offer in [&[SECURITY_VNC_AUTH][..], &[SECURITY_NONE][..]] {
+            let err = choose_security(offer, Some(Subtype::Swayrx), "pw", "").unwrap_err();
+            assert!(format!("{err:#}").contains("not swayrx with its [pam] table"), "{err:#}");
+        }
         // And the refusal says which credential is missing.
         let err = choose_security(&WAYVNC_TYPES, None, "", "vncpw").unwrap_err();
         assert!(format!("{err:#}").contains("username and password"), "{err:#}");
