@@ -264,15 +264,18 @@ password = "change-me"
 # output over one private RFB extension, so a `scale 2` output is shown at 2x
 # and a resizing window is asked for in points × scale. The subtype is explicit
 # because it changes what goes on the wire; a plain "vnc" target to the same
-# server stays at 1x. The one credential is swayrx's VncAuth password, here;
-# username and password are refused, since swayrx has no account to check them
-# against yet. See docs/swayrx-density.md.
+# server stays at 1x. The credentials are whatever swayrx is configured to
+# check: with its [pam] table it offers RSA-AES and takes the username and
+# password of the account it runs as, encrypting the session; with a
+# password_file it offers VncAuth and takes that password as vnc_password. See
+# docs/swayrx-density.md.
 # [[targets]]
 # name = "workstation-sway"
 # protocol = "vnc"
 # subtype = "swayrx"
 # host = "127.0.0.1"
-# vnc_password = "the-swayrx-password"
+# username = "me"
+# password = "that-account's-password"
 # resize = true
 
 # A Mac uses its built-in Screen Sharing service through this same path, with no

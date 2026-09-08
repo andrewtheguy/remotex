@@ -1609,22 +1609,11 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                // swayrx offers VncAuth and nothing else, so its one credential is
-                // the machine's password in vnc_password (which may be absent, for
-                // a server without one). An account is refused rather than left to
-                // choose the anonymous type against a server that offers it, or to
-                // fail against one that does not; RSA-AES with an account is on
-                // swayrx's list and will be accepted here when it lands.
-                (Protocol::Vnc, Some(Subtype::Swayrx)) => {
-                    anyhow::ensure!(
-                        target.username.is_empty() && target.password.is_empty(),
-                        "target {:?} is subtype \"swayrx\" but sets username or password — swayrx \
-                         authenticates with VncAuth only, whose password goes in vnc_password; an \
-                         account over RSA-AES is not implemented there yet",
-                        target.name
-                    );
-                }
-                (Protocol::Vnc, None) => {
+                // swayrx offers what a plain server does — RSA-AES with an account
+                // it checks through PAM, or VncAuth with the machine's password — so
+                // its credentials follow the plain rule: either, both for the offer
+                // to decide, or nothing for a server without authentication.
+                (Protocol::Vnc, None | Some(Subtype::Swayrx)) => {
                     anyhow::ensure!(
                         target.username.is_empty() || !target.password.is_empty(),
                         "target {:?} is protocol \"vnc\" and sets username without password — \
@@ -4023,19 +4012,20 @@ mod tests {
         }
     }
 
-    /// A swayrx target's one credential is the server's VncAuth password; an
-    /// account has nothing to authenticate to there yet and is refused.
+    /// swayrx checks an account through PAM over RSA-AES or a password with
+    /// VncAuth, whichever its configuration offers, so its target carries the
+    /// same credentials a plain one does.
     #[test]
-    fn a_swayrx_target_takes_only_a_vnc_password() {
+    fn a_swayrx_target_takes_an_account_or_the_servers_own_password() {
         let swayrx = |extra: &str| ConfigFile::parse(&vnc_toml(&format!("subtype = \"swayrx\"\n{extra}")));
         let plain = swayrx(r#"vnc_password = "hunter2""#).unwrap();
         assert_eq!(plain.targets[0].subtype, Some(Subtype::Swayrx));
         assert_eq!(plain.targets[0].vnc_password, "hunter2");
-        assert!(swayrx("").is_ok(), "a server without a password takes no credential");
-        for account in ["username = \"andrew\"\npassword = \"h\"", "password = \"h\"", "username = \"andrew\""] {
-            let msg = format!("{:#}", swayrx(account).unwrap_err());
-            assert!(msg.contains("swayrx") && msg.contains("vnc_password"), "{account}: {msg}");
-        }
+        let account = swayrx("username = \"andrew\"\npassword = \"hunter2\"").unwrap();
+        assert_eq!(account.targets[0].username, "andrew");
+        assert!(swayrx("").is_ok(), "a server without authentication takes no credential");
+        let msg = format!("{:#}", swayrx(r#"username = "andrew""#).unwrap_err());
+        assert!(msg.contains("username without password"), "{msg}");
     }
 
     #[test]
