@@ -788,12 +788,21 @@ impl TileSink {
         let streamed: HashSet<(u16, u16)> = {
             let mut video = self.shared.video.lock().await;
             video.regions.blit(changed.rect, &pack(changed.rect))?;
-            changed
-                .rect
-                .cells(grid)
-                .map(|cell| cell.cell_key(grid))
-                .filter(|key| video.regions.covers(*key))
-                .collect()
+            // Asked of the whole table first. With no stream running, no cell can be
+            // covered and every band below takes the quiet path, so the walk would
+            // only hash a cell per 64 points of the damage to build an empty set —
+            // about five hundred of them across a 1080p repaint, on the ordinary case
+            // of a `render_motion` desktop with nothing playing.
+            if video.regions.covering() {
+                changed
+                    .rect
+                    .cells(grid)
+                    .map(|cell| cell.cell_key(grid))
+                    .filter(|key| video.regions.covers(*key))
+                    .collect()
+            } else {
+                HashSet::new()
+            }
         };
 
         // One reading for the whole rectangle: the pieces of one report of damage
@@ -1277,7 +1286,13 @@ async fn flush_cleanups(
         video.regions.expire(now);
         ended = video.regions.drain_ended();
         let rects = video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
-        for rect in rects {
+        // Cut at `BAND_ROWS` like every other payload. A cleanup run is whole grid
+        // cells, and a cell is 128 pixels tall on a 2x framebuffer — twice what a
+        // record is allowed to be measured in bytes, which is the one thing the band
+        // bounds. At 1x a run is already a single band and this splits nothing. The
+        // budget stays a count of *cells*, so banding costs more records and not one
+        // pixel more per tick.
+        for rect in rects.into_iter().flat_map(|rect| rect.bands()) {
             let mut rgb = Vec::new();
             match video.regions.crop(rect, &mut rgb) {
                 Ok(()) => due.push((rect, rgb)),
@@ -1898,8 +1913,14 @@ mod tests {
     /// A report that every cell of `rect` really did change — damage whose bounding
     /// box is hiding nothing, which is what most tests here mean by a rectangle.
     fn all_of(rect: Rect) -> Changed {
+        all_of_at(rect, TileGrid::ONE)
+    }
+
+    /// [`all_of`] for a framebuffer whose lattice is not [`TileGrid::ONE`] — a 2x
+    /// desktop, where a cell is 128 pixels on each side.
+    fn all_of_at(rect: Rect, grid: TileGrid) -> Changed {
         let mut cells: Vec<(u16, u16)> =
-            rect.cells(TileGrid::ONE).map(|c| c.cell_key(TileGrid::ONE)).collect();
+            rect.cells(grid).map(|c| c.cell_key(grid)).collect();
         cells.sort_unstable();
         cells.dedup();
         Changed { rect, cells }
@@ -2430,9 +2451,19 @@ mod tests {
 
     /// A sink whose moving encode is a stream, told how big the desktop is.
     async fn stream_sink(w: u16, h: u16) -> (TileSink, mpsc::Receiver<ServerMsg>) {
+        stream_sink_at(w, h, UNSCALED).await
+    }
+
+    /// [`stream_sink`] for a framebuffer of a declared density: `w`x`h` are its
+    /// pixels, and `scale` is what picks the lattice ([`TileGrid::at`]).
+    async fn stream_sink_at(
+        w: u16,
+        h: u16,
+        scale: f32,
+    ) -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
         let sink = TileSink::new("test", frame_tx, MOTION_STREAM, feedback());
-        sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
+        sink.msg(ServerMsg::Resize { w, h, scale }).await.unwrap();
         sink.flush().await;
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
         (sink, frame_rx)
@@ -2449,13 +2480,16 @@ mod tests {
     /// It takes a while by construction: `CHURN_MOVING` slots before the cells count
     /// as moving, and `RETUNE` before geometry may change again.
     async fn until_streamed(sink: &TileSink, area: Rect, colour: u8) {
+        // The sink's own lattice, so a 2x desktop keys its cells the way `damage`
+        // will rather than the way a 1x test would.
+        let grid = sink.shared.grid();
         for _ in 0..40 {
-            sink.damage(&all_of(area), |piece| flat(piece.w(), piece.h(), colour))
+            sink.damage(&all_of_at(area, grid), |piece| flat(piece.w(), piece.h(), colour))
                 .await
                 .unwrap();
             sink.frame().await.unwrap();
             tokio::time::advance(CHURN_SLOT).await;
-            if sink.shared.video.lock().await.regions.covers(area.cell_key(TileGrid::ONE)) {
+            if sink.shared.video.lock().await.regions.covers(area.cell_key(grid)) {
                 return;
             }
         }
@@ -2604,6 +2638,64 @@ mod tests {
         assert_eq!(tile.format, Tile::FORMAT_PNG, "a cleanup is the base encode");
         let newest = Tile::from_rgb(0, 0, 320, 64, &flat(320, 64, 200)).unwrap();
         assert_eq!(tile.data, newest.data, "the cleanup restored a frame that was overtaken");
+    }
+
+    /// A cleanup is a payload like any other, so it is cut at [`BAND_ROWS`] however
+    /// tall the cell it restores is.
+    ///
+    /// At 2x a cell is 128 pixels on each side, and a run of them comes off
+    /// `Regions::due` 128 tall — twice what a record is allowed to be. The band is
+    /// measured in bytes, and a 2x framebuffer has four times as many per point, so
+    /// this is the density where an un-banded cleanup would be worst.
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_is_cut_into_bands_at_2x() {
+        // 1280x256 pixels is 640x128 points: a 10x2 lattice of 128-pixel cells.
+        let (sink, mut frame_rx) = stream_sink_at(1280, 256, 2.0).await;
+        assert_eq!(sink.shared.grid(), TileGrid { w: 128, h: 128 });
+        // Five cells across, which is exactly `MIN_STREAM_CELLS` — the smallest
+        // thing that gets a stream at all.
+        let moving = rect(0, 0, 640, 128);
+        until_streamed(&sink, moving, 40).await;
+
+        sink.damage(&all_of_at(moving, sink.shared.grid()), |piece| {
+            flat(piece.w(), piece.h(), 200)
+        })
+        .await
+        .unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+
+        // Whatever the tick produced, rather than a count: a cleanup that was not cut
+        // sends *fewer* records than this expects, and asking for a number would wait
+        // for a message that is never coming instead of saying what arrived.
+        let mut out = Vec::new();
+        while let Ok(msg) = frame_rx.try_recv() {
+            out.push(msg);
+        }
+        let (end, tiles) = out.split_first().expect("the cleanup tick sent nothing at all");
+        assert!(
+            matches!(end, ServerMsg::VideoEnd { stream: 0 }),
+            "the ended stream was not announced: {end:?}"
+        );
+        let bands: Vec<(u16, u16, u16, u16)> = tiles
+            .iter()
+            .map(|msg| match msg {
+                ServerMsg::Tile(tile) => (tile.x, tile.y, tile.w, tile.h),
+                other => panic!("expected a cleanup tile, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            bands,
+            vec![(0, 0, 640, 64), (0, 64, 640, 64)],
+            "a 128-pixel cleanup cell went out without being cut at BAND_ROWS"
+        );
     }
 
     // ---- congestion ---------------------------------------------------------

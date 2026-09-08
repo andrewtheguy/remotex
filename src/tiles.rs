@@ -76,7 +76,7 @@ impl Rect {
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
     /// useful unit of progress nor a comfortable WebSocket frame — and a client
     /// draws the pieces exactly as it draws any other tiles.
-    pub fn bands(&self) -> impl Iterator<Item = Rect> + '_ {
+    pub fn bands(self) -> impl Iterator<Item = Rect> {
         (self.top..=self.bottom)
             .step_by(usize::from(BAND_ROWS))
             .map(move |top| Rect {
@@ -303,6 +303,24 @@ impl Shadow {
         let mut first_byte = usize::MAX;
         let mut last_byte = 0usize;
         let mut cells: Vec<(u16, u16)> = Vec::new();
+        // Which cells of the row of cells being walked have already been found to
+        // differ. A cell spans `grid.h` rows — 64 of them, or 128 on a 2x
+        // framebuffer — and the answer for one cannot change part way down: once it
+        // holds a differing pixel it holds one whatever the rest of its rows say. So
+        // a marked column is skipped rather than compared again, and is pushed once
+        // instead of once per row. Sized to the rectangle's own span of columns, and
+        // cleared when the walk crosses into the next row of cells.
+        let first_col = u32::from(rect.left) / u32::from(self.grid.w);
+        let mut marked = vec![
+            false;
+            if self.classify {
+                (u32::from(rect.right) / u32::from(self.grid.w) - first_col + 1) as usize
+            } else {
+                0
+            }
+        ];
+        let mut marked_row: Option<u16> = None;
+        let mut marked_count = 0usize;
 
         for r in 0..h {
             let y = rect.top + r as u16;
@@ -340,17 +358,34 @@ impl Shadow {
             if !self.classify {
                 continue;
             }
-            let mine = self.row(rect.left, y, row_bytes);
             let (row_cell, left, cw) = (y / self.grid.h, u32::from(rect.left), u32::from(self.grid.w));
+            if marked_row != Some(row_cell) {
+                marked.fill(false);
+                marked_count = 0;
+                marked_row = Some(row_cell);
+            }
+            // Every cell of this row of cells has already answered, so there is
+            // nothing left for the rest of its rows to discover.
+            if marked_count == marked.len() {
+                continue;
+            }
+            let mine = self.row(rect.left, y, row_bytes);
             let (span_lo, span_hi) = (left + (lo / 3) as u32, left + (hi / 3) as u32);
             let mut col = span_lo / cw;
             while col * cw <= span_hi {
+                let seen = &mut marked[(col - first_col) as usize];
+                if *seen {
+                    col += 1;
+                    continue;
+                }
                 let from = ((col * cw).max(span_lo) - left) as usize * 3;
                 let to = ((col * cw + cw - 1).min(span_hi) - left) as usize * 3 + 3;
                 // An unknown pixel differs whatever its bytes say, so a cell the
                 // unknown span reaches cannot be ruled out by comparison.
                 let blind = unknown.is_some_and(|(ulo, uhi)| from <= uhi && to > ulo);
                 if blind || src[from..to] != mine[from..to] {
+                    *seen = true;
+                    marked_count += 1;
                     cells.push((col as u16, row_cell));
                 }
                 col += 1;
@@ -723,6 +758,40 @@ mod tests {
             "the cells in between were counted as changed"
         );
         assert!(changed.has((0, 0)) && changed.has((3, 1)) && !changed.has((1, 0)));
+    }
+
+    /// A cell is answered by the whole of it, not by whichever row is walked first.
+    ///
+    /// The classification remembers which cells of the row of cells it is walking
+    /// have already been found to differ, so a cell is compared once rather than
+    /// once per row it spans. This is the case that catches a memory that is kept
+    /// for too long or reset too late: three cells of one cell row, each differing
+    /// on a *different* pixel row, and one of them on the very last row of the cell.
+    #[test]
+    fn a_cell_is_reported_whichever_of_its_rows_differs() {
+        let width = CELL_W * 4;
+        let mut shadow = Shadow::new("test", width, CELL_H * 2, GRID);
+        let whole = rect(0, 0, width - 1, CELL_H * 2 - 1);
+        shadow.accept_rect(whole, &solid(whole, 1));
+
+        let mut pixels = solid(whole, 1);
+        let at = |x: u16, y: u16| (usize::from(y) * usize::from(width) + usize::from(x)) * 3;
+        // Cell (0,0) on its first row, (2,0) in the middle, (3,0) on its last —
+        // and cell (1,0) never, so the memory cannot simply be marking everything.
+        pixels[at(3, 0)] = 2;
+        pixels[at(CELL_W * 2 + 3, CELL_H / 2)] = 2;
+        pixels[at(CELL_W * 3 + 3, CELL_H - 1)] = 2;
+        // One more in the second row of cells, to prove the memory is cleared when
+        // the walk crosses the line rather than carried down the rectangle.
+        pixels[at(CELL_W * 2 + 3, CELL_H)] = 2;
+
+        let changed = shadow.accept(whole, &pixels).expect("something changed");
+        // Sorted as the tuples are, so column first — (2,1) lands before (3,0).
+        assert_eq!(
+            changed.cells,
+            vec![(0, 0), (2, 0), (2, 1), (3, 0)],
+            "a cell that differs on only one of its rows was missed or invented"
+        );
     }
 
     /// Every cell of a region genuinely repainted end to end is reported, so the

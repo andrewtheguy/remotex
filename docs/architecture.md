@@ -809,8 +809,7 @@ The bandwidth is the whole of the trade: 1.41 Mbit/s is fifteen times Opus, and
 is a local-network proposition only. It is not a quality argument — Opus at 96
 kbps is well clear of audible loss on this material. Guacamole carries desktop
 audio this way and only this way (its single encoder emits
-`audio/L16;rate=44100,channels=2`), which is where the option came from — see
-[`rdp-perf-vs-guacamole.md`](rdp-perf-vs-guacamole.md) for the comparison.
+`audio/L16;rate=44100,channels=2`), which is where the option came from.
 
 An RDP engine without audio still says something about sound. The wrapper's
 `AudioMode` is mstsc's three positions — redirect, leave on the host, mute — each

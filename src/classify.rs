@@ -27,9 +27,20 @@
 //!    reads as photographic.
 
 /// Pixels below which a tile is never worth a JPEG: at this size the payload
-/// saving cannot repay JPEG's own header and table overhead, and small tiles
-/// are overwhelmingly cursors, carets and widget slivers — exactly the sharp
-/// content the lossy arm mistreats.
+/// saving cannot repay JPEG's own header and table overhead.
+///
+/// Pixels rather than points, because that overhead is bytes and does not care
+/// how much screen a pixel covers. So the floor does not move with density, and
+/// a 2× tile clears it at a quarter of the screen area a 1× tile needs. That is
+/// right for the overhead it names and only half right for the other thing small
+/// tiles tend to be — cursors, carets and widget slivers, the sharp content the
+/// lossy arm mistreats, which are furniture and so measured in points. A 2×
+/// sliver of that kind gets past this gate; what refuses it is the palette test,
+/// one measurement later, which is where flat chrome was always going to lose.
+///
+/// The number is a fifth of a 320×64 cell, the grid it was chosen against. That
+/// it now equals a 64×64 one exactly is a coincidence of two unrelated choices,
+/// and nothing here should be made to follow `CELL_POINTS`.
 const MIN_PHOTO_PIXELS: usize = 4096;
 
 /// Distinct colours at or below which a tile reads as flat UI outright.
