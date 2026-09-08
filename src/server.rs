@@ -885,7 +885,6 @@ mod tests {
                 port: 9,
                 username: String::new(),
                 password: String::new(),
-                vnc_password: String::new(),
                 domain: None,
                 width: Some(1280),
                 height: Some(800),
@@ -1155,7 +1154,6 @@ mod tests {
             port: 9, // discard: this engine is scripted, nothing is dialed
             username: String::new(),
             password: String::new(),
-            vnc_password: String::new(),
             domain: None,
             width: Some(640),
             height: Some(480),

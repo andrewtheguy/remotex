@@ -100,17 +100,6 @@ pub enum Subtype {
     /// replace the virtual display's one advertised mode and the Mac answers with
     /// its new layout. See docs/apple-vnc-889.md.
     ArdHighPerformance,
-    /// A wlroots-based Wayland desktop behind the wlshare VNC server: standard
-    /// RFB 3.8 plus one private extension that reports the captured output's
-    /// pixel density, which plain RFB has no word for. The
-    /// engine asks for the reports in `SetEncodings`, labels every framebuffer
-    /// with the last one, asks `SetDesktopSize` for points × scale when
-    /// `resize` is set, and declares the browser's density to the server.
-    /// Authentication and everything else are a plain `vnc` target's. Any other
-    /// server never answers the request, and the session ends on its first
-    /// framebuffer update rather than run at a density the server never
-    /// confirmed. See docs/wlshare-density.md.
-    Wlshare,
 }
 
 impl Subtype {
@@ -119,7 +108,6 @@ impl Subtype {
         match self {
             Subtype::Ard => "ard",
             Subtype::ArdHighPerformance => "ard-high-performance",
-            Subtype::Wlshare => "wlshare",
         }
     }
 
@@ -129,14 +117,7 @@ impl Subtype {
     pub fn apple_authentication(self) -> bool {
         match self {
             Subtype::Ard | Subtype::ArdHighPerformance => true,
-            Subtype::Wlshare => false,
         }
-    }
-
-    /// Whether this subtype negotiates the wlshare density extension: the one
-    /// generic-RFB server that can say what scale its framebuffer is drawn at.
-    pub fn reports_density(self) -> bool {
-        self == Subtype::Wlshare
     }
 }
 
@@ -550,29 +531,19 @@ pub struct TargetConfig {
     /// where it is a *macOS account* and [`Self::password`] is that account's —
     /// not the Screen Sharing password. On a plain `vnc` target it is the
     /// account a server checks through RealVNC's RSA-AES security types
-    /// (wayvnc's `enable_auth` username, a RealVNC system account — see
-    /// [`crate::vnc_rsa_aes`]); RFB `VncAuth` cannot carry a name, so a plain
-    /// target that sets it must set [`Self::password`] with it.
+    /// (wayvnc's `enable_auth` username, the account wlshare runs as, a RealVNC
+    /// system account — see [`crate::vnc_rsa_aes`]), and a name needs
+    /// [`Self::password`] with it: no security type this gateway speaks carries
+    /// one alone.
     #[serde(default)]
     pub username: String,
     /// Password for [`Self::username`] (never leaves the server). On a plain
     /// `vnc` target it may stand alone, for an RSA-AES server that asks for a
-    /// password and no name.
+    /// password and no name. A VNC server's own classic `VncAuth` password has
+    /// no key here: that type names nobody and encrypts nothing, and this
+    /// gateway does not speak it.
     #[serde(default)]
     pub password: String,
-    /// A VNC server's own password — RFB `VncAuth`, which proves knowledge of a
-    /// secret belonging to the *machine* and says nothing about who is
-    /// connecting. Named apart from [`Self::password`] because on a Mac the two
-    /// are different credentials that get you different screens: this is the
-    /// Screen Sharing password, and it is answered with a login window of the
-    /// connection's own (see [`crate::vnc`]).
-    ///
-    /// A plain `vnc` target's credential for a server offering `VncAuth`; it
-    /// may sit beside [`Self::password`], and the server's offer decides which
-    /// is answered. Rejected on other protocols and on either Apple
-    /// [`Subtype`] — see [`ConfigFile::parse`].
-    #[serde(default)]
-    pub vnc_password: String,
     /// Optional domain.
     #[serde(default)]
     pub domain: Option<String>,
@@ -1578,10 +1549,10 @@ impl ConfigFile {
             }
             // Which credentials a VNC target may carry is the subtype's to say:
             // an Apple subtype authenticates an account to a Mac and nothing else,
-            // while a plain target carries an account for RSA-AES, the machine's
-            // secret for VncAuth, or both for the server's offer to decide. A
-            // credential is refused where it cannot be used rather than quietly
-            // ignored, which is how a password ends up authenticating nobody.
+            // while a plain target carries an account for RSA-AES, or a password
+            // alone for a server that asks for no name. Half an account is refused
+            // rather than quietly ignored, which is how a name ends up
+            // authenticating nobody.
             match (target.protocol, target.subtype) {
                 (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
                     let name = subtype.name();
@@ -1589,13 +1560,6 @@ impl ConfigFile {
                         !target.username.is_empty() && !target.password.is_empty(),
                         "target {:?} is subtype {name:?} but has no username and password — \
                          both are needed, and on a Mac they are an account's there",
-                        target.name
-                    );
-                    anyhow::ensure!(
-                        target.vnc_password.is_empty(),
-                        "target {:?} is subtype {name:?} but sets vnc_password, which only a \
-                         plain \"vnc\" target uses — Apple's authentication carries the \
-                         account credentials above instead",
                         target.name
                     );
                     // Standard mode shares the Mac's physical displays and has no
@@ -1609,34 +1573,12 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                // The wlshare subtype is the Apple shape: an account, checked by
-                // PAM over RSA-AES, and nothing else. wlshare also offers VncAuth
-                // with the machine's password beside it, the way a Mac offers its
-                // VNC password beside the account login, and that is what a plain
-                // `vnc` target to the same server carries — at 1x, without the
-                // density extension.
-                (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                    anyhow::ensure!(
-                        !target.username.is_empty() && !target.password.is_empty(),
-                        "target {:?} is subtype \"wlshare\" but has no username and password — \
-                         both are needed, and they are the account wlshare runs as; a server \
-                         reached by its vnc_password alone is a plain \"vnc\" target",
-                        target.name
-                    );
-                    anyhow::ensure!(
-                        target.vnc_password.is_empty(),
-                        "target {:?} is subtype \"wlshare\" but sets vnc_password, which only a \
-                         plain \"vnc\" target uses — wlshare's RSA-AES carries the account \
-                         credentials above instead",
-                        target.name
-                    );
-                }
                 (Protocol::Vnc, None) => {
                     anyhow::ensure!(
                         target.username.is_empty() || !target.password.is_empty(),
                         "target {:?} is protocol \"vnc\" and sets username without password — \
-                         RSA-AES carries the two together; a VNC server's own password goes \
-                         in vnc_password, and a Mac account under subtype = \"ard\"",
+                         RSA-AES carries the two together, and a Mac account goes under \
+                         subtype = \"ard\"",
                         target.name
                     );
                 }
@@ -1651,15 +1593,6 @@ impl ConfigFile {
                     subtype.name()
                 ),
                 (Protocol::Rdp, None) => {}
-            }
-            if target.protocol != Protocol::Vnc {
-                anyhow::ensure!(
-                    target.vnc_password.is_empty(),
-                    "target {:?} is protocol {:?} but sets vnc_password, which only \"vnc\" \
-                     targets use",
-                    target.name,
-                    target.protocol.name()
-                );
             }
             // Motion is a switch on the tiles transport, so the only transport it
             // can be off is `video` — which streams the whole desktop and has
@@ -3783,7 +3716,7 @@ mod tests {
             name = "mac"
             protocol = "vnc"
             host = "10.0.0.4"
-            vnc_password = "hunter2"
+            password = "hunter2"
             resize = true
             "#,
             site_passwd_line()
@@ -3849,11 +3782,12 @@ mod tests {
         )
     }
 
-    /// A plain `vnc` target carries an account for RSA-AES, the machine's
-    /// secret for VncAuth, or both; what it cannot carry is half an account,
-    /// because no security type takes a name without a password.
+    /// A plain `vnc` target carries an account for RSA-AES, or a password alone
+    /// for a server that asks for no name; what it cannot carry is half an
+    /// account, because no security type takes a name without a password, nor
+    /// a VNC server's classic password, which has no key at all.
     #[test]
-    fn a_plain_vnc_target_takes_an_account_or_the_servers_own_password() {
+    fn a_plain_vnc_target_takes_an_account_or_a_password_alone() {
         let err = ConfigFile::parse(&vnc_toml(r#"username = "andrew""#)).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("username without password") && msg.contains("RSA-AES"), "{msg}");
@@ -3865,19 +3799,11 @@ mod tests {
         assert!(account.targets[0].subtype.is_none());
         // A password alone is an RSA-AES server that asks for no name.
         assert!(ConfigFile::parse(&vnc_toml(r#"password = "hunter2""#)).is_ok());
-        // Both credentials at once leave the choice to the server's offer.
-        let both = ConfigFile::parse(&vnc_toml(
-            "username = \"andrew\"\npassword = \"hunter2\"\nvnc_password = \"secret\"",
-        ))
-        .unwrap();
-        assert_eq!(both.targets[0].vnc_password, "secret");
-
-        // A plain target takes the server's own password, and nothing at all is
-        // still a target: a VNC server may need no credential whatsoever.
-        let plain = ConfigFile::parse(&vnc_toml(r#"vnc_password = "hunter2""#)).unwrap();
-        assert_eq!(plain.targets[0].vnc_password, "hunter2");
-        assert!(plain.targets[0].subtype.is_none());
+        // Nothing at all is still a target: a VNC server may need no credential.
         assert!(ConfigFile::parse(&vnc_toml("")).is_ok());
+        // The classic password has no key: the file is refused, not read around.
+        let err = ConfigFile::parse(&vnc_toml(r#"vnc_password = "hunter2""#)).unwrap_err();
+        assert!(format!("{err:#}").contains("vnc_password"), "{err:#}");
     }
 
     /// `ard` is a declaration about the far end, so it comes with the credentials
@@ -3895,11 +3821,6 @@ mod tests {
         // Half a credential is no credential.
         let err = ard(r#"username = "andrew""#).unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
-
-        // The machine's own password has no part in it.
-        let err = ard("username = \"andrew\"\npassword = \"h\"\nvnc_password = \"other\"")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
         // Standard mode exposes physical displays, which this gateway never resizes.
         let err =
@@ -3954,7 +3875,7 @@ mod tests {
 
         // The credential rules are the ones `ard` has, shared rather than restated.
         let err = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
+            "subtype = \"ard-high-performance\"\npassword = \"other\"",
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
@@ -4028,47 +3949,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// A wlshare target is an account, like an Apple one: username and password
-    /// for RSA-AES, checked by PAM on the server. The server's own VncAuth
-    /// password belongs to a plain `vnc` target, so `vnc_password` is refused
-    /// here rather than left to decide nothing.
-    #[test]
-    fn a_wlshare_target_is_an_account_and_nothing_else() {
-        let wlshare = |extra: &str| ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\n{extra}")));
-        let account = wlshare("username = \"andrew\"\npassword = \"hunter2\"").unwrap();
-        assert_eq!(account.targets[0].subtype, Some(Subtype::Wlshare));
-        assert_eq!(account.targets[0].username, "andrew");
-        for half in ["", r#"username = "andrew""#, r#"password = "hunter2""#, r#"vnc_password = "hunter2""#] {
-            let msg = format!("{:#}", wlshare(half).unwrap_err());
-            assert!(msg.contains("wlshare") && msg.contains("no username and password"), "{half}: {msg}");
-        }
-        let msg = format!("{:#}", wlshare("username = \"andrew\"\npassword = \"hunter2\"\nvnc_password = \"secret\"").unwrap_err());
-        assert!(msg.contains("wlshare") && msg.contains("sets vnc_password"), "{msg}");
-        // The same server by its own password is a plain vnc target.
-        let plain = ConfigFile::parse(&vnc_toml(r#"vnc_password = "hunter2""#)).unwrap();
-        assert_eq!(plain.targets[0].subtype, None);
-    }
-
-    #[test]
-    fn a_vnc_password_on_a_non_vnc_target_is_rejected() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "pc"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            vnc_password = "hunter2"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
     }
 
     #[test]

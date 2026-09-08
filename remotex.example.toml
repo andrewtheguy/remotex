@@ -125,10 +125,6 @@ host = "192.0.2.10"
 # Credentials (used server-side only; never sent to the browser).
 username = "Administrator"
 password = "change-me"
-# A VNC server's own password (RFB VncAuth) — a separate key because it is a
-# separate credential: it proves knowledge of a machine secret and names nobody.
-# VNC only, rejected elsewhere. See the VNC target below.
-#vnc_password = "change-me"
 # Optional domain (leave unset for a local account). RDP only.
 #domain = ""
 
@@ -148,7 +144,7 @@ password = "change-me"
 #height = 1080
 
 # Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
-# RDP only — VNC negotiates VncAuth (password set) or None per the handshake, so the
+# RDP only — VNC negotiates RSA-AES (password set) or None per the handshake, so the
 # key is refused on a vnc target rather than ignored, whatever its value.
 #security = "auto"
 
@@ -250,29 +246,31 @@ password = "change-me"
 # ceiling.
 #audio_bitrate_min = 32
 
-# A VNC target needs host and, usually, one of the two passwords; domain is
-# ignored, an explicit security is refused, and width/height only ever answer a
-# default-size request (see above). `vnc_password` is the server's own password
-# and is all a server without user accounts takes.
+# A VNC target needs host and, usually, an account; domain is ignored, an
+# explicit security is refused, and width/height only ever answer a default-size
+# request (see above). The account is checked through RealVNC's RSA-AES security
+# type, which encrypts the session: a TigerVNC server with SecurityTypes=RA2_256,RA2
+# (a password alone against its password file, or username and password through
+# PAM), wayvnc with enable_auth, wlshare with its [pam] table, RealVNC with a
+# system account. Classic VncAuth is not spoken — it names nobody and encrypts
+# nothing after the login — so a server offering only that needs one of the
+# above enabled. A server offering None needs no credential at all.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
 # host = "10.0.0.2"
-# vnc_password = "change-me"
+# username = "me"
+# password = "change-me"
 
-# A wlroots-based Wayland desktop behind the wlshare VNC server reports the pixel
-# density of its output over one private RFB extension, so a `scale 2` output is
-# shown at 2x and a resizing window is asked for in points × scale. The subtype is explicit
-# because it changes what goes on the wire; a plain "vnc" target to the same
-# server stays at 1x. Like a Mac's, the credentials are an account's: wlshare
-# checks the username and password of the account it runs as through PAM over
-# RSA-AES, encrypting the session. A password_file on the server is its VNC
-# password, which a plain "vnc" target takes as vnc_password. See
-# docs/wlshare-density.md.
+# A wlroots-based Wayland desktop behind the wlshare VNC server is the same kind
+# of target. wlshare answers a private RFB extension every plain "vnc" target
+# asks for, reporting the pixel density of its output, so a `scale 2` output is
+# shown at 2x, a resizing window is asked for in points × scale, and the
+# browser's density is declared back. Its credentials are the account it runs
+# as, checked through PAM over RSA-AES. See docs/wlshare-density.md.
 # [[targets]]
 # name = "workstation-wayland"
 # protocol = "vnc"
-# subtype = "wlshare"
 # host = "127.0.0.1"
 # username = "me"
 # password = "that-account's-password"
@@ -283,8 +281,8 @@ password = "change-me"
 # the Screen Sharing password. Apple's DH authentication is the only way to tell a
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So both
-# subtypes require username and password (that account's) and take no
-# vnc_password. Resize is where they part: `ard` is refused outright — a config
+# subtypes require username and password (that account's), never the Screen
+# Sharing password. Resize is where they part: `ard` is refused outright — a config
 # setting it does not load — because it shares the Mac's physical displays, while
 # `ard-high-performance` takes it for the one virtual display it makes, as the
 # second example below does. A third-party VNC server that happens to run on a

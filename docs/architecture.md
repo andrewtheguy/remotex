@@ -996,10 +996,11 @@ display re-renders the same points at it; the resulting density travels back as
 the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
 Other engines ignore the message. Generic VNC, whose wire carries no density, is
 presented at 1x and takes no density from the client; see
-[HiDPI over generic VNC](generic-vnc-hidpi.md). The `wlshare` subtype is the
-one generic server that reports a scale, over a private extension: the label
-follows its reports and the client's density is declared to it, never applied by
-the gateway itself; see [Pixel density over VNC with wlshare](wlshare-density.md).
+[HiDPI over generic VNC](generic-vnc-hidpi.md). The wlshare server is the one
+generic server that reports a scale, over a private extension every plain `vnc`
+target asks for: the label follows its reports and the client's density is
+declared to it, never applied by the gateway itself; see
+[Pixel density over VNC with wlshare](wlshare-density.md).
 
 A client shows the display picker exactly when the target sends it a
 `ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one for both
@@ -1158,14 +1159,16 @@ decodes whichever encoding a server picks into the packed RGB888 the tile path
 takes, so nothing above it knows which was chosen.
 
 **RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
-(`subtype = "ard"`). It supports None, classic VNC authentication, RealVNC's
-RSA-AES security types (5 and 129), and Apple's Diffie-Hellman security, plus the
-Cursor pseudo-encoding. `ard` selects Apple's authentication and physical-display
-metadata and requires the macOS account username and password. Plain VNC carries
-`vnc_password` for classic `VncAuth`, and `username` and `password` for RSA-AES —
-the account a server such as wayvnc (`enable_auth`) or RealVNC checks — taking
-whichever the server offers and the encrypted one when it offers both.
-`src/vnc_rsa_aes.rs` is that exchange and the AES-EAX framed transport every byte
+(`subtype = "ard"`). It supports None, RealVNC's RSA-AES security types (5 and
+129), and Apple's Diffie-Hellman security, plus the Cursor pseudo-encoding.
+Classic `VncAuth` is deliberately absent: it names nobody, encrypts nothing after
+the login, and every server that offers RSA-AES beside it takes the account
+instead. `ard` selects Apple's authentication and physical-display metadata and
+requires the macOS account username and password. Plain VNC carries `username`
+and `password` for RSA-AES — the account a server such as wayvnc
+(`enable_auth`), wlshare (`[pam]`) or RealVNC checks, or a password alone for a
+server that asks for no name — and answers None where that is all a server
+offers. `src/vnc_rsa_aes.rs` is that exchange and the AES-EAX framed transport every byte
 of such a session then rides in, exposed to the engine the way Apple's record
 layer is: an `AsyncRead` and a per-message sink. The server's RSA key is logged
 by fingerprint, not verified. The explicit subtype prevents an anonymous macOS

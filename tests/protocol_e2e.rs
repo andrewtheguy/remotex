@@ -1036,7 +1036,6 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
             _ => "tester".to_owned(),
         },
         password: "s3cr3t-should-not-leak".to_owned(),
-        vnc_password: String::new(),
         domain: None,
         width: Some(1280),
         height: Some(800),

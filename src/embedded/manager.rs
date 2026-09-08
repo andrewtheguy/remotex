@@ -65,7 +65,8 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 # name = "pi"
 # protocol = "vnc"
 # host = "192.168.1.30"
-# vnc_password = "…"
+# username = "pi"
+# password = "…"
 "#;
 
 /// Inputs resolved by the CLI before terminal state is changed.
@@ -588,9 +589,6 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     }
     if !target.password.is_empty() {
         credentials.push("account password set".to_owned());
-    }
-    if !target.vnc_password.is_empty() {
-        credentials.push("vnc password set".to_owned());
     }
     if credentials.is_empty() {
         credentials.push("none configured".to_owned());

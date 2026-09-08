@@ -1,12 +1,12 @@
 //! End-to-end test of the VNC engine against a real VNC server.
 //!
-//! Starts the dummy TigerVNC container (`tests/vnc-dummy/`, VncAuth-protected)
+//! Starts the dummy TigerVNC container (`tests/vnc-dummy/`, RSA-AES-protected)
 //! with podman or docker, points the real axum server at it, and connects a
 //! raw WebSocket client. Browser automation deliberately does not validate
 //! canvas paint timing or pixels (see CLAUDE.md). Xtigervnc
 //! serves its root window with no session behind it, so the first
 //! non-incremental update request drives real pixels through the whole
-//! pipeline: RFB handshake + DES auth -> `ServerMsg::Tile` -> the same
+//! pipeline: RFB handshake + RSA-AES auth -> `ServerMsg::Tile` -> the same
 //! binary WS frames the RDP engine emits (tests/rdp_tiles_e2e.rs).
 //!
 //! This is also the ZRLE test of record — but only because the container paints a
@@ -86,9 +86,9 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             host: common::container_host(),
             port: vnc_port,
             username: String::new(),
-            // Must match tests/vnc-dummy/Containerfile — exercises VncAuth.
-            password: String::new(),
-            vnc_password: "secret42".to_owned(),
+            // Must match tests/vnc-dummy/Containerfile — exercises RSA-AES, in the
+            // password-only shape TigerVNC checks against its password file.
+            password: "secret42".to_owned(),
             domain: None,
             // Not the connect-time size for VNC — the server keeps its own — but
             // the size a `defaultSize` request resolves to.
@@ -183,6 +183,17 @@ fn check_tile_frame(
 /// saying it has hidden the pointer, which is what Xtigervnc reports for a
 /// root window with no cursor set. Both mean the same thing to the browser:
 /// the server is not drawing the pointer, so the browser must.
+/// The geometry a `resize` announces, as the three fields the test is about:
+/// the tile grid beside them is the encoder's business and not asserted here.
+fn assert_resize(text: &str, w: u32, h: u32, what: &str) {
+    let msg: serde_json::Value = serde_json::from_str(text).expect("resize message is JSON");
+    assert_eq!(
+        (msg["w"].as_u64(), msg["h"].as_u64(), msg["scale"].as_f64()),
+        (Some(u64::from(w)), Some(u64::from(h)), Some(1.0)),
+        "{what}: {text}"
+    );
+}
+
 fn check_cursor_msg(text: &str) {
     use base64::Engine as _;
 
@@ -257,10 +268,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         assert_eq!(covered, 0, "resize arrived after tiles");
                         // The size announced must be the VNC server's actual
                         // desktop, not the (RDP-oriented) configured 1280x800.
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{DESKTOP_W},"h":{DESKTOP_H},"scale":1.0}}"#)
-                        );
+                        assert_resize(&text, DESKTOP_W, DESKTOP_H, "the server's own desktop");
                         got_resize = true;
                     }
                     if text.contains(r#""type":"cursor""#) {
@@ -315,10 +323,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H},"scale":1.0}}"#)
-                        );
+                        assert_resize(&text, VIEWPORT_W, VIEWPORT_H, "the viewport's size");
                         resized = true;
                     }
                 }
@@ -363,11 +368,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{DEFAULT_W},"h":{DEFAULT_H},"scale":1.0}}"#),
-                            "defaultSize must resolve to the target's configured size"
-                        );
+                        assert_resize(&text, DEFAULT_W, DEFAULT_H, "defaultSize must resolve to the target's configured size");
                         restored = true;
                     }
                 }
@@ -419,11 +420,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(
-                            text,
-                            format!(r#"{{"type":"resize","w":{DEFAULT_W},"h":{DEFAULT_H},"scale":1.0}}"#),
-                            "reattach must announce the session's current size"
-                        );
+                        assert_resize(&text, DEFAULT_W, DEFAULT_H, "reattach must announce the session's current size");
                         reannounced = true;
                     }
                     if text.contains(r#""type":"cursor""#) {

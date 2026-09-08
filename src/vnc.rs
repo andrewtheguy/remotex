@@ -24,9 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aes::Aes128;
-use des::Des;
-use des::cipher::generic_array::GenericArray;
-use des::cipher::{BlockEncrypt as _, KeyInit as _};
 use md5::{Digest as _, Md5};
 use num_bigint::BigUint;
 use rand::Rng as _;
@@ -54,7 +51,6 @@ use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
 use crate::vnc_rsa_aes::{self, FrameReader, Sealer, Strength};
 
 const SECURITY_NONE: u8 = 1;
-const SECURITY_VNC_AUTH: u8 = 2;
 /// Apple's Diffie-Hellman authentication, the RFB security type that carries a
 /// *user name* to a Mac — see [`ard_authenticate`] for why a Mac target needs
 /// it and what happens without it. RealVNC's RSA-AES types carry one to
@@ -131,10 +127,10 @@ const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
 const MSG_FENCE: u8 = 248;
 
 /// The wlshare density extension's pseudo-encoding, the ASCII bytes `WLSH`. Listed
-/// in `SetEncodings` on a `subtype = "wlshare"` target and nowhere else; wlshare
-/// answers it with an [`MSG_WLSHARE_DENSITY`] report, and any other server
-/// ignores it like any encoding it does not know. See
-/// docs/wlshare-density.md.
+/// in `SetEncodings` on every plain `vnc` target, the way ContinuousUpdates and
+/// Fence are: wlshare answers it with an [`MSG_WLSHARE_DENSITY`] report, which is
+/// the only way support is announced, and any other server ignores it like any
+/// encoding it does not know. See docs/wlshare-density.md.
 const ENCODING_WLSHARE_DENSITY: i32 = 0x574c_5348;
 /// The extension's one message type, used in both directions: the server's
 /// `OutputScale` report and the client's `ClientDensity` declaration. Outside
@@ -178,7 +174,7 @@ impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
             Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
-            Some(Subtype::Ard | Subtype::Wlshare) | None => Dialect::Rfb38,
+            Some(Subtype::Ard) | None => Dialect::Rfb38,
         }
     }
 
@@ -395,12 +391,15 @@ struct DesktopState {
 /// [`ENCODING_WLSHARE_DENSITY`] and docs/wlshare-density.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Density {
-    /// Not a `wlshare` target: the pseudo-encoding was never sent.
+    /// An Apple target: the pseudo-encoding was never sent.
     Off,
     /// Sent, unanswered so far. Resize requests wait here, because a request in
     /// the wrong pixels is a desktop redrawn twice. Pixels arriving in this
-    /// state end the session: see [`DesktopState::first_update`].
+    /// state settle it: see [`DesktopState::first_update`].
     Asked,
+    /// Sent, and the server sent pixels without answering: a server that does
+    /// not speak the extension, shown at [`UNSCALED`] like any generic one.
+    Unanswered,
     /// The server answered at least once: [`DesktopState::wire_scale`] is set.
     Reported,
 }
@@ -409,16 +408,12 @@ impl DesktopState {
     /// The density request's deadline, checked on every framebuffer update.
     /// wlshare answers `SetEncodings` before it sends a single update, so
     /// pixels with no report before them mean a server that does not speak the
-    /// extension — not the server `subtype = "wlshare"` names, and not one to
-    /// show at a density it never confirmed.
-    fn first_update(&self) -> anyhow::Result<()> {
+    /// extension, and the held resize goes out in plain pixels.
+    fn first_update(&mut self) {
         if self.density == Density::Asked {
-            anyhow::bail!(
-                "the server sent pixels without reporting its scale: the target is subtype \
-                 \"wlshare\" but this server is not wlshare"
-            );
+            debug!("vnc: the server sent pixels without reporting a scale; it is presented at 1x");
+            self.density = Density::Unanswered;
         }
-        Ok(())
     }
     /// The size and scale, as a client is told them.
     fn resize_msg(&self) -> ServerMsg {
@@ -429,8 +424,8 @@ impl DesktopState {
         }
     }
 
-    /// The scale a generic rect is labelled with: the server's reported one on
-    /// a wlshare target, [`UNSCALED`] everywhere else.
+    /// The scale a generic rect is labelled with: the server's reported one
+    /// once it has reported, [`UNSCALED`] everywhere else.
     fn generic_scale(&self) -> f32 {
         self.wire_scale.unwrap_or(UNSCALED)
     }
@@ -447,8 +442,8 @@ impl DesktopState {
 
     /// The generic resize request for a window of `points`, or `None` when
     /// nothing should go out yet: the request is held in `pending` until the
-    /// server has declared SetDesktopSize support and, on a wlshare target,
-    /// answered the density request — a request in the wrong pixels is a
+    /// server has declared SetDesktopSize support and its first pixels or scale
+    /// report have settled the density request — a request in the wrong pixels is a
     /// desktop redrawn twice. `None` also when the desktop already has the
     /// size. Both that and a request sent clear any older hold: a replay must
     /// never ask for a window the browser has since left.
@@ -817,7 +812,7 @@ async fn session(
             media,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
-            density: config.subtype.is_some_and(Subtype::reports_density),
+            density: config.subtype.is_none(),
         },
         input_rx,
         sink.clone(),
@@ -869,8 +864,8 @@ struct Flags {
     host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
-    /// Whether the target is `subtype = "wlshare"`, whose density extension
-    /// was requested in the handshake — see [`Density`].
+    /// Whether the density extension was requested in the handshake, which
+    /// every plain `vnc` target does — see [`Density`].
     density: bool,
 }
 
@@ -939,7 +934,7 @@ async fn connect(
 
     let types = read_security_types(&mut reader).await?;
     let macos = is_macos_server(minor, &types);
-    let chosen = choose_security(&types, config.subtype, &config.password, &config.vnc_password)?;
+    let chosen = choose_security(&types, config.subtype, &config.password)?;
     if macos && chosen != SECURITY_ARD {
         // Said once, at the only moment it can still be acted on, because the
         // symptom is otherwise unreadable: a login screen that will not accept
@@ -1042,13 +1037,6 @@ async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         SECURITY_ARD => Ok(Secured::Apple(
             ard_authenticate(reader, sock, &config.username, &config.password).await?,
         )),
-        SECURITY_VNC_AUTH => {
-            let mut challenge = [0u8; 16];
-            reader.read_exact(&mut challenge).await?;
-            sock.write_all(&auth_response(&config.vnc_password, &challenge))
-                .await?;
-            Ok(Secured::Plain)
-        }
         rsa_aes if Strength::of(rsa_aes).is_some() => {
             let strength = Strength::of(rsa_aes).expect("guarded");
             let session =
@@ -1136,12 +1124,7 @@ async fn rfb38_preface(
     }
     uplink.send(&set_pixel_format()).await?;
     uplink
-        .send(&set_encodings(&rfb38_encoding_list(
-            apple,
-            config.resize,
-            config.clipboard,
-            config.subtype.is_some_and(Subtype::reports_density),
-        )))
+        .send(&set_encodings(&rfb38_encoding_list(apple, config.resize, config.clipboard)))
         .await?;
     if apple && config.clipboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
@@ -1158,7 +1141,7 @@ async fn rfb38_preface(
     })
 }
 
-fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, density: bool) -> Vec<i32> {
+fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
         // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
@@ -1217,9 +1200,10 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, density: bool
         // in use.
         encodings.push(vnc_clipboard::ENCODING);
     }
-    if density {
-        // The one request a wlshare target adds. Its answer, when it comes, is
-        // the scale every framebuffer from then on is labelled with.
+    if !apple {
+        // Last, so it never ranks ahead of a pixel encoding. wlshare's answer, when
+        // it comes, is the scale every framebuffer from then on is labelled with;
+        // a Mac has its own display metadata for that and is not asked.
         encodings.push(ENCODING_WLSHARE_DENSITY);
     }
     encodings
@@ -1478,7 +1462,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
-                    // On a wlshare target the report is forwarded as the client's
+                    // On a plain target the report is forwarded as the client's
                     // declared density, once the server has shown it listens
                     // and not while an earlier declaration is unanswered — see
                     // [`DesktopState::host_density_changed`]. Decided and
@@ -1930,7 +1914,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // FramebufferUpdate
             0 => {
                 reader.read_u8().await?; // padding
-                desktop.lock().unwrap().first_update()?;
+                desktop.lock().unwrap().first_update();
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
                 // an update a server starts sending before it knows how long it
                 // will be. macOS uses it for the metadata burst, so on the Apple
@@ -2125,7 +2109,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // to restart the cycle it had replaced.
             // The wlshare OutputScale report: the framebuffer's density, from the one
             // generic server that can say. Only a target that asked reads it; on
-            // any other, 0xE0 is as unknown as it was.
+            // an Apple one, 0xE0 is as unknown as it was.
             MSG_WLSHARE_DENSITY if desktop.lock().unwrap().density != Density::Off => {
                 read_output_scale(&mut reader, uplink, desktop, &shared.shadow, &sink).await?;
             }
@@ -3882,22 +3866,6 @@ fn latin1_from_str(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Classic VNC authentication: DES-ECB over the 16-byte challenge, keyed by
-/// the first 8 bytes of the password (zero-padded) with the bit order of each
-/// key byte reversed — the RFB spec's non-standard DES key convention.
-fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
-    let mut key = [0u8; 8];
-    for (slot, byte) in key.iter_mut().zip(password.bytes()) {
-        *slot = byte.reverse_bits();
-    }
-    let cipher = Des::new(GenericArray::from_slice(&key));
-    let mut response = *challenge;
-    for block in response.as_chunks_mut::<8>().0 {
-        cipher.encrypt_block(GenericArray::from_mut_slice(block));
-    }
-    response
-}
-
 /// Pick the RFB security type to answer with.
 ///
 /// The target's subtype decides first, not which credential fields happen to
@@ -3906,23 +3874,15 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 /// screen you get — see [`ard_authenticate`] — so a subtype the server cannot
 /// answer is an error rather than a silent fall back to the anonymous path.
 ///
-/// `Wlshare` is the same declaration about a wlroots-based Wayland desktop: the
-/// credentials are the account wlshare runs as, carried by RSA-AES (see
-/// [`crate::vnc_rsa_aes`]) at its 256-bit width over its 128-bit one, and a
-/// server that does not offer it is not the wlshare this target names. wlshare
-/// may list VncAuth beside it for a plain `vnc` target; this one never takes it.
-///
-/// A plain `vnc` target has two credentials for two kinds of server, and takes
-/// whichever the server can answer: `username` and `password` are an account
-/// for RSA-AES, the encrypted type and so the one preferred when both are
-/// possible; `vnc_password` is a secret belonging to the *machine* for
-/// `VncAuth`, which tells the server nothing about who is connecting.
-fn choose_security(
-    types: &[u8],
-    subtype: Option<Subtype>,
-    password: &str,
-    vnc_password: &str,
-) -> anyhow::Result<u8> {
+/// A plain `vnc` target carries one credential, `password`, with or without a
+/// `username`, for RealVNC's RSA-AES (see [`crate::vnc_rsa_aes`]): the
+/// encrypted type, taken at its 256-bit width over its 128-bit one, and the
+/// one that tells the server who is connecting. Without it, or from a server
+/// that does not offer it, the only other answer is None. Classic VncAuth is
+/// not spoken: it proves knowledge of a machine's secret, names nobody and
+/// encrypts nothing after the login, and every server that offers RSA-AES
+/// beside it — TigerVNC, wayvnc, wlshare, RealVNC — takes the account instead.
+fn choose_security(types: &[u8], subtype: Option<Subtype>, password: &str) -> anyhow::Result<u8> {
     // Both Apple subtypes authenticate the same way and neither falls back: the
     // credentials are a macOS account's, and there is nothing else on the list that
     // could carry them. The subtype names itself in the refusal, since the two are
@@ -3942,46 +3902,33 @@ fn choose_security(
     ]
     .into_iter()
     .find(|t| types.contains(t));
-    if subtype == Some(Subtype::Wlshare) {
-        let Some(rsa_aes) = rsa_aes else {
-            anyhow::bail!(
-                "the target is subtype \"wlshare\", whose account login (RSA-AES) this \
-                 server does not offer (types {types:?}) — it is not wlshare with its \
-                 [pam] table set"
-            );
-        };
-        return Ok(rsa_aes);
-    }
     if !password.is_empty()
         && let Some(rsa_aes) = rsa_aes
     {
         return Ok(rsa_aes);
     }
-    if !vnc_password.is_empty() && types.contains(&SECURITY_VNC_AUTH) {
-        return Ok(SECURITY_VNC_AUTH);
-    }
     if types.contains(&SECURITY_NONE) {
         return Ok(SECURITY_NONE);
     }
-    let offers_vnc_auth = types.contains(&SECURITY_VNC_AUTH);
-    let offers_rsa_aes = types.iter().any(|&t| Strength::of(t).is_some());
     anyhow::ensure!(
-        !(offers_vnc_auth || offers_rsa_aes),
-        "VNC server requires {} but the target has no {} configured",
-        match (offers_rsa_aes, offers_vnc_auth) {
-            (true, true) => "an account (RSA-AES) or a password (VncAuth)",
-            (true, false) => "an account (RSA-AES)",
-            _ => "a password",
-        },
-        match (offers_rsa_aes, offers_vnc_auth) {
-            (true, true) => "username and password, nor vnc_password,",
-            (true, false) => "username and password",
-            _ => "vnc_password",
-        }
+        rsa_aes.is_none(),
+        "VNC server requires an account (RSA-AES) but the target has no password \
+         configured — set username and password, or a password alone for a server \
+         that asks for no name"
+    );
+    // A Mac reached without its subtype: the one server whose refusal has a
+    // remedy the config file spells, so say it here rather than list the types.
+    anyhow::ensure!(
+        !types.contains(&SECURITY_ARD),
+        "this server is macOS Screen Sharing (types {types:?}), which authenticates a \
+         Mac account through Apple's own security type: set subtype = \"ard\" or \
+         \"ard-high-performance\" with that account's username and password"
     );
     anyhow::bail!(
-        "no supported VNC security type (server offers {types:?}; \
-         this client speaks None, VncAuth, RSA-AES and Apple's DH authentication)"
+        "no supported VNC security type (server offers {types:?}; this client speaks \
+         None, RSA-AES and Apple's DH authentication, not classic VncAuth — a server \
+         offering only that needs its account login enabled: TigerVNC's \
+         SecurityTypes=RA2,RA2_256, wayvnc's enable_auth, wlshare's [pam] table)"
     )
 }
 
@@ -4206,67 +4153,33 @@ mod tests {
     use super::*;
     use crate::protocol::WheelUnit;
 
-    // Vectors generated from a reference VNC auth implementation
-    // (node:crypto des-ecb) with the challenge 00 01 .. 0f.
-    #[test]
-    fn auth_response_matches_reference_implementation() {
-        let challenge: [u8; 16] = std::array::from_fn(|i| i as u8);
-        let cases = [
-            ("secret42", "c6e31ed26154432307b32f3f00a3e6a1"),
-            // Longer than 8 bytes: only the first 8 are used.
-            ("longpassword", "5931256585fd62106d317e09fc963baf"),
-            // Shorter than 8 bytes: zero-padded.
-            ("ab", "fe01155de95da3e28adf6cc730f06f08"),
-        ];
-        for (password, expected_hex) in cases {
-            let response = auth_response(password, &challenge);
-            let hex: String = response.iter().map(|b| format!("{b:02x}")).collect();
-            assert_eq!(hex, expected_hex, "password {password:?}");
-        }
-    }
-
-    #[test]
-    fn auth_response_truncation_boundary() {
-        // "longpass" and "longpassword" share the first 8 bytes, so their
-        // responses must be identical; a 9th significant byte would differ.
-        let challenge = [7u8; 16];
-        assert_eq!(
-            auth_response("longpass", &challenge),
-            auth_response("longpassword", &challenge)
-        );
-        assert_ne!(
-            auth_response("longpas", &challenge),
-            auth_response("longpass", &challenge)
-        );
-    }
-
     /// The macOS 26 offer, exactly as the test VM sent it.
     const MACOS_TYPES: [u8; 5] = [30, 33, 36, 2, 35];
 
     #[test]
     fn the_subtype_decides_the_authentication() {
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw", "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw").unwrap(),
             SECURITY_ARD
         );
-        // The very same server, answered anonymously, because that is what a
-        // target without the subtype asked for — and it is what costs you the
-        // Mac's own screen.
-        assert_eq!(choose_security(&MACOS_TYPES, None, "", "pw").unwrap(), SECURITY_VNC_AUTH);
+        // The very same server, without the subtype, offers nothing this client
+        // answers — its other types are classic VncAuth and Apple's own — and the
+        // refusal says which subtype would.
+        let err = choose_security(&MACOS_TYPES, None, "pw").unwrap_err();
+        assert!(format!("{err:#}").contains("set subtype = \"ard\""), "{err:#}");
         // A subtype the server cannot answer is a configuration error, not a
         // reason to authenticate as nobody.
-        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw", "")
-            .unwrap_err();
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::Ard), "pw").unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
 
         // The high-performance subtype authenticates identically — the dialect
         // above it differs, the security type does not — and names itself when the
         // server cannot answer.
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "pw", "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "pw").unwrap(),
             SECURITY_ARD
         );
-        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "pw", "")
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "pw")
             .unwrap_err();
         assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
     }
@@ -4275,9 +4188,6 @@ mod tests {
     fn the_dialect_follows_the_subtype() {
         assert_eq!(Dialect::of(None), Dialect::Rfb38);
         assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
-        // The density extension rides the standard wire; only the encoding list
-        // and one message type tell a wlshare session from a plain one.
-        assert_eq!(Dialect::of(Some(Subtype::Wlshare)), Dialect::Rfb38);
         assert_eq!(
             Dialect::of(Some(Subtype::ArdHighPerformance)),
             Dialect::Apple889
@@ -4291,13 +4201,18 @@ mod tests {
 
     #[test]
     fn security_falls_back_the_way_it_always_did() {
-        assert_eq!(choose_security(&[SECURITY_NONE], None, "", "").unwrap(), SECURITY_NONE);
-        // A password with no VncAuth on offer is not a failure: an open server
-        // is still an open server.
-        assert_eq!(choose_security(&[SECURITY_NONE], None, "", "pw").unwrap(), SECURITY_NONE);
-        let err = choose_security(&[SECURITY_VNC_AUTH], None, "", "").unwrap_err();
-        assert!(format!("{err:#}").contains("requires a password"), "{err:#}");
-        let err = choose_security(&[19], None, "", "pw").unwrap_err();
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "").unwrap(), SECURITY_NONE);
+        // A password with no account login on offer is not a failure: an open
+        // server is still an open server.
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "pw").unwrap(), SECURITY_NONE);
+        // Classic VncAuth (type 2) is not spoken, with or without a password, and
+        // the refusal says what the server has to offer instead.
+        for password in ["", "pw"] {
+            let err = choose_security(&[2], None, password).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("no supported VNC security type") && msg.contains("RA2"), "{msg}");
+        }
+        let err = choose_security(&[19], None, "pw").unwrap_err();
         assert!(format!("{err:#}").contains("no supported VNC security type"), "{err:#}");
     }
 
@@ -4308,42 +4223,25 @@ mod tests {
     fn an_account_takes_rsa_aes_at_its_widest() {
         use crate::vnc_rsa_aes::{SECURITY_RSA_AES_128, SECURITY_RSA_AES_256};
         assert_eq!(
-            choose_security(&WAYVNC_TYPES, None, "pw", "").unwrap(),
+            choose_security(&WAYVNC_TYPES, None, "pw").unwrap(),
             SECURITY_RSA_AES_256
         );
+        // TigerVNC lists the classic type beside it; the account is what is taken.
         assert_eq!(
-            choose_security(&[SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], None, "pw", "").unwrap(),
+            choose_security(&[SECURITY_RSA_AES_128, 2], None, "pw").unwrap(),
             SECURITY_RSA_AES_128
         );
-        // Encrypted beats the classic challenge when the target could do either;
-        // the classic one is still what a vnc_password-only target gets.
+        // Encrypted beats open when the target could do either.
         assert_eq!(
-            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "pw", "vncpw").unwrap(),
+            choose_security(&[SECURITY_NONE, SECURITY_RSA_AES_128], None, "pw").unwrap(),
             SECURITY_RSA_AES_128
-        );
-        assert_eq!(
-            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "", "vncpw").unwrap(),
-            SECURITY_VNC_AUTH
         );
         // The Apple subtype still wants Apple's type, whatever else is offered.
-        let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), "pw", "").unwrap_err();
+        let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), "pw").unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
-        // And the wlshare subtype wants RSA-AES: at its widest when wlshare lists
-        // VncAuth beside it, and as an error — not VncAuth, not None — when the
-        // server has no account login to offer.
-        assert_eq!(
-            choose_security(&[SECURITY_RSA_AES_256, SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], Some(Subtype::Wlshare), "pw", "").unwrap(),
-            SECURITY_RSA_AES_256
-        );
-        for offer in [&[SECURITY_VNC_AUTH][..], &[SECURITY_NONE][..]] {
-            let err = choose_security(offer, Some(Subtype::Wlshare), "pw", "").unwrap_err();
-            assert!(format!("{err:#}").contains("not wlshare with its [pam] table"), "{err:#}");
-        }
         // And the refusal says which credential is missing.
-        let err = choose_security(&WAYVNC_TYPES, None, "", "vncpw").unwrap_err();
-        assert!(format!("{err:#}").contains("username and password"), "{err:#}");
-        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "", "").unwrap_err();
-        assert!(format!("{err:#}").contains("nor vnc_password"), "{err:#}");
+        let err = choose_security(&WAYVNC_TYPES, None, "").unwrap_err();
+        assert!(format!("{err:#}").contains("no password"), "{err:#}");
     }
 
     #[test]
@@ -4622,7 +4520,7 @@ mod tests {
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
         assert_eq!(
-            rfb38_encoding_list(false, false, false, false),
+            rfb38_encoding_list(false, false, false),
             vec![
                 ENCODING_COPY_RECT,
                 ENCODING_ZRLE,
@@ -4633,6 +4531,7 @@ mod tests {
                 ENCODING_CURSOR,
                 ENCODING_CONTINUOUS_UPDATES,
                 ENCODING_FENCE,
+                ENCODING_WLSHARE_DENSITY,
             ]
         );
 
@@ -4640,12 +4539,13 @@ mod tests {
         // header alone is enough to prove it: an unrecognised encoding bails with
         // "not advertised" before any payload is read, and the promised ones do not.
         //
-        // Pixel encodings are the non-negative ones. The pseudo-encodings are
-        // excluded because a server never sends one as a rectangle at all — the
-        // clipboard's arrives as a ServerCutText, not here.
-        let pixel_encodings = rfb38_encoding_list(false, true, true, false)
+        // Pixel encodings are the non-negative ones, less the density extension's,
+        // which is positive only because it spells its name. The pseudo-encodings
+        // are excluded because a server never sends one as a rectangle at all —
+        // the clipboard's arrives as a ServerCutText, the scale as its own message.
+        let pixel_encodings = rfb38_encoding_list(false, true, true)
             .into_iter()
-            .filter(|encoding| *encoding >= 0);
+            .filter(|encoding| *encoding >= 0 && *encoding != ENCODING_WLSHARE_DENSITY);
         for encoding in pixel_encodings {
             let mut wire = vec![0u8, 0];
             wire.extend_from_slice(&1u16.to_be_bytes());
@@ -4697,7 +4597,7 @@ mod tests {
     /// see [`both_apple_subtypes_start_out_wanting_zlib`].
     #[test]
     fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
-        let encodings = rfb38_encoding_list(true, false, true, false);
+        let encodings = rfb38_encoding_list(true, false, true);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
         assert!(!encodings.contains(&ENCODING_ZLIB));
@@ -4853,12 +4753,14 @@ mod tests {
     }
 
     /// The density extension's wire, checked byte by byte against
-    /// docs/wlshare-density.md rather than through the encoder's own eyes.
+    /// docs/wlshare-density.md rather than through the encoder's own eyes. Every
+    /// plain target asks; a Mac, which reports density its own way, does not.
     #[test]
-    fn the_density_extension_is_asked_for_only_on_a_wlshare_target() {
+    fn the_density_extension_is_asked_for_on_every_plain_target() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
-        assert!(rfb38_encoding_list(false, true, true, true).contains(&ENCODING_WLSHARE_DENSITY));
-        assert!(!rfb38_encoding_list(false, true, true, false).contains(&ENCODING_WLSHARE_DENSITY));
+        assert_eq!(rfb38_encoding_list(false, false, false).last(), Some(&ENCODING_WLSHARE_DENSITY));
+        assert!(rfb38_encoding_list(false, true, true).contains(&ENCODING_WLSHARE_DENSITY));
+        assert!(!rfb38_encoding_list(true, false, true).contains(&ENCODING_WLSHARE_DENSITY));
     }
 
     #[test]
@@ -5533,7 +5435,7 @@ mod tests {
         body
     }
 
-    /// A wlshare target holds its first resize until the server has said what
+    /// A plain target holds its first resize until the server has said what
     /// scale it draws at. When that scale is the browser's, it asks for the
     /// window in points × scale at once, labels the framebuffer with it, and
     /// declares the browser's density back.
@@ -5905,21 +5807,27 @@ mod tests {
         ));
     }
 
-    /// A server that sends pixels before any report is not wlshare:
-    /// the session ends rather than showing a `wlshare` target at a density
-    /// the server never confirmed. Once reported, or on a plain target, every
-    /// update passes.
+    /// A server that sends pixels before any report does not speak the
+    /// extension: the request is settled as unanswered, the desktop is 1x, and
+    /// the held resize goes out in plain pixels. Once reported, or on an Apple
+    /// target, every update passes without a word.
     #[test]
-    fn pixels_before_the_first_report_end_the_session() {
-        let desktop = shared_desktop((1024, 768), None, None);
+    fn pixels_before_the_first_report_settle_the_request_as_unanswered() {
+        let screen = Screen { id: 3, flags: 0 };
+        let desktop = shared_desktop((1024, 768), Some(screen), Some((800, 600)));
         let mut d = desktop.lock().unwrap();
         d.density = Density::Asked;
-        let err = d.first_update().unwrap_err().to_string();
-        assert!(err.contains("not wlshare"), "{err}");
+        assert!(d.generic_resize((800, 600)).is_none(), "held while the request is out");
+        d.first_update();
+        assert_eq!(d.density, Density::Unanswered);
+        assert_eq!(d.generic_scale(), UNSCALED);
+        assert!(d.generic_resize((800, 600)).is_some(), "released, in pixels");
         d.density = Density::Reported;
-        d.first_update().unwrap();
+        d.first_update();
+        assert_eq!(d.density, Density::Reported);
         d.density = Density::Off;
-        d.first_update().unwrap();
+        d.first_update();
+        assert_eq!(d.density, Density::Off);
     }
 
     #[tokio::test]

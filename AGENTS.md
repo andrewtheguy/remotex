@@ -52,8 +52,9 @@ documentation.
   pixel density, not a fit factor. `resize = true` means the window continuously
   drives the remote size; do not add a client resize toggle or remembered resize
   preference. Density is the wire's word alone: RDP negotiates it, Apple
-  reports it, `subtype = "wlshare"` reports it over its private extension, and
-  generic VNC, whose wire carries none, is presented at 1x. Do not add a
+  reports it, the wlshare server reports it over a private extension every
+  plain `vnc` target asks for, and any other generic VNC server, whose wire
+  carries none, is presented at 1x. Do not add a
   client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
   [Display geometry](docs/architecture.md#display-geometry),

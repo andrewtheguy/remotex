@@ -26,7 +26,6 @@ patch series on neatvnc and wayvnc that carried the same wire.
 [[targets]]
 name = "workstation"
 protocol = "vnc"
-subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"              # the account wlshare runs as; its [pam] table checks the login
@@ -34,20 +33,15 @@ password = "…"
 resize = true
 ```
 
-The subtype is explicit because it changes what the gateway asks for on the
-wire, and a plain VNC connection to the same server — or any other server — must
-not. Clipboard, encodings and everything else are a plain `vnc` target's, the
-credentials excepted: a wlshare target is an account, the one wlshare runs as,
-carried by RSA-AES and checked through PAM on the server, the way an `ard` target
-is a Mac account. wlshare may offer VncAuth with a password of its own beside
-that, as a Mac offers its VNC password beside the account login; that password
-goes in a plain `vnc` target's `vnc_password`, which reaches the same server at
-1x. `vnc_password` on a wlshare target is refused, and so is a server that does
-not offer RSA-AES. Against any other server the request goes unanswered, and the session
-ends with an error on the first framebuffer update: an explicit subtype naming a
-server that is not there is a misconfiguration, not a desktop to show at a
-density the server never confirmed. A plain `vnc` target is how that server is
-reached.
+Nothing names wlshare: it is a plain `vnc` target. The extension is negotiated
+the way ContinuousUpdates, Fence and ExtendedDesktopSize already are — the
+gateway lists the pseudo-encoding to every plain VNC server, and a server
+announces support only by answering. wlshare answers before it sends a single
+pixel; any other server sends pixels first, which settles the request as
+unanswered and leaves the desktop at 1x, the generic default. The credentials
+are the account wlshare runs as, carried by RSA-AES and checked through PAM on
+the server, the way an `ard` target's are a Mac account's; with wlshare's
+`[pam]` table unset the server offers None and the target needs no credential.
 
 ## The wire
 
@@ -165,8 +159,8 @@ resize  1728x883   scale=1.0  -> 1728x883 CSS px      re-asked at points × 1
 ```
 
 The two intermediate lines are the moment between the compositor's scale change
-and the desktop's resize. A plain target against the same server stays at
-`scale=1.0` throughout and never sends the pseudo-encoding.
+and the desktop's resize. Against a server without the extension the same target
+stays at `scale=1.0` throughout.
 
 Reproduce it:
 

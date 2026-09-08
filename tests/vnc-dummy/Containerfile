@@ -3,9 +3,14 @@
 # Xtigervnc is an X server with a built-in RFB server: with no window manager
 # or session it still serves a paintable root window, so a client's first
 # non-incremental FramebufferUpdateRequest gets a real full-screen update
-# through the whole pipeline. Classic VncAuth is enabled (password below) so
-# the DES challenge path is exercised too. tigervnc-tools ships tigervncpasswd;
-# xfonts-base is needed for the X server's builtin 'fixed' font at startup, and
+# through the whole pipeline. RSA-AES is enabled (password below) so the RealVNC
+# key exchange and its framed transport are exercised too: TigerVNC checks the
+# password-only subtype against the same file VncAuth read, which the gateway
+# no longer speaks. Trixie rather than bookworm because the server side of
+# RSA-AES arrived in TigerVNC 1.13; 1.12 lists the type and then refuses it.
+# tigervnc-tools ships tigervncpasswd, and openssl makes the server's RSA key,
+# which TigerVNC reads from -RSAKey and never generates itself; xfonts-base is
+# needed for the X server's builtin 'fixed' font at startup, and
 # x11-xserver-utils for xsetroot.
 #
 # The root window is deliberately not left at its default flat colour. TigerVNC
@@ -14,13 +19,15 @@
 # so a blank desktop exercises RRE and never reaches the ZRLE encoder at all.
 # A two-colour pattern makes the rectangles real, and ZRLE is then what a client
 # advertising it actually receives.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tigervnc-standalone-server tigervnc-tools xfonts-base x11-xserver-utils \
+        tigervnc-standalone-server tigervnc-tools openssl xfonts-base x11-xserver-utils \
     && rm -rf /var/lib/apt/lists/*
-# The e2e test authenticates with this password (VncAuth ignores bytes past 8).
-RUN printf 'secret42\n' | tigervncpasswd -f > /etc/vncpasswd
+# The e2e test authenticates with this password (the file keeps eight bytes).
+# The RSA key is throwaway: a test fixture, made fresh with every image build.
+RUN printf 'secret42\n' | tigervncpasswd -f > /etc/vncpasswd \
+    && openssl genrsa -out /etc/vncrsa.pem 2048
 # Start the server, then keep trying to paint until the display answers. xsetroot
 # is the wait as well as the paint: it fails until the X server is listening.
 #
@@ -31,7 +38,7 @@ RUN printf 'secret42\n' | tigervncpasswd -f > /etc/vncpasswd
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'Xtigervnc :1 -rfbport 5900 -interface 0.0.0.0 \' \
-    '  -SecurityTypes VncAuth -PasswordFile /etc/vncpasswd \' \
+    '  -SecurityTypes RA2_256,RA2 -PasswordFile /etc/vncpasswd -RSAKey /etc/vncrsa.pem \' \
     '  -geometry 1024x768 -depth 24 &' \
     'xvnc=$!' \
     'waited=0' \

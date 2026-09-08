@@ -139,8 +139,6 @@ uuid = { version = "1", features = ["v4"] }
 bcrypt = "0.19"
 # Hidden password prompt for the `gen-passwd` helper subcommand.
 rpassword = "7"
-# Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
-des = "0.8"
 # Apple's DH authentication for VNC (src/vnc.rs), which is what names the user
 # to a Mac: modular exponentiation over the server's prime, MD5 of the shared
 # secret as an AES-128 key, and random bytes for the private key and the

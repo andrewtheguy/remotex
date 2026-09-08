@@ -1572,7 +1572,6 @@ mod tests {
             port: 1,
             username: String::new(),
             password: String::new(),
-            vnc_password: String::new(),
             domain: None,
             width: Some(1),
             height: Some(1),
