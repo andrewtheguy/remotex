@@ -260,19 +260,19 @@ password = "change-me"
 # host = "10.0.0.2"
 # vnc_password = "change-me"
 
-# A sway desktop behind the swayrx VNC server reports the pixel density of its
-# output over one private RFB extension, so a `scale 2` output is shown at 2x
-# and a resizing window is asked for in points × scale. The subtype is explicit
+# A wlroots-based Wayland desktop behind the wlshare VNC server reports the pixel
+# density of its output over one private RFB extension, so a `scale 2` output is
+# shown at 2x and a resizing window is asked for in points × scale. The subtype is explicit
 # because it changes what goes on the wire; a plain "vnc" target to the same
-# server stays at 1x. Like a Mac's, the credentials are an account's: swayrx
+# server stays at 1x. Like a Mac's, the credentials are an account's: wlshare
 # checks the username and password of the account it runs as through PAM over
 # RSA-AES, encrypting the session. A password_file on the server is its VNC
 # password, which a plain "vnc" target takes as vnc_password. See
-# docs/swayrx-density.md.
+# docs/wlshare-density.md.
 # [[targets]]
-# name = "workstation-sway"
+# name = "workstation-wayland"
 # protocol = "vnc"
-# subtype = "swayrx"
+# subtype = "wlshare"
 # host = "127.0.0.1"
 # username = "me"
 # password = "that-account's-password"

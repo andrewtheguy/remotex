@@ -138,19 +138,19 @@ the same way — a Retina window gets a 2x desktop on connect, and dragging it t
 - **Per-server semantics.** wayvnc forwards a resize as a headless output's
   custom mode; other servers (TigerVNC, x11vnc, a KVM console) have no notion of
   scale at all, and asking one for twice the pixels gives twice the desktop. So
-  the automatic path is really "sway through wayvnc", and belongs behind a
-  per-target opt-in that names the compositor it is talking to.
+  the automatic path is really "a wlroots compositor through wayvnc", and
+  belongs behind a per-target opt-in that names the compositor it is talking to.
 
 A client-side declaration is not the answer: a density the wire cannot confirm is
 a label the server may not honour, and the product rule is that density is the
 wire's word alone. Until both channels above exist, generic VNC stays 1x.
 
-Both channels now exist for one server: `subtype = "swayrx"` puts the
-scale on the VNC connection itself, as a private extension the swayrx server
-answers ([`swayrx-density.md`](swayrx-density.md)). The server reports its
+Both channels now exist for one server: `subtype = "wlshare"` puts the
+scale on the VNC connection itself, as a private extension the wlshare server
+answers ([`wlshare-density.md`](wlshare-density.md)). The server reports its
 output's scale, the gateway labels and resizes by it, the browser's density is
-declared back, and swayrx sets the output's scale to it, so the browser drives
-the desktop's density with nothing to configure. swayrx is a server of its own
+declared back, and wlshare sets the output's scale to it, so the browser drives
+the desktop's density with nothing to configure. wlshare is a server of its own
 rather than a patch on wayvnc, so the extension no longer rides on a fragile
 patch series. The sway session dialect below is the larger design this grew out
 of, and is independent of it.
@@ -162,10 +162,10 @@ Performance mode and the Windows console session work: every physical display
 is folded into one resizable headless output for the length of the session, the
 gateway renders it at the browser's density, and the person at the keyboard
 takes control back through a virtual console switch. The wire half has shipped
-as `subtype = "swayrx"`, one private pseudo-encoding and one message type each
-way, documented in [`swayrx-density.md`](swayrx-density.md). What remains is
+as `subtype = "wlshare"`, one private pseudo-encoding and one message type each
+way, documented in [`wlshare-density.md`](wlshare-density.md). What remains is
 the session daemon on the sway host, a controller speaking sway IPC beside
-swayrx. A stage 1 prototype of it was measured on macintel: stock sway
+wlshare. A stage 1 prototype of it was measured on macintel: stock sway
 1.10 gives the resizable headless output beside the live panel and the restore
 holds, but wayvnc 0.9.1 crashes on half the connects while the output is created
 beside it. That crash is the risk now, and stage 2 starts with its backtrace.
