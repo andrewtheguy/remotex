@@ -667,8 +667,11 @@ struct ClaimResponse {
 }
 
 /// Claim the single session slot. Returns the token the WebSocket
-/// must present as `/ws?session=<token>`; 409 while another browser is
-/// attached (retry with `force` to take over).
+/// must present as `/ws?session=<token>&chroma=420|444`; 409 while another
+/// browser is attached (retry with `force` to take over). The media sockets
+/// present the token alone — `chroma`, the most colour this browser's video
+/// decoder takes, is the session socket's and is required there
+/// ([`crate::ws`]).
 async fn claim_handler(
     State(state): State<AppState>,
     Json(req): Json<ClaimRequest>,

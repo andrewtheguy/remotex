@@ -3,11 +3,15 @@
 //!
 //! Two endpoints, both presenting the claim token from `POST /api/session`.
 //!
-//! `/ws?session=<token>` is the session: it attaches to the single slot
-//! ([`crate::session::SessionManager`]). The URL also names the client's screen
-//! (`w`/`h`/`scale`/`fit`, the same values `connect` carries), so an attach that finds
-//! a target whose engine a claim change ended can reconnect it for *this*
-//! browser's screen. Inbound `ClientMsg` split two ways —
+//! `/ws?session=<token>&chroma=420|444` is the session: it attaches to the single
+//! slot ([`crate::session::SessionManager`]). The URL also names what only this
+//! browser knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values
+//! `connect` carries) and, required, the most colour its `VideoDecoder` takes — so
+//! an attach that finds a target whose engine a claim change ended can reconnect it
+//! for *this* browser rather than for the previous one. `chroma` is required
+//! because that reconnect happens at attach, before any message this client could
+//! send; a socket that does not name one is refused at the upgrade.
+//! Inbound `ClientMsg` split two ways —
 //! session-control messages (`connect` to pick a target from the post-login picker,
 //! `disconnect` to switch back to it) act on the slot; everything else is engine
 //! input, routed to the current engine (or dropped in the picker state). Outbound

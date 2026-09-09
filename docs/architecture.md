@@ -549,7 +549,9 @@ needed: a takeover reconnects a still-selected target at attach
 ([session lifecycle](#session-lifecycle)), before the new browser has sent
 anything, and that engine must be built for the browser that took over rather than
 the one that left. It is held on the attachment (`ClientSlot`) and read by both
-engine starts.
+engine starts — including the one reattachment that would otherwise resume a
+running engine, which compares the plan the returning browser resolves to against
+the plan that is running and rebuilds when they differ.
 
 This is **selection, never refusal**, which is the distinction the removed probe
 lacked. Only a definite `supported === false` gives up the colour; a "yes", an
@@ -694,8 +696,11 @@ Authentication and desktop ownership are separate:
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
    `409` unless the request reclaims its token or forces takeover.
-3. `/ws?session=<token>` attaches to the slot and reports either the target
-   picker or the current connected target.
+3. `/ws?session=<token>&chroma=420|444` attaches to the slot and reports either
+   the target picker or the current connected target. `chroma` is required and
+   names the most colour this browser's video decoder takes; see
+   [Choosing a chroma](#choosing-a-chroma). The media sockets carry the token
+   alone.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
 5. Losing the WebSocket detaches the client. The engine remains available for a
@@ -707,14 +712,19 @@ Every `connect` first ends any running engine, including one already connected
 to the same target, and the next engine is not spawned until that process exits;
 `ENGINE_EXIT_GRACE` bounds the wait. Switching targets and logging out likewise
 end the engine outright. The sole resume is the owning browser reattaching to
-the same target after its session socket drops. Opening size, density, display
+the same target after its session socket drops, and it resumes only while the
+running engine is still the one that reattachment resolves to: a reload re-runs
+the chroma question, and an `"auto"` target whose browser comes back with a
+different answer is rebuilt rather than resumed, because the stream that is
+running is one that browser has just said it cannot decode. Opening size, density, display
 selection, and connection state do not carry into any other session.
 
 Any claim by a different browser — a forced takeover, or a plain claim while
 nobody is attached — closes the previous WebSocket and its engine but
 preserves the selected target: the new claimant's attach reconnects that
-target for its own screen (named on the `/ws` URL), so a desktop opened for
-one display never carries its size and density over to a different device.
+target for its own screen and chroma (both named on the `/ws` URL), so a desktop
+opened for one display never carries its size, density, or colour over to a
+different device.
 Only the owner reclaiming its token resumes the running engine, with a
 full-repaint request instead of a reconnect.
 

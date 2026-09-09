@@ -255,12 +255,16 @@ struct EngineSlot {
     input_tx: mpsc::UnboundedSender<ClientMsg>,
     /// Guards the pump's cleanup against clearing a *newer* engine.
     generation: u64,
-    /// The render dial this engine resolved to, as one line for the client's session card.
+    /// The render dial this engine resolved to, and the whole of it.
     ///
-    /// Held rather than recomputed: it is resolved when
-    /// the engine is built and cannot change while the engine runs, so a reattach reports
-    /// what is *running* rather than what today's config file says.
-    render: String,
+    /// Held rather than recomputed: it is resolved when the engine is built and
+    /// cannot change while the engine runs, so a reattach reports what is
+    /// *running* rather than what today's config file says. Held as the plan
+    /// rather than as its one-line description because a reattach also has to
+    /// *compare* it: a `render_chroma = "auto"` target resolved against the
+    /// browser that was here, and the browser coming back may not be the one it
+    /// was resolved for ([`SessionManager::attach`]).
+    plan: RenderPlan,
     /// Where this engine puts redirected audio, for an audio target. It lives on
     /// the engine slot because that is the lifetime audio has: a subscription
     /// ([`SessionManager::arm_audio`]) finds it here, and every way an engine ends
@@ -626,8 +630,8 @@ impl SessionManager {
     /// `display` and `chroma` are what this browser said about itself, carried on
     /// the socket's URL so they exist at attach time. `chroma` is the most colour
     /// its `VideoDecoder` takes, and it is kept on the attachment for every engine
-    /// this browser starts ([`ClientSlot::chroma`]); a target that named no
-    /// `render_chroma` streams what this answer allows.
+    /// this browser starts ([`ClientSlot::chroma`]); a target that named
+    /// `render_chroma = "auto"` streams what this answer allows.
     ///
     /// `display` matters on exactly one path: a target that is
     /// still selected but whose engine a claim change ended ([`Self::claim`]) is
@@ -640,7 +644,10 @@ impl SessionManager {
     /// reclaim keeps the engine) resumes it and is asked to
     /// [`ClientMsg::Refresh`] for a repaint — the one path that resumes rather
     /// than starts over, because it is the same client on the same target,
-    /// back from a dropped connection.
+    /// back from a dropped connection. It resumes only while the running engine
+    /// is still the one this attachment resolves to, which is the same thing on
+    /// every path but one: an `auto` chroma that came back different takes the
+    /// reconnect instead.
     pub async fn attach(
         self: &Arc<Self>,
         token: &str,
@@ -685,6 +692,22 @@ impl SessionManager {
         let id = st.next_attach_id;
         st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
 
+        // A resumed engine is the right engine only while what it was built for
+        // still holds, and one thing it was built for is a fact about the browser
+        // rather than about the config: a `render_chroma = "auto"` stream carries
+        // the colour the *previous* attachment said its decoder takes. A reload
+        // keeps the claim but re-runs that question, so a browser coming back with
+        // a different answer would resume onto a stream its decoder refuses. End
+        // the engine instead and let the reconnect below build the one this
+        // browser can actually decode. Every other reattach compares equal and
+        // resumes exactly as before.
+        if let (Some(target), Some(engine)) = (&st.selected, &st.engine)
+            && target.render_plan(chroma) != engine.plan
+        {
+            info!("session: the browser takes a different stream; rebuilding it");
+            st.take_engine();
+        }
+
         // Tell the freshly attached browser which post-login state it is in. The
         // channel is empty, so try_send always lands.
         let status = match (&st.selected, &st.engine) {
@@ -700,7 +723,7 @@ impl SessionManager {
                     audio: target.audio,
                     camera: target.camera,
                     microphone: target.microphone,
-                    render: engine.render.clone(),
+                    render: engine.plan.describe(),
                     grid_debug: target.render_grid_debug,
                 })
             }
@@ -1217,7 +1240,7 @@ impl SessionManager {
         st.engine = Some(EngineSlot {
             input_tx,
             generation,
-            render: render.clone(),
+            plan,
             audio: audio.clone(),
             camera: camera.clone(),
             microphone: microphone.clone(),
@@ -2099,6 +2122,61 @@ mod tests {
             "the reconnect must follow the browser that took over"
         );
         expect_connected(&mut taken.events, "video-auto").await;
+    }
+
+    /// A reload keeps the claim and re-runs the browser's chroma question. The
+    /// answer is normally the same one and the engine is resumed untouched; when
+    /// it is not, the running stream is one this browser cannot decode, and
+    /// resuming it would leave a session that never paints.
+    #[tokio::test]
+    async fn a_reload_answering_differently_rebuilds_an_auto_stream() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target,
+                  plan,
+                  _display,
+                  _input_rx,
+                  _frame_tx,
+                  _audio,
+                  _camera,
+                  _microphone,
+                  _feedback| {
+                hook_tx.send(plan).unwrap();
+            },
+        );
+        let mgr = Arc::new(SessionManager::with_spawner(
+            vec![TargetConfig {
+                render_chroma: Some(ChromaChoice::Auto),
+                ..video_target("video-auto")
+            }],
+            spawner,
+        ));
+
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "video-auto", None).await.unwrap();
+        assert!(matches!(
+            hook_rx.try_recv(),
+            Ok(RenderPlan::Video { chroma: Chroma::Full, .. })
+        ));
+        expect_connected(&mut att.events, "video-auto").await;
+
+        // The same answer: the ordinary reload, which resumes the engine that is
+        // already running rather than starting anything.
+        let mut same = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        assert!(hook_rx.try_recv().is_err(), "an unchanged answer must resume the engine");
+        expect_connected(&mut same.events, "video-auto").await;
+
+        // A different answer: the running stream carries colour this decoder has
+        // just said it refuses, so the target is rebuilt for it.
+        let mut changed = mgr.attach(&token, None, Chroma::Subsampled).await.unwrap();
+        assert_eq!(
+            hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
+            RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled },
+            "the rebuilt stream must follow the browser that came back"
+        );
+        expect_connected(&mut changed.events, "video-auto").await;
     }
 
     #[tokio::test]
