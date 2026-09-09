@@ -19,6 +19,16 @@ use crate::protocol::TileGrid;
 /// ([`Rect::cells`]), and a piece of a cell keys to that cell as the whole would.
 pub const BAND_ROWS: u16 = 64;
 
+/// The widest a band may be, and the one bound on this axis: libwebp's
+/// [`crate::protocol::WEBP_MAX_DIMENSION`], the narrowest ceiling of the still
+/// encoders a band can be sent through.
+///
+/// Named from the encoder rather than chosen, because the cut exists only to keep
+/// the encoders' limits off the damage path: a desktop this wide is a video wall,
+/// not a screen, and every ordinary framebuffer is one band per row of pixels as
+/// it always was. RFB carries a `u16` framebuffer width, so one can arrive.
+pub const BAND_COLS: u16 = crate::protocol::WEBP_MAX_DIMENSION;
+
 /// A rectangle of the framebuffer, in pixels, with **inclusive** edges.
 ///
 /// Inclusive because that is how RFB reports a rectangle, and converting once at
@@ -71,20 +81,29 @@ impl Rect {
         (left <= right && top <= bottom).then_some(Self { left, top, right, bottom })
     }
 
-    /// This rectangle split into pieces at most [`BAND_ROWS`] tall, top down.
+    /// This rectangle split into pieces at most [`BAND_ROWS`] tall and
+    /// [`BAND_COLS`] wide, top down and left to right within a row.
     ///
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
     /// useful unit of progress nor a comfortable WebSocket frame — and a client
     /// draws the pieces exactly as it draws any other tiles.
+    ///
+    /// The two axes are bounded for different reasons and so by different numbers.
+    /// Rows are the payload bound, and 64 of them is a working size. Columns are
+    /// the encoders' bound, and cutting at all is what stops a framebuffer wider
+    /// than [`BAND_COLS`] from handing an encoder a tile it must refuse — a
+    /// refusal that ends the session, and would end it for a target whose
+    /// configuration is perfectly legal.
     pub fn bands(self) -> impl Iterator<Item = Rect> {
-        (self.top..=self.bottom)
-            .step_by(usize::from(BAND_ROWS))
-            .map(move |top| Rect {
-                left: self.left,
+        (self.top..=self.bottom).step_by(usize::from(BAND_ROWS)).flat_map(move |top| {
+            let bottom = self.bottom.min(top.saturating_add(BAND_ROWS - 1));
+            (self.left..=self.right).step_by(usize::from(BAND_COLS)).map(move |left| Rect {
+                left,
                 top,
-                right: self.right,
-                bottom: self.bottom.min(top.saturating_add(BAND_ROWS - 1)),
+                right: self.right.min(left.saturating_add(BAND_COLS - 1)),
+                bottom,
             })
+        })
     }
 
     /// This rectangle cut at `grid`'s lines, left to right within each row of
@@ -957,6 +976,36 @@ mod tests {
         assert_eq!(bands[2], rect(0, BAND_ROWS * 2, 99, BAND_ROWS * 2));
         // No gaps, no overlap, and the whole rectangle is covered.
         assert_eq!(bands.iter().map(|b| usize::from(b.h())).sum::<usize>(), usize::from(tall.h()));
+    }
+
+    /// A framebuffer wider than the narrowest encoder's limit is cut on that axis
+    /// too, so no band can be a tile an encoder has to refuse.
+    #[test]
+    fn bands_split_a_rectangle_wider_than_an_encoder_will_take() {
+        let wall = rect(0, 0, BAND_COLS + 99, BAND_ROWS - 1);
+        let bands: Vec<_> = wall.bands().collect();
+        assert_eq!(bands, vec![
+            rect(0, 0, BAND_COLS - 1, BAND_ROWS - 1),
+            rect(BAND_COLS, 0, BAND_COLS + 99, BAND_ROWS - 1),
+        ]);
+
+        // Both axes at once, still one band per piece and left to right within a
+        // row of them — the order a client paints in.
+        let both = rect(0, 0, BAND_COLS, BAND_ROWS);
+        let bands: Vec<_> = both.bands().collect();
+        assert_eq!(bands.len(), 4, "{bands:?}");
+        assert_eq!(bands[0], rect(0, 0, BAND_COLS - 1, BAND_ROWS - 1));
+        assert_eq!(bands[1], rect(BAND_COLS, 0, BAND_COLS, BAND_ROWS - 1));
+        assert_eq!(bands[2], rect(0, BAND_ROWS, BAND_COLS - 1, BAND_ROWS));
+        assert_eq!(bands[3], rect(BAND_COLS, BAND_ROWS, BAND_COLS, BAND_ROWS));
+        assert_eq!(
+            bands.iter().map(|b| usize::from(b.w()) * usize::from(b.h())).sum::<usize>(),
+            usize::from(both.w()) * usize::from(both.h()),
+            "no gaps and no overlap"
+        );
+
+        // And every piece is one an encoder will take.
+        assert!(bands.iter().all(|b| b.w() <= BAND_COLS && b.h() <= BAND_ROWS));
     }
 
     #[test]

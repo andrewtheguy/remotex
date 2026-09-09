@@ -575,17 +575,19 @@ impl TileGrid {
 
 /// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
 /// [`batch`] frame. The payload is an image stream the client decodes natively —
-/// PNG or JPEG, named by the `format` byte so `createImageBitmap` gets the
+/// PNG, JPEG or WebP, named by the `format` byte so `createImageBitmap` gets the
 /// right MIME type.
 ///
 /// The RDP and VNC engines decode a framebuffer and compress it here: lossless
-/// PNG ([`Tile::from_rgb`], the default) or, for a target on a lossy render
-/// dial, JPEG ([`Tile::from_rgb_jpeg`]). The format travels with the tile instead
-/// of being a constant.
+/// PNG ([`Tile::from_rgb`], the default) or, for a target on a lossy render dial,
+/// one of the two lossy stills — JPEG ([`Tile::from_rgb_jpeg`]) or WebP
+/// ([`Tile::from_rgb_webp`]). The format travels with the tile instead of being a
+/// constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
-    /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`]. Both of them
-    /// are a self-contained picture; a frame
+    /// Payload codec: [`Tile::FORMAT_PNG`], [`Tile::FORMAT_JPEG`] or
+    /// [`Tile::FORMAT_WEBP`]. Every one of them
+    /// is a self-contained picture; a frame
     /// that only means something in sequence is a [`VideoUnit`] and not a tile at all.
     pub format: u8,
     pub x: u16,
@@ -639,6 +641,7 @@ impl JpegSampling {
 impl Tile {
     pub const FORMAT_PNG: u8 = 1;
     pub const FORMAT_JPEG: u8 = 2;
+    pub const FORMAT_WEBP: u8 = 3;
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
@@ -687,6 +690,42 @@ impl Tile {
         let data = encode_jpeg(w, h, rgb, quality, sampling)?;
         Ok(Self {
             format: Self::FORMAT_JPEG,
+            x,
+            y,
+            w,
+            h,
+            data,
+        })
+    }
+
+    /// Build a tile from packed RGB888 pixels, WebP-compressing the payload at a
+    /// fixed `quality` (1–100). The render dial's other lossy still, chosen the
+    /// same two ways [`Tile::from_rgb_jpeg`] is — every tile under
+    /// `render_subtype = "webp"`, or the classifier's photographic ones under
+    /// `render_classify_lossy = "webp"` — and differing on the wire only in the
+    /// format byte, since every client this gateway has decodes WebP natively.
+    ///
+    /// Fewer bytes than JPEG at a matched quality and more time to produce them:
+    /// which side of that a link wants is the operator's call, which is why there
+    /// is a key and not a rule. No sampling argument, unlike the JPEG path: lossy
+    /// WebP is 4:2:0 and has no other mode to pin.
+    pub fn from_rgb_webp(
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        rgb: &[u8],
+        quality: u8,
+    ) -> anyhow::Result<Self> {
+        let expected = usize::from(w) * usize::from(h) * 3;
+        anyhow::ensure!(
+            rgb.len() == expected,
+            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
+            rgb.len()
+        );
+        let data = encode_webp(w, h, rgb, quality)?;
+        Ok(Self {
+            format: Self::FORMAT_WEBP,
             x,
             y,
             w,
@@ -972,6 +1011,42 @@ fn encode_jpeg(
         .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| anyhow::anyhow!("JPEG encode failed: {e}"))?;
     Ok(out)
+}
+
+/// The largest edge libwebp will encode, from its own `WEBP_MAX_DIMENSION`. The
+/// narrowest ceiling of the three still encoders on the tile path — PNG has none
+/// and baseline JPEG's is 65535 — and so the one [`crate::tiles::BAND_COLS`] cuts
+/// bands to, which is what keeps the check below off the damage path.
+pub(crate) const WEBP_MAX_DIMENSION: u16 = 16383;
+
+/// WebP-encode packed RGB888 at a fixed `quality` (1–100), the other lossy tile
+/// path ([`Tile::from_rgb_webp`]). Like JPEG it carries its own decoding
+/// parameters, so nothing about the encode rides the wire beside the format byte.
+///
+/// `method` stays at libwebp's default 4, the middle of its speed-against-size
+/// search: the settings above it are where the measured encode times stopped being
+/// affordable on a damage hot path (see
+/// docs/still-image-classification-research.md). `thread_level` is left off — this
+/// runs on an encode worker that is already one of several encoding tiles of the
+/// same frame, and a second layer of fan-out underneath would compete with the
+/// first for the same cores.
+fn encode_webp(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
+    // Said here rather than left to libwebp's `BadDimension`, which names no
+    // number. A tile is a damage rectangle cut at the band, so only a framebuffer
+    // wider than this could reach it — and an operator reading the log deserves to
+    // know it is the format's limit and not their configuration.
+    anyhow::ensure!(
+        w <= WEBP_MAX_DIMENSION && h <= WEBP_MAX_DIMENSION,
+        "tile is {w}x{h}, past WebP's {WEBP_MAX_DIMENSION}-pixel limit on either axis"
+    );
+    let mut config = webp::WebPConfig::new()
+        .map_err(|()| anyhow::anyhow!("WebP encoder rejected its default configuration"))?;
+    config.quality = f32::from(quality);
+    config.method = 4;
+    webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
+        .encode_advanced(&config)
+        .map(|encoded| encoded.to_vec())
+        .map_err(|e| anyhow::anyhow!("WebP encode failed: {e:?}"))
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
@@ -2254,6 +2329,60 @@ mod tests {
     #[test]
     fn from_rgb_jpeg_rejects_a_mismatched_payload() {
         assert!(Tile::from_rgb_jpeg(0, 0, 2, 2, &[0u8; 11], 60, JpegSampling::Subsampled).is_err());
+    }
+
+    // The other lossy path stamps WebP and produces a real RIFF container, which
+    // is what tells the browser's decoder apart from the JPEG one.
+    #[test]
+    fn from_rgb_webp_marks_its_payload_as_webp() {
+        let (w, h) = (16, 16);
+        let tile =
+            Tile::from_rgb_webp(0, 0, w, h, &vec![0u8; usize::from(w) * usize::from(h) * 3], 60)
+                .unwrap();
+        assert_eq!(tile.format, Tile::FORMAT_WEBP);
+        assert_eq!(&tile.data[..4], b"RIFF", "RIFF container");
+        assert_eq!(&tile.data[8..12], b"WEBP", "WebP form type");
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[1], Tile::FORMAT_WEBP);
+    }
+
+    // The same claim the JPEG arm makes, made for the codec offered beside it: a
+    // photographic band is far smaller than its PNG, and the dial moves it.
+    #[test]
+    fn webp_is_smaller_than_png_on_photographic_content() {
+        let (w, h) = (320, 64);
+        let rgb = noisy_rgb(w, h);
+        let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap();
+        let webp = Tile::from_rgb_webp(0, 0, w, h, &rgb, 60).unwrap();
+        assert!(
+            webp.data.len() < png.data.len(),
+            "WebP should beat PNG on photographic content: {} vs {}",
+            webp.data.len(),
+            png.data.len()
+        );
+        let lower = Tile::from_rgb_webp(0, 0, w, h, &rgb, 20).unwrap();
+        assert!(
+            lower.data.len() < webp.data.len(),
+            "lower quality should be smaller: {} vs {}",
+            lower.data.len(),
+            webp.data.len()
+        );
+    }
+
+    #[test]
+    fn from_rgb_webp_rejects_a_mismatched_payload() {
+        assert!(Tile::from_rgb_webp(0, 0, 2, 2, &[0u8; 11], 60).is_err());
+    }
+
+    /// The format's own edge limit, refused by name. Nothing this gateway cuts
+    /// reaches it today — a tile is a damage rectangle inside a framebuffer — but
+    /// the error an operator would read should say which limit was hit.
+    #[test]
+    fn from_rgb_webp_refuses_a_tile_wider_than_the_format_allows() {
+        let w = WEBP_MAX_DIMENSION + 1;
+        let err = Tile::from_rgb_webp(0, 0, w, 1, &vec![0u8; usize::from(w) * 3], 60).unwrap_err();
+        assert!(format!("{err:#}").contains("16383"), "{err:#}");
     }
 
     /// The chroma sampling a JPEG declares, read off its own frame header rather

@@ -41,9 +41,12 @@ licenses and reimplement ideas rather than copying source.
 ## The RemoteX baseline
 
 `render_subtype = "classify"` already has the right high-level split: a tile that
-looks photographic goes to JPEG, while flat UI, text, small input and uncertain
-input stay in PNG. A false negative costs bytes; a false positive can leave text
-soft until the rectangle changes, so PNG is deliberately the conservative answer.
+looks photographic goes to the lossy still, while flat UI, text, small input and
+uncertain input stay in PNG. A false negative costs bytes; a false positive can
+leave text soft until the rectangle changes, so PNG is deliberately the
+conservative answer. Which lossy still receives the photographic verdict is
+`render_classify_lossy`, JPEG or WebP; it does not enter into the classifier's
+decision, and every measurement below about the decision holds under either.
 
 The implementation in [`src/classify.rs`](../src/classify.rs) currently uses:
 
@@ -61,9 +64,10 @@ has shown that the current direction changes a useful verdict.
 The classifier tests cover synthetic content and the measured size floor. The
 ignored device tests in
 [`tests/classify_render_e2e.rs`](../tests/classify_render_e2e.rs) exercise the real
-classifier path over RDP, TigerVNC, Apple High Performance and a classify base with
-motion enabled. They report the PNG/JPEG split and verify complete, correctly
-labelled and decodable wire output. Their screens are mutable, so they deliberately
+classifier path against whichever QA machine `REMOTEX_UAT_TARGET` names — the
+suite names no device itself, so it does not go stale as a lab changes — under a
+JPEG lossy arm, a WebP lossy arm and a motion base. They report the lossless/lossy
+split and verify complete, correctly labelled and decodable wire output. Their screens are mutable, so they deliberately
 do not assert a fixed split or measure visual regret against the codec not selected.
 
 Production encode totals currently aggregate the still formats. They cannot answer
@@ -91,9 +95,14 @@ records the real wlshare measurement that cut `MIN_PHOTO_PIXELS` from 4,096 to
   with streams and cleanup active. No classifier-admitted tile fell below a
   point-scaled version of the old floor because real damage rectangles were wide.
 - The ignored `weigh_the_size_floor` instrument carries admitted synthetic content
-  through PNG and JPEG at a size ladder. JPEG is about one third of PNG at 32×32,
-  about half at 24×24, and loses at 16×16 because of roughly 640 bytes of JPEG
-  tables. A real 9×10 caret was 261 bytes as PNG and 683 bytes as JPEG.
+  through PNG, JPEG and WebP at a size ladder. JPEG is about one third of PNG at
+  32×32, about half at 24×24, and loses at 16×16 because of roughly 640 bytes of
+  JPEG tables. A real 9×10 caret was 261 bytes as PNG and 683 bytes as JPEG. WebP
+  at the same quality dial is around a tenth of the PNG at every size on that
+  ladder, 16×16 included — it has no table cost to amortize, so the shared size
+  floor is set by JPEG and is well clear of where WebP breaks even. That is a byte
+  comparison at a matched dial number, not a matched visual quality, and it says
+  nothing about the encode time measured below.
 - The real-device end-to-end tests paint a complete desktop over Windows RDP,
   TigerVNC and Apple High Performance, plus a classify base under motion. They
   validate the operational classifier path and report its actual PNG/JPEG verdict
@@ -251,7 +260,7 @@ wire and decodes natively in the browser. Benchmark these changes independently:
 - a native libjpeg-turbo path only if its measured gain justifies another native
   dependency and the packaging obligations that follow.
 
-### WebP: measured and deprioritized, for later revisit
+### WebP: measured, and offered as the operator's choice
 
 RemoteX has already implemented and measured WebP rather than relying on general
 web-image claims. Commit `2e62a0bbc2c243d5b7ffdf6c6b69c631f93c11f3`
@@ -278,12 +287,28 @@ It was later revisited as an optional fixed-quality subtype in
 `05aa6d94ed17f6deabdd0ec15d745e79e97399c6` while JPEG remained the sole lossy
 still codec.
 
-WebP was therefore deprioritized because its encoder was slower than both PNG on
-the lossless side and JPEG on the lossy side, despite saving bytes. It is not
-permanently rejected. Revisit it later if the encoder implementation, target
-hardware or measured workload changes enough to alter that trade. A revisit should
-start by reproducing the real-screen benchmark, then test method 0 or 1 with a
-strict per-frame or rolling time budget and immediate PNG/JPEG fallback.
+Those measurements say the same thing twice: WebP saves bytes and spends encoder
+time to do it. What they do not say is which of the two a given deployment would
+rather spend, and that is not a question a measurement of this gateway can answer —
+it depends on the link and on how busy the host running the gateway is.
+
+So WebP is back on the dial as a choice rather than as a policy. `render_subtype =
+"webp"` sends every tile that way, `render_classify_lossy = "webp"` sends only the
+tiles the classifier reads as photographic, and JPEG remains the default under
+both. Nothing decides between them at run time: there is no probe, no budget and no
+fallback, and an operator who does not name WebP never encodes one.
+
+Lossless is untouched by this. PNG is the only lossless tile encoder, on the
+evidence above — lossless WebP saved 15% of the bytes at an affordable setting and
+was still many times slower than PNG `Compression::Fast` — so `render_subtype` has
+no lossless choice to make and the classifier's lossless verdict is PNG under
+either value of `render_classify_lossy`.
+
+What the measurements still leave open is an encoder-time budget of the kind
+KasmVNC uses: admit WebP only while a per-frame or rolling budget permits and fall
+back to JPEG when it does not. That would be a run-time policy on top of the
+operator's choice, and it should not be built until the corpus below can show what
+it would buy.
 
 Google's general corpus reports smaller WebP output than comparable PNG and JPEG,
 but those figures do not override RemoteX's hot-path measurements:
@@ -291,9 +316,9 @@ but those figures do not override RemoteX's hot-path measurements:
 also 4:2:0, which matters around coloured glyphs and sharp edges:
 [WebP FAQ](https://developers.google.com/speed/webp/faq).
 
-Reintroducing it later would require a tile format discriminator, frontend MIME
-mapping and an independent wire-format test. It would remain a still-image codec
-and would not change the VP9 video path.
+It remains a still-image codec: the format byte tells a WebP tile from a JPEG one,
+the browser maps it to `image/webp` for `createImageBitmap`, and the VP9 video path
+is unaffected in either direction.
 
 ### AVIF and QOI
 
@@ -351,10 +376,10 @@ only spends bandwidth.
 5. Benchmark explicit JPEG 4:4:4 for `render_subtype = "jpeg"`, where text and UI
    cannot escape to PNG. Keep classifier-approved photographs on the current JPEG
    sampling policy.
-6. Leave WebP deprioritized. Revisit it later only after the preceding work, or
-   when a materially different encoder or deployment CPU justifies rerunning the
-   existing real-screen benchmark; test an encoder-time budget at that point.
-7. Keep AVIF behind that revisit unless new measurements justify moving it ahead.
+6. WebP is on the dial as an operator's choice, JPEG remaining the default. Do not
+   add a run-time policy that picks between them until the corpus above can weigh
+   an encoder-time budget against the bytes it would give back.
+7. Keep AVIF behind that measurement unless new evidence justifies moving it ahead.
 
 The likely policy shape is intentionally conservative:
 
@@ -362,7 +387,7 @@ The likely policy shape is intentionally conservative:
 | --- | --- |
 | Clear UI or text | PNG |
 | Ambiguous | PNG |
-| Clear photograph | JPEG |
+| Clear photograph | The target's lossy still: JPEG, or WebP if asked for |
 | Motion region | VP9 video stream, followed by the existing base-tile cleanup |
 
 ## Explicit exclusions
@@ -375,3 +400,5 @@ The likely policy shape is intentionally conservative:
 - No application/window metadata assumption for a composed framebuffer.
 - No blanket lossless refresh that cancels the intended static-photo savings.
 - No codec choice justified solely by generic web-image compression claims.
+- No run-time switching between JPEG and WebP: the operator names one.
+- No lossless codec beside PNG.

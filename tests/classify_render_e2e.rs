@@ -1,27 +1,35 @@
-//! End-to-end test of `render_subtype = "classify"` against real devices.
+//! End-to-end test of `render_subtype = "classify"` against a real device.
 //!
 //! No container stands in here: the classifier's whole subject is what real
-//! desktop pixels look like, so these tests borrow the operator's own QA
-//! machines from `tmp/test_uat.toml` — the Windows box over RDP, the TigerVNC
-//! workstation, and the Mac in High Performance mode — override each target's
-//! render dial to a `classify` base, and read the session WebSocket a
-//! browser would. The Linux workstation is also driven with that base under
-//! `motion`, the pairing where a settled cell is classified while a moving one
+//! desktop pixels look like, so this test borrows one of the operator's own QA
+//! machines from `tmp/test_uat.toml`, overrides its render dial to a `classify`
+//! base, and reads the session WebSocket a browser would. One case adds `motion`
+//! on top, the pairing where a settled cell is classified while a moving one
 //! takes the cheaper motion encode.
 //!
-//! What is asserted is the system's decisions, not the devices' content: every
-//! tile names PNG or JPEG in its format byte, every payload begins with the
-//! magic of the format it names, and a full repaint of the announced desktop
-//! arrives tile by tile. Whether any given tile went lossy depends on what the
-//! remote screen happens to show, so the PNG/JPEG split is *reported* rather
-//! than asserted — with one exception: a real desktop always has flat regions,
-//! so a classify session that produced no PNG at all is a classifier that has
-//! stopped saying no.
+//! **Which machine is the operator's to say, and this file names none.** A
+//! hostname or a target name written here is a fact about somebody's lab that
+//! ages out of date on its own, silently, until a run fails for a reason that has
+//! nothing to do with the classifier. So [`TARGET_ENV`] names the target inside
+//! that config, and the run says which device it drove. Point it at the Windows
+//! box, at a Linux VNC host, at the Mac in High Performance mode — the assertions
+//! below are about this gateway's decisions and hold for any of them.
 //!
-//! Ignored by default; each needs its device reachable:
+//! What is asserted is the system's decisions, not the device's content: every
+//! tile names PNG or the session's lossy still in its format byte, every payload
+//! begins with the magic of the format it names, and a full repaint of the
+//! announced desktop arrives tile by tile. Whether any given tile went lossy
+//! depends on what the remote screen happens to show, so the split is *reported*
+//! rather than asserted — with one exception: a real desktop always has flat
+//! regions, so a classify session that produced no PNG at all is a classifier
+//! that has stopped saying no.
+//!
+//! Ignored by default, and one test rather than three: the cases share a device,
+//! so they run in sequence inside it. It needs the named device reachable:
 //!
 //! ```sh
-//! cargo test --test classify_render_e2e -- --ignored --nocapture
+//! REMOTEX_UAT_TARGET=<target in tmp/test_uat.toml> \
+//!   cargo test --test classify_render_e2e -- --ignored --nocapture
 //! ```
 
 mod common;
@@ -30,7 +38,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, RenderSubtype, TargetConfig};
+use remotex::config::{AppConfig, ClassifyLossy, RenderSubtype, RenderType, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -39,8 +47,9 @@ use tokio_tungstenite::tungstenite::Message;
 /// stand-in for a client, and a client only has the numbers.
 const TILE_FORMAT_PNG: u8 = 1;
 const TILE_FORMAT_JPEG: u8 = 2;
+const TILE_FORMAT_WEBP: u8 = 3;
 
-/// The quality the classifier's JPEG side runs at here. Any legal value would
+/// The quality the classifier's lossy side runs at here. Any legal value would
 /// do — the assertions are about formats, not fidelity.
 const QUALITY: u8 = 60;
 
@@ -48,12 +57,34 @@ const QUALITY: u8 = 60;
 /// [`QUALITY`], and lower for the same reason an operator's would be.
 const MOTION_QUALITY: u8 = 15;
 
-/// Put the operator's `name` target on a classify-base tiles dial, with or
-/// without the motion discount on top of it.
-fn uat_target(name: &str, motion: bool) -> TargetConfig {
+/// Which target in `tmp/test_uat.toml` these tests drive. An environment
+/// variable rather than a name in this file: see the module docs — the devices
+/// are the operator's, and the ones written into a test go stale where nobody is
+/// looking.
+const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
+
+/// The target the operator pointed this run at.
+fn target_name() -> String {
+    std::env::var(TARGET_ENV).unwrap_or_else(|_| {
+        panic!(
+            "set {TARGET_ENV} to the name of a target in tmp/test_uat.toml — these tests \
+             drive a real desktop and this file deliberately names none"
+        )
+    })
+}
+
+/// Put that target on a classify-base tiles dial, with the named lossy still
+/// under the classifier, and with or without the motion discount on top of it.
+fn uat_target(name: &str, lossy: ClassifyLossy, motion: bool) -> TargetConfig {
     let mut target = common::uat_target(name);
+    // Whatever the operator has this target set to. A target already on
+    // `render_type = "video"` resolves to a whole-desktop VP9 plan and never
+    // reads the subtype at all, so the classify dial below would be set and
+    // ignored — no tiles, and a timeout blaming the device.
+    target.render_type = RenderType::Tiles;
     target.render_subtype = Some(RenderSubtype::Classify);
     target.render_subtype_quality = Some(QUALITY);
+    target.render_classify_lossy = Some(lossy);
     target.render_motion = motion;
     target.render_stream_quality = motion.then_some(MOTION_QUALITY);
     target.render_motion_debug = false;
@@ -89,15 +120,16 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
 #[derive(Default)]
 struct Tally {
     png: u64,
-    jpeg: u64,
+    lossy: u64,
 }
 
-/// Connect to `name` on the classify dial and read tiles until the announced
-/// desktop is fully painted. Every tile's format byte and payload magic are
-/// checked on the way past; the PNG/JPEG split comes back for reporting.
-async fn paint_a_whole_desktop(name: &str, motion: bool) -> Tally {
+/// Connect to the operator's target on the classify dial and read tiles until the
+/// announced desktop is fully painted. Every tile's format byte and payload magic
+/// are checked on the way past; the lossless/lossy split comes back for reporting.
+async fn paint_a_whole_desktop(lossy: ClassifyLossy, motion: bool) -> Tally {
     common::init_logging();
-    let addr = spawn_app(uat_target(name, motion)).await;
+    let name = &target_name();
+    let addr = spawn_app(uat_target(name, lossy, motion)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
@@ -131,7 +163,7 @@ async fn paint_a_whole_desktop(name: &str, motion: bool) -> Tally {
                     let coverage = coverage.as_mut().expect("tile arrived before resize");
                     for painted in stream.paint(&frame) {
                         if let common::Painted::Tile(tile) = &painted {
-                            check_tile(tile, &mut tally);
+                            check_tile(tile, lossy, &mut tally);
                         }
                         // A copy paints pixels the client already checked when
                         // they first arrived; only its geometry counts here.
@@ -160,7 +192,12 @@ async fn paint_a_whole_desktop(name: &str, motion: bool) -> Tally {
     .await
     .expect("timed out before the desktop was fully painted");
 
-    println!("{name}: {} png tile(s), {} jpeg tile(s)", tally.png, tally.jpeg);
+    println!(
+        "{name}: {} png tile(s), {} {} tile(s)",
+        tally.png,
+        tally.lossy,
+        lossy.name()
+    );
     assert!(
         tally.png > 0,
         "{name}: a real desktop was painted whole without one PNG tile — the classifier \
@@ -170,49 +207,68 @@ async fn paint_a_whole_desktop(name: &str, motion: bool) -> Tally {
 }
 
 /// One tile's wire claims, checked against each other: the format byte must be
-/// one of the two the classifier chooses between, and the payload must begin
-/// with that format's magic — a JPEG in PNG clothing would decode as neither.
-fn check_tile(tile: &common::BatchTile, tally: &mut Tally) {
+/// PNG or the one lossy still this session configured — a third format would be
+/// an encoder the operator did not ask for — and the payload must begin with that
+/// format's magic, a JPEG in PNG clothing decoding as neither.
+fn check_tile(tile: &common::BatchTile, lossy: ClassifyLossy, tally: &mut Tally) {
     assert!(tile.w > 0 && tile.h > 0, "empty tile {}x{}", tile.w, tile.h);
-    match tile.format {
-        TILE_FORMAT_PNG => {
-            assert!(
-                tile.payload.len() >= 8 && tile.payload[..8] == *b"\x89PNG\r\n\x1a\n",
-                "a tile marked PNG does not carry a PNG stream"
-            );
-            tally.png += 1;
-        }
-        TILE_FORMAT_JPEG => {
-            assert!(
-                tile.payload.len() >= 3 && tile.payload[..3] == [0xFF, 0xD8, 0xFF],
-                "a tile marked JPEG does not carry a JPEG stream"
-            );
-            tally.jpeg += 1;
-        }
-        other => panic!("unexpected tile format byte {other}"),
+    let (format, magic): (u8, &[u8]) = match lossy {
+        ClassifyLossy::Jpeg => (TILE_FORMAT_JPEG, &[0xFF, 0xD8, 0xFF]),
+        // The RIFF container's form type sits at byte 8, past the four length
+        // bytes, so the magic is checked in two pieces below.
+        ClassifyLossy::Webp => (TILE_FORMAT_WEBP, b"RIFF"),
+    };
+    if tile.format == TILE_FORMAT_PNG {
+        assert!(
+            tile.payload.len() >= 8 && tile.payload[..8] == *b"\x89PNG\r\n\x1a\n",
+            "a tile marked PNG does not carry a PNG stream"
+        );
+        tally.png += 1;
+        return;
     }
+    assert_eq!(
+        tile.format,
+        format,
+        "a classify session on {} sent a tile in another format",
+        lossy.name()
+    );
+    assert!(
+        tile.payload.len() > magic.len() && tile.payload[..magic.len()] == *magic,
+        "a tile marked {} does not carry one",
+        lossy.name()
+    );
+    if lossy == ClassifyLossy::Webp {
+        assert!(
+            tile.payload.len() >= 12 && tile.payload[8..12] == *b"WEBP",
+            "a tile marked WebP carries a RIFF container that is not WebP"
+        );
+    }
+    tally.lossy += 1;
 }
 
+/// The classifier against a real desktop, three sessions deep. Run it once per
+/// device worth covering — an RDP host, a VNC host, a Mac in High Performance
+/// mode — by pointing [`TARGET_ENV`] at each in turn.
+///
+/// **One test rather than three, because the three share a device.** Rust runs
+/// the tests of a binary concurrently, so three of these would open three
+/// sessions to the same desktop at once — which an RDP host or a Mac answers by
+/// evicting or refusing, and the loser fails for a reason that is about the test
+/// harness and nothing about the classifier. Sequential here is not a
+/// simplification of parallel; it is the only shape that matches one device.
+///
+/// The three cases in order:
+///
+/// - the encoder the classifier was measured against;
+/// - the same desktop with the classifier's other encoder underneath it — the
+///   verdicts are the classifier's either way, and what this adds is that the
+///   tiles it sends lossy arrive as WebP a browser can decode;
+/// - the classifier as the base of a motion plan, where a settled cell is
+///   classified while whatever is moving takes the stream instead.
 #[tokio::test]
-#[ignore = "needs the real Windows RDP host from tmp/test_uat.toml"]
-async fn classify_paints_the_windows_desktop_over_rdp() {
-    paint_a_whole_desktop("windows", false).await;
-}
-
-#[tokio::test]
-#[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
-async fn classify_paints_the_linux_desktop_over_vnc() {
-    paint_a_whole_desktop("workstationlinux", false).await;
-}
-
-#[tokio::test]
-#[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
-async fn a_classify_base_paints_the_linux_desktop_under_motion() {
-    paint_a_whole_desktop("workstationlinux", true).await;
-}
-
-#[tokio::test]
-#[ignore = "needs the real Mac in High Performance mode from tmp/test_uat.toml"]
-async fn classify_paints_the_mac_desktop_in_high_performance_mode() {
-    paint_a_whole_desktop("sandbox2highperf", false).await;
+#[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
+async fn classify_paints_a_real_desktop() {
+    paint_a_whole_desktop(ClassifyLossy::Jpeg, false).await;
+    paint_a_whole_desktop(ClassifyLossy::Webp, false).await;
+    paint_a_whole_desktop(ClassifyLossy::Jpeg, true).await;
 }

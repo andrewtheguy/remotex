@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.198"
+version = "0.0.199"
 
 [package]
 name = "remotex"
@@ -72,6 +72,17 @@ png = "0.18"
 # already distinguishes PNG from JPEG on the wire and the client decodes either,
 # so this is a gateway-only encoder. `simd` because it runs on the session hot path.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
+# WebP, the other lossy still codec on the render dial: `render_subtype = "webp"`
+# for every tile, or `render_classify_lossy = "webp"` for the tiles the classifier
+# reads as photographic. Fewer bytes than JPEG at a matched quality and slower to
+# produce them (docs/still-image-classification-research.md holds the
+# measurements), which is why the operator picks and neither one is a default.
+# `default-features = false` drops the crate's `image` bridge: tiles arrive here as
+# packed RGB888 and `Encoder::from_rgb` takes them as they are. Its sys crate
+# compiles libwebp with `cc` — no cmake, no system library, and libwebp selects its
+# own SSE/AVX/NEON kernels at run time, which is the CPU floor packaging/README.md
+# requires.
+webp = { version = "0.3", default-features = false }
 # libvpx, for VP9 — the video codec, for either streaming mode: the whole framebuffer
 # under `render_type = "video"`, or moving regions under `render_motion = true`
 # (src/vp9.rs). VP9 is BSD-3-Clause with a patent grant, so every browser
