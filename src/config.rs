@@ -217,9 +217,9 @@ impl AudioCodec {
     }
 }
 
-/// How much colour a target's video streams carry per pixel, chosen per target
-/// because it is a picture-against-decoder trade and only the operator knows which
-/// browsers a target is watched from.
+/// How much colour a video stream carries per pixel, as the encoder and the wire have
+/// it: one of two VP9 profiles, and never a question. What a *target* asks for is
+/// [`ChromaChoice`], which has a third answer this deliberately does not.
 ///
 /// This is where the picture loss on a desktop stream actually is — not the
 /// quantizer. Measured 2026-09-01 on 1280×800 of rendered text, coloured on a dark
@@ -232,22 +232,33 @@ impl AudioCodec {
 /// picture at 4:4:4 and the same quantizer measures 42.8 dB with a worst pixel 33
 /// off. `a_444_stream_keeps_the_colour_420_averages_away` in [`crate::vp9`] is the
 /// round trip that pins it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+///
+/// `Deserialize` for the session socket's `chroma` query parameter — the browser
+/// naming the most colour its decoder takes, which is a settled chroma and not a
+/// choice. No `Default`: a stream's chroma is resolved from a [`ChromaChoice`] and,
+/// where that is [`ChromaChoice::Auto`], from that answer; there is no third source
+/// for one to come from silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub enum Chroma {
     /// 4:2:0 — one colour sample per 2×2 pixels, VP9 profile 0. The default, and
     /// the one every VP9 decoder takes, hardware ones included.
-    #[default]
     #[serde(rename = "420")]
     Subsampled,
     /// 4:4:4 — a colour sample per pixel, VP9 profile 1. On the picture above:
     /// a keyframe a third larger, inter frames no larger, a third more encode
     /// time, and coloured text that is the colour it was.
     ///
-    /// The trade is the decoder. No hardware VP9 decoder takes profile 1, so
-    /// this always decodes in software — Chromium does (measured headless,
-    /// 2026-09-01), and a browser with no software VP9 at all, which is iOS and
-    /// iPadOS, refuses the stream by name at `VideoDecoder.configure`, the same
-    /// way it would refuse any configuration it lacks. Nothing falls back.
+    /// The trade is the decoder. No hardware VP9 decoder takes profile 1, so this
+    /// always decodes in software — Chromium does (measured headless, 2026-09-01),
+    /// and a browser with no software VP9 at all, which is iOS and iPadOS, refuses
+    /// the stream by name at `VideoDecoder.configure`, the same way it would refuse
+    /// any configuration it lacks. Losing the hardware path is a smaller loss than
+    /// it reads: the GPU-process decoder is the one that goes quiet under churn, and
+    /// software libvpx is what answers every chunk (see
+    /// `frontend/src/videoDecoder.ts`).
+    ///
+    /// [`ChromaChoice::Auto`] exists to get in front of that refusal without making
+    /// the operator maintain a second target for the browsers that would raise it.
     #[serde(rename = "444")]
     Full,
 }
@@ -260,6 +271,39 @@ impl Chroma {
             Self::Full => "444",
         }
     }
+}
+
+/// What [`TargetConfig::render_chroma`] can say: name a profile, or let the browser
+/// pick between them.
+///
+/// A type of its own rather than `Option<Chroma>` meaning "ask", because the third
+/// answer is a real setting an operator writes down and not the absence of one — and
+/// because an encoder must never be handed a chroma that still has a question in it.
+/// [`TargetConfig::render_plan`] is the one place this becomes a [`Chroma`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum ChromaChoice {
+    /// 4:2:0 for every browser ([`Chroma::Subsampled`]). The default, and what every
+    /// stream was before this key existed.
+    #[default]
+    #[serde(rename = "420")]
+    Subsampled,
+    /// 4:4:4 for every browser ([`Chroma::Full`]), refusals included: an iPhone or
+    /// iPad watching this target is sent a stream its `VideoDecoder` rejects by name.
+    /// The setting to hold a fleet to one bitstream, or to pin one side of a
+    /// comparison — [`Self::Auto`] is the one to reach for otherwise.
+    #[serde(rename = "444")]
+    Full,
+    /// 4:4:4 where the browser's decoder takes VP9 profile 1, 4:2:0 where it says it
+    /// does not.
+    ///
+    /// The browser is asked once, at page load, and states the answer on its session
+    /// socket (`frontend/src/videoChroma.ts`, [`crate::ws`]); the gateway selects on
+    /// it and never refuses a client for it, so a browser that answers wrongly still
+    /// ends where it always did, at its own decoder's refusal by name. One target
+    /// then serves a desktop and an iPad without being written down twice, which is
+    /// the whole reason this answer exists.
+    #[serde(rename = "auto")]
+    Auto,
 }
 
 /// A target's audio keys as the encoder consumes them, resolved by
@@ -569,7 +613,10 @@ impl RenderPlan {
             adaptive.map_or_else(String::new, |floor| format!(" · adaptive ≥{floor}"))
         }
         // Named only when it is not the default: 4:2:0 is what every stream was
-        // before the key existed, and saying so on each card would be noise.
+        // before the key existed, and saying so on each card would be noise. An
+        // `auto` target still reads its answer off this — 4:4:4 named where the
+        // browser took it, and nothing where it did not, which is the plain 4:2:0
+        // card every other subsampled target shows.
         fn chroma(chroma: Chroma) -> &'static str {
             match chroma {
                 Chroma::Subsampled => "",
@@ -891,12 +938,22 @@ pub struct TargetConfig {
     pub render_motion_debug: bool,
     /// Chroma sampling of this target's video streams — `render_type = "video"`
     /// and `render_motion = true` alike; `None` reads as
-    /// [`Chroma::Subsampled`]. `Option` rather than a bare default so that
-    /// setting it on a target that streams nothing is refused at parse time
-    /// instead of accepted and left inert, the same rule as `audio_codec`
-    /// without `audio`.
+    /// [`ChromaChoice::Subsampled`], which is what every stream was before this key
+    /// existed.
+    ///
+    /// `"auto"` is the one to reach for on a target watched from more than one kind
+    /// of browser: it gets the 4:4:4 picture wherever a decoder takes it and the
+    /// 4:2:0 one where profile 1 would be refused, off a question the browser
+    /// answered once at page load, so the target need not be written down twice
+    /// under two names. `"444"` states the same preference and asks nobody, which is
+    /// what makes it the wrong key for a fleet and the right one for a measurement.
+    /// See [`ChromaChoice`] and [`Self::render_plan`].
+    ///
+    /// `Option` rather than a bare default so that setting it on a target that
+    /// streams nothing is refused at parse time instead of accepted and left inert,
+    /// the same rule as `audio_codec` without `audio`.
     #[serde(default)]
-    pub render_chroma: Option<Chroma>,
+    pub render_chroma: Option<ChromaChoice>,
     /// Which lossy still the classifier's photographic tiles go to; `None` reads
     /// as [`ClassifyLossy::Jpeg`]. A key for [`RenderSubtype::Classify`] and
     /// refused for any other subtype — the fixed subtypes name their encoder on
@@ -1030,11 +1087,23 @@ impl TargetConfig {
     /// already guaranteed is present and in range; each `None` arm falls back to
     /// the safe answer — lossless PNG for the base, no motion encode at all —
     /// rather than trusting that here.
-    pub fn render_plan(&self) -> RenderPlan {
+    ///
+    /// `decoder` is the most colour the attached browser said its `VideoDecoder`
+    /// takes, carried on the session socket and held with its attachment
+    /// ([`crate::session::SessionManager::attach`]). It is read by
+    /// [`ChromaChoice::Auto`] and by nothing else: a target that names a profile
+    /// gets that profile whatever this says, which is what keeps the explicit key a
+    /// decision no browser can overrule, and a target that streams nothing reads it
+    /// not at all.
+    pub fn render_plan(&self, decoder: Chroma) -> RenderPlan {
         let adaptive = self
             .render_adaptive
             .then(|| self.render_adaptive_min.unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN));
-        let chroma = self.render_chroma.unwrap_or_default();
+        let chroma = match self.render_chroma.unwrap_or_default() {
+            ChromaChoice::Subsampled => Chroma::Subsampled,
+            ChromaChoice::Full => Chroma::Full,
+            ChromaChoice::Auto => decoder,
+        };
         if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_stream_quality) {
             return RenderPlan::Video { quality, adaptive, chroma };
         }
@@ -1054,6 +1123,23 @@ impl TargetConfig {
             _ => None,
         };
         RenderPlan::Tiles { base, motion, debug: self.render_motion_debug, adaptive }
+    }
+
+    /// The render dial for a reader with no browser in front of it — the TUI's
+    /// target card, which describes a config file rather than a session.
+    ///
+    /// There is no browser here for [`ChromaChoice::Auto`] to resolve against, and
+    /// picking one of its two answers to print would name a colour this target may
+    /// never send. So that target is described at the colour it asks for, with the
+    /// condition said out loud rather than settled behind the reader's back. Every
+    /// other target has one answer already and reads as its plan.
+    pub fn render_summary(&self) -> String {
+        let auto = self.render_chroma == Some(ChromaChoice::Auto);
+        let line = self.render_plan(if auto { Chroma::Full } else { Chroma::Subsampled }).describe();
+        if auto {
+            return format!("{line} where the browser takes it, else 4:2:0");
+        }
+        line
     }
 
     /// The audio keys collapsed to what the encoder is built from, the same way
@@ -2972,7 +3058,7 @@ mod tests {
         assert_eq!(t.render_stream_quality, None);
         assert_eq!(t.render_subtype_quality, None);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(Chroma::Full),
             RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false, adaptive: None }
         );
     }
@@ -2996,7 +3082,7 @@ mod tests {
         assert_eq!(t.render_subtype(), RenderSubtype::Jpeg);
         assert_eq!(t.render_subtype_quality, Some(60));
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Lossy(LossyStill::Jpeg {
                     quality: 60,
@@ -3028,7 +3114,7 @@ mod tests {
         let t = &cfg.targets[0];
         assert_eq!(t.render_subtype(), RenderSubtype::Webp);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Lossy(LossyStill::Webp { quality: 60 }),
                 motion: None,
@@ -3072,7 +3158,7 @@ mod tests {
             ))
             .unwrap()
             .targets[0]
-                .render_plan()
+                .render_plan(Chroma::Full)
         };
         let base = |plan: RenderPlan| match plan {
             RenderPlan::Tiles { base, .. } => base,
@@ -3142,7 +3228,7 @@ mod tests {
                 "#
             ))
             .unwrap();
-            let RenderPlan::Tiles { base, .. } = cfg.targets[0].render_plan() else {
+            let RenderPlan::Tiles { base, .. } = cfg.targets[0].render_plan(Chroma::Full) else {
                 panic!("a lossy subtype is a tiles plan");
             };
             let lossy = match base {
@@ -3173,7 +3259,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Lossy(LossyStill::Jpeg {
                     quality: 60,
@@ -3203,7 +3289,7 @@ mod tests {
         let t = &cfg.targets[0];
         assert_eq!(t.render_subtype(), RenderSubtype::Classify);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Classify {
                     lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
@@ -3249,7 +3335,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Classify {
                     lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
@@ -3263,7 +3349,9 @@ mod tests {
     }
 
     /// The chroma key reaches both kinds of stream and defaults to what every
-    /// stream was before it existed.
+    /// stream was before it existed. Every case here is resolved against a browser
+    /// that takes 4:4:4, and none of them takes it up: a named profile is the
+    /// operator's decision and no decoder's answer moves it.
     #[test]
     fn render_chroma_reaches_the_stream_and_defaults_to_420() {
         let video = |extra: &str| {
@@ -3280,7 +3368,7 @@ mod tests {
             ))
             .unwrap()
             .targets[0]
-                .render_plan()
+                .render_plan(Chroma::Full)
         };
         assert_eq!(
             video(""),
@@ -3307,7 +3395,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
                 motion: Some(MotionEncode { quality: 30, chroma: Chroma::Full }),
@@ -3356,6 +3444,104 @@ mod tests {
         assert!(format!("{err:#}").contains("422"), "{err:#}");
     }
 
+    /// `auto` is the third answer, and the only one that reads the browser: the
+    /// same target resolves to 4:4:4 for a decoder that takes profile 1 and to
+    /// 4:2:0 for one that does not, on both kinds of stream. This is what a target
+    /// watched from a desktop and an iPad is written as, once.
+    #[test]
+    fn auto_chroma_follows_the_browser_on_both_kinds_of_stream() {
+        let target = |render: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                {render}
+                render_chroma = "auto"
+                "#
+            ))
+            .unwrap()
+            .targets
+            .remove(0)
+        };
+
+        let video = target("render_type = \"video\"\nrender_stream_quality = 100");
+        assert_eq!(video.render_chroma, Some(ChromaChoice::Auto));
+        assert_eq!(
+            video.render_plan(Chroma::Full),
+            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Full }
+        );
+        assert_eq!(
+            video.render_plan(Chroma::Subsampled),
+            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
+        );
+
+        let motion = target("render_motion = true\nrender_stream_quality = 30");
+        let plan = |decoder| match motion.render_plan(decoder) {
+            RenderPlan::Tiles { motion: Some(MotionEncode { chroma, .. }), .. } => chroma,
+            other => panic!("a motion target must resolve to a motion plan: {other:?}"),
+        };
+        assert_eq!(plan(Chroma::Full), Chroma::Full);
+        assert_eq!(plan(Chroma::Subsampled), Chroma::Subsampled);
+
+        // And it is refused where the other two are, for the same reason: there is
+        // no stream for the browser's answer to resolve.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_chroma = "auto"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_chroma"), "{err:#}");
+    }
+
+    /// The TUI reads a config file with no browser in front of it, so `auto` is the
+    /// one target it cannot describe by resolving: it says what the answer decides
+    /// instead of picking one. Every other target reads as its plan.
+    #[test]
+    fn a_target_card_states_an_auto_chroma_rather_than_resolving_it() {
+        let summary = |extra: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "video"
+                render_stream_quality = 60
+                {extra}
+                "#
+            ))
+            .unwrap()
+            .targets[0]
+                .render_summary()
+        };
+        assert_eq!(summary(""), "video q60");
+        assert_eq!(summary("render_chroma = \"420\""), "video q60");
+        assert_eq!(summary("render_chroma = \"444\""), "video q60 4:4:4");
+        assert_eq!(
+            summary("render_chroma = \"auto\""),
+            "video q60 4:4:4 where the browser takes it, else 4:2:0"
+        );
+
+        // A target with no stream has no chroma to qualify, whatever it is.
+        let tiles = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(tiles.targets[0].render_summary(), "tiles · lossless png");
+    }
+
     /// The grid is the debug aid no encoder can see: it belongs to the two
     /// transport that cuts damage into tiles, and it leaves the render plan alone.
     #[test]
@@ -3379,7 +3565,7 @@ mod tests {
             // plan they would have read without it.
             let mut plain = target.clone();
             plain.render_grid_debug = false;
-            assert_eq!(target.render_plan(), plain.render_plan(), "{render}");
+            assert_eq!(target.render_plan(Chroma::Full), plain.render_plan(Chroma::Full), "{render}");
         }
 
         // Off unless asked for, and then there is no lattice to state either.
@@ -3429,7 +3615,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Classify {
                     lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
@@ -3502,7 +3688,7 @@ mod tests {
             "#,
         )
         .expect("video with a quality");
-        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled });
+        assert_eq!(cfg.targets[0].render_plan(Chroma::Full), RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled });
     }
 
     #[test]
@@ -3591,8 +3777,8 @@ mod tests {
             assert_eq!(explicit.targets[0].render_subtype, Some(RenderSubtype::Png), "{keys}");
             assert_eq!(implicit.targets[0].render_subtype, None, "{keys}");
             assert_eq!(
-                explicit.targets[0].render_plan(),
-                implicit.targets[0].render_plan(),
+                explicit.targets[0].render_plan(Chroma::Full),
+                implicit.targets[0].render_plan(Chroma::Full),
                 "{keys}: naming the default changes nothing"
             );
         }
@@ -3675,7 +3861,7 @@ mod tests {
         assert!(t.render_motion);
         assert_eq!(t.render_subtype(), RenderSubtype::Png);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
                 motion: Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled }),
@@ -3705,7 +3891,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Lossy(LossyStill::Jpeg {
                     quality: 60,
@@ -3803,7 +3989,7 @@ mod tests {
             );
             let cfg = ConfigFile::parse(&toml)
                 .unwrap_or_else(|e| panic!("{what} should be a legal dial: {e:#}"));
-            let described = cfg.targets[0].render_plan().describe();
+            let described = cfg.targets[0].render_plan(Chroma::Full).describe();
             assert_eq!(described, expected, "{what}");
             seen.push(described);
         }
@@ -3890,7 +4076,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(matches!(cfg.targets[0].render_plan(), RenderPlan::Tiles { debug: true, .. }));
+        assert!(matches!(cfg.targets[0].render_plan(Chroma::Full), RenderPlan::Tiles { debug: true, .. }));
 
         let plain = ConfigFile::parse(
             r#"
@@ -3902,7 +4088,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(plain.targets[0].render_plan(), RenderPlan::Tiles { debug: false, .. }),
+            matches!(plain.targets[0].render_plan(Chroma::Full), RenderPlan::Tiles { debug: false, .. }),
             "the overlay defaulted on"
         );
 
@@ -3972,7 +4158,7 @@ mod tests {
             parse_target("render_type = \"video\"\nrender_stream_quality = 60")
                 .unwrap()
                 .targets[0]
-                .render_plan(),
+                .render_plan(Chroma::Full),
             RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled }
         );
         assert_eq!(
@@ -3980,7 +4166,7 @@ mod tests {
                 parse_target("render_motion = true\nrender_stream_quality = 60")
                     .unwrap()
                     .targets[0]
-                    .render_plan()
+                    .render_plan(Chroma::Full)
             ),
             Some(MotionEncode { quality: 60, chroma: Chroma::Subsampled })
         );
@@ -4030,7 +4216,7 @@ mod tests {
         )
         .expect("motion is independent of the VNC subtype");
         assert_eq!(
-            motion_of(cfg.targets[0].render_plan()),
+            motion_of(cfg.targets[0].render_plan(Chroma::Full)),
             Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled })
         );
     }
@@ -4058,7 +4244,7 @@ mod tests {
         )
         .unwrap();
         for t in &cfg.targets {
-            assert_eq!(motion_of(t.render_plan()), None, "target {:?}", t.name);
+            assert_eq!(motion_of(t.render_plan(Chroma::Full)), None, "target {:?}", t.name);
         }
     }
 
@@ -4799,7 +4985,7 @@ mod tests {
             "render_type = \"video\"\nrender_stream_quality = 80\nrender_adaptive = true",
         )
         .expect("adaptive video");
-        let plan = cfg.targets[0].render_plan();
+        let plan = cfg.targets[0].render_plan(Chroma::Full);
         assert_eq!(
             plan,
             RenderPlan::Video { quality: 80, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }
@@ -4811,7 +4997,7 @@ mod tests {
              render_subtype_quality = 70\nrender_adaptive = true\nrender_adaptive_min = 35",
         )
         .expect("adaptive tiles");
-        let plan = cfg.targets[0].render_plan();
+        let plan = cfg.targets[0].render_plan(Chroma::Full);
         assert_eq!(
             plan,
             RenderPlan::Tiles {
@@ -4831,7 +5017,7 @@ mod tests {
         )
         .expect("adaptive motion stream");
         assert_eq!(
-            cfg.targets[0].render_plan().describe(),
+            cfg.targets[0].render_plan(Chroma::Full).describe(),
             "motion · base lossless png, moving stream q60 · adaptive ≥20"
         );
     }
@@ -4842,7 +5028,7 @@ mod tests {
         let cfg = parse_target("render_type = \"video\"\nrender_stream_quality = 80")
             .expect("plain video");
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Video { quality: 80, adaptive: None, chroma: Chroma::Subsampled }
         );
     }

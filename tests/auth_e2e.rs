@@ -161,7 +161,7 @@ async fn login_sets_the_session_cookie_and_grants_access() {
 async fn websocket_upgrade_without_a_login_fails_with_401() {
     let addr = spawn_app().await;
 
-    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session=whatever"))
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session=whatever&chroma=444"))
         .await
         .expect_err("the unauthenticated upgrade must be refused");
     match err {
