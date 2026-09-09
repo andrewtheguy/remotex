@@ -207,10 +207,21 @@ impl AudioListener {
     ///
     /// Exists for the engines' tests, which assert that what arrived on the wire
     /// reached this queue as samples — the one thing a bridge with no listener
-    /// otherwise keeps to itself.
+    /// otherwise keeps to itself. A lagged reader panics rather than reading as
+    /// an empty queue: a test that overran the queue's depth is a test whose
+    /// buffers went missing, and reporting that as "nothing arrived" would make
+    /// the wrong assertion fail.
     #[cfg(test)]
     pub fn queued_wave(&mut self) -> Option<Bytes> {
-        self.waves.try_recv().ok()
+        match self.waves.try_recv() {
+            Ok(samples) => Some(samples),
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                None
+            }
+            Err(broadcast::error::TryRecvError::Lagged(dropped)) => {
+                panic!("the test queue dropped {dropped} buffer(s) before this read")
+            }
+        }
     }
 
     /// Return everything the client has to be told, and a live-only stream of

@@ -5013,13 +5013,19 @@ mod tests {
         wire
     }
 
-    /// A `FramebufferUpdate` of one empty Raw rectangle: pixels, and no
-    /// announcement in front of them.
+    /// A `FramebufferUpdate` of one Raw rectangle covering the 2x2 desktop these
+    /// tests use: real pixels, and no announcement in front of them. The size
+    /// matters — a 0x0 rect carries no pixels and would leave the extension
+    /// still merely `Asked`.
     fn pixels_without_announcement() -> Vec<u8> {
         let mut wire = vec![0u8, 0];
         wire.extend_from_slice(&1u16.to_be_bytes());
-        wire.extend_from_slice(&[0u8; 8]);
+        wire.extend_from_slice(&0u16.to_be_bytes()); // x
+        wire.extend_from_slice(&0u16.to_be_bytes()); // y
+        wire.extend_from_slice(&2u16.to_be_bytes()); // w
+        wire.extend_from_slice(&2u16.to_be_bytes()); // h
         wire.extend_from_slice(&0i32.to_be_bytes()); // Raw
+        wire.extend_from_slice(&[0x20u8; 2 * 2 * 4]); // BGRX
         wire
     }
 
@@ -5131,9 +5137,47 @@ mod tests {
     /// is sent, because there is nothing to enable.
     #[tokio::test]
     async fn a_server_that_announces_nothing_is_never_asked_to_start() {
-        let (written, bridge, _listener) = run_audio_wire(pixels_without_announcement()).await;
-        assert!(written.is_empty(), "nothing was sent to a server with no sound to give");
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let bridge = Arc::new(crate::audio::AudioBridge::new());
+        let shared = test_shared_with_audio(
+            test_shared(uplink, shared_desktop((2, 2), None, None), test_shadow((2, 2))),
+            &bridge,
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(pixels_without_announcement()),
+            shared,
+            ReadFlags { clipboard: true, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await;
+        // The update really carried pixels, which is what settles the extension
+        // as unanswered; against a 0x0 rect this test would prove nothing.
+        assert!(
+            forwarded(&sink, &mut rx).await.is_some(),
+            "the Raw rect should have reached the browser as pixels"
+        );
+        assert!(written(&sent).is_empty(), "nothing was sent to a server with no sound to give");
         assert_eq!(bridge.negotiated_format(), None);
+    }
+
+    /// And giving up on a server is not final: the pixels above settle the
+    /// extension as unanswered, and an announcement after them is still taken —
+    /// the stream is turned on and its samples reach the queue as ever.
+    #[tokio::test]
+    async fn an_announcement_after_the_pixels_is_still_taken() {
+        let wire = [
+            pixels_without_announcement(),
+            audio_announcement(),
+            server_audio(1, &[]),
+            server_audio(2, &[7, 7, 7, 7]),
+        ]
+        .concat();
+        let (written, bridge, mut listener) = run_audio_wire(wire).await;
+        assert_eq!(written, vec![255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 0]);
+        assert_eq!(bridge.negotiated_format(), Some(vnc_qemu_audio::SOURCE_FORMAT));
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[7, 7, 7, 7][..]));
     }
 
     /// The QEMU submessages share no length field, so one this client cannot

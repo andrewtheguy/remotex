@@ -1170,9 +1170,13 @@ impl TargetConfig {
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
+            // Named rather than wildcarded, so a subtype added later has to
+            // say which of the two audio paths it is. Standard `ard` carries
+            // neither and is refused the key at parse; naming it beside the
+            // generic case is what makes that a decision rather than a default.
             Protocol::Vnc => match self.subtype {
                 Some(Subtype::ArdHighPerformance) => crate::vnc_apple_audio::SOURCE_FORMAT,
-                _ => crate::vnc_qemu_audio::SOURCE_FORMAT,
+                None | Some(Subtype::Ard) => crate::vnc_qemu_audio::SOURCE_FORMAT,
             },
         }
     }
@@ -4676,10 +4680,11 @@ mod tests {
         assert_eq!(cfg.targets[1].security(), Security::Auto);
     }
 
-    /// Audio is RDP's, and refused on VNC by name.
+    /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is
+    /// the one target that refuses it by name.
     ///
-    /// The error has to say which protocol carries it, because the mistake
-    /// behind the key is a belief about what RFB does rather than a typo — and a
+    /// The error has to say what does carry it, because the mistake behind the
+    /// key is a belief about what the subtype does rather than a typo — and a
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]

@@ -57,8 +57,8 @@ directions. `rfbproto` calls it the QEMU Audio extension.
   recovers from.
 - **Samples** are little-endian. The specification says nothing about the byte
   order of a sample wider than eight bits; QEMU writes host-native samples and
-  gtk-vnc reads little-endian ones, which on the hosts either runs on are the
-  same bytes.
+  gtk-vnc reads little-endian ones. Host-native is safe because every host this
+  runs on is little-endian, which is what gtk-vnc already expects.
 
 ### Server → client: the announcement
 
