@@ -145,17 +145,17 @@ const MSG_WLSHARE_DENSITY: u8 = 0xE0;
 /// A fence the server wants echoed. Nothing else in the flags word obliges a
 /// client, and the two it may keep are [`FENCE_BLOCK_BEFORE`] and
 /// [`FENCE_BLOCK_AFTER`].
-/// Longest run of samples one audio message may carry. A second of the format
-/// this client asks for is 192 000 bytes, and a buffer is 20 ms of it, so
-/// anything past a megabyte is a server that has lost its framing rather than
-/// one with a lot to say: its bytes are stepped over instead of allocated.
-const MAX_AUDIO_SAMPLES: u32 = 1 << 20;
 const FENCE_REQUEST: u32 = 1 << 31;
 const FENCE_BLOCK_BEFORE: u32 = 1 << 0;
 const FENCE_BLOCK_AFTER: u32 = 1 << 1;
 /// Longest fence payload the extension defines. A server sending more is malformed;
 /// the excess is consumed to keep the stream in step and left out of the echo.
 const MAX_FENCE_PAYLOAD: usize = 64;
+/// Longest run of samples one QEMU Audio message may carry. A second of the
+/// format this client asks for is 192 000 bytes, and a buffer is 20 ms of it, so
+/// anything past a megabyte is a server that has lost its framing rather than
+/// one with a lot to say: its bytes are stepped over instead of allocated.
+const MAX_AUDIO_SAMPLES: u32 = 1 << 20;
 /// Bytes per pixel of the format we force with SetPixelFormat.
 pub(crate) const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.

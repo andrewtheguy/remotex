@@ -778,11 +778,13 @@ pub struct TargetConfig {
     #[serde(default)]
     pub clipboard: bool,
     /// Carry the remote's sound. Packets are sent only while the attached client
-    /// subscribes. RDP negotiates it at connect (MS-RDPEA); an
+    /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
+    /// asks a generic server for the QEMU Audio extension and is answered by one
+    /// that speaks it, wlshare today — see [`crate::vnc_qemu_audio`]; an
     /// `ard-high-performance` target negotiates the Mac's system audio over its
     /// media stream, and only in a gateway built with the `apple-hp-audio` feature
-    /// — see [`crate::vnc_apple_audio`]. Refused on every other VNC target, which
-    /// has no channel to carry it.
+    /// — see [`crate::vnc_apple_audio`]. Refused on Apple's standard Screen
+    /// Sharing, which has neither.
     #[serde(default)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
@@ -817,9 +819,9 @@ pub struct TargetConfig {
     /// that could not do anything.
     #[serde(default)]
     pub audio_bitrate_min: Option<u32>,
-    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC,
-    /// like [`Self::audio`] and for the same shape of reason: RFB has no
-    /// equivalent channel at all.
+    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC:
+    /// RFB has no equivalent channel, and unlike [`Self::audio`] there is no
+    /// extension carrying one either.
     ///
     /// **Experimental**, for lack of tests. The socket's session rules and its
     /// message encodings are unit tested; the redirection itself is not, and
@@ -838,8 +840,9 @@ pub struct TargetConfig {
     #[serde(default)]
     pub camera: bool,
     /// Offer the remote a redirected microphone (MS-RDPEAI). Rejected for VNC,
-    /// like [`Self::audio`] and [`Self::camera`] and for the same shape of
-    /// reason: RFB has no equivalent channel at all.
+    /// like [`Self::camera`] and for the same reason: RFB has no equivalent
+    /// channel, and no extension carries one. The QEMU Audio extension
+    /// [`Self::audio`] uses runs the other way only.
     ///
     /// **Experimental**, for lack of tests, and the camera's twin in that too:
     /// the socket's session rules are unit tested and `micOpen`/`micClose` are
@@ -4830,8 +4833,9 @@ mod tests {
         assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.bits_per_sample, 16);
     }
 
-    /// The camera follows audio's rule: MS-RDPECAM is an RDP channel, so the key
-    /// is refused on VNC at parse time and opt-in (default off) on RDP.
+    /// MS-RDPECAM is an RDP channel with no RFB counterpart and no extension
+    /// carrying one, so the key is refused on VNC at parse time and opt-in
+    /// (default off) on RDP.
     #[test]
     fn camera_belongs_to_rdp_and_is_refused_on_vnc() {
         let err = ConfigFile::parse(&format!(
