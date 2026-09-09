@@ -187,9 +187,22 @@ documents the trade between JPEG 4:4:4 and chroma-subsampled JPEG. Photographs t
 to tolerate subsampling, while sharp coloured boundaries can blur.
 
 The `jpeg-encoder` version currently used by RemoteX defaults to 4:2:0 below quality
-90 and 4:4:4 at quality 90 or above. Explicit 4:4:4 for borderline, colourful
-tiles is therefore worth benchmarking before introducing a new still format. It
-keeps the existing wire image type and browser decode path.
+90 and 4:4:4 at quality 90 or above. The useful distinction is the render subtype,
+not classifier confidence:
+
+- `render_subtype = "classify"` only hands content positively classified as
+  photographic to JPEG. The current JPEG sampling policy is the better fit for
+  that path; uncertain, sharp and text-like tiles have already stayed in PNG.
+- `render_subtype = "jpeg"` hands every tile to JPEG, including text and coloured
+  UI. Explicit 4:4:4 below quality 90 is worth measuring there because it preserves
+  chroma at sharp boundaries that this subtype cannot route to PNG.
+
+That policy would keep the existing JPEG wire image type and browser decode path;
+JPEG carries its sampling factors in the image. It must be an internal still-codec
+choice, not an extension or reuse of `render_chroma`, which belongs only to VP9
+streams. Under adaptive quality, an explicit 4:4:4 all-JPEG path should keep its
+sampling while the quantization quality walks down rather than silently changing
+to 4:2:0 at the encoder's quality-90 boundary.
 
 TurboVNC also tracks lossy rectangles and supports lossless refresh after
 inactivity. As with TigerVNC, that mechanism should not be copied wholesale onto
@@ -231,8 +244,9 @@ the filter search costs more CPU or delays later rectangles.
 JPEG remains the low-risk photographic codec because it is fast, is already on the
 wire and decodes natively in the browser. Benchmark these changes independently:
 
-- explicit 4:4:4 for uncertain or sharp colourful candidates;
-- the current 4:2:0 behavior for clear photographs;
+- explicit 4:4:4 below quality 90 for the all-JPEG subtype, using mixed desktop
+  content with text and coloured edges;
+- the current sampling behavior for classifier-approved photographs;
 - optimized Huffman tables, including the extra encode cost; and
 - a native libjpeg-turbo path only if its measured gain justifies another native
   dependency and the packaging obligations that follow.
@@ -334,7 +348,9 @@ only spends bandwidth.
    on rotations and transposes. Replace it only if the comparison demonstrates a
    useful reduction in regret.
 4. Add a repetition/run signal as a conservative JPEG rejector for colourful UI.
-5. Benchmark explicit JPEG 4:4:4 for borderline sharp content.
+5. Benchmark explicit JPEG 4:4:4 for `render_subtype = "jpeg"`, where text and UI
+   cannot escape to PNG. Keep classifier-approved photographs on the current JPEG
+   sampling policy.
 6. Leave WebP deprioritized. Revisit it later only after the preceding work, or
    when a materially different encoder or deployment CPU justifies rerunning the
    existing real-screen benchmark; test an encoder-time budget at that point.
