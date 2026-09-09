@@ -112,6 +112,11 @@ documentation.
 - Windows ships only `serve`, `check-config`, and `gen-passwd` in the MSI. Build
   it with `packaging/build-windows-msi.ps1` on `windows-ci-build` through
   `ci/windows/remote.ps1`. Do not add a service or package-owned live config.
+  `packaging/windows/remotex-service.ps1` is an operator template applied by
+  hand, never a package component: keep it out of `windows/remotex.wxs`, and
+  keep `remotex.exe` a console program with no service control dispatcher —
+  NSSM is the service binary and the console Ctrl+C it sends on stop is the
+  signal `serve` already waits on.
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
 

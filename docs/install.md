@@ -135,6 +135,53 @@ For a Mac target, configure `protocol = "vnc"`, `subtype = "ard"`, and the Mac
 account's username and password. The gateway connects directly to macOS Screen
 Sharing; nothing is installed on the target Mac.
 
+## Windows service (template)
+
+No package installs a service, and the `.msi` is no exception: it owns a
+program and nothing else, so an upgrade or a removal can never register,
+reconfigure or delete one. Running the gateway unattended is the operator's
+half, and the repository ships a starting point for it in
+[`packaging/windows/remotex-service.ps1`](../packaging/windows/remotex-service.ps1)
+— a template to copy and adapt, not a file the package puts on the machine.
+
+`remotex.exe` is a console program with no service control dispatcher, so the
+SCM cannot start it directly; it would fail with error 1053. The template uses
+[NSSM](https://nssm.cc) as the service binary instead, supervising
+`remotex serve` as its child. That indirection is what buys the stop path:
+NSSM's first stop method generates a console Ctrl+C, the signal `serve`
+already waits on, so `Stop-Service` is the same orderly exit as Ctrl+C in a
+terminal rather than a killed process.
+
+Install NSSM first — `winget install NSSM.NSSM`, `choco install nssm`,
+`scoop install nssm`, or the win64 `nssm.exe` from the zip at
+<https://nssm.cc/download> — then, from an elevated PowerShell 7, with the
+config from the previous section already in place:
+
+```powershell
+pwsh -File packaging\windows\remotex-service.ps1 install
+pwsh -File packaging\windows\remotex-service.ps1 status
+pwsh -File packaging\windows\remotex-service.ps1 uninstall
+```
+
+It registers a delayed-auto-start service named `remotex` running as
+`NT AUTHORITY\NetworkService` — the gateway holds the target credentials and
+listens on the network, so the default is the lowest-privilege built-in that
+can still open a socket, not `LocalSystem`. Registering it grants that account
+read on `%ProgramData%\remotex\remotex.toml` and write on
+`%ProgramData%\remotex\logs`, where stdout and stderr are captured and
+rotated; nothing else it touches is outside the read-only tree Program Files
+already grants. `-ServiceAccount` and `-ServiceAccountPassword` take a domain
+or local account instead, `-Listen` overrides `[server].listen`, and
+`-ServiceName`, `-InstallRoot`, `-Config` and `-LogDirectory` cover the rest.
+Removing the service leaves the config and the logs alone.
+
+A service reachable from another machine also needs a hole in the firewall,
+which the template deliberately does not open:
+
+```powershell
+New-NetFirewallRule -DisplayName 'remotex' -Direction Inbound -Protocol TCP -LocalPort 52380 -Action Allow
+```
+
 ## Upgrade
 
 Download the new asset and hand it to the same package manager:

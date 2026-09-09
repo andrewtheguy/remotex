@@ -36,6 +36,13 @@ C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.
 
+No package installs a service either. `windows/remotex-service.ps1` is a
+template the operator copies and applies by hand, deliberately outside every
+manifest so that upgrading or removing remotex cannot register, reconfigure or
+delete a service. It supervises the installed `remotex serve` with NSSM, whose
+console Ctrl+C stop reaches the signal `serve` already waits on. See
+[Windows service](../docs/install.md#windows-service-template).
+
 The live config is deliberately outside the manifests:
 `/etc/remotex/remotex.toml` on Linux,
 `/usr/local/etc/remotex/remotex.toml` on macOS and
@@ -51,6 +58,7 @@ That keeps both upgrades and removals away from stored credentials.
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
+| `windows/remotex-service.ps1` | operator template: register the installed gateway as an NSSM-supervised Windows service |
 | `build-container-binary.sh` | build and verify a gateway with all default features disabled |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `install.sh` | install the tarball fallback under a relocatable prefix |
