@@ -17,7 +17,7 @@ use crate::audio::PcmFormat;
 #[cfg(all(feature = "embedded-gateway", unix))]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
-use crate::protocol::HostDisplay;
+use crate::protocol::{HostDisplay, JpegSampling};
 
 /// RDP security negotiation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -344,14 +344,17 @@ impl RenderSubtype {
 pub enum TileCodec {
     /// Lossless PNG — the default path.
     Png,
-    /// JPEG at the given quality (1–100).
-    Jpeg(u8),
+    /// JPEG at the given quality (1–100), with the chroma sampling decided from
+    /// the dial's quality once ([`JpegSampling::for_quality`]) and carried along
+    /// so the adaptive walk cannot change it.
+    Jpeg { quality: u8, sampling: JpegSampling },
     /// Per tile, whichever of the other two [`crate::classify`] says fits:
-    /// photographic content as JPEG at this quality (1–100), everything else
-    /// as PNG. The decision runs on the encode worker, from the tile's own
-    /// pixels, so it costs the read loops nothing.
+    /// photographic content as JPEG at this quality (1–100) and sampling,
+    /// everything else as PNG. The decision runs on the encode worker, from the
+    /// tile's own pixels, so it costs the read loops nothing.
     Classify {
         quality: u8,
+        sampling: JpegSampling,
         /// Outline the tiles the classifier sent as JPEG, in the pixels
         /// themselves, so QA reads the decision off the screen
         /// ([`TargetConfig::render_classify_debug`]). Carried here because the
@@ -451,8 +454,8 @@ impl RenderPlan {
         fn tile(codec: TileCodec) -> String {
             match codec {
                 TileCodec::Png => "lossless png".to_owned(),
-                TileCodec::Jpeg(q) => format!("jpeg q{q}"),
-                TileCodec::Classify { quality, debug } => {
+                TileCodec::Jpeg { quality, .. } => format!("jpeg q{quality}"),
+                TileCodec::Classify { quality, debug, .. } => {
                     let debug = if debug { " (debug outlines)" } else { "" };
                     format!("classified png / jpeg q{quality}{debug}")
                 }
@@ -921,10 +924,14 @@ impl TargetConfig {
             return RenderPlan::Video { quality, adaptive, chroma };
         }
         let base = match (self.render_subtype(), self.render_subtype_quality) {
-            (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
-            (RenderSubtype::Classify, Some(q)) => {
-                TileCodec::Classify { quality: q, debug: self.render_classify_debug }
+            (RenderSubtype::Jpeg, Some(quality)) => {
+                TileCodec::Jpeg { quality, sampling: JpegSampling::for_quality(quality) }
             }
+            (RenderSubtype::Classify, Some(quality)) => TileCodec::Classify {
+                quality,
+                sampling: JpegSampling::for_quality(quality),
+                debug: self.render_classify_debug,
+            },
             _ => TileCodec::Png,
         };
         let motion = match (self.render_motion, self.render_stream_quality) {
@@ -2851,8 +2858,42 @@ mod tests {
         assert_eq!(t.render_subtype_quality, Some(60));
         assert_eq!(
             t.render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None }
+            RenderPlan::Tiles {
+                base: TileCodec::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
+                motion: None,
+                debug: false,
+                adaptive: None,
+            }
         );
+    }
+
+    /// The dial's quality decides the chroma sampling once, for both lossy
+    /// subtypes, at the encoder's own threshold — so the plan carries it and the
+    /// per-encode quality walk has nothing left to decide about colour.
+    #[test]
+    fn a_lossy_dial_at_ninety_pins_full_chroma() {
+        for subtype in ["jpeg", "classify"] {
+            let cfg = ConfigFile::parse(&format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_subtype = "{subtype}"
+                render_subtype_quality = 90
+                render_adaptive = true
+                "#
+            ))
+            .unwrap();
+            let RenderPlan::Tiles { base, .. } = cfg.targets[0].render_plan() else {
+                panic!("a lossy subtype is a tiles plan");
+            };
+            let sampling = match base {
+                TileCodec::Jpeg { sampling, .. } | TileCodec::Classify { sampling, .. } => sampling,
+                TileCodec::Png => panic!("{subtype} resolved to PNG"),
+            };
+            assert_eq!(sampling, JpegSampling::Full, "{subtype} at quality 90");
+        }
     }
 
     /// The subtype is the codec axis, so a lossy one needs no particular
@@ -2872,7 +2913,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None }
+            RenderPlan::Tiles {
+                base: TileCodec::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
+                motion: None,
+                debug: false,
+                adaptive: None,
+            }
         );
     }
 
@@ -2895,7 +2941,11 @@ mod tests {
         assert_eq!(
             t.render_plan(),
             RenderPlan::Tiles {
-                base: TileCodec::Classify { quality: 60, debug: false },
+                base: TileCodec::Classify {
+                    quality: 60,
+                    sampling: JpegSampling::Subsampled,
+                    debug: false,
+                },
                 motion: None,
                 debug: false,
                 adaptive: None
@@ -2938,7 +2988,11 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
-                base: TileCodec::Classify { quality: 60, debug: false },
+                base: TileCodec::Classify {
+                    quality: 60,
+                    sampling: JpegSampling::Subsampled,
+                    debug: false,
+                },
                 motion: Some(MotionEncode { quality: 30, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None
@@ -3115,7 +3169,11 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
-                base: TileCodec::Classify { quality: 60, debug: true },
+                base: TileCodec::Classify {
+                    quality: 60,
+                    sampling: JpegSampling::Subsampled,
+                    debug: true,
+                },
                 motion: None,
                 debug: false,
                 adaptive: None
@@ -3388,7 +3446,7 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(),
             RenderPlan::Tiles {
-                base: TileCodec::Jpeg(60),
+                base: TileCodec::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
                 motion: Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None
@@ -4482,7 +4540,7 @@ mod tests {
         assert_eq!(
             plan,
             RenderPlan::Tiles {
-                base: TileCodec::Jpeg(70),
+                base: TileCodec::Jpeg { quality: 70, sampling: JpegSampling::Subsampled },
                 motion: None,
                 debug: false,
                 adaptive: Some(35)

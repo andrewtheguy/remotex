@@ -659,18 +659,23 @@ impl Shared {
         };
         let quality = match codec {
             TileCodec::Png => return codec,
-            TileCodec::Jpeg(q) | TileCodec::Classify { quality: q, .. } => q,
+            TileCodec::Jpeg { quality, .. } | TileCodec::Classify { quality, .. } => quality,
         };
         let lag = self.feedback.lag(now);
         let cut = lag.saturating_sub(TILE_LAG_FREE).as_millis().min(u128::from(u8::MAX)) as u8;
         // The default floor over a lower dial clamps, same as `Congestion::new`.
         let adapted = quality.saturating_sub(cut).max(floor.min(quality));
+        // The sampling stays: it was decided from the dial, and a walk that
+        // moved it would leave every tile sent under lag with coarser colour,
+        // not just coarser quantization (see [`crate::protocol::JpegSampling`]).
         match codec {
             TileCodec::Png => unreachable!("returned above"),
-            TileCodec::Jpeg(_) => TileCodec::Jpeg(adapted),
+            TileCodec::Jpeg { sampling, .. } => TileCodec::Jpeg { quality: adapted, sampling },
             // Only the lossy arm walks: the tiles the classifier keeps
             // lossless were never spending the bytes the lag is about.
-            TileCodec::Classify { debug, .. } => TileCodec::Classify { quality: adapted, debug },
+            TileCodec::Classify { sampling, debug, .. } => {
+                TileCodec::Classify { quality: adapted, sampling, debug }
+            }
         }
     }
 }
@@ -1295,17 +1300,19 @@ fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile>
     let (x, y, w, h) = (rect.left, rect.top, rect.w(), rect.h());
     match codec {
         TileCodec::Png => Tile::from_rgb(x, y, w, h, rgb),
-        TileCodec::Jpeg(q) => Tile::from_rgb_jpeg(x, y, w, h, rgb, q),
-        TileCodec::Classify { quality, debug } => {
+        TileCodec::Jpeg { quality, sampling } => {
+            Tile::from_rgb_jpeg(x, y, w, h, rgb, quality, sampling)
+        }
+        TileCodec::Classify { quality, sampling, debug } => {
             if !crate::classify::photographic(w, h, rgb) {
                 return Tile::from_rgb(x, y, w, h, rgb);
             }
             if debug {
                 let mut copy = rgb.to_vec();
                 outline(&mut copy, usize::from(w), usize::from(h), MARK_JPEG);
-                Tile::from_rgb_jpeg(x, y, w, h, &copy, quality)
+                Tile::from_rgb_jpeg(x, y, w, h, &copy, quality, sampling)
             } else {
-                Tile::from_rgb_jpeg(x, y, w, h, rgb, quality)
+                Tile::from_rgb_jpeg(x, y, w, h, rgb, quality, sampling)
             }
         }
     }
@@ -1722,10 +1729,15 @@ impl fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{UNSCALED, VideoUnit};
+    use crate::protocol::{JpegSampling, UNSCALED, VideoUnit};
 
     fn plan(base: TileCodec) -> RenderPlan {
         RenderPlan::Tiles { base, motion: None, debug: false, adaptive: None }
+    }
+
+    /// A JPEG dial below 90, sampled as the dial would be.
+    fn jpeg(quality: u8) -> TileCodec {
+        TileCodec::Jpeg { quality, sampling: JpegSampling::Subsampled }
     }
 
     /// A fresh, never-written link measurement: what every sink here runs on, so
@@ -1783,7 +1795,7 @@ mod tests {
     #[tokio::test]
     async fn a_jpeg_quality_makes_tiles_jpeg() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Jpeg(60)), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(jpeg(60)), feedback());
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
         sink.flush().await;
@@ -1803,7 +1815,11 @@ mod tests {
         let sink = TileSink::new(
             "test",
             frame_tx,
-            plan(TileCodec::Classify { quality: 60, debug: false }),
+            plan(TileCodec::Classify {
+                quality: 60,
+                sampling: JpegSampling::Subsampled,
+                debug: false,
+            }),
             feedback(),
         );
 
@@ -1839,7 +1855,11 @@ mod tests {
             "test",
             frame_tx,
             RenderPlan::Tiles {
-                base: TileCodec::Classify { quality: 60, debug: false },
+                base: TileCodec::Classify {
+                    quality: 60,
+                    sampling: JpegSampling::Subsampled,
+                    debug: false,
+                },
                 motion: Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None,
@@ -3021,7 +3041,7 @@ mod tests {
         let feedback = feedback();
         let adaptive = Shared::new(
             RenderPlan::Tiles {
-                base: TileCodec::Jpeg(60),
+                base: jpeg(60),
                 motion: None,
                 debug: false,
                 adaptive: Some(25),
@@ -3037,18 +3057,18 @@ mod tests {
 
         // No lag beyond the free allowance: the dial's own quality.
         assert_eq!(
-            adaptive.adapted(TileCodec::Jpeg(60), sent + TILE_LAG_FREE),
-            TileCodec::Jpeg(60)
+            adaptive.adapted(jpeg(60), sent + TILE_LAG_FREE),
+            jpeg(60)
         );
         // 30 ms past the allowance: one point per millisecond.
         assert_eq!(
-            adaptive.adapted(TileCodec::Jpeg(60), sent + TILE_LAG_FREE + Duration::from_millis(30)),
-            TileCodec::Jpeg(30),
+            adaptive.adapted(jpeg(60), sent + TILE_LAG_FREE + Duration::from_millis(30)),
+            jpeg(30),
         );
         // Far past it: the floor holds.
         assert_eq!(
-            adaptive.adapted(TileCodec::Jpeg(60), sent + Duration::from_secs(2)),
-            TileCodec::Jpeg(25)
+            adaptive.adapted(jpeg(60), sent + Duration::from_secs(2)),
+            jpeg(25)
         );
         // Lossless has no quality to give up.
         assert_eq!(
@@ -3056,14 +3076,29 @@ mod tests {
             TileCodec::Png
         );
 
+        // A dial at or above 90 keeps full colour on the way down: the walk
+        // moves quantization and nothing else, so the colour of a tile sent
+        // under lag matches the colour of its neighbours sent before it.
+        let full = TileCodec::Jpeg { quality: 95, sampling: JpegSampling::Full };
+        assert_eq!(
+            adaptive.adapted(full, sent + TILE_LAG_FREE + Duration::from_millis(30)),
+            TileCodec::Jpeg { quality: 65, sampling: JpegSampling::Full }
+        );
+        let classified =
+            TileCodec::Classify { quality: 95, sampling: JpegSampling::Full, debug: false };
+        assert_eq!(
+            adaptive.adapted(classified, sent + TILE_LAG_FREE + Duration::from_millis(30)),
+            TileCodec::Classify { quality: 65, sampling: JpegSampling::Full, debug: false }
+        );
+
         // The same lag through a non-adaptive plan moves nothing.
         let fixed = Shared::new(
-            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false, adaptive: None },
+            RenderPlan::Tiles { base: jpeg(60), motion: None, debug: false, adaptive: None },
             Arc::clone(&feedback),
         );
         assert_eq!(
-            fixed.adapted(TileCodec::Jpeg(60), sent + Duration::from_secs(2)),
-            TileCodec::Jpeg(60)
+            fixed.adapted(jpeg(60), sent + Duration::from_secs(2)),
+            jpeg(60)
         );
     }
 
@@ -3074,7 +3109,7 @@ mod tests {
     fn a_motion_stream_plan_carries_its_floor_into_both_halves() {
         let shared = Shared::new(
             RenderPlan::Tiles {
-                base: TileCodec::Jpeg(70),
+                base: jpeg(70),
                 motion: Some(MotionEncode { quality: 60, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: Some(25),
