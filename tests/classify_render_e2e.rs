@@ -1,11 +1,11 @@
 //! End-to-end test of `render_subtype = "classify"` against a real device.
 //!
 //! No container stands in here: the classifier's whole subject is what real
-//! desktop pixels look like, so these tests borrow one of the operator's own QA
-//! machines from `tmp/test_uat.toml`, override its render dial to a `classify`
-//! base, and read the session WebSocket a browser would. One of them adds
-//! `motion` on top, the pairing where a settled cell is classified while a moving
-//! one takes the cheaper motion encode.
+//! desktop pixels look like, so this test borrows one of the operator's own QA
+//! machines from `tmp/test_uat.toml`, overrides its render dial to a `classify`
+//! base, and reads the session WebSocket a browser would. One case adds `motion`
+//! on top, the pairing where a settled cell is classified while a moving one
+//! takes the cheaper motion encode.
 //!
 //! **Which machine is the operator's to say, and this file names none.** A
 //! hostname or a target name written here is a fact about somebody's lab that
@@ -24,7 +24,8 @@
 //! regions, so a classify session that produced no PNG at all is a classifier
 //! that has stopped saying no.
 //!
-//! Ignored by default; each needs the named device reachable:
+//! Ignored by default, and one test rather than three: the cases share a device,
+//! so they run in sequence inside it. It needs the named device reachable:
 //!
 //! ```sh
 //! REMOTEX_UAT_TARGET=<target in tmp/test_uat.toml> \
@@ -37,7 +38,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, ClassifyLossy, RenderSubtype, TargetConfig};
+use remotex::config::{AppConfig, ClassifyLossy, RenderSubtype, RenderType, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -76,6 +77,11 @@ fn target_name() -> String {
 /// under the classifier, and with or without the motion discount on top of it.
 fn uat_target(name: &str, lossy: ClassifyLossy, motion: bool) -> TargetConfig {
     let mut target = common::uat_target(name);
+    // Whatever the operator has this target set to. A target already on
+    // `render_type = "video"` resolves to a whole-desktop VP9 plan and never
+    // reads the subtype at all, so the classify dial below would be set and
+    // ignored — no tiles, and a timeout blaming the device.
+    target.render_type = RenderType::Tiles;
     target.render_subtype = Some(RenderSubtype::Classify);
     target.render_subtype_quality = Some(QUALITY);
     target.render_classify_lossy = Some(lossy);
@@ -240,28 +246,29 @@ fn check_tile(tile: &common::BatchTile, lossy: ClassifyLossy, tally: &mut Tally)
     tally.lossy += 1;
 }
 
-/// The classifier against a real desktop, on the encoder it was measured with.
-/// Run it once per device worth covering — an RDP host, a VNC host, a Mac in High
-/// Performance mode — by pointing [`TARGET_ENV`] at each in turn.
+/// The classifier against a real desktop, three sessions deep. Run it once per
+/// device worth covering — an RDP host, a VNC host, a Mac in High Performance
+/// mode — by pointing [`TARGET_ENV`] at each in turn.
+///
+/// **One test rather than three, because the three share a device.** Rust runs
+/// the tests of a binary concurrently, so three of these would open three
+/// sessions to the same desktop at once — which an RDP host or a Mac answers by
+/// evicting or refusing, and the loser fails for a reason that is about the test
+/// harness and nothing about the classifier. Sequential here is not a
+/// simplification of parallel; it is the only shape that matches one device.
+///
+/// The three cases in order:
+///
+/// - the encoder the classifier was measured against;
+/// - the same desktop with the classifier's other encoder underneath it — the
+///   verdicts are the classifier's either way, and what this adds is that the
+///   tiles it sends lossy arrive as WebP a browser can decode;
+/// - the classifier as the base of a motion plan, where a settled cell is
+///   classified while whatever is moving takes the stream instead.
 #[tokio::test]
 #[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
 async fn classify_paints_a_real_desktop() {
     paint_a_whole_desktop(ClassifyLossy::Jpeg, false).await;
-}
-
-/// The same desktop with the classifier's other encoder underneath it: the
-/// verdicts are the classifier's either way, and what this proves is that the
-/// tiles it sends lossy arrive as WebP the browser can decode.
-#[tokio::test]
-#[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
-async fn classify_paints_a_real_desktop_through_its_webp_arm() {
     paint_a_whole_desktop(ClassifyLossy::Webp, false).await;
-}
-
-/// The classifier as the base of a motion plan: a settled cell is classified
-/// while whatever is moving takes the stream instead.
-#[tokio::test]
-#[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
-async fn a_classify_base_paints_a_real_desktop_under_motion() {
     paint_a_whole_desktop(ClassifyLossy::Jpeg, true).await;
 }
