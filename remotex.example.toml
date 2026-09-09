@@ -250,6 +250,36 @@ password = "change-me"
 # ceiling.
 #audio_bitrate_min = 32
 
+# Camera redirection (RDP only): offer the remote a virtual webcam whose frames
+# are this browser's, over MS-RDPECAM. EXPERIMENTAL, for lack of tests — the
+# socket's rules and its messages are checked and the redirection itself is not,
+# because the channel exists only on a Windows host carrying the Remote Desktop
+# Session Host role and no dummy server here has one. It has been verified by
+# hand against such a host and only that way, unlike `audio` above and the rest
+# of the RDP features, which every test run covers.
+#
+# Capability only. The device appears when a client turns the camera on from the
+# floating menu — explicitly, per session, never remembered — and is unplugged
+# when that client closes it, the session changes hands, or the engine ends. The
+# browser encodes H.264 and the gateway passes it through untranscoded, so there
+# is no codec key beside this one. RFB has no equivalent channel, so a "vnc"
+# target refuses the key rather than ignoring it. A Windows Server without the
+# RDSH role never creates the enumeration channel, so an enabled camera against
+# one is simply never asked for a frame.
+#camera = false
+
+# Microphone redirection (RDP only): the camera's twin over MS-RDPEAI, feeding
+# this browser's captured audio to the remote as its own microphone.
+# EXPERIMENTAL for the same reason — hand-verified against a Windows host, with
+# no automated coverage of the redirection.
+#
+# Capability only, enabled per session from the floating menu and never
+# remembered. The host picks the sample rate and channel count when an
+# application on it starts capturing; the browser captures raw PCM to match and
+# the gateway passes it through, so there is no codec key beside this one. A
+# "vnc" target refuses it, as it refuses `camera`.
+#microphone = false
+
 # A VNC target needs host and, usually, one of the two passwords; domain is
 # ignored, an explicit security is refused, and width/height only ever answer a
 # default-size request (see above). `vnc_password` is the server's own password

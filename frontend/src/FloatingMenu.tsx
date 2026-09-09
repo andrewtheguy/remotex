@@ -440,6 +440,11 @@ function AudioSection({
 // requires. Targets without a camera omit the row — the same rule as Audio's.
 // Unlike Audio there is no remembered default anywhere: this button is the one
 // and only way the camera turns on, per session, every session.
+//
+// The row says "experimental" because the redirection behind it has no automated
+// coverage — no test carries a frame to a host — where Audio's does. The label
+// is where an operator meets that, since it is the one place the feature is
+// turned on.
 function CameraSection({
   available,
   enabled,
@@ -461,7 +466,7 @@ function CameraSection({
   }
   return (
     <div className="toolbar-section">
-      <span className="toolbar-label">Camera</span>
+      <span className="toolbar-label">Camera (experimental)</span>
       <button
         type="button"
         className="toolbar-btn"
@@ -485,7 +490,8 @@ function CameraSection({
 
 // The microphone toggle: the camera's twin, and the same rules — a target
 // without `microphone = true` omits the row, the enable is the `getUserMedia`
-// gesture, and nothing is remembered between sessions.
+// gesture, nothing is remembered between sessions, and the label carries the
+// same "experimental", for the same lack of coverage.
 function MicSection({
   available,
   enabled,
@@ -506,7 +512,7 @@ function MicSection({
   }
   return (
     <div className="toolbar-section">
-      <span className="toolbar-label">Microphone</span>
+      <span className="toolbar-label">Microphone (experimental)</span>
       <button
         type="button"
         className="toolbar-btn"

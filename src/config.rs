@@ -670,6 +670,15 @@ pub struct TargetConfig {
     /// like [`Self::audio`] and for the same shape of reason: RFB has no
     /// equivalent channel at all.
     ///
+    /// **Experimental**, for lack of tests. The socket's session rules and its
+    /// message encodings are unit tested; the redirection itself is not, and
+    /// there is nothing here to test it against — the MS-RDPECAM enumeration
+    /// channel exists only on a Windows host carrying the Remote Desktop
+    /// Session Host role, which the container dummies are not. The path has
+    /// been verified by hand against one such host and only that way, where
+    /// [`Self::audio`] and the rest of the RDP feature set are exercised on
+    /// every run.
+    ///
     /// Capability only. The device itself appears when a client enables the
     /// camera — explicitly, per session, never remembered — by opening
     /// `/ws/camera`; a target with this key and no such client offers the
@@ -680,6 +689,12 @@ pub struct TargetConfig {
     /// Offer the remote a redirected microphone (MS-RDPEAI). Rejected for VNC,
     /// like [`Self::audio`] and [`Self::camera`] and for the same shape of
     /// reason: RFB has no equivalent channel at all.
+    ///
+    /// **Experimental**, for lack of tests, and the camera's twin in that too:
+    /// the socket's session rules are unit tested and `micOpen`/`micClose` are
+    /// pinned byte for byte, while nothing exercises the redirection itself —
+    /// no dummy RDP server here answers the audin channel. Hand-verified
+    /// against a Windows host, unlike [`Self::audio`], which every run covers.
     ///
     /// Capability only, and the camera's twin: the microphone flows when a
     /// client enables it — explicitly, per session, never remembered — by

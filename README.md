@@ -211,6 +211,19 @@ descriptor has been measured across its arbitrary-size boundary and a burst of
 viewport reports, but remains reverse engineered. Its system audio is
 **experimental** and stays behind the non-default `apple-hp-audio` build feature.
 
+Two RDP redirections that send this browser's own media the other way are
+**experimental**, for lack of tests: `camera = true` offers the remote a virtual
+webcam over MS-RDPECAM, and `microphone = true` offers it a microphone over
+MS-RDPEAI. Both are off by default, both are enabled per session from the
+floating menu and never remembered, and both are refused on VNC. What is missing
+is coverage of the redirection itself — their socket rules and control messages
+are tested like everything else, and no test carries a frame or a sample to a
+host, because those channels are answered only by a real Windows host and the
+camera's only by one carrying the Remote Desktop Session Host role. They have
+been verified by hand there and only there, where remote audio (`audio = true`)
+and the rest of the RDP feature set are exercised on every test run. Expect to
+re-check them by hand after a change.
+
 ## Container
 
 ```sh

@@ -13,6 +13,7 @@ browser SPA over loopback or the network
    │  /ws: JSON control/input, binary image batches
    │  /ws/audio: the audio format, then binary audio frames
    │  /ws/camera: the camera format and H.264 samples up, start/stop down
+   │  /ws/mic: PCM up, the host's open/close decisions down
    ▼
 axum server ── single session slot ── protocol engine
                                          ├─ RDP through FreeRDP
@@ -27,7 +28,9 @@ Apple Remote Desktop authentication, or with the
 `ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
-passed through to the host over MS-RDPECAM.
+passed through to the host over MS-RDPECAM, and its microphone on `/ws/mic` as
+raw PCM over MS-RDPEAI. Both redirections are experimental — see
+[Camera frames](#camera-frames).
 
 ## Constraints
 
@@ -868,6 +871,20 @@ client, so detailed negotiation status remains in the gateway log.
 
 ### Camera frames
 
+**Experimental, for lack of tests.** The camera and the microphone below are the
+two paths this gateway ships without automated coverage of the redirection
+itself. Their socket rules and message encodings are unit tested like everything
+else here — the claim and engine binding, the eviction, the byte-for-byte
+control frames — and no test carries a frame or a sample to a host. The reason
+is the far side. MS-RDPECAM's enumeration channel is created only by
+a Windows host carrying the Remote Desktop Session Host role, and MS-RDPEAI's
+audin is answered only by a real Windows host too; the dummy RDP server the
+container tests drive is neither, so there is nothing here to redirect to. Both
+have been verified by hand against a Windows host and only that way — where
+remote audio and the rest of the RDP feature set are covered on every run.
+Treat what follows as measured behavior on those hosts, and expect a change here
+to need a hand check.
+
 The browser's camera goes the other way, on a third socket, and only to an RDP
 target that opted in with `camera = true` (refused on VNC at parse time: the
 channel is MS-RDPECAM and RFB has no equivalent). **Opening
@@ -934,6 +951,32 @@ a short queue while credit is owed, and on overflow the queue is dropped whole
 and the browser is asked for a keyframe, because H.264 cannot resume mid-GOP.
 `src/rdp_camera.rs` adapts that endpoint to the gateway's `CameraBridge`
 (`src/camera.rs`), which is all the session layer sees.
+
+### Microphone frames
+
+The microphone is the camera's twin, one direction over and one socket along:
+`microphone = true` on an RDP target (refused on VNC at parse time, MS-RDPEAI
+being an RDP channel), and **opening `/ws/mic?session=<token>` is the enable** —
+per session, never remembered, closed by every engine end and claim change, with
+the same **4002** when the running target carries no microphone. It is
+experimental for the reason given above.
+
+What travels differs from the camera in two ways. Upstream the frames are raw
+S16LE PCM rather than an encoded bitstream: the browser's `AudioContext`
+captures and resamples, the gateway owns no codec, and the host reads the bytes
+as its own microphone — the `audio_codec = "pcm"` bargain in the other
+direction. Downstream the host names the format, because MS-RDPEAI lets it pick:
+`micOpen` carries the sample rate and channel count an application on the host
+opened the stream with, and `micClose` ends it. There is no device layer to plug
+or unplug, so the microphone exists for as long as the channel is registered.
+
+The host opens audin once, during the RDP handshake, seconds before any mic
+socket connects, so `MicBridge` (`src/mic.rs`) latches the last open under the
+same lock as the socket's sender and replays it to a socket that subscribes
+while the host is open; a close clears the latch. Without that, a browser that
+attached after the open would wait for ever for an event that had already
+fired. `src/rdp_mic.rs` adapts the FreeRDP wrapper's audin events to that
+bridge, and the session layer sees only the bridge.
 
 ### Display geometry
 
