@@ -102,10 +102,11 @@ records the real wlshare measurement that cut `MIN_PHOTO_PIXELS` from 4,096 to
 
 Those results directly support the current size floor and show that the classifier
 runs usefully on real desktops. They do not compare proposed two-dimensional or
-run-based signals, JPEG chroma choices, WebP or AVIF. They also do not preserve one
-fixed set of real pixels against which every alternative can be replayed. The
-measurement work proposed below extends the existing evidence for those new
-questions; it does not restart or discount the completed validation.
+run-based signals or JPEG chroma choices. They also do not preserve one fixed set
+of real pixels against which every alternative can be replayed. WebP has separate
+real-screen measurements recorded below. The measurement work proposed here
+extends the existing evidence for new classifier questions; it does not restart or
+discount the completed validation.
 
 ## Findings from other implementations
 
@@ -172,10 +173,11 @@ rectangle counts and bytes. The published baseline shows materially better WebP
 compression accompanied by much slower encoding in that implementation:
 [KasmVNC performance testing](https://github.com/kasmtech/KasmVNC/wiki/Performance-Testing).
 
-This is the right control model if WebP is tested in RemoteX: admit it only while a
-measured time budget permits and retain JPEG/PNG as the still-tile answer when it
-does not. KasmVNC's video codecs, scaling modes and fit-to-window policies are not
-applicable.
+This independently agrees with RemoteX's own reason for deprioritizing WebP. If
+WebP is revisited later, KasmVNC's encoder-time budget is a useful improvement to
+test: admit WebP only while that budget permits and retain JPEG/PNG when it does
+not. It is not a reason to move WebP ahead of the current classifier work.
+KasmVNC's video codecs, scaling modes and fit-to-window policies are not applicable.
 
 ### TurboVNC: chroma subsampling is part of text quality
 
@@ -235,41 +237,66 @@ wire and decodes natively in the browser. Benchmark these changes independently:
 - a native libjpeg-turbo path only if its measured gain justifies another native
   dependency and the packaging obligations that follow.
 
-### WebP
+### WebP: measured and deprioritized, for later revisit
 
-Google reports smaller WebP output than comparable PNG and JPEG on its general web
-corpora, but those numbers do not represent RemoteX's small damage rectangles or
-latency constraints: [WebP compression study](https://developers.google.com/speed/webp).
-Lossy WebP is also 4:2:0, which matters around coloured glyphs and sharp edges:
+RemoteX has already implemented and measured WebP rather than relying on general
+web-image claims. Commit `2e62a0bbc2c243d5b7ffdf6c6b69c631f93c11f3`
+sampled engine-shaped tiles from real 1,600×1,000 screen pixels on an arm64 NEON
+Mac and compared lossless WebP with PNG `Compression::Fast`:
+
+| WebP setting | Bytes relative to PNG | 16×16 encode time | 320×64 encode time |
+| --- | ---: | ---: | ---: |
+| method 0, quality 20 | 0.85× | 29.9× | 6.8× |
+| method 2, quality 50 | 0.66× | 43.7× | 46.0× |
+| method 4, quality 75 | 0.66× | 45.6× | 156.6× |
+
+The affordable setting saved only 15% of the bytes and was still much slower than
+PNG. The larger byte gains required encode costs unsuitable for the tile hot path.
+The same work found lossy WebP quality 80 at 0.50–0.70× the bytes of
+`jpeg-encoder` quality 80 on ordinary tiles and 0.92× on uniform noise. When the
+WebP tile path subsequently shipped, two real screenshots put lossless output at
+0.64–0.81× PNG for a working window and 0.83–0.88× for photographic wallpaper;
+lossy WebP took 2.5× JPEG's encode time on the deployment host. Commits
+`18cc5c58e156d80b09c41f7e9406986de61907db` and
+`e4ad86e57ddf9959dce2777b072ae6cd914b520d` preserve that history.
+It was later revisited as an optional fixed-quality subtype in
+`f38e6992aa301d3b9cf2f8d1b0127acc6b9bd868`, then removed again in
+`05aa6d94ed17f6deabdd0ec15d745e79e97399c6` while JPEG remained the sole lossy
+still codec.
+
+WebP was therefore deprioritized because its encoder was slower than both PNG on
+the lossless side and JPEG on the lossy side, despite saving bytes. It is not
+permanently rejected. Revisit it later if the encoder implementation, target
+hardware or measured workload changes enough to alter that trade. A revisit should
+start by reproducing the real-screen benchmark, then test method 0 or 1 with a
+strict per-frame or rolling time budget and immediate PNG/JPEG fallback.
+
+Google's general corpus reports smaller WebP output than comparable PNG and JPEG,
+but those figures do not override RemoteX's hot-path measurements:
+[WebP compression study](https://developers.google.com/speed/webp). Lossy WebP is
+also 4:2:0, which matters around coloured glyphs and sharp edges:
 [WebP FAQ](https://developers.google.com/speed/webp/faq).
 
-WebP is the strongest new still-tile candidate, subject to measurement:
-
-- lossless WebP versus PNG for colourful UI;
-- lossy WebP versus JPEG for clear photographs;
-- encoder method 0 or 1 first;
-- a per-frame or rolling encode-time budget; and
-- immediate JPEG/PNG fallback when the budget is exhausted.
-
-Adding it would require a new tile format discriminator, a frontend MIME mapping
-and an independent wire-format test. It would not change the VP9 video path.
+Reintroducing it later would require a tile format discriminator, frontend MIME
+mapping and an independent wire-format test. It would remain a still-image codec
+and would not change the VP9 video path.
 
 ### AVIF and QOI
 
-AVIF should remain in an offline benchmark matrix until its fastest screen/photo
-settings demonstrate an end-to-end benefit over WebP and JPEG. QOI is unattractive
-for this design because the browser has no native `createImageBitmap()` QOI decoder
-and its larger WAN payload trades away the central benefit sought here.
+AVIF should remain behind the deferred WebP revisit unless materially different
+evidence gives it a credible hot-path advantage. QOI is unattractive for this
+design because the browser has no native `createImageBitmap()` QOI decoder and its
+larger WAN payload trades away the central benefit sought here.
 
 ## Extending the existing measurement
 
 The controlled wlshare sessions and real-device end-to-end runs answer the current
-size-floor and operational questions. Proposed classifier signals and still codecs
-need a replayable comparison because they must see exactly the same input pixels.
-An opt-in capture can record representative damage tiles or frames under `tmp/`
-and replay them through every candidate. Desktop captures may contain passwords,
-personal messages or other private material, so capture must never be enabled by
-default or committed.
+size-floor and operational questions. Proposed classifier signals need a replayable
+comparison because they must see exactly the same input pixels. An opt-in capture
+can record representative damage tiles or frames under `tmp/` and replay them
+through every candidate. Desktop captures may contain passwords, personal messages
+or other private material, so capture must never be enabled by default or
+committed. The same corpus can be reused when the deferred WebP work is revisited.
 
 The corpus should contain:
 
@@ -308,18 +335,18 @@ only spends bandwidth.
    useful reduction in regret.
 4. Add a repetition/run signal as a conservative JPEG rejector for colourful UI.
 5. Benchmark explicit JPEG 4:4:4 for borderline sharp content.
-6. Test low-method WebP behind a strict encoder-time budget. Promote it only when
-   the RemoteX corpus shows an end-to-end win.
-7. Test AVIF offline only if WebP demonstrates that another still format is worth
-   the protocol and maintenance cost.
+6. Leave WebP deprioritized. Revisit it later only after the preceding work, or
+   when a materially different encoder or deployment CPU justifies rerunning the
+   existing real-screen benchmark; test an encoder-time budget at that point.
+7. Keep AVIF behind that revisit unless new measurements justify moving it ahead.
 
 The likely policy shape is intentionally conservative:
 
 | Evidence | Still-tile choice |
 | --- | --- |
-| Clear UI or text | PNG, or measured lossless WebP candidate |
+| Clear UI or text | PNG |
 | Ambiguous | PNG |
-| Clear photograph | JPEG, or time-budgeted lossy WebP candidate |
+| Clear photograph | JPEG |
 | Motion region | VP9 video stream, followed by the existing base-tile cleanup |
 
 ## Explicit exclusions
