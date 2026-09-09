@@ -212,7 +212,7 @@ mod tests {
     #[test]
     #[ignore]
     fn weigh_the_size_floor() {
-        use crate::protocol::Tile;
+        use crate::protocol::{JpegSampling, Tile};
 
         // Smooth and detailed: the photograph the lossy arm exists for.
         let photo = |w: usize, h: usize| -> Vec<u8> {
@@ -255,8 +255,14 @@ mod tests {
                 let rgb = make(usize::from(w), usize::from(h));
                 let admitted = photographic(w, h, &rgb);
                 let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap().data.len();
-                let j70 = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 70).unwrap().data.len();
-                let j90 = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 90).unwrap().data.len();
+                let j70 = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 70, JpegSampling::for_quality(70))
+                    .unwrap()
+                    .data
+                    .len();
+                let j90 = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 90, JpegSampling::for_quality(90))
+                    .unwrap()
+                    .data
+                    .len();
                 println!(
                     "  {:>9} | {:>6} | {:>5} | {:>7} | {:>9} ({:>5.0}%) | {:>9} ({:>5.0}%){}",
                     name,
