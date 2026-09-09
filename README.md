@@ -335,7 +335,7 @@ For a remote Podman connection:
 
 ```sh
 CONTAINER_CONNECTION=workstation-wsl \
-REMOTEX_TEST_CONTAINER_HOST=10.22.34.32 \
+REMOTEX_TEST_CONTAINER_HOST=<engine-host> \
 cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 ```
 

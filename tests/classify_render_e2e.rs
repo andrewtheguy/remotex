@@ -1,27 +1,34 @@
-//! End-to-end test of `render_subtype = "classify"` against real devices.
+//! End-to-end test of `render_subtype = "classify"` against a real device.
 //!
 //! No container stands in here: the classifier's whole subject is what real
-//! desktop pixels look like, so these tests borrow the operator's own QA
-//! machines from `tmp/test_uat.toml` — the Windows box over RDP, the TigerVNC
-//! workstation, and the Mac in High Performance mode — override each target's
-//! render dial to a `classify` base, and read the session WebSocket a
-//! browser would. The Linux workstation is also driven with that base under
-//! `motion`, the pairing where a settled cell is classified while a moving one
-//! takes the cheaper motion encode.
+//! desktop pixels look like, so these tests borrow one of the operator's own QA
+//! machines from `tmp/test_uat.toml`, override its render dial to a `classify`
+//! base, and read the session WebSocket a browser would. One of them adds
+//! `motion` on top, the pairing where a settled cell is classified while a moving
+//! one takes the cheaper motion encode.
 //!
-//! What is asserted is the system's decisions, not the devices' content: every
-//! tile names PNG or JPEG in its format byte, every payload begins with the
-//! magic of the format it names, and a full repaint of the announced desktop
-//! arrives tile by tile. Whether any given tile went lossy depends on what the
-//! remote screen happens to show, so the PNG/JPEG split is *reported* rather
-//! than asserted — with one exception: a real desktop always has flat regions,
-//! so a classify session that produced no PNG at all is a classifier that has
-//! stopped saying no.
+//! **Which machine is the operator's to say, and this file names none.** A
+//! hostname or a target name written here is a fact about somebody's lab that
+//! ages out of date on its own, silently, until a run fails for a reason that has
+//! nothing to do with the classifier. So [`TARGET_ENV`] names the target inside
+//! that config, and the run says which device it drove. Point it at the Windows
+//! box, at a Linux VNC host, at the Mac in High Performance mode — the assertions
+//! below are about this gateway's decisions and hold for any of them.
 //!
-//! Ignored by default; each needs its device reachable:
+//! What is asserted is the system's decisions, not the device's content: every
+//! tile names PNG or the session's lossy still in its format byte, every payload
+//! begins with the magic of the format it names, and a full repaint of the
+//! announced desktop arrives tile by tile. Whether any given tile went lossy
+//! depends on what the remote screen happens to show, so the split is *reported*
+//! rather than asserted — with one exception: a real desktop always has flat
+//! regions, so a classify session that produced no PNG at all is a classifier
+//! that has stopped saying no.
+//!
+//! Ignored by default; each needs the named device reachable:
 //!
 //! ```sh
-//! cargo test --test classify_render_e2e -- --ignored --nocapture
+//! REMOTEX_UAT_TARGET=<target in tmp/test_uat.toml> \
+//!   cargo test --test classify_render_e2e -- --ignored --nocapture
 //! ```
 
 mod common;
@@ -49,9 +56,24 @@ const QUALITY: u8 = 60;
 /// [`QUALITY`], and lower for the same reason an operator's would be.
 const MOTION_QUALITY: u8 = 15;
 
-/// Put the operator's `name` target on a classify-base tiles dial, with the
-/// named lossy still under the classifier, and with or without the motion
-/// discount on top of it.
+/// Which target in `tmp/test_uat.toml` these tests drive. An environment
+/// variable rather than a name in this file: see the module docs — the devices
+/// are the operator's, and the ones written into a test go stale where nobody is
+/// looking.
+const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
+
+/// The target the operator pointed this run at.
+fn target_name() -> String {
+    std::env::var(TARGET_ENV).unwrap_or_else(|_| {
+        panic!(
+            "set {TARGET_ENV} to the name of a target in tmp/test_uat.toml — these tests \
+             drive a real desktop and this file deliberately names none"
+        )
+    })
+}
+
+/// Put that target on a classify-base tiles dial, with the named lossy still
+/// under the classifier, and with or without the motion discount on top of it.
 fn uat_target(name: &str, lossy: ClassifyLossy, motion: bool) -> TargetConfig {
     let mut target = common::uat_target(name);
     target.render_subtype = Some(RenderSubtype::Classify);
@@ -95,11 +117,12 @@ struct Tally {
     lossy: u64,
 }
 
-/// Connect to `name` on the classify dial and read tiles until the announced
-/// desktop is fully painted. Every tile's format byte and payload magic are
-/// checked on the way past; the lossless/lossy split comes back for reporting.
-async fn paint_a_whole_desktop(name: &str, lossy: ClassifyLossy, motion: bool) -> Tally {
+/// Connect to the operator's target on the classify dial and read tiles until the
+/// announced desktop is fully painted. Every tile's format byte and payload magic
+/// are checked on the way past; the lossless/lossy split comes back for reporting.
+async fn paint_a_whole_desktop(lossy: ClassifyLossy, motion: bool) -> Tally {
     common::init_logging();
+    let name = &target_name();
     let addr = spawn_app(uat_target(name, lossy, motion)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
@@ -217,35 +240,28 @@ fn check_tile(tile: &common::BatchTile, lossy: ClassifyLossy, tally: &mut Tally)
     tally.lossy += 1;
 }
 
+/// The classifier against a real desktop, on the encoder it was measured with.
+/// Run it once per device worth covering — an RDP host, a VNC host, a Mac in High
+/// Performance mode — by pointing [`TARGET_ENV`] at each in turn.
 #[tokio::test]
-#[ignore = "needs the real Windows RDP host from tmp/test_uat.toml"]
-async fn classify_paints_the_windows_desktop_over_rdp() {
-    paint_a_whole_desktop("windows", ClassifyLossy::Jpeg, false).await;
-}
-
-#[tokio::test]
-#[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
-async fn classify_paints_the_linux_desktop_over_vnc() {
-    paint_a_whole_desktop("workstationlinux", ClassifyLossy::Jpeg, false).await;
+#[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
+async fn classify_paints_a_real_desktop() {
+    paint_a_whole_desktop(ClassifyLossy::Jpeg, false).await;
 }
 
 /// The same desktop with the classifier's other encoder underneath it: the
 /// verdicts are the classifier's either way, and what this proves is that the
 /// tiles it sends lossy arrive as WebP the browser can decode.
 #[tokio::test]
-#[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
-async fn classify_paints_the_linux_desktop_over_vnc_as_webp() {
-    paint_a_whole_desktop("workstationlinux", ClassifyLossy::Webp, false).await;
+#[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
+async fn classify_paints_a_real_desktop_through_its_webp_arm() {
+    paint_a_whole_desktop(ClassifyLossy::Webp, false).await;
 }
 
+/// The classifier as the base of a motion plan: a settled cell is classified
+/// while whatever is moving takes the stream instead.
 #[tokio::test]
-#[ignore = "needs the real TigerVNC workstation from tmp/test_uat.toml"]
-async fn a_classify_base_paints_the_linux_desktop_under_motion() {
-    paint_a_whole_desktop("workstationlinux", ClassifyLossy::Jpeg, true).await;
-}
-
-#[tokio::test]
-#[ignore = "needs the real Mac in High Performance mode from tmp/test_uat.toml"]
-async fn classify_paints_the_mac_desktop_in_high_performance_mode() {
-    paint_a_whole_desktop("sandbox2highperf", ClassifyLossy::Jpeg, false).await;
+#[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
+async fn a_classify_base_paints_a_real_desktop_under_motion() {
+    paint_a_whole_desktop(ClassifyLossy::Jpeg, true).await;
 }

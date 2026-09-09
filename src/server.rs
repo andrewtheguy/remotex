@@ -1027,7 +1027,7 @@ mod tests {
         for host in [
             "remotex.example.com",
             "remotex.example.com:52675",
-            "10.22.34.32:52675",
+            "192.0.2.10:52675",
             "[fdb8:d92a::1]:52675",
             // Not loopback however much it reads like it: the suffix is what
             // RFC 6761 reserves, and this one only *contains* the word.

@@ -64,10 +64,10 @@ has shown that the current direction changes a useful verdict.
 The classifier tests cover synthetic content and the measured size floor. The
 ignored device tests in
 [`tests/classify_render_e2e.rs`](../tests/classify_render_e2e.rs) exercise the real
-classifier path over RDP, TigerVNC, Apple High Performance, a classify base with
-motion enabled, and a WebP classify base over TigerVNC. They report the
-lossless/lossy split and verify complete, correctly
-labelled and decodable wire output. Their screens are mutable, so they deliberately
+classifier path against whichever QA machine `REMOTEX_UAT_TARGET` names — the
+suite names no device itself, so it does not go stale as a lab changes — under a
+JPEG lossy arm, a WebP lossy arm and a motion base. They report the lossless/lossy
+split and verify complete, correctly labelled and decodable wire output. Their screens are mutable, so they deliberately
 do not assert a fixed split or measure visual regret against the codec not selected.
 
 Production encode totals currently aggregate the still formats. They cannot answer
