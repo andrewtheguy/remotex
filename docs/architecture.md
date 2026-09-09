@@ -838,9 +838,10 @@ does not reset the table.
 
 ### Audio frames
 
-Remote audio is opt-in per target — `audio = true` on an RDP target, or on an
-Apple High Performance target in a gateway built with the `apple-hp-audio`
-feature (see the VNC engine below) — and it has a socket of its own. **Opening
+Remote audio is opt-in per target — `audio = true` on an RDP target, on a plain
+`vnc` target, or on an Apple High Performance target in a gateway built with the
+`apple-hp-audio` feature (see the VNC engine below) — and it has a socket of its
+own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.
 
@@ -955,6 +956,17 @@ built for it (48 kHz is already the encoder's rate); under `pcm` the packets are
 encoder from `TargetConfig::audio_source_format` — the one format each engine's
 wave buffers can be in — when the audio socket opens before the remote's channel
 is up, which is what keeps a 48 kHz stream from being encoded as 44.1.
+
+An audio-enabled **generic VNC** engine has no channel to negotiate either. It
+lists the QEMU Audio pseudo-encoding, and a server that speaks it announces so
+with an empty rectangle, at which point the gateway names the format it wants —
+48 kHz, 16-bit stereo, little-endian — and turns the stream on; the samples then
+arrive as messages on the RFB connection itself and reach the bridge uncopied,
+since that format is already what the queue takes. A server that announces
+nothing gives a desktop and no sound, which is the whole of the failure mode:
+asking costs such a session nothing. wlshare is the server this was built
+against — see [`wlshare-audio.md`](wlshare-audio.md) — and the extension is
+`rfbproto`'s, not a private one.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -1329,6 +1341,15 @@ costs thirteen bytes on both links instead of an encode on the second. Where it
 does not — a motion or streaming plan — the pixels are read back out of the shadow
 as before. Either way a source the shadow does not know costs one non-incremental
 repaint rather than an invented picture.
+
+Generic `vnc` asked for `audio` also advertises the **QEMU Audio**
+pseudo-encoding (`-259`), the one audio extension `rfbproto` registers.
+`src/vnc_qemu_audio.rs` is that wire: the server announces support with an empty
+rectangle of the encoding, the client answers with a set-format and an enable,
+and message 255 submessage 1 then carries begin, a run of sample buffers, and
+end. Discovery works the way the density extension's does, and a server that
+never announces leaves the session silent rather than failing it. See
+[`wlshare-audio.md`](wlshare-audio.md).
 
 Generic `vnc` also advertises **ContinuousUpdates** and **Fence**, which go
 together. A server that supports the first answers the `SetEncodings` carrying it

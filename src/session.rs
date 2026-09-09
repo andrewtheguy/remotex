@@ -1500,8 +1500,9 @@ impl SessionManager {
 /// engine — fine here, since multi session is permanently out of scope
 /// (single user, one active session at a time; see CLAUDE.md).
 /// `audio` is `Some` only when the target opted in, which the config file has
-/// already confined to the two engines with a channel to carry it: RDP's MS-RDPEA,
-/// and Apple High Performance's media stream in a build with its decoder.
+/// already confined to the three paths that can carry it: RDP's MS-RDPEA, the
+/// QEMU Audio extension a generic VNC target asks a server for, and Apple High
+/// Performance's media stream in a build with its decoder.
 // Nine positional handoffs — the engine's whole input surface — rather than a
 // parameter struct that would exist only to be destructured at the one call site.
 #[allow(clippy::too_many_arguments)]
