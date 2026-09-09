@@ -98,9 +98,10 @@ pairings are validated at config-load time in `ConfigFile::parse_with`:
   `"webp"`).
 
 Which of the two lossy encoders a target wants is a judgement about that link and
-that gateway, not a fact the code can settle, so both are offered and neither is a
-default. WebP's measured place in this tree — smaller output, a slower encode — is
-in
+that gateway, not a fact the code can settle, so both are offered. A target that
+names neither gets `png`, the base default, and one that classifies without
+naming an encoder gets `jpeg` — the encoder the classifier was measured against.
+WebP's measured place in this tree — smaller output, a slower encode — is in
 [Still-image classification in remote desktop implementations](still-image-classification-research.md#webp-measured-and-offered-as-the-operators-choice).
 
 `video` is the one transport with nothing on the subtype axis, and refuses it: it
