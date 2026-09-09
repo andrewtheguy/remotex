@@ -121,6 +121,8 @@ changing fast is not worth classifying). `render_classify_debug = true` outlines
 as JPEG in yellow — drawn on the copy handed to the encoder, never on the pixels
 the shadow records, so the mark lives exactly as long as the lossy tile it
 describes, and a colour of its own so it stays readable beside the motion marks.
+The classifier's cross-project source review and measurement candidates live in
+[Still-image classification in remote desktop implementations](still-image-classification-research.md).
 
 Three more keys sit across the whole dial rather than on either axis.
 `render_chroma` (`"420"`, the default, or `"444"`) is how much colour a *stream*
