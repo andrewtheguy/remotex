@@ -29,7 +29,13 @@ framebuffer's bottom edge falls under it — 64×56 on a 1080-tall desktop.
 
 What actually drifts is the floor's second job. Keeping small sharp furniture out
 of the lossy arm is a claim about points, and a 2× widget sliver four times this
-size now reaches the content tests. The palette gate refuses flat chrome there,
-so the exposure is narrow: colourful, gradient-heavy fragments that are neither
-photographs nor text. Scaling the floor by density would fix the second job and
-break the first, and there is no measurement saying the second one is failing.
+size now reaches the content tests. The palette gate refuses flat chrome there, so
+the exposure is narrow: colourful, gradient-heavy fragments that are neither
+photographs nor text. Scaling the floor by density is the tempting fix and is now
+measured and refused (`classify::tests::weigh_the_size_floor`): it would stand at
+16384 pixels on a 2× desktop, where a cell reaches the encoder as 128×64 = 8192 —
+every ordinary 2× tile back to PNG, 18696 bytes against 1591 for a photographic
+one. The same table puts JPEG's own break-even nearer 256 pixels than 4096, under
+which the palette gate cannot pass anything anyway, so the floor is not the
+overhead guard it was named for; it is the furniture guard, and it stays in
+pixels. What is left unmeasured is only whether that furniture job is failing.
