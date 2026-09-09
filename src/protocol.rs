@@ -1013,8 +1013,11 @@ fn encode_jpeg(
     Ok(out)
 }
 
-/// The largest edge libwebp will encode, from its own `WEBP_MAX_DIMENSION`.
-const WEBP_MAX_DIMENSION: u16 = 16383;
+/// The largest edge libwebp will encode, from its own `WEBP_MAX_DIMENSION`. The
+/// narrowest ceiling of the three still encoders on the tile path — PNG has none
+/// and baseline JPEG's is 65535 — and so the one [`crate::tiles::BAND_COLS`] cuts
+/// bands to, which is what keeps the check below off the damage path.
+pub(crate) const WEBP_MAX_DIMENSION: u16 = 16383;
 
 /// WebP-encode packed RGB888 at a fixed `quality` (1–100), the other lossy tile
 /// path ([`Tile::from_rgb_webp`]). Like JPEG it carries its own decoding
