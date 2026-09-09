@@ -95,8 +95,7 @@ measurements are what should settle them:
   if it turns out to be common.
 
 None of these is worth changing on argument. They want the same treatment `video`
-got: a measurement first. The per-cell costs the 64×64 grid multiplied are
-tracked separately in [`tile-grid-followups.md`](tile-grid-followups.md).
+got: a measurement first.
 
 ### Raising quality above the dial
 

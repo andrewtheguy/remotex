@@ -26,31 +26,34 @@
 //!    tile whose soft transitions outnumber hard ones [`SOFT_PER_HARD`]-fold
 //!    reads as photographic.
 
-/// Pixels below which a tile is never offered to JPEG.
+/// Pixels below which a tile is never offered to JPEG: the break-even for JPEG's
+/// own header and table bytes, weighed rather than assumed.
 ///
-/// Not the break-even for JPEG's own header and table bytes, which is far lower.
-/// [`tests::weigh_the_size_floor`] weighs it: a tile this classifier admits costs
-/// an eighth of its PNG at 64×64 and still half of it at 24×24, because content
-/// that clears the palette and transition gates is content PNG carries badly.
-/// Those ~640 bytes stop being repaid nearer 256 pixels — under which the palette
-/// gate could not pass anything anyway, wanting more colours than the tile has
-/// pixels.
+/// [`tests::weigh_the_size_floor`] carries both encodings across the size ladder. A
+/// tile this classifier admits costs a third of its PNG at 32×32 and half at 24×24,
+/// while at 16×16 the ~640 bytes of tables win and JPEG loses outright; real tiles
+/// agree, a 9×10 caret being 261 bytes as PNG against 683 as JPEG. Below 257 pixels
+/// the palette gate could not admit anything anyway, wanting more colours than the
+/// tile has pixels, so a floor under that would be inert.
 ///
-/// What the number actually guards is the other thing small tiles tend to be:
-/// cursors, carets and widget slivers, the sharp content the lossy arm mistreats.
-/// That is furniture, and furniture is a claim about points — yet the floor is in
-/// pixels and has to stay there. Scaling it with density would put it at 16384
-/// pixels on a 2× desktop, where a cell reaches the encoder as 128×64 = 8192, a
-/// band staying 64 rows at either density: every ordinary 2× tile refused, and a
-/// photographic one of those costs 18696 bytes as PNG against 1591 as JPEG. So a
-/// 2× sliver of furniture does get past this gate; what refuses it is the palette
-/// test, one measurement later, which is where flat chrome was always going to
-/// lose.
+/// Pixels rather than points, because table bytes are bytes and do not care how much
+/// screen a pixel covers. A floor in pixels therefore lapses as density rises, and
+/// the value here is what that lapse taught. It was 4096 while it doubled as a guard
+/// against sending small sharp furniture lossy — but measured on a wlshare desktop
+/// driven beside the gateway, a 60×24-point gradient chip repainting on its own was
+/// refused 117 times out of 117 at 1×, for 378 KB of PNG, and admitted 118 out of
+/// 118 at 2×, for 145 KB of JPEG. The guard was doing nothing at the density where
+/// furniture is largest and charging for it at the density where it is smallest. The
+/// sharp content it was meant to catch is refused by the transition test, which is
+/// the measurement that actually looks for edges. That chip had to be built to raise
+/// the question at all: across three 2× sessions of scrolled photographs, terminal
+/// glyphs and chrome, streams and cleanups live, no admitted tile fell under a
+/// point-scaled floor, real damage boxes being wide.
 ///
-/// The number is a fifth of a 320×64 cell, the grid it was chosen against. That
-/// it now equals a 64×64 one exactly is a coincidence of two unrelated choices,
-/// and nothing here should be made to follow `CELL_POINTS`.
-const MIN_PHOTO_PIXELS: usize = 4096;
+/// Nothing here follows `CELL_POINTS`. That the old value equalled a 64×64 cell
+/// exactly was a coincidence of two unrelated choices; this one sits where the bytes
+/// turn over.
+const MIN_PHOTO_PIXELS: usize = 1024;
 
 /// Distinct colours at or below which a tile reads as flat UI outright.
 /// One byte's worth: the palette a Tight encoder would have indexed.
@@ -181,10 +184,12 @@ mod tests {
         assert!(!photographic(W, H, &rgb));
     }
 
-    /// Below the size floor nothing is photographic, however smooth.
+    /// Below the size floor nothing is photographic, however smooth — and below it
+    /// the palette gate could not pass a tile either, wanting more colours than
+    /// this one has pixels.
     #[test]
     fn a_small_tile_is_never_photographic() {
-        let (w, h) = (32u16, 32u16);
+        let (w, h) = (16u16, 16u16);
         let mut rgb = Vec::new();
         for y in 0..usize::from(h) {
             for x in 0..usize::from(w) {
