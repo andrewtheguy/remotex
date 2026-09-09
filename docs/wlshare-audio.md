@@ -89,7 +89,7 @@ passthrough encoder's PCM, and so needs no resampler on either path.
 | 2 | U16 | operation: 0 enable, 1 disable, 2 set format |
 | 4 | U8 | sample format (set format only): 0 U8, 1 S8, 2 U16, **3 S16**, 4 U32, 5 S32 |
 | 5 | U8 | channels, 1 or 2 |
-| 6 | U32 | frequency |
+| 6 | U32 | frequency, up to 192 000 in wlshare |
 
 Four bytes for an enable or a disable, ten for a set-format. The gateway sends
 set-format then enable, once, when the announcement arrives.
@@ -139,11 +139,14 @@ enables audio, on a thread of its own, and stops it on a disable or when the
 client goes. The stream is a `Stream/Input/Audio` node with
 `stream.capture.sink = "true"`, which is what makes PipeWire connect it to the
 **default sink's monitor** rather than to a microphone, and `node.latency` asks
-for 20 ms buffers. The process callback runs on PipeWire's real-time thread and
-does nothing but copy whole frames into a sixteen-deep queue, dropping the
-oldest when a client cannot keep up — a dropped buffer is a hole, and a stalled
-capture callback is worse. A set-format on a running stream restarts the capture
-in the new format.
+for 20 ms buffers. The process callback runs on that capture's own loop thread
+rather than on the graph's real-time one — `RT_PROCESS` is deliberately not set,
+since the callback allocates, takes a mutex and wakes a task, none of which is
+real-time safe: on the data thread it could stall the whole audio graph and give
+every application on the host an xrun. It copies whole frames into a sixteen-deep
+queue, dropping the oldest when a client cannot keep up — a dropped buffer is a
+hole, and a stalled capture callback is worse. A set-format on a running stream
+restarts the capture in the new format.
 
 PipeWire honours its own quantum before settling on the requested one, so the
 first buffers of a session are often smaller than 20 ms — 512 frames where 960
