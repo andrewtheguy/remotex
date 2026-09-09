@@ -33,14 +33,3 @@ size now reaches the content tests. The palette gate refuses flat chrome there,
 so the exposure is narrow: colourful, gradient-heavy fragments that are neither
 photographs nor text. Scaling the floor by density would fix the second job and
 break the first, and there is no measurement saying the second one is failing.
-
-### `merge` is cubic in components
-
-`merge` (`src/regions.rs`) is O(n²) per pass and removes one component per pass.
-Components are bounded by moving cells over `MIN_STREAM_CELLS`, which at 1080p went
-from about 20 to about 102 — roughly 130× the work per retune. It runs twice a
-second on integers and is not worth changing at `RETUNE = 500 ms` and
-`MAX_STREAMS = 4`: a synthetic worst case of disjoint five-cell bars measures
-0.2 ms for the 45 components a 1080p grid can hold and 4.6 ms for the 170 a 4K
-grid can, in a release build. It is written down so it is not a surprise if either
-moves.
