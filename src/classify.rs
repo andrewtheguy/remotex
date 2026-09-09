@@ -1,6 +1,11 @@
 //! The picture classifier behind `render_subtype = "classify"`: per tile, is
-//! this photographic content that JPEG compresses well, or flat UI and text
-//! that PNG keeps small *and* sharp?
+//! this photographic content that a lossy still compresses well, or flat UI and
+//! text that PNG keeps small *and* sharp?
+//!
+//! Which lossy still that is — JPEG or WebP, `render_classify_lossy` — is not a
+//! question for this module. It answers what the pixels are; the encoder the
+//! answer is carried out by is the operator's, and every threshold below was
+//! measured against JPEG, which of the two is the harder to break even on.
 //!
 //! The question is answered from the pixels alone, per tile, on the encode
 //! worker — nothing upstream carries state for it, so two tiles of one frame
@@ -26,10 +31,14 @@
 //!    tile whose soft transitions outnumber hard ones [`SOFT_PER_HARD`]-fold
 //!    reads as photographic.
 
-/// Pixels below which a tile is never offered to JPEG: the break-even for JPEG's
-/// own header and table bytes, weighed rather than assumed.
+/// Pixels below which a tile is never offered to the lossy encode: the break-even
+/// for JPEG's own header and table bytes, weighed rather than assumed. One floor
+/// serves both lossy stills because JPEG is the one with a break-even to find —
+/// measured on the same ladder, WebP's container costs so little that it is a tenth
+/// of the PNG at every size on it, 16×16 included, so a floor set where JPEG turns
+/// over is simply well clear of where WebP does.
 ///
-/// [`tests::weigh_the_size_floor`] carries both encodings across the size ladder. A
+/// [`tests::weigh_the_size_floor`] carries all three encodings across the size ladder. A
 /// tile this classifier admits costs a third of its PNG at 32×32 and half at 24×24,
 /// while at 16×16 the ~640 bytes of tables win and JPEG loses outright; real tiles
 /// agree, a 9×10 caret being 261 bytes as PNG against 683 as JPEG. Below 257 pixels
@@ -70,8 +79,8 @@ const SOFT_DELTA: u8 = 24;
 /// sharp change rarely.
 const SOFT_PER_HARD: u64 = 4;
 
-/// Whether a `w`×`h` tile of packed RGB888 reads as photographic — the tile
-/// JPEG should carry. `false` is the safe answer and every malformed or
+/// Whether a `w`×`h` tile of packed RGB888 reads as photographic — the tile the
+/// lossy still should carry. `false` is the safe answer and every malformed or
 /// borderline input gets it: the caller then encodes PNG, which is never
 /// wrong, only bigger.
 pub fn photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
@@ -206,8 +215,10 @@ mod tests {
     }
 
     /// What the floor is protecting, weighed: for content the classifier admits,
-    /// how a JPEG compares with the PNG it replaces at each size the grid hands
-    /// the encoder. Run with
+    /// how each lossy still compares with the PNG it replaces at each size the grid
+    /// hands the encoder. Both are here because the floor is one number for both,
+    /// and it is JPEG's tables that set it: WebP breaks even far below the smallest
+    /// size on this ladder, so the shared floor never costs it anything. Run with
     ///   cargo test --release --lib classify::tests::weigh_the_size_floor -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -247,8 +258,14 @@ mod tests {
         };
 
         println!(
-            "\n  {:>9} | {:>6} | {:>5} | {:>7} | {:>19} | {:>19}",
-            "content", "size", "px", "png B", "jpeg 70 B (of png)", "jpeg 90 B (of png)"
+            "\n  {:>9} | {:>6} | {:>5} | {:>7} | {:>19} | {:>19} | {:>19}",
+            "content",
+            "size",
+            "px",
+            "png B",
+            "jpeg 70 B (of png)",
+            "jpeg 90 B (of png)",
+            "webp 70 B (of png)"
         );
         for (name, make) in [("photo", &photo as &dyn Fn(usize, usize) -> Vec<u8>), ("gradient", &gradient)] {
             for (w, h) in [(16u16, 16u16), (24, 24), (32, 32), (48, 48), (64, 56), (64, 64), (128, 64), (128, 128), (320, 64)] {
@@ -263,8 +280,10 @@ mod tests {
                     .unwrap()
                     .data
                     .len();
+                let w70 = Tile::from_rgb_webp(0, 0, w, h, &rgb, 70).unwrap().data.len();
                 println!(
-                    "  {:>9} | {:>6} | {:>5} | {:>7} | {:>9} ({:>5.0}%) | {:>9} ({:>5.0}%){}",
+                    "  {:>9} | {:>6} | {:>5} | {:>7} | {:>9} ({:>5.0}%) | {:>9} ({:>5.0}%) | \
+                     {:>9} ({:>5.0}%){}",
                     name,
                     format!("{w}x{h}"),
                     usize::from(w) * usize::from(h),
@@ -273,13 +292,15 @@ mod tests {
                     100.0 * j70 as f64 / png as f64,
                     j90,
                     100.0 * j90 as f64 / png as f64,
+                    w70,
+                    100.0 * w70 as f64 / png as f64,
                     if admitted { "" } else { "  [refused]" },
                 );
             }
         }
         println!(
             "\n  [refused] is the classifier's own verdict, floor included: a row without it \
-             is a tile that would go out as JPEG today.\n"
+             is a tile that would go out at the target's lossy still today.\n"
         );
     }
 }

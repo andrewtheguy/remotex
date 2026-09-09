@@ -1475,6 +1475,7 @@ mod tests {
             render_motion: false,
             render_motion_debug: false,
             render_chroma: None,
+            render_classify_lossy: None,
             render_classify_debug: false,
             render_grid_debug: false,
             render_adaptive: false,

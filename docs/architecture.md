@@ -22,7 +22,7 @@ axum server ── single session slot ── protocol engine
 
 RDP and VNC frames are decoded in the gateway and sent as independent image tiles
 or as VP9 streams, according to the target's render plan. Tiles are lossless
-PNG by default, with JPEG available at fixed quality. A Mac is reached
+PNG by default, with JPEG or WebP available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the
 `ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
@@ -84,12 +84,24 @@ pairings are validated at config-load time in `ConfigFile::parse_with`:
   to the PNG-only gateway that preceded the dial.
 - `video` — the whole desktop as one video stream at `render_stream_quality`.
 
-`render_subtype`, the base codec — any of the three under `tiles`:
+`render_subtype`, the base codec — any of the four under `tiles`:
 
-- `png` — lossless, no quality key. The default.
+- `png` — lossless, no quality key. The default, and the only lossless answer
+  there is: the choice this axis offers is on the lossy side.
 - `jpeg` — every base tile JPEG at `render_subtype_quality`.
-- `classify` — per tile, what its own pixels are: photographic content JPEG at
-  `render_subtype_quality`, flat UI and text lossless PNG.
+- `webp` — every base tile WebP at `render_subtype_quality`. The same fixed trade
+  in the other lossy still: fewer bytes for the same dial, and more encoder time to
+  produce them.
+- `classify` — per tile, what its own pixels are: photographic content lossy at
+  `render_subtype_quality`, flat UI and text lossless PNG. Which lossy still it
+  spends that quality on is `render_classify_lossy` (`"jpeg"`, the default, or
+  `"webp"`).
+
+Which of the two lossy encoders a target wants is a judgement about that link and
+that gateway, not a fact the code can settle, so both are offered and neither is a
+default. WebP's measured place in this tree — smaller output, a slower encode — is
+in
+[Still-image classification in remote desktop implementations](still-image-classification-research.md#webp-measured-and-offered-as-the-operators-choice).
 
 `video` is the one transport with nothing on the subtype axis, and refuses it: it
 sends no tiles at all — one fixed region, the whole desktop, for the whole session
@@ -106,19 +118,21 @@ streams the whole desktop already and has no settled cells left to discount.
 **Nothing on this dial names a video codec, because video is VP9 only** — see
 [the codec](#the-codec).
 
-No classifier runs under the `jpeg` subtype: it sends *every* tile as
-JPEG, so flat UI and text soften along with photographic content. That is the
+No classifier runs under the `jpeg` and `webp` subtypes: each sends *every* tile
+lossy, so flat UI and text soften along with photographic content. That is the
 honest trade of a single fixed knob. `classify` is that trade removed for a little
 CPU: a picture classifier (`src/classify.rs`) reads each tile on the encode worker
 — a palette gate, then the shape of neighbour-to-neighbour deltas — and only what
-reads as photographic takes the JPEG; PNG is the verdict for everything flat,
+reads as photographic takes the lossy encode; PNG is the verdict for everything flat,
 sharp, small or ambiguous, because a photo sent lossless only costs bytes while
 text sent lossy costs legibility until that region next changes. The decision is
 per tile and stateless, so the same window answers differently as content scrolls
-through it. Under `render_motion` it composes: a settled cell is classified, a
-moving one takes the motion encode (which defaults to `jpeg` there — a cell
-changing fast is not worth classifying). `render_classify_debug = true` outlines the tiles sent
-as JPEG in yellow — drawn on the copy handed to the encoder, never on the pixels
+through it. `render_classify_lossy` moves nothing about that decision — the same
+pixels get the same verdict — only which encoder carries the photographic verdict
+out. Under `render_motion` it composes: a settled cell is classified, a
+moving one takes the motion encode (a cell changing fast is not worth classifying).
+`render_classify_debug = true` outlines the tiles sent
+lossy in yellow — drawn on the copy handed to the encoder, never on the pixels
 the shadow records, so the mark lives exactly as long as the lossy tile it
 describes, and a colour of its own so it stays readable beside the motion marks.
 The classifier's cross-project source review and measurement candidates live in
@@ -154,8 +168,8 @@ repaint is never sent again. Baked into tiles the grid would shear off with the
 first scroll and never reach the still parts at all.
 
 The still dial costs no wire change. A tile record's first byte is already its format
-(`Tile::FORMAT_PNG` / `FORMAT_JPEG`) and the client decodes both
-through `createImageBitmap` from a MIME type. What streams costs one: a
+(`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and the client decodes each of
+them through `createImageBitmap` from a MIME type. What streams costs one: a
 `VIDEO` record, described under the client protocol below.
 
 The engines never see the config enums. The axes and the qualities collapse to one
@@ -169,16 +183,26 @@ and the compiler is what stops a consumer handling only the first. The plan's `m
 path off: a target that does not ask for it does not pay for it.
 
 ```text
-render_type / render_subtype / render_subtype_quality / render_stream_quality / render_motion*
+render_type / render_subtype / render_subtype_quality / render_classify_lossy /
+render_stream_quality / render_motion*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
-  → Tile::from_rgb / from_rgb_jpeg
+  → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
 ```
+
+The two lossy encoders collapse to one `LossyStill` inside `TileCodec`, so which
+tiles reach a lossy encode and which encoder that is stay separate questions: the
+classifier answers the first, `render_classify_lossy` the second, and the adaptive
+walk moves the quality inside a `LossyStill` without knowing which encoder it
+holds.
 
 Because `TileSink` is shared, RDP and VNC get every codec from one implementation,
 and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
 `encode_jpeg` wraps `jpeg-encoder`, built with the target's SIMD, so the encode on
-the session hot path costs no C toolchain and no runtime dependency.
+the session hot path costs no C toolchain and no runtime dependency. `encode_webp`
+wraps `libwebp`, which its sys crate compiles with `cc` — no CMake, no system
+library, and libwebp picks its own SIMD kernels at run time, which keeps the
+baseline CPU floor packaging/README.md requires.
 
 #### `render_motion`: a discount on what is too busy to notice
 
@@ -536,7 +560,7 @@ paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
 flight while every queue stayed shallow. The walk's floor moves from 1 to
 `render_adaptive_min`, and the same key puts a *per-encode* quality on the lossy
 tile paths: Guacamole's curve — one quality point per millisecond of lag past
-20 ms, clamped at the floor — applied at `Shared::adapted` wherever a JPEG
+20 ms, clamped at the floor — applied at `Shared::adapted` wherever a lossy
 tile is about to be encoded, cleanups included. PNG passes through
 untouched; which cells deserve losslessness was the operator's call, not the
 link's. Without the key, nothing changes: pressure-only walk for streams, fixed
@@ -691,7 +715,7 @@ VIDEO    op 0x03: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
 COPY     op 0x04: u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
 ```
 
-Tile formats are PNG and JPEG. One frame carries multiple ready updates so a
+Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
 repaint does not require one WebSocket event per tile. Receivers reject unknown
 operations, truncated records, and unsupported formats, and reject a nonzero frame
 flags byte. A `VIDEO` record's own flags byte is `0x01` for a keyframe and nothing

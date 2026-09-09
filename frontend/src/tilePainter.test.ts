@@ -17,6 +17,8 @@ const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
 const OP_COPY = 0x04;
 const FORMAT_PNG = 1;
+const FORMAT_JPEG = 2;
+const FORMAT_WEBP = 3;
 
 type Record =
   | {
@@ -138,6 +140,8 @@ let blitted: {
   dh: number;
 }[] = [];
 let decoded: FakeBitmap[] = [];
+/** The MIME type each tile payload was handed to the decoder as. */
+let decodedAs: string[] = [];
 let resets = 0;
 let videoErrors: (string | null)[] = [];
 /** Streams whose chain was cut. The stub never goes quiet, so these are failures. */
@@ -253,6 +257,7 @@ beforeEach(() => {
   cropped = [];
   blitted = [];
   decoded = [];
+  decodedAs = [];
   resets = 0;
   videoErrors = [];
   videoKeyframeAsks = [];
@@ -277,6 +282,7 @@ beforeEach(() => {
   releaseDecodes = () => {};
   globals.createImageBitmap = async (blob: Blob) => {
     const tag = new Uint8Array(await blob.arrayBuffer())[0];
+    decodedAs.push(blob.type);
     if (stalled.has(tag)) {
       await new Promise<void>((resolve) => {
         const previous = releaseDecodes;
@@ -339,6 +345,53 @@ test("tiles are drawn in wire order at their own coordinates", async () => {
     { tag: 2, x: 30, y: 40 },
     { tag: 3, x: 10, y: 20 },
   ]);
+});
+
+test("each tile format reaches the decoder as its own MIME type", async () => {
+  // The format byte is the only thing that says what a payload is, and the Blob's
+  // type is the only thing `createImageBitmap` reads. A tile handed over as the
+  // wrong type decodes as nothing, so the mapping is the contract.
+  await painter().draw(
+    batchFrame([
+      {
+        op: "tile",
+        slot: NO_SLOT,
+        x: 0,
+        y: 0,
+        format: FORMAT_PNG,
+        payload: [1],
+      },
+      {
+        op: "tile",
+        slot: NO_SLOT,
+        x: 0,
+        y: 0,
+        format: FORMAT_JPEG,
+        payload: [2],
+      },
+      {
+        op: "tile",
+        slot: NO_SLOT,
+        x: 0,
+        y: 0,
+        format: FORMAT_WEBP,
+        payload: [3],
+      },
+    ]),
+  );
+  assert.deepEqual(decodedAs, ["image/png", "image/jpeg", "image/webp"]);
+});
+
+test("a tile in a format this client has no decoder name for is dropped", async () => {
+  // A stale gateway's byte, or a corrupt frame: unknown bytes never reach a
+  // decoder, and the batch they arrived in is refused whole.
+  await painter().draw(
+    batchFrame([
+      { op: "tile", slot: NO_SLOT, x: 0, y: 0, format: 9, payload: [1] },
+    ]),
+  );
+  assert.deepEqual(decodedAs, [], "an unknown format was handed to a decoder");
+  assert.deepEqual(drawn, []);
 });
 
 test("a copy blits the canvas onto itself, source rectangle to destination", async () => {
