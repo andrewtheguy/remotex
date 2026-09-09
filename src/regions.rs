@@ -37,7 +37,8 @@
 //! and every cell of it — the margin the region has left behind included — stays
 //! covered and owed a cleanup until the stream ends.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -321,68 +322,101 @@ fn components(cells: &[(u16, u16)]) -> Vec<Component> {
 
 /// The second half of [`coalesce`]: at most `max` pairwise disjoint boxes from the
 /// components, merging and dropping under [`MERGE_WASTE`] as described there.
-fn merge(mut components: Vec<Component>, max: usize) -> Vec<CellBox> {
+///
+/// Pair decisions live in heaps rather than being rediscovered after every
+/// removal. A generation makes an entry stale when one of its components is
+/// merged; only its new pairs are then evaluated. The original index is kept as a
+/// stable id, so equal-cost pairs and equal-size drops resolve in the same order as
+/// the component list. That bounds the work to O(n² log n) and the stored
+/// candidates to O(n²).
+fn merge(components: Vec<Component>, max: usize) -> Vec<CellBox> {
     if max == 0 {
         return Vec::new();
     }
-    loop {
+
+    // (left id, right id, left generation, right generation). `Reverse` makes the
+    // lexicographically first overlap the min of this max-heap.
+    let mut overlaps = OverlapQueue::new();
+    // Cost comes first, then stable ids, matching the old row-major pair scan's
+    // first-wins tie break.
+    let mut merges = MergeQueue::new();
+    let mut components: Vec<Option<Component>> = components.into_iter().map(Some).collect();
+    let mut generations = vec![0; components.len()];
+    let mut active = components.len();
+
+    for i in 0..components.len() {
+        for j in i + 1..components.len() {
+            queue_pair(i, j, &components, &generations, &mut overlaps, &mut merges);
+        }
+    }
+
+    while active != 0 {
         // Overlaps first, because they are forced rather than chosen: the delivery
         // rule leaves no option of keeping both boxes as they are.
-        let overlapping = (0..components.len())
-            .flat_map(|i| (i + 1..components.len()).map(move |j| (i, j)))
-            .find(|&(i, j)| components[i].bbox.overlaps(&components[j].bbox));
+        let overlapping = loop {
+            let Some(Reverse((i, j, i_generation, j_generation))) = overlaps.pop() else {
+                break None;
+            };
+            if pair_is_current(&components, &generations, i, j, i_generation, j_generation) {
+                break Some((i, j));
+            }
+        };
         if let Some((i, j)) = overlapping {
-            let merged = components[i].bbox.union(&components[j].bbox);
-            let moving = components[i].moving + components[j].moving;
+            let left = components[i].expect("a current pair has two components");
+            let right = components[j].expect("a current pair has two components");
+            debug_assert!(left.bbox.overlaps(&right.bbox));
+            let merged = left.bbox.union(&right.bbox);
+            let moving = left.moving + right.moving;
             // A nested pair's union is the larger box itself. Refusing that would
             // drop the inner component to the still codecs while the larger stream
             // carried its cells anyway — the delivery rule broken from the other
             // side — so it is always taken.
-            let nested = merged == components[i].bbox || merged == components[j].bbox;
+            let nested = merged == left.bbox || merged == right.bbox;
             if nested || merged.area() <= MERGE_WASTE * moving {
-                components.remove(j);
-                components[i] = Component { bbox: merged, moving };
+                components[j] = None;
+                components[i] = Some(Component { bbox: merged, moving });
+                generations[i] += 1;
+                active -= 1;
+                queue_component(i, &components, &generations, &mut overlaps, &mut merges);
             } else {
                 // The union would swallow still cells outside both boxes, so the
                 // smaller component loses its stream instead: its cells inside the
                 // survivor's box are carried by the survivor, and the rest are crisp.
-                let loser = if (components[j].moving, components[j].bbox.area())
-                    < (components[i].moving, components[i].bbox.area())
+                let loser = if (right.moving, right.bbox.area())
+                    < (left.moving, left.bbox.area())
                 {
                     j
                 } else {
                     i
                 };
-                components.remove(loser);
+                components[loser] = None;
+                active -= 1;
             }
             continue;
         }
-        if components.len() <= max {
+        if active <= max {
             break;
         }
-        let mut best: Option<(usize, usize, u32)> = None;
-        for i in 0..components.len() {
-            for j in i + 1..components.len() {
-                let merged = components[i].bbox.union(&components[j].bbox);
-                let moving = components[i].moving + components[j].moving;
-                if merged.area() > MERGE_WASTE * moving {
-                    continue;
-                }
-                // No two boxes overlap by the time this runs, so the union is at
-                // least the sum of the parts and the subtraction cannot wrap.
-                let cost = merged.area() - components[i].bbox.area() - components[j].bbox.area();
-                if best.is_none_or(|(_, _, at)| cost < at) {
-                    best = Some((i, j, cost));
-                }
+
+        let best = loop {
+            let Some(Reverse((_, i, j, i_generation, j_generation))) = merges.pop() else {
+                break None;
+            };
+            if pair_is_current(&components, &generations, i, j, i_generation, j_generation) {
+                break Some((i, j));
             }
-        }
+        };
         match best {
-            Some((i, j, _)) => {
-                let taken = components.remove(j);
-                components[i] = Component {
-                    bbox: components[i].bbox.union(&taken.bbox),
-                    moving: components[i].moving + taken.moving,
-                };
+            Some((i, j)) => {
+                let left = components[i].expect("a current pair has two components");
+                let right = components[j].take().expect("a current pair has two components");
+                components[i] = Some(Component {
+                    bbox: left.bbox.union(&right.bbox),
+                    moving: left.moving + right.moving,
+                });
+                generations[i] += 1;
+                active -= 1;
+                queue_component(i, &components, &generations, &mut overlaps, &mut merges);
             }
             // Nothing may be merged without swallowing a screenful of still pixels,
             // so the smallest region loses its stream rather than the biggest one
@@ -391,14 +425,77 @@ fn merge(mut components: Vec<Component>, max: usize) -> Vec<CellBox> {
                 let smallest = components
                     .iter()
                     .enumerate()
+                    .filter_map(|(i, c)| c.map(|c| (i, c)))
                     .min_by_key(|(_, c)| (c.moving, c.bbox.area()))
                     .map(|(i, _)| i)
                     .expect("more components than max, so at least one");
-                components.remove(smallest);
+                components[smallest] = None;
+                active -= 1;
             }
         }
     }
-    components.into_iter().map(|c| c.bbox).collect()
+    components.into_iter().flatten().map(|c| c.bbox).collect()
+}
+
+type OverlapQueue = BinaryHeap<Reverse<(usize, usize, u32, u32)>>;
+type MergeQueue = BinaryHeap<Reverse<(u32, usize, usize, u32, u32)>>;
+
+/// Add every pair changed by replacing component `at`.
+fn queue_component(
+    at: usize,
+    components: &[Option<Component>],
+    generations: &[u32],
+    overlaps: &mut OverlapQueue,
+    merges: &mut MergeQueue,
+) {
+    for other in 0..components.len() {
+        if other == at || components[other].is_none() {
+            continue;
+        }
+        queue_pair(at.min(other), at.max(other), components, generations, overlaps, merges);
+    }
+}
+
+/// Evaluate one pair once, until a merge changes one of its endpoints.
+fn queue_pair(
+    i: usize,
+    j: usize,
+    components: &[Option<Component>],
+    generations: &[u32],
+    overlaps: &mut OverlapQueue,
+    merges: &mut MergeQueue,
+) {
+    let left = components[i].expect("only live components are queued");
+    let right = components[j].expect("only live components are queued");
+    let i_generation = generations[i];
+    let j_generation = generations[j];
+    if left.bbox.overlaps(&right.bbox) {
+        overlaps.push(Reverse((i, j, i_generation, j_generation)));
+        return;
+    }
+
+    let merged = left.bbox.union(&right.bbox);
+    let moving = left.moving + right.moving;
+    if merged.area() <= MERGE_WASTE * moving {
+        // The boxes do not overlap, so the union is at least the sum of the parts
+        // and the subtraction cannot wrap.
+        let cost = merged.area() - left.bbox.area() - right.bbox.area();
+        merges.push(Reverse((cost, i, j, i_generation, j_generation)));
+    }
+}
+
+fn pair_is_current(
+    components: &[Option<Component>],
+    generations: &[u32],
+    i: usize,
+    j: usize,
+    i_generation: u32,
+    j_generation: u32,
+) -> bool {
+    components[i].is_some()
+        && components[j].is_some()
+        && generations[i] == i_generation
+        && generations[j] == j_generation
 }
 
 /// The lowest stream id none of `taken` is using, or `None` when the wire has none
@@ -1512,6 +1609,17 @@ mod tests {
         assert_eq!(regions.len(), 2, "{regions:?}");
         assert!(regions.contains(&boxed(0, 0, 4, 3)), "the neighbours did not merge: {regions:?}");
         assert!(regions.contains(&boxed(20, 0, 21, 3)), "the far one was dragged in: {regions:?}");
+    }
+
+    /// The pair queues must not turn a cost tie into a policy change: component
+    /// order has always picked the first pair, so the top two bars merge rather
+    /// than the bottom two.
+    #[test]
+    fn equal_cost_merges_keep_component_order() {
+        let mut cells = block(0, 0, 4, 0);
+        cells.extend(block(0, 2, 4, 2));
+        cells.extend(block(0, 4, 4, 4));
+        assert_eq!(coalesce(&cells, 2), vec![boxed(0, 0, 4, 2), boxed(0, 4, 4, 4)]);
     }
 
     /// And when no merge is cheap enough, the smallest region loses its stream rather
