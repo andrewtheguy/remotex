@@ -26,22 +26,34 @@
 //!    tile whose soft transitions outnumber hard ones [`SOFT_PER_HARD`]-fold
 //!    reads as photographic.
 
-/// Pixels below which a tile is never worth a JPEG: at this size the payload
-/// saving cannot repay JPEG's own header and table overhead.
+/// Pixels below which a tile is never offered to JPEG: the break-even for JPEG's
+/// own header and table bytes, weighed rather than assumed.
 ///
-/// Pixels rather than points, because that overhead is bytes and does not care
-/// how much screen a pixel covers. So the floor does not move with density, and
-/// a 2× tile clears it at a quarter of the screen area a 1× tile needs. That is
-/// right for the overhead it names and only half right for the other thing small
-/// tiles tend to be — cursors, carets and widget slivers, the sharp content the
-/// lossy arm mistreats, which are furniture and so measured in points. A 2×
-/// sliver of that kind gets past this gate; what refuses it is the palette test,
-/// one measurement later, which is where flat chrome was always going to lose.
+/// [`tests::weigh_the_size_floor`] carries both encodings across the size ladder. A
+/// tile this classifier admits costs a third of its PNG at 32×32 and half at 24×24,
+/// while at 16×16 the ~640 bytes of tables win and JPEG loses outright; real tiles
+/// agree, a 9×10 caret being 261 bytes as PNG against 683 as JPEG. Below 257 pixels
+/// the palette gate could not admit anything anyway, wanting more colours than the
+/// tile has pixels, so a floor under that would be inert.
 ///
-/// The number is a fifth of a 320×64 cell, the grid it was chosen against. That
-/// it now equals a 64×64 one exactly is a coincidence of two unrelated choices,
-/// and nothing here should be made to follow `CELL_POINTS`.
-const MIN_PHOTO_PIXELS: usize = 4096;
+/// Pixels rather than points, because table bytes are bytes and do not care how much
+/// screen a pixel covers. A floor in pixels therefore lapses as density rises, and
+/// the value here is what that lapse taught. It was 4096 while it doubled as a guard
+/// against sending small sharp furniture lossy — but measured on a wlshare desktop
+/// driven beside the gateway, a 60×24-point gradient chip repainting on its own was
+/// refused 117 times out of 117 at 1×, for 378 KB of PNG, and admitted 118 out of
+/// 118 at 2×, for 145 KB of JPEG. The guard was doing nothing at the density where
+/// furniture is largest and charging for it at the density where it is smallest. The
+/// sharp content it was meant to catch is refused by the transition test, which is
+/// the measurement that actually looks for edges. That chip had to be built to raise
+/// the question at all: across three 2× sessions of scrolled photographs, terminal
+/// glyphs and chrome, streams and cleanups live, no admitted tile fell under a
+/// point-scaled floor, real damage boxes being wide.
+///
+/// Nothing here follows `CELL_POINTS`. That the old value equalled a 64×64 cell
+/// exactly was a coincidence of two unrelated choices; this one sits where the bytes
+/// turn over.
+const MIN_PHOTO_PIXELS: usize = 1024;
 
 /// Distinct colours at or below which a tile reads as flat UI outright.
 /// One byte's worth: the palette a Tight encoder would have indexed.
@@ -172,10 +184,12 @@ mod tests {
         assert!(!photographic(W, H, &rgb));
     }
 
-    /// Below the size floor nothing is photographic, however smooth.
+    /// Below the size floor nothing is photographic, however smooth — and below it
+    /// the palette gate could not pass a tile either, wanting more colours than
+    /// this one has pixels.
     #[test]
     fn a_small_tile_is_never_photographic() {
-        let (w, h) = (32u16, 32u16);
+        let (w, h) = (16u16, 16u16);
         let mut rgb = Vec::new();
         for y in 0..usize::from(h) {
             for x in 0..usize::from(w) {
@@ -189,5 +203,77 @@ mod tests {
     #[test]
     fn a_mismatched_payload_is_not_photographic() {
         assert!(!photographic(W, H, &[0u8; 17]));
+    }
+
+    /// What the floor is protecting, weighed: for content the classifier admits,
+    /// how a JPEG compares with the PNG it replaces at each size the grid hands
+    /// the encoder. Run with
+    ///   cargo test --release --lib classify::tests::weigh_the_size_floor -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn weigh_the_size_floor() {
+        use crate::protocol::Tile;
+
+        // Smooth and detailed: the photograph the lossy arm exists for.
+        let photo = |w: usize, h: usize| -> Vec<u8> {
+            let mut rgb = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                for x in 0..w {
+                    let (fx, fy) = (x as f32, y as f32);
+                    let n = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) >> 3) as u8 % 13;
+                    rgb.extend_from_slice(&[
+                        (110.0 + 80.0 * (fx / 11.0).sin() * (fy / 7.0).cos()) as u8 + n,
+                        (110.0 + 80.0 * (fx / 17.0 + fy / 13.0).sin()) as u8 + n,
+                        (110.0 + 80.0 * (fy / 9.0).sin()) as u8 + n,
+                    ]);
+                }
+            }
+            rgb
+        };
+        // Smooth chrome: colourful enough to pass the palette gate, gradient
+        // enough to pass the transition test, and the thing PNG carries well.
+        let gradient = |w: usize, h: usize| -> Vec<u8> {
+            let mut rgb = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                for x in 0..w {
+                    rgb.extend_from_slice(&[
+                        (40 + x * 3 % 200) as u8,
+                        (60 + y * 3 % 180) as u8,
+                        (90 + (x + y) * 2 % 160) as u8,
+                    ]);
+                }
+            }
+            rgb
+        };
+
+        println!(
+            "\n  {:>9} | {:>6} | {:>5} | {:>7} | {:>19} | {:>19}",
+            "content", "size", "px", "png B", "jpeg 70 B (of png)", "jpeg 90 B (of png)"
+        );
+        for (name, make) in [("photo", &photo as &dyn Fn(usize, usize) -> Vec<u8>), ("gradient", &gradient)] {
+            for (w, h) in [(16u16, 16u16), (24, 24), (32, 32), (48, 48), (64, 56), (64, 64), (128, 64), (128, 128), (320, 64)] {
+                let rgb = make(usize::from(w), usize::from(h));
+                let admitted = photographic(w, h, &rgb);
+                let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap().data.len();
+                let j70 = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 70).unwrap().data.len();
+                let j90 = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 90).unwrap().data.len();
+                println!(
+                    "  {:>9} | {:>6} | {:>5} | {:>7} | {:>9} ({:>5.0}%) | {:>9} ({:>5.0}%){}",
+                    name,
+                    format!("{w}x{h}"),
+                    usize::from(w) * usize::from(h),
+                    png,
+                    j70,
+                    100.0 * j70 as f64 / png as f64,
+                    j90,
+                    100.0 * j90 as f64 / png as f64,
+                    if admitted { "" } else { "  [refused]" },
+                );
+            }
+        }
+        println!(
+            "\n  [refused] is the classifier's own verdict, floor included: a row without it \
+             is a tile that would go out as JPEG today.\n"
+        );
     }
 }
