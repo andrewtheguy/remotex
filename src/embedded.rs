@@ -423,12 +423,13 @@ mod tests {
     }
 
     /// The whole point of `check`: it refuses what the gateway would refuse to
-    /// start on, not merely what fails to parse. `audio` on a VNC target is
-    /// well-formed TOML and an unusable config.
+    /// start on, not merely what fails to parse. `audio` on Apple's standard
+    /// Screen Sharing is well-formed TOML and an unusable config — that subtype
+    /// carries no sound and speaks no audio extension.
     #[test]
     fn checking_goes_as_far_as_starting_would() {
-        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nhost = \"::1\"\naudio = true\n";
-        let error = check(text).expect_err("audio is rejected on vnc");
+        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"::1\"\nusername = \"a\"\npassword = \"b\"\naudio = true\n";
+        let error = check(text).expect_err("audio is rejected on standard ard");
         assert!(format!("{error:#}").contains("audio"), "{error:#}");
     }
 }

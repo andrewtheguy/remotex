@@ -203,6 +203,16 @@ impl AudioListener {
         *self.format.borrow()
     }
 
+    /// The next buffer already queued, or `None` if none is.
+    ///
+    /// Exists for the engines' tests, which assert that what arrived on the wire
+    /// reached this queue as samples — the one thing a bridge with no listener
+    /// otherwise keeps to itself.
+    #[cfg(test)]
+    pub fn queued_wave(&mut self) -> Option<Bytes> {
+        self.waves.try_recv().ok()
+    }
+
     /// Return everything the client has to be told, and a live-only stream of
     /// packet batches. The stream ends with the bridge or consumer; a format this
     /// codec cannot carry fails here.

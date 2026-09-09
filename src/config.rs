@@ -1158,16 +1158,22 @@ impl TargetConfig {
 
     /// The one PCM format this target's wave buffers can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
-    /// ([`crate::audio::PCM_CD_QUALITY`]), or what the Mac's AAC-ELD decodes to
-    /// ([`crate::vnc_apple_audio::SOURCE_FORMAT`]). The session builds its encoder
-    /// from this when the audio socket opens before the remote's channel is up, so
-    /// it has to be the source's — an encoder built for the wrong rate plays every
-    /// note at the wrong pitch. Callers gate on [`Self::audio`], as with
-    /// [`Self::audio_plan`].
+    /// ([`crate::audio::PCM_CD_QUALITY`]), what the Mac's AAC-ELD decodes to
+    /// ([`crate::vnc_apple_audio::SOURCE_FORMAT`]), or what a generic VNC server
+    /// is asked to send over the QEMU Audio extension
+    /// ([`crate::vnc_qemu_audio::SOURCE_FORMAT`]) — the last of which this client
+    /// chooses outright, since the extension leaves the format to the client. The
+    /// session builds its encoder from this when the audio socket opens before the
+    /// remote's channel is up, so it has to be the source's — an encoder built for
+    /// the wrong rate plays every note at the wrong pitch. Callers gate on
+    /// [`Self::audio`], as with [`Self::audio_plan`].
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
-            Protocol::Vnc => crate::vnc_apple_audio::SOURCE_FORMAT,
+            Protocol::Vnc => match self.subtype {
+                Some(Subtype::ArdHighPerformance) => crate::vnc_apple_audio::SOURCE_FORMAT,
+                _ => crate::vnc_qemu_audio::SOURCE_FORMAT,
+            },
         }
     }
 
@@ -1675,31 +1681,39 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
-            // Audio is carried by two engines and refused elsewhere rather than
-            // ignored: MS-RDPEA on RDP, and Apple's media stream on High Performance
-            // mode — the latter only in a build with the AAC-ELD decoder the Mac's
-            // stream needs (the `apple-hp-audio` feature, off by default and absent
-            // from every release binary). RFB itself has no audio at all, so
-            // `audio = true` on any other VNC target could only ever be a mistake
-            // about what the protocol carries. Naming each case at parse time is the
-            // difference between a config error and a session that is silent for no
-            // stated reason.
+            // Audio is carried by three paths and refused elsewhere rather than
+            // ignored: MS-RDPEA on RDP, the QEMU Audio extension on a generic VNC
+            // target ([`crate::vnc_qemu_audio`]), and Apple's media stream on High
+            // Performance mode — the last only in a build with the AAC-ELD decoder
+            // the Mac's stream needs (the `apple-hp-audio` feature, off by default
+            // and absent from every release binary). What is left is Apple's
+            // standard Screen Sharing, which carries no sound and does not speak
+            // the QEMU extension either, so `audio = true` there could only ever be
+            // a mistake about what the subtype carries. Naming each case at parse
+            // time is the difference between a config error and a session that is
+            // silent for no stated reason.
+            //
+            // A generic VNC target is *asked* rather than assumed: the extension is
+            // discovered on the connection, and a server that never announces it —
+            // wayvnc, TigerVNC, x11vnc — runs the session in silence. The key is
+            // what makes this client ask at all.
             //
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about the
             // *engine* and the *build* and not about any of them.
-            if target.audio && target.protocol != Protocol::Rdp {
+            if target.audio && target.protocol == Protocol::Vnc {
                 anyhow::ensure!(
-                    target.subtype == Some(Subtype::ArdHighPerformance),
-                    "target {:?} sets audio on a {} target, and only rdp and ard-high-performance \
-                     carry it: MS-RDPEA is an RDP channel, and Apple's media stream exists in \
-                     High Performance mode alone. Remove the key to start the session without \
-                     sound.",
+                    target.subtype != Some(Subtype::Ard),
+                    "target {:?} sets audio on a {} target, and Apple's standard Screen Sharing \
+                     carries none: its system audio exists in High Performance mode alone, and \
+                     the QEMU Audio extension a generic vnc target is asked for is not something \
+                     a Mac speaks. Remove the key to start the session without sound.",
                     target.name,
-                    target.subtype.map_or(target.protocol.name(), Subtype::name)
+                    Subtype::Ard.name()
                 );
                 anyhow::ensure!(
-                    cfg!(feature = "apple-hp-audio"),
+                    target.subtype != Some(Subtype::ArdHighPerformance)
+                        || cfg!(feature = "apple-hp-audio"),
                     "target {:?} sets audio on an ard-high-performance target, and this gateway \
                      was built without the apple-hp-audio feature: the Mac's system audio is \
                      AAC-ELD, which needs a decoder that is not in the default build or in any \
@@ -4669,24 +4683,31 @@ mod tests {
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]
-    fn audio_belongs_to_rdp_and_is_refused_on_vnc() {
-        let err = ConfigFile::parse(&format!(
+    fn audio_belongs_to_rdp_and_to_generic_vnc() {
+        // A plain `vnc` target asks a generic server for the QEMU Audio
+        // extension, and gets silence from one that does not speak it. That is
+        // discovery, not a config error.
+        let config = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
 
             [[targets]]
-            name = "nope"
+            name = "wlshare"
             protocol = "vnc"
             host = "10.0.0.5"
             audio = true
             "#,
             site_passwd_line()
         ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("audio"), "{rendered}");
-        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].audio);
+        assert_eq!(
+            config.targets[0].audio_source_format(),
+            crate::vnc_qemu_audio::SOURCE_FORMAT
+        );
 
         let config = ConfigFile::parse(&format!(
             r#"
@@ -4731,7 +4752,11 @@ mod tests {
         .unwrap_err();
         let rendered = format!("{err:#}");
         assert!(rendered.contains("on a ard target"), "{rendered}");
-        assert!(rendered.contains("ard-high-performance"), "{rendered}");
+        assert!(rendered.contains("High Performance"), "{rendered}");
+        assert!(
+            rendered.contains("QEMU Audio"),
+            "the other path a vnc target can have is named too: {rendered}"
+        );
     }
 
     /// High Performance audio is a build decision before it is a config one: the
@@ -4785,6 +4810,19 @@ mod tests {
         assert_eq!(rdp.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
         assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.sample_rate, 48_000);
         assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.channels, 2);
+
+        // A generic vnc target's is the format this client asks the extension
+        // for, which is the same 48 kHz stereo and needs no resampling either.
+        let vnc = ConfigFile::parse(&format!(
+            "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\nhost = \"h\"\naudio = true\n",
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert_eq!(vnc.targets[0].audio_source_format(), crate::vnc_qemu_audio::SOURCE_FORMAT);
+        assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.sample_rate, 48_000);
+        assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.bits_per_sample, 16);
     }
 
     /// The camera follows audio's rule: MS-RDPECAM is an RDP channel, so the key

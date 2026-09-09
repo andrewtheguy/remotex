@@ -202,6 +202,13 @@ its output's scale, the gateway labels the framebuffer with it and asks for the
 window in points × scale, and the browser's density is declared back to the
 server. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
+`audio = true` works on a plain VNC target too, through the QEMU Audio
+extension `rfbproto` registers: the gateway lists its pseudo-encoding, a server
+that speaks it announces so and then streams the desktop's sound on the RFB
+connection itself, and a server that does not — wayvnc, TigerVNC, x11vnc — gives
+the desktop and no sound. wlshare speaks it, capturing the default sink's
+monitor from PipeWire. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
+
 High Performance mode is the one part of remotex built entirely without a
 specification: Apple documents none of the protocol revision,
 its record layer, its control messages or its virtual display handling, so all of
