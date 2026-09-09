@@ -180,7 +180,9 @@ async def main() -> int:
     token = claim.json()["sessionId"]
     print(f"  logged in, session {token[:12]}…")
 
-    url = f"ws://127.0.0.1:{args.port}/ws?session={token}"
+    # The session socket requires the browser's chroma answer; the probe stands in
+    # for a decoder that takes VP9 profile 1, as a desktop browser does.
+    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444"
     async with websockets.connect(
         url, additional_headers={"Cookie": f"remotex_session={cookie}"}
     ) as socket:

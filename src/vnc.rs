@@ -35,7 +35,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{Subtype, TargetConfig};
+use crate::config::{RenderPlan, Subtype, TargetConfig};
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -742,13 +742,14 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 /// function, and the sink forwards from a task of its own.
 pub async fn run(
     config: TargetConfig,
+    plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<crate::audio::AudioBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("vnc", frame_tx, config.render_plan(), feedback);
+    let sink = TileSink::new("vnc", frame_tx, plan, feedback);
     session(config, display, input_rx, audio, &sink).await;
     sink.finish().await;
 }

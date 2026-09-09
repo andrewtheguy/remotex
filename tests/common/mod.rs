@@ -470,11 +470,15 @@ pub fn init_logging() {
 }
 
 /// Open the session WebSocket with a claim token and the login cookie.
+///
+/// `chroma=444` is what a browser whose decoder takes VP9 profile 1 states, and the
+/// session socket requires an answer: these tests stand in for the ordinary desktop
+/// client, so they give the ordinary desktop answer.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
-    let mut request = format!("ws://{addr}/ws?session={token}")
+    let mut request = format!("ws://{addr}/ws?session={token}&chroma=444")
         .into_client_request()
         .unwrap();
     request

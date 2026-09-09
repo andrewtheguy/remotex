@@ -520,7 +520,10 @@ export function createVideoStream(
     codec: format.decode,
     optimizeForLatency: true,
     // `hardwareAcceleration` is deliberately left out, so a browser decodes this
-    // however it decodes VP9. Asking for software is a hint by specification — WebKit
+    // however it decodes VP9. (The one thing this page does state about its decoder
+    // is which chroma it takes, asked once at load and answered to the gateway
+    // rather than to a decoder — see videoChroma.ts.) Asking for software here is a
+    // hint by specification — WebKit
     // falls back past it, Firefox disregards it — and on iOS and iPadOS it is a hint
     // with nothing behind it at all: WebKit maps `prefer-software` to
     // `HardwareAcceleration::No`, the clause routing that to a local software decoder

@@ -644,7 +644,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
             "off"
         },
     ));
-    lines.push(spec("render", &target.render_plan().describe()));
+    lines.push(spec("render", &target.render_summary()));
     lines
 }
 

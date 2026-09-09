@@ -565,16 +565,36 @@ password = "change-me"
 # render_type = "video" and render_motion = true alike. Refused on a target that
 # streams nothing.
 #
-#   "420" — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
-#           every decoder takes, hardware ones included.
-#   "444" — a colour sample per pixel (VP9 profile 1). This, not render_stream_quality, is
-#           where a desktop stream's visible loss is: a one-pixel coloured glyph stem
-#           on a dark terminal shares its one 4:2:0 colour sample with three pixels of
-#           background and comes back at a quarter of its saturation, at any quality
-#           — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
-#           for a keyframe about a third larger and inter frames no larger. It always
-#           decodes in software (no hardware VP9 decoder takes profile 1): Chromium
-#           does; iOS and iPadOS have no software VP9 at all and refuse it by name.
+#   "420"  — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
+#            every decoder takes, hardware ones included.
+#   "444"  — a colour sample per pixel (VP9 profile 1). This, not render_stream_quality, is
+#            where a desktop stream's visible loss is: a one-pixel coloured glyph stem
+#            on a dark terminal shares its one 4:2:0 colour sample with three pixels of
+#            background and comes back at a quarter of its saturation, at any quality
+#            — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
+#            for a keyframe about a third larger and inter frames no larger. It always
+#            decodes in software (no hardware VP9 decoder takes profile 1): Chromium
+#            does; iOS and iPadOS have no software VP9 at all and refuse it by name,
+#            and this setting sends it to them anyway.
+#   "auto" — 4:4:4 where the browser's decoder takes profile 1, 4:2:0 where it says it
+#            does not. The page asks its own VideoDecoder once, at load, and states the
+#            answer on its session socket.
+#
+# Which to write down:
+#
+#   Watched from more than one kind of browser — a desktop and an iPad, say — use
+#   "auto". It is the whole reason this target need not be duplicated under two names,
+#   and every browser gets the best picture it can actually decode.
+#
+#   Set "444" only to hold a fleet to one bitstream or to pin one side of a measurement:
+#   it asks nobody, so any iOS or iPadOS client sees the decoder's refusal instead of a
+#   desktop. On the browsers that do take it the cost is client CPU — twice the chroma
+#   samples per frame, and no hardware path — which in this system's experience is the
+#   safer decoder anyway: the GPU-process one is what goes quiet under stream churn.
+#
+#   Set "420" (or leave the key out) for a fleet that must stay on a hardware decoder,
+#   or where the target is photographic rather than text and the extra colour buys
+#   nothing worth the bytes.
 #render_chroma = "420"
 
 # Let every lossy quality in this target's render plan track measured client

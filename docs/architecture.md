@@ -140,10 +140,12 @@ The classifier's cross-project source review and measurement candidates live in
 [Still-image classification in remote desktop implementations](still-image-classification-research.md).
 
 Three more keys sit across the whole dial rather than on either axis.
-`render_chroma` (`"420"`, the default, or `"444"`) is how much colour a *stream*
-carries per pixel — every stream the target has, `video` and a `render_motion`
-region alike — and is refused on a target that streams nothing; see [the codec](#the-codec) for
-why it, and not the quality, is where a desktop stream's picture goes.
+`render_chroma` (`"420"`, the default, `"444"`, or `"auto"`) is how much colour a
+*stream* carries per pixel — every stream the target has, `video` and a
+`render_motion` region alike — and is refused on a target that streams nothing; see
+[the codec](#the-codec) for why it, and not the quality, is where a desktop stream's
+picture goes, and [choosing a chroma](#choosing-a-chroma) for which of the three to
+write down.
 `render_adaptive = true` lets every lossy quality the target configures track the
 measured link between `render_adaptive_min` (default 20) and its configured value,
 which stays the ceiling — see [what the link will bear](#the-codec) for the signal
@@ -525,11 +527,56 @@ larger, inter frames no larger, about a third more encode time — and the codec
 string it announces is `vp09.01.…` instead of `vp09.00.…`. The cost is the
 decoder: no hardware VP9 decoder takes profile 1, so it always decodes in software
 — Chromium does — and a browser with no software VP9 at all, which is iOS and
-iPadOS, refuses the configuration by name the way it would refuse any other. That
-is why it is per target and off by default, and why nothing falls back: the client
-already says exactly which configuration it would not take.
+iPadOS, refuses the configuration by name the way it would refuse any other.
 `a_444_stream_keeps_the_colour_420_averages_away` in `src/vp9.rs` is the round
 trip that pins the difference, through the archive's own decoder.
+
+### Choosing a chroma
+
+The key takes three answers, and two of them are decisions the browser cannot
+overrule.
+
+**`"auto"` — 4:4:4 where the decoder takes profile 1, 4:2:0 where it does not.**
+The one to reach for on a target watched from more than one kind of browser, and
+the reason a target need not be written down twice under two names. The page asks
+its own `VideoDecoder` once, at load, about the profile 1 configuration the gateway
+would announce (`frontend/src/videoChroma.ts`), and states the answer as
+`chroma=444|420` on every session socket it opens. `render_plan` resolves the key
+against it; nothing else reads it.
+
+The answer rides the socket URL rather than a message because of *when* it is
+needed: a takeover reconnects a still-selected target at attach
+([session lifecycle](#session-lifecycle)), before the new browser has sent
+anything, and that engine must be built for the browser that took over rather than
+the one that left. It is held on the attachment (`ClientSlot`) and read by both
+engine starts — including the one reattachment that would otherwise resume a
+running engine, which compares the plan the returning browser resolves to against
+the plan that is running and rebuilds when they differ.
+
+This is **selection, never refusal**, which is the distinction the removed probe
+lacked. Only a definite `supported === false` gives up the colour; a "yes", an
+answer with no verdict, and an `isConfigSupported` that throws all read as 4:4:4,
+and a browser that answered wrongly still ends where every browser ends, at its own
+decoder's refusal by name. One question at page load, no round trip in front of a
+session, and no path where the gateway turns a client away on the strength of a
+probe.
+
+**`"444"` — profile 1 for every browser, refusals included.** Set it to hold a
+fleet to one bitstream, or to pin one side of a measurement; an iPhone or iPad
+watching the target is sent a stream it rejects by name. Losing the hardware
+decoder on the browsers that do take it is a smaller loss than it reads: the
+GPU-process decoder is the one that goes quiet under stream churn, and software
+libvpx is what answers every chunk (`frontend/src/videoDecoder.ts`). What it costs
+is CPU on the client, roughly twice the samples per frame.
+
+**`"420"` — profile 0 for every browser.** The default, and what every stream was
+before the key existed. Right for a fleet that must stay on a hardware decoder, or
+where the target is photographic rather than text and the chroma buys nothing.
+
+Set nothing and the target streams 4:2:0, exactly as before. `"auto"` is the
+setting to write down when the picture matters and the fleet is mixed; the two
+fixed answers are for when the bitstream, not the picture, is the thing being held
+still.
 
 The keyframe header also *says* the conversion is BT.601 studio swing
 (`VP9E_SET_COLOR_SPACE` / `VP9E_SET_COLOR_RANGE`). libvpx writes *unknown* unless
@@ -618,21 +665,29 @@ Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
 `regions.rs` and the wire carry access units, a keyframe bit and a configuration
 string, and `vp9.rs` is reachable only from `regions.rs`.
 
-**The browser is not asked, and that is a deliberate reversal.** The client used to
-probe: `/api/config` published the gateway's ordered codecs with a WebCodecs string for
-each, the client asked `VideoDecoder.isConfigSupported` about them before login, and
-`ClientMsg::Connect` carried the accepted names for `connect` to pick from. It worked,
-and it was removed. It put a round trip and a decoder query in front of every video
-session; `isConfigSupported` is not reliable enough on the same browser twice to build a
-refusal on; and because the refusal was phrased as "this browser accepted neither", any
-fault anywhere near the path — a serde field-name mismatch, for one — surfaced as an
-accusation against the browser and sent the reader to the wrong half of the system.
+**The browser is asked one question, and never asked to justify itself.** The
+client used to probe for the codec: `/api/config` published the gateway's ordered
+codecs with a WebCodecs string for each, the client asked
+`VideoDecoder.isConfigSupported` about them before login, and `ClientMsg::Connect`
+carried the accepted names for `connect` to pick from. It worked, and it was
+removed. It put a round trip and a decoder query in front of every video session;
+`isConfigSupported` is not reliable enough on the same browser twice to build a
+refusal on; and because the refusal was phrased as "this browser accepted neither",
+any fault anywhere near the path — a serde field-name mismatch, for one — surfaced
+as an accusation against the browser and sent the reader to the wrong half of the
+system.
 
-What replaces it is one honest failure. The gateway announces the
-configuration in `ServerMsg::VideoFormat` before the stream's first unit,
-`VideoDecoder.configure` accepts it or refuses it, and a refusal is reported by name —
-"this browser cannot decode the video this target sends" — with the configuration
-string beside it.
+What survives of asking is one question with no power to refuse: how much colour
+this decoder takes, for `render_chroma = "auto"` to resolve against
+([choosing a chroma](#choosing-a-chroma)). It selects between two streams the
+gateway is willing to send, both of them VP9; it never decides whether a session
+may happen. A wrong answer costs a picture, not a desktop.
+
+The refusal itself stays where it always was: one honest failure at the client's own
+decoder. The gateway announces the configuration in `ServerMsg::VideoFormat` before
+the stream's first unit, `VideoDecoder.configure` accepts it or refuses it, and a
+refusal is reported by name — "this browser cannot decode the video this target
+sends" — with the configuration string beside it.
 
 ## Session lifecycle
 
@@ -641,8 +696,11 @@ Authentication and desktop ownership are separate:
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
    `409` unless the request reclaims its token or forces takeover.
-3. `/ws?session=<token>` attaches to the slot and reports either the target
-   picker or the current connected target.
+3. `/ws?session=<token>&chroma=420|444` attaches to the slot and reports either
+   the target picker or the current connected target. `chroma` is required and
+   names the most colour this browser's video decoder takes; see
+   [Choosing a chroma](#choosing-a-chroma). The media sockets carry the token
+   alone.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
 5. Losing the WebSocket detaches the client. The engine remains available for a
@@ -654,14 +712,19 @@ Every `connect` first ends any running engine, including one already connected
 to the same target, and the next engine is not spawned until that process exits;
 `ENGINE_EXIT_GRACE` bounds the wait. Switching targets and logging out likewise
 end the engine outright. The sole resume is the owning browser reattaching to
-the same target after its session socket drops. Opening size, density, display
+the same target after its session socket drops, and it resumes only while the
+running engine is still the one that reattachment resolves to: a reload re-runs
+the chroma question, and an `"auto"` target whose browser comes back with a
+different answer is rebuilt rather than resumed, because the stream that is
+running is one that browser has just said it cannot decode. Opening size, density, display
 selection, and connection state do not carry into any other session.
 
 Any claim by a different browser — a forced takeover, or a plain claim while
 nobody is attached — closes the previous WebSocket and its engine but
 preserves the selected target: the new claimant's attach reconnects that
-target for its own screen (named on the `/ws` URL), so a desktop opened for
-one display never carries its size and density over to a different device.
+target for its own screen and chroma (both named on the `/ws` URL), so a desktop
+opened for one display never carries its size, density, or colour over to a
+different device.
 Only the owner reclaiming its token resumes the running engine, with a
 full-repaint request instead of a reconnect.
 

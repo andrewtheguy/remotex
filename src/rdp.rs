@@ -46,7 +46,7 @@ use tokio::time::{Duration, Instant};
 use crate::audio::AudioBridge;
 use crate::camera::CameraBridge;
 use crate::mic::MicBridge;
-use crate::config::{Security, TargetConfig};
+use crate::config::{RenderPlan, Security, TargetConfig};
 use crate::copies;
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16};
@@ -192,6 +192,7 @@ fn connect_budget() -> Duration {
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
+    plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
@@ -200,7 +201,7 @@ pub async fn run(
     microphone: Option<Arc<MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, config.render_plan(), feedback);
+    let sink = TileSink::new("rdp", frame_tx, plan, feedback);
     session(config, display, input_rx, &sink, audio, camera, microphone).await;
     sink.finish().await;
 }

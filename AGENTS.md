@@ -67,10 +67,15 @@ documentation.
 
 ## Media paths
 
-- Video streams are VP9 only. There is no codec probe, codec key, or fallback.
-  `render_chroma` is the only per-target codec choice. Preserve the announced
-  configuration and color-space behavior described in
-  [The codec](docs/architecture.md#the-codec).
+- Video streams are VP9 only. There is no codec probe, codec key, or codec
+  fallback. `render_chroma` is the only per-target codec choice, and its `"auto"`
+  value is the only thing the browser is asked: the page states which VP9 profile
+  its decoder takes on the session socket, the gateway *selects* between two
+  profiles on it, and no client is ever refused for the answer. Do not grow it into
+  a capability negotiation, a second codec, or a reason to turn a session away.
+  Preserve the announced configuration and color-space behavior described in
+  [The codec](docs/architecture.md#the-codec) and
+  [Choosing a chroma](docs/architecture.md#choosing-a-chroma).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. The supported target
   choices are Opus and unresampled PCM passthrough; do not add another encoder.
