@@ -45,6 +45,12 @@ documentation.
   uninterpreted MS-RDPEI contacts when an RDP host reports `touchReady`. Never add
   gesture recognition to touch passthrough. See
   [Browser SPA](docs/architecture.md#browser-spa).
+- The display picker is the remote's list and the remote's checkmark. Engines fill
+  it — Apple's display layout, wlshare's output list — and the browser holds no
+  display state of its own, so never move the checkmark on the click or add a
+  client-side selection. An engine with nothing to choose between sends no list and
+  the panel stays hidden. See
+  [Switching outputs over VNC with wlshare](docs/wlshare-outputs.md).
 - Pointer clients present the remote desktop at 100%; oversized desktops scroll.
   Do not add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile,
   gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
