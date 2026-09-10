@@ -6,7 +6,6 @@
 //! exactly the same path without reimplementing either protocol.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -37,6 +36,9 @@ const STOP_GRACE: Duration = Duration::from_millis(1500);
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_HEAD: usize = 64 * 1024;
 const MASTER_HOST: &str = "remotex.localhost";
+/// The binary's version, so the header answers what `--version` would without
+/// leaving the TUI. Every instance is a worker of this same binary.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A first launch's complete instance config: no server block and no pretend
 /// target. The TUI creates this atomically before adding the instance to its list.
@@ -283,17 +285,32 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Opens the instance config in the operator's editor and waits for it.
+///
+/// `VISUAL` and `EDITOR` hold a shell command line, not a program path: `subl -w`
+/// and `code --wait` are ordinary values, and every tool that honours these
+/// variables lets the shell split them. So the value is handed to `sh -c` with
+/// the path as a positional argument, which keeps a path with spaces in it out of
+/// the words the shell splits.
 async fn edit_config(path: &Path) -> anyhow::Result<()> {
-    let editor = std::env::var_os("VISUAL")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("EDITOR").filter(|value| !value.is_empty()))
-        .unwrap_or_else(|| OsString::from("vi"));
-    let status = Command::new(&editor)
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| String::from("vi"));
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg("sh")
         .arg(path)
         .status()
         .await
-        .with_context(|| format!("cannot start editor {editor:?}"))?;
-    anyhow::ensure!(status.success(), "editor exited with {status}");
+        .with_context(|| format!("cannot start editor {editor}"))?;
+    anyhow::ensure!(status.success(), "editor {editor} exited with {status}");
     Ok(())
 }
 
@@ -409,7 +426,14 @@ fn render(
         render_specs(&mut frame, width, height, name, lines, *offset)?;
         return Ok(frame);
     }
-    line(&mut frame, 0, width, "remotex local control plane", Some(Color::Cyan), true)?;
+    line(
+        &mut frame,
+        0,
+        width,
+        &format!("remotex {VERSION} local control plane"),
+        Some(Color::Cyan),
+        true,
+    )?;
     line(
         &mut frame,
         2,
