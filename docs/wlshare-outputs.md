@@ -135,16 +135,52 @@ before the wire.
   output makes them work again. Neither is new: it is the rule wlshare already
   had, now reachable in one session.
 
-## Not yet measured
+## Measured
 
-Unlike the density extension, this one has no measured trace in this repo yet: it
-was written against a single-output session and the two-monitor sequence — the
-list, a switch, the `ExtendedDesktopSize` that follows it — has not been captured
-with `tests/ws_probe.py` against a real two-monitor host. Run it there before
-treating the sequence above as measurement rather than as what the two ends
-intend:
+Measured 2026-09-09 on `macintel`, a sway session with two physical outputs —
+`HDMI-A-1` at 1920×1080 and `LVDS-1` at 1280×800, both at scale 1 — through
+`tests/ws_probe.py` over an SSH tunnel to wlshare on its loopback port. That
+session's wlshare has `resize = false`, since it shares physical panels.
 
-```sh
-uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> \
-  --display 1728x1117@200 --viewport 1728x883 --seconds 20
+Connect, then switch to the laptop panel:
+
 ```
+resize  1920x1080  scale=1.0        connect: the output the session is on
+displays  active=0x32               HDMI-A-1 1920×1080, LVDS-1 1280×800
+-> selectDisplay 0x34
+displays  active=0x34               the checkmark moves when the server says it moved
+resize  1280x800   scale=1.0        the ExtendedDesktopSize rect for the new output
+                                    then the tiles of the new screen
+```
+
+The ids are the `wl_output` globals, `0x32` and `0x34` here. Switching back runs
+the mirror sequence and repaints at 1920×1080.
+
+The pointer goes with the capture. A `mouseMove` to the centre of the new
+1280×800 framebuffer moved sway's focused output to `LVDS-1`, and the same move
+after switching back moved it to `HDMI-A-1` — the virtual pointer is remade
+against the output being shared, so absolute positions land on the screen the
+client is looking at rather than on the one it left.
+
+Three more, measured the same way:
+
+- **The output already shared.** Answered with the list, no resize, and the tiles
+  keep coming: a second click on the checkmark costs a message and nothing else.
+- **An id the list does not have.** Dropped by the engine before the wire — the
+  gateway logs `ignoring a selection of unknown display 153` — so the server is
+  never asked to bind to something that is gone.
+- **An output arriving or leaving mid-session.** `swaymsg output LVDS-1 disable`
+  shrank the list to one entry (a client then shows no picker at all, which is
+  the rule for a list of one), and re-enabling it brought the output back under a
+  **new** id: the global is unique for as long as that output exists, not across
+  its life.
+
+The choice outlives the client. wlshare keeps the output the last client asked
+for — a reconnect opens on that one, not on the configured default — until the
+daemon restarts.
+
+One thing worth knowing when testing an idle host: with the monitors asleep
+(`swaymsg output * power off`, which swayidle does on a timer), wlr-screencopy
+fails every frame and no pixels arrive at all. That is not this extension, and it
+is not the switch — it is the same for one monitor as for two — but it does make
+a switch look like it did nothing. `swaymsg "output * power on"` first.
