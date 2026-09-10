@@ -3400,8 +3400,11 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         state.active = active;
         // Sent only on a change, as the Apple path sends its own: every
         // `SetEncodings` is answered with a list, and a reconnecting browser is
-        // told the current one by the reattach path.
-        changed.then(|| state.displays_msg()).flatten()
+        // told the current one by the reattach path. A change to an empty list is
+        // sent too, unlike [`DisplayState::displays_msg`]'s: wlshare lists nothing
+        // once the compositor has no output left, and a browser told nothing
+        // would keep offering outputs that are gone.
+        changed.then(|| ServerMsg::Displays { active: state.active, displays: state.displays.clone() })
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
@@ -5243,6 +5246,44 @@ mod tests {
             forwarded(&sink, &mut rx).await,
             Some(ServerMsg::Displays { active: 3, .. })
         ));
+    }
+
+    /// A list that empties is forwarded empty, which is what hides the picker: a
+    /// browser left holding the last non-empty list would keep offering outputs
+    /// the compositor no longer has. An empty list that says nothing new is not
+    /// forwarded again.
+    #[tokio::test]
+    async fn an_output_list_that_empties_clears_the_picker() {
+        let (sink, mut rx) = test_sink();
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        let outputs = [
+            Listed { id: 3, name: "DP-2", size: (1920, 1080), scale: 1.0, headless: false },
+            Listed { id: 7, name: "HDMI-A-1", size: (1280, 800), scale: 1.0, headless: false },
+        ];
+        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &display, &sink)
+            .await
+            .unwrap();
+        assert!(matches!(
+            forwarded(&sink, &mut rx).await,
+            Some(ServerMsg::Displays { active: 3, ref displays }) if displays.len() == 2
+        ));
+
+        // Every output went away: nothing listed, nothing shared.
+        read_output_list(&mut output_list_body(0, &[]).as_slice(), &display, &sink)
+            .await
+            .unwrap();
+        let Some(ServerMsg::Displays { active, displays }) = forwarded(&sink, &mut rx).await else {
+            panic!("the emptied list was not forwarded");
+        };
+        assert_eq!(active, 0);
+        assert!(displays.is_empty());
+        assert!(display.lock().unwrap().displays.is_empty());
+
+        // Empty again: nothing new to say.
+        read_output_list(&mut output_list_body(0, &[]).as_slice(), &display, &sink)
+            .await
+            .unwrap();
+        assert!(forwarded(&sink, &mut rx).await.is_none());
     }
 
     /// A count no compositor sends ends the session: the entries are
