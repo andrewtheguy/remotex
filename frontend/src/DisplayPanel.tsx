@@ -10,7 +10,9 @@
 //
 // Standard Apple Screen Sharing (`subtype = "ard"`) sends the Mac's physical
 // screens plus an "All Displays" entry. High Performance mode sends one virtual
-// display, leaving nothing to choose; RDP and generic VNC likewise expose no list.
+// display, leaving nothing to choose. A wlshare desktop sends the compositor's
+// outputs, one of which it is capturing; RDP and every other VNC server expose
+// one framebuffer and no list.
 
 import { useRef } from "react";
 import type { DisplayInfo } from "./protocol.ts";

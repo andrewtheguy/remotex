@@ -1357,7 +1357,8 @@ export function useRemoteDesktop(
 
     // The remote's display list, and the one follow-up a change of display needs:
     // this screen's density again. Standard macOS Screen Sharing sends its physical
-    // displays here; High Performance mode reports its single virtual display.
+    // displays here; High Performance mode reports its single virtual display; a
+    // wlshare desktop sends the compositor's outputs and captures the chosen one.
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);

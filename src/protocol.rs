@@ -334,10 +334,12 @@ pub enum ClientMsg {
     ClipboardRequest,
     /// Share the display identified by the last [`ServerMsg::Displays`].
     ///
-    /// Acted on by the VNC engine's Apple dialect and by nothing else: RDP and plain
-    /// VNC each deliver one framebuffer spanning every remote screen and have no
-    /// message for this. A client that never receives [`ServerMsg::Displays`] never
-    /// has an id to name here, which is how the panel stays hidden on those engines.
+    /// Acted on by the VNC engine's Apple dialect and by wlshare, whose outputs
+    /// extension lists the compositor's outputs and takes one back. RDP delivers
+    /// one framebuffer spanning every remote screen and has no message for this,
+    /// and neither has any other generic VNC server. A client that never receives
+    /// [`ServerMsg::Displays`] never has an id to name here, which is how the
+    /// panel stays hidden on those engines.
     SelectDisplay { id: u32 },
     /// One touch contact's transition, in framebuffer coordinates: the
     /// touchscreen mode, where fingers are forwarded as the contacts they are
@@ -1063,15 +1065,17 @@ pub const UNSCALED: f32 = 1.0;
 
 /// One of the remote's displays, as a client lists it for the user to pick from.
 ///
-/// The strings are built by the remote end and passed through: the Mac knows how
-/// its displays are named and numbered, and having it say so once keeps the
-/// browser panel reading it.
+/// The strings are built by the engine from what the remote said and passed
+/// through: the Mac knows how its displays are named and numbered and a
+/// compositor knows what it calls its outputs, and having them say so once keeps
+/// the browser panel reading it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
     /// [`ClientMsg::SelectDisplay`]. On the Apple dialect it is a
     /// `CGDirectDisplayID`, except for `0xffffffff`, which the engine uses for its
-    /// own "All Displays" entry (and which is Apple's own sentinel for that).
+    /// own "All Displays" entry (and which is Apple's own sentinel for that);
+    /// against wlshare it is the output's `wl_output` global.
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,
@@ -1080,7 +1084,8 @@ pub struct DisplayInfo {
     /// The remote's primary screen.
     pub main: bool,
     /// A display the remote made for this purpose rather than one of its own
-    /// screens, so a client can say which is which.
+    /// screens, so a client can say which is which: a Mac's High Performance
+    /// virtual display, or a compositor's headless output.
     pub virtual_display: bool,
 }
 

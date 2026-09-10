@@ -753,8 +753,9 @@ It also carries three things a client cannot work out and nothing else reveals:
 `subtype`, the target's `ard` or `ard-high-performance` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server, a Mac
 in Standard mode and a Mac in High Performance mode all say `vnc`, and they
-differ in whether there is a display list, whether resize is offered, and
-whether the path beneath is the reverse-engineered one. All three appear on the
+differ in whether resize is offered and whether the path beneath is the
+reverse-engineered one (a display list is no longer the difference: wlshare sends
+one over a plain `vnc` target). All three appear on the
 client's session card, which `frontend/src/connectionLabel.ts` and
 `videoLabel.ts` word.
 
@@ -1151,16 +1152,19 @@ density is declared to it, never applied by the gateway itself; see
 [Pixel density over VNC with wlshare](wlshare-density.md).
 
 A client shows the display picker exactly when the target sends it a
-`ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one for both
-Apple subtypes: it parses an `AppleDisplayLayout` into a `displays` message and
-acts on a `selectDisplay` by binding that screen. RDP and generic VNC expose a
-single framebuffer spanning every remote screen and have nothing to enumerate,
-so they never send the message and the picker stays hidden on those targets.
+`ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one on both
+Apple subtypes and against wlshare: it parses an `AppleDisplayLayout`, or
+wlshare's `OutputList`, into a `displays` message and acts on a `selectDisplay`
+by asking that remote for that screen. RDP exposes a single framebuffer spanning
+every remote screen and has nothing to enumerate, and so does any other generic
+VNC server, so neither sends the message and the picker stays hidden there.
 
-Where the list is sent, the engine prepends an *All Displays* entry of its own so a
-client that picks a screen can get back, and it moves the checkmark only when a
-layout comes back naming the screen the Mac is now sending — never on the click. See
-[`apple-vnc-889.md`](apple-vnc-889.md).
+Where the list is sent, the checkmark moves only when the remote comes back naming
+the screen it is now sending — never on the click. On a Mac the engine prepends an
+*All Displays* entry of its own so a client that picks a screen can get back; see
+[`apple-vnc-889.md`](apple-vnc-889.md). wlshare captures one output at a time and
+has no combined view to offer, so its list is the compositor's outputs and nothing
+else; see [Switching outputs over VNC with wlshare](wlshare-outputs.md).
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine.
