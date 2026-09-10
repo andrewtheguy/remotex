@@ -134,10 +134,21 @@ before the wire.
 - **Nothing is optimistic.** The panel is a list plus a checkmark, both from the
   server. A switch the compositor refuses leaves the menu agreeing with what is on
   the canvas rather than with what was clicked.
-- **Density follows the switch.** The browser re-declares its own density after
-  the checkmark moves, and wlshare answers with an `OutputScale` as it always
-  does — applying it on a headless output, and reporting the scale as it is on a
-  monitor whose mode belongs to the person in front of it.
+- **Density follows the switch.** The browser's density was declared to the
+  output left behind, so the gateway declares it again when a list says the
+  shared output moved — on a `resize = true` target, the only kind that declares
+  one at all — and wlshare answers with an `OutputScale` as it always does:
+  applying it on a headless output, and reporting the scale as it is on a monitor
+  whose mode belongs to the person in front of it. A switch that lands while a
+  declaration is still out waits for that one's answer, as a density change does.
+- **The size is announced whatever `resize` says.** A switch to a differently
+  sized output is an `ExtendedDesktopSize` rectangle, and a server with nothing
+  negotiated to send one in has no choice but to close the connection. So both
+  size pseudo-encodings are listed on every generic target; `resize` decides only
+  whether the window asks for sizes of its own.
+- **An emptied list is still a list.** A browser attaching after the compositor
+  lost its last output is told the list is empty rather than left with the menu
+  it had.
 - **Resize follows the same rule.** Switching to a real monitor means resize
   requests are answered *prohibited* from then on; switching back to a headless
   output makes them work again. Neither is new: it is the rule wlshare already

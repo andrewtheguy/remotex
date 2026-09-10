@@ -1371,9 +1371,9 @@ it says nothing and the polling loop never stops. The Apple subtypes are not
 offered either: their encoding lists are measured exact, and adding to one costs
 the display layout.
 
-With `resize = true`,
-the client advertises DesktopSize and ExtendedDesktopSize against servers that
-accept them. Generic VNC clipboard support uses Extended Clipboard when the server
+The client advertises DesktopSize and ExtendedDesktopSize on every generic
+target, so a server can always say its size changed; `resize = true` decides only
+whether the window asks it to change, with `SetDesktopSize`. Generic VNC clipboard support uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple subtype
 also negotiates Apple's display metadata, display picker and native pasteboard on
 the ordinary byte stream, and asks for zlib in the second `SetEncodings` exactly as

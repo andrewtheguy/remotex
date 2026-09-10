@@ -399,10 +399,12 @@ struct DesktopState {
     /// whatever pixels the server settled on — one redraw, not two.
     following: bool,
     /// The density last declared to the server, followed or not; `None` before
-    /// the first declaration. The report answering a declaration is compared
-    /// with it: a browser whose density moved on while that declaration was out
-    /// is declared again then, so one transition is in flight at a time and the
-    /// server's last word is the browser's newest.
+    /// the first declaration, and from a switch of output until the next — the
+    /// output now shared was declared nothing. The report answering a
+    /// declaration is compared with it: a browser whose density moved on while
+    /// that declaration was out, or an output switched under it, is declared
+    /// again then, so one transition is in flight at a time and the server's
+    /// last word is the browser's newest.
     declared: Option<f32>,
     /// A scale report relabelled the current pixels, which cleared the browser's
     /// canvas, and nothing since has asked the server for them again. Cleared
@@ -570,6 +572,19 @@ impl DesktopState {
             .then(|| self.declare_density(declared))
             .flatten()
     }
+
+    /// The `ClientDensity` a switch of shared output needs, or `None`. The
+    /// browser's density was declared to the output left behind, and the
+    /// browser's own report of it is unchanged by the switch, so nothing else
+    /// would tell the new one. Declared on the terms a density change is: once
+    /// the server has reported, and not while a declaration is out — the report
+    /// answering that one declares instead, finding [`Self::declared`] cleared.
+    fn output_switched(&mut self) -> Option<[u8; 8]> {
+        self.declared = None;
+        (self.density == Density::Reported && !self.following)
+            .then(|| self.declare_density(self.host_density))
+            .flatten()
+    }
 }
 
 /// Decide a message from the desktop's state and send it, with the uplink held
@@ -612,6 +627,10 @@ struct DisplayState {
     /// is on the canvas rather than with what was clicked — client state is never
     /// optimistic here, see [`ServerMsg::Displays`].
     active: u32,
+    /// Whether the server has listed its screens at all. A list that empties is
+    /// still a list, and one a browser has to be told: see
+    /// [`DisplayState::displays_msg`].
+    listed: bool,
 }
 
 impl DisplayState {
@@ -624,9 +643,12 @@ impl DisplayState {
     const COMBINED: u32 = u32::MAX;
 
     /// The message that tells a client the list and the selection, or `None` while
-    /// there is nothing to choose between.
+    /// the server has listed nothing — a generic server without the outputs
+    /// extension, or one that has not answered yet. A list that emptied is sent
+    /// empty: wlshare lists nothing once the compositor has no output left, and a
+    /// browser told nothing would keep offering the outputs it last saw.
     fn displays_msg(&self) -> Option<ServerMsg> {
-        (!self.displays.is_empty()).then(|| ServerMsg::Displays {
+        self.listed.then(|| ServerMsg::Displays {
             active: self.active,
             displays: self.displays.clone(),
         })
@@ -1192,7 +1214,6 @@ async fn rfb38_preface(
     uplink
         .send(&set_encodings(&rfb38_encoding_list(
             apple,
-            config.resize,
             config.clipboard,
             config.audio,
         )))
@@ -1212,7 +1233,7 @@ async fn rfb38_preface(
     })
 }
 
-fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, audio: bool) -> Vec<i32> {
+fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
         // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
@@ -1239,9 +1260,13 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, audio: bool) 
     // gains nothing from pixels that have already lost information. Advertising an
     // encoding is a promise to decode it.
     //
-    // Cursor is unconditional (the browser can always draw a pointer). The resize
-    // pseudo-encodings are advertised only when the target opts in; without them
-    // the server never announces support and keeps its connect-time size.
+    // Cursor is unconditional (the browser can always draw a pointer), and so are
+    // the two size pseudo-encodings. They are how a server *tells* this end its
+    // framebuffer changed size, which is not the same as being asked to change it:
+    // that is `resize`, and it is decided where a SetDesktopSize is, never sent on
+    // a target without it. A server whose size changes under a client that listed
+    // neither has no way to say so and hangs up, which is what a wlshare output
+    // switch to a differently sized monitor would do to a `resize = false` target.
     //
     // ContinuousUpdates and Fence are unconditional and go together. The first asks
     // the server to send updates for the whole desktop as it changes instead of once
@@ -1260,11 +1285,9 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool, audio: bool) 
         ENCODING_CURSOR,
         ENCODING_CONTINUOUS_UPDATES,
         ENCODING_FENCE,
+        ENCODING_EXTENDED_DESKTOP_SIZE,
+        ENCODING_DESKTOP_SIZE,
     ];
-    if resize {
-        encodings.push(ENCODING_EXTENDED_DESKTOP_SIZE);
-        encodings.push(ENCODING_DESKTOP_SIZE);
-    }
     if clipboard {
         // Extended Clipboard is the only way generic RFB carries anything outside
         // latin-1. A server that ignores it never sends caps and the fallback stays
@@ -2251,7 +2274,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // that listed the encoding; on the Apple dialects 0xE1 is as unknown
             // as it was, and a Mac's screens arrive in its display layout.
             MSG_WLSHARE_OUTPUTS if apple.is_none() => {
-                read_output_list(&mut reader, display, &sink).await?;
+                read_output_list(&mut reader, uplink, desktop, display, &sink).await?;
             }
             // The QEMU Audio extension's one message type: a stream beginning, a
             // stream ending, or a run of samples ([`vnc_qemu_audio`]). Only a
@@ -3289,9 +3312,10 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
             let declared = d.host_density;
             // Declared on the first report, and again when the declaration
             // just answered is no longer the browser's density: a change that
-            // arrived while the server was busy waited its turn here.
+            // arrived while the server was busy waited its turn here, and so did
+            // a switch of output, which leaves nothing declared.
             let moved_on =
-                answered && d.declared.is_some_and(|was| (was - declared).abs() > 0.005);
+                answered && d.declared.is_none_or(|was| (was - declared).abs() > 0.005);
             let declare = (first || moved_on).then(|| d.declare_density(declared)).flatten();
             // Not while a declaration is out: the report answering it re-asks in
             // the pixels the server settles on.
@@ -3367,6 +3391,8 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
 /// output as the repaint the selection asked for.
 async fn read_output_list<R: AsyncRead + Unpin>(
     reader: &mut R,
+    uplink: &SharedUplink,
+    desktop: &SharedDesktop,
     display: &SharedDisplay,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
@@ -3393,21 +3419,25 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         "vnc: the server lists {} output(s), sharing id {active}",
         displays.len()
     );
-    let msg = {
+    let (msg, switched) = {
         let mut state = display.lock().unwrap();
         let changed = state.displays != displays || state.active != active;
+        // The shared output moved to another: not the session's first list, and
+        // not to nothing at all.
+        let switched = state.listed && state.active != active && active != 0;
         state.displays = displays;
         state.active = active;
+        state.listed = true;
         // Sent only on a change, as the Apple path sends its own: every
         // `SetEncodings` is answered with a list, and a reconnecting browser is
-        // told the current one by the reattach path. A change to an empty list is
-        // sent too, unlike [`DisplayState::displays_msg`]'s: wlshare lists nothing
-        // once the compositor has no output left, and a browser told nothing
-        // would keep offering outputs that are gone.
-        changed.then(|| ServerMsg::Displays { active: state.active, displays: state.displays.clone() })
+        // told the current one by the reattach path.
+        (changed.then(|| state.displays_msg()).flatten(), switched)
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
+    }
+    if switched {
+        send_decided(uplink, desktop, DesktopState::output_switched).await?;
     }
     Ok(())
 }
@@ -3611,6 +3641,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         let changed = state.displays != infos || state.active != active;
         state.displays = infos;
         state.active = active;
+        state.listed = true;
         // Sent only on a change, since a client holds no display state of its own
         // and the checkmark is the only thing telling it what it is looking at. Most
         // layouts change neither half — one arrives at every login and lock — and
@@ -4916,7 +4947,7 @@ mod tests {
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
         assert_eq!(
-            rfb38_encoding_list(false, false, false, false),
+            rfb38_encoding_list(false, false, false),
             vec![
                 ENCODING_COPY_RECT,
                 ENCODING_ZRLE,
@@ -4927,6 +4958,8 @@ mod tests {
                 ENCODING_CURSOR,
                 ENCODING_CONTINUOUS_UPDATES,
                 ENCODING_FENCE,
+                ENCODING_EXTENDED_DESKTOP_SIZE,
+                ENCODING_DESKTOP_SIZE,
                 ENCODING_WLSHARE_DENSITY,
                 ENCODING_WLSHARE_OUTPUTS,
             ]
@@ -4942,7 +4975,7 @@ mod tests {
         // one as a rectangle at all — the clipboard's arrives as a
         // ServerCutText, the density report and the output list as their own
         // messages, not here.
-        let pixel_encodings = rfb38_encoding_list(false, true, true, true)
+        let pixel_encodings = rfb38_encoding_list(false, true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0 && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS].contains(encoding)
@@ -4998,7 +5031,7 @@ mod tests {
     /// see [`both_apple_subtypes_start_out_wanting_zlib`].
     #[test]
     fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
-        let encodings = rfb38_encoding_list(true, false, true, true);
+        let encodings = rfb38_encoding_list(true, true, true);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
         assert!(!encodings.contains(&ENCODING_ZLIB));
@@ -5161,10 +5194,10 @@ mod tests {
     fn the_wlshare_extensions_are_asked_of_every_generic_server_and_no_mac() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
-        for (resize, clipboard) in [(false, false), (true, false), (false, true), (true, true)] {
-            let generic = rfb38_encoding_list(false, resize, clipboard, false);
+        for clipboard in [false, true] {
+            let generic = rfb38_encoding_list(false, clipboard, false);
             assert_eq!(&generic[generic.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            let apple = rfb38_encoding_list(true, resize, clipboard, false);
+            let apple = rfb38_encoding_list(true, clipboard, false);
             assert!(!apple.contains(&ENCODING_WLSHARE_DENSITY));
             assert!(!apple.contains(&ENCODING_WLSHARE_OUTPUTS));
         }
@@ -5205,6 +5238,8 @@ mod tests {
     /// browser holds no display state to correct.
     #[tokio::test]
     async fn an_output_list_becomes_the_display_picker() {
+        let (uplink, _wire) = test_uplink();
+        let desktop = shared_desktop((1920, 1080), None, None);
         let (sink, mut rx) = test_sink();
         let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
         let outputs = [
@@ -5216,7 +5251,7 @@ mod tests {
         // A trailing byte stands in for the next message: it must survive.
         wire.push(0xAB);
         let mut reader = wire.as_slice();
-        read_output_list(&mut reader, &display, &sink).await.unwrap();
+        read_output_list(&mut reader, &uplink, &desktop, &display, &sink).await.unwrap();
         assert_eq!(reader, &[0xAB]);
 
         let Some(ServerMsg::Displays { active, displays }) = forwarded(&sink, &mut rx).await else {
@@ -5233,13 +5268,13 @@ mod tests {
         assert_eq!(display.lock().unwrap().active, 7);
 
         // The same list again: nothing new to say.
-        read_output_list(&mut output_list_body(7, &outputs).as_slice(), &display, &sink)
+        read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
         assert!(forwarded(&sink, &mut rx).await.is_none());
 
         // The server switched: the same list, a new checkmark.
-        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &display, &sink)
+        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
         assert!(matches!(
@@ -5254,13 +5289,15 @@ mod tests {
     /// forwarded again.
     #[tokio::test]
     async fn an_output_list_that_empties_clears_the_picker() {
+        let (uplink, _wire) = test_uplink();
+        let desktop = shared_desktop((1920, 1080), None, None);
         let (sink, mut rx) = test_sink();
         let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
         let outputs = [
             Listed { id: 3, name: "DP-2", size: (1920, 1080), scale: 1.0, headless: false },
             Listed { id: 7, name: "HDMI-A-1", size: (1280, 800), scale: 1.0, headless: false },
         ];
-        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &display, &sink)
+        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
         assert!(matches!(
@@ -5269,7 +5306,7 @@ mod tests {
         ));
 
         // Every output went away: nothing listed, nothing shared.
-        read_output_list(&mut output_list_body(0, &[]).as_slice(), &display, &sink)
+        read_output_list(&mut output_list_body(0, &[]).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
         let Some(ServerMsg::Displays { active, displays }) = forwarded(&sink, &mut rx).await else {
@@ -5280,10 +5317,119 @@ mod tests {
         assert!(display.lock().unwrap().displays.is_empty());
 
         // Empty again: nothing new to say.
-        read_output_list(&mut output_list_body(0, &[]).as_slice(), &display, &sink)
+        read_output_list(&mut output_list_body(0, &[]).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
         assert!(forwarded(&sink, &mut rx).await.is_none());
+
+        // A browser attaching now — or reattaching with the old list still in
+        // its menu — is told the list is empty, not left with what it had.
+        assert!(matches!(
+            display.lock().unwrap().displays_msg(),
+            Some(ServerMsg::Displays { active: 0, ref displays }) if displays.is_empty()
+        ));
+    }
+
+    /// A server that has listed nothing — one without the extension, or one that
+    /// has not answered yet — gives a reattaching browser nothing to be told.
+    #[test]
+    fn no_list_received_is_nothing_to_replay() {
+        assert!(DisplayState::default().displays_msg().is_none());
+    }
+
+    /// A switch of shared output declares the browser's density to the output
+    /// now shared: it was declared to the one left behind, and the browser's own
+    /// report is unchanged by the switch. The session's first list and a list
+    /// that empties declare nothing.
+    #[tokio::test]
+    async fn a_switch_of_output_declares_the_density_again() {
+        let (uplink, wire) = test_uplink();
+        let desktop = shared_desktop((3456, 1766), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(2.0);
+            d.host_density = 2.0;
+            d.declared = Some(2.0);
+        }
+        let (sink, _rx) = test_sink();
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        let outputs = [
+            Listed { id: 3, name: "HEADLESS-1", size: (3456, 1766), scale: 2.0, headless: true },
+            Listed { id: 7, name: "HEADLESS-2", size: (1920, 1080), scale: 1.0, headless: true },
+        ];
+
+        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+        assert!(written(&wire).is_empty(), "the first list is no switch");
+
+        // wlshare reports the new output's 1x before the list that moves the
+        // checkmark; the browser is still 2x.
+        desktop.lock().unwrap().wire_scale = Some(1.0);
+        read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density(2.0));
+        {
+            let d = desktop.lock().unwrap();
+            assert!(d.following, "the new output is asked to follow");
+            assert_eq!(d.declared, Some(2.0));
+        }
+
+        // What the run loop does with the browser's re-sent, unchanged report:
+        // already declared, so nothing more.
+        assert!(!send_decided(&uplink, &desktop, |d| d.host_density_changed(2.0)).await.unwrap());
+
+        desktop.lock().unwrap().following = false;
+        read_output_list(&mut output_list_body(0, &[]).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density(2.0), "no output left to declare to");
+    }
+
+    /// A switch while a declaration is out waits its turn, as a density change
+    /// does: the report answering that declaration finds nothing declared to the
+    /// output now shared and declares the browser's density to it.
+    #[tokio::test]
+    async fn a_switch_while_a_declaration_is_out_is_declared_by_the_answer() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1920, 1080), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(1.0);
+            d.host_density = 1.0;
+        }
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        let outputs = [
+            Listed { id: 3, name: "HEADLESS-1", size: (1920, 1080), scale: 1.0, headless: true },
+            Listed { id: 7, name: "HEADLESS-2", size: (1920, 1080), scale: 1.0, headless: true },
+        ];
+        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+
+        // The browser moved to a 2x screen: declared, and the server is busy.
+        assert!(send_decided(&uplink, &desktop, |d| d.host_density_changed(2.0)).await.unwrap());
+        assert_eq!(written(&wire), client_density(2.0));
+
+        // The switch lands before the answer: nothing more goes out yet.
+        read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density(2.0), "one declaration in flight at a time");
+
+        // The answer is the new output at its own 1x: the browser's 2x goes to it.
+        let body = output_scale_body((1920, 1080), 1.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), [client_density(2.0).to_vec(), client_density(2.0).to_vec()].concat());
+        let d = desktop.lock().unwrap();
+        assert!(d.following);
+        assert_eq!(d.declared, Some(2.0));
     }
 
     /// A count no compositor sends ends the session: the entries are
@@ -5291,12 +5437,14 @@ mod tests {
     /// place in rather than a desk with that many monitors.
     #[tokio::test]
     async fn an_implausible_output_count_is_refused() {
+        let (uplink, _wire) = test_uplink();
+        let desktop = shared_desktop((1920, 1080), None, None);
         let (sink, _rx) = test_sink();
         let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
         let mut body = vec![0u8];
         body.extend_from_slice(&(MAX_OUTPUTS + 1).to_be_bytes());
         body.extend_from_slice(&0u32.to_be_bytes());
-        assert!(read_output_list(&mut body.as_slice(), &display, &sink).await.is_err());
+        assert!(read_output_list(&mut body.as_slice(), &uplink, &desktop, &display, &sink).await.is_err());
     }
 
     /// The selection's wire: the id, big-endian, after three bytes of padding.
@@ -5380,8 +5528,8 @@ mod tests {
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_qemu_audio::ENCODING, -259);
-        for (resize, clipboard) in [(false, false), (true, true)] {
-            let asked = rfb38_encoding_list(false, resize, clipboard, true);
+        for clipboard in [false, true] {
+            let asked = rfb38_encoding_list(false, clipboard, true);
             assert!(asked.contains(&vnc_qemu_audio::ENCODING));
             assert_eq!(
                 &asked[asked.len() - 2..],
@@ -5389,12 +5537,12 @@ mod tests {
                 "the wlshare requests stay last, so audio never weighs on encoding preference"
             );
             assert!(
-                !rfb38_encoding_list(false, resize, clipboard, false)
+                !rfb38_encoding_list(false, clipboard, false)
                     .contains(&vnc_qemu_audio::ENCODING),
                 "a target without audio does not ask"
             );
             assert!(
-                !rfb38_encoding_list(true, resize, clipboard, true)
+                !rfb38_encoding_list(true, clipboard, true)
                     .contains(&vnc_qemu_audio::ENCODING),
                 "no Mac is asked"
             );
