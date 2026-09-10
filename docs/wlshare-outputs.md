@@ -109,6 +109,14 @@ the screen it just left. A different size then reaches it as an
 `ExtendedDesktopSize` rectangle with the server as the reason; a same-sized output
 carries no rectangle at all and arrives as a full repaint.
 
+That first frame is asked for outright rather than waiting on damage, and taken
+whole rather than by the rectangles the compositor reports. Both matter to a
+gateway: a screencopy that waits for damage is answered only when the new output
+changes, and the second monitor of an idle desk may not change for minutes, so
+the switch would produce no rectangle, no resize and no tiles until somebody
+moved the mouse — and damage reported against the previous frame would fill only
+the parts that happened to be moving, leaving the rest of the new screen black.
+
 ## What the gateway does with it
 
 `src/vnc.rs` reads the list into the same `DisplayState` the Apple dialect fills,
@@ -174,6 +182,17 @@ Three more, measured the same way:
   the rule for a list of one), and re-enabling it brought the output back under a
   **new** id: the global is unique for as long as that output exists, not across
   its life.
+
+A switch on an idle desk arrives without input. Measured by reconstructing the
+canvas from the gateway's tile batches, with no pointer movement at all: after
+`selectDisplay`, the new output's `resize` and a fully painted screen — nothing
+unpainted, nothing black — land inside five seconds. Against a wlshare built
+before its capture took a blank framebuffer whole, the same probe on the same
+desk got no resize and no tiles at all: the canvas stayed at the old output's
+size showing the old output's picture, and the new screen only arrived once the
+pointer was nudged. It is worth knowing which side that fault sat on, because it
+looks exactly like a gateway that dropped a repaint: the gateway asks for its
+non-incremental update, and there is simply nothing to answer it with.
 
 The choice outlives the client. wlshare keeps the output the last client asked
 for — a reconnect opens on that one, not on the configured default — until the
