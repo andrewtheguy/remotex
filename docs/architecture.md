@@ -1325,6 +1325,18 @@ by fingerprint, not verified. The explicit subtype prevents an anonymous macOS
 Screen Sharing connection from landing at a separate login-window session rather
 than the user's screen.
 
+A generic server that ignores the Cursor pseudo-encoding composites its pointer
+into the framebuffer and never sends `cursor`, and the browser hides its own
+pointer so only one shows. That pointer moves with the frames: every move over a
+still desktop is damage, an encode and a paint, and it trails the mouse by however
+far behind the frames are. `local_cursor = true` is for a server whose session
+draws no pointer at all. `connected` carries `localCursor`, and the browser owns
+the pointer from the start with no shape — the same neutral arrow it draws when a
+remote hides its shape — until a `cursor` message names one. wlshare cannot keep
+sway's pointer out of a headless output's frames: wlroots' headless backend has no
+cursor plane, so the pointer is painted into the output itself, and a headless
+sway session pairs the key with an invisible cursor theme instead.
+
 Apple Standard mode maps X11 modifiers by its own table. Measured on macOS 26,
 `Alt_L`/`Alt_R` and `Super_L`/`Super_R` all arrive as Command,
 `Meta_L`/`Meta_R` arrive as the corresponding Option key, and `Mode_switch` and

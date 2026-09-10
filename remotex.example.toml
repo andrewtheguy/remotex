@@ -177,6 +177,17 @@ password = "change-me"
 # and refused on VNC even when set to false.
 #egfx = true
 
+# Show the browser's own pointer (opt-in, plain "vnc" only). A VNC server that
+# sends no pointer shape draws the pointer into the picture, and the browser
+# hides its own so only one shows; that drawn pointer moves with the frames, so
+# it trails the mouse whenever they lag, and every move over a still screen is
+# an update. Set this for a server whose session draws no pointer at all —
+# wlshare under a sway session with an invisible cursor theme — and the browser
+# shows a plain arrow that moves with the mouse itself. A shape the server does
+# send is still drawn. RDP and the Apple subtypes always send the shape, and
+# refuse the key.
+#local_cursor = false
+
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

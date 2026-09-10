@@ -1421,6 +1421,13 @@ export function useRemoteDesktop(
       // `connected`: this browser holds no preference for it and offers no
       // toggle, the same way it offers none for `resize`.
       setGridDebug(msg.gridDebug);
+      // A server whose session draws no pointer: the page owns the pointer from
+      // the start, with no shape of its own, which is the neutral arrow. A shape
+      // the server does send replaces it like any other.
+      if (msg.localCursor) {
+        cursorRef.current = { image: null };
+        syncCursor();
+      }
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {

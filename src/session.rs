@@ -725,6 +725,7 @@ impl SessionManager {
                     microphone: target.microphone,
                     render: engine.plan.describe(),
                     grid_debug: target.render_grid_debug,
+                    local_cursor: target.local_cursor,
                 })
             }
             // A target with no engine is a claim change's teardown, and nothing
@@ -1270,6 +1271,7 @@ impl SessionManager {
             microphone: target.microphone,
             render,
             grid_debug: target.render_grid_debug,
+            local_cursor: target.local_cursor,
         };
         st.selected = Some(target);
         status
@@ -1655,6 +1657,7 @@ mod tests {
             render_classify_lossy: None,
             render_classify_debug: false,
             render_grid_debug: false,
+            local_cursor: false,
             render_adaptive: false,
             render_adaptive_min: None,
             audio_bitrate: None,
@@ -1769,6 +1772,7 @@ mod tests {
                 microphone: got_microphone,
                 render: _,
                 grid_debug: _,
+                local_cursor: _,
             }) => {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");

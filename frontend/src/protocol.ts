@@ -239,6 +239,10 @@ export type ControlMsg =
       // is not here — it rides every `resize`, because it follows the
       // framebuffer's density and there is no framebuffer yet.
       gridDebug: boolean;
+      // `local_cursor`: the server sends no pointer shape and its session draws
+      // no pointer, so this page shows its own. Only a plain VNC target can say
+      // so; every other engine hands the shape over anyway.
+      localCursor: boolean;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already

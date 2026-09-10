@@ -766,6 +766,19 @@ pub struct TargetConfig {
     /// `None` reads as on ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
+    /// Show the browser's own pointer over this desktop. A VNC server that
+    /// sends no pointer shape draws the pointer into the framebuffer, and the
+    /// browser hides its own so only one shows — but a drawn pointer moves with
+    /// the frames, trailing the mouse by however far behind they are, and every
+    /// move over a still screen is an update. Set this for a server whose
+    /// session draws no pointer at all (wlshare under a sway session with an
+    /// invisible cursor theme): the browser shows a plain arrow that moves with
+    /// the mouse itself. A shape the server does send is still drawn instead.
+    ///
+    /// Refused on rdp and on the Apple subtypes, whose servers always hand the
+    /// shape over, so there the key could only be inert.
+    #[serde(default)]
+    pub local_cursor: bool,
     /// Clipboard bridge: let the browser read and write this target's
     /// clipboard, through the floating menu's Clipboard panel. Off by default —
     /// a remote desktop's clipboard often holds whatever was last copied there,
@@ -1729,6 +1742,18 @@ impl ConfigFile {
                     target.name
                 );
             }
+            // The browser's own pointer stands in only where the server sends no
+            // shape, which is a generic VNC server's case alone: RDP and both
+            // Apple subtypes always hand the pointer over, and the browser already
+            // draws it there.
+            anyhow::ensure!(
+                !target.local_cursor
+                    || (target.protocol == Protocol::Vnc && target.subtype.is_none()),
+                "target {:?} sets local_cursor, which only a plain vnc target uses: rdp and the \
+                 Apple subtypes always send the pointer's shape, and the browser already draws \
+                 it. Remove the key.",
+                target.name
+            );
             // The camera is RDP's alone by the same rule: MS-RDPECAM is an RDP
             // channel and RFB has nothing to redirect a client's camera onto.
             anyhow::ensure!(
@@ -4393,6 +4418,40 @@ mod tests {
         assert_eq!(plain.targets[0].vnc_password, "hunter2");
         assert!(plain.targets[0].subtype.is_none());
         assert!(ConfigFile::parse(&vnc_toml("")).is_ok());
+    }
+
+    /// The browser's own pointer is for a server that sends no shape, which only
+    /// a plain vnc target can be; everywhere else the shape always arrives and
+    /// the key would do nothing.
+    #[test]
+    fn local_cursor_is_a_plain_vnc_key() {
+        let cfg = ConfigFile::parse(&vnc_toml("local_cursor = true")).unwrap();
+        assert!(cfg.targets[0].local_cursor);
+        assert!(!ConfigFile::parse(&vnc_toml("")).unwrap().targets[0].local_cursor);
+
+        for subtype in ["ard", "ard-high-performance"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"{subtype}\"\nusername = \"andrew\"\npassword = \"h\"\nlocal_cursor = true"
+            )))
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("local_cursor"), "{subtype}: {err:#}");
+        }
+
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "pc"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            local_cursor = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("local_cursor"), "{err:#}");
     }
 
     /// `ard` is a declaration about the far end, so it comes with the credentials

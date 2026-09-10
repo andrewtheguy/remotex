@@ -25,8 +25,9 @@ export interface CursorImage {
   pointSized: boolean;
 }
 
-// The engine's pointer state. `image` is null when the remote hid the pointer;
-// the state as a whole is null while the remote is drawing it itself.
+// The engine's pointer state. `image` is null when the remote hid the pointer,
+// or when the target's `local_cursor` says its session draws none; the state as
+// a whole is null while the remote is drawing it itself.
 export interface RemoteCursor {
   image: CursorImage | null;
 }

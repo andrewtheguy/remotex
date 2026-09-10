@@ -49,6 +49,7 @@ async fn spawn_app() -> SocketAddr {
             render_classify_lossy: None,
             render_classify_debug: false,
             render_grid_debug: false,
+            local_cursor: false,
             render_adaptive: false,
             render_adaptive_min: None,
             audio_bitrate: None,

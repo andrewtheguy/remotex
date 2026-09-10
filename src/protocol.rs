@@ -1193,6 +1193,9 @@ pub enum ServerMsg {
         /// and stop short at the first still corner. Drawn over the canvas it is
         /// exact everywhere, always complete, and costs the encoders nothing.
         grid_debug: bool,
+        /// Show the browser's own pointer where the server sends no shape: the
+        /// operator's `local_cursor`, for a server whose session draws no pointer.
+        local_cursor: bool,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -1378,6 +1381,8 @@ enum ControlMsg<'a> {
         render: &'a str,
         #[serde(rename = "gridDebug")]
         grid_debug: bool,
+        #[serde(rename = "localCursor")]
+        local_cursor: bool,
     },
     RemoteOs { macos: bool },
     TouchReady,
@@ -1492,6 +1497,7 @@ impl ServerMsg {
                 microphone,
                 render,
                 grid_debug,
+                local_cursor,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -1503,6 +1509,7 @@ impl ServerMsg {
                 microphone: *microphone,
                 render,
                 grid_debug: *grid_debug,
+                local_cursor: *local_cursor,
             }),
             ServerMsg::CameraStart {
                 width,
@@ -1912,12 +1919,13 @@ mod tests {
             microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: false,
+            local_cursor: false,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false,"localCursor":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1934,6 +1942,7 @@ mod tests {
             microphone: true,
             render: "video q60".to_owned(),
             grid_debug: false,
+            local_cursor: false,
         })
         .text_frame()
         {
@@ -1953,10 +1962,30 @@ mod tests {
             microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: true,
+            local_cursor: false,
         })
         .text_frame()
         {
             Some(json) => assert!(json.contains(r#""gridDebug":true"#), "{json}"),
+            None => panic!("connected must be a text frame"),
+        }
+        // `local_cursor` is a flag beside it, for a VNC server that sends no shape.
+        match (ServerMsg::Connected {
+            name: "wl".to_owned(),
+            protocol: "vnc",
+            subtype: None,
+            resize: true,
+            clipboard: false,
+            audio: false,
+            camera: false,
+            microphone: false,
+            render: "tiles · lossless png".to_owned(),
+            grid_debug: false,
+            local_cursor: true,
+        })
+        .text_frame()
+        {
+            Some(json) => assert!(json.contains(r#""localCursor":true"#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         // A 2x framebuffer is cut at 64 points, which is 128 of its pixels, and the
