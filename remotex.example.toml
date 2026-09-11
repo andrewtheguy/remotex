@@ -181,9 +181,8 @@ password = "change-me"
 # each resize is an EGFX graphics reset: no reactivation or reconnect, so it is
 # cheap enough for the window to drive continuously. The trade is that a Windows
 # host's text stays soft after the resize. Set this false for the sharp legacy
-# path, whose reactivation re-renders the desktop at each size; a Windows session
-# carrying sound on dynamic rdpsnd then reconnects so audio survives. RDP only,
-# and refused on VNC even when set to false.
+# path, whose reactivation re-renders the desktop at each size. RDP only, and
+# refused on VNC even when set to false.
 #egfx = true
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
@@ -192,7 +191,8 @@ password = "change-me"
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
 # all. The Clipboard panel always works regardless, and is the way to move text
 # when automatic sync cannot run.
-# RDP (MS-RDPECLIP) always carries full Unicode text. VNC does too on servers
+# RDP carries no clipboard: the key is accepted, and the session connects without
+# one. VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
 # Both Apple subtypes use the Mac's native UTF-8 pasteboard protocol; High
@@ -200,7 +200,8 @@ password = "change-me"
 #clipboard = false
 
 # Remote audio: carry this target's sound when the client asks for it, with the
-# floating menu's Audio button. RDP carries it over MS-RDPEA. An
+# floating menu's Audio button. RDP carries no sound: the key is accepted, and
+# the session connects silent. An
 # "ard-high-performance" target carries the Mac's system audio over Apple's media
 # stream — EXPERIMENTAL, and only in a gateway built by hand with
 # `cargo build --release --features apple-hp-audio`, because that stream is AAC-ELD
@@ -210,9 +211,8 @@ password = "change-me"
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
-# sound away while nobody is listening. From RDP only 44100 Hz 16-bit stereo PCM
-# is accepted — a server that offers no matching format sends nothing, and the
-# log says so; the Mac's stream decodes to 48000 Hz 16-bit stereo. The Mac sends
+# sound away while nobody is listening. The Mac's stream decodes to 48000 Hz
+# 16-bit stereo. The Mac sends
 # by UDP to this gateway's address on a port it chooses, so it must reach the
 # gateway directly.
 #
@@ -220,10 +220,8 @@ password = "change-me"
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound is simply one of the things that work.
 #
-# Off leaves the remote's sound where it is. An RDP target without audio tells
-# Windows to keep playing on the host's own speakers (mstsc's "play on remote
-# computer"), never to mute the session — so a headset paired to the host stays
-# usable — which is also all a VNC target without audio can do.
+# Off leaves the remote's sound where it is. An RDP session has no audio device
+# either way.
 #audio = false
 
 # How that audio is carried. Valid only with `audio = true` above; setting it

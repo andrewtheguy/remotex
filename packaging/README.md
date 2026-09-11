@@ -96,8 +96,8 @@ them by release version.
 The Linux x86-64 binary targets the baseline x86-64 ISA and dispatches SIMD at
 run time. Neither Cargo configuration nor packaging and CI set `target-cpu`, and
 the prebuilt archives downloaded by the sys crates must use the same baseline
-with their hand-written kernels selected by CPUID: libvpx's rtcd tables, opus's
-`MAY_HAVE` dispatch, and FreeRDP's primitives autodetection. The sys crates fetch
+with their hand-written kernels selected by CPUID: libvpx's rtcd tables and
+opus's `MAY_HAVE` dispatch. The sys crates fetch
 each dependency repository's latest release, so that release's archives—not the
 tag pinned in this repository's `Cargo.toml`—set the effective CPU floor.
 
@@ -112,8 +112,8 @@ binary's global CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt`, `libvpx-prebuilt`, and
-`libfreerdp-prebuilt`. Their sys crates download static archives instead of
+Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
+download static archives instead of
 building vendored C, so this project needs no CMake, assembler, pkg-config,
 libclang, vcpkg, or system copies of those libraries. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source

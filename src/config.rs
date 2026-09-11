@@ -45,8 +45,8 @@ impl Security {
 }
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
-/// the same browser protocol (docs/architecture.md): `rdp` via FreeRDP
-/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
+/// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
+/// client (src/rdp.rs over src/rdp_client), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
 /// with `subtype = "ard"`, Apple Screen Sharing Standard mode over RFB 3.8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
