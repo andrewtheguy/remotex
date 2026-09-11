@@ -819,44 +819,6 @@ pub struct TargetConfig {
     /// that could not do anything.
     #[serde(default)]
     pub audio_bitrate_min: Option<u32>,
-    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC:
-    /// RFB has no equivalent channel, and unlike [`Self::audio`] there is no
-    /// extension carrying one either.
-    ///
-    /// **Experimental**, for lack of tests. The socket's session rules and its
-    /// message encodings are unit tested; the redirection itself is not, and
-    /// there is nothing here to test it against — the MS-RDPECAM enumeration
-    /// channel exists only on a Windows host carrying the Remote Desktop
-    /// Session Host role, which the container dummies are not. The path has
-    /// been verified by hand against one such host and only that way, where
-    /// [`Self::audio`] and the rest of the RDP feature set are exercised on
-    /// every run.
-    ///
-    /// Capability only. The device itself appears when a client enables the
-    /// camera — explicitly, per session, never remembered — by opening
-    /// `/ws/camera`; a target with this key and no such client offers the
-    /// remote nothing. The browser encodes H.264 and the gateway passes it
-    /// through, so there is no codec key beside this one.
-    #[serde(default)]
-    pub camera: bool,
-    /// Offer the remote a redirected microphone (MS-RDPEAI). Rejected for VNC,
-    /// like [`Self::camera`] and for the same reason: RFB has no equivalent
-    /// channel, and no extension carries one. The QEMU Audio extension
-    /// [`Self::audio`] uses runs the other way only.
-    ///
-    /// **Experimental**, for lack of tests, and the camera's twin in that too:
-    /// the socket's session rules are unit tested and `micOpen`/`micClose` are
-    /// pinned byte for byte, while nothing exercises the redirection itself —
-    /// no dummy RDP server here answers the audin channel. Hand-verified
-    /// against a Windows host, unlike [`Self::audio`], which every run covers.
-    ///
-    /// Capability only, and the camera's twin: the microphone flows when a
-    /// client enables it — explicitly, per session, never remembered — by
-    /// opening `/ws/mic`; a target with this key and no such client offers the
-    /// remote silence. The browser captures PCM and the gateway passes it
-    /// through, so there is no codec key beside this one.
-    #[serde(default)]
-    pub microphone: bool,
     /// Render *transport* for this target. Defaults to [`RenderType::Tiles`],
     /// which with the default subtype (lossless PNG) and no [`Self::render_motion`]
     /// is byte-identical to before the dial existed. Validated against
@@ -1729,24 +1691,6 @@ impl ConfigFile {
                     target.name
                 );
             }
-            // The camera is RDP's alone by the same rule: MS-RDPECAM is an RDP
-            // channel and RFB has nothing to redirect a client's camera onto.
-            anyhow::ensure!(
-                !target.camera || target.protocol == Protocol::Rdp,
-                "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
-                 is an RDP channel and RFB has no equivalent. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
-            // The microphone is RDP's alone by the same rule: MS-RDPEAI is an RDP
-            // channel and RFB has nothing to redirect a client's microphone onto.
-            anyhow::ensure!(
-                !target.microphone || target.protocol == Protocol::Rdp,
-                "target {:?} sets microphone on a {} target, and only rdp carries it: MS-RDPEAI \
-                 is an RDP channel and RFB has no equivalent. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
             // is a forgotten `audio = true` rather than a deliberate choice.
@@ -4831,101 +4775,6 @@ mod tests {
         assert_eq!(vnc.targets[0].audio_source_format(), crate::vnc_qemu_audio::SOURCE_FORMAT);
         assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.sample_rate, 48_000);
         assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.bits_per_sample, 16);
-    }
-
-    /// MS-RDPECAM is an RDP channel with no RFB counterpart and no extension
-    /// carrying one, so the key is refused on VNC at parse time and opt-in
-    /// (default off) on RDP.
-    #[test]
-    fn camera_belongs_to_rdp_and_is_refused_on_vnc() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "nope"
-            protocol = "vnc"
-            host = "10.0.0.5"
-            camera = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("camera"), "{rendered}");
-        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
-
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            camera = true
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].camera);
-        assert!(!config.targets[1].camera, "the camera is opt-in");
-    }
-
-    /// The microphone follows the camera's rule: MS-RDPEAI is an RDP channel, so
-    /// the key is refused on VNC at parse time and opt-in (default off) on RDP.
-    #[test]
-    fn microphone_belongs_to_rdp_and_is_refused_on_vnc() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "nope"
-            protocol = "vnc"
-            host = "10.0.0.5"
-            microphone = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("microphone"), "{rendered}");
-        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
-
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            microphone = true
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].microphone);
-        assert!(!config.targets[1].microphone, "the microphone is opt-in");
     }
 
     /// An unset codec reads as Opus, and passthrough can be asked for by name.

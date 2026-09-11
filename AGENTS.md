@@ -96,13 +96,6 @@ documentation.
 - Apple High Performance system audio remains behind the non-default
   `apple-hp-audio` feature and absent from release artifacts. Do not add a second
   decoder beside the feature-gated fdk-aac path.
-- Browser camera redirection is RDP-only, H.264-only, and never transcoded. It
-  uses its own `/ws/camera` socket, is explicit per session, and is bound to both
-  claim and engine. Do not enable FreeRDP's V4L `CHANNEL_RDPECAM` implementation.
-  See [Camera frames](docs/architecture.md#camera-frames).
-- Do not use Windows Server for ordinary camera QA; without the Remote Desktop
-  Session Host role it does not offer the enumeration channel. Camera redirection
-  is not required in the normal QA flow.
 
 ## Packaging and platforms
 

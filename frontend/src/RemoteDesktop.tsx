@@ -43,14 +43,6 @@ export default function RemoteDesktop({
     canAudio,
     audioEnabled,
     audioError,
-    canCamera,
-    cameraEnabled,
-    cameraError,
-    cameraStreaming,
-    canMic,
-    micEnabled,
-    micError,
-    micStreaming,
     videoError,
     audioStream,
     videoStreams,
@@ -75,8 +67,6 @@ export default function RemoteDesktop({
     switchTarget,
     selectDisplay,
     setAudio,
-    setCamera,
-    setMic,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
@@ -89,19 +79,15 @@ export default function RemoteDesktop({
     onUnauthorized,
   );
 
-  // A speaker on the tab title while sound is playing, a camera and a microphone
-  // while each is offered — the one place the desktop has room to say so, since
-  // the toggles live in the drawer, and for the camera and mic it is also the
-  // honest little recording light. At the *front*, not the end: a tab title is
-  // truncated from the right, so a suffix is the first thing to vanish. Desktop
-  // only, so the picker's tab stays the plain branding.
+  // A speaker on the tab title while sound is playing — the one place the
+  // desktop has room to say so, since the toggle lives in the drawer. At the
+  // *front*, not the end: a tab title is truncated from the right, so a suffix is
+  // the first thing to vanish. Desktop only, so the picker's tab stays the plain
+  // branding.
   useEffect(() => {
-    const marks =
-      mode === "desktop"
-        ? `${cameraEnabled ? "🎥 " : ""}${micEnabled ? "🎤 " : ""}${audioEnabled ? "🔊 " : ""}`
-        : "";
+    const marks = mode === "desktop" && audioEnabled ? "🔊 " : "";
     document.title = `${marks}${branding}`;
-  }, [mode, audioEnabled, cameraEnabled, micEnabled, branding]);
+  }, [mode, audioEnabled, branding]);
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
@@ -169,16 +155,6 @@ export default function RemoteDesktop({
           audioStream={audioStream}
           videoStreams={videoStreams}
           onAudioChange={setAudio}
-          canCamera={canCamera}
-          cameraEnabled={cameraEnabled}
-          cameraError={cameraError}
-          cameraStreaming={cameraStreaming}
-          onCameraChange={setCamera}
-          canMic={canMic}
-          micEnabled={micEnabled}
-          micError={micError}
-          micStreaming={micStreaming}
-          onMicChange={setMic}
           macKeyOverridesEnabled={macKeyOverridesEnabled}
           macKeyOverridesActive={macKeyOverridesActive}
           isMacHost={isMacHost}
