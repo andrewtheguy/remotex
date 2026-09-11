@@ -176,13 +176,14 @@ password = "change-me"
 # messages are ignored.
 #resize = false
 
-# RDP graphics pipeline, on by default and independent of `resize`. With both on,
-# each resize is an EGFX graphics reset: no reactivation or reconnect, so it is
-# cheap enough for the window to drive continuously. The trade is that a Windows
-# host's text stays soft after the resize. Set this false for the sharp legacy
-# path, whose reactivation re-renders the desktop at each size. RDP only, and
-# refused on VNC even when set to false.
-#egfx = true
+# RDP graphics pipeline, off by default and independent of `resize`. Off, each
+# resize is a reactivation, which a Windows host answers by re-rendering the
+# desktop sharp at the new size. On, each resize is an EGFX graphics reset — no
+# reactivation or reconnect, cheap enough for the window to drive continuously —
+# but the text stays soft afterwards, and the pipeline's progressive decoder
+# still fails on some Windows hosts partway through a session, which ends it.
+# RDP only, and refused on VNC even when set to false.
+#egfx = false
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
