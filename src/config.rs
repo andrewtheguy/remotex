@@ -735,6 +735,16 @@ pub struct TargetConfig {
     /// time instead of accepted and left inert, the same rule as `egfx`.
     #[serde(default)]
     pub security: Option<Security>,
+    /// Let this target log on over plain TLS — TLS without NLA — whether chosen
+    /// with `security = "tls"` or picked by the server under `"auto"`. Off by
+    /// default because the RDP client verifies no server certificate: without NLA
+    /// the credentials travel in the logon PDU to whoever answered, where NLA
+    /// binds them to the server's TLS key so an interceptor cannot use them. xrdp
+    /// speaks no NLA and needs this. RDP only, and `Option` so that setting it on
+    /// a VNC target is refused at parse time, the same rule as `security`; `None`
+    /// reads as off ([`TargetConfig::allow_plain_tls`]).
+    #[serde(default)]
+    pub allow_plain_tls: Option<bool>,
     /// Allow client-driven resize: hand this target's desktop size to the
     /// client's window. A desktop client reports every window change while this
     /// is on; there is no client-side mode, manual resize command, or second
@@ -1032,6 +1042,12 @@ impl TargetConfig {
     /// RDP's graphics pipeline switch, on unless the operator traded it away.
     pub fn egfx(&self) -> bool {
         self.egfx.unwrap_or(true)
+    }
+
+    /// Whether a plain-TLS logon is allowed, off unless the operator opted in —
+    /// see [`Self::allow_plain_tls`](TargetConfig::allow_plain_tls).
+    pub fn allow_plain_tls(&self) -> bool {
+        self.allow_plain_tls.unwrap_or(false)
     }
 
     /// [`Self::security`] resolved: [`Security::Auto`] unless the operator chose.
@@ -1649,6 +1665,23 @@ impl ConfigFile {
                  nla — RFB settles its own security in the handshake. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            anyhow::ensure!(
+                target.allow_plain_tls.is_none() || target.protocol == Protocol::Rdp,
+                "target {:?} sets allow_plain_tls on a {} target, and only rdp logs on over \
+                 tls. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
+            // Plain TLS hands the credentials to a server whose certificate nobody
+            // checked, so asking for it and nothing else needs the opt-in too — a
+            // session that could only ever fail at logon is better refused here.
+            anyhow::ensure!(
+                target.security() != Security::Tls || target.allow_plain_tls(),
+                "target {:?} sets security = \"tls\", which sends its credentials to a server \
+                 whose certificate is not verified. Use \"nla\" or \"auto\", or set \
+                 allow_plain_tls = true to accept that.",
+                target.name
             );
             // Audio is carried by three paths and refused elsewhere rather than
             // ignored: MS-RDPEA on RDP, the QEMU Audio extension on a generic VNC
@@ -4613,6 +4646,7 @@ mod tests {
             protocol = "rdp"
             host = "10.0.0.5"
             security = "tls"
+            allow_plain_tls = true
 
             [[targets]]
             name = "bare"
@@ -4625,6 +4659,30 @@ mod tests {
         assert_eq!(cfg.targets[0].security, Some(Security::Tls));
         assert_eq!(cfg.targets[1].security, None);
         assert_eq!(cfg.targets[1].security(), Security::Auto);
+        assert!(!cfg.targets[1].allow_plain_tls(), "plain TLS is off unless asked for");
+    }
+
+    /// Plain TLS sends credentials to a server whose certificate nobody checked,
+    /// so a target that asks for it and nothing else has to say it accepts that —
+    /// and the opt-in is RDP's, refused on VNC even when false.
+    #[test]
+    fn plain_tls_needs_its_opt_in_and_the_opt_in_is_rdps() {
+        let parse = |target: &str| {
+            ConfigFile::parse(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"t\"\nhost = \"h\"\n{target}\n",
+                site_passwd_line()
+            ))
+        };
+        let err = parse("protocol = \"rdp\"\nsecurity = \"tls\"").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("allow_plain_tls"), "the way out is named: {rendered}");
+        assert!(parse("protocol = \"rdp\"\nsecurity = \"tls\"\nallow_plain_tls = true").is_ok());
+        // Under "auto" the opt-in is optional: NLA is still on offer.
+        assert!(parse("protocol = \"rdp\"\nallow_plain_tls = true").is_ok());
+        for value in ["true", "false"] {
+            let err = parse(&format!("protocol = \"vnc\"\nallow_plain_tls = {value}")).unwrap_err();
+            assert!(format!("{err:#}").contains("allow_plain_tls"), "{err:#}");
+        }
     }
 
     /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is
