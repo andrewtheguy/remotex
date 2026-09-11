@@ -34,8 +34,8 @@ use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed, single_sequenc
 use log::{debug, info, warn};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 
 use super::egfx::{self, Update};
@@ -186,20 +186,45 @@ impl Session {
         let spawned = std::thread::Builder::new().name("rdp".into()).spawn({
             let framebuffer = Arc::clone(&framebuffer);
             let events = events.clone();
+            let stop = input.stopped();
             move || {
                 // Dropped when this closure returns, however it returns.
                 let _finished = finished_tx;
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                let runtime = match runtime {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        // Nothing has been sent yet, so there is room for this.
+                        let _ = events.try_send(Event::Ended(Err(Error::new(format!(
+                            "could not start the RDP session runtime: {e}"
+                        )))));
+                        return;
+                    }
+                };
                 // A panic here would otherwise take the thread down with no `Ended`
                 // event, and the caller would wait on the receiver forever. Converted
                 // into the disconnection it really is.
                 let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    thread_main(config, commands, &framebuffer, &events)
+                    runtime.block_on(thread_main(config, commands, &framebuffer, &events, stop))
                 }));
                 let result = outcome
                     .unwrap_or_else(|_| Err(Error::new("the RDP session thread panicked")));
-                // Outside the runtime by now, so a blocking send; it returns at once
-                // if the caller has stopped listening.
-                let _ = events.blocking_send(Event::Ended(result));
+                // The last word waits for room like any other event, but not past the
+                // point where a caller dropping this session has given up on the
+                // thread: staying longer would hold a thread nobody is waiting for
+                // against a queue nobody is draining.
+                runtime.block_on(async {
+                    if tokio::time::timeout(JOIN_BUDGET, events.send(Event::Ended(result)))
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            "rdp: the caller took no event for {}s, so the session's last one \
+                             is dropped",
+                            JOIN_BUDGET.as_secs()
+                        );
+                    }
+                });
             }
         });
         let thread = match spawned {
@@ -264,36 +289,32 @@ fn install_crypto_provider() {
     });
 }
 
-fn thread_main(
+async fn thread_main(
     config: Connect,
     mut commands: mpsc::UnboundedReceiver<Command>,
     framebuffer: &Framebuffer,
     events: &mpsc::Sender<Event>,
+    stop: watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::new(format!("could not start the RDP session runtime: {e}")))?;
-    runtime.block_on(async {
-        let display = DisplayCaps::default();
-        let graphics = egfx::Updates::default();
-        let (result, framed) = tokio::select! {
-            // Biased so a session dropped mid-connect stops at the next await rather
-            // than finishing a handshake nobody is waiting for.
-            biased;
-            () = shutdown_requested(&mut commands) => {
-                return Err(Error::new("the session was ended before it connected"));
-            }
-            connected = connect(&config, &display, &graphics) => connected?,
-        };
-        let desktop = result.desktop_size;
-        info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
-        framebuffer.resize(u32::from(desktop.width), u32::from(desktop.height));
-        let _ = events
-            .send(Event::Connected { width: u32::from(desktop.width), height: u32::from(desktop.height) })
-            .await;
-        Active::new(result, framed, framebuffer, events, display, graphics).run(&mut commands).await
-    })
+    let display = DisplayCaps::default();
+    let graphics = egfx::Updates::default();
+    let (result, framed) = tokio::select! {
+        // Biased so a session dropped mid-connect stops at the next await rather
+        // than finishing a handshake nobody is waiting for.
+        biased;
+        () = shutdown_requested(&mut commands) => {
+            return Err(Error::new("the session was ended before it connected"));
+        }
+        connected = connect(&config, &display, &graphics) => connected?,
+    };
+    let desktop = result.desktop_size;
+    info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
+    framebuffer.resize(u32::from(desktop.width), u32::from(desktop.height));
+    // The first event of the session, so there is room for it.
+    let _ = events
+        .send(Event::Connected { width: u32::from(desktop.width), height: u32::from(desktop.height) })
+        .await;
+    Active::new(result, framed, framebuffer, events, display, graphics, stop).run(&mut commands).await
 }
 
 /// Resolves once the caller has asked this session to stop, or dropped every
@@ -529,6 +550,9 @@ struct Active<'a> {
     /// recent, since a resize supersedes every earlier one rather than queueing
     /// behind it.
     pending_resize: Option<(u32, u32, u32)>,
+    /// Raised once the session has been asked to stop, which is what lets a wait
+    /// for room in the caller's queue end — see [`Self::deliver`].
+    stop: watch::Receiver<bool>,
 }
 
 impl<'a> Active<'a> {
@@ -539,6 +563,7 @@ impl<'a> Active<'a> {
         events: &'a mpsc::Sender<Event>,
         display: DisplayCaps,
         graphics: egfx::Updates,
+        stop: watch::Receiver<bool>,
     ) -> Self {
         let desktop = result.desktop_size;
         let (reader, writer) = ironrdp_tokio::split_tokio_framed(framed);
@@ -568,6 +593,7 @@ impl<'a> Active<'a> {
             display,
             resize_ready: false,
             pending_resize: None,
+            stop,
         }
     }
 
@@ -612,14 +638,31 @@ impl<'a> Active<'a> {
     /// Hand the caller an event, after every rectangle painted before it — waiting
     /// for room in the queue if the caller is behind.
     async fn send(&mut self, event: Event) {
-        for rect in self.damage.drain(..) {
-            if self.events.send(Event::Paint(rect)).await.is_err() {
-                break;
+        for rect in std::mem::take(&mut self.damage) {
+            if !self.deliver(Event::Paint(rect)).await {
+                return;
             }
         }
-        // A closed receiver means the caller stopped listening while keeping the
-        // `Session`; the session carries on and events go nowhere.
-        let _ = self.events.send(event).await;
+        self.deliver(event).await;
+    }
+
+    /// One event into the queue, waiting for room. `false` means it was not
+    /// delivered and neither will anything after it be.
+    ///
+    /// The wait ends early when the session has been asked to stop, because the
+    /// command that asked sits in a queue this thread reads only between events:
+    /// waiting here for a caller that is no longer reading would be waiting for a
+    /// caller that has already gone. The event is dropped in that case — the loop
+    /// picks the shutdown up on its next turn and disconnects — and so is a session
+    /// whose receiver is closed, which is a caller that stopped listening while
+    /// keeping its `Session`.
+    async fn deliver(&mut self, event: Event) -> bool {
+        let Self { stop, events, .. } = self;
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|&stop| stop) => false,
+            sent = events.send(event) => sent.is_ok(),
+        }
     }
 
     /// Record a painted rectangle. It goes to the caller at once if the queue has
