@@ -106,6 +106,11 @@ pub(crate) const ENCODING_ZLIB: i32 = 6;
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
 /// the framebuffer.
 const ENCODING_CURSOR: i32 = -239;
+/// Cursor With Alpha pseudo-encoding: the same handover with the shape's alpha
+/// intact — a `S32` encoding, then premultiplied RGBA in it — so a shadow and
+/// antialiased edges survive that the 1-bit mask would cut away. A server that
+/// speaks it prefers it; one that does not goes on sending [`ENCODING_CURSOR`].
+const ENCODING_CURSOR_WITH_ALPHA: i32 = -314;
 /// DesktopSize pseudo-encoding: the server announces a new framebuffer size.
 const ENCODING_DESKTOP_SIZE: i32 = -223;
 /// ExtendedDesktopSize pseudo-encoding: size announcements with a screen
@@ -1260,8 +1265,9 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool) -> Vec<i32> {
     // gains nothing from pixels that have already lost information. Advertising an
     // encoding is a promise to decode it.
     //
-    // Cursor is unconditional (the browser can always draw a pointer), and so are
-    // the two size pseudo-encodings. They are how a server *tells* this end its
+    // Cursor is unconditional (the browser can always draw a pointer), and so is
+    // Cursor With Alpha, which only improves on it, and so are the two size
+    // pseudo-encodings. They are how a server *tells* this end its
     // framebuffer changed size, which is not the same as being asked to change it:
     // that is `resize`, and it is decided where a SetDesktopSize is, never sent on
     // a target without it. A server whose size changes under a client that listed
@@ -1283,6 +1289,7 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool) -> Vec<i32> {
         ENCODING_RRE,
         ENCODING_RAW,
         ENCODING_CURSOR,
+        ENCODING_CURSOR_WITH_ALPHA,
         ENCODING_CONTINUOUS_UPDATES,
         ENCODING_FENCE,
         ENCODING_EXTENDED_DESKTOP_SIZE,
@@ -2897,6 +2904,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
             read_cursor(reader, cursor, (x, y, w, h), sink).await?;
             return Ok(RectEffect::NOTHING);
         }
+        // The same, with the header's hotspot and size and an alpha channel.
+        ENCODING_CURSOR_WITH_ALPHA => {
+            read_alpha_cursor(reader, cursor, (x, y, w, h), sink).await?;
+            return Ok(RectEffect::NOTHING);
+        }
         // No payload at all: the rectangle's presence is the whole message.
         ENCODING_LAST_RECT => return Ok(RectEffect::LAST),
         // DesktopSize: the rect itself is the announcement; no payload.
@@ -3159,6 +3171,63 @@ async fn read_cursor<R: AsyncRead + Unpin>(
     };
     *cursor.lock().unwrap() = state;
     sink.msg(msg).await
+}
+
+/// Read a Cursor With Alpha rect's payload — its own encoding, then the shape —
+/// and forward it as [`read_cursor`] does.
+///
+/// Raw is the only encoding read. The extension lets a server pick any encoding
+/// this end listed, but TigerVNC and QEMU, the servers that speak it, and
+/// wlshare all send Raw, and ZRLE's CPIXEL would drop the very alpha the
+/// extension exists for. Anything else cannot be skipped — its length is not in
+/// the header — so it ends the session with the encoding named.
+///
+/// The spec's pixels are `R, G, B, A` with the alpha premultiplied, divided back
+/// out here for a PNG. QEMU sends its cursor's native `B, G, R, A` words
+/// instead; a greyscale pointer, which is what a guest's usually is, reads the
+/// same either way, and that is the extent of the allowance made for it.
+async fn read_alpha_cursor<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cursor: &SharedCursor,
+    (hx, hy, w, h): (u16, u16, u16, u16),
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+    let encoding = reader.read_i32().await?;
+    anyhow::ensure!(
+        encoding == ENCODING_RAW,
+        "a Cursor With Alpha rect in encoding {encoding}; only Raw is read"
+    );
+    let pixels_len = usize::from(w) * usize::from(h) * BPP;
+    let (state, msg) = if w == 0 || h == 0 {
+        debug!("vnc: server hid the pointer (alpha cursor)");
+        (CursorState::Hidden, ServerMsg::Cursor(None))
+    } else if w > MAX_CURSOR_DIM || h > MAX_CURSOR_DIM {
+        // As for the masked cursor: the server still is not drawing it.
+        warn!("vnc: ignoring an oversized {w}x{h} cursor");
+        discard(reader, pixels_len as u64).await?;
+        (CursorState::Hidden, ServerMsg::Cursor(None))
+    } else {
+        let mut rgba = vec![0u8; pixels_len];
+        reader.read_exact(&mut rgba).await?;
+        unpremultiply(&mut rgba);
+        let shape = CursorShape::from_rgba(w, h, hx, hy, CursorUnit::Pixels, &rgba)?;
+        debug!("vnc: alpha cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
+        (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
+    };
+    *cursor.lock().unwrap() = state;
+    sink.msg(msg).await
+}
+
+/// Divide premultiplied RGBA's alpha back out of its colour, in place, for a
+/// PNG, whose alpha is straight. A fully transparent pixel is cleared to black,
+/// as [`masked_bgrx_to_rgba`] clears one outside the mask.
+fn unpremultiply(rgba: &mut [u8]) {
+    for px in rgba.as_chunks_mut::<BPP>().0 {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = (u32::from(*c) * 255 + a / 2).checked_div(a).map_or(0, |v| v.min(255) as u8);
+        }
+    }
 }
 
 /// The [`ServerMsg`] that reproduces the current pointer state for a browser
@@ -4956,6 +5025,7 @@ mod tests {
                 ENCODING_RRE,
                 ENCODING_RAW,
                 ENCODING_CURSOR,
+                ENCODING_CURSOR_WITH_ALPHA,
                 ENCODING_CONTINUOUS_UPDATES,
                 ENCODING_FENCE,
                 ENCODING_EXTENDED_DESKTOP_SIZE,
@@ -5122,6 +5192,79 @@ mod tests {
         // so the browser is told to fall back rather than left with nothing.
         assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(None))));
         assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
+    }
+
+    // ── Cursor With Alpha pseudo-encoding ───────────────────────────────────
+
+    #[tokio::test]
+    async fn an_alpha_cursor_is_unpremultiplied_into_an_rgba_png() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (sink, mut rx) = test_sink();
+        // 3x1, premultiplied: opaque red, a half-transparent white, and a
+        // transparent pixel whose colour must not survive.
+        let mut payload = ENCODING_RAW.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[255, 0, 0, 255, 128, 128, 128, 128, 7, 7, 7, 0]);
+        let mut reader = payload.as_slice();
+
+        read_alpha_cursor(&mut reader, &cursor, (2, 0, 3, 1), &sink).await.unwrap();
+
+        let shape = match forwarded(&sink, &mut rx).await.unwrap() {
+            ServerMsg::Cursor(Some(shape)) => shape,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!((shape.w, shape.h, shape.hx, shape.hy), (3, 1, 2, 0));
+        assert!(!shape.point_sized, "RFB cursors are framebuffer pixels");
+        assert_eq!(
+            decode_rgba(&shape.png),
+            (3, 1, vec![255, 0, 0, 255, 255, 255, 255, 128, 0, 0, 0, 0])
+        );
+        match cursor_msg(&cursor) {
+            Some(ServerMsg::Cursor(Some(cached))) => assert_eq!(cached, shape),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_alpha_cursor_hides_the_pointer_after_its_encoding() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (sink, mut rx) = test_sink();
+        // The encoding is there even with no pixels after it; a trailing byte
+        // stands in for the next rect.
+        let mut payload = ENCODING_RAW.to_be_bytes().to_vec();
+        payload.push(0xAB);
+        let mut reader = payload.as_slice();
+        read_alpha_cursor(&mut reader, &cursor, (0, 0, 0, 0), &sink).await.unwrap();
+        assert_eq!(reader, &[0xAB]);
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(None))));
+        assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_alpha_cursor_is_drained_and_hides_the_pointer() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (sink, mut rx) = test_sink();
+        let (w, h) = (MAX_CURSOR_DIM + 1, 1);
+        let mut payload = ENCODING_RAW.to_be_bytes().to_vec();
+        payload.extend(std::iter::repeat_n(0u8, usize::from(w) * BPP));
+        payload.push(0xAB);
+        let mut reader = payload.as_slice();
+        read_alpha_cursor(&mut reader, &cursor, (0, 0, w, h), &sink).await.unwrap();
+        assert_eq!(reader, &[0xAB]);
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(None))));
+    }
+
+    /// An encoding other than Raw has no length this end can skip by, so it is
+    /// an error naming it rather than a guess at where the next rect starts.
+    #[tokio::test]
+    async fn an_alpha_cursor_in_another_encoding_ends_the_session() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (sink, _rx) = test_sink();
+        let payload = ENCODING_ZRLE.to_be_bytes();
+        let err = read_alpha_cursor(&mut payload.as_slice(), &cursor, (0, 0, 2, 2), &sink)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("encoding 16"), "{err:#}");
+        assert_eq!(*cursor.lock().unwrap(), CursorState::ServerDrawn);
     }
 
     #[tokio::test]
