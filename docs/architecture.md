@@ -1313,7 +1313,11 @@ takes, so nothing above it knows which was chosen.
 **RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
 (`subtype = "ard"`). It supports None, classic VNC authentication, RealVNC's
 RSA-AES security types (5 and 129), and Apple's Diffie-Hellman security, plus the
-Cursor pseudo-encoding. `ard` selects Apple's authentication and physical-display
+Cursor pseudo-encoding and, on generic `vnc`, Cursor With Alpha — the same shape
+with its alpha, so a shadow and antialiased edges survive where Cursor's 1-bit
+mask cuts them away. Only its Raw form is read, which is what TigerVNC, QEMU and
+wlshare send; QEMU's pixels are in its native `B, G, R, A` rather than the
+spec's `R, G, B, A`, which a greyscale guest pointer does not show. `ard` selects Apple's authentication and physical-display
 metadata and requires the macOS account username and password. Plain VNC carries
 `vnc_password` for classic `VncAuth`, and `username` and `password` for RSA-AES —
 the account a server such as wayvnc (`enable_auth`) or RealVNC checks — taking
