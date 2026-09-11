@@ -1,5 +1,7 @@
 # Repository instructions
 
+the rdp-refactor branch is the base branch for rdp refactor works, branch off it for any rdp refactor works, and merge back to it when done. Do not merge rdp-refactor to main.
+
 Keep this file to rules that change how work is performed. Design explanations,
 protocol details, measurements, and operational guides belong in the linked
 documentation.
