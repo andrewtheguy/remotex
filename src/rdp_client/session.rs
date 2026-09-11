@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use ironrdp::connector::connection_activation::{ConnectionActivationFactory, ConnectionActivationState};
+use ironrdp::connector::ClientConnectorState;
 use ironrdp::connector::sspi::generator::NetworkRequest;
 use ironrdp::connector::{
     self, ClientConnector, ConnectionResult, ConnectorError, ConnectorErrorExt as _, ConnectorResult,
@@ -22,6 +23,7 @@ use ironrdp::pdu::gcc::{ConnectionType, KeyboardType};
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent};
 use ironrdp::pdu::mcs::{DisconnectProviderUltimatum, DisconnectReason, McsMessage};
+use ironrdp::pdu::nego::SecurityProtocol;
 use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp::pdu::x224::X224;
@@ -33,6 +35,7 @@ use log::{debug, info, warn};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::Duration;
 
 use super::egfx::{self, Update};
@@ -57,6 +60,11 @@ pub struct Connect {
     pub width: u32,
     pub height: u32,
     pub security: Security,
+    /// Whether a logon over plain TLS — no NLA — may go ahead. Any server
+    /// certificate is accepted, so without NLA the credentials go to whoever
+    /// answered; a session the server steers there without this is refused before
+    /// they are sent, and one allowed there says so in the log.
+    pub allow_plain_tls: bool,
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
@@ -118,6 +126,30 @@ pub enum Event {
     Ended(Result<(), Error>),
 }
 
+/// How many events may wait for the caller before the session thread waits for it.
+///
+/// Bounded so a caller that falls behind slows the session rather than growing a
+/// queue: paint rectangles fold together on the session thread while the queue is
+/// full (see `Active::paint`), and anything else waits for room — which is the
+/// socket going unread, and so the server slowing down.
+const EVENT_QUEUE: usize = 64;
+
+/// How long one write to the host may take before the connection is given up.
+///
+/// A peer that stops reading leaves a write pending forever where nothing else
+/// notices — Linux's `TCP_USER_TIMEOUT` bounds it, macOS and Windows have no
+/// equivalent — and the session thread cannot see its queue, shutdown included,
+/// while it waits. The same 30 seconds `engine` gives unacknowledged data.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long dropping a [`Session`] waits for its thread before leaving it behind.
+///
+/// Enough for the disconnect the thread sends on the way out (itself bounded to a
+/// second), and short enough that a thread stuck somewhere else cannot hold the
+/// caller's thread with it. A thread left behind still ends — at the latest when
+/// its write times out or its socket fails — and owns nothing the caller needs.
+const JOIN_BUDGET: Duration = Duration::from_secs(3);
+
 // ------------------------------------------------------------------ the session handle
 
 /// A live RDP session.
@@ -130,6 +162,9 @@ pub struct Session {
     input: Input,
     framebuffer: Arc<Framebuffer>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Closed by the thread as it finishes, which is what lets `drop` wait for it
+    /// with a deadline — a `JoinHandle` has none.
+    finished: std::sync::mpsc::Receiver<()>,
 }
 
 impl Session {
@@ -140,9 +175,10 @@ impl Session {
     /// Connecting takes seconds (TCP, TLS, CredSSP, licensing, the first desktop),
     /// and a `start` that blocked for them would have to be called from a thread the
     /// caller was willing to lose anyway.
-    pub fn start(config: Connect) -> (Self, mpsc::UnboundedReceiver<Event>) {
+    pub fn start(config: Connect) -> (Self, mpsc::Receiver<Event>) {
         install_crypto_provider();
-        let (events, receiver) = mpsc::unbounded_channel();
+        let (events, receiver) = mpsc::channel(EVENT_QUEUE);
+        let (finished_tx, finished) = std::sync::mpsc::channel::<()>();
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let input = Input::new(commands_tx);
         let framebuffer = Arc::new(Framebuffer::new());
@@ -151,6 +187,8 @@ impl Session {
             let framebuffer = Arc::clone(&framebuffer);
             let events = events.clone();
             move || {
+                // Dropped when this closure returns, however it returns.
+                let _finished = finished_tx;
                 // A panic here would otherwise take the thread down with no `Ended`
                 // event, and the caller would wait on the receiver forever. Converted
                 // into the disconnection it really is.
@@ -159,20 +197,23 @@ impl Session {
                 }));
                 let result = outcome
                     .unwrap_or_else(|_| Err(Error::new("the RDP session thread panicked")));
-                let _ = events.send(Event::Ended(result));
+                // Outside the runtime by now, so a blocking send; it returns at once
+                // if the caller has stopped listening.
+                let _ = events.blocking_send(Event::Ended(result));
             }
         });
         let thread = match spawned {
             Ok(thread) => Some(thread),
             Err(e) => {
-                // The closure never ran, so nothing else will end this session.
-                let _ = events.send(Event::Ended(Err(Error::new(format!(
+                // The closure never ran, so nothing else will end this session. The
+                // queue is empty, so this cannot be refused for room.
+                let _ = events.try_send(Event::Ended(Err(Error::new(format!(
                     "could not start the RDP session thread: {e}"
                 )))));
                 None
             }
         };
-        (Self { input, framebuffer, thread }, receiver)
+        (Self { input, framebuffer, thread, finished }, receiver)
     }
 
     /// Keyboard, mouse, refresh and resize.
@@ -190,10 +231,23 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.input.shutdown();
         if let Some(thread) = self.thread.take() {
-            // Joined rather than detached, and bounded: the thread's loop — and its
-            // connect, which races the same queue — wakes on the command, sends its
-            // disconnect, and returns.
-            let _ = thread.join();
+            // Joined rather than detached whenever it can be: the thread's loop — and
+            // its connect, which races the same queue — wakes on the command, sends
+            // its disconnect, and returns. Bounded, because a thread busy elsewhere —
+            // in a write the host is not reading, or waiting for room in a queue
+            // nobody is draining — would otherwise hold this thread too.
+            match self.finished.recv_timeout(JOIN_BUDGET) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    warn!(
+                        "rdp: the session thread did not stop within {}s; leaving it to finish \
+                         on its own",
+                        JOIN_BUDGET.as_secs()
+                    );
+                }
+                _ => {
+                    let _ = thread.join();
+                }
+            }
         }
     }
 }
@@ -214,7 +268,7 @@ fn thread_main(
     config: Connect,
     mut commands: mpsc::UnboundedReceiver<Command>,
     framebuffer: &Framebuffer,
-    events: &mpsc::UnboundedSender<Event>,
+    events: &mpsc::Sender<Event>,
 ) -> Result<(), Error> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -235,10 +289,9 @@ fn thread_main(
         let desktop = result.desktop_size;
         info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
         framebuffer.resize(u32::from(desktop.width), u32::from(desktop.height));
-        let _ = events.send(Event::Connected {
-            width: u32::from(desktop.width),
-            height: u32::from(desktop.height),
-        });
+        let _ = events
+            .send(Event::Connected { width: u32::from(desktop.width), height: u32::from(desktop.height) })
+            .await;
         Active::new(result, framed, framebuffer, events, display, graphics).run(&mut commands).await
     })
 }
@@ -313,6 +366,26 @@ async fn connect(
     let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
         .await
         .map_err(|e| Error::chain("RDP negotiation", &e))?;
+    // Nothing secret has crossed yet. Without NLA the credentials would go in the
+    // logon PDU, over a TLS session whose certificate is never checked — and a
+    // server can steer an `"auto"` session there by selecting plain TLS — so that
+    // is refused here unless the target accepted it.
+    if let ClientConnectorState::EnhancedSecurityUpgrade { selected_protocol } = &connector.state {
+        let nla = selected_protocol.intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX);
+        if !nla {
+            if !config.allow_plain_tls {
+                return Err(Error::new(format!(
+                    "{dest} offered only TLS without NLA, which would send the credentials to a \
+                     server whose certificate is not verified; set allow_plain_tls = true on \
+                     this target to accept that"
+                )));
+            }
+            warn!(
+                "rdp: logging on to {dest} over TLS without NLA; the credentials go to a server \
+                 whose certificate is not verified (allow_plain_tls = true)"
+            );
+        }
+    }
     let (tcp, leftover) = framed.into_inner();
     // Any certificate is accepted, for this session only — see the module doc.
     let (tls, certificate) = ironrdp_tls::upgrade(tcp, &server_name)
@@ -425,6 +498,9 @@ fn connector_config(config: &Connect) -> connector::Config {
 
 // ------------------------------------------------------------------ the active session
 
+/// Most rectangles the waiting paint holds before it collapses to one bounding box.
+const DAMAGE_CAP: usize = 32;
+
 /// How many queued commands one turn of the loop takes before it goes back to the
 /// socket: enough to fill a fast-path input PDU, few enough that a burst of input
 /// cannot starve the desktop.
@@ -441,7 +517,10 @@ struct Active<'a> {
     refresh_rect: bool,
     suppress_output: bool,
     framebuffer: &'a Framebuffer,
-    events: &'a mpsc::UnboundedSender<Event>,
+    events: &'a mpsc::Sender<Event>,
+    /// Painted rectangles not yet handed to the caller, folded together while the
+    /// event queue is full — see [`EVENT_QUEUE`].
+    damage: Vec<Rect>,
     graphics: egfx::Updates,
     display: DisplayCaps,
     /// Whether [`Event::ResizeReady`] has gone out.
@@ -457,7 +536,7 @@ impl<'a> Active<'a> {
         result: ConnectionResult,
         framed: TokioFramed<Tls>,
         framebuffer: &'a Framebuffer,
-        events: &'a mpsc::UnboundedSender<Event>,
+        events: &'a mpsc::Sender<Event>,
         display: DisplayCaps,
         graphics: egfx::Updates,
     ) -> Self {
@@ -484,6 +563,7 @@ impl<'a> Active<'a> {
             suppress_output: result.suppress_output_support,
             framebuffer,
             events,
+            damage: Vec::new(),
             graphics,
             display,
             resize_ready: false,
@@ -502,6 +582,18 @@ impl<'a> Active<'a> {
                         return ended;
                     }
                 }
+                // Paint that waited for room in the queue, sent as soon as there is
+                // some even if the host goes quiet.
+                permit = self.events.reserve(), if !self.damage.is_empty() => {
+                    match permit {
+                        Ok(permit) => {
+                            permit.send(Event::Paint(self.damage.remove(0)));
+                            self.try_send_damage();
+                        }
+                        // The caller stopped listening; nothing will read these.
+                        Err(_) => self.damage.clear(),
+                    }
+                }
                 command = commands.recv() => {
                     let stop = match command {
                         Some(command) => self.on_commands(command, commands).await?,
@@ -517,20 +609,69 @@ impl<'a> Active<'a> {
         }
     }
 
-    fn send(&self, event: Event) {
+    /// Hand the caller an event, after every rectangle painted before it — waiting
+    /// for room in the queue if the caller is behind.
+    async fn send(&mut self, event: Event) {
+        for rect in self.damage.drain(..) {
+            if self.events.send(Event::Paint(rect)).await.is_err() {
+                break;
+            }
+        }
         // A closed receiver means the caller stopped listening while keeping the
         // `Session`; the session carries on and events go nowhere.
-        let _ = self.events.send(event);
+        let _ = self.events.send(event).await;
+    }
+
+    /// Record a painted rectangle. It goes to the caller at once if the queue has
+    /// room, and otherwise folds into what is already waiting: one overlapping an
+    /// earlier rectangle becomes their union, and past [`DAMAGE_CAP`] everything
+    /// collapses to one bounding box — coarser, never longer.
+    fn paint(&mut self, rect: Rect) {
+        let union = |a: Rect, b: Rect| {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            let right = (a.x + a.width).max(b.x + b.width);
+            let bottom = (a.y + a.height).max(b.y + b.height);
+            Rect { x, y, width: right - x, height: bottom - y }
+        };
+        let overlaps = |a: &Rect, b: &Rect| {
+            a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+        };
+        if let Some(waiting) = self.damage.iter_mut().find(|waiting| overlaps(waiting, &rect)) {
+            *waiting = union(*waiting, rect);
+        } else if self.damage.len() >= DAMAGE_CAP {
+            let whole = self.damage.drain(..).fold(rect, union);
+            self.damage.push(whole);
+        } else {
+            self.damage.push(rect);
+        }
+        self.try_send_damage();
+    }
+
+    /// Send waiting rectangles while the queue has room, keeping the rest.
+    fn try_send_damage(&mut self) {
+        while let Some(&rect) = self.damage.first() {
+            match self.events.try_send(Event::Paint(rect)) {
+                Ok(()) => {
+                    self.damage.remove(0);
+                }
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Closed(_)) => self.damage.clear(),
+            }
+        }
     }
 
     async fn write(&mut self, frame: &[u8]) -> Result<(), Error> {
         if frame.is_empty() {
             return Ok(());
         }
-        self.writer
-            .write_all(frame)
-            .await
-            .map_err(|e| Error::new(format!("the connection to the host failed: {e}")))
+        match tokio::time::timeout(WRITE_TIMEOUT, self.writer.write_all(frame)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(Error::new(format!("the connection to the host failed: {e}"))),
+            Err(_) => Err(Error::new(format!(
+                "the connection to the host failed: it accepted nothing for {}s",
+                WRITE_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     /// One PDU from the server. `Some` is the session's end.
@@ -545,11 +686,11 @@ impl<'a> Active<'a> {
                 ActiveStageOutput::GraphicsUpdate(region) => self.paint_image(region),
                 ActiveStageOutput::PointerBitmap(decoded) => {
                     if let Some(image) = pointer::image(&decoded) {
-                        self.send(Event::Cursor(Cursor::Image(image)));
+                        self.send(Event::Cursor(Cursor::Image(image))).await;
                     }
                 }
-                ActiveStageOutput::PointerHidden => self.send(Event::Cursor(Cursor::Hidden)),
-                ActiveStageOutput::PointerDefault => self.send(Event::Cursor(Cursor::Default)),
+                ActiveStageOutput::PointerHidden => self.send(Event::Cursor(Cursor::Hidden)).await,
+                ActiveStageOutput::PointerDefault => self.send(Event::Cursor(Cursor::Default)).await,
                 ActiveStageOutput::Terminate(reason) => {
                     info!("rdp: the server ended the session: {reason}");
                     return Ok(Some(match reason {
@@ -571,13 +712,13 @@ impl<'a> Active<'a> {
             debug!("rdp: a bitmap update was discarded; asking for a repaint");
             self.refresh().await?;
         }
-        self.apply_graphics();
+        self.apply_graphics().await;
         self.poll_display_control().await?;
         Ok(None)
     }
 
     /// Copy a rectangle the legacy path painted into `image` out to the framebuffer.
-    fn paint_image(&self, region: InclusiveRectangle) {
+    fn paint_image(&mut self, region: InclusiveRectangle) {
         if region.right < region.left || region.bottom < region.top {
             return;
         }
@@ -588,34 +729,37 @@ impl<'a> Active<'a> {
             height: u32::from(region.bottom - region.top) + 1,
         };
         if self.framebuffer.blit(self.image.data(), self.image.stride(), rect) {
-            self.send(Event::Paint(rect));
+            self.paint(rect);
         }
     }
 
     /// Everything the graphics pipeline queued while the last PDU was processed.
-    fn apply_graphics(&mut self) {
+    async fn apply_graphics(&mut self) {
         for update in self.graphics.take() {
             match update {
                 Update::Reset { width, height } => {
                     info!("rdp: graphics reset, desktop {width}x{height}");
-                    self.redefine_desktop(width, height);
+                    self.redefine_desktop(width, height).await;
                 }
                 Update::Paint { rect, rgba } => {
                     if self.framebuffer.blit_packed(rect, &rgba) {
-                        self.send(Event::Paint(rect));
+                        self.paint(rect);
                     }
                 }
-                Update::FrameEnd => self.send(Event::Frame),
+                Update::FrameEnd => self.send(Event::Frame).await,
             }
         }
     }
 
     /// The desktop is now `width` × `height`: both copies of it start again, blank,
     /// and the caller is told.
-    fn redefine_desktop(&mut self, width: u32, height: u32) {
+    async fn redefine_desktop(&mut self, width: u32, height: u32) {
         self.image = DecodedImage::new(PixelFormat::RgbA32, narrow(width), narrow(height));
         self.framebuffer.resize(width, height);
-        self.send(Event::Resize { width, height });
+        // Rectangles of the desktop that just went away name pixels that no longer
+        // exist; the caller starts over from the resize anyway.
+        self.damage.clear();
+        self.send(Event::Resize { width, height }).await;
     }
 
     /// Announce Display Control the first time it is ready, and send whatever size
@@ -623,7 +767,7 @@ impl<'a> Active<'a> {
     async fn poll_display_control(&mut self) -> Result<(), Error> {
         if !self.resize_ready && self.stage.display_control_ready() == Some(true) {
             self.resize_ready = true;
-            self.send(Event::ResizeReady { max_area: self.display.max_area() });
+            self.send(Event::ResizeReady { max_area: self.display.max_area() }).await;
             self.send_layout().await?;
         }
         Ok(())
@@ -711,7 +855,8 @@ impl<'a> Active<'a> {
                 self.refresh_rect = refresh_rect_support;
                 self.suppress_output = suppress_output_support;
                 info!("rdp: reactivated, desktop {}x{}", desktop_size.width, desktop_size.height);
-                self.redefine_desktop(u32::from(desktop_size.width), u32::from(desktop_size.height));
+                self.redefine_desktop(u32::from(desktop_size.width), u32::from(desktop_size.height))
+                    .await;
                 return Ok(());
             }
         }

@@ -28,7 +28,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use remotex::rdp_client::{Connect, Event, Session};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 
 /// Which target in `tmp/test_uat.toml` to drive — see the module docs.
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
@@ -43,7 +43,7 @@ const RESIZED: (u32, u32) = (1600, 900);
 const RESIZE_BUDGET: Duration = Duration::from_secs(30);
 const RESIZE_RETRY: Duration = Duration::from_secs(2);
 
-fn connect(egfx: bool) -> (Session, UnboundedReceiver<Event>) {
+fn connect(egfx: bool) -> (Session, Receiver<Event>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
@@ -58,6 +58,7 @@ fn connect(egfx: bool) -> (Session, UnboundedReceiver<Event>) {
         width: OPENING.0,
         height: OPENING.1,
         security: target.security(),
+        allow_plain_tls: target.allow_plain_tls(),
         resize: true,
         egfx,
     })
@@ -76,7 +77,7 @@ struct Tally {
 /// Read events until `until` says stop or `deadline` passes. Panics on an ended
 /// session: every case here expects the session to survive.
 async fn pump(
-    events: &mut UnboundedReceiver<Event>,
+    events: &mut Receiver<Event>,
     tally: &mut Tally,
     deadline: Instant,
     mut until: impl FnMut(&Tally) -> bool,
@@ -112,7 +113,7 @@ fn lit(session: &Session) -> (u64, u64) {
 /// does. Returns how long the host took.
 async fn resize_to(
     session: &Session,
-    events: &mut UnboundedReceiver<Event>,
+    events: &mut Receiver<Event>,
     tally: &mut Tally,
     size: (u32, u32),
 ) -> Duration {
