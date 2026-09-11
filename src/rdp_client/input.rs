@@ -7,12 +7,14 @@
 //! that arrives while the connection is closing has no useful error for the caller
 //! to handle, and a `Result` on every key press would be noise.
 
+use std::sync::Arc;
+
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::PointerFlags;
 use ironrdp::pdu::input::mouse_x::PointerXFlags;
 use ironrdp::pdu::input::{MousePdu, MouseXPdu};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// A mouse button, in the three the RDP fast-path mouse event encodes directly
 /// plus the two extended ones.
@@ -43,6 +45,13 @@ pub(super) enum Command {
 #[derive(Clone)]
 pub struct Input {
     commands: mpsc::UnboundedSender<Command>,
+    /// Raised by [`Input::shutdown`] beside the queued [`Command::Shutdown`].
+    ///
+    /// The queued command is what ends the session properly, but the session
+    /// thread only sees its queue between events; a thread parked on a full event
+    /// queue would not reach it until the caller drained one. This is the same
+    /// news on a path that needs no room — see `Active::deliver`.
+    stop: Arc<watch::Sender<bool>>,
 }
 
 /// The largest rotation one wheel event carries: the wire field is nine-bit two's
@@ -52,7 +61,12 @@ const MAX_WHEEL_ROTATION: i16 = 255;
 
 impl Input {
     pub(super) fn new(commands: mpsc::UnboundedSender<Command>) -> Self {
-        Self { commands }
+        Self { commands, stop: Arc::new(watch::channel(false).0) }
+    }
+
+    /// Watches for [`Input::shutdown`], for the session thread.
+    pub(super) fn stopped(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
     }
 
     /// An input whose queue nobody drains, for a test that needs a handle and no
@@ -176,6 +190,9 @@ impl Input {
     }
 
     pub(super) fn shutdown(&self) {
+        // Raised first, so a thread waiting for room stops waiting before it is
+        // asked to stop.
+        let _ = self.stop.send(true);
         self.push(Command::Shutdown);
     }
 
@@ -318,6 +335,20 @@ mod tests {
         for (width, _) in [sanitise_size(0, 600), sanitise_size(u32::MAX, 600), sanitise_size(1, 1)] {
             assert_eq!(width % 2, 0, "the clamp produced an odd width");
         }
+    }
+
+    /// The queued command is what ends the session, but a session thread parked on
+    /// a full event queue reaches its commands only once the caller takes an event.
+    /// The watch is the same news by a route that needs nothing of the caller.
+    #[test]
+    fn a_shutdown_is_announced_as_well_as_queued() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let input = Input::new(tx);
+        let stop = input.stopped();
+        assert!(!*stop.borrow(), "nothing has asked this session to stop");
+        input.shutdown();
+        assert!(*stop.borrow(), "a thread with no room to send is told anyway");
+        assert!(matches!(rx.try_recv(), Ok(Command::Shutdown)), "and the command still goes to the loop");
     }
 
     #[test]
