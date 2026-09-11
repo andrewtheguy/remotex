@@ -11,10 +11,9 @@ reaches every target — RDP, VNC and Macs alike — with nothing to install per
 platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
 for rather than scaled on the client; plain `vnc`, Apple High Performance and
-`rdp` can all be handed the window. On RDP the default `egfx` pipeline makes that
-cheap — a display layout, no reactivation — at the cost of a Windows host's text
-staying soft afterwards; `egfx = false` re-renders sharp and pays a reactivation
-per resize.
+`rdp` can all be handed the window. On RDP each resize reactivates the session, so
+a Windows host re-renders the desktop sharp at the new size; `egfx = true` trades
+that for a cheaper display-layout resize whose text stays soft.
 
 - RDP uses a built-in client on [IronRDP](https://github.com/Devolutions/IronRDP)'s
   protocol crates: the desktop over the graphics pipeline or plain bitmaps,

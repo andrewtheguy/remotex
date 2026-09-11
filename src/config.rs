@@ -777,18 +777,22 @@ pub struct TargetConfig {
     /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
-    /// RDP's graphics pipeline (EGFX), on by default and decoupled from
-    /// [`Self::resize`]. With both on, a resize is a Display Control monitor
-    /// layout under the pipeline — a graphics reset, no reactivation and no
-    /// reconnect — which is what makes handing the size to the window cheap
-    /// enough to do on every drag. The trade is a Windows host's text staying
-    /// soft after an EGFX resize, where the legacy path's reactivation
-    /// re-renders it sharp: set `egfx = false` to buy sharp text at the price
-    /// of a reactivation per resize (and a reconnect where sound negotiated on
-    /// the dynamic `rdpsnd` transport). `Option` rather than a bare default so
-    /// that setting it on a VNC target, which has no graphics pipeline to
-    /// switch, is refused at parse time instead of accepted and left inert;
-    /// `None` reads as on ([`TargetConfig::egfx`]).
+    /// RDP's graphics pipeline (EGFX), off by default and decoupled from
+    /// [`Self::resize`]. Off, a resize is a Deactivation-Reactivation Sequence,
+    /// and a Windows host re-renders the desktop sharp at the new size. On, a
+    /// resize is a Display Control monitor layout under the pipeline — a
+    /// graphics reset, no reactivation and no reconnect — which is cheaper on
+    /// every drag, at the price of text staying soft afterward.
+    ///
+    /// The default is off because the pipeline's RFX Progressive decoder still
+    /// fails on some Windows hosts mid-session, which ends the session; the
+    /// legacy bitmap path decodes everything this client needs. Turn it on to
+    /// trade that risk for the cheaper resize.
+    ///
+    /// `Option` rather than a bare default so that setting it on a VNC target,
+    /// which has no graphics pipeline to switch, is refused at parse time
+    /// instead of accepted and left inert; `None` reads as off
+    /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
     /// Clipboard bridge: let the browser read and write this target's
@@ -1054,9 +1058,9 @@ impl TargetConfig {
         self.pinned_size().unwrap_or(DEFAULT_SIZE)
     }
 
-    /// RDP's graphics pipeline switch, on unless the operator traded it away.
+    /// RDP's graphics pipeline switch, off unless the operator asked for it.
     pub fn egfx(&self) -> bool {
-        self.egfx.unwrap_or(true)
+        self.egfx.unwrap_or(false)
     }
 
     /// Whether a plain-TLS logon is allowed, off unless the operator opted in —
@@ -2545,7 +2549,7 @@ mod tests {
         assert_eq!(t.security(), Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
-        assert!(t.egfx(), "the graphics pipeline is on unless the operator trades it away");
+        assert!(!t.egfx(), "the graphics pipeline is opt-in");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.audio, "remote audio is opt-in");
     }

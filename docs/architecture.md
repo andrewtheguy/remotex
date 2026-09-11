@@ -974,7 +974,7 @@ an engine without it drops them all, and the client sends them exactly
 when `connected` said `resize` — on every window change, with no toggle, no
 manual button and no remembered preference beside it. Standard `ard` rejects
 `resize` at config parse because it shares physical displays. On RDP the `egfx`
-key (default true) keeps the graphics pipeline on, making each resize a graphics
+key (default false) turns the graphics pipeline on, making each resize a graphics
 reset instead of a reactivation; that trade is the operator's, not the client's.
 
 The opening size is one rule for every engine that can ask for one: the pinned
@@ -1130,18 +1130,22 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-The `egfx` target key controls the Graphics Pipeline and defaults to true,
-independently of `resize`. It is offered without an H.264 decoder, so a server
-picks among the codecs IronRDP decodes in Rust. The pipeline is wrapped rather than
-registered directly (`src/rdp_client/egfx.rs`): IronRDP's session composites
-pipeline output into an image sized at connect and never resized, so a graphics
-reset to a larger desktop would drop every region outside the old one; the wrapper
-drains the compositor itself and applies the reset first. Under EGFX, a resize is a
-graphics reset with no reactivation or reconnect; the trade is that a Windows host's
-text stays soft afterward. `egfx = false` selects the legacy bitmap path, whose full
-reactivation re-renders the desktop sharp. Servers without the pipeline (xrdp among
-them) also use that legacy path. The client announces no drawing orders, so the
-legacy path is bitmaps throughout.
+The `egfx` target key controls the Graphics Pipeline and defaults to false,
+independently of `resize`. The default is the legacy bitmap path, where a resize is
+a full reactivation that makes a Windows host re-render the desktop sharp, and
+where the decoding is the interleaved and planar bitmap codecs alone — the client
+announces no drawing orders, so that path is bitmaps throughout. Servers without
+the pipeline (xrdp among them) use it regardless of the key. It is also what the
+pipeline's RFX Progressive decoder costs to avoid: that decoder still fails partway
+through a session on some Windows hosts, and a decode error ends the session.
+
+`egfx = true` offers the pipeline, without an H.264 decoder, so a server picks among
+the codecs IronRDP decodes in Rust; a resize is then a graphics reset with no
+reactivation or reconnect, at the price of text staying soft afterward. The pipeline
+is wrapped rather than registered directly (`src/rdp_client/egfx.rs`): IronRDP's
+session composites pipeline output into an image sized at connect and never resized,
+so a graphics reset to a larger desktop would drop every region outside the old one;
+the wrapper drains the compositor itself and applies the reset first.
 
 The pointer is not part of that framebuffer. RDP servers send the cursor's shape
 rather than drawing it, and each shape goes to the client as `cursor`, which draws
