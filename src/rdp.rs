@@ -44,8 +44,6 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::AudioBridge;
-use crate::camera::CameraBridge;
-use crate::mic::MicBridge;
 use crate::config::{RenderPlan, Security, TargetConfig};
 use crate::copies;
 use crate::encode::TileSink;
@@ -56,9 +54,7 @@ use crate::protocol::{
     MouseButton, ServerMsg, TileGrid, TouchPhase, UNSCALED,
 };
 use crate::rdp_audio;
-use crate::rdp_camera;
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
-use crate::rdp_mic;
 use crate::tiles::{self, Rect, Shadow};
 
 // A Windows peer can advertise Unicode text, fail the first FormatDataRequest,
@@ -188,8 +184,6 @@ fn connect_budget() -> Duration {
 /// calls on its own thread, never through the `select!` below. That is the whole
 /// separation — see [`crate::rdp_audio`], which also says what a `None` asks the
 /// host to do with its sound instead.
-// Eight handoffs matching the engine spawner's surface; see spawn_engine.
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
     plan: RenderPlan,
@@ -197,12 +191,10 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
-    camera: Option<Arc<CameraBridge>>,
-    microphone: Option<Arc<MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, plan, feedback);
-    session(config, display, input_rx, &sink, audio, camera, microphone).await;
+    session(config, display, input_rx, &sink, audio).await;
     sink.finish().await;
 }
 
@@ -247,11 +239,8 @@ async fn session(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
     audio: Option<Arc<AudioBridge>>,
-    camera: Option<Arc<CameraBridge>>,
-    microphone: Option<Arc<MicBridge>>,
 ) {
-    let (session, events) =
-        Session::start(connect_config(&config, display, audio, camera, microphone));
+    let (session, events) = Session::start(connect_config(&config, display, audio));
     let mut events = bridge_events(events);
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
@@ -383,8 +372,6 @@ fn connect_config(
     config: &TargetConfig,
     display: Option<HostDisplay>,
     audio: Option<Arc<AudioBridge>>,
-    camera: Option<Arc<CameraBridge>>,
-    microphone: Option<Arc<MicBridge>>,
 ) -> Connect {
     // The opening size, in points at 1x: the pinned config size, else the full
     // resolution of the client's own screen — the same rule every engine
@@ -412,8 +399,8 @@ fn connect_config(
         },
         clipboard: config.clipboard,
         audio: rdp_audio::connect(audio),
-        camera: rdp_camera::connect(camera),
-        microphone: rdp_mic::connect(microphone),
+        camera: None,
+        microphone: None,
         resize: config.resize,
         egfx: config.egfx(),
         // Always offered, not a target key: whether touch exists is the host's
@@ -1624,14 +1611,10 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
         // them: it empties that socket's tile cache and injects its own `Refresh`.
-        // `CameraFormat` is the camera socket's opening message and acts on the
-        // slot's camera bridge the same way; the camera itself reaches this
-        // engine through `Connect::camera`, never through input.
         ClientMsg::Connect { .. }
         | ClientMsg::Disconnect
         | ClientMsg::CacheReset
-        | ClientMsg::PaintAck { .. }
-        | ClientMsg::CameraFormat { .. } => Vec::new(),
+        | ClientMsg::PaintAck { .. } => Vec::new(),
         // An RDP session is one framebuffer spanning every monitor the server
         // composed into it, and its protocol has no way to ask for one of them.
         // So this engine never sends a display list, no client offers the

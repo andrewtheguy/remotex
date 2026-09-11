@@ -360,23 +360,6 @@ pub enum ClientMsg {
         x: i32,
         y: i32,
     },
-    /// What the browser's camera will send, and the camera socket's opening
-    /// move: `/ws/camera`'s first message must be this, and it is what plugs
-    /// the virtual device into the remote. Never sent on the session socket —
-    /// the camera has its own socket the way audio does, and this message is
-    /// that socket's only text traffic inbound.
-    ///
-    /// The fields are the H.264 the browser's encoder is configured for, and
-    /// the remote is offered exactly this one media type. The rate is rational
-    /// because both ends speak one: browsers report 29.97 as 30000/1001.
-    CameraFormat {
-        width: u32,
-        height: u32,
-        #[serde(rename = "fpsNumerator")]
-        fps_numerator: u32,
-        #[serde(rename = "fpsDenominator")]
-        fps_denominator: u32,
-    },
 }
 
 /// The layout of a server -> client binary frame: a **batch** of records.
@@ -491,38 +474,6 @@ pub mod audio {
             frame.extend_from_slice(packet);
         }
         frame
-    }
-}
-
-/// The layout of a client -> server **camera** frame: one encoded H.264 access
-/// unit, on `/ws/camera` and nowhere else.
-///
-/// ```text
-/// offset 0: u8  frame kind, always 0x04 (camera sample)
-/// offset 1: u8  flags — bit 0 set on a keyframe; a receiver rejects the rest
-/// offset 2: the access unit, to the end of the WebSocket frame
-/// ```
-///
-/// The only binary frame the gateway *receives*: everything else inbound is
-/// JSON text. No packet table like [`audio`]'s, because the unit of transfer is
-/// the unit of decode — one access unit per frame per WebSocket message — and
-/// the keyframe bit exists so the gateway's drop policy can recover a stream
-/// without parsing H.264.
-pub mod camera {
-    pub const FRAME_KIND: u8 = 0x04;
-    pub const HEADER_LEN: usize = 2;
-    const FLAG_KEYFRAME: u8 = 0x01;
-
-    /// Split one camera frame into its keyframe bit and access unit, or `None`
-    /// for anything malformed — an unknown kind, a flag this version does not
-    /// define, or an empty unit. A bad frame is dropped whole, for the same
-    /// reason the audio parser drops rather than salvages: a partial unit can
-    /// wedge a decoder where a missing one cannot.
-    pub fn parse(frame: &[u8]) -> Option<(bool, &[u8])> {
-        if frame.len() <= HEADER_LEN || frame[0] != FRAME_KIND || frame[1] & !FLAG_KEYFRAME != 0 {
-            return None;
-        }
-        Some((frame[1] & FLAG_KEYFRAME != 0, &frame[HEADER_LEN..]))
     }
 }
 
@@ -1161,14 +1112,6 @@ pub enum ServerMsg {
         resize: bool,
         clipboard: bool,
         audio: bool,
-        /// Whether this target redirects the browser's camera to the remote.
-        /// Capability only, like `audio` — enabling is the client's move, made
-        /// afresh each session by opening `/ws/camera`, and never remembered.
-        camera: bool,
-        /// Whether this target redirects the browser's microphone to the remote.
-        /// Capability only, the camera's twin — enabling is the client's move,
-        /// made afresh each session by opening `/ws/mic`, and never remembered.
-        microphone: bool,
         /// The render dial this session resolved to, as one line — see
         /// [`crate::config::RenderPlan::describe`].
         ///
@@ -1296,38 +1239,6 @@ pub enum ServerMsg {
     /// **Ordered against [`ServerMsg::Video`] like a format is.** Ids are reused, so
     /// this must not overtake the units of the next stream to be given the same one.
     VideoEnd { stream: u8 },
-    /// The remote started consuming the camera — an application on it opened
-    /// the device — and the browser should encode and send from now on,
-    /// starting at a keyframe. Camera-socket traffic only, like the two below:
-    /// these three relay the remote's streaming decisions to the one browser
-    /// driving `/ws/camera`, and never appear on the session socket.
-    ///
-    /// The format is the remote's confirmation and always the one the client
-    /// announced in [`ClientMsg::CameraFormat`] — the gateway advertises
-    /// exactly one media type — so it is a check, not a renegotiation.
-    CameraStart {
-        width: u32,
-        height: u32,
-        fps_numerator: u32,
-        fps_denominator: u32,
-    },
-    /// The remote stopped consuming the camera. Encoding should stop; the
-    /// device stays plugged and another [`ServerMsg::CameraStart`] may follow.
-    CameraStop,
-    /// Samples were dropped and the stream cannot resume mid-GOP: the next
-    /// frame the browser sends must be a keyframe.
-    CameraKeyframe,
-    /// The remote opened the microphone — an application on it began capturing —
-    /// in the PCM format it chose. Relayed to the one browser driving `/ws/mic`,
-    /// which starts capturing at this rate and channel count and streaming raw
-    /// signed-16-bit PCM. Never appears on the session socket.
-    MicOpen {
-        sample_rate: u32,
-        channels: u16,
-    },
-    /// The remote closed the microphone. Capture should stop; another
-    /// [`ServerMsg::MicOpen`] may follow if the host reopens.
-    MicClose,
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -1373,8 +1284,6 @@ enum ControlMsg<'a> {
         resize: bool,
         clipboard: bool,
         audio: bool,
-        camera: bool,
-        microphone: bool,
         render: &'a str,
         #[serde(rename = "gridDebug")]
         grid_debug: bool,
@@ -1412,22 +1321,6 @@ enum ControlMsg<'a> {
     VideoEnd {
         stream: u8,
     },
-    CameraStart {
-        width: u32,
-        height: u32,
-        #[serde(rename = "fpsNumerator")]
-        fps_numerator: u32,
-        #[serde(rename = "fpsDenominator")]
-        fps_denominator: u32,
-    },
-    CameraStop,
-    CameraKeyframe,
-    MicOpen {
-        #[serde(rename = "sampleRate")]
-        sample_rate: u32,
-        channels: u16,
-    },
-    MicClose,
 }
 
 /// [`DisplayInfo`] as it goes out: `virtual_display` is `virtual` on the wire,
@@ -1488,8 +1381,6 @@ impl ServerMsg {
                 resize,
                 clipboard,
                 audio,
-                camera,
-                microphone,
                 render,
                 grid_debug,
             } => control(&ControlMsg::Connected {
@@ -1499,32 +1390,9 @@ impl ServerMsg {
                 resize: *resize,
                 clipboard: *clipboard,
                 audio: *audio,
-                camera: *camera,
-                microphone: *microphone,
                 render,
                 grid_debug: *grid_debug,
             }),
-            ServerMsg::CameraStart {
-                width,
-                height,
-                fps_numerator,
-                fps_denominator,
-            } => control(&ControlMsg::CameraStart {
-                width: *width,
-                height: *height,
-                fps_numerator: *fps_numerator,
-                fps_denominator: *fps_denominator,
-            }),
-            ServerMsg::CameraStop => control(&ControlMsg::CameraStop),
-            ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
-            ServerMsg::MicOpen {
-                sample_rate,
-                channels,
-            } => control(&ControlMsg::MicOpen {
-                sample_rate: *sample_rate,
-                channels: *channels,
-            }),
-            ServerMsg::MicClose => control(&ControlMsg::MicClose),
             ServerMsg::VideoEnd { stream } => control(&ControlMsg::VideoEnd { stream: *stream }),
             ServerMsg::VideoFormat { stream, decode } => {
                 control(&ControlMsg::VideoFormat { stream: *stream, decode })
@@ -1811,78 +1679,6 @@ mod tests {
         );
     }
 
-    /// The camera frame parser: the one binary the gateway *receives*. The
-    /// browser's builder (`encodeCameraFrame` in frontend/src/protocol.ts) has its
-    /// own tests over the same bytes — the independent two-ends check the audio
-    /// frame gets in the other direction.
-    #[test]
-    fn a_camera_frame_is_kind_flags_then_the_unit() {
-        assert_eq!(camera::parse(&[0x04, 0x01, 9, 8]), Some((true, &[9u8, 8][..])));
-        assert_eq!(camera::parse(&[0x04, 0x00, 7]), Some((false, &[7u8][..])));
-        // Malformed frames are dropped whole: wrong kind, unknown flags, no unit.
-        assert_eq!(camera::parse(&[0x03, 0x00, 7]), None, "an audio kind is not a sample");
-        assert_eq!(camera::parse(&[0x04, 0x02, 7]), None, "an unknown flag is a newer gateway");
-        assert_eq!(camera::parse(&[0x04, 0x01]), None, "an empty unit is not a sample");
-        assert_eq!(camera::parse(&[]), None);
-    }
-
-    /// The camera control messages, pinned byte for byte like the audio format:
-    /// the streaming decisions the browser obeys, on the camera socket alone.
-    #[test]
-    fn the_camera_controls_are_text_frames() {
-        let start = (ServerMsg::CameraStart {
-            width: 1280,
-            height: 720,
-            fps_numerator: 30_000,
-            fps_denominator: 1_001,
-        })
-        .text_frame()
-        .expect("cameraStart must be a text frame");
-        assert_eq!(
-            start,
-            r#"{"type":"cameraStart","width":1280,"height":720,"fpsNumerator":30000,"fpsDenominator":1001}"#
-        );
-        assert_eq!(
-            ServerMsg::CameraStop.text_frame().as_deref(),
-            Some(r#"{"type":"cameraStop"}"#)
-        );
-        assert_eq!(
-            ServerMsg::CameraKeyframe.text_frame().as_deref(),
-            Some(r#"{"type":"cameraKeyframe"}"#)
-        );
-    }
-
-    /// The microphone control messages, pinned byte for byte: the open/close
-    /// decisions the browser obeys, on the mic socket alone.
-    #[test]
-    fn the_mic_controls_are_text_frames() {
-        let open = (ServerMsg::MicOpen { sample_rate: 44_100, channels: 2 })
-            .text_frame()
-            .expect("micOpen must be a text frame");
-        assert_eq!(open, r#"{"type":"micOpen","sampleRate":44100,"channels":2}"#);
-        assert_eq!(
-            ServerMsg::MicClose.text_frame().as_deref(),
-            Some(r#"{"type":"micClose"}"#)
-        );
-    }
-
-    /// The camera socket's one inbound text message parses with the field names
-    /// the browser sends.
-    #[test]
-    fn the_camera_format_parses_from_the_browsers_json() {
-        let msg: ClientMsg = serde_json::from_str(
-            r#"{"type":"cameraFormat","width":640,"height":480,"fpsNumerator":2997,"fpsDenominator":100}"#,
-        )
-        .expect("the camera format must parse");
-        match msg {
-            ClientMsg::CameraFormat { width, height, fps_numerator, fps_denominator } => {
-                assert_eq!((width, height), (640, 480));
-                assert_eq!((fps_numerator, fps_denominator), (2997, 100));
-            }
-            other => panic!("parsed {other:?}"),
-        }
-    }
-
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
     #[test]
     fn control_messages_encode_to_tagged_camelcase_text() {
@@ -1908,8 +1704,6 @@ mod tests {
             resize: false,
             clipboard: true,
             audio: false,
-            camera: false,
-            microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: false,
         })
@@ -1917,7 +1711,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"render":"tiles · lossless png","gridDebug":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1930,8 +1724,6 @@ mod tests {
             resize: true,
             clipboard: false,
             audio: false,
-            camera: true,
-            microphone: true,
             render: "video q60".to_owned(),
             grid_debug: false,
         })
@@ -1949,8 +1741,6 @@ mod tests {
             resize: true,
             clipboard: false,
             audio: false,
-            camera: false,
-            microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: true,
         })
