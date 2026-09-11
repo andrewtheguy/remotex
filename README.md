@@ -16,10 +16,10 @@ cheap — a display layout, no reactivation — at the cost of a Windows host's 
 staying soft afterwards; `egfx = false` re-renders sharp and pays a reactivation
 per resize.
 
-- RDP uses **FreeRDP 3**, linked from static archives that
-  [libfreerdp-prebuilt](https://github.com/andrewtheguy/libfreerdp-prebuilt) builds
-  once per target — so this project still builds with `cargo build` alone: no cmake,
-  no pkg-config, no OpenSSL to install and no libclang.
+- RDP uses a built-in client on [IronRDP](https://github.com/Devolutions/IronRDP)'s
+  protocol crates: the desktop over the graphics pipeline or plain bitmaps,
+  pointer, keyboard, mouse and resize. It does not carry sound, the clipboard or
+  touch.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.

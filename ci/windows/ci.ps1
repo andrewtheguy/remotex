@@ -25,7 +25,7 @@ Write-Host '== toolchain =='
 & bun --version
 & wix --version
 if ($env:CARGO_TARGET_DIR) { Write-Host "   CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR" }
-foreach ($dir in 'FREERDP_PREBUILT_DIR', 'LIBVPX_PREBUILT_DIR', 'LIBOPUS_PREBUILT_DIR') {
+foreach ($dir in 'LIBVPX_PREBUILT_DIR', 'LIBOPUS_PREBUILT_DIR') {
     $v = [Environment]::GetEnvironmentVariable($dir)
     if ($v) { Write-Host "   $dir=$v" }
 }

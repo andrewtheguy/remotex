@@ -123,18 +123,12 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **RDP EGFX, past what FreeRDP's GDI already gives.** The pipeline itself is
-  **on**: `SupportGraphicsPipeline` with `RemoteFxCodec` beside it, which is the
-  pair guacamole-server ships and the resolution of the black-framebuffer fault
-  this entry used to open with — the pipeline advertised *without a codec next to
-  it* was the whole of that bug, and the e2e that measured exactly black now
-  measures a painted desktop. Its frame boundaries are taken too — the wrapper
-  marks the pipeline's once-per-frame surface flush (and the legacy markers
-  besides) as `Event::Frame`, and the engine flushes on it. What remains planned
-  is using more of the channel than FreeRDP's software GDI surfaces: the surface
-  compositor, and a separate assessment of AVC420 pass-through. The parts exist
-  in the archives; what makes the rest large is that it is a second graphics
-  pipeline beside the one every engine shares, not an option on it.
+- **RDP EGFX pass-through.** The pipeline is on, decoded in the gateway by
+  IronRDP's codecs and compositor, with its frame boundaries taken as
+  `Event::Frame`. What remains planned is an assessment of AVC420 pass-through —
+  handing the host's H.264 to the browser rather than decoding it and encoding
+  VP9. What makes it large is that it is a second graphics pipeline beside the
+  one every engine shares, not an option on it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
