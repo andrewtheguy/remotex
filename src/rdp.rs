@@ -139,11 +139,10 @@ fn connect_budget() -> Duration {
 /// channel, so such a session is silent, and the line below says so once rather
 /// than leaving an empty audio socket to explain itself.
 ///
-/// The event channel from the RDP client is unbounded, and that is safe for the same
-/// reason the damage path is: an `Event` carries a *rectangle*, never pixels — the
-/// pixels are in the shared framebuffer — and `stage_damage` folds overlapping
-/// rectangles and collapses past a cap. A slow consumer makes the rectangles
-/// coarser rather than the queue longer.
+/// The event channel from the RDP client is bounded, and a slow consumer makes the
+/// rectangles coarser rather than the queue longer: while it is full the client
+/// folds overlapping paint and collapses past a cap before anything is queued, and
+/// every other event waits for room — see `EVENT_QUEUE` in the client.
 pub async fn run(
     config: TargetConfig,
     plan: RenderPlan,
@@ -223,7 +222,7 @@ async fn session(
 /// switching between an RDP and a VNC target should not be able to tell which
 /// library produced it. `None` means the caller has nothing left to do.
 async fn await_desktop(
-    events: &mut mpsc::UnboundedReceiver<Event>,
+    events: &mut mpsc::Receiver<Event>,
     config: &TargetConfig,
     sink: &TileSink,
 ) -> Option<(u16, u16)> {
@@ -304,6 +303,7 @@ fn connect_config(config: &TargetConfig, display: Option<HostDisplay>) -> Connec
         width,
         height,
         security: config.security(),
+        allow_plain_tls: config.allow_plain_tls(),
         resize: config.resize,
         egfx: config.egfx(),
     }
@@ -570,7 +570,7 @@ fn shape_of(image: &client::CursorImage) -> Option<CursorShape> {
 
 async fn active_loop(
     session: &Session,
-    mut events: mpsc::UnboundedReceiver<Event>,
+    mut events: mpsc::Receiver<Event>,
     flags: Flags,
     connected_at: (u16, u16),
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
