@@ -33,7 +33,7 @@ including with nothing, retry a `CB_RESPONSE_FAIL` on a bounded ladder — is
 `ClipboardState` in `src/rdp.rs`. What it took is recorded in
 [The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
 
-EGFX is in, staged as [the plan](rdp-egfx-plan.md) lays out; what is left of it
+EGFX is in, measured as [the plan](rdp-egfx-plan.md) records; what is left of it
 beyond the decoders is under
 [Source payloads](#source-payloads-the-gateway-decodes-instead-of-forwarding)
 rather than here, because that payoff is a transcode removed, not a control
