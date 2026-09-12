@@ -913,10 +913,11 @@ impl Supervisor {
                 Ok(())
             }
             Err(error) => {
-                let message = format!("{error:#}");
-                self.instances[index].state = InstanceState::Failed(message.clone());
+                // The state carries a rendering because the TUI prints it; the
+                // caller gets the error itself, cause chain intact.
+                self.instances[index].state = InstanceState::Failed(format!("{error:#}"));
                 self.publish().await;
-                Err(anyhow::anyhow!(message))
+                Err(error)
             }
         }
     }

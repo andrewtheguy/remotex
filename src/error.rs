@@ -1,6 +1,6 @@
 //! Typed error type for the HTTP API boundary.
 //!
-//! Per the project's error-handling convention (see CLAUDE.md): application and
+//! Per the project's error-handling convention (see AGENTS.md): application and
 //! internal code uses `anyhow`; the HTTP API surfaces a typed `thiserror` error.
 //! Application errors bubbled up with `?` land in [`AppError::Internal`] (500)
 //! via the `#[from] anyhow::Error` conversion, while handlers can also return
