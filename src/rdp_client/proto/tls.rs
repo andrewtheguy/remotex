@@ -5,7 +5,7 @@
 //! runs inside it, and only then does the MCS connection sequence start — still inside
 //! the TLS session, which carries every PDU for the rest of the connection.
 //!
-//! # The certificate is not verified
+//! # The certificate chain is not verified — the handshake still is
 //!
 //! Any certificate is accepted, for the session only and without storing it. That is
 //! defensible *because* this client insists on NLA: CredSSP binds the credential
@@ -14,6 +14,14 @@
 //! exchange, and cannot replay the credentials onward. It would not be defensible
 //! under plain TLS, where the credentials travel in the logon PDU to whoever answered
 //! — which is one of the reasons this client does not offer plain TLS.
+//!
+//! What makes that argument hold is that the handshake signature *is* checked, with
+//! the provider's own algorithms. Skipping it would let a machine in the middle
+//! present a copy of the real server's certificate — a certificate is public — and
+//! terminate the connection without ever holding the key that goes with it: the
+//! public key CredSSP then binds to would be the real server's, and the binding would
+//! prove nothing. Who answered is established here; *that they are the host* is what
+//! the chain would say, and what CredSSP says instead.
 //!
 //! [`public_key`] is what makes that true, so it is not an accessory to the handshake:
 //! a connection that cannot read the server's public key has nothing to bind to and
@@ -40,10 +48,15 @@ pub type Stream = tokio_rustls::client::TlsStream<TcpStream>;
 /// written with: rustls takes a name or an address, not the `[..]` form a URL uses.
 pub async fn upgrade(tcp: TcpStream, server_name: &str) -> Result<Stream> {
     install_crypto_provider();
+    // The provider the handshake itself will use, so that the signature it presents
+    // is checked against exactly the algorithms that negotiated it.
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .ok_or_else(|| anyhow!("rustls has no crypto provider to handshake with"))?
+        .clone();
 
     let mut config = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate))
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate { provider }))
         .with_no_client_auth();
     // Nothing resumes: one session per connection, and a resumed handshake would
     // hand back a certificate this client never saw the server present.
@@ -79,9 +92,13 @@ fn install_crypto_provider() {
 }
 
 /// See the module docs: the binding CredSSP does is what this connection trusts, not
-/// the certificate chain.
+/// the certificate chain. The chain is what goes unchecked here — the handshake
+/// signature is not, because without it the key CredSSP binds to would not have to be
+/// the key of whoever answered.
 #[derive(Debug)]
-struct AcceptAnyCertificate;
+struct AcceptAnyCertificate {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
 
 impl ServerCertVerifier for AcceptAnyCertificate {
     fn verify_server_cert(
@@ -97,43 +114,35 @@ impl ServerCertVerifier for AcceptAnyCertificate {
 
     fn verify_tls12_signature(
         &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            certificate,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            certificate,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
-    /// Every scheme, because none of them is being checked. Naming a short list here
-    /// would not add safety — it would only make some servers fail to handshake.
+    /// What the provider can actually check, which is what the two above are given.
+    /// Offering a scheme wider than that would be offering to skip the check.
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        use rustls::SignatureScheme::{
-            ECDSA_NISTP256_SHA256, ECDSA_NISTP384_SHA384, ECDSA_NISTP521_SHA512, ED448, ED25519,
-            RSA_PKCS1_SHA1, RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512, RSA_PSS_SHA256,
-            RSA_PSS_SHA384, RSA_PSS_SHA512,
-        };
-        vec![
-            RSA_PKCS1_SHA1,
-            RSA_PKCS1_SHA256,
-            RSA_PKCS1_SHA384,
-            RSA_PKCS1_SHA512,
-            RSA_PSS_SHA256,
-            RSA_PSS_SHA384,
-            RSA_PSS_SHA512,
-            ECDSA_NISTP256_SHA256,
-            ECDSA_NISTP384_SHA384,
-            ECDSA_NISTP521_SHA512,
-            ED25519,
-            ED448,
-        ]
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }

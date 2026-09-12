@@ -15,6 +15,7 @@ use super::error::Error;
 use super::framebuffer::{Framebuffer, Rect};
 use super::input::{Command, Input};
 use super::pointer::Cursor;
+use super::proto::bitmap::MAX_DESKTOP_BYTES;
 use super::proto::capabilities::DemandActive;
 use super::proto::fastpath::{self, Fragments, Update};
 use super::proto::frame::Frames;
@@ -101,15 +102,6 @@ const EVENT_QUEUE: usize = 64;
 /// equivalent — and the session thread cannot see its queue, shutdown included,
 /// while it waits. The same 30 seconds `engine` gives unacknowledged data.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The most memory one desktop may take here: its width × height × 4 bytes.
-///
-/// Both numbers come from the server, and neither is bounded anywhere near this by
-/// the protocol — a negotiated desktop is two `u16`s — so a server that asks for an
-/// absurd desktop would otherwise have this process allocate gigabytes and be killed
-/// for it. 512 MiB is past any real desktop — 16384x8192 — and well short of a
-/// memory this process cannot find.
-const MAX_DESKTOP_BYTES: usize = 512 << 20;
 
 /// How long dropping a [`Session`] waits for its thread before leaving it behind.
 ///
@@ -430,6 +422,11 @@ impl<'a> Active<'a> {
     }
 
     async fn run(mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<()> {
+        // Updates that arrived while the share was being finalized were read past
+        // there — the server may start painting once it has the Font List, which is
+        // before this client has the Font Map that ends the sequence — so the desktop
+        // is asked for again here, the way it is after a reactivation.
+        self.refresh().await?;
         loop {
             tokio::select! {
                 read = self.frames.next(&mut self.frame) => {
@@ -736,9 +733,10 @@ impl<'a> Active<'a> {
     ///
     /// `true` means the session was asked to stop part-way through. A server owes
     /// this sequence a reply it can take as long as it likes over — and a server
-    /// that never sends one leaves the read below waiting forever — so the wait
-    /// gives way to a shutdown here as the main loop's does, rather than holding a
-    /// connection nobody is watching until a write finally times out.
+    /// that never sends one leaves the reads below waiting forever — so every one of
+    /// them, the capability exchange included, gives way to a shutdown as the main
+    /// loop's does, rather than holding a connection nobody is watching until a write
+    /// finally times out.
     async fn reactivate(&mut self) -> Result<bool> {
         debug!("rdp: the server deactivated the desktop; reactivating");
         let demand = loop {
@@ -767,8 +765,17 @@ impl<'a> Active<'a> {
         };
         info!("rdp: reactivated, desktop {}x{}", demand.width, demand.height);
 
-        let Self { frames, writer, frame, user, io_channel, .. } = self;
-        connect::activate(frames, writer, frame, *user, *io_channel, &demand).await?;
+        let Self { frames, writer, frame, user, io_channel, stop, .. } = self;
+        // The same wait as above, for the same reason: the capability exchange ends
+        // with a Font Map the server owes and may never send, and a session nobody is
+        // watching must not be held open by it.
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|&stop| stop) => return Ok(true),
+            activated = connect::activate(frames, writer, frame, *user, *io_channel, &demand) => {
+                activated?;
+            }
+        }
 
         self.share = Share::from(&demand);
         self.fragments = Fragments::new(demand.multifragment);
