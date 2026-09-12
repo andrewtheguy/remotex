@@ -71,16 +71,36 @@ pub enum Message<'a> {
 #[error("a {0}-byte dynamic channel payload does not fit one PDU")]
 pub struct TooLong(pub usize);
 
+/// The most one dynamic channel payload may announce before it is refused rather
+/// than gathered.
+///
+/// A graphics pipeline frame is the largest thing that travels here — a whole
+/// desktop's worth of RemoteFX Progressive tiles, or an uncompressed rectangle of
+/// it — and a few megabytes is a big one. Sixty-four is past any frame a real host
+/// sends and well short of what one bad length field could make this process
+/// allocate.
+pub const MAX_PAYLOAD: usize = 64 << 20;
+
 /// The server's side of the dynamic channel, one PDU at a time.
 ///
 /// Stateful for one reason: a Data First says how long the whole payload is and
-/// carries the start of it, and the Data PDUs after it carry the rest. Everything a
-/// Display Control session receives arrives whole, so the buffer stays empty — but a
-/// split payload is the server's decision, not this client's.
+/// carries the start of it, and the Data PDUs after it carry the rest. The pieces
+/// of one channel's payload never interleave with each other, but they may
+/// interleave with *another* channel's PDUs — Display Control's capabilities can
+/// land between two fragments of a graphics frame — so each channel gathers on its
+/// own.
 #[derive(Debug, Default)]
 pub struct Incoming {
-    /// The channel a split payload is being gathered for, and how long it will be.
-    gathering: Option<(u32, usize)>,
+    /// Every channel with a split payload in progress.
+    gathering: Vec<Gathering>,
+    /// The payload most recently completed, kept here so the message can borrow it.
+    done: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct Gathering {
+    channel: u32,
+    total: usize,
     buffer: Vec<u8>,
 }
 
@@ -109,48 +129,57 @@ impl Incoming {
                     .map_err(|_| r.refuse("a channel name that is not text, of", length))?;
                 Ok(Some(Message::Create { channel, name }))
             }
-            CLOSE => Ok(Some(Message::Close { channel: read_field(&mut r, cb_id)? })),
+            CLOSE => {
+                let channel = read_field(&mut r, cb_id)?;
+                // Whatever was being gathered for it is not going to finish.
+                self.gathering.retain(|gathering| gathering.channel != channel);
+                Ok(Some(Message::Close { channel }))
+            }
             DATA_FIRST => {
                 let channel = read_field(&mut r, cb_id)?;
                 let announced = read_field(&mut r, sp)?;
                 let total = usize::try_from(announced).unwrap_or(usize::MAX);
                 let data = r.rest();
                 if data.len() >= total {
-                    return Err(self.abandon("a first piece already as long as its", announced));
+                    return Err(self.abandon(channel, "a first piece already as long as its", announced));
                 }
-                self.gathering = Some((channel, total));
-                self.buffer.clear();
-                self.buffer.extend_from_slice(data);
+                if total > MAX_PAYLOAD {
+                    return Err(self.abandon(channel, "a payload announcing", announced));
+                }
+                if self.gathering.iter().any(|gathering| gathering.channel == channel) {
+                    return Err(self.abandon(channel, "a first piece inside an unfinished payload for channel", channel));
+                }
+                let mut buffer = Vec::with_capacity(total);
+                buffer.extend_from_slice(data);
+                self.gathering.push(Gathering { channel, total, buffer });
                 Ok(None)
             }
             DATA => {
                 let channel = read_field(&mut r, cb_id)?;
                 let data = r.rest();
-                let Some((gathering, total)) = self.gathering else {
+                let Some(at) = self.gathering.iter().position(|gathering| gathering.channel == channel)
+                else {
                     return Ok(Some(Message::Data { channel, data }));
                 };
-                if channel != gathering {
-                    return Err(self.abandon("a piece for channel", channel));
-                }
-                self.buffer.extend_from_slice(data);
-                if self.buffer.len() < total {
+                let gathering = &mut self.gathering[at];
+                gathering.buffer.extend_from_slice(data);
+                if gathering.buffer.len() < gathering.total {
                     return Ok(None);
                 }
-                if self.buffer.len() > total {
-                    let gathered = u32::try_from(self.buffer.len()).unwrap_or(u32::MAX);
-                    return Err(self.abandon("pieces coming to", gathered));
+                if gathering.buffer.len() > gathering.total {
+                    let gathered = u32::try_from(gathering.buffer.len()).unwrap_or(u32::MAX);
+                    return Err(self.abandon(channel, "pieces coming to", gathered));
                 }
-                self.gathering = None;
-                Ok(Some(Message::Data { channel, data: &self.buffer }))
+                self.done = self.gathering.swap_remove(at).buffer;
+                Ok(Some(Message::Data { channel, data: &self.done }))
             }
             other => Err(r.refuse("a command", other)),
         }
     }
 
-    /// Forget what was being gathered, and say why it was given up on.
-    fn abandon(&mut self, field: &'static str, value: impl Into<u64>) -> Malformed {
-        self.gathering = None;
-        self.buffer.clear();
+    /// Forget what was being gathered for `channel`, and say why it was given up on.
+    fn abandon(&mut self, channel: u32, field: &'static str, value: impl Into<u64>) -> Malformed {
+        self.gathering.retain(|gathering| gathering.channel != channel);
         Malformed::Refused { what: WHAT, field, value: value.into() }
     }
 }
@@ -317,16 +346,40 @@ mod tests {
         );
     }
 
+    /// Two channels split their payloads independently, and a whole PDU for a third
+    /// passes between the pieces untouched: a graphics frame in flight does not
+    /// stop Display Control from being heard.
     #[test]
-    fn a_piece_for_another_channel_is_refused_and_the_sequence_given_up_on() {
+    fn the_pieces_of_two_channels_interleave_and_a_whole_pdu_passes_between_them() {
         let mut incoming = Incoming::new();
-        let first = server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x06, 1, 2]);
+        assert_eq!(incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x04, 1, 2])).unwrap(), None);
+        assert_eq!(incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x04, 0x03, 7])).unwrap(), None);
+        assert_eq!(
+            incoming.push(&server(DATA, BYTE, BYTE, &[0x05, 9])).unwrap(),
+            Some(Message::Data { channel: 5, data: &[9] })
+        );
+        assert_eq!(
+            incoming.push(&server(DATA, BYTE, BYTE, &[0x04, 8, 9])).unwrap(),
+            Some(Message::Data { channel: 4, data: &[7, 8, 9] })
+        );
+        assert_eq!(
+            incoming.push(&server(DATA, BYTE, BYTE, &[0x03, 3, 4])).unwrap(),
+            Some(Message::Data { channel: 3, data: &[1, 2, 3, 4] })
+        );
+    }
+
+    /// A payload that overruns its own announced length is a sequence that has gone
+    /// wrong, and it is given up on — for that channel alone.
+    #[test]
+    fn pieces_that_overrun_the_announced_length_are_refused_and_the_sequence_given_up_on() {
+        let mut incoming = Incoming::new();
+        let first = server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x03, 1, 2]);
         assert_eq!(incoming.push(&first).unwrap(), None);
-        let err = incoming.push(&server(DATA, BYTE, BYTE, &[0x04, 3])).unwrap_err();
+        let err = incoming.push(&server(DATA, BYTE, BYTE, &[0x03, 3, 4])).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "a dynamic virtual channel PDU carries a piece for channel 0x4, which this client \
-             does not accept"
+            "a dynamic virtual channel PDU carries pieces coming to 0x4, which this client does \
+             not accept"
         );
 
         // The sequence is gone, so the next PDU for the channel stands on its own.
@@ -334,6 +387,35 @@ mod tests {
             incoming.push(&server(DATA, BYTE, BYTE, &[0x03, 9])).unwrap(),
             Some(Message::Data { channel: 3, data: &[9] })
         );
+    }
+
+    /// A second Data First on a channel still gathering is a server that has lost
+    /// the thread, and a channel closed mid-payload takes its pieces with it.
+    #[test]
+    fn a_first_piece_inside_an_unfinished_payload_is_refused_and_a_close_drops_the_pieces() {
+        let mut incoming = Incoming::new();
+        assert_eq!(incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x06, 1, 2])).unwrap(), None);
+        let err = incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x06, 1, 2])).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { value: 3, .. }), "{err}");
+
+        assert_eq!(incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x06, 1, 2])).unwrap(), None);
+        assert_eq!(incoming.push(&server(CLOSE, BYTE, BYTE, &[0x03])).unwrap(), Some(Message::Close { channel: 3 }));
+        assert_eq!(
+            incoming.push(&server(DATA, BYTE, BYTE, &[0x03, 9])).unwrap(),
+            Some(Message::Data { channel: 3, data: &[9] })
+        );
+    }
+
+    /// A length field is four bytes, and a payload it announces is an allocation.
+    #[test]
+    fn a_payload_announcing_more_than_this_client_holds_is_refused() {
+        let mut incoming = Incoming::new();
+        let huge = u32::try_from(MAX_PAYLOAD + 1).unwrap().to_le_bytes();
+        let mut rest = vec![0x03];
+        rest.extend_from_slice(&huge);
+        rest.push(1);
+        let err = incoming.push(&server(DATA_FIRST, LONG, BYTE, &rest)).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "a payload announcing", .. }), "{err}");
     }
 
     #[test]

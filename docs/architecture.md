@@ -1122,12 +1122,17 @@ MS-RDPEI, which this client never asks for. What each of the two would take is i
 [`roadmap.md`](roadmap.md).
 
 Two static virtual channels are asked for, each by a key: `drdynvc` for
-`resize = true` and `cliprdr` for `clipboard = true`. The Graphics Pipeline is not
-advertised at all, so the server draws with bitmap updates, and the pointer travels
-as its own shape rather than in the framebuffer. Damage is flushed on a 16 ms
-guess, because bitmap updates carry no frame boundary. A resize is a full
-Deactivation-Reactivation Sequence, which is what lets a Windows host re-render the
-desktop sharp at the new size and density.
+`resize = true` or the default `egfx = true`, and `cliprdr` for `clipboard = true`.
+Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
+dynamic channel, marks every frame's end — which is the engine's flush signal, with
+the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
+with a graphics reset. The pipeline's decoders are landing in stages: uncompressed
+and planar rectangles paint today, and every other codec the host sends is counted
+and left unpainted until its decoder lands. `egfx = false` is the bitmap path: the
+server draws with bitmap updates, damage is flushed on the 16 ms guess because those
+carry no frame boundary, and a resize is a full Deactivation-Reactivation Sequence,
+after which a Windows host re-renders the desktop sharp at the new size and density.
+On either path the pointer travels as its own shape rather than in the framebuffer.
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
 connection sequence, the channels and the chunk flags a Windows host silently

@@ -34,9 +34,9 @@ use crate::engine;
 const KEYBOARD_LAYOUT: u32 = 0x0409;
 
 /// The static virtual channels a session asks for, each one a capability the caller
-/// turned on: [`Channel::DYNAMIC`] is the transport Display Control rides on, and
-/// [`Channel::CLIPBOARD`] is MS-RDPECLIP itself. A session that wants neither asks
-/// for no channel at all.
+/// turned on: [`Channel::DYNAMIC`] is the transport Display Control and the graphics
+/// pipeline both ride on, and [`Channel::CLIPBOARD`] is MS-RDPECLIP itself. A session
+/// that wants none of them asks for no channel at all.
 ///
 /// The order is what makes the server's answer readable: `SC_NET` numbers the
 /// channels in the order `CS_NET` named them and says nothing else about which is
@@ -44,7 +44,7 @@ const KEYBOARD_LAYOUT: u32 = 0x0409;
 /// [`Connected::channel`].
 fn wanted_channels(config: &Connect) -> Vec<Channel> {
     let mut channels = Vec::new();
-    if config.resize {
+    if config.resize || config.egfx {
         channels.push(Channel::DYNAMIC);
     }
     if config.clipboard {
@@ -153,6 +153,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         keyboard_layout: KEYBOARD_LAYOUT,
         selected_protocol: protocol.bits(),
         channels: &wanted,
+        graphics: config.egfx,
     }
     .encode();
     writer

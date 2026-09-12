@@ -95,6 +95,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             width: Some(DEFAULT_W as u16),
             height: Some(DEFAULT_H as u16),
             resize: true,             // exercise the dynamic resize path
+            egfx: None,
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all
             audio_codec: None,

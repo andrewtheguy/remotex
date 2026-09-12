@@ -87,6 +87,12 @@ const COLOR_DEPTHS: u16 = 0x000F;
 /// is a connection that ends badly later rather than a feature.
 const EARLY_CAPABILITIES: u16 = 0x0001 | 0x0002 | 0x0008 | 0x0020;
 
+/// `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL`: this client takes the graphics pipeline
+/// (MS-RDPEGFX), so the server may open the Graphics dynamic channel and draw the
+/// desktop there instead of with bitmap updates. Claimed only when the session
+/// asked for it — see [`ConferenceCreateRequest::graphics`].
+const SUPPORT_DYNVC_GFX_PROTOCOL: u16 = 0x0100;
+
 /// `connectionType`: LAN. It tunes nothing on the wire; it tells the server which
 /// visual effects the user is likely to tolerate.
 const CONNECTION_TYPE_LAN: u8 = 0x06;
@@ -172,6 +178,9 @@ pub struct ConferenceCreateRequest<'a> {
     /// in the middle rewriting the negotiation.
     pub selected_protocol: u32,
     pub channels: &'a [Channel],
+    /// Whether to offer the graphics pipeline. A server that is offered it opens the
+    /// Graphics channel over [`Channel::DYNAMIC`], which `channels` must then name.
+    pub graphics: bool,
 }
 
 impl ConferenceCreateRequest<'_> {
@@ -223,7 +232,8 @@ impl ConferenceCreateRequest<'_> {
         w.u32_le(0); // serialNumber
         w.u16_le(HIGH_COLOR_24BPP);
         w.u16_le(COLOR_DEPTHS);
-        w.u16_le(EARLY_CAPABILITIES);
+        let graphics = if self.graphics { SUPPORT_DYNVC_GFX_PROTOCOL } else { 0 };
+        w.u16_le(EARLY_CAPABILITIES | graphics);
         w.zeros(64); // clientDigProductId: an installation identifier we do not have
         w.u8(CONNECTION_TYPE_LAN);
         w.u8(0); // pad1octet
@@ -403,7 +413,32 @@ mod tests {
             keyboard_layout: 0x0409,
             selected_protocol: 2,
             channels: &CHANNELS,
+            graphics: false,
         }
+    }
+
+    /// The offset of `earlyCapabilityFlags` inside `CS_CORE`'s contents, after the
+    /// version, the size, the depths, the layout, the build, the name, the keyboard
+    /// fields, the IME name, the two superseded depths, the product id, the serial
+    /// number, the high colour depth and the supported depths.
+    const EARLY_CAPABILITIES_AT: usize = 4 + 2 + 2 + 2 + 2 + 4 + 4 + 32 + 4 + 4 + 4 + 64 + 2 + 2 + 4 + 2 + 2;
+
+    fn early_capabilities(request: &ConferenceCreateRequest<'_>) -> u16 {
+        let bytes = request.blocks();
+        // The first block is CS_CORE, whose header is four bytes.
+        let at = BLOCK_HEADER + EARLY_CAPABILITIES_AT;
+        u16::from_le_bytes([bytes[at], bytes[at + 1]])
+    }
+
+    /// The one bit that lets a Windows host open the Graphics channel, present when
+    /// the pipeline is wanted and absent — leaving the flags exactly as they were —
+    /// when it is not.
+    #[test]
+    fn the_graphics_pipeline_is_offered_by_one_early_capability_bit() {
+        let without = request();
+        assert_eq!(early_capabilities(&without), EARLY_CAPABILITIES);
+        let with = ConferenceCreateRequest { graphics: true, ..request() };
+        assert_eq!(early_capabilities(&with), EARLY_CAPABILITIES | 0x0100);
     }
 
     #[test]

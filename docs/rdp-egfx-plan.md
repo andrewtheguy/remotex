@@ -47,8 +47,10 @@ in the house style: refuse an unknown field by name rather than skip it.
   `earlyCapabilityFlags` of GCC `CS_CORE` (`proto/gcc.rs`) — verify against MS-RDPBCGR
   2.2.1.3.2 in Stage 1 (if wrong, the host simply never opens the Graphics channel,
   which the probe catches).
-- **Framing.** Every channel PDU is ZGFX-compressed (RDP8 bulk), then one or more
-  RDPGFX PDUs (`RDPGFX_HEADER`: cmdId u16, flags u16, pduLength u32).
+- **Framing.** A server-to-client channel PDU is ZGFX-compressed (RDP8 bulk), then
+  one or more RDPGFX PDUs (`RDPGFX_HEADER`: cmdId u16, flags u16, pduLength u32).
+  Client-to-server PDUs go raw — Stage 1 proved the host reads their header straight
+  off the channel and fails its graphics subsystem if they are wrapped.
 - **Frames.** EGFX brackets updates with StartFrame / EndFrame carrying a frameId; the
   client MUST reply `RDPGFX_FRAME_ACKNOWLEDGE` per EndFrame (queueDepth
   `QUEUE_DEPTH_UNAVAILABLE` = 0) or the host throttles then stalls. This gives a *real*
@@ -115,10 +117,41 @@ Changed files:
   tally, and print the codecId / PDU distribution the host produced.
 
 Stage-1 QA (see Verification): run the probe against `windows-ent-sandbox`, capture
-which codecIds and PDUs appear. Expected on modern Windows: CAPROGRESSIVE for the
-desktop, PLANAR + UNCOMPRESSED for some regions, the cache/copy PDUs for scrolls,
-ClearCodec occasionally, NSCodec effectively never. That capture is the input to
-Stages 2–3.
+which codecIds and PDUs appear. That capture is the input to Stages 2–3.
+
+### Stage 1 — measured (2026-09-12, `windows-ent-sandbox`, Windows RDS)
+
+Landed and QA'd. The channel opens, the host confirms **CAPVERSION_10** (flags
+`0x22` = SMALL_CACHE | AVC_DISABLED), frames flow and are acknowledged, and each
+monitor-layout resize is a **RESETGRAPHICS** (1280→1600→1280) with no reactivation.
+The session survives a full run; `egfx = false` still lights the desktop over bitmap
+updates (≈1.02M of 1.024M pixels), and the clipboard round-trip passes under EGFX.
+
+One caught bug worth recording: **client→server RDPGFX PDUs go out raw, not
+ZGFX-wrapped.** Only the server→client direction is bulk-compressed; a Windows host
+reads the RDPGFX header straight off the channel for the caps advertise and the
+frame acknowledgement, and wrapping them made it read the descriptor byte as a
+command id and end the session with `ERRINFO_GRAPHICS_SUBSYSTEM_FAILED` (0x112f).
+
+The codec/command distribution over ~253 frames diverges from the guess above and
+**reorders Stages 2–3**:
+
+| what the host sent | count | carried by |
+| --- | --- | --- |
+| ClearCodec | 569 | WireToSurface_1 |
+| RemoteFX Progressive | 27 | WireToSurface_2 (+ DeleteEncodingContext) |
+| CacheToSurface | 2184 | — |
+| SurfaceToCache | 585 | — |
+| SolidFill | 13 | — |
+| SurfaceToSurface | 7 | — |
+
+No PLANAR, no UNCOMPRESSED, no NSCodec, no plain RemoteFX (CAVIDEO). So on this
+host **ClearCodec is the primary desktop codec and the caches are load-bearing** —
+the desktop is dark until both are decoded, which is why Stage 1's probe asserts
+frames rather than lit pixels under EGFX. Progressive alone (the plan's Stage 2)
+paints only a small share; ClearCodec and CacheToSurface/SurfaceToCache (the plan's
+Stage 3) are what a lit desktop needs here. The two later stages are best taken
+together, or Stage 3 first, rather than in the written order.
 
 ## Stage 2 — RemoteFX Progressive (PR 2)
 
