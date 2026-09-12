@@ -54,6 +54,16 @@ const COMPRESSION_HEADER: u16 = 8;
 /// The only colour depth a rectangle may arrive in. See the module docs.
 pub const DEPTH: u16 = 32;
 
+/// The most memory the pixels of one desktop may take: width × height × 4 bytes, and
+/// the ceiling one rectangle of it is held to as well.
+///
+/// Every one of those numbers comes from the server, and none is bounded anywhere
+/// near this by the protocol — a negotiated desktop is two `u16`s, and so is the size
+/// of a bitmap — so a server that names an absurd one would otherwise have this
+/// process allocate gigabytes and be killed for it. 512 MiB is past any real desktop
+/// — 16384x8192 — and well short of a memory this process cannot find.
+pub const MAX_DESKTOP_BYTES: usize = 512 << 20;
+
 /// Bytes per pixel, on the wire and in the answer alike: `BGRX` in, `RGBX` out.
 const PIXEL: usize = 4;
 
@@ -135,6 +145,14 @@ fn rectangle<'a>(r: &mut Reader<'a>) -> Result<Bitmap<'a>, Malformed> {
     };
     if paint_width > width || paint_height > height {
         return Err(r.refuse("a rectangle larger than the bitmap in it", paint_width));
+    }
+    // The bitmap's own size, which the compressed path allocates three planes from
+    // before it has read a byte of the stream. A few bytes on the wire may declare
+    // 65535x65535, which is twelve gigabytes of planes — so a bitmap larger than the
+    // largest desktop this client will hold is refused here rather than in the
+    // allocator.
+    if usize::from(width) * usize::from(height) > MAX_DESKTOP_BYTES / PIXEL {
+        return Err(r.refuse("a bitmap larger than any desktop this client holds", width));
     }
     Ok(Bitmap { x, y, paint_width, paint_height, width, height, compressed, data })
 }
@@ -332,6 +350,41 @@ mod tests {
             "an RDP Bitmap Update carries a rectangle larger than the bitmap in it 0x4, which \
              this client does not accept"
         );
+    }
+
+    /// A handful of bytes on the wire declares a bitmap of four thousand megapixels.
+    /// The compressed path would allocate three planes from those two numbers before
+    /// reading any of them.
+    #[test]
+    fn a_bitmap_too_large_to_hold_is_refused_before_it_is_decoded() {
+        let rectangle = Rectangle {
+            x: 0,
+            y: 0,
+            paint: (1, 1),
+            size: (u16::MAX, u16::MAX),
+            flags: COMPRESSED | NO_COMPRESSION_HEADER,
+            data: &[0x20],
+        };
+        let body = pdu(&[rectangle]);
+        assert_eq!(
+            update(&body).unwrap_err().to_string(),
+            "an RDP Bitmap Update carries a bitmap larger than any desktop this client holds \
+             0xffff, which this client does not accept"
+        );
+
+        // The largest bitmap that is still held, at four bytes a pixel.
+        let (width, height) = (16384_usize, 8192_usize);
+        assert_eq!(width * height * PIXEL, MAX_DESKTOP_BYTES);
+        let rectangle = Rectangle {
+            x: 0,
+            y: 0,
+            paint: (1, 1),
+            size: (16384, 8192),
+            flags: COMPRESSED | NO_COMPRESSION_HEADER,
+            data: &[0x20],
+        };
+        let body = pdu(&[rectangle]);
+        update(&body).expect("a bitmap the size of the largest desktop this client holds");
     }
 
     #[test]
