@@ -10,12 +10,18 @@
 //!
 //! - [`wire`] — the primitives every PDU is spelled in: a bounds-checked reader and a
 //!   writer, both with the byte order in the method name.
-//! - [`der`] — the tag-length-value reader the ASN.1 layers need: the server's
-//!   certificate now, T.125 MCS next.
+//! - [`der`] — tag-length-value ASN.1, which the server's certificate and the MCS
+//!   connect PDUs are both written in.
+//! - [`per`] — packed ASN.1, which the T.124 conference and the rest of MCS are
+//!   written in.
 //! - [`x224`] — TPKT framing, the X.224 connection sequence, and the security
 //!   negotiation that decides whether TLS and CredSSP follow.
 //! - [`tls`] — the TLS session the rest of the connection lives inside.
 //! - [`credssp`] — Network Level Authentication, before the server builds a session.
+//! - [`mcs`] — the channels every later PDU travels on, and the sequence that opens
+//!   them.
+//! - [`gcc`] — what the two sides tell each other while those channels are opened:
+//!   the desktop, the colour depth, the virtual channels.
 //!
 //! # One kind of server
 //!
@@ -38,6 +44,9 @@
 
 pub mod credssp;
 pub mod der;
+pub mod gcc;
+pub mod mcs;
+pub mod per;
 pub mod tls;
 pub mod wire;
 pub mod x224;
