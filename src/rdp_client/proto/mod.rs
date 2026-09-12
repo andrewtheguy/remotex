@@ -22,6 +22,12 @@
 //!   them.
 //! - [`gcc`] — what the two sides tell each other while those channels are opened:
 //!   the desktop, the colour depth, the virtual channels.
+//! - [`channel`] — the header a static virtual channel's data wears, and the chunks a
+//!   long one is split into.
+//! - [`dvc`] — the dynamic channels a server opens over one of those while the session
+//!   is live.
+//! - [`display`] — the one dynamic channel this client takes, which is how a desktop
+//!   is resized.
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
 //! - [`info`] — the logon: who the session belongs to and what it should look like.
@@ -58,8 +64,11 @@
 
 pub mod bitmap;
 pub mod capabilities;
+pub mod channel;
 pub mod credssp;
 pub mod der;
+pub mod display;
+pub mod dvc;
 pub mod fastpath;
 pub mod finalization;
 pub mod gcc;

@@ -32,6 +32,7 @@
 //! a decade this client has never heard of without ending the connection.
 
 use super::bitmap;
+use super::channel;
 use super::wire::{Malformed, Reader, Writer};
 
 /// `originatorId`, which [MS-RDPBCGR] requires to be the server's own MCS channel.
@@ -132,6 +133,10 @@ pub struct DemandActive {
     /// The largest fast-path update the server will reassemble into one, out of its
     /// Multifragment Update capability.
     pub multifragment: u32,
+    /// The largest chunk a virtual channel PDU may be split into, out of the server's
+    /// Virtual Channel capability. A server that names none is taken to mean the
+    /// smallest, which is what [MS-RDPBCGR] says every server accepts.
+    pub chunk: usize,
 }
 
 impl DemandActive {
@@ -149,6 +154,7 @@ impl DemandActive {
 
         let mut desktop = None;
         let mut multifragment = None;
+        let mut chunk = None;
         for _ in 0..count {
             let kind = r.u16_le()?;
             let length = r.u16_le()?;
@@ -171,6 +177,22 @@ impl DemandActive {
                     let mut r = Reader::new("a server Multifragment Update capability set", body);
                     multifragment = Some(r.u32_le()?);
                 }
+                VIRTUAL_CHANNEL => {
+                    let mut r = Reader::new("a server Virtual Channel capability set", body);
+                    // `flags`, which say what compression the server would use. This
+                    // client claims none, so a server has nothing to compress with.
+                    r.skip(4)?;
+                    // `VCChunkSize`, which older servers leave off the end.
+                    if r.is_empty() {
+                        continue;
+                    }
+                    let named = r.u32_le()?;
+                    let size = usize::try_from(named).unwrap_or(usize::MAX);
+                    if !(channel::MIN_CHUNK..=channel::MAX_CHUNK).contains(&size) {
+                        return Err(r.refuse("a channel chunk size", named));
+                    }
+                    chunk = Some(size);
+                }
                 _ => {}
             }
         }
@@ -181,6 +203,7 @@ impl DemandActive {
             width,
             height,
             multifragment: multifragment.unwrap_or(DEFAULT_MULTIFRAGMENT),
+            chunk: chunk.unwrap_or(channel::MIN_CHUNK),
         })
     }
 }
@@ -457,6 +480,7 @@ mod tests {
             bitmap(1024, 768),
             (ORDER, vec![0; 84]),
             (MULTIFRAGMENT, 0x0004_0000_u32.to_le_bytes().to_vec()),
+            (VIRTUAL_CHANNEL, [0_u32.to_le_bytes(), 16_256_u32.to_le_bytes()].concat()),
             (0x1D, vec![0; 40]),
         ]);
         assert_eq!(
@@ -466,14 +490,37 @@ mod tests {
                 width: 1024,
                 height: 768,
                 multifragment: 0x0004_0000,
+                chunk: 16_256,
             }
         );
     }
 
+    /// Two fields a server may leave off the end, and what this client does without
+    /// them: ask for as much as it can take, and send as little as every server takes.
     #[test]
-    fn a_server_that_names_no_fragment_size_gets_one_asked_of_it() {
-        let pdu = demand(&[bitmap(1920, 1080)]);
-        assert_eq!(DemandActive::decode(&pdu).unwrap().multifragment, DEFAULT_MULTIFRAGMENT);
+    fn a_server_that_names_neither_size_gets_one_asked_of_it_and_one_assumed() {
+        let pdu = demand(&[bitmap(1920, 1080), (VIRTUAL_CHANNEL, 0_u32.to_le_bytes().to_vec())]);
+        let demanded = DemandActive::decode(&pdu).unwrap();
+        assert_eq!(demanded.multifragment, DEFAULT_MULTIFRAGMENT);
+        assert_eq!(demanded.chunk, channel::MIN_CHUNK);
+    }
+
+    /// A chunk outside the range the specification gives is a server this client
+    /// cannot write to: too small and a PDU it sends is refused, too large and the
+    /// number is not one a server meant.
+    #[test]
+    fn a_chunk_size_no_server_should_name_is_refused_where_it_is_named() {
+        for named in [1599_u32, 16_257] {
+            let chunk = [0_u32.to_le_bytes(), named.to_le_bytes()].concat();
+            let pdu = demand(&[bitmap(1920, 1080), (VIRTUAL_CHANNEL, chunk)]);
+            assert_eq!(
+                DemandActive::decode(&pdu).unwrap_err().to_string(),
+                format!(
+                    "a server Virtual Channel capability set carries a channel chunk size \
+                     {named:#x}, which this client does not accept"
+                )
+            );
+        }
     }
 
     #[test]
