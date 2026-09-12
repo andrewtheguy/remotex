@@ -374,9 +374,11 @@ struct DesktopState {
     /// sent an ExtendedDesktopSize rect — its declaration that SetDesktopSize
     /// is supported; nothing is requested before that.
     screen: Option<Screen>,
-    /// A browser viewport report, in points, that could not be sent yet — no
-    /// support declared, or the density report still awaited — replayed on
-    /// the first ExtendedDesktopSize rect or the report.
+    /// A desktop size, in points, that could not be asked for yet — no support
+    /// declared, or the density report still awaited — replayed on the first
+    /// ExtendedDesktopSize rect or the report. A browser viewport report while
+    /// the session runs, and at session-open the operator's pinned size
+    /// ([`Flags::pinned`]).
     pending: Option<(u16, u16)>,
     /// The window's last requested size in points, kept so a scale report can
     /// ask for the same window again in the new pixels. `None` until the first
@@ -890,6 +892,7 @@ async fn session(
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: config.default_size(),
+            pinned: (!apple).then(|| config.pinned_size()).flatten(),
             video: config.streams_video(),
             apple,
             high_performance,
@@ -925,6 +928,15 @@ struct Flags {
     /// [`active_loop`] is given the handshaken link and these switches, not the
     /// profile behind them.
     default_size: (u16, u16),
+    /// The operator's pinned size ([`TargetConfig::pinned_size`]), in points,
+    /// on a generic target. The desktop is asked for it once, as soon as the
+    /// server declares SetDesktopSize support — a pin is the operator's opening
+    /// size and not the window's, so it is spent whether or not `resize` is
+    /// granted, and a granted `resize` simply supersedes it with the browser's
+    /// first viewport report. `None` on both Apple dialects, where a pin is
+    /// either spent by [`opening_mode`] at connect (High Performance) or refused
+    /// by the config file (Standard `ard` exposes physical displays).
+    pinned: Option<(u16, u16)>,
     /// Whether this target puts moving pixels on the wire as a video stream
     /// ([`TargetConfig::streams_video`]): a generic `SetDesktopSize` is then
     /// held under the stream's picture ceiling — see [`request_resize`].
@@ -1269,10 +1281,11 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool) -> Vec<i32> {
     // Cursor With Alpha, which only improves on it, and so are the two size
     // pseudo-encodings. They are how a server *tells* this end its
     // framebuffer changed size, which is not the same as being asked to change it:
-    // that is `resize`, and it is decided where a SetDesktopSize is, never sent on
-    // a target without it. A server whose size changes under a client that listed
-    // neither has no way to say so and hangs up, which is what a wlshare output
-    // switch to a differently sized monitor would do to a `resize = false` target.
+    // that is asked for where a SetDesktopSize is decided, by the window under
+    // `resize` and once at session-open under a pinned size. A server whose size
+    // changes under a client that listed neither has no way to say so and hangs
+    // up, which is what a wlshare output switch to a differently sized monitor
+    // would do.
     //
     // ContinuousUpdates and Fence are unconditional and go together. The first asks
     // the server to send updates for the whole desktop as it changes instead of once
@@ -1477,6 +1490,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         resize,
         clipboard: clipboard_enabled,
         default_size,
+        pinned,
         video,
         apple,
         high_performance,
@@ -1493,7 +1507,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         scale: UNSCALED,
         host_density,
         screen: None,
-        pending: None,
+        // A pinned size is seeded as a held request: nothing can be asked for
+        // before the server declares SetDesktopSize support, and the hold is
+        // already replayed on that declaration — see [`Flags::pinned`].
+        pending: pinned,
         viewport: None,
         density: if apple { Density::Off } else { Density::Asked },
         wire_scale: None,
@@ -6285,6 +6302,65 @@ mod tests {
         assert!(matches!(resize, Some(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
         assert_eq!(written(&wire), set_desktop_size((640, 480), screen), "nothing replayed");
         assert_eq!(desktop.lock().unwrap().viewport, Some((640, 480)));
+    }
+
+    /// The operator's pinned size on a generic target is seeded as a held
+    /// request, so the desktop is asked for it as soon as the server declares
+    /// SetDesktopSize support — and asked for it on a target *without*
+    /// `resize`, which is the whole point of a pin: `resize` decides whether
+    /// the window drives the size afterwards, not whether the operator's
+    /// opening size is spent at all.
+    #[tokio::test]
+    async fn a_pinned_size_is_asked_for_on_a_target_without_resize() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let screen = Screen { id: 9, flags: 1 };
+        // What `active_loop` builds for `width = 1440`, `height = 900`,
+        // `resize = false` against a server whose desktop is 1920x1080.
+        let desktop = shared_desktop((1920, 1080), None, Some((1440, 900)));
+        desktop.lock().unwrap().resize = false;
+
+        // wlshare's opening announcement: reason 0, the server's own size.
+        let payload = eds_payload(screen);
+        read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &uplink,
+            &desktop,
+            &test_shadow((1920, 1080)),
+            (0, 0, 1920, 1080),
+            &sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(written(&wire), set_desktop_size((1440, 900), screen));
+        let d = desktop.lock().unwrap();
+        assert_eq!(d.pending, None, "the pin was spent, not held again");
+        assert_eq!(d.viewport, Some((1440, 900)), "and it is what a scale report re-asks for");
+    }
+
+    /// The same declaration on an unpinned target asks for nothing: a session
+    /// with no pin keeps the server's own size until the window says otherwise.
+    #[tokio::test]
+    async fn an_unpinned_target_asks_for_nothing_when_support_is_declared() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1920, 1080), None, None);
+        desktop.lock().unwrap().resize = false;
+
+        let payload = eds_payload(Screen { id: 9, flags: 1 });
+        read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &uplink,
+            &desktop,
+            &test_shadow((1920, 1080)),
+            (0, 0, 1920, 1080),
+            &sink,
+        )
+        .await
+        .unwrap();
+
+        assert!(written(&wire).is_empty());
     }
 
     /// The viewport changes while the read loop's replay is blocked behind the
