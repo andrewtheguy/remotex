@@ -142,6 +142,16 @@ const EVENT_QUEUE: usize = 64;
 /// while it waits. The same 30 seconds `engine` gives unacknowledged data.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most memory one desktop may take here: its width × height × 4 bytes.
+///
+/// Both numbers come from the server, and neither is bounded anywhere near this by
+/// the protocol — a negotiated desktop is two `u16`s, and IronRDP lets a graphics
+/// reset name 32766 a side — so a server that asks for an absurd desktop would
+/// otherwise have this process allocate gigabytes twice over (the framebuffer, and
+/// the decoder's own image) and be killed for it. 512 MiB is past any real
+/// desktop — 16384x8192 — and well short of a memory this process cannot find.
+const MAX_DESKTOP_BYTES: usize = 512 << 20;
+
 /// How long dropping a [`Session`] waits for its thread before leaving it behind.
 ///
 /// Enough for the disconnect the thread sends on the way out (itself bounded to a
@@ -309,6 +319,8 @@ async fn thread_main(
     };
     let desktop = result.desktop_size;
     info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
+    // Before the framebuffer and, below, the decoder's image are sized to it.
+    affordable(u32::from(desktop.width), u32::from(desktop.height))?;
     framebuffer.resize(u32::from(desktop.width), u32::from(desktop.height));
     // The first event of the session, so there is room for it.
     let _ = events
@@ -742,7 +754,15 @@ impl<'a> Active<'a> {
                         GracefulDisconnectReason::Other(why) => Err(Error::new(why)),
                     }));
                 }
-                ActiveStageOutput::DeactivateAll => self.reactivate().await?,
+                ActiveStageOutput::DeactivateAll => {
+                    let stopped = self.reactivate().await?;
+                    if stopped {
+                        // Asked to stop mid-sequence: leave as politely as the loop
+                        // itself does, rather than dropping the connection.
+                        self.disconnect().await;
+                        return Ok(Some(Ok(())));
+                    }
+                }
                 // Where the server thinks the pointer is, the server's own view of its
                 // monitors, logon and reconnect bookkeeping, and network measurements:
                 // nothing here acts on any of them.
@@ -755,7 +775,7 @@ impl<'a> Active<'a> {
             debug!("rdp: a bitmap update was discarded; asking for a repaint");
             self.refresh().await?;
         }
-        self.apply_graphics().await;
+        self.apply_graphics().await?;
         self.poll_display_control().await?;
         Ok(None)
     }
@@ -777,12 +797,12 @@ impl<'a> Active<'a> {
     }
 
     /// Everything the graphics pipeline queued while the last PDU was processed.
-    async fn apply_graphics(&mut self) {
+    async fn apply_graphics(&mut self) -> Result<(), Error> {
         for update in self.graphics.take() {
             match update {
                 Update::Reset { width, height } => {
                     info!("rdp: graphics reset, desktop {width}x{height}");
-                    self.redefine_desktop(width, height).await;
+                    self.redefine_desktop(width, height).await?;
                 }
                 Update::Paint { rect, rgba } => {
                     if self.framebuffer.blit_packed(rect, &rgba) {
@@ -792,17 +812,23 @@ impl<'a> Active<'a> {
                 Update::FrameEnd => self.send(Event::Frame).await,
             }
         }
+        Ok(())
     }
 
     /// The desktop is now `width` × `height`: both copies of it start again, blank,
     /// and the caller is told.
-    async fn redefine_desktop(&mut self, width: u32, height: u32) {
+    ///
+    /// A size this client cannot afford to hold ends the session instead: the two
+    /// images below are one allocation each, sized by the server.
+    async fn redefine_desktop(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        affordable(width, height)?;
         self.image = DecodedImage::new(PixelFormat::RgbA32, narrow(width), narrow(height));
         self.framebuffer.resize(width, height);
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
         self.damage.clear();
         self.send(Event::Resize { width, height }).await;
+        Ok(())
     }
 
     /// Announce Display Control the first time it is ready, and send whatever size
@@ -862,14 +888,26 @@ impl<'a> Active<'a> {
 
     /// The Deactivation-Reactivation Sequence: the server tore the desktop down and
     /// is building it again — its answer to a monitor layout on the legacy path.
-    async fn reactivate(&mut self) -> Result<(), Error> {
+    ///
+    /// `true` means the session was asked to stop part-way through. A server owes
+    /// this sequence a reply it can take as long as it likes over — and a server
+    /// that never sends one leaves the read below waiting forever — so the wait
+    /// gives way to a shutdown here as the main loop's does, rather than holding a
+    /// connection nobody is watching until a write finally times out.
+    async fn reactivate(&mut self) -> Result<bool, Error> {
         debug!("rdp: the server deactivated the desktop; reactivating");
         let mut sequence = self.activation.create();
         let mut buf = WriteBuf::new();
         loop {
-            let written = single_sequence_step_read(&mut self.reader, &mut sequence, &mut buf)
-                .await
-                .map_err(|e| Error::chain("reactivation", &e))?;
+            let step = {
+                let Self { stop, reader, .. } = &mut *self;
+                tokio::select! {
+                    biased;
+                    _ = stop.wait_for(|&stop| stop) => return Ok(true),
+                    step = single_sequence_step_read(reader, &mut sequence, &mut buf) => step,
+                }
+            };
+            let written = step.map_err(|e| Error::chain("reactivation", &e))?;
             if written.size().is_some() {
                 let frame = buf.filled().to_vec();
                 self.write(&frame).await?;
@@ -899,8 +937,8 @@ impl<'a> Active<'a> {
                 self.suppress_output = suppress_output_support;
                 info!("rdp: reactivated, desktop {}x{}", desktop_size.width, desktop_size.height);
                 self.redefine_desktop(u32::from(desktop_size.width), u32::from(desktop_size.height))
-                    .await;
-                return Ok(());
+                    .await?;
+                return Ok(false);
             }
         }
     }
@@ -999,4 +1037,44 @@ impl<'a> Active<'a> {
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
+}
+
+/// A desktop size the server named, refused before anything is allocated for it —
+/// see [`MAX_DESKTOP_BYTES`]. Both a real desktop's size and an absurd one are
+/// legal on the wire, so the difference is made here.
+fn affordable(width: u32, height: u32) -> Result<(), Error> {
+    let bytes = usize::try_from(width)
+        .ok()
+        .zip(usize::try_from(height).ok())
+        .and_then(|(width, height)| width.checked_mul(height))
+        .and_then(|pixels| pixels.checked_mul(4));
+    match bytes {
+        Some(bytes) if bytes <= MAX_DESKTOP_BYTES => Ok(()),
+        _ => Err(Error::new(format!(
+            "the server asked for a {width}x{height} desktop, which is more than the {} MiB \
+             this client will hold",
+            MAX_DESKTOP_BYTES >> 20
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server names the desktop, and this client allocates two images from what
+    /// it says. Both numbers are legal on the wire well past any real screen.
+    #[test]
+    fn a_desktop_too_large_to_hold_is_refused_rather_than_allocated() {
+        affordable(1920, 1080).expect("an ordinary desktop");
+        affordable(15360, 4320).expect("two 8K monitors side by side is still real");
+        affordable(0, 0).expect("a desktop with no pixels costs nothing");
+
+        // IronRDP's own bound on a graphics reset, and the largest desktop the
+        // connector can carry: past what this client will hold.
+        let err = affordable(32766, 32766).expect_err("4 GiB");
+        assert!(format!("{err}").contains("32766x32766"), "{err}");
+        affordable(65535, 65535).expect_err("17 GB");
+        affordable(u32::MAX, u32::MAX).expect_err("the arithmetic itself must not wrap");
+    }
 }

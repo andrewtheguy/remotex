@@ -905,8 +905,9 @@ audio this way and only this way (its single encoder emits
 `audio/L16;rate=44100,channels=2`), which is where the option came from.
 
 The RDP engine carries no sound. Its Client Info PDU says `INFO_NOAUDIOPLAYBACK`,
-so the session has no audio device, and `audio = true` on an RDP target connects
-a silent session and says so in the log.
+so the session has no audio device at all, and `audio = true` is refused on an rdp
+target at config parse rather than opening a socket that would never carry a
+sample.
 
 The queue never blocks an engine's read loop. `AudioBridge` retains sixteen remote
 wave buffers (about three seconds at the measured Windows cadence) and drops the
@@ -1047,7 +1048,9 @@ holds the latest remote value and its observed change time:
   while a fetch is pending, the normal framebuffer cycle finishes its one
   outstanding response and pauses before requesting another, leaving the ordered
   server stream free to deliver the pasteboard reply;
-- RDP carries no clipboard; a Fetch is answered as a remote that has copied nothing.
+- RDP carries no clipboard; `clipboard = true` is refused on an rdp target at
+  config parse, and an engine asked for one anyway answers a Fetch as a remote
+  that has copied nothing.
 
 Clients may request the current value after attaching, since they may have
 missed earlier pushes. Replies to that explicit request are marked separately
