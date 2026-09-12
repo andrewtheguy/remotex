@@ -22,10 +22,9 @@ impl Rect {
 /// One complete frame, in `RGBX32`: four bytes per pixel, red first, the fourth
 /// byte unused.
 ///
-/// That byte order is the decoders' own — IronRDP's `RgbA32` image and the EGFX
-/// compositor's RGBA8888 surfaces both store R,G,B in memory order — so a paint is
-/// a row copy with no swizzle, and a consumer that encodes finds the channels in
-/// the order every encoder wants.
+/// That byte order is the decoder's own — IronRDP's `RgbA32` image stores R,G,B in
+/// memory order — so a paint is a row copy with no swizzle, and a consumer that
+/// encodes finds the channels in the order every encoder wants.
 pub struct Frame {
     pub width: u32,
     pub height: u32,
@@ -112,28 +111,13 @@ impl Framebuffer {
         frame.pixels.resize(bytes, 0);
     }
 
-    /// Copy `rect` out of a buffer laid out like the desktop itself — the legacy
-    /// path's decoded image, whose pixel (x, y) sits at `y * stride + x * 4`.
+    /// Copy `rect` out of a buffer laid out like the desktop itself — the decoded
+    /// image, whose pixel (x, y) sits at `y * stride + x * 4`.
     ///
     /// `false`, with the reason logged, for a rectangle that does not fit either
     /// side: that can only mean the two disagree about the desktop's size, which is
     /// a missed resize, and clamping would paint a sheared image and hide it.
     pub(super) fn blit(&self, src: &[u8], src_stride: usize, rect: Rect) -> bool {
-        let left = rect.x as usize * 4;
-        self.copy_rows(rect, |row| {
-            let start = (rect.y as usize + row) * src_stride + left;
-            src.get(start..start + rect.width as usize * 4)
-        })
-    }
-
-    /// Copy `rect` out of a tightly packed buffer of exactly that rectangle — what
-    /// the EGFX compositor hands over per changed region.
-    pub(super) fn blit_packed(&self, rect: Rect, src: &[u8]) -> bool {
-        let bytes = rect.width as usize * 4;
-        self.copy_rows(rect, |row| src.get(row * bytes..(row + 1) * bytes))
-    }
-
-    fn copy_rows<'a>(&self, rect: Rect, source_row: impl Fn(usize) -> Option<&'a [u8]>) -> bool {
         let mut frame = self.lock();
         if rect.x.saturating_add(rect.width) > frame.width
             || rect.y.saturating_add(rect.height) > frame.height
@@ -149,7 +133,8 @@ impl Framebuffer {
         let left = rect.x as usize * 4;
         let stride = frame.stride;
         for row in 0..rect.height as usize {
-            let Some(src) = source_row(row) else {
+            let from = (rect.y as usize + row) * src_stride + left;
+            let Some(src) = src.get(from..from + bytes) else {
                 warn!(
                     "rdp: dropping the rest of a {}x{}+{}+{} paint whose pixels ran out at row \
                      {row}",
@@ -157,8 +142,8 @@ impl Framebuffer {
                 );
                 return false;
             };
-            let start = (rect.y as usize + row) * stride + left;
-            frame.pixels[start..start + bytes].copy_from_slice(src);
+            let to = (rect.y as usize + row) * stride + left;
+            frame.pixels[to..to + bytes].copy_from_slice(src);
         }
         true
     }
@@ -184,21 +169,6 @@ mod tests {
         });
     }
 
-    /// The compositor's regions are packed to their own width, so row `n` of the
-    /// source is `n * width * 4` in — not `n * stride`.
-    #[test]
-    fn a_packed_blit_reads_the_source_at_its_own_width() {
-        let fb = Framebuffer::new();
-        fb.resize(3, 2);
-        let src: Vec<u8> = (0..16).collect(); // 2x2 pixels, packed
-        assert!(fb.blit_packed(Rect { x: 1, y: 0, width: 2, height: 2 }, &src));
-        fb.with(|frame| {
-            let rows: Vec<_> = frame.rows(Rect { x: 1, y: 0, width: 2, height: 2 }).collect();
-            assert_eq!(rows[0], &src[..8]);
-            assert_eq!(rows[1], &src[8..]);
-        });
-    }
-
     /// The failure this guards is a *silent* one: a stale rectangle against a
     /// resized frame would otherwise read past the end of a row and shear the
     /// picture.
@@ -217,7 +187,8 @@ mod tests {
     fn a_source_too_short_for_its_rectangle_is_not_a_panic() {
         let fb = Framebuffer::new();
         fb.resize(4, 4);
-        assert!(!fb.blit_packed(Rect { x: 0, y: 0, width: 2, height: 2 }, &[0; 12]));
+        // Two rows of a 16-byte stride, from a buffer that holds one.
+        assert!(!fb.blit(&[0; 16], 16, Rect { x: 0, y: 0, width: 4, height: 2 }));
     }
 
     #[test]

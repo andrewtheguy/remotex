@@ -38,7 +38,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 
-use super::egfx::{self, Update};
 use super::error::Error;
 use super::framebuffer::{Framebuffer, Rect};
 use super::input::{Command, Input};
@@ -68,19 +67,11 @@ pub struct Connect {
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
-    /// A server answers a monitor layout by resizing the desktop: a graphics reset
-    /// under [`Connect::egfx`], and without it a Deactivation-Reactivation
-    /// Sequence that tears down the desktop and the capability set and builds them
-    /// again. Either way this client sees only an [`Event::Resize`] afterwards.
+    /// A server answers a monitor layout with a Deactivation-Reactivation Sequence:
+    /// it tears the desktop and the capability set down and builds them again, after
+    /// which it renders the new size from scratch. This client sees one
+    /// [`Event::Resize`] at the end of it.
     pub resize: bool,
-    /// Whether to advertise the graphics pipeline (MS-RDPEGFX), deliberately
-    /// independent of [`Connect::resize`], because the two paths trade against each
-    /// other after a resize. With the pipeline, a monitor layout is answered by a
-    /// graphics reset — no reactivation, channels untouched — but a Windows host
-    /// then renders text that stays blurry for the rest of the session. Without it,
-    /// the same layout costs a full reactivation after which the server renders the
-    /// new desktop from scratch, sharp.
-    pub egfx: bool,
 }
 
 // ------------------------------------------------------------------ events
@@ -92,13 +83,11 @@ pub enum Event {
     /// successful session; a failed one goes straight to [`Event::Ended`].
     Connected { width: u32, height: u32 },
     /// This rectangle of the framebuffer changed.
+    ///
+    /// Bitmap updates carry no frame boundary, so nothing here says where one
+    /// picture ends and the next begins; a consumer that needs to present coherent
+    /// frames paces them itself.
     Paint(Rect),
-    /// The server finished a frame: every [`Event::Paint`] since the last `Frame`
-    /// belongs to one coherent picture. Sent only when the server says so itself —
-    /// the graphics pipeline's `EndFrame` — never guessed from timing. The legacy
-    /// path marks no frames, so a consumer keeps whatever pacing it had and treats
-    /// this as the upgrade it is.
-    Frame,
     /// The desktop was redefined — resized, or rebuilt at the same size — and the
     /// framebuffer has already been resized and cleared, so everything is about to
     /// be repainted.
@@ -145,11 +134,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The most memory one desktop may take here: its width × height × 4 bytes.
 ///
 /// Both numbers come from the server, and neither is bounded anywhere near this by
-/// the protocol — a negotiated desktop is two `u16`s, and IronRDP lets a graphics
-/// reset name 32766 a side — so a server that asks for an absurd desktop would
-/// otherwise have this process allocate gigabytes twice over (the framebuffer, and
-/// the decoder's own image) and be killed for it. 512 MiB is past any real
-/// desktop — 16384x8192 — and well short of a memory this process cannot find.
+/// the protocol — a negotiated desktop is two `u16`s — so a server that asks for an
+/// absurd desktop would otherwise have this process allocate gigabytes twice over
+/// (the framebuffer, and the decoder's own image) and be killed for it. 512 MiB is
+/// past any real desktop — 16384x8192 — and well short of a memory this process
+/// cannot find.
 const MAX_DESKTOP_BYTES: usize = 512 << 20;
 
 /// How long dropping a [`Session`] waits for its thread before leaving it behind.
@@ -307,7 +296,6 @@ async fn thread_main(
     stop: watch::Receiver<bool>,
 ) -> Result<(), Error> {
     let display = DisplayCaps::default();
-    let graphics = egfx::Updates::default();
     let (result, framed) = tokio::select! {
         // Biased so a session dropped mid-connect stops at the next await rather
         // than finishing a handshake nobody is waiting for.
@@ -315,7 +303,7 @@ async fn thread_main(
         () = shutdown_requested(&mut commands) => {
             return Err(Error::new("the session was ended before it connected"));
         }
-        connected = connect(&config, &display, &graphics) => connected?,
+        connected = connect(&config, &display) => connected?,
     };
     let desktop = result.desktop_size;
     info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
@@ -326,7 +314,7 @@ async fn thread_main(
     let _ = events
         .send(Event::Connected { width: u32::from(desktop.width), height: u32::from(desktop.height) })
         .await;
-    Active::new(result, framed, framebuffer, events, display, graphics, stop).run(&mut commands).await
+    Active::new(result, framed, framebuffer, events, display, stop).run(&mut commands).await
 }
 
 /// Resolves once the caller has asked this session to stop, or dropped every
@@ -366,7 +354,6 @@ impl DisplayCaps {
 async fn connect(
     config: &Connect,
     display: &DisplayCaps,
-    graphics: &egfx::Updates,
 ) -> Result<(ConnectionResult, TokioFramed<Tls>), Error> {
     let dest = engine::host_port(&config.host, config.port);
     let stream = engine::tcp_connect(&dest).await?;
@@ -377,22 +364,16 @@ async fn connect(
 
     let mut framed = TokioFramed::new(stream);
     let mut connector = ClientConnector::new(connector_config(config), client_addr);
-    if config.resize || config.egfx {
-        // One `drdynvc` for every dynamic channel this session wants, because there
-        // is only one to have.
-        let mut drdynvc = DrdynvcClient::new();
-        if config.resize {
-            let caps = display.clone();
-            drdynvc = drdynvc.with_dynamic_channel(DisplayControlClient::new(move |received| {
-                if let Ok(mut slot) = caps.0.lock() {
-                    *slot = Some(received.max_monitor_area());
-                }
-                Ok(Vec::new())
-            }));
-        }
-        if config.egfx {
-            drdynvc = drdynvc.with_dynamic_channel(egfx::Channel::new(graphics.clone()));
-        }
+    if config.resize {
+        // Display Control is the one dynamic channel this client opens, and
+        // `drdynvc` is what carries it.
+        let caps = display.clone();
+        let drdynvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(move |received| {
+            if let Ok(mut slot) = caps.0.lock() {
+                *slot = Some(received.max_monitor_area());
+            }
+            Ok(Vec::new())
+        }));
         connector = connector.with_static_channel(drdynvc);
     }
 
@@ -486,8 +467,7 @@ fn connector_config(config: &Connect) -> connector::Config {
         // probe but RTT, which IronRDP answers on its own.
         connection_type: ConnectionType::Lan,
         ime_file_name: String::new(),
-        // No bitmap codecs: the legacy path is plain bitmaps — lossless, which is the
-        // point of turning the pipeline off — and the pipeline carries its own.
+        // No bitmap codecs: this client takes plain bitmaps, which are lossless.
         bitmap: None,
         dig_product_id: String::new(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
@@ -525,7 +505,8 @@ fn connector_config(config: &Connect) -> connector::Config {
         enable_server_pointer: true,
         pointer_software_rendering: false,
         multitransport_flags: None,
-        support_dyn_vc_gfx_protocol: config.egfx,
+        // The graphics pipeline is not offered: this client decodes bitmaps.
+        support_dyn_vc_gfx_protocol: false,
     }
 }
 
@@ -541,8 +522,8 @@ const COMMANDS_PER_TURN: usize = FastPathInput::MAX_EVENTS;
 
 struct Active<'a> {
     stage: ActiveStage,
-    /// The legacy path's decoded desktop. `ActiveStage` paints bitmap updates into
-    /// it and names the rectangle, which is then copied into `framebuffer`.
+    /// The decoded desktop. `ActiveStage` paints bitmap updates into it and names
+    /// the rectangle, which is then copied into `framebuffer`.
     image: DecodedImage,
     reader: Reader,
     writer: Writer,
@@ -554,7 +535,6 @@ struct Active<'a> {
     /// Painted rectangles not yet handed to the caller, folded together while the
     /// event queue is full — see [`EVENT_QUEUE`].
     damage: Vec<Rect>,
-    graphics: egfx::Updates,
     display: DisplayCaps,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
@@ -574,7 +554,6 @@ impl<'a> Active<'a> {
         framebuffer: &'a Framebuffer,
         events: &'a mpsc::Sender<Event>,
         display: DisplayCaps,
-        graphics: egfx::Updates,
         stop: watch::Receiver<bool>,
     ) -> Self {
         let desktop = result.desktop_size;
@@ -601,7 +580,6 @@ impl<'a> Active<'a> {
             framebuffer,
             events,
             damage: Vec::new(),
-            graphics,
             display,
             resize_ready: false,
             pending_resize: None,
@@ -769,18 +747,17 @@ impl<'a> Active<'a> {
                 _ => {}
             }
         }
-        // A malformed legacy bitmap was dropped, so part of the desktop is stale
-        // until the server paints it again.
+        // A malformed bitmap was dropped, so part of the desktop is stale until the
+        // server paints it again.
         if self.stage.take_bitmap_recovery_request() {
             debug!("rdp: a bitmap update was discarded; asking for a repaint");
             self.refresh().await?;
         }
-        self.apply_graphics().await?;
         self.poll_display_control().await?;
         Ok(None)
     }
 
-    /// Copy a rectangle the legacy path painted into `image` out to the framebuffer.
+    /// Copy a rectangle the decoder painted into `image` out to the framebuffer.
     fn paint_image(&mut self, region: InclusiveRectangle) {
         if region.right < region.left || region.bottom < region.top {
             return;
@@ -794,25 +771,6 @@ impl<'a> Active<'a> {
         if self.framebuffer.blit(self.image.data(), self.image.stride(), rect) {
             self.paint(rect);
         }
-    }
-
-    /// Everything the graphics pipeline queued while the last PDU was processed.
-    async fn apply_graphics(&mut self) -> Result<(), Error> {
-        for update in self.graphics.take() {
-            match update {
-                Update::Reset { width, height } => {
-                    info!("rdp: graphics reset, desktop {width}x{height}");
-                    self.redefine_desktop(width, height).await?;
-                }
-                Update::Paint { rect, rgba } => {
-                    if self.framebuffer.blit_packed(rect, &rgba) {
-                        self.paint(rect);
-                    }
-                }
-                Update::FrameEnd => self.send(Event::Frame).await,
-            }
-        }
-        Ok(())
     }
 
     /// The desktop is now `width` × `height`: both copies of it start again, blank,
@@ -887,7 +845,7 @@ impl<'a> Active<'a> {
     }
 
     /// The Deactivation-Reactivation Sequence: the server tore the desktop down and
-    /// is building it again — its answer to a monitor layout on the legacy path.
+    /// is building it again — its answer to a monitor layout.
     ///
     /// `true` means the session was asked to stop part-way through. A server owes
     /// this sequence a reply it can take as long as it likes over — and a server
@@ -1070,8 +1028,8 @@ mod tests {
         affordable(15360, 4320).expect("two 8K monitors side by side is still real");
         affordable(0, 0).expect("a desktop with no pixels costs nothing");
 
-        // IronRDP's own bound on a graphics reset, and the largest desktop the
-        // connector can carry: past what this client will hold.
+        // The largest desktop a negotiation can name, and past what this client
+        // will hold.
         let err = affordable(32766, 32766).expect_err("4 GiB");
         assert!(format!("{err}").contains("32766x32766"), "{err}");
         affordable(65535, 65535).expect_err("17 GB");

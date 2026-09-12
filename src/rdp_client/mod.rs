@@ -7,11 +7,9 @@
 //! module's business — [`crate::rdp`] is the caller, and it encodes them.
 //!
 //! IronRDP supplies the protocol: the connection sequence, CredSSP, TLS, fast-path
-//! and slow-path decoding, the legacy bitmap codecs, the graphics pipeline with its
-//! codecs and compositor, and Display Control. This module owns what a headless
-//! gateway needs on top — one thread per session, the framebuffer copy, the event
-//! stream, the resize paths, and the ordering fix the pipeline needs (see
-//! [`egfx`](self::egfx)).
+//! and slow-path decoding, the bitmap codecs, and Display Control. This module owns
+//! what a headless gateway needs on top — one thread per session, the framebuffer
+//! copy, the event stream, and the resize path.
 //!
 //! # The two threads
 //!
@@ -23,24 +21,22 @@
 //! ```
 //!
 //! Every session gets an OS thread of its own, and it keeps it until the session
-//! ends. Decoding a desktop — RemoteFX Progressive, ClearCodec, planar — is real
-//! CPU work, and on its own thread it runs beside the caller's encoding rather than
-//! in turns with it. Input goes onto a queue the thread drains between PDUs, so
-//! nothing outside that thread ever touches the connection.
+//! ends. Decoding a desktop is real CPU work, and on its own thread it runs beside
+//! the caller's encoding rather than in turns with it. Input goes onto a queue the
+//! thread drains between PDUs, so nothing outside that thread ever touches the
+//! connection.
 //!
-//! # The two graphics paths
+//! # Graphics
 //!
-//! [`Connect::egfx`] chooses. With the graphics pipeline, the server draws through
-//! MS-RDPEGFX surfaces, marks its frames ([`Event::Frame`]), and answers a monitor
-//! layout with a graphics reset. Without it, the server sends plain bitmaps on the
-//! legacy path and answers a monitor layout with a Deactivation-Reactivation
-//! Sequence. Either way a resize surfaces as one [`Event::Resize`].
+//! The server draws with plain bitmap updates, and answers a monitor layout with a
+//! Deactivation-Reactivation Sequence — it tears the desktop down and builds it
+//! again at the new size, which surfaces here as one [`Event::Resize`].
 //!
 //! # What this does not do
 //!
 //! - **No sound, no clipboard, no touch.** None of those channels is opened.
-//! - **No H.264.** The pipeline is offered without an AVC decoder, so the server
-//!   picks among the codecs IronRDP decodes in Rust.
+//! - **No graphics pipeline.** MS-RDPEGFX is not advertised, so no surface
+//!   commands, no RemoteFX Progressive and no H.264.
 //! - **No certificate verification.** Any server certificate is accepted, for the
 //!   session only and without storing it. That is defensible under NLA, where
 //!   CredSSP binds the server's TLS public key into the credential exchange so an
@@ -49,7 +45,6 @@
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
 //! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
 
-mod egfx;
 mod error;
 mod framebuffer;
 mod input;

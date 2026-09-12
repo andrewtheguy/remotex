@@ -81,7 +81,6 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             width: Some(1280),
             height: Some(800),
             security: None,
-            egfx: None,
             // xrdp speaks no NLA, so its logon is plain TLS.
             allow_plain_tls: Some(true),
             resize: false,

@@ -123,12 +123,12 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **RDP EGFX pass-through.** The pipeline is on, decoded in the gateway by
-  IronRDP's codecs and compositor, with its frame boundaries taken as
-  `Event::Frame`. What remains planned is an assessment of AVC420 pass-through —
-  handing the host's H.264 to the browser rather than decoding it and encoding
-  VP9. What makes it large is that it is a second graphics pipeline beside the
-  one every engine shares, not an option on it.
+- **RDP EGFX.** The RDP client takes plain bitmap updates and does not advertise
+  MS-RDPEGFX at all, so a host's surface commands, RemoteFX Progressive and H.264
+  are all unused. Carrying the pipeline would buy cheaper resizes and, beyond it,
+  AVC420 pass-through — handing the host's H.264 to the browser rather than
+  decoding it and encoding VP9. What makes that large is that it is a second
+  graphics pipeline beside the one every engine shares, not an option on it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
