@@ -39,6 +39,13 @@ use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, Keyboard
 use ironrdp::pdu::input::mouse::PointerFlags;
 use ironrdp::pdu::input::mouse_x::PointerXFlags;
 use ironrdp::pdu::input::{MousePdu, MouseXPdu};
+use ironrdp::displaycontrol::pdu::{
+    DeviceScaleFactor, DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry,
+};
+use ironrdp::dvc::pdu::{
+    CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus, DataPdu,
+    DrdynvcClientPdu, DrdynvcDataPdu,
+};
 use ironrdp::pdu::pointer::{ColorPointerAttribute, LargePointerAttribute, PointerAttribute};
 use remotex::rdp_client::proto::bitmap::{self, Scratch};
 use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
@@ -46,6 +53,7 @@ use remotex::rdp_client::proto::credssp::{self, Credentials};
 use remotex::rdp_client::proto::fastpath::{self, Fragments};
 use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
+use remotex::rdp_client::proto::{channel, display, dvc};
 use remotex::rdp_client::proto::input::{self, Button, Event};
 use remotex::rdp_client::proto::pointer::{self, Pointer, Shape};
 use remotex::rdp_client::proto::info::ClientInfo;
@@ -75,6 +83,9 @@ const CHANNELS: [Channel; 1] = [Channel::DYNAMIC];
 /// A size to open at. Nothing in this probe depends on it; the server just has to
 /// accept it.
 const DESKTOP: (u16, u16) = (1920, 1080);
+
+/// What to resize it to, which nothing but a monitor layout can bring about.
+const RESIZED: (u16, u16) = (1280, 800);
 
 /// US English, which every Windows host has.
 const KEYBOARD_LAYOUT: u32 = 0x0409;
@@ -183,6 +194,9 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
 
         // 6. Join every channel, the user's own first. Each is its own round trip,
         //    and the server may answer with a different number than was asked for.
+        // The one virtual channel that was asked for, numbered by the server. It is
+        // what Display Control will be opened over.
+        let dynamic = channels[0];
         for channel in std::iter::once(user).chain(std::iter::once(io_channel)).chain(channels) {
             stream
                 .write_all(&mcs::channel_join_request(user, channel))
@@ -267,8 +281,34 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         println!("the desktop is live");
 
         // 11. The updates. Nothing is asked for: a share that has just gone live
-        //     paints itself, and what arrives is whatever the host decided to send.
-        watch(&mut stream, &demand, io_channel).await;
+        //     paints itself, and what arrives is whatever the host decided to send —
+        //     including the dynamic channel it opens, which is answered as it comes.
+        let display = watch(&mut stream, &demand, user, io_channel, dynamic).await;
+
+        // 12. The resize. A monitor layout is the one thing this client says on a
+        //     virtual channel, and the host's answer is to tear the share down and
+        //     build it again at the size that was asked for — which is the only way
+        //     to see from out here that every layer under it was right.
+        let control = display.channel.expect("the host opened Display Control");
+        assert!(
+            display.caps.is_some(),
+            "Display Control is not usable until its capabilities arrive"
+        );
+        let layout = display::monitor_layout(RESIZED.0.into(), RESIZED.1.into(), 100);
+        let chunk = channel::pdu(&dvc::data(control, &layout).unwrap(), demand.chunk).unwrap();
+        send(&mut stream, user, dynamic, &chunk).await;
+        println!("-> a monitor layout of {}x{}", RESIZED.0, RESIZED.1);
+
+        let demand = reactivation(&mut stream, io_channel).await;
+        println!(
+            "<- Demand Active: share {:#x}, desktop {}x{}",
+            demand.share_id, demand.width, demand.height
+        );
+        assert_eq!(
+            (demand.width, demand.height),
+            RESIZED,
+            "the host rebuilt the desktop at the size the monitor layout asked for"
+        );
     })
     .await
     .expect("the connection sequence finished within its budget");
@@ -317,8 +357,10 @@ fn hex(bytes: &[u8]) -> String {
 async fn watch(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     demand: &DemandActive,
+    user: u16,
     io_channel: u16,
-) {
+    dynamic: u16,
+) -> Display {
     let (width, height) = (usize::from(demand.width), usize::from(demand.height));
     let mut desktop = vec![0_u8; width * height * 4];
     let mut painted = vec![false; width * height];
@@ -329,6 +371,9 @@ async fn watch(
     let mut ironrdp = BitmapStreamDecoder::default();
     let mut reference = Vec::new();
     let mut cursors = pointer::Cache::new();
+    let mut chunks = channel::Reassembly::new();
+    let mut incoming = dvc::Incoming::new();
+    let mut display = Display::default();
 
     let mut seen: Vec<(&str, usize)> = Vec::new();
     let mut rectangles = 0_usize;
@@ -341,13 +386,27 @@ async fn watch(
             // The slow path still carries everything that is not an update. During a
             // quiet session that is a Set Error Info saying nothing is wrong.
             let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
-            if data.channel != io_channel {
+            if data.channel == dynamic {
                 // The dynamic virtual channel, which the server opens as soon as the
-                // share is live. Display Control rides on it, and reading it is the
-                // phase after this one.
-                println!("<- channel {}: {} bytes", data.channel, data.payload.len());
+                // share is live. Everything it says is answered here, because a
+                // channel whose Create Request goes unanswered is never opened — and
+                // Display Control is the one this client is after.
+                let reply = {
+                    let Some(pdu) = chunks.push(data.payload).expect("a channel PDU") else {
+                        continue;
+                    };
+                    let Some(message) = incoming.push(pdu).expect("a dynamic channel PDU") else {
+                        continue;
+                    };
+                    answer(message, &mut display)
+                };
+                if let Some(reply) = reply {
+                    let chunk = channel::pdu(&reply, demand.chunk).expect("a reply of a few bytes");
+                    send(stream, user, dynamic, &chunk).await;
+                }
                 continue;
             }
+            assert_eq!(data.channel, io_channel, "a PDU on a channel nothing asked for");
             // Named rather than printed: a Save Session Info PDU is a kilobyte of
             // Unicode, and what matters here is that it decoded and what it was.
             let what = match share::decode(data.payload).expect("a share control PDU") {
@@ -409,6 +468,95 @@ async fn watch(
 
     assert!(rectangles > 0, "a live share paints itself, and nothing arrived");
     assert!(covered > 0, "rectangles arrived and none of them landed on the desktop");
+    display
+}
+
+/// The Display Control channel, once the server has opened it.
+#[derive(Debug, Default)]
+struct Display {
+    /// The number the server's Create Request gave it.
+    channel: Option<u32>,
+    /// What it said it would lay out, which arrives after the channel is open and
+    /// before a layout may be sent.
+    caps: Option<display::Capabilities>,
+}
+
+/// What to say back to one dynamic channel PDU.
+///
+/// The one channel this client takes is Display Control; every other name a Windows
+/// host offers — a printer, a smart card, a camera — is refused by name, which is
+/// what a client with nothing behind them does.
+fn answer(message: dvc::Message<'_>, display: &mut Display) -> Option<Vec<u8>> {
+    match message {
+        dvc::Message::Capabilities { version } => {
+            println!("<- drdynvc: capabilities version {version}");
+            Some(dvc::capabilities_response(version))
+        }
+        dvc::Message::Create { channel, name } => {
+            let wanted = name == display::CHANNEL_NAME;
+            let status = if wanted { dvc::ACCEPTED } else { dvc::NO_LISTENER };
+            println!(
+                "<- drdynvc: create {channel} for {name} ({})",
+                if wanted { "taken" } else { "refused" }
+            );
+            if wanted {
+                display.channel = Some(channel);
+            }
+            Some(dvc::create_response(channel, status))
+        }
+        dvc::Message::Close { channel } => {
+            println!("<- drdynvc: close {channel}");
+            if display.channel == Some(channel) {
+                *display = Display::default();
+            }
+            None
+        }
+        dvc::Message::Data { channel, data } => {
+            if display.channel != Some(channel) {
+                println!("<- drdynvc: {} bytes on channel {channel}", data.len());
+                return None;
+            }
+            let caps = display::capabilities(data).expect("the Display Control capabilities");
+            println!("<- display control: {caps:?}");
+            display.caps = Some(caps);
+            None
+        }
+    }
+}
+
+/// Read until the server has torn the share down and demanded a new one.
+///
+/// Everything in between is the session going about its business — fast-path updates
+/// for a desktop that is about to be replaced, and whatever the slow path carries —
+/// and none of it is what this is waiting for.
+async fn reactivation(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    io_channel: u16,
+) -> DemandActive {
+    let mut deactivated = false;
+    loop {
+        let frame = tokio::time::timeout(WATCH, read_any(stream))
+            .await
+            .expect("the host answers a monitor layout within the watch window");
+        if fastpath::is_output(frame[0]) {
+            continue;
+        }
+        let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
+        if data.channel != io_channel {
+            continue;
+        }
+        match share::decode(data.payload).expect("a share control PDU") {
+            Pdu::DeactivateAll => {
+                println!("<- Deactivate All: the host is rebuilding the desktop");
+                deactivated = true;
+            }
+            Pdu::DemandActive(body) => {
+                assert!(deactivated, "a Demand Active without the Deactivate All before it");
+                return DemandActive::decode(body).expect("an RDP Demand Active PDU");
+            }
+            Pdu::Data(_) => {}
+        }
+    }
 }
 
 /// The pointer updates, which [`pointer::Cache`] is the whole reader of.
@@ -685,5 +833,67 @@ fn translate(event: Event) -> FastPathInputEvent {
             };
             mouse(flags, rotation, x, y)
         }
+    }
+}
+
+/// Every PDU this client sends on a virtual channel, encoded by both stacks and
+/// compared byte for byte.
+///
+/// The dynamic channel's first byte packs a command and the width of the two fields
+/// after it, so a channel number that crosses a width boundary changes the shape of
+/// the PDU rather than one field in it — which is exactly the kind of mistake a live
+/// host answers by quietly never opening the channel.
+#[test]
+fn our_dynamic_channel_pdus_encode_to_the_bytes_ironrdp_sends() {
+    for (version, theirs) in [(1, CapsVersion::V1), (2, CapsVersion::V2), (3, CapsVersion::V3)] {
+        let theirs = DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(theirs));
+        assert_eq!(dvc::capabilities_response(version), encode_vec(&theirs).unwrap());
+    }
+
+    for channel in [0x03_u32, 0xFF, 0x0100, 0xFFFF, 0x0001_0000, u32::MAX] {
+        let accepted = CreateResponsePdu::new(channel, CreationStatus::OK);
+        assert_eq!(
+            dvc::create_response(channel, dvc::ACCEPTED),
+            encode_vec(&DrdynvcClientPdu::Create(accepted)).unwrap(),
+            "a create response for channel {channel:#x}"
+        );
+        let refused = CreateResponsePdu::new(channel, CreationStatus::NO_LISTENER);
+        assert_eq!(
+            dvc::create_response(channel, dvc::NO_LISTENER),
+            encode_vec(&DrdynvcClientPdu::Create(refused)).unwrap(),
+            "a refusal for channel {channel:#x}"
+        );
+        assert_eq!(
+            dvc::close(channel),
+            encode_vec(&DrdynvcClientPdu::Close(ClosePdu::new(channel))).unwrap(),
+            "a close for channel {channel:#x}"
+        );
+        let data = DrdynvcDataPdu::Data(DataPdu::new(channel, vec![1, 2, 3]));
+        assert_eq!(
+            dvc::data(channel, &[1, 2, 3]).unwrap(),
+            encode_vec(&DrdynvcClientPdu::Data(data)).unwrap(),
+            "a data PDU for channel {channel:#x}"
+        );
+    }
+}
+
+/// The monitor layout, against the one the session builds today.
+///
+/// This is the whole of what this client says on a dynamic channel, and the fields it
+/// leaves at zero — orientation, physical size — are the ones the stack being replaced
+/// was already being told to leave at zero.
+#[test]
+fn our_monitor_layout_encodes_to_the_bytes_ironrdp_sends() {
+    for (width, height, scale) in [(1280, 800, 100), (1920, 1080, 150), (3840, 2160, 500)] {
+        let entry = MonitorLayoutEntry::new_primary(width, height)
+            .and_then(|entry| entry.with_desktop_scale_factor(scale))
+            .map(|entry| entry.with_device_scale_factor(DeviceScaleFactor::Scale100Percent))
+            .expect("a layout entry the other stack accepts");
+        let theirs = DisplayControlPdu::from(DisplayControlMonitorLayout::new(&[entry]).unwrap());
+        assert_eq!(
+            display::monitor_layout(width, height, scale),
+            encode_vec(&theirs).unwrap(),
+            "a {width}x{height} layout at {scale}%"
+        );
     }
 }
