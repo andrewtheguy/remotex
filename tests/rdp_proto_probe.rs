@@ -14,17 +14,29 @@
 //!   cargo test --test rdp_proto_probe -- --ignored --nocapture
 //! ```
 //!
-//! It goes as far as the new stack can carry a connection and stops there — at the
-//! moment the desktop is live and the first update would arrive. What it proves at
-//! each step is the step a server is the only judge of: that the host accepts what we
-//! sent, and that what it sends back decodes.
+//! It goes as far as the new stack can carry a connection, and then watches the
+//! desktop paint itself. What it proves at each step is the step a server is the only
+//! judge of: that the host accepts what we sent, and that what it sends back decodes.
+//!
+//! The pixels get a second judge. Every compressed rectangle is decoded twice — once
+//! by [`remotex::rdp_client::proto::planar`] and once by IronRDP, which is the stack
+//! this one is replacing and which has been rendering this host correctly all along —
+//! and the two are compared. Plane order and row order are the two mistakes a planar
+//! decoder makes that produce a picture which is merely *wrong* rather than one that
+//! fails to decode, and neither is visible in a hex dump.
+//!
+//! What it decodes is also written out, as `tmp/rdp_proto_probe.ppm`, for an operator
+//! who would rather look at the desktop than read a coverage figure.
 
 mod common;
 
 use std::time::Duration;
 
+use ironrdp::graphics::rdp6::BitmapStreamDecoder;
+use remotex::rdp_client::proto::bitmap::{self, Scratch};
 use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
 use remotex::rdp_client::proto::credssp::{self, Credentials};
+use remotex::rdp_client::proto::fastpath::{self, Fragments};
 use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
 use remotex::rdp_client::proto::info::ClientInfo;
@@ -57,6 +69,14 @@ const DESKTOP: (u16, u16) = (1920, 1080);
 
 /// US English, which every Windows host has.
 const KEYBOARD_LAYOUT: u32 = 0x0409;
+
+/// How long to watch the desktop paint. A Windows host repaints the whole screen as
+/// soon as the share is live, so this is long enough to see every rectangle of it and
+/// short enough that the probe is not a wait.
+const WATCH: Duration = Duration::from_secs(5);
+
+/// Where the decoded desktop is left for an operator to look at.
+const PICTURE: &str = "tmp/rdp_proto_probe.ppm";
 
 #[tokio::test]
 #[ignore = "requires a real Windows host from tmp/test_uat.toml"]
@@ -236,6 +256,10 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             }
         }
         println!("the desktop is live");
+
+        // 11. The updates. Nothing is asked for: a share that has just gone live
+        //     paints itself, and what arrives is whatever the host decided to send.
+        watch(&mut stream, &demand, io_channel).await;
     })
     .await
     .expect("the connection sequence finished within its budget");
@@ -274,4 +298,204 @@ async fn read_frame(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Vec<u
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Watch the desktop paint itself, decoding everything that arrives.
+///
+/// Nothing is sent from here. What a share sends when it goes live is the host's
+/// decision, and the point is to find out what that is and whether this client can
+/// read it — not to provoke a particular update.
+async fn watch(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    demand: &DemandActive,
+    io_channel: u16,
+) {
+    let (width, height) = (usize::from(demand.width), usize::from(demand.height));
+    let mut desktop = vec![0_u8; width * height * 4];
+    let mut painted = vec![false; width * height];
+
+    let mut fragments = Fragments::new(demand.multifragment);
+    let mut scratch = Scratch::default();
+    let mut pixels = Vec::new();
+    let mut ironrdp = BitmapStreamDecoder::default();
+    let mut reference = Vec::new();
+
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    let mut rectangles = 0_usize;
+    let mut compressed = 0_usize;
+    let mut bytes = 0_usize;
+
+    let deadline = tokio::time::Instant::now() + WATCH;
+    while let Ok(frame) = tokio::time::timeout_at(deadline, read_any(stream)).await {
+        if !fastpath::is_output(frame[0]) {
+            // The slow path still carries everything that is not an update. During a
+            // quiet session that is a Set Error Info saying nothing is wrong.
+            let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
+            if data.channel != io_channel {
+                // The dynamic virtual channel, which the server opens as soon as the
+                // share is live. Display Control rides on it, and reading it is the
+                // phase after this one.
+                println!("<- channel {}: {} bytes", data.channel, data.payload.len());
+                continue;
+            }
+            // Named rather than printed: a Save Session Info PDU is a kilobyte of
+            // Unicode, and what matters here is that it decoded and what it was.
+            let what = match share::decode(data.payload).expect("a share control PDU") {
+                Pdu::DemandActive(body) => format!("a Demand Active of {} bytes", body.len()),
+                Pdu::DeactivateAll => "a Deactivate All".to_owned(),
+                Pdu::Data(pdu) => {
+                    format!("a data PDU of type {:#04x}, {} bytes", pdu.kind, pdu.body.len())
+                }
+            };
+            println!("<- slow path: {what}");
+            continue;
+        }
+        bytes += frame.len();
+        for piece in fastpath::updates(&frame).expect("a fast-path output PDU") {
+            let piece = piece.expect("a fast-path update");
+            let Some(update) = fragments.push(piece).expect("a reassembled update") else {
+                continue;
+            };
+            count(&mut seen, name(update.code));
+            if update.code != fastpath::BITMAP {
+                continue;
+            }
+            for rectangle in bitmap::update(update.data).expect("a Bitmap Update") {
+                rectangle.decode(&mut scratch, &mut pixels).expect("a rectangle of the desktop");
+                assert_eq!(pixels.len(), rectangle.painted_bytes());
+                if rectangle.compressed {
+                    compressed += 1;
+                    check(&mut ironrdp, &mut reference, &rectangle, &pixels);
+                }
+                blit(&mut desktop, &mut painted, width, &rectangle, &pixels);
+                rectangles += 1;
+            }
+        }
+    }
+
+    seen.sort_unstable();
+    println!("<- {bytes} bytes of fast-path output: {seen:?}");
+    println!("   {rectangles} rectangles, {compressed} of them compressed");
+    let covered = painted.iter().filter(|seen| **seen).count();
+    println!("   {}% of the desktop painted", covered * 100 / painted.len());
+    write_picture(&desktop, width, height);
+
+    assert!(rectangles > 0, "a live share paints itself, and nothing arrived");
+    assert!(covered > 0, "rectangles arrived and none of them landed on the desktop");
+}
+
+/// Decode the same rectangle with IronRDP, and insist the two agree.
+///
+/// IronRDP hands back the whole bitmap as `RGB24` in the order it was stored — bottom
+/// row first — so the comparison applies the same turn and the same crop that
+/// [`bitmap::Bitmap::decode`] does. Getting either of those wrong is the failure this
+/// is here to catch.
+fn check(
+    ironrdp: &mut BitmapStreamDecoder,
+    reference: &mut Vec<u8>,
+    rectangle: &bitmap::Bitmap<'_>,
+    ours: &[u8],
+) {
+    let (width, height) = (usize::from(rectangle.width), usize::from(rectangle.height));
+    reference.clear();
+    ironrdp
+        .decode_bitmap_stream_to_rgb24(rectangle.data, reference, width, height)
+        .expect("IronRDP to decode the same rectangle");
+
+    let mut expected = Vec::with_capacity(rectangle.painted_bytes());
+    for row in (height - usize::from(rectangle.paint_height)..height).rev() {
+        for column in 0..usize::from(rectangle.paint_width) {
+            let at = (row * width + column) * 3;
+            expected.extend_from_slice(&[reference[at], reference[at + 1], reference[at + 2], 0]);
+        }
+    }
+    assert_eq!(ours, expected, "a {width}x{height} planar rectangle decoded two ways");
+}
+
+/// Paint one decoded rectangle onto the desktop, and remember that it was painted.
+fn blit(
+    desktop: &mut [u8],
+    painted: &mut [bool],
+    width: usize,
+    rectangle: &bitmap::Bitmap<'_>,
+    pixels: &[u8],
+) {
+    let (x, y) = (usize::from(rectangle.x), usize::from(rectangle.y));
+    let columns = usize::from(rectangle.paint_width);
+    for row in 0..usize::from(rectangle.paint_height) {
+        let from = row * columns * 4;
+        let to = ((y + row) * width + x) * 4;
+        assert!(to + columns * 4 <= desktop.len(), "a rectangle outside a {width}-wide desktop");
+        desktop[to..to + columns * 4].copy_from_slice(&pixels[from..from + columns * 4]);
+        painted[(y + row) * width + x..(y + row) * width + x + columns].fill(true);
+    }
+}
+
+/// The desktop as a `P6` portable pixmap, which needs no encoder and which every
+/// image viewer on this machine opens.
+fn write_picture(desktop: &[u8], width: usize, height: usize) {
+    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+    let (pixels, _) = desktop.as_chunks::<4>();
+    ppm.extend(pixels.iter().flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]));
+    std::fs::write(PICTURE, ppm).expect("write the decoded desktop");
+    println!("   the decoded desktop is in {PICTURE}");
+}
+
+fn count(seen: &mut Vec<(&str, usize)>, what: &'static str) {
+    match seen.iter_mut().find(|(name, _)| *name == what) {
+        Some((_, count)) => *count += 1,
+        None => seen.push((what, 1)),
+    }
+}
+
+/// What an update type is called, for a line an operator reads.
+fn name(code: u8) -> &'static str {
+    match code {
+        fastpath::ORDERS => "orders",
+        fastpath::BITMAP => "bitmap",
+        fastpath::PALETTE => "palette",
+        fastpath::SYNCHRONIZE => "synchronize",
+        fastpath::SURFACE_COMMANDS => "surface commands",
+        fastpath::POINTER_HIDDEN => "pointer hidden",
+        fastpath::POINTER_DEFAULT => "pointer default",
+        fastpath::POINTER_POSITION => "pointer position",
+        fastpath::COLOR_POINTER => "colour pointer",
+        fastpath::CACHED_POINTER => "cached pointer",
+        fastpath::NEW_POINTER => "new pointer",
+        fastpath::LARGE_POINTER => "large pointer",
+        _ => "something unnamed",
+    }
+}
+
+/// One whole frame of either framing, told apart by its first byte.
+async fn read_any(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Vec<u8> {
+    let mut first = [0_u8; 1];
+    stream.read_exact(&mut first).await.expect("read the first byte of a frame");
+    if !fastpath::is_output(first[0]) {
+        let mut header = [0_u8; TPKT_HEADER];
+        header[0] = first[0];
+        stream.read_exact(&mut header[1..]).await.expect("read a TPKT header");
+        let length = frame_length(&header).expect("a TPKT frame");
+        let mut frame = vec![0_u8; length];
+        frame[..TPKT_HEADER].copy_from_slice(&header);
+        stream.read_exact(&mut frame[TPKT_HEADER..]).await.expect("read the rest of a frame");
+        return frame;
+    }
+
+    // A fast-path header is two bytes, or three when the second says so.
+    let mut frame = first.to_vec();
+    let length = loop {
+        match fastpath::frame_length(&frame).expect("a fast-path output header") {
+            Some(length) => break length,
+            None => {
+                let mut byte = [0_u8; 1];
+                stream.read_exact(&mut byte).await.expect("read a fast-path length");
+                frame.push(byte[0]);
+            }
+        }
+    };
+    let at = frame.len();
+    frame.resize(length, 0);
+    stream.read_exact(&mut frame[at..]).await.expect("read the rest of a fast-path frame");
+    frame
 }
