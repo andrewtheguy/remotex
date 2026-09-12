@@ -2793,6 +2793,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2",
  "socket2",
+ "sspi",
  "tempfile",
  "thiserror",
  "tokio",
