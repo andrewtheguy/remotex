@@ -22,6 +22,14 @@
 //!   them.
 //! - [`gcc`] — what the two sides tell each other while those channels are opened:
 //!   the desktop, the colour depth, the virtual channels.
+//! - [`share`] — the headers every PDU wears once the channels are open, and the
+//!   dispatch that says which kind has arrived.
+//! - [`info`] — the logon: who the session belongs to and what it should look like.
+//! - [`license`] — the one licensing PDU a Windows host sends, which says none is
+//!   needed.
+//! - [`capabilities`] — what the two ends agree to send each other, exchanged once
+//!   before any pixel moves.
+//! - [`finalization`] — the four PDUs between a confirmed share and a desktop.
 //!
 //! # One kind of server
 //!
@@ -42,11 +50,16 @@
 //!
 //! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
+pub mod capabilities;
 pub mod credssp;
 pub mod der;
+pub mod finalization;
 pub mod gcc;
+pub mod info;
+pub mod license;
 pub mod mcs;
 pub mod per;
+pub mod share;
 pub mod tls;
 pub mod wire;
 pub mod x224;
