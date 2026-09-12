@@ -108,23 +108,82 @@ far end's clipboard then costs a report of its size instead of the session.
 
 ## Graphics
 
-The Graphics Pipeline (MS-RDPEGFX) is not advertised at all, so the server draws
-with bitmap updates, decoded by the planar bitmap codec (`proto/planar.rs`). The
-client announces no drawing orders either, so the path is bitmaps throughout. That
-is what makes a resize a full reactivation, after which a Windows host re-renders
-the desktop sharp; it is also what avoids the pipeline's RFX Progressive decoder,
-which still fails partway through a session on some Windows hosts, where a decode
-error ends the session.
+Two paths, chosen by the target's `egfx` key, which defaults to on.
 
-A server names the desktop, and the framebuffer is one allocation sized by what it
-says, so a size past `bitmap::MAX_DESKTOP_BYTES` ends the session before anything
-is allocated for it. One compressed rectangle is held to the same ceiling, before
-its planes are.
+### The graphics pipeline (MS-RDPEGFX)
+
+The client sets `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in the GCC core data, and a
+Windows host answers by opening `Microsoft::Windows::RDS::Graphics` over `drdynvc`
+— the same dynamic channel transport Display Control rides, so `drdynvc` is asked
+for when either key is on. The client accepts the channel and at once advertises
+two capability sets (`proto/gfx.rs::caps_advertise`): version 8 with the small
+cache, and version 10 with the small cache and `AVC_DISABLED`, so the host never
+sends H.264. `THINCLIENT` is deliberately not set. The host confirms one set and
+then draws.
+
+Every PDU on the channel is wrapped in RDP 8 bulk compression (`proto/zgfx.rs`), a
+port of FreeRDP's decoder: a fixed Huffman table over literals, matches into a
+2.5 MB history shared by every PDU for the channel's life, and runs of unencoded
+bytes. One wrapper may hold several RDPGFX PDUs, each eight-byte-headed with its
+own length, and `proto/gfx.rs` decodes them in order. Only the server-to-client
+direction is wrapped: the client's own PDUs — the caps advertise, each frame
+acknowledgement — go out raw, because a Windows host reads the RDPGFX header
+straight off the channel and fails its graphics subsystem when it finds a wrapper
+there instead.
+
+The host does not paint the desktop; it paints *surfaces* it creates and sizes,
+maps them onto the output at an origin, and brackets drawing in StartFrame and
+EndFrame. `rdp_client/gfx.rs` keeps each surface's pixels and the rectangles drawn
+into since the last frame, and at the EndFrame copies those rectangles of every
+mapped surface into the framebuffer — the shape of FreeRDP's `gdi/gfx.c`. Each
+EndFrame is acknowledged (`queueDepth` unavailable), which a Windows host requires
+or it throttles and then stops; and each surfaces to the engine as `Event::Frame`
+after the paints it covers, which is the frame boundary the engine's flush was
+built to guess at. A monitor layout is answered by ResetGraphics, which resizes the
+framebuffer and surfaces as `Event::Resize` — no reactivation, and the channels
+untouched.
+
+The compositor decodes everything a current Windows host sends, measured against
+one ([the plan](rdp-egfx-plan.md) records the tally). Uncompressed rectangles and
+the planar codec — the same `proto/planar.rs` a bitmap update uses, with the rows
+the right way up. ClearCodec (`proto/clear.rs`), the desktop's primary codec here:
+its residual, band and glyph layers with their caches, and all three subcodecs,
+raw, RLEX and NSCodec (`proto/nsc.rs`), the last carrying most pictures and
+anti-aliased text. RemoteFX Progressive (`proto/progressive.rs`), which arrives on
+WireToSurface2 with its own rectangles: the decoder keeps every tile of every
+surface between PDUs — its coefficients and their signs — so an upgrade pass adds
+bits to what a first pass left, and only the reduce-extrapolate wavelet and RLGR1 a
+modern host uses are implemented; a region asking for the classic RemoteFX wavelet
+is refused by name. The copies and caches that make a desktop cheap are acted on:
+SurfaceToSurface reads its source whole before writing so a scroll over itself does
+not smear, SurfaceToCache and CacheToSurface keep rectangles by slot, SolidFill
+clips to the surface. A rectangle that will not decode is left unpainted with a
+warning and the session runs on, since the host draws it again; a PDU whose framing
+is wrong ends the session, as any malformed PDU does. The channel says which codecs
+and commands it carried when it ends, at `info`.
+
+### Bitmap updates
+
+With `egfx = false` the pipeline is not advertised, so the server draws with bitmap
+updates, decoded by the planar bitmap codec (`proto/planar.rs`). The client
+announces no drawing orders either, so the path is bitmaps throughout. That is what
+makes a resize a full reactivation, after which a Windows host re-renders the
+desktop sharp. Every server that is not Windows takes this path whatever the key.
 
 Bitmap updates carry no frame boundary, so the engine flushes damage on a guess:
 the 16 ms coalescer (`DAMAGE_INTERVAL` in `src/rdp.rs`) reconstructs boundaries by
 timing — a quiet screen's damage leaves on the spot, and everything within one
-interval after it waits for the deadline, coalesced.
+interval after it waits for the deadline, coalesced. Under the pipeline the
+EndFrame is the flush signal and that interval demotes to a 100 ms safety net
+(`FRAME_NET`) hung past any real frame.
+
+### Either way
+
+A server names the desktop, and the framebuffer is one allocation sized by what it
+says, so a size past `bitmap::MAX_DESKTOP_BYTES` — named in a Demand Active, a
+ResetGraphics or a CreateSurface — ends the session before anything is allocated
+for it. One compressed rectangle is held to the same ceiling, before its planes
+are.
 
 Under a plan that takes copies, each flush first searches the damage for regions
 the client already holds elsewhere on its canvas (`src/copies.rs`, guacamole-
@@ -150,13 +209,15 @@ desktop-size requests, and also matches the client's display density: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
 stretched. The opening handshake is always 1x; the client applies its screen
-density after `connected`, so a Retina client costs a reactivation. RDP reports no
-scale factor back, so the density here is declared rather than measured. The layout
+density after `connected`, so a Retina client costs a graphics reset on the default
+pipeline path and a reactivation on the bitmap path. RDP reports no scale factor
+back, so the density here is declared rather than measured. The layout
 always says a monitor is upright: a window taller than it is wide is not a rotated
 screen, and a server told otherwise turns the desktop on its side.
 
-A size change that is *real* costs a full Deactivation-Reactivation Sequence,
-which the client runs and reports as a new desktop size. Asking twice for the same
+A size change that is *real* costs a graphics reset under the pipeline and a full
+Deactivation-Reactivation Sequence without it; the client runs either and reports a
+new desktop size. Asking twice for the same
 size triggers one change, and a request equal to the current size never triggers
 one. A layout is asked for on a bounded schedule rather than once, because a
 Windows host discards one sent before the session it is starting has settled and

@@ -29,11 +29,15 @@
 //! thread drains between PDUs, so nothing outside that thread ever touches the
 //! connection.
 //!
-//! # Graphics
+//! # The two graphics paths
 //!
-//! The server draws with plain bitmap updates, and answers a monitor layout with a
-//! Deactivation-Reactivation Sequence — it tears the desktop down and builds it
-//! again at the new size, which surfaces here as one [`Event::Resize`].
+//! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
+//! draws through surfaces on a dynamic channel — [`gfx`](self::gfx) composes them
+//! into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
+//! layout with a graphics reset. Without it, the server sends plain bitmap updates
+//! on the share and answers a monitor layout with a Deactivation-Reactivation
+//! Sequence — it tears the desktop down and builds it again at the new size. Either
+//! way a resize surfaces here as one [`Event::Resize`].
 //!
 //! # The clipboard
 //!
@@ -47,8 +51,8 @@
 //! # What this does not do
 //!
 //! - **No sound and no touch.** Neither channel is opened.
-//! - **No graphics pipeline.** MS-RDPEGFX is not advertised, so no surface
-//!   commands, no RemoteFX Progressive and no H.264.
+//! - **No H.264.** The graphics pipeline is offered with AVC disabled, so a server
+//!   draws with the codecs this module decodes in Rust.
 //! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a
 //!   server that cannot do CredSSP is refused rather than logged on to some other
 //!   way.
@@ -63,6 +67,7 @@
 mod connect;
 mod error;
 mod framebuffer;
+mod gfx;
 mod input;
 mod pointer;
 pub mod proto;

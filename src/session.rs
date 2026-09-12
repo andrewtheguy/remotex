@@ -1323,6 +1323,7 @@ mod tests {
             width: Some(1),
             height: Some(1),
             resize: meta.resize,
+            egfx: None,
             clipboard: meta.clipboard,
             audio: meta.audio,
             audio_codec: meta.audio_codec,

@@ -12,10 +12,10 @@ use tokio::time::Duration;
 
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
-use super::framebuffer::{Framebuffer, Rect};
+use super::framebuffer::{Framebuffer, Rect, affordable};
+use super::gfx::{self, Graphics};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
-use super::proto::bitmap::MAX_DESKTOP_BYTES;
 use super::proto::capabilities::DemandActive;
 use super::proto::channel::Chunk;
 use super::proto::fastpath::{self, Fragments, Update};
@@ -24,6 +24,7 @@ use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
 use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, tls};
+use super::proto::gfx as gfx_proto;
 
 // ------------------------------------------------------------------ configuration
 
@@ -41,11 +42,19 @@ pub struct Connect {
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
-    /// A server answers a monitor layout with a Deactivation-Reactivation Sequence:
-    /// it tears the desktop and the capability set down and builds them again, after
-    /// which it renders the new size from scratch. This client sees one
-    /// [`Event::Resize`] at the end of it.
+    /// A server answers a monitor layout by resizing the desktop: with a graphics
+    /// reset under [`Connect::egfx`], and without it with a Deactivation-Reactivation
+    /// Sequence that tears the desktop and the capability set down and builds them
+    /// again. Either way this client sees one [`Event::Resize`] at the end of it.
     pub resize: bool,
+    /// Whether to offer the graphics pipeline (MS-RDPEGFX).
+    ///
+    /// Offered, a Windows host draws the desktop through surfaces on a dynamic
+    /// channel of its own, marks every frame's end — [`Event::Frame`] — and answers a
+    /// monitor layout with a graphics reset rather than a reactivation. Not offered,
+    /// the host draws with bitmap updates on the share, which is the path every
+    /// other server takes anyway.
+    pub egfx: bool,
     /// Whether to open MS-RDPECLIP, which is what makes the clipboard side of
     /// [`Input`] do anything.
     ///
@@ -66,10 +75,21 @@ pub enum Event {
     Connected { width: u32, height: u32 },
     /// This rectangle of the framebuffer changed.
     ///
-    /// Bitmap updates carry no frame boundary, so nothing here says where one
-    /// picture ends and the next begins; a consumer that needs to present coherent
-    /// frames paces them itself.
+    /// Bitmap updates carry no frame boundary, so on a session without
+    /// [`Event::Frame`] nothing says where one picture ends and the next begins; a
+    /// consumer that needs to present coherent frames paces them itself.
     Paint(Rect),
+    /// The server finished a frame: every [`Event::Paint`] since the last `Frame`
+    /// belongs to one coherent picture. Sent only when the server says so itself —
+    /// the graphics pipeline's EndFrame — never guessed from timing. The bitmap path
+    /// marks no frames, so a consumer keeps whatever pacing it had and treats this as
+    /// the upgrade it is.
+    Frame,
+    /// The server confirmed the graphics pipeline, so every [`Event::Paint`] from
+    /// here on arrives inside a frame that ends in an [`Event::Frame`]. Sent before
+    /// the first such paint, so a consumer pacing frames itself stops guessing
+    /// before there is a frame to cut in half.
+    FramesMarked,
     /// The desktop was redefined — resized, or rebuilt at the same size — and the
     /// framebuffer has already been resized and cleared, so everything is about to
     /// be repainted.
@@ -324,7 +344,7 @@ async fn run(
     framebuffer.resize(width, height);
     // The first event of the session, so there is room for it.
     let _ = events.send(Event::Connected { width, height }).await;
-    Active::new(connected, framebuffer, events, stop).run(commands).await
+    Active::new(connected, &config, framebuffer, events, stop).run(commands).await
 }
 
 /// Resolves once the caller has asked this session to stop, or dropped every
@@ -352,7 +372,9 @@ const COMMANDS_PER_TURN: usize = input::MAX_EVENTS;
 ///
 /// All of it is replaced wholesale when the server rebuilds the desktop, which is
 /// why it is one struct: after a Deactivation-Reactivation Sequence the share
-/// identifier, the size and the limits are all the new share's.
+/// identifier, the size and the limits are all the new share's. The size alone
+/// also moves with a graphics pipeline reset, which resizes the output without
+/// rebuilding the share.
 struct Share {
     /// Names the share, and every data PDU either side sends carries it.
     id: u32,
@@ -388,7 +410,7 @@ struct Active<'a> {
     user: u16,
     io_channel: u16,
     /// The static virtual channel dynamic channels are opened over, for a session
-    /// that asked to be resizable.
+    /// that asked to be resizable or for the graphics pipeline.
     dynamic: Option<Joined>,
     /// The static virtual channel the clipboard travels on, for a session that asked
     /// for one.
@@ -411,12 +433,11 @@ struct Active<'a> {
     /// of two PDUs never interleave on one channel, and these are a separate
     /// sequence from the dynamic channel's.
     clip_chunks: channel::Reassembly,
-    /// The number the server's Create Request gave Display Control, once it has
-    /// opened it.
-    control: Option<u32>,
-    /// What Display Control said it would lay out, which arrives after the channel
-    /// is open and before a layout may be sent.
-    caps: Option<display::Capabilities>,
+    /// The dynamic channels this client takes, by the numbers the server gave them.
+    dynamics: Dynamics,
+    /// The graphics pipeline's surfaces and decompressor, for a session that offered
+    /// it. Outlives a reactivation with the channel it belongs to.
+    graphics: Option<Graphics>,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
@@ -445,9 +466,27 @@ struct Active<'a> {
     stop: watch::Receiver<bool>,
 }
 
+/// The dynamic channels this client takes, and the numbers the server's Create
+/// Requests gave them.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Dynamics {
+    /// Whether Display Control is wanted at all — [`Connect::resize`].
+    resize: bool,
+    /// Whether the Graphics channel is wanted at all — [`Connect::egfx`].
+    egfx: bool,
+    /// Display Control, once the server has opened it.
+    control: Option<u32>,
+    /// What Display Control said it would lay out, which arrives after the channel
+    /// is open and before a layout may be sent.
+    caps: Option<display::Capabilities>,
+    /// The Graphics channel, once the server has opened it.
+    graphics: Option<u32>,
+}
+
 impl<'a> Active<'a> {
     fn new(
         connected: Connected,
+        config: &Connect,
         framebuffer: &'a Framebuffer,
         events: &'a mpsc::Sender<Event>,
         stop: watch::Receiver<bool>,
@@ -471,8 +510,8 @@ impl<'a> Active<'a> {
             chunks: channel::Reassembly::new(),
             incoming: dvc::Incoming::new(),
             clip_chunks: channel::Reassembly::new(),
-            control: None,
-            caps: None,
+            dynamics: Dynamics { resize: config.resize, egfx: config.egfx, ..Dynamics::default() },
+            graphics: config.egfx.then(Graphics::new),
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -651,13 +690,14 @@ impl<'a> Active<'a> {
     /// live. Everything it says is answered, because a channel whose Create Request
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
-        let reply = {
-            let Self { chunks, incoming, control, caps, .. } = self;
+        let (replies, updates) = {
+            let Self { chunks, incoming, dynamics, graphics, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
-                // Every PDU on this channel is tens of bytes, so this is a server
-                // that has lost the thread rather than a payload worth having.
+                // Every PDU on this channel is one chunk of a dynamic channel PDU, so
+                // this is a server that has lost the thread rather than a payload
+                // worth having.
                 Chunk::Dropped { length } => {
                     warn!("rdp: dropping a {length}-byte dynamic channel PDU, which is absurd");
                     return Ok(());
@@ -666,22 +706,75 @@ impl<'a> Active<'a> {
             let Some(message) = incoming.push(pdu)? else {
                 return Ok(());
             };
-            answer(message, control, caps)?
+            match message {
+                // The desktop itself, which is the framebuffer's business and not a
+                // reply's.
+                dvc::Message::Data { channel, data } if dynamics.graphics == Some(channel) => {
+                    let Some(graphics) = graphics else {
+                        bail!("the host drew on a graphics channel this client never accepted");
+                    };
+                    (Vec::new(), graphics.receive(data, framebuffer)?)
+                }
+                // The channel is gone, and with it every surface and the history the
+                // compressor was working from; a channel opened again starts afresh.
+                dvc::Message::Close { channel } if dynamics.graphics == Some(channel) => {
+                    debug!("rdp: the host closed the graphics channel");
+                    dynamics.graphics = None;
+                    *graphics = Some(Graphics::new());
+                    (Vec::new(), Vec::new())
+                }
+                message => (answer(message, dynamics)?, Vec::new()),
+            }
         };
-        if let (Some(reply), Some(dynamic)) = (reply, self.dynamic) {
-            self.write_channel(dynamic, &reply).await?;
+        if let Some(dynamic) = self.dynamic {
+            for reply in replies {
+                self.write_channel(dynamic, &reply).await?;
+            }
+        }
+        for update in updates {
+            match update {
+                // The host confirmed the pipeline, so every paint from here on
+                // arrives inside a marked frame; said before the first of them.
+                gfx::Update::Confirmed => self.send(Event::FramesMarked).await,
+                // The framebuffer is already the new size; the caller is told now,
+                // before the paints that follow in the same PDU. The share's size
+                // follows too: a Refresh Rect asked for later — and one is, after
+                // every resize — is in the coordinates of this desktop, not the one
+                // the Demand Active described.
+                gfx::Update::Reset { width, height } => {
+                    info!("rdp: graphics reset, desktop {width}x{height}");
+                    self.share.width = width;
+                    self.share.height = height;
+                    self.announce_desktop(width, height).await;
+                }
+                gfx::Update::Paint(rect) => self.paint(rect),
+                gfx::Update::Frame { id, decoded } => {
+                    self.send(Event::Frame).await;
+                    self.acknowledge_frame(id, decoded).await?;
+                }
+            }
         }
         // Display Control is usable once its capabilities have arrived, and a size
         // asked for before then has been waiting for exactly this.
         if !self.resize_ready
-            && self.control.is_some()
-            && let Some(caps) = self.caps
+            && self.dynamics.control.is_some()
+            && let Some(caps) = self.dynamics.caps
         {
             self.resize_ready = true;
             self.send(Event::ResizeReady { max_area: caps.area }).await;
             self.send_layout().await?;
         }
         Ok(())
+    }
+
+    /// The acknowledgement every EndFrame is owed: without it a Windows host
+    /// throttles, then stops sending frames altogether.
+    async fn acknowledge_frame(&mut self, frame: u32, decoded: u32) -> Result<()> {
+        let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
+            return Ok(()); // the channel closed under the frame; nothing to answer on
+        };
+        let ack = gfx_proto::frame_acknowledge(frame, decoded);
+        self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
     }
 
     /// The clipboard channel. Both ends announce a copy and neither transfers
@@ -835,11 +928,16 @@ impl<'a> Active<'a> {
     async fn redefine_desktop(&mut self, width: u32, height: u32) -> Result<()> {
         affordable(width, height)?;
         self.framebuffer.resize(width, height);
+        self.announce_desktop(width, height).await;
+        Ok(())
+    }
+
+    /// The framebuffer has been resized and cleared; tell the caller.
+    async fn announce_desktop(&mut self, width: u32, height: u32) {
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
         self.damage.clear();
         self.send(Event::Resize { width, height }).await;
-        Ok(())
     }
 
     /// Send the pending monitor layout, if there is one and a channel to carry it.
@@ -850,7 +948,7 @@ impl<'a> Active<'a> {
         let Some((width, height, scale)) = self.pending_resize.take() else {
             return Ok(());
         };
-        let Some(control) = self.control else {
+        let Some(control) = self.dynamics.control else {
             return Ok(()); // the server closed the channel; nothing can carry it
         };
         let Some(dynamic) = self.dynamic else {
@@ -1169,41 +1267,51 @@ fn answer_clipboard(pdu: &[u8]) -> Result<(Option<Vec<u8>>, Option<Event>)> {
     })
 }
 
-/// What to say back to one dynamic channel PDU.
+/// What to say back to one dynamic channel PDU — none, one, or two replies.
 ///
-/// The one channel this client takes is Display Control; every other name a Windows
-/// host offers — a printer, a smart card, a camera — is refused by name, which is
-/// what a client with nothing behind them does.
-fn answer(
-    message: dvc::Message<'_>,
-    control: &mut Option<u32>,
-    caps: &mut Option<display::Capabilities>,
-) -> Result<Option<Vec<u8>>> {
+/// Two channels are taken, each only when the session asked for what rides on it:
+/// Display Control for [`Connect::resize`], and the Graphics channel for
+/// [`Connect::egfx`], whose acceptance is followed at once by this client's
+/// capabilities, because a server waits for those before it draws anything. Every
+/// other name a Windows host offers — a printer, a smart card, a camera — is refused
+/// by name, which is what a client with nothing behind them does.
+///
+/// The Graphics channel's own data does not come here: it is the desktop, and the
+/// session hands it to the compositor instead.
+fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<u8>>> {
     Ok(match message {
-        dvc::Message::Capabilities { version } => Some(dvc::capabilities_response(version)),
+        dvc::Message::Capabilities { version } => vec![dvc::capabilities_response(version)],
         dvc::Message::Create { channel, name } => {
-            let wanted = name == display::CHANNEL_NAME;
-            if wanted {
+            if name == display::CHANNEL_NAME && dynamics.resize {
                 debug!("rdp: the host opened Display Control on dynamic channel {channel}");
-                *control = Some(channel);
+                dynamics.control = Some(channel);
+                vec![dvc::create_response(channel, dvc::ACCEPTED)]
+            } else if name == gfx_proto::CHANNEL_NAME && dynamics.egfx {
+                debug!("rdp: the host opened the graphics pipeline on dynamic channel {channel}");
+                dynamics.graphics = Some(channel);
+                // Client-to-server graphics PDUs go raw: the host reads the RDPGFX
+                // header off the channel directly, and only the server-to-client
+                // direction is bulk-compressed.
+                let caps = gfx_proto::caps_advertise();
+                vec![dvc::create_response(channel, dvc::ACCEPTED), dvc::data(channel, &caps)?]
+            } else {
+                vec![dvc::create_response(channel, dvc::NO_LISTENER)]
             }
-            let status = if wanted { dvc::ACCEPTED } else { dvc::NO_LISTENER };
-            Some(dvc::create_response(channel, status))
         }
         dvc::Message::Close { channel } => {
-            if *control == Some(channel) {
-                *control = None;
-                *caps = None;
+            if dynamics.control == Some(channel) {
+                dynamics.control = None;
+                dynamics.caps = None;
             }
-            None
+            Vec::new()
         }
         dvc::Message::Data { channel, data } => {
-            if *control == Some(channel) {
+            if dynamics.control == Some(channel) {
                 let read = display::capabilities(data)?;
                 debug!("rdp: Display Control will lay out {read:?}");
-                *caps = Some(read);
+                dynamics.caps = Some(read);
             }
-            None
+            Vec::new()
         }
     })
 }
@@ -1214,57 +1322,39 @@ fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
 }
 
-/// A desktop size the server named, refused before anything is allocated for it —
-/// see [`MAX_DESKTOP_BYTES`]. Both a real desktop's size and an absurd one are
-/// legal on the wire, so the difference is made here.
-fn affordable(width: u32, height: u32) -> Result<()> {
-    let bytes = usize::try_from(width)
-        .ok()
-        .zip(usize::try_from(height).ok())
-        .and_then(|(width, height)| width.checked_mul(height))
-        .and_then(|pixels| pixels.checked_mul(4));
-    match bytes {
-        Some(bytes) if bytes <= MAX_DESKTOP_BYTES => Ok(()),
-        _ => Err(anyhow!(
-            "the server asked for a {width}x{height} desktop, which is more than the {} MiB \
-             this client will hold",
-            MAX_DESKTOP_BYTES >> 20
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A server names the desktop, and this client allocates a framebuffer from what
-    /// it says. Both numbers are legal on the wire well past any real screen.
+    /// The two channels this client takes, out of the dozen a Windows host offers —
+    /// and each only when the session asked for what rides on it.
     #[test]
-    fn a_desktop_too_large_to_hold_is_refused_rather_than_allocated() {
-        affordable(1920, 1080).expect("an ordinary desktop");
-        affordable(15360, 4320).expect("two 8K monitors side by side is still real");
-        affordable(0, 0).expect("a desktop with no pixels costs nothing");
-
-        // The largest desktop a negotiation can name, and past what this client
-        // will hold.
-        let err = affordable(32766, 32766).expect_err("4 GiB");
-        assert!(format!("{err}").contains("32766x32766"), "{err}");
-        affordable(65535, 65535).expect_err("17 GB");
-        affordable(u32::MAX, u32::MAX).expect_err("the arithmetic itself must not wrap");
-    }
-
-    /// The one channel this client takes, out of the dozen a Windows host offers.
-    #[test]
-    fn only_display_control_is_taken_and_every_other_channel_is_refused_by_name() {
-        let (mut control, mut caps) = (None, None);
+    fn only_the_channels_asked_for_are_taken_and_every_other_is_refused_by_name() {
+        let mut dynamics = Dynamics { resize: true, egfx: true, ..Dynamics::default() };
         let create = |name| dvc::Message::Create { channel: 11, name };
-        let reply = answer(create("AUDIO_PLAYBACK_DVC"), &mut control, &mut caps).unwrap();
-        assert_eq!(reply, Some(dvc::create_response(11, dvc::NO_LISTENER)));
-        assert_eq!(control, None, "a channel nothing listens on is not remembered");
+        let reply = answer(create("AUDIO_PLAYBACK_DVC"), &mut dynamics).unwrap();
+        assert_eq!(reply, vec![dvc::create_response(11, dvc::NO_LISTENER)]);
+        assert_eq!(dynamics.control, None, "a channel nothing listens on is not remembered");
 
-        let reply = answer(create(display::CHANNEL_NAME), &mut control, &mut caps).unwrap();
-        assert_eq!(reply, Some(dvc::create_response(11, dvc::ACCEPTED)));
-        assert_eq!(control, Some(11));
+        let reply = answer(create(display::CHANNEL_NAME), &mut dynamics).unwrap();
+        assert_eq!(reply, vec![dvc::create_response(11, dvc::ACCEPTED)]);
+        assert_eq!(dynamics.control, Some(11));
+
+        // The graphics channel is accepted and, in the same breath, told what this
+        // client can take: a server draws nothing until it has heard that.
+        let reply = answer(dvc::Message::Create { channel: 12, name: gfx_proto::CHANNEL_NAME }, &mut dynamics).unwrap();
+        assert_eq!(reply.len(), 2);
+        assert_eq!(reply[0], dvc::create_response(12, dvc::ACCEPTED));
+        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise()).unwrap());
+        assert_eq!(dynamics.graphics, Some(12));
+
+        // A session that asked for neither refuses both by name.
+        let mut none = Dynamics::default();
+        let reply = answer(create(display::CHANNEL_NAME), &mut none).unwrap();
+        assert_eq!(reply, vec![dvc::create_response(11, dvc::NO_LISTENER)]);
+        let reply = answer(create(gfx_proto::CHANNEL_NAME), &mut none).unwrap();
+        assert_eq!(reply, vec![dvc::create_response(11, dvc::NO_LISTENER)]);
+        assert_eq!(none, Dynamics::default());
     }
 
     /// The opening PDU of the clipboard negotiation is answered from inside the
@@ -1344,11 +1434,12 @@ mod tests {
     #[test]
     fn closing_display_control_forgets_what_it_said_it_would_do() {
         let said = display::Capabilities { monitors: 1, area: 4 };
-        let (mut control, mut caps) = (Some(11), Some(said));
+        let mut dynamics =
+            Dynamics { resize: true, control: Some(11), caps: Some(said), ..Dynamics::default() };
         let elsewhere = dvc::Message::Close { channel: 12 };
-        assert_eq!(answer(elsewhere, &mut control, &mut caps).unwrap(), None);
-        assert_eq!(control, Some(11), "another channel closing says nothing about this one");
-        answer(dvc::Message::Close { channel: 11 }, &mut control, &mut caps).unwrap();
-        assert_eq!((control, caps), (None, None));
+        assert!(answer(elsewhere, &mut dynamics).unwrap().is_empty());
+        assert_eq!(dynamics.control, Some(11), "another channel closing says nothing about this one");
+        answer(dvc::Message::Close { channel: 11 }, &mut dynamics).unwrap();
+        assert_eq!((dynamics.control, dynamics.caps), (None, None));
     }
 }

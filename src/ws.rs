@@ -1204,6 +1204,7 @@ mod tests {
             width: Some(1),
             height: Some(1),
             resize: false,
+            egfx: None,
             clipboard: false,
             audio,
             audio_codec: None,

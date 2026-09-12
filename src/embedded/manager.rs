@@ -642,6 +642,14 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
 
     if target.protocol == Protocol::Rdp {
         lines.push(spec("security", "nla — the credentials are checked before the session"));
+        lines.push(spec(
+            "graphics",
+            if target.egfx() {
+                "egfx pipeline; a resize is a graphics reset"
+            } else {
+                "bitmap updates; a resize reactivates the session"
+            },
+        ));
     }
 
     // Beside the clipboard rather than inside the block above: sound is the

@@ -33,9 +33,11 @@ including with nothing, retry a `CB_RESPONSE_FAIL` on a bounded ladder — is
 `ClipboardState` in `src/rdp.rs`. What it took is recorded in
 [The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
 
-EGFX is the third thing this client does not carry, and it is under
+EGFX is in, measured as [the plan](rdp-egfx-plan.md) records; what is left of it
+beyond the decoders is under
 [Source payloads](#source-payloads-the-gateway-decodes-instead-of-forwarding)
-rather than here: its payoff is a transcode removed, not a control restored.
+rather than here, because that payoff is a transcode removed, not a control
+restored.
 
 #### Touch (MS-RDPEI)
 
@@ -197,12 +199,15 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **RDP EGFX.** The RDP client takes plain bitmap updates and does not advertise
-  MS-RDPEGFX at all, so a host's surface commands, RemoteFX Progressive and H.264
-  are all unused. Carrying the pipeline would buy cheaper resizes and, beyond it,
-  AVC420 pass-through — handing the host's H.264 to the browser rather than
-  decoding it and encoding VP9. What makes that large is that it is a second
-  graphics pipeline beside the one every engine shares, not an option on it.
+- **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
+  the surface compositor with its caches and copies, the frame marks, and the
+  decoders a current Windows host draws with: ClearCodec with NSCodec inside it,
+  RemoteFX Progressive, planar and uncompressed ([the plan](rdp-egfx-plan.md)
+  records the measurement each was picked from). Beyond the decoders lies AVC420
+  pass-through — handing the host's H.264 to the browser
+  rather than decoding it and encoding VP9. What makes that large is that it is a
+  second graphics pipeline beside the one every engine shares, not an option on
+  it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to

@@ -172,6 +172,15 @@ password = "change-me"
 # messages are ignored.
 #resize = false
 
+# RDP graphics pipeline (MS-RDPEGFX), on by default and independent of `resize`.
+# On, a Windows host draws the desktop through the pipeline's surfaces and marks
+# every frame, and each resize is a graphics reset — no reactivation or reconnect,
+# cheap enough for the window to drive continuously. Off, the host draws with
+# bitmap updates and each resize is a reactivation, after which it re-renders the
+# desktop sharp at the new size; that is the escape hatch while the pipeline's
+# decoders land in stages. RDP only, and refused on VNC even when set to false.
+#egfx = true
+
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

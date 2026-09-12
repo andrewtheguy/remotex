@@ -1,9 +1,9 @@
-//! The RDP client against a real host.
+//! The RDP client against a real host, with the graphics pipeline or without it.
 //!
 //! No container stands in here: the client speaks NLA to a current Windows host and
-//! nothing else, and what this exercises — bitmap updates and a
-//! Deactivation-Reactivation Sequence — is that host's behaviour. So, like
-//! `classify_render_e2e`, it
+//! nothing else, and what this exercises — the graphics pipeline's surfaces and
+//! codecs, a graphics reset, or bitmap updates and a Deactivation-Reactivation
+//! Sequence — is that host's behaviour. So, like `classify_render_e2e`, it
 //! borrows a target from the operator's `tmp/test_uat.toml`, named by
 //! [`TARGET_ENV`] rather than written here, and drives [`remotex::rdp_client`]
 //! directly with no gateway in front of it.
@@ -16,6 +16,17 @@
 //! What is asserted is the client's contract: a desktop arrives, gets painted,
 //! and a requested size comes back as a resize of that size with a framebuffer to
 //! match. Counts are printed, not asserted — they are the host's business.
+//!
+//! ## The graphics pipeline, measured
+//!
+//! [`EGFX_ENV`] chooses the path, and the pipeline is the default, as it is in the
+//! gateway. Under it the client decodes every codec the sandbox sends — ClearCodec
+//! with all three subcodecs, RemoteFX Progressive, planar and uncompressed — so the
+//! probe asserts a lit desktop there as it does on the bitmap path, and after each
+//! resize. Which codecs and commands the host chose is still the measurement, said at
+//! the end of the session at `info`: run with `RUST_LOG=remotex=info` to read it, and
+//! set [`DUMP_ENV`] to a directory to get the framebuffer as PNG at each stage, for
+//! the check only eyes can make.
 //!
 //! ## The clipboard
 //!
@@ -50,6 +61,10 @@ use tokio::sync::mpsc::Receiver;
 /// Which target in `tmp/test_uat.toml` to drive — see the module docs.
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 
+/// Whether to offer the graphics pipeline: anything but `0` or `false` does, and so
+/// does leaving it unset.
+const EGFX_ENV: &str = "REMOTEX_UAT_EGFX";
+
 /// The opening size, and the one each case asks to move to. Both even, both well
 /// inside what any host accepts.
 const OPENING: (u32, u32) = (1280, 800);
@@ -75,12 +90,17 @@ const KEY_A: u8 = 0x1E;
 const KEY_C: u8 = 0x2E;
 const KEY_V: u8 = 0x2F;
 
+/// Whether this run offers the graphics pipeline — see [`EGFX_ENV`].
+fn egfx() -> bool {
+    !matches!(std::env::var(EGFX_ENV).as_deref(), Ok("0") | Ok("false"))
+}
+
 fn connect() -> (Session, Receiver<Event>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
     let target = common::uat_target(&name);
-    println!("rdp_client_probe: {name} ({}:{})", target.host, target.port);
+    println!("rdp_client_probe: {name} ({}:{}), egfx {}", target.host, target.port, egfx());
     Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
@@ -90,6 +110,7 @@ fn connect() -> (Session, Receiver<Event>) {
         width: OPENING.0,
         height: OPENING.1,
         resize: true,
+        egfx: egfx(),
         clipboard: true,
     })
 }
@@ -98,6 +119,8 @@ fn connect() -> (Session, Receiver<Event>) {
 #[derive(Default, Debug)]
 struct Tally {
     paints: u64,
+    /// Frame boundaries the host marked, which only the graphics pipeline does.
+    frames: u64,
     cursors: u64,
     resizes: Vec<(u32, u32)>,
     resize_ready: bool,
@@ -130,6 +153,8 @@ async fn pump(
         };
         match event.expect("the event channel closed without an Ended") {
             Event::Paint(_) => tally.paints += 1,
+            Event::Frame => tally.frames += 1,
+            Event::FramesMarked => {}
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
@@ -164,6 +189,33 @@ async fn pump(
         }
     }
     true
+}
+
+/// Directory to write the framebuffer to as PNG at each stage, for eyes to check
+/// what the counts cannot: that the decoded desktop looks like a desktop.
+const DUMP_ENV: &str = "REMOTEX_UAT_DUMP";
+
+/// Write the framebuffer as `<dir>/<name>.png` when [`DUMP_ENV`] names a directory.
+fn dump(session: &Session, name: &str) {
+    let Ok(dir) = std::env::var(DUMP_ENV) else { return };
+    std::fs::create_dir_all(&dir).expect("creating the framebuffer dump directory");
+    let path = std::path::Path::new(&dir).join(format!("{name}.png"));
+    let bytes = session.framebuffer().with(|frame| {
+        let mut rgba = frame.pixels.clone();
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 0xFF;
+        }
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, frame.width, frame.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        writer.finish().expect("png finish");
+        out
+    });
+    std::fs::write(&path, bytes).expect("writing the framebuffer dump");
+    println!("  framebuffer written to {}", path.display());
 }
 
 /// How many of the framebuffer's pixels are not black: a desktop that decoded to
@@ -214,10 +266,13 @@ async fn case() {
     };
     println!("  connected at {width}x{height}");
 
-    // A desktop worth of paint, and Display Control, before anything is resized.
+    // A desktop worth of drawing, and Display Control, before anything is resized.
+    // Under the pipeline the drawing shows as frames; on the bitmap path, as paint.
+    let egfx = egfx();
+    let drawn = |t: &Tally| if egfx { t.frames > 0 } else { t.paints > 0 };
     let mut tally = Tally::default();
     pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(8), |t| {
-        t.resize_ready && t.clipboard_ready && t.paints > 0
+        t.resize_ready && t.clipboard_ready && drawn(t)
     })
     .await;
     // And a moment more, so a desktop still arriving is counted whole.
@@ -225,7 +280,8 @@ async fn case() {
         .await;
     let (on, total) = lit(&session);
     println!("  opening: {tally:?}, {on} of {total} pixels lit");
-    assert!(tally.paints > 0, "nothing was painted");
+    dump(&session, "opening");
+    assert!(drawn(&tally), "the host drew nothing");
     assert!(on > 0, "the desktop decoded to pure black");
     assert!(tally.resize_ready, "the host never offered Display Control");
     assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
@@ -234,19 +290,23 @@ async fn case() {
         let took = resize_to(&session, &mut events, &mut tally, size).await;
         // Let the repaint after the resize land.
         tally.paints = 0;
+        tally.frames = 0;
         pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(3), |_| false)
             .await;
         let (on, total) = lit(&session);
         let framebuffer = session.framebuffer().with(|frame| (frame.width, frame.height));
         println!(
-            "  resized to {}x{} after {:.1}s; {} paints since, {on} of {total} pixels lit",
+            "  resized to {}x{} after {:.1}s; {} paints and {} frames since, {on} of {total} \
+             pixels lit",
             size.0,
             size.1,
             took.as_secs_f32(),
-            tally.paints
+            tally.paints,
+            tally.frames,
         );
+        dump(&session, &format!("resized-{}x{}", size.0, size.1));
         assert_eq!(framebuffer, size, "the framebuffer did not follow the resize");
-        assert!(tally.paints > 0, "nothing was repainted after the resize");
+        assert!(drawn(&tally), "nothing was drawn after the resize");
         assert!(on > 0, "the resized desktop decoded to pure black");
     }
 

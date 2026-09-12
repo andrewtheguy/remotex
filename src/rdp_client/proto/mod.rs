@@ -26,8 +26,10 @@
 //!   long one is split into.
 //! - [`dvc`] — the dynamic channels a server opens over one of those while the session
 //!   is live.
-//! - [`display`] — the one dynamic channel this client takes, which is how a desktop
-//!   is resized.
+//! - [`display`] — the dynamic channel a desktop is resized over.
+//! - [`zgfx`] — the bulk compression every graphics pipeline PDU is wrapped in.
+//! - [`gfx`] — the graphics pipeline's own PDUs: surfaces, frames, and the codecs
+//!   that fill them.
 //! - [`cliprdr`] — the clipboard, on a static channel of its own.
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
@@ -68,6 +70,7 @@
 pub mod bitmap;
 pub mod capabilities;
 pub mod channel;
+pub mod clear;
 pub mod cliprdr;
 pub mod credssp;
 pub mod der;
@@ -78,14 +81,18 @@ pub mod fastpath;
 pub mod frame;
 pub mod finalization;
 pub mod gcc;
+pub mod gfx;
 pub mod info;
 pub mod input;
 pub mod license;
 pub mod mcs;
+pub mod nsc;
 pub mod per;
 pub mod planar;
 pub mod pointer;
+pub mod progressive;
 pub mod share;
 pub mod tls;
 pub mod wire;
 pub mod x224;
+pub mod zgfx;
