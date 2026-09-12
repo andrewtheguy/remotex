@@ -1,9 +1,9 @@
 //! The MS-RDPECLIP half of the clipboard bridge: the format this gateway
 //! carries, and the conversions either direction needs.
 //!
-//! ## What the engine crate does and does not do
+//! ## What the channel does and does not do
 //!
-//! [`freerdp`] carries the clipboard *negotiation* — format lists, requests,
+//! The channel carries the clipboard *negotiation* — format lists, requests,
 //! responses — and nothing else: what crosses that boundary is a format id and a
 //! `Vec<u8>`. That is the right seam, and it is why the UTF-16 lives here.
 //! Choosing a text format, deciding what a line ending is, and deciding what
@@ -32,15 +32,12 @@
 //! HTML, bitmaps and file lists have nowhere to go, and nothing is planned for
 //! them.
 
-use freerdp::ClipboardFormat;
-
 use crate::protocol::clipboard_fits;
 
 /// `CF_UNICODETEXT`, the one Windows clipboard format id this gateway speaks.
 ///
-/// A bare constant rather than an import: the engine crate deliberately carries
-/// format ids as plain `u32` (they are Windows' numbers, not FreeRDP's), and 13
-/// is fixed by the platform rather than by any library here.
+/// A bare constant rather than an import: format ids are Windows' numbers, not
+/// any library's, and 13 is fixed by the platform.
 pub const CF_UNICODETEXT: u32 = 13;
 
 /// The one format worth asking for out of what the remote advertised.
@@ -49,8 +46,8 @@ pub const CF_UNICODETEXT: u32 = 13;
 /// that format is ANSI in the remote's code page, which we would have to guess
 /// at, and a server offering text at all offers the Unicode flavour beside it.
 /// An image or file-list copy simply produces no browser-visible clipboard.
-pub fn pick_text_format(formats: &[ClipboardFormat]) -> Option<u32> {
-    formats.iter().map(|format| format.id).find(|&id| id == CF_UNICODETEXT)
+pub fn pick_text_format(formats: &[u32]) -> Option<u32> {
+    formats.iter().copied().find(|&id| id == CF_UNICODETEXT)
 }
 
 /// `CF_UNICODETEXT` bytes → a Rust string.
@@ -199,14 +196,11 @@ mod tests {
 
     #[test]
     fn unicode_text_is_the_only_format_taken() {
-        let unicode = ClipboardFormat::new(CF_UNICODETEXT);
-        let ansi = ClipboardFormat::new(1); // CF_TEXT
-        let bitmap = ClipboardFormat::new(2); // CF_BITMAP
+        let unicode = CF_UNICODETEXT;
+        let ansi = 1; // CF_TEXT
+        let bitmap = 2; // CF_BITMAP
 
-        assert_eq!(
-            pick_text_format(&[ansi.clone(), unicode.clone(), bitmap.clone()]),
-            Some(CF_UNICODETEXT)
-        );
+        assert_eq!(pick_text_format(&[ansi, unicode, bitmap]), Some(CF_UNICODETEXT));
         assert_eq!(pick_text_format(&[unicode]), Some(CF_UNICODETEXT));
 
         // ANSI alone is refused rather than guessed at: CF_TEXT is in the
@@ -216,8 +210,8 @@ mod tests {
         assert_eq!(pick_text_format(&[]), None);
     }
 
-    /// The encoding is this module's own now — it used to be IronRDP's — so the
-    /// round trip is a real test rather than a pin on somebody else's library.
+    /// The encoding is this module's own, so the round trip is a real test rather
+    /// than a pin on somebody else's library.
     #[test]
     fn utf16_survives_a_round_trip_including_the_hard_cases() {
         for original in ["plain", "画面 ☕", "emoji 🚀 non-BMP", "", "line\r\nbreak", "a\0b"] {

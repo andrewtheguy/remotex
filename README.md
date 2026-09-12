@@ -11,15 +11,15 @@ reaches every target — RDP, VNC and Macs alike — with nothing to install per
 platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
 for rather than scaled on the client; plain `vnc`, Apple High Performance and
-`rdp` can all be handed the window. On RDP the default `egfx` pipeline makes that
-cheap — a display layout, no reactivation — at the cost of a Windows host's text
-staying soft afterwards; `egfx = false` re-renders sharp and pays a reactivation
-per resize.
+`rdp` can all be handed the window. On RDP a resize is a graphics reset under the
+default graphics pipeline, and a reactivation — after which a Windows host
+re-renders the desktop sharp at the new size — with `egfx = false`.
 
-- RDP uses **FreeRDP 3**, linked from static archives that
-  [libfreerdp-prebuilt](https://github.com/andrewtheguy/libfreerdp-prebuilt) builds
-  once per target — so this project still builds with `cargo build` alone: no cmake,
-  no pkg-config, no OpenSSL to install and no libclang.
+- RDP uses a built-in client, protocol and all: the desktop over the graphics
+  pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and
+  resize, spoken to a current Windows host over NLA. It carries the clipboard and
+  sound (MS-RDPEA), and does not carry touch. See
+  [`docs/rdp-client.md`](docs/rdp-client.md).
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
@@ -218,19 +218,6 @@ descriptor has been measured across its arbitrary-size boundary and a burst of
 viewport reports, but remains reverse engineered. Its system audio is
 **experimental** and stays behind the non-default `apple-hp-audio` build feature.
 
-Two RDP redirections that send this browser's own media the other way are
-**experimental**, for lack of tests: `camera = true` offers the remote a virtual
-webcam over MS-RDPECAM, and `microphone = true` offers it a microphone over
-MS-RDPEAI. Both are off by default, both are enabled per session from the
-floating menu and never remembered, and both are refused on VNC. What is missing
-is coverage of the redirection itself — their socket rules and control messages
-are tested like everything else, and no test carries a frame or a sample to a
-host, because those channels are answered only by a real Windows host and the
-camera's only by one carrying the Remote Desktop Session Host role. They have
-been verified by hand there and only there, where remote audio (`audio = true`)
-and the rest of the RDP feature set are exercised on every test run. Expect to
-re-check them by hand after a change.
-
 ## Container
 
 ```sh
@@ -327,12 +314,17 @@ bun run check
 cd ..
 ```
 
-The container-backed RDP and VNC tests use Docker or Podman and do not start a
-browser. They are ignored by default; run them explicitly with:
+The container-backed VNC test uses Docker or Podman and does not start a
+browser. It is ignored by default; run it explicitly with:
 
 ```sh
-cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
+cargo test --test vnc_tiles_e2e -- --ignored
 ```
+
+RDP has no container to test against: the gateway's RDP client speaks NLA to a
+current Windows host and nothing else, so its end-to-end tests borrow a real
+machine — see [`tests/rdp_proto_probe.rs`](tests/rdp_proto_probe.rs) and
+[`tests/rdp_client_probe.rs`](tests/rdp_client_probe.rs).
 
 Stable headless browser checks for DOM/control-plane flows live under
 [`tests/playwright`](tests/playwright/README.md). They intentionally do not
@@ -343,13 +335,13 @@ For a remote Podman connection:
 ```sh
 CONTAINER_CONNECTION=workstation-wsl \
 REMOTEX_TEST_CONTAINER_HOST=<engine-host> \
-cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
+cargo test --test vnc_tiles_e2e -- --ignored
 ```
 
 `CONTAINER_CONNECTION` is the Podman system connection name.
 `REMOTEX_TEST_CONTAINER_HOST` is the engine host's IP address or DNS name as
 reachable from the machine running the tests; an SSH config alias is not
-resolved for the tests' direct RDP and VNC connections.
+resolved for the tests' direct VNC connections.
 
 ## Build
 

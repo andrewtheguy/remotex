@@ -60,14 +60,12 @@ else
 fi
 
 echo ">> building release binary"
-# No env coaxing here for any of the C libraries, and that is three separate
-# decisions pointing the same way. Remote audio links `opus-prebuilt`, VP9 links
-# `libvpx-prebuilt`, and the RDP engine links `libfreerdp-prebuilt` — each pulls a
-# prebuilt static archive rather than compiling vendored C, so none of them needs
-# cmake, pkg-config, a system library or a `*_STATIC` variable set. FreeRDP brings
-# its own static OpenSSL inside that archive, which is why there is no libssl to
-# find either. The binary is self-contained on debian:trixie-slim, and there is no
-# cmake_minimum_required for CMake 4 to reject.
+# No env coaxing here for either prebuilt C library. Remote audio links
+# `opus-prebuilt` and VP9 links `libvpx-prebuilt` — each pulls a prebuilt static
+# archive rather than compiling vendored C, so neither needs cmake, pkg-config, a
+# system library or a `*_STATIC` variable set. The RDP client's TLS is rustls over
+# `ring`, so there is no libssl to find either. The binary runs on
+# debian:trixie-slim, and there is no cmake_minimum_required for CMake 4 to reject.
 cargo build --release
 
 echo ">> assembling ${pkg}"

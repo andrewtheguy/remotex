@@ -1,8 +1,7 @@
 # Turn the Windows CI box (already carrying the VS Build Tools and rustup that the
 # sibling repos' provision scripts install) into one that can also build the C halves
-# remotex links: libvpx (bash + make + perl + nasm + msbuild), FreeRDP and OpenSSL
-# (cmake + ninja + Strawberry perl + nasm + cl), the FreeRDP bindings (libclang), and
-# the frontend (bun), and the installer (the .NET SDK, and WiX as a dotnet tool).
+# remotex links: libvpx (bash + make + perl + nasm + msbuild), the frontend (bun), and
+# the installer (the .NET SDK, and WiX as a dotnet tool).
 #
 # Runs *on the VM*, elevated, deployed and started as a SYSTEM scheduled task by
 # ../devtools/ci/windows/remote.ps1 (`remote.ps1 provision`), so a dropped connection
@@ -12,16 +11,9 @@
 # DONE-FAIL.
 #
 # What is *not* installed here, and why:
-#   - cmake and ninja: the VS Build Tools ship both under
-#     C:\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake — the same pair a VS
-#     developer shell puts on PATH — so they are added to the machine PATH rather than
-#     installed twice.
 #   - msbuild, cl, nmake, link: on PATH only inside a VS developer shell; ci.ps1 enters
 #     one (Enter-VsDevShell) rather than polluting the machine PATH with a toolset
 #     version.
-#   - MSYS2's perl is fine for libvpx's rtcd.pl but OpenSSL's Windows notes want a
-#     native perl for `Configure VC-WIN64A` (MSYS perl emits POSIX paths that nmake
-#     cannot read), hence Strawberry Perl beside it.
 #
 # PowerShell 7 runs this — remote.ps1 registers the task with pwsh.exe, the same one
 # sshd runs as its subsystem. Never Windows PowerShell 5.1: it reads a BOM-less UTF-8
@@ -109,16 +101,6 @@ try {
         if (-not (Test-Path $must)) { throw "$must is missing — run a Rust repo's provision (e.g. wrustic) first" }
     }
 
-    # --- cmake + ninja from the Build Tools ----------------------------------
-    $CMakeBin = 'C:\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
-    $NinjaBin = 'C:\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
-    foreach ($bin in @("$CMakeBin\cmake.exe", "$NinjaBin\ninja.exe")) {
-        if (-not (Test-Path $bin)) { throw "$bin is missing — the Build Tools were installed without --includeRecommended" }
-    }
-    Add-MachinePath $CMakeBin
-    Add-MachinePath $NinjaBin
-    Log "cmake $(& "$CMakeBin\cmake.exe" --version | Select-Object -First 1); ninja $(& "$NinjaBin\ninja.exe" --version)"
-
     # --- MSYS2: bash, make, perl, nasm ---------------------------------------
     # The same environment GitHub's msys2/setup-msys2 gives a runner, so build.sh runs
     # under one bash on both. The base sfx is a self-extracting 7z; `-y -oC:\` unpacks
@@ -166,36 +148,6 @@ try {
         if (-not (Test-Path "$Msys\usr\bin\$tool.exe")) { throw "$Msys\usr\bin\$tool.exe is missing after pacman" }
     }
     Log "MSYS2 tools: $(& $MsysBash -lc 'make --version | head -1; nasm -v; perl -v | sed -n 2p')"
-
-    # --- Strawberry Perl, for OpenSSL's Configure ----------------------------
-    if (-not (Test-Path 'C:\Strawberry\perl\bin\perl.exe')) {
-        $msi = "$Root\strawberry-perl-5.42.3.1-64bit.msi"
-        Get-File 'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit.msi' $msi `
-            -Sha256 'b0adbd4f1b3fc0a91b96cdff647cabcb6d3dd4bf05d9ee6f4f4fb76913ac57cd'
-        Log 'installing Strawberry Perl'
-        $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', $msi, '/qn', '/norestart')
-        if ($p.ExitCode -notin 0, 3010) { throw "strawberry perl msiexec failed with $($p.ExitCode)" }
-        if (-not (Test-Path 'C:\Strawberry\perl\bin\perl.exe')) { throw 'Strawberry Perl installed but perl.exe is missing' }
-    } else { Log 'Strawberry Perl already present' }
-    # The MSI adds its three bin directories to the machine PATH itself; the running
-    # process needs them too for the version line below. Not c\bin: the MSI puts its gcc on
-    # PATH itself and cmake would pick that gcc over cl, which is why build.sh sets CC=cl.
-    foreach ($dir in @('C:\Strawberry\perl\bin', 'C:\Strawberry\perl\site\bin')) { Add-MachinePath $dir }
-    Log "perl: $(& 'C:\Strawberry\perl\bin\perl.exe' -e 'print $^V')"
-
-    # --- LLVM: libclang for bindgen, llvm-nm/llvm-readobj for build.sh -------
-    if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) {
-        $exe = "$Root\LLVM-22.1.8-win64.exe"
-        Get-File 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe' $exe `
-            -Sha256 '16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c'
-        Log 'installing LLVM (silent NSIS)'
-        $p = Start-Process $exe -Wait -PassThru -ArgumentList @('/S')
-        if ($p.ExitCode -ne 0) { throw "LLVM installer failed with $($p.ExitCode)" }
-        if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) { throw 'LLVM installed but libclang.dll is missing' }
-    } else { Log 'LLVM already present' }
-    Add-MachinePath 'C:\Program Files\LLVM\bin'
-    Set-MachineEnv 'LIBCLANG_PATH' 'C:\Program Files\LLVM\bin'
-    Log "llvm: $(& 'C:\Program Files\LLVM\bin\llvm-nm.exe' --version | Select-Object -First 2 | Select-Object -Last 1)"
 
     # --- bun, for the frontend ------------------------------------------------
     if (-not (Test-Path 'C:\tools\bun\bun.exe')) {

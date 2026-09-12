@@ -156,11 +156,6 @@ password = "change-me"
 #width = 1920
 #height = 1080
 
-# Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
-# RDP only — VNC negotiates VncAuth (password set) or None per the handshake, so the
-# key is refused on a vnc target rather than ignored, whatever its value.
-#security = "auto"
-
 # Dynamic resize (opt-in): hand the remote desktop's size to the client's window.
 # The client reports every window change while connected. There is no client-side
 # resize toggle, one-shot "Resize to window" button or remembered preference: this
@@ -177,22 +172,26 @@ password = "change-me"
 # messages are ignored.
 #resize = false
 
-# RDP graphics pipeline, on by default and independent of `resize`. With both on,
-# each resize is an EGFX graphics reset: no reactivation or reconnect, so it is
-# cheap enough for the window to drive continuously. The trade is that a Windows
-# host's text stays soft after the resize. Set this false for the sharp legacy
-# path, whose reactivation re-renders the desktop at each size; a Windows session
-# carrying sound on dynamic rdpsnd then reconnects so audio survives. RDP only,
-# and refused on VNC even when set to false.
+# RDP graphics pipeline (MS-RDPEGFX), on by default and independent of `resize`.
+# On, a Windows host draws the desktop through the pipeline's surfaces and marks
+# every frame, and each resize is a graphics reset — no reactivation or reconnect,
+# cheap enough for the window to drive continuously. Off, the host draws with
+# bitmap updates and each resize is a reactivation, after which it re-renders the
+# desktop sharp at the new size; that is the escape hatch while the pipeline's
+# decoders land in stages. RDP only, and refused on VNC even when set to false.
 #egfx = true
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
-# all. The Clipboard panel always works regardless, and is the way to move text
-# when automatic sync cannot run.
-# RDP (MS-RDPECLIP) always carries full Unicode text. VNC does too on servers
+# all. On a target that transfers a clipboard, the Clipboard panel works
+# regardless, and is the way to move text when automatic sync cannot run.
+# RDP carries Unicode text over MS-RDPECLIP. Both directions of that protocol are
+# lazy — a copy announces the formats it can be had in and the bytes follow on
+# request — which the gateway hides: a copy on the remote is fetched at once, and a
+# copy here is handed over when the remote pastes.
+# VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
 # Both Apple subtypes use the Mac's native UTF-8 pasteboard protocol; High
@@ -200,30 +199,32 @@ password = "change-me"
 #clipboard = false
 
 # Remote audio: carry this target's sound when the client asks for it, with the
-# floating menu's Audio button. RDP carries it over MS-RDPEA. An
+# floating menu's Audio button. An "rdp" target negotiates sound redirection
+# (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM; without the key the
+# host's own audio settings are left untouched and the session has no audio device.
+# A Windows host sends nothing on the channel until something plays. An
 # "ard-high-performance" target carries the Mac's system audio over Apple's media
 # stream — EXPERIMENTAL, and only in a gateway built by hand with
 # `cargo build --release --features apple-hp-audio`, because that stream is AAC-ELD
 # and the decoder's licence keeps it out of every release binary; any other build
-# refuses the key at startup. RFB itself has no audio, so every other "vnc" target
-# refuses it rather than ignoring it.
+# refuses the key at startup. A plain "vnc" target asks the server for the QEMU
+# Audio extension, and one that never announces it gives a silent session; Standard
+# Apple "ard" has no sound and refuses the key rather than ignoring it.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
-# sound away while nobody is listening. From RDP only 44100 Hz 16-bit stereo PCM
-# is accepted — a server that offers no matching format sends nothing, and the
-# log says so; the Mac's stream decodes to 48000 Hz 16-bit stereo. The Mac sends
+# sound away while nobody is listening. The Mac's stream decodes to 48000 Hz
+# 16-bit stereo. The Mac sends
 # by UDP to this gateway's address on a port it chooses, so it must reach the
 # gateway directly.
 #
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
-# target is picked, sound is simply one of the things that work.
+# target is picked, sound works wherever the target carries it — an "rdp" target,
+# a plain "vnc" server that speaks the QEMU extension, or "ard-high-performance" in
+# an apple-hp-audio build.
 #
-# Off leaves the remote's sound where it is. An RDP target without audio tells
-# Windows to keep playing on the host's own speakers (mstsc's "play on remote
-# computer"), never to mute the session — so a headset paired to the host stays
-# usable — which is also all a VNC target without audio can do.
+# Off leaves the remote's sound where it is.
 #audio = false
 
 # How that audio is carried. Valid only with `audio = true` above; setting it
@@ -258,36 +259,6 @@ password = "change-me"
 # `audio_adaptive = true`; an explicit floor must be 6–510 and below the bitrate
 # ceiling.
 #audio_bitrate_min = 32
-
-# Camera redirection (RDP only): offer the remote a virtual webcam whose frames
-# are this browser's, over MS-RDPECAM. EXPERIMENTAL, for lack of tests — the
-# socket's rules and its messages are checked and the redirection itself is not,
-# because the channel exists only on a Windows host carrying the Remote Desktop
-# Session Host role and no dummy server here has one. It has been verified by
-# hand against such a host and only that way, unlike `audio` above and the rest
-# of the RDP features, which every test run covers.
-#
-# Capability only. The device appears when a client turns the camera on from the
-# floating menu — explicitly, per session, never remembered — and is unplugged
-# when that client closes it, the session changes hands, or the engine ends. The
-# browser encodes H.264 and the gateway passes it through untranscoded, so there
-# is no codec key beside this one. RFB has no equivalent channel, so a "vnc"
-# target refuses the key rather than ignoring it. A Windows Server without the
-# RDSH role never creates the enumeration channel, so an enabled camera against
-# one is simply never asked for a frame.
-#camera = false
-
-# Microphone redirection (RDP only): the camera's twin over MS-RDPEAI, feeding
-# this browser's captured audio to the remote as its own microphone.
-# EXPERIMENTAL for the same reason — hand-verified against a Windows host, with
-# no automated coverage of the redirection.
-#
-# Capability only, enabled per session from the floating menu and never
-# remembered. The host picks the sample rate and channel count when an
-# application on it starts capturing; the browser captures raw PCM to match and
-# the gateway passes it through, so there is no codec key beside this one. A
-# "vnc" target refuses it, as it refuses `camera`.
-#microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is
 # ignored, an explicit security is refused, and width/height only ever answer a

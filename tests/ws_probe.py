@@ -140,6 +140,16 @@ async def main() -> int:
         "held together as one chord, pressed in order and released in reverse)",
     )
     parser.add_argument(
+        "--chord",
+        action="append",
+        default=[],
+        metavar="CODE[+CODE...]",
+        help="a chord of DOM key codes, pressed in order and released in reverse "
+        "(repeatable: each --chord is sent in turn, a moment apart, after --key-delay). "
+        "Where --key holds one chord down for --key-hold, this taps a sequence — what "
+        "driving a dialog on the remote takes",
+    )
+    parser.add_argument(
         "--key-delay",
         type=duration,
         default=8.0,
@@ -151,6 +161,22 @@ async def main() -> int:
         type=duration,
         default=0.3,
         help="seconds the --key chord stays down",
+    )
+    parser.add_argument(
+        "--chord-gap",
+        type=duration,
+        default=1.0,
+        help="seconds between one --chord and the next, which is how long whatever "
+        "the last one opened on the remote gets to appear",
+    )
+    parser.add_argument(
+        "--clipboard",
+        metavar="TEXT",
+        help="drive the Clipboard panel once the desktop is up: fetch what the remote "
+        "holds, then put TEXT on its clipboard, and report every clipboard message "
+        "that comes back. A push is not echoed — what the remote does with it is a "
+        "paste over there, which shows up as nothing here and as the text in whatever "
+        "was pasted into",
     )
     parser.add_argument(
         "--burst",
@@ -196,6 +222,7 @@ async def main() -> int:
         awaiting_viewport = None
         burst_sent = False
         mouse_sent = False
+        clipboard_sent = False
         tiles = 0
 
         # The second connect runs on its own clock, beside the receive loop: a
@@ -267,7 +294,33 @@ async def main() -> int:
                     await asyncio.sleep(1 / 12)
             print("  <- paging done")
 
+        # Each --chord tapped in turn. Held and released, never left down: a
+        # modifier this end forgets is one the remote desktop keeps, and every
+        # keystroke after it arrives wearing it.
+        async def press_chords() -> None:
+            await asyncio.sleep(args.key_delay)
+            for chord in args.chord:
+                codes = chord.split("+")
+                print(f"  -> chord {'+'.join(codes)}")
+                for code in codes:
+                    await socket.send(
+                        json.dumps(
+                            {"type": "key", "code": code, "pressed": True, "caps": False}
+                        )
+                    )
+                    await asyncio.sleep(1 / 60)
+                for code in reversed(codes):
+                    await socket.send(
+                        json.dumps(
+                            {"type": "key", "code": code, "pressed": False, "caps": False}
+                        )
+                    )
+                    await asyncio.sleep(1 / 60)
+                await asyncio.sleep(args.chord_gap)
+            print("  <- chords done")
+
         keys_task = None
+        chords_task = None
         sweep_task = None
         page_task = None
         try:
@@ -297,6 +350,8 @@ async def main() -> int:
                     if kind == "resize":
                         if args.key and keys_task is None:
                             keys_task = asyncio.create_task(press_keys())
+                        if args.chord and chords_task is None:
+                            chords_task = asyncio.create_task(press_chords())
                         if args.sweep is not None and sweep_task is None:
                             sweep_task = asyncio.create_task(sweep(data["w"], data["h"]))
                         if args.page is not None and page_task is None:
@@ -414,8 +469,32 @@ async def main() -> int:
                     elif kind == "error":
                         print(f"  !! error: {data['message']}")
                         return 1
+                    elif kind == "clipboard":
+                        # `requested` is the panel's Fetch being answered; without it
+                        # this is the remote having copied something, which is what
+                        # drives the browser's automatic sync.
+                        how = "fetched" if data["requested"] else "pushed"
+                        oversized = data["oversizedBytes"]
+                        size = f"  oversizedBytes={oversized}" if oversized else ""
+                        print(
+                            f"  clipboard ({how})  changedAtMs={data['changedAtMs']}"
+                            f"{size}  text={data['text']!r}"
+                        )
                     elif kind == "connected":
-                        print(f"  connected  {data['name']}  resize={data['resize']}")
+                        print(
+                            f"  connected  {data['name']}  resize={data['resize']}"
+                            f"  clipboard={data['clipboard']}"
+                        )
+                        if args.clipboard is not None and not clipboard_sent:
+                            clipboard_sent = True
+                            # The fetch first, so what the remote already held is
+                            # reported before this end takes the clipboard over.
+                            print("  -> clipboardRequest")
+                            await socket.send(json.dumps({"type": "clipboardRequest"}))
+                            print(f"  -> clipboard {args.clipboard!r}")
+                            await socket.send(
+                                json.dumps({"type": "clipboard", "text": args.clipboard})
+                            )
                     elif kind not in ("cursor", "picker"):
                         print(f"  {kind}: {json.dumps(data)[:120]}")
         except TimeoutError:
@@ -425,6 +504,8 @@ async def main() -> int:
                 reconnect_task.cancel()
             if keys_task is not None and not keys_task.done():
                 keys_task.cancel()
+            if chords_task is not None and not chords_task.done():
+                chords_task.cancel()
             if sweep_task is not None and not sweep_task.done():
                 sweep_task.cancel()
             if page_task is not None and not page_task.done():

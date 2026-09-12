@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 
 use super::Handshake;
 use crate::config::{
-    DEFAULT_AUDIO_BITRATE_KBPS, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, Security, TargetConfig,
+    DEFAULT_AUDIO_BITRATE_KBPS, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -641,25 +641,20 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     ));
 
     if target.protocol == Protocol::Rdp {
-        lines.push(spec(
-            "security",
-            match target.security() {
-                Security::Auto => "auto — the server picks tls or nla",
-                Security::Nla => "nla required",
-                Security::Tls => "tls only; the remote shows its login window",
-            },
-        ));
+        lines.push(spec("security", "nla — the credentials are checked before the session"));
         lines.push(spec(
             "graphics",
             if target.egfx() {
-                "egfx pipeline; a resize is a layout change"
+                "egfx pipeline; a resize is a graphics reset"
             } else {
-                "legacy; a resize reactivates the session"
+                "bitmap updates; a resize reactivates the session"
             },
         ));
-        lines.push(spec("audio", &describe_audio(target)));
     }
 
+    // Beside the clipboard rather than inside the block above: sound is the
+    // protocol's own question, and it is VNC that answers it today.
+    lines.push(spec("audio", &describe_audio(target)));
     lines.push(spec(
         "clipboard",
         if target.clipboard {
@@ -1600,8 +1595,10 @@ mod tests {
             instance.config_path(),
             "[branding]\ntext = \"work laptop\"\n\n\
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
-             username = \"andrew\"\npassword = \"hunter2\"\naudio = true\nresize = true\n\
-             render_type = \"tiles\"\nrender_subtype = \"jpeg\"\nrender_subtype_quality = 70\n",
+             username = \"andrew\"\npassword = \"hunter2\"\nresize = true\n\
+             render_type = \"tiles\"\nrender_subtype = \"jpeg\"\nrender_subtype_quality = 70\n\n\
+             [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"192.168.1.21\"\n\
+             audio = true\n",
         )
         .unwrap();
 

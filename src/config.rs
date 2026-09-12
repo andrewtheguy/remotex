@@ -19,34 +19,9 @@ use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::{HostDisplay, JpegSampling};
 
-/// RDP security negotiation mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Security {
-    /// Advertise both TLS and NLA/CredSSP; the server picks the strongest.
-    #[default]
-    Auto,
-    /// Require NLA/CredSSP (network-level auth before the session).
-    Nla,
-    /// Plain TLS security only — no NLA; the remote shows a graphical login.
-    Tls,
-}
-
-impl Security {
-    /// `(enable_tls, enable_credssp)`, which is the shape both the config file
-    /// and the RDP engine's own security selection are written in.
-    pub fn flags(self) -> (bool, bool) {
-        match self {
-            Security::Auto => (true, true),
-            Security::Nla => (false, true),
-            Security::Tls => (true, false),
-        }
-    }
-}
-
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
-/// the same browser protocol (docs/architecture.md): `rdp` via FreeRDP
-/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
+/// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
+/// client (src/rdp.rs over src/rdp_client), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
 /// with `subtype = "ard"`, Apple Screen Sharing Standard mode over RFB 3.8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -743,13 +718,6 @@ pub struct TargetConfig {
     /// Pinned desktop height, in points. See [`Self::width`].
     #[serde(default)]
     pub height: Option<u16>,
-    /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`; `None` reads
-    /// as [`Security::Auto`] ([`TargetConfig::security`]). RDP only — RFB
-    /// negotiates its own security per the handshake — and `Option` rather than
-    /// a bare default so that setting it on a VNC target is refused at parse
-    /// time instead of accepted and left inert, the same rule as `egfx`.
-    #[serde(default)]
-    pub security: Option<Security>,
     /// Allow client-driven resize: hand this target's desktop size to the
     /// client's window. A desktop client reports every window change while this
     /// is on; there is no client-side mode, manual resize command, or second
@@ -767,18 +735,19 @@ pub struct TargetConfig {
     /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
-    /// RDP's graphics pipeline (EGFX), on by default and decoupled from
-    /// [`Self::resize`]. With both on, a resize is a Display Control monitor
-    /// layout under the pipeline — a graphics reset, no reactivation and no
-    /// reconnect — which is what makes handing the size to the window cheap
-    /// enough to do on every drag. The trade is a Windows host's text staying
-    /// soft after an EGFX resize, where the legacy path's reactivation
-    /// re-renders it sharp: set `egfx = false` to buy sharp text at the price
-    /// of a reactivation per resize (and a reconnect where sound negotiated on
-    /// the dynamic `rdpsnd` transport). `Option` rather than a bare default so
-    /// that setting it on a VNC target, which has no graphics pipeline to
-    /// switch, is refused at parse time instead of accepted and left inert;
-    /// `None` reads as on ([`TargetConfig::egfx`]).
+    /// RDP's graphics pipeline (MS-RDPEGFX), on by default and decoupled from
+    /// [`Self::resize`]. On, a Windows host draws the desktop through the
+    /// pipeline's surfaces and marks every frame, and a resize is a graphics reset
+    /// — no reactivation and no reconnect. Off, the host draws with bitmap updates
+    /// and a resize is a Deactivation-Reactivation Sequence, after which it
+    /// re-renders the desktop from scratch; that is the escape hatch for a host
+    /// whose pipeline this client's decoders cannot yet paint, and the path every
+    /// non-Windows server takes regardless.
+    ///
+    /// `Option` rather than a bare default so that setting it on a VNC target,
+    /// which has no graphics pipeline to switch, is refused at parse time
+    /// instead of accepted and left inert; `None` reads as on
+    /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
     /// Clipboard bridge: let the browser read and write this target's
@@ -834,44 +803,6 @@ pub struct TargetConfig {
     /// that could not do anything.
     #[serde(default)]
     pub audio_bitrate_min: Option<u32>,
-    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC:
-    /// RFB has no equivalent channel, and unlike [`Self::audio`] there is no
-    /// extension carrying one either.
-    ///
-    /// **Experimental**, for lack of tests. The socket's session rules and its
-    /// message encodings are unit tested; the redirection itself is not, and
-    /// there is nothing here to test it against — the MS-RDPECAM enumeration
-    /// channel exists only on a Windows host carrying the Remote Desktop
-    /// Session Host role, which the container dummies are not. The path has
-    /// been verified by hand against one such host and only that way, where
-    /// [`Self::audio`] and the rest of the RDP feature set are exercised on
-    /// every run.
-    ///
-    /// Capability only. The device itself appears when a client enables the
-    /// camera — explicitly, per session, never remembered — by opening
-    /// `/ws/camera`; a target with this key and no such client offers the
-    /// remote nothing. The browser encodes H.264 and the gateway passes it
-    /// through, so there is no codec key beside this one.
-    #[serde(default)]
-    pub camera: bool,
-    /// Offer the remote a redirected microphone (MS-RDPEAI). Rejected for VNC,
-    /// like [`Self::camera`] and for the same reason: RFB has no equivalent
-    /// channel, and no extension carries one. The QEMU Audio extension
-    /// [`Self::audio`] uses runs the other way only.
-    ///
-    /// **Experimental**, for lack of tests, and the camera's twin in that too:
-    /// the socket's session rules are unit tested and `micOpen`/`micClose` are
-    /// pinned byte for byte, while nothing exercises the redirection itself —
-    /// no dummy RDP server here answers the audin channel. Hand-verified
-    /// against a Windows host, unlike [`Self::audio`], which every run covers.
-    ///
-    /// Capability only, and the camera's twin: the microphone flows when a
-    /// client enables it — explicitly, per session, never remembered — by
-    /// opening `/ws/mic`; a target with this key and no such client offers the
-    /// remote silence. The browser captures PCM and the gateway passes it
-    /// through, so there is no codec key beside this one.
-    #[serde(default)]
-    pub microphone: bool,
     /// Render *transport* for this target. Defaults to [`RenderType::Tiles`],
     /// which with the default subtype (lossless PNG) and no [`Self::render_motion`]
     /// is byte-identical to before the dial existed. Validated against
@@ -1082,14 +1013,9 @@ impl TargetConfig {
         self.pinned_size().unwrap_or(DEFAULT_SIZE)
     }
 
-    /// RDP's graphics pipeline switch, on unless the operator traded it away.
+    /// RDP's graphics pipeline switch, on unless the operator turned it off.
     pub fn egfx(&self) -> bool {
         self.egfx.unwrap_or(true)
-    }
-
-    /// [`Self::security`] resolved: [`Security::Auto`] unless the operator chose.
-    pub fn security(&self) -> Security {
-        self.security.unwrap_or_default()
     }
 
     /// [`Self::render_subtype`] resolved: lossless PNG unless the operator chose.
@@ -1687,23 +1613,13 @@ impl ConfigFile {
                  key",
                 target.name
             );
-            // The graphics pipeline is RDP's alone: EGFX is an RDP
-            // channel, so on a VNC target the key could only be a belief about
-            // the wrong protocol, and either value would be silently inert.
+            // The graphics pipeline is RDP's alone: EGFX is an RDP channel, so on a
+            // VNC target the key could only be a belief about the wrong protocol,
+            // and either value would be silently inert.
             anyhow::ensure!(
                 target.egfx.is_none() || target.protocol == Protocol::Rdp,
                 "target {:?} sets egfx on a {} target, and only rdp has a graphics pipeline \
                  to switch. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
-            // And the security mode: TLS and NLA are RDP's negotiation, where
-            // RFB settles its own in the handshake, so on a VNC target the key
-            // names a choice nothing would read.
-            anyhow::ensure!(
-                target.security.is_none() || target.protocol == Protocol::Rdp,
-                "target {:?} sets security on a {} target, and only rdp negotiates tls or \
-                 nla — RFB settles its own security in the handshake. Remove the key.",
                 target.name,
                 target.protocol.name()
             );
@@ -1748,24 +1664,6 @@ impl ConfigFile {
                     target.name
                 );
             }
-            // The camera is RDP's alone by the same rule: MS-RDPECAM is an RDP
-            // channel and RFB has nothing to redirect a client's camera onto.
-            anyhow::ensure!(
-                !target.camera || target.protocol == Protocol::Rdp,
-                "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
-                 is an RDP channel and RFB has no equivalent. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
-            // The microphone is RDP's alone by the same rule: MS-RDPEAI is an RDP
-            // channel and RFB has nothing to redirect a client's microphone onto.
-            anyhow::ensure!(
-                !target.microphone || target.protocol == Protocol::Rdp,
-                "target {:?} sets microphone on a {} target, and only rdp carries it: MS-RDPEAI \
-                 is an RDP channel and RFB has no equivalent. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
             // is a forgotten `audio = true` rather than a deliberate choice.
@@ -1873,7 +1771,16 @@ impl ConfigFile {
                     target.name,
                     subtype.name()
                 ),
-                (Protocol::Rdp, None) => {}
+                // The client offers only NLA, and CredSSP has nothing to log on
+                // with unless both are set.
+                (Protocol::Rdp, None) => {
+                    anyhow::ensure!(
+                        !target.username.is_empty() && !target.password.is_empty(),
+                        "target {:?} is protocol \"rdp\" and needs both username and password — \
+                         this client logs on only through NLA, which carries the two together",
+                        target.name
+                    );
+                }
             }
             if target.protocol != Protocol::Vnc {
                 anyhow::ensure!(
@@ -2543,6 +2450,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2569,10 +2478,9 @@ mod tests {
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
         assert_eq!(t.pinned_size(), None, "an unpinned size follows the client's screen");
         assert_eq!(t.default_size(), DEFAULT_SIZE);
-        assert_eq!(t.security(), Security::Auto);
-        assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
+        assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
         assert!(!t.resize, "dynamic resize is opt-in");
-        assert!(t.egfx(), "the graphics pipeline is on unless the operator trades it away");
+        assert!(t.egfx(), "the graphics pipeline is on unless turned off");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.audio, "remote audio is opt-in");
     }
@@ -2588,6 +2496,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2818,6 +2728,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2945,7 +2857,6 @@ mod tests {
             domain = "CORP"
             width = 1920
             height = 1080
-            security = "nla"
 
             [[targets]]
             name = "other"
@@ -2962,7 +2873,6 @@ mod tests {
         assert_eq!(config.targets.len(), 2);
         let win = &config.targets[0];
         assert_eq!(win.name, "win");
-        assert_eq!(win.security(), Security::Nla);
         assert_eq!(win.domain.as_deref(), Some("CORP"));
         assert_eq!(win.pinned_size(), Some((1920, 1080)));
         let other = &config.targets[1];
@@ -2978,6 +2888,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
         "#;
         let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
@@ -2999,6 +2911,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
         "#;
         let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
@@ -3017,10 +2931,14 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h1"
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h2"
             "#,
         )
@@ -3036,6 +2954,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             passwd = "oops"
             "#,
@@ -3087,6 +3007,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -3110,6 +3032,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "jpeg"
@@ -3144,6 +3068,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "webp"
@@ -3171,6 +3097,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "webp"
             "#,
@@ -3190,6 +3118,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_subtype = "classify"
                 render_subtype_quality = 60
@@ -3238,6 +3168,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {keys}
                 "#
@@ -3261,6 +3193,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_subtype = "{subtype}"
                 render_subtype_quality = 90
@@ -3292,6 +3226,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "jpeg"
             render_subtype_quality = 60
@@ -3319,6 +3255,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "classify"
@@ -3349,6 +3287,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "classify"
             "#,
@@ -3366,6 +3306,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype = "classify"
@@ -3400,6 +3342,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_stream_quality = 100
@@ -3427,6 +3371,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_stream_quality = 30
@@ -3459,6 +3405,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {keys}
                 render_chroma = "444"
@@ -3474,6 +3422,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             render_stream_quality = 100
@@ -3496,6 +3446,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {render}
                 render_chroma = "auto"
@@ -3532,6 +3484,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_chroma = "auto"
             "#,
@@ -3551,6 +3505,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_stream_quality = 60
@@ -3575,6 +3531,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -3593,6 +3551,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {render}
                 render_grid_debug = true
@@ -3614,6 +3574,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -3626,6 +3588,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             render_stream_quality = 60
@@ -3647,6 +3611,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "classify"
             render_subtype_quality = 60
@@ -3672,6 +3638,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "jpeg"
             render_subtype_quality = 60
@@ -3689,6 +3657,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "jpeg"
             "#,
@@ -3705,6 +3675,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_subtype = "jpeg"
                 render_subtype_quality = {q}
@@ -3722,6 +3694,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             render_stream_quality = 60
@@ -3738,6 +3712,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             "#,
@@ -3754,6 +3730,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_stream_quality = {q}
@@ -3779,6 +3757,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_subtype = "{subtype}"
@@ -3806,11 +3786,11 @@ mod tests {
             "render_motion = true\nrender_stream_quality = 30",
         ] {
             let explicit = format!(
-                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n\
+                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n\
                  render_subtype = \"png\"\n"
             );
             let implicit = format!(
-                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n"
+                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n"
             );
             let explicit = ConfigFile::parse(&explicit).unwrap_or_else(|e| panic!("{keys}: {e:#}"));
             let implicit = ConfigFile::parse(&implicit).unwrap_or_else(|e| panic!("{keys}: {e:#}"));
@@ -3853,6 +3833,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {keys}render_subtype_quality = 50
                 "#
@@ -3869,6 +3851,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "adaptive"
             "#,
@@ -3890,6 +3874,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_stream_quality = 10
@@ -3922,6 +3908,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype = "jpeg"
@@ -4024,7 +4012,7 @@ mod tests {
         for (what, keys, expected) in cases {
             let toml = format!(
                 "[server]\n{}\n\n[[targets]]\nname = \"t\"\nprotocol = \"rdp\"\n\
-                 host = \"192.0.2.10\"\n{keys}\n",
+                 host = \"192.0.2.10\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n",
                 site_passwd_line()
             );
             let cfg = ConfigFile::parse(&toml)
@@ -4053,6 +4041,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             "#,
@@ -4069,6 +4059,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_motion = true
                 render_stream_quality = {q}
@@ -4090,6 +4082,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype = "jpeg"
@@ -4109,6 +4103,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_stream_quality = 10
@@ -4123,6 +4119,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -4137,6 +4135,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion_debug = true
             "#,
@@ -4154,6 +4154,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype_quality = 60
@@ -4271,11 +4273,15 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
 
             [[targets]]
             name = "b"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "jpeg"
@@ -4359,6 +4365,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             {extra}
             "#,
@@ -4574,6 +4582,8 @@ mod tests {
             [[targets]]
             name = "pc"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             vnc_password = "hunter2"
             "#,
@@ -4584,122 +4594,46 @@ mod tests {
         assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
     }
 
+    /// The RDP client logs on only through NLA, so a target without both halves of
+    /// its credential could never connect and is refused up front.
     #[test]
-    fn clipboard_is_accepted_for_both_protocols() {
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "box"
-            protocol = "vnc"
-            host = "10.0.0.4"
-            clipboard = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].clipboard);
-
-        // Clipboard is accepted for both engines, including RDP via MS-RDPECLIP.
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            clipboard = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].clipboard);
+    fn an_rdp_target_needs_username_and_password() {
+        for keys in ["", "username = \"u\"", "password = \"p\""] {
+            let err = ConfigFile::parse(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n",
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("username") && msg.contains("password"), "{keys}: {msg}");
+        }
     }
 
-    /// EGFX is RDP's, and refused on VNC by name — either value, since a key
-    /// that could not do anything is a config error, not a preference.
+    /// The clipboard is every engine's: generic VNC's Extended Clipboard, Apple's
+    /// pasteboard, and MS-RDPECLIP on the RDP client's own channel.
     #[test]
-    fn egfx_belongs_to_rdp_and_is_refused_on_vnc() {
-        for value in ["true", "false"] {
-            let err = ConfigFile::parse(&format!(
+    fn clipboard_is_taken_by_every_protocol() {
+        for (protocol, host) in [("vnc", "10.0.0.4"), ("rdp", "10.0.0.5")] {
+            let config = ConfigFile::parse(&format!(
                 r#"
                 [server]
                 {}
 
                 [[targets]]
-                name = "nope"
-                protocol = "vnc"
-                host = "10.0.0.5"
-                egfx = {value}
+                name = "box"
+                protocol = "{protocol}"
+                host = "{host}"
+                username = "u"
+                password = "p"
+                clipboard = true
                 "#,
                 site_passwd_line()
             ))
-            .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains("egfx"), "{rendered}");
-            assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
+            .unwrap()
+            .resolve()
+            .unwrap();
+            assert!(config.targets[0].clipboard, "{protocol}");
         }
-    }
-
-    /// The security mode is RDP's negotiation, and refused on VNC by name —
-    /// every value, `auto` included, since the mistake is a key that nothing on
-    /// this protocol would read, not the value chosen for it.
-    #[test]
-    fn security_belongs_to_rdp_and_is_refused_on_vnc() {
-        for value in ["auto", "nla", "tls"] {
-            for subtype in ["", "subtype = \"ard\"\nusername = \"u\"\npassword = \"p\""] {
-                let err = ConfigFile::parse(&format!(
-                    r#"
-                    [server]
-                    {}
-
-                    [[targets]]
-                    name = "nope"
-                    protocol = "vnc"
-                    host = "10.0.0.5"
-                    security = "{value}"
-                    {subtype}
-                    "#,
-                    site_passwd_line()
-                ))
-                .unwrap_err();
-                let rendered = format!("{err:#}");
-                assert!(rendered.contains("security"), "{value}: {rendered}");
-                assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
-            }
-        }
-        // On RDP the key is read, and leaving it out is `auto` without being a
-        // choice.
-        let cfg = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            security = "tls"
-
-            [[targets]]
-            name = "bare"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap();
-        assert_eq!(cfg.targets[0].security, Some(Security::Tls));
-        assert_eq!(cfg.targets[1].security, None);
-        assert_eq!(cfg.targets[1].security(), Security::Auto);
     }
 
     /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is
@@ -4710,7 +4644,7 @@ mod tests {
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]
-    fn audio_belongs_to_rdp_and_to_generic_vnc() {
+    fn audio_belongs_to_rdp_and_generic_vnc() {
         // A plain `vnc` target asks a generic server for the QEMU Audio
         // extension, and gets silence from one that does not speak it. That is
         // discovery, not a config error.
@@ -4736,6 +4670,9 @@ mod tests {
             crate::vnc_qemu_audio::SOURCE_FORMAT
         );
 
+        // An rdp target negotiates MS-RDPEA when it connects, and what the host
+        // redirects is CD-quality PCM, which is the source format the encoder is
+        // built from.
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -4744,6 +4681,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             audio = true
             "#,
@@ -4753,6 +4692,53 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].audio);
+        assert_eq!(config.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
+    }
+
+    /// EGFX is RDP's, and refused on VNC by name — either value, since a key
+    /// that could not do anything is a config error, not a preference. On RDP the
+    /// key is read, and `false` is the bitmap path.
+    #[test]
+    fn egfx_belongs_to_rdp_and_is_refused_on_vnc() {
+        for value in ["true", "false"] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "nope"
+                protocol = "vnc"
+                host = "10.0.0.5"
+                egfx = {value}
+                "#,
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("egfx"), "{rendered}");
+            assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
+        }
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            username = "u"
+            password = "p"
+            host = "10.0.0.5"
+            egfx = false
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(!config.targets[0].egfx(), "the bitmap path is one key away");
     }
 
     /// Standard mode has no audio to offer — Apple's media stream is High
@@ -4827,8 +4813,10 @@ mod tests {
     /// asked for, 48 kHz stereo is what the Mac's AAC-ELD decodes to.
     #[test]
     fn the_audio_source_format_is_the_engines() {
+        // Without the key, which RDP is refused until its client carries sound —
+        // the format is the protocol's, and is what that client will be asked for.
         let rdp = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\naudio = true\n",
+            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n",
             site_passwd_line()
         ))
         .unwrap()
@@ -4852,101 +4840,6 @@ mod tests {
         assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.bits_per_sample, 16);
     }
 
-    /// MS-RDPECAM is an RDP channel with no RFB counterpart and no extension
-    /// carrying one, so the key is refused on VNC at parse time and opt-in
-    /// (default off) on RDP.
-    #[test]
-    fn camera_belongs_to_rdp_and_is_refused_on_vnc() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "nope"
-            protocol = "vnc"
-            host = "10.0.0.5"
-            camera = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("camera"), "{rendered}");
-        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
-
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            camera = true
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].camera);
-        assert!(!config.targets[1].camera, "the camera is opt-in");
-    }
-
-    /// The microphone follows the camera's rule: MS-RDPEAI is an RDP channel, so
-    /// the key is refused on VNC at parse time and opt-in (default off) on RDP.
-    #[test]
-    fn microphone_belongs_to_rdp_and_is_refused_on_vnc() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "nope"
-            protocol = "vnc"
-            host = "10.0.0.5"
-            microphone = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("microphone"), "{rendered}");
-        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
-
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            microphone = true
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].microphone);
-        assert!(!config.targets[1].microphone, "the microphone is opt-in");
-    }
-
     /// An unset codec reads as Opus, and passthrough can be asked for by name.
     #[test]
     fn the_audio_codec_defaults_to_opus() {
@@ -4964,8 +4857,8 @@ mod tests {
             {}
 
             [[targets]]
-            name = "win"
-            protocol = "rdp"
+            name = "box"
+            protocol = "vnc"
             host = "10.0.0.5"
             audio = true
             audio_codec = "pcm"
@@ -4991,6 +4884,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             audio_codec = "pcm"
             "#,
@@ -5012,6 +4907,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             audio = true
             audio_codec = "mp3"
@@ -5026,6 +4923,25 @@ mod tests {
     // ---- the adaptive dials --------------------------------------------------
 
     /// One valid target body per test below, parameterized by the keys under test.
+    /// The same, on the protocol that carries sound — every audio key is refused
+    /// on RDP, whose client does not have it yet.
+    fn parse_audio_target(body: &str) -> anyhow::Result<AppConfig> {
+        ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "t"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            {body}
+            "#,
+            site_passwd_line()
+        ))?
+        .resolve()
+    }
+
     fn parse_target(body: &str) -> anyhow::Result<AppConfig> {
         ConfigFile::parse(&format!(
             r#"
@@ -5035,6 +4951,8 @@ mod tests {
             [[targets]]
             name = "t"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             {body}
             "#,
@@ -5151,17 +5069,17 @@ mod tests {
     /// walk was asked for.
     #[test]
     fn the_audio_plan_resolves_defaults_and_the_adaptive_floor() {
-        let cfg = parse_target("audio = true").expect("bare audio");
+        let cfg = parse_audio_target("audio = true").expect("bare audio");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
         assert_eq!(cfg.targets[0].audio_plan().bitrate_bps, 96_000);
 
-        let cfg = parse_target("audio = true\naudio_bitrate = 128").expect("a rate");
+        let cfg = parse_audio_target("audio = true\naudio_bitrate = 128").expect("a rate");
         assert_eq!(
             cfg.targets[0].audio_plan(),
             AudioPlan { codec: AudioCodec::Opus, bitrate_bps: 128_000, adaptive_floor_bps: None }
         );
 
-        let cfg = parse_target("audio = true\naudio_adaptive = true").expect("adaptive");
+        let cfg = parse_audio_target("audio = true\naudio_adaptive = true").expect("adaptive");
         assert_eq!(
             cfg.targets[0].audio_plan(),
             AudioPlan {
@@ -5171,7 +5089,7 @@ mod tests {
             }
         );
 
-        let cfg = parse_target(
+        let cfg = parse_audio_target(
             "audio = true\naudio_bitrate = 64\naudio_adaptive = true\naudio_bitrate_min = 24",
         )
         .expect("adaptive with both rates");
@@ -5188,36 +5106,36 @@ mod tests {
     /// Passthrough has no encoder: every key that tunes one is refused beside it.
     #[test]
     fn the_bitrate_keys_are_opus_only() {
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_codec = \"pcm\"\naudio_bitrate = 96",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("audio_bitrate"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_codec = \"pcm\"\naudio_adaptive = true",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("audio_adaptive"));
 
         // And without audio at all, same rule one step up.
-        let err = parse_target("audio_bitrate = 96").unwrap_err();
+        let err = parse_audio_target("audio_bitrate = 96").unwrap_err();
         assert!(format!("{err:#}").contains("audio_bitrate"));
     }
 
     /// The floor needs the walk, has a range, and must sit under the ceiling.
     #[test]
     fn the_audio_floor_is_validated_against_the_walk_and_the_ceiling() {
-        let err = parse_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
+        let err = parse_audio_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
         assert!(format!("{err:#}").contains("audio_adaptive"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_adaptive = true\naudio_bitrate_min = 4",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("6–510"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_bitrate = 48\naudio_adaptive = true\naudio_bitrate_min = 48",
         )
         .unwrap_err();
@@ -5226,10 +5144,10 @@ mod tests {
         // The *default* floor above a low ceiling is no contradiction — the
         // operator never wrote it. It parses, and the walk clamps it to the
         // ceiling (`AudioCongestion::new`) instead.
-        parse_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
+        parse_audio_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
             .expect("a default floor clamps instead of refusing");
 
-        let err = parse_target("audio = true\naudio_bitrate = 999").unwrap_err();
+        let err = parse_audio_target("audio = true\naudio_bitrate = 999").unwrap_err();
         assert!(format!("{err:#}").contains("6–510"));
     }
 }

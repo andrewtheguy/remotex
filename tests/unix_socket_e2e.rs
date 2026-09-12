@@ -34,6 +34,8 @@ site_passwd = "{site_passwd}"
 name = "unreachable"
 protocol = "rdp"
 host = "192.0.2.10"
+username = "u"
+password = "p"
 "#
     )
 }

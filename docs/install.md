@@ -248,7 +248,7 @@ cargo build --release --features apple-hp-audio
 ```
 
 The build downloads a prebuilt static fdk-aac archive the same way it already
-downloads FreeRDP, libopus and libvpx — no C++ toolchain is needed. Then set
+downloads libopus and libvpx — no C++ toolchain is needed. Then set
 `audio = true` on the target. A gateway built without the feature refuses that
 key at startup and says so. The Mac sends its audio by UDP to the gateway's
 address on a port it chooses (the VNC port's number, as measured), so the gateway

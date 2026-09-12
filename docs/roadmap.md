@@ -8,6 +8,73 @@ is the only place they can be read in context.
 
 ## Planned
 
+### What the RDP client does not carry yet
+
+The client carries the desktop, the pointer, keyboard, mouse, resize, the
+clipboard and sound. Touch was carried by the engine before it, from FreeRDP's
+`rdpei` plugin, and is not carried *here*: `proto` is the gateway's own now, so it
+is a channel to write rather than a dependency to configure, and it is refused
+where it would otherwise build a control with nothing behind it, by having no key
+at all — whether touch exists is the host's answer, and this client never asks.
+
+Everything on either side of the channel is already written and shipped: the
+browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
+and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
+designing for it.
+
+The clipboard and sound were the other two of these and are done. MS-RDPECLIP is
+`rdp_client/proto/cliprdr.rs`, the channel plumbing the static channels needed is
+in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on
+Ready, ask the moment the remote's format list arrives, answer every paste request
+including with nothing, retry a `CB_RESPONSE_FAIL` on a bounded ladder — is
+`ClipboardState` in `src/rdp.rs`. MS-RDPEA is `rdp_client/proto/rdpsnd.rs`, with
+the device-redirection handshake a Windows host requires beside it in
+`proto/rdpdr.rs`, and its buffers reach the same `AudioBridge` every other engine
+feeds. What each took is recorded in
+[The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
+
+EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+describes; what is left of it
+beyond the decoders is under
+[Source payloads](#source-payloads-the-gateway-decodes-instead-of-forwarding)
+rather than here, because that payoff is a transcode removed, not a control
+restored.
+
+#### Touch (MS-RDPEI)
+
+MS-RDPEI is a *dynamic* channel and that transport is already here:
+`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
+every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
+touch event's contact frames — and the contact state machine are the work.
+
+The rest is waiting for it. A host that opens the channel becomes
+`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
+re-sends to each client that attaches; the browser offers the passthrough toggle
+only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
+can report one. Held contacts must be released when a client goes away, or the
+remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
+xrdp never does, which is the reason this stays an always-offered capability
+rather than a key.
+
+#### Licensing on a Remote Desktop Session Host
+
+The licensing step accepts exactly one PDU: an `ERROR_ALERT` carrying
+`STATUS_VALID_CLIENT`, which is what every Windows host this client has been
+pointed at sends. Anything else is refused by name in
+`proto/license.rs`, and the connection ends before `DemandActive`.
+
+A Session Host with the Remote Desktop Session Host role and per-device CAL
+licensing does not send that. It opens a real exchange: `LICENSE_REQUEST`, the
+client's new or upgrade licence request, the platform challenge and its response,
+and the issued licence. This client would disconnect at the first of those. The
+exchange is written in FreeRDP 3.30.0's `libfreerdp/core/license.c`, the version
+`main` builds against, and a copy is in the local reference checkout under
+`tmp/references/`.
+
+How many real deployments this reaches is not known, and no host in use has shown
+it. What would settle it is one connection to an RDSH configured for per-device
+CALs; the work is only worth taking once a host that needs it turns up.
+
 ### Render dial — what the region streams do not decide yet
 
 `render_motion = true` ships: the motion detection chooses the regions,
@@ -123,18 +190,15 @@ browser needs, and it decodes or re-encodes instead. Each is real work with a re
 payoff, and none of them is near-term — they are here so that "why not this one"
 has an answer rather than being rediscovered.
 
-- **RDP EGFX, past what FreeRDP's GDI already gives.** The pipeline itself is
-  **on**: `SupportGraphicsPipeline` with `RemoteFxCodec` beside it, which is the
-  pair guacamole-server ships and the resolution of the black-framebuffer fault
-  this entry used to open with — the pipeline advertised *without a codec next to
-  it* was the whole of that bug, and the e2e that measured exactly black now
-  measures a painted desktop. Its frame boundaries are taken too — the wrapper
-  marks the pipeline's once-per-frame surface flush (and the legacy markers
-  besides) as `Event::Frame`, and the engine flushes on it. What remains planned
-  is using more of the channel than FreeRDP's software GDI surfaces: the surface
-  compositor, and a separate assessment of AVC420 pass-through. The parts exist
-  in the archives; what makes the rest large is that it is a second graphics
-  pipeline beside the one every engine shares, not an option on it.
+- **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
+  the surface compositor with its caches and copies, the frame marks, and the
+  decoders a current Windows host draws with: ClearCodec with NSCodec inside it,
+  RemoteFX Progressive, planar and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+  describes each). Beyond the decoders lies AVC420
+  pass-through — handing the host's H.264 to the browser
+  rather than decoding it and encoding VP9. What makes that large is that it is a
+  second graphics pipeline beside the one every engine shares, not an option on
+  it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
@@ -165,49 +229,6 @@ has an answer rather than being rediscovered.
   rectangle into one logical coordinate space, with the corresponding tile and
   pointer transforms. High Performance mode is unaffected because it uses one
   virtual display rather than a mosaic of physical displays.
-
-### Automatic density on generic VNC
-
-Today a plain VNC server is shown at 1x: standard RFB carries pixels and nothing
-else, so the gateway has no density to read and takes none from the client, and a
-sway output at scale 2 behind wayvnc comes out as half a logical desktop
-stretched back up ([`docs/generic-vnc-hidpi.md`](generic-vnc-hidpi.md)). RDP
-does this with nothing to configure: it declares the browser's density in the
-monitor layout and the host renders at it. Making generic VNC follow the browser
-the same way — a Retina window gets a 2x desktop on connect, and dragging it to a
-1x screen gives a 1x one — wants both halves closed, and neither is small:
-
-- **Telling the compositor.** Standard RFB has no field for it, so the density
-  must reach sway some other way: an IPC call the gateway makes on the sway host
-  (`swaymsg output <name> scale <n>`, over SSH or a small agent there), or a
-  wayvnc or neatvnc extension that carries a scale with `SetDesktopSize`, which
-  means patches upstream. Either is a second channel beside the VNC connection,
-  with its own reachability, credentials and failure modes; the gateway has none
-  of that for VNC today.
-- **Learning the answer.** Whatever the compositor was asked, the gateway needs
-  to *know* what it did before labelling the framebuffer, because a label the
-  server did not honour is a desktop shown at the wrong size. RDP and Apple both
-  answer on the wire; standard RFB never will. The label would have to come from
-  the same side channel, and be re-read whenever the desktop changes size.
-- **Per-server semantics.** wayvnc forwards a resize as a headless output's
-  custom mode; other servers (TigerVNC, x11vnc, a KVM console) have no notion of
-  scale at all, and asking one for twice the pixels gives twice the desktop. So
-  the automatic path is really "a wlroots compositor through wayvnc", and
-  belongs behind a per-target opt-in that names the compositor it is talking to.
-
-A client-side declaration is not the answer: a density the wire cannot confirm is
-a label the server may not honour, and the product rule is that density is the
-wire's word alone. Until both channels above exist, generic VNC stays 1x.
-
-Both channels now exist for one server: the wlshare server puts the scale on
-the VNC connection itself, as a private extension every generic target asks for
-and only it answers ([`wlshare-density.md`](wlshare-density.md)). The server reports its
-output's scale, the gateway labels and resizes by it, the browser's density is
-declared back, and wlshare sets the output's scale to it, so the browser drives
-the desktop's density with nothing to configure. wlshare is a server of its own
-rather than a patch on wayvnc, so the extension no longer rides on a fragile
-patch series. The sway session dialect below is the larger design this grew out
-of, and is independent of it.
 
 ### A virtual-display remote session for sway
 

@@ -113,7 +113,9 @@ cp -R "$release/share/remotex/web" "$payload/usr/share/remotex/web"
 # which sorts before everything: '0.0.1-rc.1-1' would otherwise sort *after* the
 # '0.0.1-1' release. '+' is left alone — it is legal in a Debian version and
 # already sorts after the plain release, which is what build metadata means.
-deb_version="${version//-/~}"
+# `tr`, not '${version//-/~}': bash 5.2 tilde-expands a replacement that begins
+# with '~', which turned '0.0.208-beta1' into '0.0.208$HOMEbeta1'.
+deb_version=$(printf '%s' "$version" | tr -- '-' '~')
 
 deb_root="$stage/deb-root"
 cp -R "$payload" "$deb_root"
@@ -144,8 +146,7 @@ echo ">> wrote $deb_output"
 # Release. Preserve their ordering semantics with '~' for a prerelease and '.'
 # for build metadata. Release filenames retain the exact Cargo version through
 # the release tag; this only affects RPM's internal version field.
-rpm_version="${version//-/~}"
-rpm_version="${rpm_version//+/.}"
+rpm_version=$(printf '%s' "$version" | tr -- '-+' '~.')
 
 rpm_top="$stage/rpmbuild"
 mkdir -p "$rpm_top/BUILD" "$rpm_top/BUILDROOT" "$rpm_top/RPMS" "$rpm_top/SOURCES" "$rpm_top/SPECS" "$rpm_top/SRPMS"
