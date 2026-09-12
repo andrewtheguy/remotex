@@ -12,6 +12,12 @@ import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
 import { desktopViewportSize, sizeWindowToDesktop } from "./desktopWindow.ts";
 import {
+  fullscreenSupported,
+  isFullscreen,
+  onFullscreenChange,
+  toggleFullscreen,
+} from "./fullscreen.ts";
+import {
   type AudioRow,
   type AudioStreamInfo,
   audioLabel,
@@ -163,6 +169,30 @@ function AppWindowHelpRow() {
   );
 }
 
+/// What the mode is worth and how to get out of it, which are both easy to get wrong
+/// from the outside: Chrome's own full screen looks identical and does none of it, and
+/// Escape leaves by being held rather than pressed once it is locked with the rest.
+function ImmersiveHelpRows() {
+  if (!fullscreenSupported()) {
+    return null;
+  }
+  return (
+    <>
+      <div className="help-item">
+        <dt>Send every key, Super and Alt+Tab included</dt>
+        <dd>
+          Menu → Immersive full screen. Chrome's own full screen — ⛶ beside the
+          zoom row, or F11 — looks the same and does not do this
+        </dd>
+      </div>
+      <div className="help-item">
+        <dt>Leave immersive full screen</dt>
+        <dd>Hold Esc, or the same menu button</dd>
+      </div>
+    </>
+  );
+}
+
 function usePanel() {
   const [panel, setPanel] = useState<Panel | null>(null);
   const closePanel = useCallback(() => setPanel(null), []);
@@ -269,6 +299,55 @@ function DisplaySection({
       >
         {open ? "Hide displays" : (active?.label ?? "Display")}
       </button>
+    </div>
+  );
+}
+
+// Immersive full screen — and the only reason this client carries a full-screen control
+// at all. Chromium activates Keyboard Lock in the page's own full screen and in no
+// other, so Chrome's ⛶ (the one beside the zoom row, and F11) hides the frame while the
+// host goes on taking the Super key, Alt+Tab and the browser's own chords out of the
+// stream: the remote desktop fills the screen and Super+E still opens a local window.
+// Nothing the page can do promotes that full screen into this one, which is why this is
+// a button rather than something the client arranges for itself. See fullscreen.ts.
+//
+// Offered wherever the browser grants it, touch clients included. A phone has no Super
+// key to win back, but full screen is still the larger desktop.
+function FullscreenSection() {
+  const fullscreen = useSyncExternalStore(
+    onFullscreenChange,
+    isFullscreen,
+    () => false,
+  );
+  // A request refused for want of a user gesture, or by a permissions policy, changes
+  // nothing on screen. Said out loud here, because the alternative is a button that
+  // looks broken.
+  const [refusal, setRefusal] = useState<string | null>(null);
+  if (!fullscreenSupported()) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Full screen</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => {
+          setRefusal(null);
+          toggleFullscreen().catch((cause: unknown) =>
+            setRefusal(cause instanceof Error ? cause.message : String(cause)),
+          );
+        }}
+        aria-pressed={fullscreen}
+        title={
+          fullscreen
+            ? "Return to the window; the browser and this computer take their shortcuts back"
+            : "Fill the screen and let Super, Alt+Tab and the browser's own chords reach the remote. Hold Esc to leave"
+        }
+      >
+        {fullscreen ? "Leave full screen" : "Immersive full screen"}
+      </button>
+      {refusal && <p className="toolbar-note">{refusal}</p>}
     </div>
   );
 }
@@ -1079,6 +1158,8 @@ export default function FloatingMenu({
 
       {open && !hidden && (
         <div className="toolbar" style={toolbarStyle}>
+          <FullscreenSection />
+
           <WindowSection size={size} onSize={onSizeWindow} />
 
           <DisplaySection
@@ -1222,6 +1303,7 @@ export default function FloatingMenu({
                     looks gone for good. */}
                 <dd>{hideChromeShortcut(isMacHost)}</dd>
               </div>
+              <ImmersiveHelpRows />
               <AppWindowHelpRow />
             </dl>
             {isMacHost && (

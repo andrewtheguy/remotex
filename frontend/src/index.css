@@ -606,6 +606,14 @@ body {
   letter-spacing: 0.05em;
 }
 
+/* A line under a section's button, for the one thing that section has to say: so far,
+   the browser's reason for refusing full screen. */
+.toolbar-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+
 .toolbar-btn {
   padding: 0.45rem 0.8rem;
   font: inherit;

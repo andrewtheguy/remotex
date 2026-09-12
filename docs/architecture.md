@@ -1490,14 +1490,31 @@ There are two ways for this page to be given the six Command chords a browser
 otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** (`appWindow.ts`:
 *Install page as app…*, or `--app=`) reserves no keys at all, so they arrive as
 ordinary keydowns and `preventDefault` is the whole of it; that is the configuration
-the client is meant to be run in. A plain tab gets the same from full screen plus
-`navigator.keyboard.lock`
-(`keyboardLock.ts`), which also locks ⌘Q. That lock is an automatic browser enhancement,
-not a mode or menu control; it follows fullscreen because Chromium does not grant it to
-a windowed tab. The Command translation table itself is always complete and never
-changes with fullscreen. App windows therefore send every chord in windowed and
-fullscreen use alike, while a normal windowed tab remains subject to the
-shortcuts Chrome consumes before the page sees them. The window kind moves in one
+the client is meant to be run in. A plain tab gets the same from **immersive full
+screen** plus `navigator.keyboard.lock` (`fullscreen.ts`, `keyboardLock.ts`), which
+asks for every key rather than a list: ⌘Q, and the keys no window of any kind is
+otherwise given — the Super key, Alt+Tab — so Super+E reaches the guest instead of
+opening a local file manager over it. The lock is not a control of its own; it follows
+the full screen, and the full screen is the menu button.
+
+Which full screen is the whole of it, and the distinction is invisible from the
+outside. Chromium activates a lock in `WebContentsImpl::RequestKeyboardLock` only
+while `IsFullscreenForTabOrPending` holds — *element* full screen, entered through
+`requestFullscreen()`, which is what **Menu → Immersive full screen** calls on
+`documentElement`. Chrome's own full screen (the ⛶ beside the zoom row, or F11) hides
+the frame and nothing else: `document.fullscreenElement` stays null, no lock is
+activated, and the host keeps every key it reserves behind a remote desktop that fills
+the screen. A page cannot promote one into the other, so the client offers its own
+button and `keyboardLock.ts` deliberately does not watch `(display-mode: fullscreen)`
+— arming on that took a lock Chromium never made active, which is the failure it
+looked like a fix for. The way out of the mode is that button again, or holding
+Escape, which is Chromium's own exit from a locked full screen.
+
+The Command translation table itself is always complete and never changes with
+fullscreen. App windows therefore send every chord in windowed and fullscreen use
+alike, while a normal windowed tab remains subject to the shortcuts Chrome consumes
+before the page sees them — and an app window still needs immersive full screen for
+the Super key, which no browser window is handed without the lock. The window kind moves in one
 direction only: *Install page as app…* reparents the live document into the new window
 instead of reloading it, so `appWindow.ts` latches its answer true and notifies rather
 than answering once at load — and full screen, which reports `display-mode: fullscreen`
