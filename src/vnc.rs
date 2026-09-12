@@ -931,11 +931,21 @@ struct Flags {
     /// The operator's pinned size ([`TargetConfig::pinned_size`]), in points,
     /// on a generic target. The desktop is asked for it once, as soon as the
     /// server declares SetDesktopSize support — a pin is the operator's opening
-    /// size and not the window's, so it is spent whether or not `resize` is
-    /// granted, and a granted `resize` simply supersedes it with the browser's
-    /// first viewport report. `None` on both Apple dialects, where a pin is
-    /// either spent by [`opening_mode`] at connect (High Performance) or refused
-    /// by the config file (Standard `ard` exposes physical displays).
+    /// size and not the window's, so it is offered whether or not `resize` is
+    /// granted.
+    ///
+    /// Under `resize` it commonly never goes out, and that is the intended
+    /// outcome rather than a race lost: the browser reports its window the
+    /// moment `connected` reaches it, which is well before the handshake can
+    /// declare support, and a held request is superseded by the newest size the
+    /// window wants — see [`DesktopState::generic_resize`]. Asking for the pin
+    /// first would redraw the whole desktop for a size the browser had already
+    /// left. A client that reports no window at all (a phone) leaves the pin to
+    /// go out on the declaration.
+    ///
+    /// `None` on both Apple dialects, where a pin is either spent by
+    /// [`opening_mode`] at connect (High Performance) or refused by the config
+    /// file (Standard `ard` exposes physical displays).
     pinned: Option<(u16, u16)>,
     /// Whether this target puts moving pixels on the wire as a video stream
     /// ([`TargetConfig::streams_video`]): a generic `SetDesktopSize` is then
@@ -6361,6 +6371,40 @@ mod tests {
         .unwrap();
 
         assert!(written(&wire).is_empty());
+    }
+
+    /// The same pin under `resize`, which is the ordering every desktop browser
+    /// produces: the window is reported the moment `connected` reaches it, long
+    /// before a rect can declare SetDesktopSize support, so the report supersedes
+    /// the held pin exactly as it supersedes any older hold. One request goes out
+    /// on the declaration and it is the window's — the pin is never asked for
+    /// behind a size the browser has already left.
+    #[tokio::test]
+    async fn a_viewport_report_supersedes_a_pin_that_has_not_gone_out() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let screen = Screen { id: 9, flags: 1 };
+        let desktop = shared_desktop((1920, 1080), None, Some((1440, 900)));
+
+        // The browser's first viewport, handled before any rect has arrived.
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1280, 800)), false).await.unwrap();
+        assert!(written(&wire).is_empty(), "nothing goes out before support is declared");
+        assert_eq!(desktop.lock().unwrap().pending, Some((1280, 800)), "the pin gave way");
+
+        let payload = eds_payload(screen);
+        read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &uplink,
+            &desktop,
+            &test_shadow((1920, 1080)),
+            (0, 0, 1920, 1080),
+            &sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(written(&wire), set_desktop_size((1280, 800), screen));
+        assert_eq!(desktop.lock().unwrap().pending, None);
     }
 
     /// The viewport changes while the read loop's replay is blocked behind the
