@@ -272,7 +272,7 @@ impl Clear {
                     return Err(refuse("an invalid vBar header", u64::from(header)));
                 };
 
-                draw_column(&mut dst, usize::from(x_start), y_start, i, &column, vbar_height)?;
+                draw_column(&mut dst, usize::from(x_start), y_start, i, &column, vbar_height);
             }
         }
         Ok(())
@@ -454,28 +454,20 @@ fn fit_column(stored: &[u8], height: usize) -> Vec<u8> {
     column
 }
 
-/// Draw column `i` of a band down onto the rectangle at `(x_start + i, y_start..)`.
-fn draw_column(
-    dst: &mut Dst<'_>,
-    x_start: usize,
-    y_start: usize,
-    i: usize,
-    column: &[u8],
-    height: usize,
-) -> Result<(), Malformed> {
-    if i >= dst.w {
-        return Ok(());
+/// Draw column `i` of a band down onto the rectangle at `(x_start + i, y_start..)`,
+/// clipped to the rectangle. The reference decodes straight onto the surface and lets
+/// a band spill past the rectangle onto it; here the spill has nowhere to go and is
+/// dropped, rather than costing the whole rectangle.
+fn draw_column(dst: &mut Dst<'_>, x_start: usize, y_start: usize, i: usize, column: &[u8], height: usize) {
+    let x = x_start + i;
+    if x >= dst.w {
+        return;
     }
-    let count = height.min(dst.h);
+    let count = height.min(dst.h.saturating_sub(y_start));
     for row in 0..count {
-        let (ax, ay) = (x_start + i, y_start + row);
-        if ax >= dst.w || ay >= dst.h {
-            return Err(refuse("a band column past the rectangle", (ax.max(ay)) as u64));
-        }
-        let at = (ay * dst.w + ax) * 4;
+        let at = ((y_start + row) * dst.w + x) * 4;
         dst.out[at..at + 4].copy_from_slice(&column[row * 4..row * 4 + 4]);
     }
-    Ok(())
 }
 
 /// Write one `BGRX` pixel at a linear index of a packed buffer.
@@ -593,6 +585,28 @@ mod tests {
         band.extend_from_slice(&0x0200u16.to_le_bytes()); // yOn 0, yOff 2 -> short miss
         band.extend_from_slice(&[3, 2, 1]); // pixel 0: B3 G2 R1
         band.extend_from_slice(&[6, 5, 4]); // pixel 1: B6 G5 R4
+        let src = rect(0, 0, None, &[], &band, &[]);
+        clear.decompress(&src, &mut out, 1, 2).unwrap();
+        assert_eq!(out, vec![3, 2, 1, 0, 6, 5, 4, 0]);
+    }
+
+    /// A band that spills past the rectangle paints the rows and columns that fit,
+    /// as the reference lets it spill onto the surface, rather than refusing the
+    /// whole rectangle.
+    #[test]
+    fn a_band_past_the_rectangle_is_clipped_to_it() {
+        let mut clear = Clear::new();
+        let mut out = Vec::new();
+        let mut band = Vec::new();
+        band.extend_from_slice(&0u16.to_le_bytes()); // xStart
+        band.extend_from_slice(&1u16.to_le_bytes()); // xEnd: two columns, one past a 1-wide rectangle
+        band.extend_from_slice(&0u16.to_le_bytes()); // yStart
+        band.extend_from_slice(&3u16.to_le_bytes()); // yEnd: four rows, two past a 2-tall rectangle
+        band.extend_from_slice(&[0, 0, 0]); // background
+        for _ in 0..2 {
+            band.extend_from_slice(&0x0400u16.to_le_bytes()); // yOn 0, yOff 4 -> short miss
+            band.extend_from_slice(&[3, 2, 1, 6, 5, 4, 9, 8, 7, 12, 11, 10]);
+        }
         let src = rect(0, 0, None, &[], &band, &[]);
         clear.decompress(&src, &mut out, 1, 2).unwrap();
         assert_eq!(out, vec![3, 2, 1, 0, 6, 5, 4, 0]);

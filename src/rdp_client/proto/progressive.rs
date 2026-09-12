@@ -281,8 +281,21 @@ impl Progressive {
                 }
                 WBT_REGION => {
                     let grid = self.surfaces.get_mut(&surface).expect("inserted above");
-                    let region = read_region(&mut b, grid, &mut self.work, &mut self.temp, &mut self.touched)?;
-                    present(grid, &region, &mut self.touched, &mut paint);
+                    match read_region(&mut b, grid, &mut self.work, &mut self.temp, &mut self.touched) {
+                        Ok(region) => present(grid, &region, &mut self.touched, &mut paint),
+                        Err(e) => {
+                            // The tiles decoded before the fault are not written out;
+                            // left marked as if they had been, nothing would ever
+                            // write them out again.
+                            for &index in &self.touched {
+                                if let Some(tile) = grid.tiles[index].as_deref_mut() {
+                                    tile.dirty = false;
+                                }
+                            }
+                            self.touched.clear();
+                            return Err(e);
+                        }
+                    }
                 }
                 other => return Err(refuse("a block type", other)),
             }
@@ -1201,6 +1214,22 @@ mod tests {
         let src = pdu(&[region(&[(0, 0, 64, 64)], 0, &[flat_tile(WBT_TILE_SIMPLE, 0, 0, 5)])]);
         let err = collect(&mut p, 1, 64, 64, &src).unwrap_err();
         assert!(matches!(err, Malformed::Refused { field: "a region without the reduce-extrapolate flag", .. }), "{err}");
+    }
+
+    /// A region refused after some of its tiles decoded leaves those tiles free to be
+    /// drawn again: the next region that touches them paints them.
+    #[test]
+    fn tiles_of_a_refused_region_are_painted_by_the_next() {
+        let mut p = Progressive::new();
+        let tiles = [flat_tile(WBT_TILE_FIRST, 0, 0, 5), vec![0xC9, 0xCC, 6, 0, 0, 0]]; // then a block of no known kind
+        let src = pdu(&[region(&[(0, 0, 64, 64)], 1, &tiles)]);
+        let err = collect(&mut p, 1, 64, 64, &src).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "a tile block type", .. }), "{err}");
+
+        let again = pdu(&[region(&[(0, 0, 64, 64)], 1, &[flat_tile(WBT_TILE_SIMPLE, 0, 0, 7)])]);
+        let paints = collect(&mut p, 1, 64, 64, &again).unwrap();
+        assert_eq!(paints.len(), 1);
+        assert_eq!(paints[0].1, grey(7).repeat(COEFFS));
     }
 
     /// A tile difference adds to the coefficients held from the pass before.

@@ -82,6 +82,12 @@ pub struct TooLong(pub usize);
 /// so a server cannot multiply it by opening channels.
 pub const MAX_PAYLOAD: usize = 64 << 20;
 
+/// The most channels that may have a split payload in progress at once. Two are ever
+/// accepted — the graphics pipeline and Display Control — and a payload for a channel
+/// nobody listens on is parsed before it is dropped, so a few more are allowed for;
+/// past that a server is multiplying entries, not sending anything.
+pub const MAX_GATHERING: usize = 8;
+
 /// The server's side of the dynamic channel, one PDU at a time.
 ///
 /// Stateful for one reason: a Data First says how long the whole payload is and
@@ -159,6 +165,10 @@ impl Incoming {
                 if in_flight + total > MAX_PAYLOAD {
                     let together = u64::try_from(in_flight + total).unwrap_or(u64::MAX);
                     return Err(self.abandon(channel, "payloads in flight together announcing", together));
+                }
+                if self.gathering.len() >= MAX_GATHERING {
+                    let count = u64::try_from(self.gathering.len()).unwrap_or(u64::MAX);
+                    return Err(self.abandon(channel, "a first piece with channels already gathering numbering", count));
                 }
                 let mut buffer = Vec::with_capacity(total);
                 buffer.extend_from_slice(data);
@@ -467,6 +477,22 @@ mod tests {
         assert!(matches!(err, Malformed::Refused { field: "payloads in flight together announcing", .. }), "{err}");
         // The first channel is still gathering; only the newcomer was turned away.
         assert_eq!(incoming.gathering.len(), 1);
+    }
+
+    /// Entries cost memory too: only so many channels may gather at once, however
+    /// little each announces.
+    #[test]
+    fn only_so_many_channels_gather_at_once() {
+        let mut incoming = Incoming::new();
+        for channel in 0..u8::try_from(MAX_GATHERING).unwrap() {
+            assert_eq!(incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[channel, 0x04, 1])).unwrap(), None);
+        }
+        let err = incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x77, 0x04, 1])).unwrap_err();
+        assert!(
+            matches!(err, Malformed::Refused { field: "a first piece with channels already gathering numbering", .. }),
+            "{err}"
+        );
+        assert_eq!(incoming.gathering.len(), MAX_GATHERING);
     }
 
     #[test]

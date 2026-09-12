@@ -138,7 +138,10 @@ impl Zgfx {
             MULTIPART => {
                 let count = r.u16_le()?;
                 let total = usize::try_from(r.u32_le()?).unwrap_or(usize::MAX);
-                out.reserve(total.min(SEGMENT_MAX * usize::from(count)));
+                // Room for one segment's worth up front; the rest grows as segments
+                // land. The total and the count are the peer's word, and a
+                // reservation sized by them would be an allocation of its choosing.
+                out.reserve(total.min(SEGMENT_MAX));
                 for _ in 0..count {
                     let size = usize::try_from(r.u32_le()?).unwrap_or(usize::MAX);
                     let segment = r.bytes(size)?;

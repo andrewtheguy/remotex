@@ -39,6 +39,11 @@ use super::proto::{clear, planar, progressive, zgfx};
 /// bounding box — coarser, never longer.
 const DAMAGE_CAP: usize = 64;
 
+/// Most bytes the cache slots hold together. The caps this client advertises promise
+/// the host a 16 MiB cache (`SMALL_CACHE`), so a host that keeps its word never comes
+/// near this; one that does not is refused the entry rather than the process's memory.
+const CACHE_BUDGET: usize = 64 << 20;
+
 /// Something the pipeline did that the session has to act on, in the order it
 /// happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,8 +385,10 @@ impl Graphics {
                 match self.surfaces.get_mut(&surface) {
                     Some(found) => {
                         debug!("rdp: graphics surface {surface} mapped to the output at {x},{y}");
+                        // Whatever was drawn into it before the map is still owed to
+                        // the output at the EndFrame, so the changed rectangles stay;
+                        // FreeRDP keeps them too.
                         found.mapped = Some((x, y));
-                        found.invalid.clear();
                     }
                     None => warn!("rdp: the host mapped graphics surface {surface}, which does not exist"),
                 }
@@ -581,6 +588,22 @@ impl Graphics {
             return;
         }
         let (width, height) = (u32::from(rect.width()), u32::from(rect.height()));
+        // One budget for every slot together; the slot being replaced gives its
+        // bytes back first.
+        let bytes = width as usize * height as usize * 4;
+        let held: usize = self.caches.iter().filter(|(s, _)| **s != slot).map(|(_, held)| held.pixels.len()).sum();
+        if held + bytes > CACHE_BUDGET {
+            warn!(
+                "rdp: dropping a {width}x{height} cache entry for slot {slot}: with the {} MiB of \
+                 entries already held it is more than the {} MiB this client will cache",
+                held >> 20,
+                CACHE_BUDGET >> 20
+            );
+            // The host thinks the slot holds the new rectangle now; the old one must
+            // not stand in for it.
+            self.caches.remove(&slot);
+            return;
+        }
         let mut pixels = Vec::new();
         source.copy_out(to_rect(rect), &mut pixels);
         self.caches.insert(slot, Cache { width, height, pixels });
@@ -1049,6 +1072,45 @@ mod tests {
         assert!(format!("{err}").contains("512 MiB of surfaces"), "{err}");
         receive(&mut graphics, &framebuffer, &[create(1, 16384, 8192)]);
         assert_eq!(graphics.surfaces.len(), 1);
+    }
+
+    /// The cache slots draw on one budget: an entry that would take them past it is
+    /// dropped, and the slot it was meant for is emptied rather than left stale; an
+    /// entry replacing a slot's own is not counted against it.
+    #[test]
+    fn cache_slots_share_one_budget() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        // A 4096x4096 surface is exactly the cache budget when lifted whole.
+        receive(&mut graphics, &framebuffer, &[reset(4, 4), create(1, 4096, 4096), map(1, 0, 0)]);
+        receive(&mut graphics, &framebuffer, &[s2c(1, 1, (0, 0, 4096, 4096))]);
+        assert_eq!(graphics.caches.len(), 1);
+        receive(&mut graphics, &framebuffer, &[s2c(1, 2, (0, 0, 1, 1))]);
+        assert!(!graphics.caches.contains_key(&2), "the second entry was dropped");
+        receive(&mut graphics, &framebuffer, &[s2c(1, 1, (0, 0, 4096, 4096))]);
+        assert_eq!(graphics.caches.len(), 1, "the slot's own entry is replaced, not added to");
+        // Now the slot holds a small one; the next big one has room.
+        receive(&mut graphics, &framebuffer, &[s2c(1, 1, (0, 0, 1, 1)), s2c(1, 2, (0, 0, 4096, 4095))]);
+        assert_eq!(graphics.caches.len(), 2);
+    }
+
+    /// A surface drawn into before it is mapped shows what was drawn at the EndFrame
+    /// after the map, rather than waiting for the host to draw it again.
+    #[test]
+    fn what_was_drawn_before_the_map_is_presented_after_it() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(4, 4), create(1, 4, 4)]);
+        let updates = receive(&mut graphics, &framebuffer, &[
+            start(1),
+            wire(1, CODEC_UNCOMPRESSED, (0, 0, 1, 1), &[30, 20, 10, 0xFF]),
+            map(1, 0, 0),
+            end(1),
+        ]);
+        assert_eq!(updates, vec![
+            Update::Paint(Rect { x: 0, y: 0, width: 1, height: 1 }),
+            Update::Frame { id: 1, decoded: 1 },
+        ]);
     }
 
     /// The host's CapsConfirm is the moment the session learns that its frames will
