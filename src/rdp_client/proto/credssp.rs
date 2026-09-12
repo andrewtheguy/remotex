@@ -22,7 +22,7 @@
 //!
 //! [MS-CSSP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cssp/9664994d-0784-4659-b85b-83b8d54c2336
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use sspi::credssp::{ClientMode, ClientState, CredSspClient, CredSspMode, TsRequest};
 use sspi::{AuthIdentity, Username};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -49,7 +49,6 @@ pub async fn authenticate(
     server_public_key: Vec<u8>,
 ) -> Result<()> {
     let username = Username::new(credentials.username, credentials.domain)
-        .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("{:?} is not a user name", credentials.username))?;
     let identity =
         AuthIdentity { username, password: credentials.password.to_owned().into() };
@@ -64,7 +63,7 @@ pub async fn authenticate(
         // CredSSP carries it and a server may log it.
         format!("TERMSRV/{server_name}"),
     )
-    .map_err(|e| anyhow!("starting CredSSP: {e}"))?;
+    .context("starting CredSSP")?;
 
     // The first message is produced from an empty request: there is nothing from the
     // server yet, and the client speaks first.
@@ -73,7 +72,6 @@ pub async fn authenticate(
         let state = client
             .process(from_server)
             .resolve_to_result()
-            .map_err(|e| anyhow!("{e}"))
             .context("the logon attempt was refused")?;
         let (reply, done) = match state {
             ClientState::ReplyNeeded(reply) => (reply, false),
@@ -127,7 +125,7 @@ async fn receive(stream: &mut Stream) -> Result<TsRequest> {
             // "this is not a TSRequest at all".
             Err(_) if bytes.len() < HEADER => {}
             Err(e) => {
-                return Err(anyhow!(e)).context("the server's answer is not a CredSSP response");
+                return Err(e).context("the server's answer is not a CredSSP response");
             }
         }
     };

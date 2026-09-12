@@ -2061,7 +2061,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // a person. Passed through rather than wrapped in "read server
             // message", which would bury them.
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                return Err(anyhow::anyhow!("{e}"));
+                return Err(anyhow::Error::new(e));
             }
             Err(e) => return Err(anyhow::anyhow!("read server message: {e}")),
         };
