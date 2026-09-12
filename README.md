@@ -12,13 +12,11 @@ platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
 for rather than scaled on the client; plain `vnc`, Apple High Performance and
 `rdp` can all be handed the window. On RDP each resize reactivates the session, so
-a Windows host re-renders the desktop sharp at the new size; `egfx = true` trades
-that for a cheaper display-layout resize whose text stays soft.
+a Windows host re-renders the desktop sharp at the new size.
 
 - RDP uses a built-in client on [IronRDP](https://github.com/Devolutions/IronRDP)'s
-  protocol crates: the desktop over the graphics pipeline or plain bitmaps,
-  pointer, keyboard, mouse and resize. It does not carry sound, the clipboard or
-  touch.
+  protocol crates: the desktop over plain bitmap updates, pointer, keyboard, mouse
+  and resize. It does not carry sound, the clipboard or touch.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.

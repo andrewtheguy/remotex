@@ -649,14 +649,6 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
                 Security::Tls => "tls only; the remote shows its login window",
             },
         ));
-        lines.push(spec(
-            "graphics",
-            if target.egfx() {
-                "egfx pipeline; a resize is a layout change"
-            } else {
-                "legacy; a resize reactivates the session"
-            },
-        ));
     }
 
     // Beside the clipboard rather than inside the block above: sound is the

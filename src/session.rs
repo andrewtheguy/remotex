@@ -1326,7 +1326,6 @@ mod tests {
             width: Some(1),
             height: Some(1),
             security: None,
-            egfx: None,
             allow_plain_tls: None,
             resize: meta.resize,
             clipboard: meta.clipboard,
