@@ -171,8 +171,8 @@ sha1 = "0.11"
 # (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no new
 # dependency.
 #
-# **The backend is not chosen here.** IronRDP's CredSSP dependency (`sspi`, via
-# `winscard`) turns on flate2's C zlib, so `libz-sys` is in the tree and every
+# **The backend is not chosen here.** The RDP client's CredSSP dependency (`sspi`,
+# via `winscard`) turns on flate2's C zlib, so `libz-sys` is in the tree and every
 # flate2 user gets C zlib. The two backends differ in one way this repo has met: a
 # sync flush against an already-flushed stream emits an empty stored block on
 # miniz_oxide where the C zlib suppresses it, which once hung a test helper written
@@ -188,29 +188,20 @@ flate2 = "1"
 socket2 = { version = "0.6", features = ["all"] }
 
 # Server-side RDP engine (see docs/architecture.md): the gateway's own headless
-# client in src/rdp_client/, on IronRDP's protocol crates. Pure Rust apart from
-# `ring` and zlib, so the build still needs no cmake, pkg-config, OpenSSL or
-# libclang.
+# client in src/rdp_client/, protocol and all — every PDU is encoded and decoded in
+# src/rdp_client/proto/ against [MS-RDPBCGR], so nothing below is an RDP library.
+# Pure Rust apart from `ring` and zlib, so the build needs no cmake, pkg-config,
+# OpenSSL or libclang.
 #
-# Every IronRDP crate is pinned to the same revision of the upstream repository,
-# because they are released together and the session, connector and channel crates
-# share types across their public APIs. The client takes bitmap updates, Display
-# Control, and the tokio framing (`ironrdp-tokio`, without its reqwest-based
-# Kerberos client — CredSSP runs NTLM here). The graphics pipeline is not offered.
-#
-# TLS is `ironrdp-tls` over rustls with `ring`, and rustls needs that provider
-# installed as the process default before the first handshake: `tokio-rustls` is a
-# direct dependency only so src/rdp_client can install it.
-ironrdp = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35", features = ["connector", "session", "graphics", "dvc", "svc", "displaycontrol"] }
-ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35" }
-ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35", features = ["rustls-ring"] }
+# TLS is rustls with `ring`, and rustls needs that provider installed as the process
+# default before the first handshake: `tokio-rustls` is a direct dependency both for
+# the session's own TLS and so src/rdp_client can install it.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 # CredSSP and NTLM for the gateway's own RDP stack (src/rdp_client/proto/credssp.rs).
 # Network Level Authentication is not optional on a current Windows host, and NTLM is
 # the one mechanism a user name and a password can drive — so this is the part of the
 # connection sequence that is not worth writing twice. It arrived in the tree as
-# IronRDP's own CredSSP dependency; naming it here is what lets IronRDP leave without
-# taking authentication with it.
+# IronRDP's own CredSSP dependency, and stayed when IronRDP left.
 #
 # No features. The ones on offer — `aws-lc-rs`/`ring`, `network_client`, `scard` —
 # reach sspi's *own* TLS and its Kerberos network client, neither of which a CredSSP

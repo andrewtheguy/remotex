@@ -302,8 +302,6 @@ fn connect_config(config: &TargetConfig, display: Option<HostDisplay>) -> Connec
         domain: config.domain.clone(),
         width,
         height,
-        security: config.security(),
-        allow_plain_tls: config.allow_plain_tls(),
         resize: config.resize,
     }
 }

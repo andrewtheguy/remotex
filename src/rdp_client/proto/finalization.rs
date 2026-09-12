@@ -21,6 +21,7 @@
 //! a logon notification, a monitor layout — which is why the reader here takes a PDU
 //! at a time and says what it was rather than expecting a fixed order.
 
+use super::desktop;
 use super::share::{self, Data};
 use super::wire::{Malformed, Reader, Writer};
 
@@ -68,8 +69,9 @@ pub fn requests(user: u16, share_id: u32) -> [Vec<u8>; 4] {
 
 /// What one of the server's PDUs was.
 ///
-/// A Set Error Info PDU carrying a real code becomes the error here, because that PDU
-/// *is* the server's explanation and there is no better place to turn it into one.
+/// A Set Error Info PDU carrying a real code becomes the error here, by way of
+/// [`desktop::error_info`]: a server that refuses a logon says so with the same PDU
+/// it would end a live session with.
 pub fn response(pdu: &Data<'_>) -> Result<Response, Malformed> {
     match pdu.kind {
         share::SYNCHRONIZE => Ok(Response::Synchronize),
@@ -82,42 +84,12 @@ pub fn response(pdu: &Data<'_>) -> Result<Response, Malformed> {
             }
         }
         share::FONT_MAP => Ok(Response::FontMap),
-        share::SET_ERROR_INFO => {
-            const WHAT: &str = "the server ended the session";
-            let mut r = Reader::new(WHAT, pdu.body);
-            match r.u32_le()? {
-                0 => Ok(Response::Aside),
-                code => Err(r.report(describe(code), code)),
-            }
-        }
+        share::SET_ERROR_INFO => desktop::error_info(pdu.body).map(|()| Response::Aside),
         share::SAVE_SESSION_INFO | share::MONITOR_LAYOUT => Ok(Response::Aside),
         other => {
             let r = Reader::new("a share data PDU during connection finalization", pdu.body);
             Err(r.refuse("its type", other))
         }
-    }
-}
-
-/// What a Set Error Info code means, for the codes that do not depend on which
-/// protocol was in use. The rest are numbered and left that way: a name invented for
-/// a code is worse than the code.
-fn describe(code: u32) -> &'static str {
-    match code {
-        0x0000_0001 => "an administrator disconnected the session",
-        0x0000_0002 => "an administrator logged the session off",
-        0x0000_0003 => "the session was idle for longer than the host allows",
-        0x0000_0004 => "the logon took longer than the host allows",
-        0x0000_0005 => "another connection took the session over",
-        0x0000_0006 => "the host ran out of memory",
-        0x0000_0007 => "the host denied the connection",
-        0x0000_0009 => "the account is not allowed to log on to this host",
-        0x0000_000A => "the host wants credentials entered at its own logon screen",
-        0x0000_000B => "the user disconnected the session",
-        0x0000_000C => "the user logged the session off",
-        0x0000_0010 => "the host's desktop compositor stopped",
-        0x0000_0017 => "the host's logon process stopped",
-        0x0000_0018 => "the host's session manager stopped",
-        _ => "for a reason this client has no name for",
     }
 }
 

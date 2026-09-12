@@ -1,10 +1,8 @@
 //! RDP's wire format, written here.
 //!
-//! The client above this module is built on IronRDP's protocol crates. This module
-//! is the replacement for them: the PDUs a connection is made of, encoded and decoded
-//! against the specification rather than against a dependency. It is built and tested
-//! on its own until it can carry a whole session, so that no connection is ever half
-//! one stack and half the other.
+//! Every PDU a session is made of, encoded and decoded against the specification
+//! rather than against a dependency. The client above this module — [`super::Session`]
+//! — is built on nothing else.
 //!
 //! # What is here
 //!
@@ -16,6 +14,8 @@
 //!   written in.
 //! - [`x224`] — TPKT framing, the X.224 connection sequence, and the security
 //!   negotiation that decides whether TLS and CredSSP follow.
+//! - [`frame`] — one whole frame off the socket, of whichever of the two framings it
+//!   happens to wear.
 //! - [`tls`] — the TLS session the rest of the connection lives inside.
 //! - [`credssp`] — Network Level Authentication, before the server builds a session.
 //! - [`mcs`] — the channels every later PDU travels on, and the sequence that opens
@@ -42,6 +42,8 @@
 //! - [`planar`] — the codec a 32-bit session compresses a rectangle with.
 //! - [`pointer`] — the cursor, which travels as its own shape and is never drawn
 //!   into the desktop.
+//! - [`desktop`] — what a client asks of a desktop that is already up, and the last
+//!   thing a server says about one.
 //!
 //! # One kind of server
 //!
@@ -67,9 +69,11 @@ pub mod capabilities;
 pub mod channel;
 pub mod credssp;
 pub mod der;
+pub mod desktop;
 pub mod display;
 pub mod dvc;
 pub mod fastpath;
+pub mod frame;
 pub mod finalization;
 pub mod gcc;
 pub mod info;

@@ -5,10 +5,9 @@ use std::fmt;
 /// Why a session did not start, or did not continue.
 ///
 /// A sentence and nothing else, because that is all a caller ever does with one:
-/// show it. It is built from the whole cause chain — IronRDP wraps the reason a
-/// handshake failed (a refused credential, a CredSSP status, a TLS alert) inside
-/// errors that only name the step — so the part a person can act on is not lost
-/// behind "connect_finalize failed".
+/// show it. It is built from the whole cause chain — the step that failed, then what
+/// it was doing, down to the field or the status the host actually objected to — so
+/// the part a person can act on is not lost behind "RDP negotiation failed".
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct Error {
@@ -18,22 +17,6 @@ pub struct Error {
 impl Error {
     pub(super) fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
-    }
-
-    /// `doing`, then every error in `err`'s `source()` chain.
-    pub(super) fn chain(doing: &str, err: &(dyn std::error::Error + 'static)) -> Self {
-        let mut message = format!("{doing}: {err}");
-        let mut source = err.source();
-        while let Some(e) = source {
-            let text = e.to_string();
-            // A wrapper that already quotes its source would say it twice.
-            if !message.contains(&text) {
-                message.push_str(": ");
-                message.push_str(&text);
-            }
-            source = e.source();
-        }
-        Self { message }
     }
 }
 
@@ -54,24 +37,18 @@ impl From<anyhow::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use anyhow::Context as _;
 
-    #[derive(Debug, thiserror::Error)]
-    #[error("{0}")]
-    struct Layer(&'static str, #[source] Option<Box<Layer>>);
+    use super::*;
 
     /// The reason is at the bottom of the chain, and it is the part worth reading.
     #[test]
-    fn the_whole_chain_is_kept_and_repeats_are_not() {
-        let inner = Layer("the logon attempt failed", None);
-        let middle = Layer("CredSSP", Some(Box::new(inner)));
-        let outer = Layer("connect_finalize", Some(Box::new(middle)));
+    fn the_whole_chain_is_kept() {
+        let inner: anyhow::Result<()> = Err(anyhow::anyhow!("the logon attempt failed"));
+        let err = inner.context("CredSSP").context("RDP negotiation").unwrap_err();
         assert_eq!(
-            Error::chain("RDP activation", &outer).to_string(),
-            "RDP activation: connect_finalize: CredSSP: the logon attempt failed"
+            Error::from(err).to_string(),
+            "RDP negotiation: CredSSP: the logon attempt failed"
         );
-
-        let quoting = Layer("TLS: bad certificate", Some(Box::new(Layer("bad certificate", None))));
-        assert_eq!(Error::chain("upgrade", &quoting).to_string(), "upgrade: TLS: bad certificate");
     }
 }

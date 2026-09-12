@@ -1,4 +1,4 @@
-//! A headless RDP client, on IronRDP's protocol crates.
+//! A headless RDP client, protocol and all.
 //!
 //! Screen, pointer, keyboard, mouse and resize, and nothing else. There is no
 //! window and no drawing: [`Session::start`] connects, keeps a complete framebuffer
@@ -6,10 +6,13 @@
 //! rectangle of it changes. What the caller does with those pixels is not this
 //! module's business — [`crate::rdp`] is the caller, and it encodes them.
 //!
-//! IronRDP supplies the protocol: the connection sequence, CredSSP, TLS, fast-path
-//! and slow-path decoding, the bitmap codecs, and Display Control. This module owns
-//! what a headless gateway needs on top — one thread per session, the framebuffer
-//! copy, the event stream, and the resize path.
+//! [`proto`] is the wire: the connection sequence, CredSSP, TLS, fast-path and
+//! slow-path decoding, the bitmap codec, the cursor, and Display Control, all
+//! written here against [MS-RDPBCGR] rather than taken from a dependency. This
+//! module is what a headless gateway needs on top — one thread per session, the
+//! framebuffer copy, the event stream, and the resize path.
+//!
+//! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 //!
 //! # The two threads
 //!
@@ -37,6 +40,9 @@
 //! - **No sound, no clipboard, no touch.** None of those channels is opened.
 //! - **No graphics pipeline.** MS-RDPEGFX is not advertised, so no surface
 //!   commands, no RemoteFX Progressive and no H.264.
+//! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a
+//!   server that cannot do CredSSP is refused rather than logged on to some other
+//!   way.
 //! - **No certificate verification.** Any server certificate is accepted, for the
 //!   session only and without storing it. That is defensible under NLA, where
 //!   CredSSP binds the server's TLS public key into the credential exchange so an
@@ -45,6 +51,7 @@
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
 //! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
 
+mod connect;
 mod error;
 mod framebuffer;
 mod input;

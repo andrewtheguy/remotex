@@ -1,8 +1,9 @@
 //! The RDP client against a real host.
 //!
-//! No container stands in here: what this exercises — bitmap updates and a
-//! Deactivation-Reactivation Sequence — is a Windows host's behaviour, and xrdp's
-//! is a different one. So, like `classify_render_e2e`, it
+//! No container stands in here: the client speaks NLA to a current Windows host and
+//! nothing else, and what this exercises — bitmap updates and a
+//! Deactivation-Reactivation Sequence — is that host's behaviour. So, like
+//! `classify_render_e2e`, it
 //! borrows a target from the operator's `tmp/test_uat.toml`, named by
 //! [`TARGET_ENV`] rather than written here, and drives [`remotex::rdp_client`]
 //! directly with no gateway in front of it.
@@ -55,8 +56,6 @@ fn connect() -> (Session, Receiver<Event>) {
         domain: target.domain.clone(),
         width: OPENING.0,
         height: OPENING.1,
-        security: target.security(),
-        allow_plain_tls: target.allow_plain_tls(),
         resize: true,
     })
 }

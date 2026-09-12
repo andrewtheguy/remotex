@@ -37,8 +37,8 @@ pub const MAX_DIMENSION: u32 = 8192;
 
 /// The range a desktop scale factor is read in. Outside it, the server ignores the
 /// scale — see the module doc.
-const MIN_SCALE: u32 = 100;
-const MAX_SCALE: u32 = 500;
+pub const MIN_SCALE: u32 = 100;
+pub const MAX_SCALE: u32 = 500;
 
 /// The device scale factor, which has three permitted values and is pinned to the
 /// first: this client has no display of its own to have been built for.
@@ -92,6 +92,18 @@ pub fn capabilities(payload: &[u8]) -> Result<Capabilities, Malformed> {
     Ok(Capabilities { monitors, area: a * b * u64::from(monitors) })
 }
 
+/// Bring a desktop size inside what a monitor layout may ask for: [`MIN_DIMENSION`]
+/// to [`MAX_DIMENSION`], with an odd width rounded *down* so a desktop stays inside
+/// the window that asked for it rather than growing a scrollbar by one pixel.
+///
+/// Public because a caller deciding *whether to ask at all* has to compare against
+/// the size that would really be sent: asking a host for the desktop it already has
+/// is not free — it answers with a full resize — so a client comparing an unadjusted
+/// 1281 against a live 1280 would ask again forever.
+pub fn adjust_size(width: u32, height: u32) -> (u32, u32) {
+    (width.clamp(MIN_DIMENSION, MAX_DIMENSION) & !1, height.clamp(MIN_DIMENSION, MAX_DIMENSION))
+}
+
 /// Ask the host for a desktop of this size.
 ///
 /// `width` and `height` come from a browser window and are clamped to what the
@@ -100,8 +112,7 @@ pub fn capabilities(payload: &[u8]) -> Result<Capabilities, Malformed> {
 /// desktop the host will open is a better answer than none. `scale` is the browser's
 /// pixel density as a percentage, and is written only if the server would read it.
 pub fn monitor_layout(width: u32, height: u32, scale: u32) -> Vec<u8> {
-    let width = width.clamp(MIN_DIMENSION, MAX_DIMENSION) & !1;
-    let height = height.clamp(MIN_DIMENSION, MAX_DIMENSION);
+    let (width, height) = adjust_size(width, height);
     let scale = if (MIN_SCALE..=MAX_SCALE).contains(&scale) { Some(scale) } else { None };
 
     let mut w = Writer::with_capacity(LAYOUT as usize);

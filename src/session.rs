@@ -87,7 +87,7 @@ pub const REATTACH_GRACE_PERIOD: std::time::Duration =
 /// whose High Performance session is still winding down would otherwise be
 /// asked for a second virtual display under the first. An engine ends within
 /// milliseconds once its input channel closes; the bound is for one that
-/// cannot — a remote that vanished mid-session leaves FreeRDP's disconnect
+/// cannot — a remote that vanished mid-session leaves the RDP client's disconnect
 /// waiting on a socket — and it caps what that costs the next connect.
 pub const ENGINE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1198,14 +1198,11 @@ impl SessionManager {
 
 /// Spawn the protocol engine for `target` on its own thread.
 ///
-/// The engine runs on a dedicated thread with a current-thread runtime. The
-/// reason has changed and the arrangement has not: it used to be that IronRDP's
-/// `read_pdu` future was not `Send`-general, so it could not live on the shared
-/// multi-thread runtime. The RDP engine is FreeRDP now, which owns *its own* OS
-/// thread and a blocking event loop — so what this isolates is a session's whole
-/// lifetime from the runtime serving HTTP, which matters more rather than less
-/// now that a C library is in there. The VNC engine doesn't need either
-/// property, but sharing the one spawn path keeps the seam uniform. The engine
+/// The engine runs on a dedicated thread with a current-thread runtime. What that
+/// isolates is a session's whole lifetime — decoding a desktop is real CPU work —
+/// from the runtime serving HTTP. The RDP engine keeps an OS thread of its own
+/// besides (see [`crate::rdp_client`]); the VNC engine needs neither property, but
+/// sharing the one spawn path keeps the seam uniform. The engine
 /// ends when the remote host disconnects (the session outlives any one browser —
 /// see [`SessionManager`]).
 ///
@@ -1325,8 +1322,6 @@ mod tests {
             domain: None,
             width: Some(1),
             height: Some(1),
-            security: None,
-            allow_plain_tls: None,
             resize: meta.resize,
             clipboard: meta.clipboard,
             audio: meta.audio,

@@ -28,6 +28,8 @@
 //! Every function in this module takes or returns a whole TPKT frame, so a caller
 //! reads a frame off the socket and hands it over without unwrapping anything.
 
+use std::fmt;
+
 use super::wire::{Malformed, Reader, Writer};
 use super::x224::{self, TooLong};
 use super::{der, per};
@@ -203,6 +205,53 @@ pub fn send_data_request(user: u16, channel: u16, payload: &[u8]) -> Result<Vec<
     x224::data(&w.finish())
 }
 
+/// Leave the conference, which is how a client that meant to disconnect says so: the
+/// server keeps the session logged on for whoever connects next, rather than tearing
+/// it down as it would for a socket that simply stopped answering.
+pub fn disconnect_provider_ultimatum(reason: Reason) -> Vec<u8> {
+    let reason = reason.0;
+    // The reason is a three-bit ENUMERATED straddling two bytes, which is PER packing
+    // bits rather than bytes for once — the same straddle [`domain_pdu`] reads.
+    let mut w = Writer::with_capacity(2);
+    w.u8((DISCONNECT_PROVIDER_ULTIMATUM << 2) | ((reason >> 1) & 0x03));
+    w.u8(reason << 7);
+    frame("a Disconnect Provider Ultimatum", &w.finish())
+}
+
+/// Why a conference ended, in the MCS `Reason` both ends write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reason(u8);
+
+impl Reason {
+    /// The one this client sends: the person is done, and the session stays on the
+    /// host for their next connection.
+    pub const USER_REQUESTED: Self = Self(3);
+
+    /// Whether an ultimatum that arrived means an orderly end rather than a fault. A
+    /// server hanging up on purpose, and a client that asked to leave, are the two
+    /// that do.
+    pub fn is_orderly(self) -> bool {
+        matches!(self, Self(1) | Self(3))
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self.0 {
+            0 => "the domain was disconnected",
+            1 => "the host disconnected the session",
+            2 => "a token was purged",
+            3 => "the session was disconnected at the user's request",
+            4 => "a channel was purged",
+            _ => "for a reason this client has no name for",
+        }
+    }
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.describe(), self.0)
+    }
+}
+
 /// One channel's worth of what the server said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SendData<'a> {
@@ -210,15 +259,31 @@ pub struct SendData<'a> {
     pub payload: &'a [u8],
 }
 
-/// A Send Data Indication: everything the server says after the connection sequence.
-pub fn send_data_indication(frame: &[u8]) -> Result<SendData<'_>, Malformed> {
+/// What arrived on the connection once the conference is up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Indication<'a> {
+    /// A PDU addressed to a channel.
+    Data(SendData<'a>),
+    /// The server left the conference. Every session ends with one of these, from
+    /// one end or the other.
+    Disconnect(Reason),
+}
+
+/// A Send Data Indication: everything the server says after the connection sequence,
+/// and the one other PDU it may send instead — which is not an error here, unlike in
+/// the middle of the connection sequence, because it is how a session ends.
+pub fn send_data_indication(frame: &[u8]) -> Result<Indication<'_>, Malformed> {
     const WHAT: &str = "an MCS Send Data Indication";
+    let payload = x224::data_payload(frame)?;
+    if let Some(reason) = ultimatum(WHAT, payload)? {
+        return Ok(Indication::Disconnect(reason));
+    }
     let mut r = domain_pdu(WHAT, frame, SEND_DATA_INDICATION)?;
     per::read_integer16(&mut r, BASE_USER)?; // initiator, which is the server
     let channel = per::read_integer16(&mut r, 0)?;
     r.u8()?; // dataPriority and segmentation, which RDP never splits
     let length = usize::from(per::read_length(&mut r)?);
-    Ok(SendData { channel, payload: r.bytes(length)? })
+    Ok(Indication::Data(SendData { channel, payload: r.bytes(length)? }))
 }
 
 /// A whole TPKT frame around a PDU whose size is known at compile time to fit one.
@@ -233,19 +298,31 @@ fn domain_pdu<'a>(
     frame: &'a [u8],
     expected: u8,
 ) -> Result<Reader<'a>, Malformed> {
-    let mut r = Reader::new(what, x224::data_payload(frame)?);
+    let payload = x224::data_payload(frame)?;
+    let mut r = Reader::new(what, payload);
     let choice = r.u8()?;
     let found = choice >> 2;
     if found == expected {
         return Ok(r);
     }
-    if found == DISCONNECT_PROVIDER_ULTIMATUM {
-        // The reason is a two-bit ENUMERATED straddling the CHOICE byte and the next,
-        // which is PER packing bits rather than bytes for once.
-        let reason = ((choice & 0x01) << 1) | (r.u8()? >> 7);
-        return Err(r.refuse("a Disconnect Provider Ultimatum instead, whose reason is", reason));
+    if let Some(reason) = ultimatum(what, payload)? {
+        let field = "a Disconnect Provider Ultimatum instead, whose reason is";
+        return Err(Malformed::Refused { what, field, value: u64::from(reason.0) });
     }
     Err(r.refuse("an MCS PDU type", found))
+}
+
+/// The reason, if the PDU that starts here is a Disconnect Provider Ultimatum.
+///
+/// The reason is a three-bit ENUMERATED straddling the CHOICE byte and the next,
+/// which is PER packing bits rather than bytes for once.
+fn ultimatum(what: &'static str, payload: &[u8]) -> Result<Option<Reason>, Malformed> {
+    let mut r = Reader::new(what, payload);
+    let choice = r.u8()?;
+    if choice >> 2 != DISCONNECT_PROVIDER_ULTIMATUM {
+        return Ok(None);
+    }
+    Ok(Some(Reason(((choice & 0x03) << 1) | (r.u8()? >> 7))))
 }
 
 /// The `result` field both confirms start with.
@@ -388,7 +465,38 @@ mod tests {
         indication[0] = SEND_DATA_INDICATION << 2;
         let indication = server(&indication);
         let decoded = send_data_indication(&indication).unwrap();
-        assert_eq!(decoded, SendData { channel: 1003, payload: b"hello" });
+        assert_eq!(decoded, Indication::Data(SendData { channel: 1003, payload: b"hello" }));
+    }
+
+    /// The same two bytes each way, and the straddle is the whole of it: the reason
+    /// is split across them, so a reason above one is where a wrong mask shows up.
+    #[test]
+    fn leaving_the_conference_is_written_and_read_the_same_way() {
+        let bytes = disconnect_provider_ultimatum(Reason::USER_REQUESTED);
+        assert_eq!(payload(&bytes), &[0x21, 0x80]);
+        assert_eq!(ultimatum("a test", &[0x21, 0x80]).unwrap(), Some(Reason::USER_REQUESTED));
+        for reason in 0..=4_u8 {
+            let written = [
+                (DISCONNECT_PROVIDER_ULTIMATUM << 2) | ((reason >> 1) & 0x03),
+                reason << 7,
+            ];
+            let read = ultimatum("a test", &written).unwrap();
+            assert_eq!(read, Some(Reason(reason)), "reason {reason}");
+        }
+    }
+
+    /// Mid-session an ultimatum is the session ending, not a PDU in the wrong place —
+    /// which is the opposite of what it means during the connection sequence.
+    #[test]
+    fn a_server_that_hangs_up_on_a_live_session_is_read_as_the_end_of_it() {
+        let frame = server(&[0x21, 0x80]);
+        let decoded = send_data_indication(&frame).unwrap();
+        assert_eq!(decoded, Indication::Disconnect(Reason(3)));
+        let Indication::Disconnect(reason) = decoded else { panic!("a disconnect") };
+        assert!(reason.is_orderly());
+        assert_eq!(reason.to_string(), "the session was disconnected at the user's request (3)");
+        assert!(!Reason(0).is_orderly(), "a domain that went away is not an orderly end");
+        assert!(Reason(1).is_orderly(), "and a host that hung up on purpose is");
     }
 
     #[test]

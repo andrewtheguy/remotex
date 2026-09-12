@@ -1203,8 +1203,6 @@ mod tests {
             domain: None,
             width: Some(1),
             height: Some(1),
-            security: None,
-            allow_plain_tls: None,
             resize: false,
             clipboard: false,
             audio,
