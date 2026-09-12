@@ -191,8 +191,8 @@ password = "change-me"
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
 # all. On a target that transfers a clipboard, the Clipboard panel works
 # regardless, and is the way to move text when automatic sync cannot run.
-# RDP carries no clipboard: the key is accepted and the session connects, but the
-# panel gets no remote text and nothing copied in the browser reaches the remote.
+# RDP carries no clipboard: its client does not have MS-RDPECLIP yet, so the key
+# is refused on an rdp target rather than opening a panel with nothing behind it.
 # VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
@@ -222,10 +222,10 @@ password = "change-me"
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound works wherever the target carries it — a plain "vnc"
 # server that speaks the QEMU extension, or "ard-high-performance" in an
-# apple-hp-audio build. An RDP session stays silent, as above.
+# apple-hp-audio build. An rdp target is refused the key: its client carries no
+# sound yet, and a silent audio socket is worse than none.
 #
-# Off leaves the remote's sound where it is. An RDP session has no audio device
-# either way.
+# Off leaves the remote's sound where it is.
 #audio = false
 
 # How that audio is carried. Valid only with `audio = true` above; setting it

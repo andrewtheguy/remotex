@@ -1660,6 +1660,23 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
+            // Sound and the clipboard are what this gateway's own RDP client does
+            // not carry. Both keys turn something on in the browser — an audio
+            // socket, the Clipboard panel — so accepting one on a target that can
+            // never answer it builds a control that does nothing. Refused where it
+            // would be inert, the same rule as every other key above.
+            anyhow::ensure!(
+                !target.audio || target.protocol != Protocol::Rdp,
+                "target {:?} asks for audio, which this gateway's RDP client does not carry \
+                 yet. Remove the key.",
+                target.name
+            );
+            anyhow::ensure!(
+                !target.clipboard || target.protocol != Protocol::Rdp,
+                "target {:?} asks for clipboard, which this gateway's RDP client does not \
+                 carry yet. Remove the key.",
+                target.name
+            );
             // And the security mode: TLS and NLA are RDP's negotiation, where
             // RFB settles its own in the handshake, so on a VNC target the key
             // names a choice nothing would read.
@@ -4547,7 +4564,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_is_accepted_for_both_protocols() {
+    fn clipboard_is_vncs_alone_until_the_rdp_client_carries_it() {
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -4566,8 +4583,10 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].clipboard);
 
-        // Clipboard is accepted for both engines, including RDP via MS-RDPECLIP.
-        let config = ConfigFile::parse(&format!(
+        // MS-RDPECLIP is not in this gateway's RDP client yet, so the key is
+        // refused there rather than opening a Clipboard panel with nothing behind
+        // it.
+        let err = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
@@ -4580,10 +4599,10 @@ mod tests {
             "#,
             site_passwd_line()
         ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].clipboard);
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("clipboard"), "{rendered}");
+        assert!(rendered.contains("does not carry"), "{rendered}");
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key
@@ -4697,7 +4716,7 @@ mod tests {
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]
-    fn audio_belongs_to_rdp_and_to_generic_vnc() {
+    fn audio_belongs_to_generic_vnc_and_is_refused_on_rdp() {
         // A plain `vnc` target asks a generic server for the QEMU Audio
         // extension, and gets silence from one that does not speak it. That is
         // discovery, not a config error.
@@ -4723,7 +4742,10 @@ mod tests {
             crate::vnc_qemu_audio::SOURCE_FORMAT
         );
 
-        let config = ConfigFile::parse(&format!(
+        // RDP's own audio channel is not in this gateway's client yet, and a key
+        // that would open a silent socket in the browser is a config error rather
+        // than a preference.
+        let err = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
@@ -4736,10 +4758,10 @@ mod tests {
             "#,
             site_passwd_line()
         ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].audio);
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("audio"), "{rendered}");
+        assert!(rendered.contains("does not carry"), "{rendered}");
     }
 
     /// Standard mode has no audio to offer — Apple's media stream is High
@@ -4814,8 +4836,10 @@ mod tests {
     /// asked for, 48 kHz stereo is what the Mac's AAC-ELD decodes to.
     #[test]
     fn the_audio_source_format_is_the_engines() {
+        // Without the key, which RDP is refused until its client carries sound —
+        // the format is the protocol's, and is what that client will be asked for.
         let rdp = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\naudio = true\n",
+            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\n",
             site_passwd_line()
         ))
         .unwrap()
@@ -4856,8 +4880,8 @@ mod tests {
             {}
 
             [[targets]]
-            name = "win"
-            protocol = "rdp"
+            name = "box"
+            protocol = "vnc"
             host = "10.0.0.5"
             audio = true
             audio_codec = "pcm"
@@ -4918,6 +4942,25 @@ mod tests {
     // ---- the adaptive dials --------------------------------------------------
 
     /// One valid target body per test below, parameterized by the keys under test.
+    /// The same, on the protocol that carries sound — every audio key is refused
+    /// on RDP, whose client does not have it yet.
+    fn parse_audio_target(body: &str) -> anyhow::Result<AppConfig> {
+        ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "t"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            {body}
+            "#,
+            site_passwd_line()
+        ))?
+        .resolve()
+    }
+
     fn parse_target(body: &str) -> anyhow::Result<AppConfig> {
         ConfigFile::parse(&format!(
             r#"
@@ -5043,17 +5086,17 @@ mod tests {
     /// walk was asked for.
     #[test]
     fn the_audio_plan_resolves_defaults_and_the_adaptive_floor() {
-        let cfg = parse_target("audio = true").expect("bare audio");
+        let cfg = parse_audio_target("audio = true").expect("bare audio");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
         assert_eq!(cfg.targets[0].audio_plan().bitrate_bps, 96_000);
 
-        let cfg = parse_target("audio = true\naudio_bitrate = 128").expect("a rate");
+        let cfg = parse_audio_target("audio = true\naudio_bitrate = 128").expect("a rate");
         assert_eq!(
             cfg.targets[0].audio_plan(),
             AudioPlan { codec: AudioCodec::Opus, bitrate_bps: 128_000, adaptive_floor_bps: None }
         );
 
-        let cfg = parse_target("audio = true\naudio_adaptive = true").expect("adaptive");
+        let cfg = parse_audio_target("audio = true\naudio_adaptive = true").expect("adaptive");
         assert_eq!(
             cfg.targets[0].audio_plan(),
             AudioPlan {
@@ -5063,7 +5106,7 @@ mod tests {
             }
         );
 
-        let cfg = parse_target(
+        let cfg = parse_audio_target(
             "audio = true\naudio_bitrate = 64\naudio_adaptive = true\naudio_bitrate_min = 24",
         )
         .expect("adaptive with both rates");
@@ -5080,36 +5123,36 @@ mod tests {
     /// Passthrough has no encoder: every key that tunes one is refused beside it.
     #[test]
     fn the_bitrate_keys_are_opus_only() {
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_codec = \"pcm\"\naudio_bitrate = 96",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("audio_bitrate"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_codec = \"pcm\"\naudio_adaptive = true",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("audio_adaptive"));
 
         // And without audio at all, same rule one step up.
-        let err = parse_target("audio_bitrate = 96").unwrap_err();
+        let err = parse_audio_target("audio_bitrate = 96").unwrap_err();
         assert!(format!("{err:#}").contains("audio_bitrate"));
     }
 
     /// The floor needs the walk, has a range, and must sit under the ceiling.
     #[test]
     fn the_audio_floor_is_validated_against_the_walk_and_the_ceiling() {
-        let err = parse_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
+        let err = parse_audio_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
         assert!(format!("{err:#}").contains("audio_adaptive"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_adaptive = true\naudio_bitrate_min = 4",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("6–510"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_bitrate = 48\naudio_adaptive = true\naudio_bitrate_min = 48",
         )
         .unwrap_err();
@@ -5118,10 +5161,10 @@ mod tests {
         // The *default* floor above a low ceiling is no contradiction — the
         // operator never wrote it. It parses, and the walk clamps it to the
         // ceiling (`AudioCongestion::new`) instead.
-        parse_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
+        parse_audio_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
             .expect("a default floor clamps instead of refusing");
 
-        let err = parse_target("audio = true\naudio_bitrate = 999").unwrap_err();
+        let err = parse_audio_target("audio = true\naudio_bitrate = 999").unwrap_err();
         assert!(format!("{err:#}").contains("6–510"));
     }
 }
