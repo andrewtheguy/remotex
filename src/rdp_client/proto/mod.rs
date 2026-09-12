@@ -10,8 +10,20 @@
 //!
 //! - [`wire`] — the primitives every PDU is spelled in: a bounds-checked reader and a
 //!   writer, both with the byte order in the method name.
+//! - [`der`] — the tag-length-value reader the ASN.1 layers need: the server's
+//!   certificate now, T.125 MCS next.
 //! - [`x224`] — TPKT framing, the X.224 connection sequence, and the security
 //!   negotiation that decides whether TLS and CredSSP follow.
+//! - [`tls`] — the TLS session the rest of the connection lives inside.
+//! - [`credssp`] — Network Level Authentication, before the server builds a session.
+//!
+//! # One kind of server
+//!
+//! The target is a current Windows host, and only that. This client asks for
+//! `HYBRID` — TLS with the credentials checked first — and nothing else: no legacy
+//! RDP encryption, no plain TLS, no Kerberos, no RDSTLS. Every protocol a server
+//! might also speak is one more sequence to get right and to keep right, and none of
+//! them is needed to reach a Windows desktop.
 //!
 //! # Where the shapes come from
 //!
@@ -24,5 +36,8 @@
 //!
 //! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
+pub mod credssp;
+pub mod der;
+pub mod tls;
 pub mod wire;
 pub mod x224;

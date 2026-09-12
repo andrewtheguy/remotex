@@ -205,6 +205,17 @@ ironrdp = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881ea
 ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35" }
 ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35", features = ["rustls-ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# CredSSP and NTLM for the gateway's own RDP stack (src/rdp_client/proto/credssp.rs).
+# Network Level Authentication is not optional on a current Windows host, and NTLM is
+# the one mechanism a user name and a password can drive — so this is the part of the
+# connection sequence that is not worth writing twice. It arrived in the tree as
+# IronRDP's own CredSSP dependency; naming it here is what lets IronRDP leave without
+# taking authentication with it.
+#
+# No features. The ones on offer — `aws-lc-rs`/`ring`, `network_client`, `scard` —
+# reach sspi's *own* TLS and its Kerberos network client, neither of which a CredSSP
+# exchange over an already-open TLS session touches. The TLS here is rustls, below.
+sspi = { version = "0.21", default-features = false }
 # RealVNC's RSA-AES security types for VNC (src/vnc_rsa_aes.rs), which is how a
 # plain `vnc` target names a user to a server that is not a Mac — wayvnc with
 # `enable_auth` offers nothing else this client speaks. A fresh RSA key pair per
