@@ -52,9 +52,12 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::{Connect, Event, Input, Session};
+use remotex::rdp_client::proto::rdpsnd;
+use remotex::rdp_client::{AudioSink, Connect, Event, Input, Session};
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use tokio::sync::mpsc::Receiver;
 
@@ -95,13 +98,43 @@ fn egfx() -> bool {
     !matches!(std::env::var(EGFX_ENV).as_deref(), Ok("0") | Ok("false"))
 }
 
-fn connect() -> (Session, Receiver<Event>) {
+/// Where the session's sound goes: counted, never played. What the host redirects
+/// depends on what happens to be playing over there, so the numbers are printed
+/// rather than asserted; the negotiation is the part a host always does.
+#[derive(Default, Debug)]
+struct Ear {
+    negotiated: AtomicBool,
+    buffers: AtomicU64,
+    bytes: AtomicU64,
+    closes: AtomicU64,
+}
+
+struct Listen(Arc<Ear>);
+
+impl AudioSink for Listen {
+    fn negotiated(&self, format: rdpsnd::Format) {
+        assert_eq!(format, rdpsnd::CD_QUALITY);
+        self.0.negotiated.store(true, Ordering::Relaxed);
+    }
+
+    fn wave(&self, samples: Vec<u8>) {
+        self.0.buffers.fetch_add(1, Ordering::Relaxed);
+        self.0.bytes.fetch_add(samples.len() as u64, Ordering::Relaxed);
+    }
+
+    fn closed(&self) {
+        self.0.closes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn connect() -> (Session, Receiver<Event>, Arc<Ear>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
     let target = common::uat_target(&name);
     println!("rdp_client_probe: {name} ({}:{}), egfx {}", target.host, target.port, egfx());
-    Session::start(Connect {
+    let ear = Arc::new(Ear::default());
+    let (session, events) = Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
         username: target.username.clone(),
@@ -112,7 +145,9 @@ fn connect() -> (Session, Receiver<Event>) {
         resize: true,
         egfx: egfx(),
         clipboard: true,
-    })
+        audio: Some(Box::new(Listen(Arc::clone(&ear)))),
+    });
+    (session, events, ear)
 }
 
 /// What a stretch of the session did.
@@ -255,7 +290,7 @@ async fn resize_to(
 
 async fn case() {
     common::init_logging();
-    let (session, mut events) = connect();
+    let (session, mut events, ear) = connect();
 
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
@@ -350,6 +385,12 @@ async fn case() {
     for format in &tally.pastes[before..] {
         assert_eq!(*format, CF_UNICODETEXT, "the host asked for a format never offered");
     }
+    println!("  sound: {ear:?}");
+    assert!(
+        ear.negotiated.load(Ordering::Relaxed),
+        "the host never negotiated sound redirection; a Windows host sends its format list only \
+         once something plays, so start a sound on the remote before running this probe"
+    );
 
     drop(session);
     // The drop disconnected and joined the thread, so its last word is here.
@@ -397,7 +438,7 @@ fn chord(input: &Input, modifiers: &[(u8, bool)], key: u8, extended: bool) {
 ///   reads, and the bytes that come back are the bytes that went out.
 async fn round_trip() {
     common::init_logging();
-    let (session, mut events) = connect();
+    let (session, mut events, _ear) = connect();
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
         .expect("no first event within 60s")

@@ -10,27 +10,27 @@ is the only place they can be read in context.
 
 ### What the RDP client does not carry yet
 
-The client carries the desktop, the pointer, keyboard, mouse, resize and the
-clipboard. Sound and touch were both carried by the engines before it, and neither
-was carried *here*: sound came from a library's channel client — IronRDP's
-`rdpsnd`, then FreeRDP's — and touch from FreeRDP's `rdpei` plugin. `proto` is the
-gateway's own now, so each is a channel to write rather than a dependency to
-configure, and each is refused where it would otherwise build a control with
-nothing behind it: `audio = true` at config parse, touch by having no key at all —
-whether touch exists is the host's answer, and this client never asks.
+The client carries the desktop, the pointer, keyboard, mouse, resize, the
+clipboard and sound. Touch was carried by the engine before it, from FreeRDP's
+`rdpei` plugin, and is not carried *here*: `proto` is the gateway's own now, so it
+is a channel to write rather than a dependency to configure, and it is refused
+where it would otherwise build a control with nothing behind it, by having no key
+at all — whether touch exists is the host's answer, and this client never asks.
 
-Everything on either side of both channels is already written and shipped. The
-browser's touch passthrough layer (`touchPassthrough.ts`), the `/ws/audio` socket,
-the audio queue and both its encoders are protocol-agnostic; so are
-`ServerMsg::TouchReady` and `ClientMsg::Touch`. Nothing below the wire needs
-designing for either of them.
+Everything on either side of the channel is already written and shipped: the
+browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
+and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
+designing for it.
 
-The clipboard was the third of these and is done: MS-RDPECLIP is
-`rdp_client/proto/cliprdr.rs`, the channel plumbing the two static channels needed
-is in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on
+The clipboard and sound were the other two of these and are done. MS-RDPECLIP is
+`rdp_client/proto/cliprdr.rs`, the channel plumbing the static channels needed is
+in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on
 Ready, ask the moment the remote's format list arrives, answer every paste request
 including with nothing, retry a `CB_RESPONSE_FAIL` on a bounded ladder — is
-`ClipboardState` in `src/rdp.rs`. What it took is recorded in
+`ClipboardState` in `src/rdp.rs`. MS-RDPEA is `rdp_client/proto/rdpsnd.rs`, with
+the device-redirection handshake a Windows host requires beside it in
+`proto/rdpdr.rs`, and its buffers reach the same `AudioBridge` every other engine
+feeds. What each took is recorded in
 [The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
 
 EGFX is in, measured as [the plan](rdp-egfx-plan.md) records; what is left of it

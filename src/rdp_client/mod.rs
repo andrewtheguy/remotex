@@ -77,4 +77,4 @@ pub use error::Error;
 pub use framebuffer::{Frame, Framebuffer, Rect};
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
-pub use session::{Connect, Event, Session};
+pub use session::{AudioSink, Connect, Event, Session};

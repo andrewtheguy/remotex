@@ -40,7 +40,9 @@ use super::x224::TooLong;
 /// - `0x0100` the Windows key is the remote session's, not the local machine's.
 /// - `0x0001_0000` report a failed logon rather than just disconnecting.
 /// - `0x0002_0000` the mouse has a wheel.
-/// - `0x0008_0000` do not redirect audio: there is nothing here to play it.
+/// - `0x0008_0000` do not redirect audio — said only for a target that asked for no
+///   sound. With it set the session has no audio device to redirect at all, so a
+///   target that did ask leaves it out.
 /// - `0x0040_0000` do not redirect video either.
 ///
 /// Bulk compression is deliberately absent. It is a second decompressor on every PDU
@@ -55,8 +57,10 @@ const FLAGS: u32 = 0x0000_0001
     | 0x0000_0100
     | 0x0001_0000
     | 0x0002_0000
-    | 0x0008_0000
     | 0x0040_0000;
+
+/// `INFO_NOAUDIOPLAYBACK`.
+const NO_AUDIO: u32 = 0x0008_0000;
 
 /// `PERF_DISABLE_*`: wallpaper, full-window drag, menu animations and theming, in
 /// that order. See the module docs.
@@ -85,6 +89,9 @@ pub struct ClientInfo<'a> {
     /// This end of the socket. The server shows it in its own session list and does
     /// nothing else with it: it is not an identity and not a route back.
     pub address: IpAddr,
+    /// Whether the target asked for the remote's sound. Without it the logon says
+    /// there is nothing here to play audio, and the host redirects none.
+    pub audio: bool,
 }
 
 impl ClientInfo<'_> {
@@ -112,7 +119,7 @@ impl ClientInfo<'_> {
         // The code page is read only when the GCC client core data asked for a
         // keyboard layout of zero, and it did not.
         w.u32_le(0);
-        w.u32_le(FLAGS);
+        w.u32_le(if self.audio { FLAGS } else { FLAGS | NO_AUDIO });
         // Five lengths, then the five strings. A length counts the characters and
         // not the terminator that follows them; the two after the strings count the
         // terminator, because the fields they measure are allowed to be absent and a
@@ -171,7 +178,20 @@ mod tests {
             password: "secret",
             domain: None,
             address: IpAddr::from([10, 0, 0, 2]),
+            audio: false,
         }
+    }
+
+    /// A target that asked for sound leaves `INFO_NOAUDIOPLAYBACK` out; one that did
+    /// not says it, so the host redirects nothing.
+    #[test]
+    fn the_no_audio_flag_follows_whether_sound_was_asked_for() {
+        let flags = |audio: bool| {
+            let bytes = ClientInfo { audio, ..logon() }.encode().unwrap();
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap())
+        };
+        assert_eq!(flags(false) & NO_AUDIO, NO_AUDIO);
+        assert_eq!(flags(true) & NO_AUDIO, 0);
     }
 
     #[test]

@@ -199,8 +199,10 @@ password = "change-me"
 #clipboard = false
 
 # Remote audio: carry this target's sound when the client asks for it, with the
-# floating menu's Audio button. RDP carries no sound: the key is accepted, and
-# the session connects silent. An
+# floating menu's Audio button. An "rdp" target negotiates sound redirection
+# (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM; without the key the
+# host's own audio settings are left untouched and the session has no audio device.
+# A Windows host sends nothing on the channel until something plays. An
 # "ard-high-performance" target carries the Mac's system audio over Apple's media
 # stream — EXPERIMENTAL, and only in a gateway built by hand with
 # `cargo build --release --features apple-hp-audio`, because that stream is AAC-ELD
@@ -218,10 +220,9 @@ password = "change-me"
 #
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
-# target is picked, sound works wherever the target carries it — a plain "vnc"
-# server that speaks the QEMU extension, or "ard-high-performance" in an
-# apple-hp-audio build. An rdp target is refused the key: its client carries no
-# sound yet, and a silent audio socket is worse than none.
+# target is picked, sound works wherever the target carries it — an "rdp" target,
+# a plain "vnc" server that speaks the QEMU extension, or "ard-high-performance" in
+# an apple-hp-audio build.
 #
 # Off leaves the remote's sound where it is.
 #audio = false

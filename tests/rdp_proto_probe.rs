@@ -204,6 +204,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             password: &target.password,
             domain: target.domain.as_deref(),
             address: client_address,
+            audio: false,
         }
         .encode()
         .expect("the Client Info PDU fits a frame");
