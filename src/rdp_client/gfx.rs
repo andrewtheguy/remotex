@@ -31,9 +31,9 @@ use log::{debug, info, warn};
 
 use super::framebuffer::{Framebuffer, Rect, affordable};
 use super::proto::bitmap::MAX_DESKTOP_BYTES;
-use super::proto::gfx::{self, Message, Rect16};
+use super::proto::gfx::{self, Message, Point16, Rect16};
 use super::proto::wire::Malformed;
-use super::proto::{planar, zgfx};
+use super::proto::{clear, planar, zgfx};
 
 /// Most rectangles a surface holds as changed before it collapses them to one
 /// bounding box — coarser, never longer.
@@ -98,6 +98,50 @@ impl Surface {
         });
     }
 
+    /// Whether an arbitrary rectangle lies inside this surface.
+    fn contains(&self, x: u32, y: u32, width: u32, height: u32) -> bool {
+        x.checked_add(width).is_some_and(|right| right <= self.width)
+            && y.checked_add(height).is_some_and(|bottom| bottom <= self.height)
+    }
+
+    /// Fill a rectangle with one colour, `[r, g, b]` in the surface's own order.
+    fn fill(&mut self, rect: Rect, rgb: [u8; 3]) {
+        let stride = self.stride();
+        let px = [rgb[0], rgb[1], rgb[2], 0];
+        for row in 0..rect.height as usize {
+            let at = (rect.y as usize + row) * stride + rect.x as usize * 4;
+            for out in self.pixels[at..at + rect.width as usize * 4].as_chunks_mut::<4>().0 {
+                *out = px;
+            }
+        }
+        self.invalidate(rect);
+    }
+
+    /// Copy a rectangle of this surface out, its rows packed tight, top row first.
+    fn copy_out(&self, rect: Rect, out: &mut Vec<u8>) {
+        let stride = self.stride();
+        let bytes = rect.width as usize * 4;
+        out.clear();
+        out.reserve(bytes * rect.height as usize);
+        for row in 0..rect.height as usize {
+            let at = (rect.y as usize + row) * stride + rect.x as usize * 4;
+            out.extend_from_slice(&self.pixels[at..at + bytes]);
+        }
+    }
+
+    /// Write packed rows — as [`Surface::copy_out`] produced them — into a
+    /// rectangle, and record it as changed. The caller has checked the rectangle
+    /// fits.
+    fn copy_in(&mut self, x: u32, y: u32, width: u32, height: u32, packed: &[u8]) {
+        let stride = self.stride();
+        let bytes = width as usize * 4;
+        for (row, src) in packed.chunks_exact(bytes).take(height as usize).enumerate() {
+            let at = (y as usize + row) * stride + x as usize * 4;
+            self.pixels[at..at + bytes].copy_from_slice(src);
+        }
+        self.invalidate(Rect { x, y, width, height });
+    }
+
     /// Record a rectangle drawn into, folding it into one it overlaps and
     /// collapsing everything to a bounding box past [`DAMAGE_CAP`].
     fn invalidate(&mut self, rect: Rect) {
@@ -109,6 +153,25 @@ impl Surface {
         } else {
             self.invalid.push(rect);
         }
+    }
+}
+
+/// A rectangle lifted off a surface and kept under a slot, to be stamped back down
+/// on the output later — the scroll-and-repeat the desktop leans on most. Its pixels
+/// are a surface's own packed `RGBX32`.
+struct Cache {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+/// A `Rect16`, with its exclusive edges, as the framebuffer's [`Rect`].
+fn to_rect(rect: Rect16) -> Rect {
+    Rect {
+        x: u32::from(rect.left),
+        y: u32::from(rect.top),
+        width: u32::from(rect.width()),
+        height: u32::from(rect.height()),
     }
 }
 
@@ -168,6 +231,10 @@ pub(super) struct Graphics {
     /// One PDU decompressed, reused across PDUs.
     buffer: Vec<u8>,
     surfaces: BTreeMap<u16, Surface>,
+    /// Rectangles lifted off surfaces, by slot, for the copies below.
+    caches: BTreeMap<u16, Cache>,
+    /// A rectangle copied out of one surface on its way into another; reused.
+    scratch: Vec<u8>,
     /// The output's size, from the last ResetGraphics. Nothing is mapped before one.
     output: Option<(u32, u32)>,
     /// The frame the server has started and not ended.
@@ -178,6 +245,9 @@ pub(super) struct Graphics {
     /// The planar codec's working space.
     planes: Vec<u8>,
     pixels: Vec<u8>,
+    /// ClearCodec's state and caches, made on the first ClearCodec rectangle since a
+    /// channel may never draw one.
+    clear: Option<Box<clear::Clear>>,
 }
 
 impl Graphics {
@@ -186,12 +256,15 @@ impl Graphics {
             zgfx: zgfx::Zgfx::new(),
             buffer: Vec::new(),
             surfaces: BTreeMap::new(),
+            caches: BTreeMap::new(),
+            scratch: Vec::new(),
             output: None,
             frame: None,
             decoded: 0,
             tally: Tally::default(),
             planes: Vec::new(),
             pixels: Vec::new(),
+            clear: None,
         }
     }
 
@@ -306,11 +379,26 @@ impl Graphics {
                 self.tally.codec(codec);
                 self.tally.unhandled("codec", codec, gfx::codec_name(codec));
             }
-            Message::SolidFill { .. } => self.unhandled(gfx::CMD_SOLID_FILL),
-            Message::SurfaceToSurface { .. } => self.unhandled(gfx::CMD_SURFACE_TO_SURFACE),
-            Message::SurfaceToCache { .. } => self.unhandled(gfx::CMD_SURFACE_TO_CACHE),
-            Message::CacheToSurface { .. } => self.unhandled(gfx::CMD_CACHE_TO_SURFACE),
-            Message::EvictCacheEntry { .. } => self.unhandled(gfx::CMD_EVICT_CACHE_ENTRY),
+            Message::SolidFill { surface, color, rects } => {
+                self.tally.command(gfx::CMD_SOLID_FILL);
+                self.solid_fill(surface, color, &rects);
+            }
+            Message::SurfaceToSurface { src, dst, rect, points } => {
+                self.tally.command(gfx::CMD_SURFACE_TO_SURFACE);
+                self.surface_to_surface(src, dst, rect, &points);
+            }
+            Message::SurfaceToCache { surface, slot, rect, .. } => {
+                self.tally.command(gfx::CMD_SURFACE_TO_CACHE);
+                self.surface_to_cache(surface, slot, rect);
+            }
+            Message::CacheToSurface { slot, surface, points } => {
+                self.tally.command(gfx::CMD_CACHE_TO_SURFACE);
+                self.cache_to_surface(slot, surface, &points);
+            }
+            Message::EvictCacheEntry { slot } => {
+                self.tally.command(gfx::CMD_EVICT_CACHE_ENTRY);
+                self.caches.remove(&slot);
+            }
             Message::DeleteEncodingContext { .. } => self.unhandled(gfx::CMD_DELETE_ENCODING_CONTEXT),
             Message::Other { command, length } => {
                 self.tally.command(command);
@@ -361,6 +449,10 @@ impl Graphics {
                 planar::decompress(data, &mut self.planes, &mut self.pixels, width, height)
                     .map(|()| &self.pixels[..])
             }
+            gfx::CODEC_CLEARCODEC => {
+                let clear = self.clear.get_or_insert_with(|| Box::new(clear::Clear::new()));
+                clear.decompress(data, &mut self.pixels, width, height).map(|()| &self.pixels[..])
+            }
             other => {
                 self.tally.unhandled("codec", other, gfx::codec_name(other));
                 return;
@@ -370,6 +462,91 @@ impl Graphics {
             Ok(bgrx) => found.write(rect, bgrx),
             // One rectangle the server will draw again; not the session.
             Err(e) => warn!("rdp: leaving a {width}x{height} {} rectangle unpainted: {e}", gfx::codec_name(codec)),
+        }
+    }
+
+    /// Fill rectangles of a surface with one colour. Each is clipped to the
+    /// surface, as [MS-RDPEGFX] 3.3.5.4 has it; the fill colour's alpha is ignored.
+    fn solid_fill(&mut self, surface: u16, color: [u8; 4], rects: &[Rect16]) {
+        let Some(found) = self.surfaces.get_mut(&surface) else {
+            warn!("rdp: the host filled graphics surface {surface}, which does not exist");
+            return;
+        };
+        let rgb = [color[2], color[1], color[0]];
+        let bounds = found.bounds();
+        for rect in rects {
+            if let Some(rect) = to_rect(*rect).clipped(bounds) {
+                found.fill(rect, rgb);
+            }
+        }
+    }
+
+    /// Copy one rectangle of a surface to each of a list of points, on the same
+    /// surface or another. The source rectangle is lifted out whole first, so a
+    /// copy that overlaps itself — a scroll — is still correct.
+    fn surface_to_surface(&mut self, src: u16, dst: u16, rect: Rect16, points: &[Point16]) {
+        let Some(source) = self.surfaces.get(&src) else {
+            warn!("rdp: the host copied from graphics surface {src}, which does not exist");
+            return;
+        };
+        if !source.holds(rect) {
+            warn!("rdp: dropping a copy of a rectangle that does not fit graphics surface {src}");
+            return;
+        }
+        let (width, height) = (u32::from(rect.width()), u32::from(rect.height()));
+        let mut scratch = std::mem::take(&mut self.scratch);
+        source.copy_out(to_rect(rect), &mut scratch);
+        let Some(target) = self.surfaces.get_mut(&dst) else {
+            warn!("rdp: the host copied to graphics surface {dst}, which does not exist");
+            self.scratch = scratch;
+            return;
+        };
+        for point in points {
+            let (x, y) = (u32::from(point.x), u32::from(point.y));
+            if target.contains(x, y, width, height) {
+                target.copy_in(x, y, width, height, &scratch);
+            } else {
+                warn!("rdp: dropping a copy to {x},{y} that does not fit graphics surface {dst}");
+            }
+        }
+        self.scratch = scratch;
+    }
+
+    /// Lift one rectangle of a surface into a cache slot, replacing whatever the slot
+    /// held.
+    fn surface_to_cache(&mut self, surface: u16, slot: u16, rect: Rect16) {
+        let Some(source) = self.surfaces.get(&surface) else {
+            warn!("rdp: the host cached from graphics surface {surface}, which does not exist");
+            return;
+        };
+        if !source.holds(rect) {
+            warn!("rdp: dropping a cache of a rectangle that does not fit graphics surface {surface}");
+            return;
+        }
+        let (width, height) = (u32::from(rect.width()), u32::from(rect.height()));
+        let mut pixels = Vec::new();
+        source.copy_out(to_rect(rect), &mut pixels);
+        self.caches.insert(slot, Cache { width, height, pixels });
+    }
+
+    /// Stamp a cached rectangle down onto a surface at each of a list of points.
+    fn cache_to_surface(&mut self, slot: u16, surface: u16, points: &[Point16]) {
+        let Some(cache) = self.caches.get(&slot) else {
+            warn!("rdp: the host drew cache slot {slot}, which is empty");
+            return;
+        };
+        let Some(target) = self.surfaces.get_mut(&surface) else {
+            warn!("rdp: the host drew to graphics surface {surface}, which does not exist");
+            return;
+        };
+        let (width, height) = (cache.width, cache.height);
+        for point in points {
+            let (x, y) = (u32::from(point.x), u32::from(point.y));
+            if target.contains(x, y, width, height) {
+                target.copy_in(x, y, width, height, &cache.pixels);
+            } else {
+                warn!("rdp: dropping a cache draw to {x},{y} that does not fit graphics surface {surface}");
+            }
         }
     }
 
@@ -416,8 +593,9 @@ impl Drop for Graphics {
 mod tests {
     use super::*;
     use crate::rdp_client::proto::gfx::{
-        CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT, CMD_RESET_GRAPHICS,
-        CMD_START_FRAME, CMD_WIRE_TO_SURFACE_1, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
+        CMD_CACHE_TO_SURFACE, CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT,
+        CMD_RESET_GRAPHICS, CMD_SOLID_FILL, CMD_START_FRAME, CMD_SURFACE_TO_CACHE,
+        CMD_SURFACE_TO_SURFACE, CMD_WIRE_TO_SURFACE_1, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
         CODEC_UNCOMPRESSED, PIXEL_XRGB_8888, pdu,
     };
     use crate::rdp_client::proto::wire::Writer;
@@ -472,6 +650,61 @@ mod tests {
         w.u32_le(u32::try_from(data.len()).unwrap());
         w.bytes(data);
         pdu(CMD_WIRE_TO_SURFACE_1, &w.finish())
+    }
+
+    fn solidfill(surface: u16, bgra: [u8; 4], rects: &[(u16, u16, u16, u16)]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16_le(surface);
+        w.bytes(&bgra);
+        w.u16_le(u16::try_from(rects.len()).unwrap());
+        for r in rects {
+            w.u16_le(r.0);
+            w.u16_le(r.1);
+            w.u16_le(r.2);
+            w.u16_le(r.3);
+        }
+        pdu(CMD_SOLID_FILL, &w.finish())
+    }
+
+    fn s2s(src: u16, dst: u16, rect: (u16, u16, u16, u16), points: &[(u16, u16)]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16_le(src);
+        w.u16_le(dst);
+        w.u16_le(rect.0);
+        w.u16_le(rect.1);
+        w.u16_le(rect.2);
+        w.u16_le(rect.3);
+        w.u16_le(u16::try_from(points.len()).unwrap());
+        for p in points {
+            w.u16_le(p.0);
+            w.u16_le(p.1);
+        }
+        pdu(CMD_SURFACE_TO_SURFACE, &w.finish())
+    }
+
+    fn s2c(surface: u16, slot: u16, rect: (u16, u16, u16, u16)) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16_le(surface);
+        w.u32_le(0); // cacheKey low
+        w.u32_le(0); // cacheKey high
+        w.u16_le(slot);
+        w.u16_le(rect.0);
+        w.u16_le(rect.1);
+        w.u16_le(rect.2);
+        w.u16_le(rect.3);
+        pdu(CMD_SURFACE_TO_CACHE, &w.finish())
+    }
+
+    fn c2s(slot: u16, surface: u16, points: &[(u16, u16)]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16_le(slot);
+        w.u16_le(surface);
+        w.u16_le(u16::try_from(points.len()).unwrap());
+        for p in points {
+            w.u16_le(p.0);
+            w.u16_le(p.1);
+        }
+        pdu(CMD_CACHE_TO_SURFACE, &w.finish())
     }
 
     /// Several PDUs in one channel PDU, wrapped the way a server that compressed
@@ -608,6 +841,89 @@ mod tests {
             assert_eq!(&frame.pixels[60..], &[7, 6, 5, 0]);
             assert!(frame.pixels[..60].iter().all(|b| *b == 0), "the old picture is gone");
         });
+    }
+
+    /// A solid fill paints one colour, and a rectangle that pokes past the surface
+    /// is clipped to it rather than dropped.
+    #[test]
+    fn a_solid_fill_paints_one_colour_clipped_to_the_surface() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(4, 4), create(1, 4, 4), map(1, 0, 0)]);
+        // Fill R=10 G=20 B=30 (wire order B, G, R, A) over a rectangle past the edge.
+        let updates = receive(&mut graphics, &framebuffer, &[
+            start(1),
+            solidfill(1, [30, 20, 10, 0xFF], &[(2, 2, 6, 6)]),
+            end(1),
+        ]);
+        let painted = Rect { x: 2, y: 2, width: 2, height: 2 };
+        assert_eq!(updates, vec![Update::Paint(painted), Update::Frame { id: 1, decoded: 1 }]);
+        framebuffer.with(|frame| {
+            for row in frame.rows(painted) {
+                for px in row.chunks_exact(4) {
+                    assert_eq!(px, &[10, 20, 30, 0]);
+                }
+            }
+        });
+    }
+
+    /// A rectangle lifted into a cache slot and stamped back down lands where the
+    /// server points it, and survives the frame that cached it.
+    #[test]
+    fn a_rectangle_cached_and_stamped_back_lands_where_it_is_told() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(4, 4), create(1, 4, 4), map(1, 0, 0)]);
+        receive(&mut graphics, &framebuffer, &[
+            start(1),
+            wire(1, CODEC_UNCOMPRESSED, (0, 0, 1, 1), &[30, 20, 10, 0xFF]),
+            s2c(1, 5, (0, 0, 1, 1)),
+            c2s(5, 1, &[(3, 3)]),
+            end(1),
+        ]);
+        framebuffer.with(|frame| {
+            assert_eq!(&frame.pixels[..4], &[10, 20, 30, 0]);
+            assert_eq!(&frame.pixels[(3 * 4 + 3) * 4..], &[10, 20, 30, 0]);
+        });
+    }
+
+    /// A copy of a rectangle over itself — a scroll — reads its whole source before
+    /// it writes, so the overlap does not smear.
+    #[test]
+    fn a_scroll_copies_a_rectangle_over_itself_correctly() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(2, 2), create(1, 2, 2), map(1, 0, 0)]);
+        receive(&mut graphics, &framebuffer, &[
+            start(1),
+            // The top row is one colour; copy it down onto the bottom row.
+            wire(1, CODEC_UNCOMPRESSED, (0, 0, 2, 1), &[30, 20, 10, 0xFF, 30, 20, 10, 0xFF]),
+            s2s(1, 1, (0, 0, 2, 1), &[(0, 1)]),
+            end(1),
+        ]);
+        framebuffer.with(|frame| {
+            assert_eq!(&frame.pixels[..4], &[10, 20, 30, 0]);
+            assert_eq!(&frame.pixels[8..12], &[10, 20, 30, 0]);
+        });
+    }
+
+    /// A cache draw from an empty slot, a copy from a missing surface, and a stamp
+    /// that does not fit are each a dropped rectangle, not the end of the session.
+    #[test]
+    fn a_bad_copy_or_cache_costs_the_rectangle_and_not_the_session() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(4, 4), create(1, 4, 4), map(1, 0, 0)]);
+        let updates = receive(&mut graphics, &framebuffer, &[
+            start(1),
+            c2s(9, 1, &[(0, 0)]),           // empty slot
+            s2s(2, 1, (0, 0, 2, 2), &[(0, 0)]), // no such source surface
+            wire(1, CODEC_UNCOMPRESSED, (0, 0, 2, 2), &[0; 16]),
+            s2c(1, 3, (0, 0, 2, 2)),
+            c2s(3, 1, &[(3, 3)]),            // 2x2 at (3,3) does not fit a 4x4
+            end(1),
+        ]);
+        assert_eq!(updates.last(), Some(&Update::Frame { id: 1, decoded: 1 }));
     }
 
     /// A surface larger than any desktop this client holds is refused before it is

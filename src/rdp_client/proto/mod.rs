@@ -70,6 +70,7 @@
 pub mod bitmap;
 pub mod capabilities;
 pub mod channel;
+pub mod clear;
 pub mod cliprdr;
 pub mod credssp;
 pub mod der;
