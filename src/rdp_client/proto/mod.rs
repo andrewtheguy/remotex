@@ -25,6 +25,7 @@
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
 //! - [`info`] — the logon: who the session belongs to and what it should look like.
+//! - [`input`] — keystrokes and mouse events, on the fast path back to the host.
 //! - [`license`] — the one licensing PDU a Windows host sends, which says none is
 //!   needed.
 //! - [`capabilities`] — what the two ends agree to send each other, exchanged once
@@ -33,6 +34,8 @@
 //! - [`fastpath`] — the framing the server's updates arrive in once it is live.
 //! - [`bitmap`] — the rectangles of pixels those updates carry, and where they go.
 //! - [`planar`] — the codec a 32-bit session compresses a rectangle with.
+//! - [`pointer`] — the cursor, which travels as its own shape and is never drawn
+//!   into the desktop.
 //!
 //! # One kind of server
 //!
@@ -61,10 +64,12 @@ pub mod fastpath;
 pub mod finalization;
 pub mod gcc;
 pub mod info;
+pub mod input;
 pub mod license;
 pub mod mcs;
 pub mod per;
 pub mod planar;
+pub mod pointer;
 pub mod share;
 pub mod tls;
 pub mod wire;
