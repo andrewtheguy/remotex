@@ -81,7 +81,7 @@ function leaveFullscreen(): void {
   fireFullscreenChange();
 }
 
-await import("./keyboardLock.ts");
+const { keyboardLockSupported } = await import("./keyboardLock.ts");
 
 test("windowed startup does not ask for a lock", () => {
   assert.equal(lockCalls, 0);
@@ -109,4 +109,16 @@ test("leaving full screen releases the lock", () => {
   const before = unlocks;
   leaveFullscreen();
   assert.equal(unlocks, before + 1);
+});
+
+test("the API's presence is reported, because the page promises keys on it", () => {
+  // Not whether a lock took — that stays unreported by design — but whether this
+  // browser has one to take, which is what the menu and the Help card word
+  // themselves from.
+  assert.equal(keyboardLockSupported(), true);
+  const navigator = fakeNavigator as { keyboard?: unknown };
+  const api = navigator.keyboard;
+  navigator.keyboard = undefined;
+  assert.equal(keyboardLockSupported(), false);
+  navigator.keyboard = api;
 });

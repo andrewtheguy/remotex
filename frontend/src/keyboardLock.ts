@@ -31,6 +31,16 @@ function keyboardApi(): KeyboardLockApi | undefined {
   return (navigator as Navigator & { keyboard?: KeyboardLockApi }).keyboard;
 }
 
+// Whether this browser has the API at all. That is the half of "will every key
+// reach the remote" that can be answered before anyone is standing in front of a
+// full screen, and the page says it out loud: a browser without the lock still
+// gets the larger desktop, and the host still takes Super and Alt+Tab out of the
+// stream. A lock this browser has and then refuses stays unreported, for the
+// reason at the top of this file.
+export function keyboardLockSupported(): boolean {
+  return keyboardApi() !== undefined;
+}
+
 let held = false;
 let arming: Promise<void> | null = null;
 

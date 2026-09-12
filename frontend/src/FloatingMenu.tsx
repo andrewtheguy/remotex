@@ -17,6 +17,7 @@ import {
   onFullscreenChange,
   toggleFullscreen,
 } from "./fullscreen.ts";
+import { keyboardLockSupported } from "./keyboardLock.ts";
 import {
   type AudioRow,
   type AudioStreamInfo,
@@ -176,18 +177,31 @@ function ImmersiveHelpRows() {
   if (!fullscreenSupported()) {
     return null;
   }
+  // A full screen without Keyboard Lock is the larger desktop and nothing more, so
+  // the card promises the keys only where the browser has them to give. Escape also
+  // stops being a key that has to be *held*, which is a lock's doing alone.
+  const locks = keyboardLockSupported();
   return (
     <>
       <div className="help-item">
-        <dt>Send every key, Super and Alt+Tab included</dt>
+        <dt>
+          {locks
+            ? "Send every key, Super and Alt+Tab included"
+            : "Fill the screen with the remote desktop"}
+        </dt>
         <dd>
-          Menu → Immersive full screen. Chrome's own full screen — ⛶ beside the
-          zoom row, or F11 — looks the same and does not do this
+          {locks
+            ? "Menu → Immersive full screen. Chrome's own full screen — ⛶ beside the zoom row, or F11 — looks the same and does not do this"
+            : "Menu → Full screen. This browser has no Keyboard Lock, so Super, Alt+Tab and the browser's own chords stay with this computer"}
         </dd>
       </div>
       <div className="help-item">
-        <dt>Leave immersive full screen</dt>
-        <dd>Hold Esc, or the same menu button</dd>
+        <dt>{locks ? "Leave immersive full screen" : "Leave full screen"}</dt>
+        <dd>
+          {locks
+            ? "Hold Esc, or the same menu button"
+            : "Esc, or the same menu button"}
+        </dd>
       </div>
     </>
   );
@@ -313,7 +327,7 @@ function DisplaySection({
 //
 // Offered wherever the browser grants it, touch clients included. A phone has no Super
 // key to win back, but full screen is still the larger desktop.
-function FullscreenSection() {
+function FullscreenSection({ onSettled }: { onSettled: () => void }) {
   const fullscreen = useSyncExternalStore(
     onFullscreenChange,
     isFullscreen,
@@ -326,6 +340,10 @@ function FullscreenSection() {
   if (!fullscreenSupported()) {
     return null;
   }
+  // Whether this browser can hand over the keys as well as the screen. A mode called
+  // immersive that still loses Super to the host would be the same puzzle Chrome's own
+  // full screen already is, so it is only called that where the lock exists.
+  const locks = keyboardLockSupported();
   return (
     <div className="toolbar-section">
       <span className="toolbar-label">Full screen</span>
@@ -334,7 +352,7 @@ function FullscreenSection() {
         className="toolbar-btn"
         onClick={() => {
           setRefusal(null);
-          toggleFullscreen().catch((cause: unknown) =>
+          toggleFullscreen().then(onSettled, (cause: unknown) =>
             setRefusal(cause instanceof Error ? cause.message : String(cause)),
           );
         }}
@@ -342,10 +360,16 @@ function FullscreenSection() {
         title={
           fullscreen
             ? "Return to the window; the browser and this computer take their shortcuts back"
-            : "Fill the screen and let Super, Alt+Tab and the browser's own chords reach the remote. Hold Esc to leave"
+            : locks
+              ? "Fill the screen and let Super, Alt+Tab and the browser's own chords reach the remote. Hold Esc to leave"
+              : "Fill the screen with the remote desktop. This browser has no Keyboard Lock, so Super, Alt+Tab and the browser's own chords stay with this computer. Esc leaves"
         }
       >
-        {fullscreen ? "Leave full screen" : "Immersive full screen"}
+        {fullscreen
+          ? "Leave full screen"
+          : locks
+            ? "Immersive full screen"
+            : "Full screen"}
       </button>
       {refusal && <p className="toolbar-note">{refusal}</p>}
     </div>
@@ -741,6 +765,7 @@ export default function FloatingMenu({
   touchActive,
   onTouchChange,
   onLocalShortcut,
+  onFocusDesktop,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -835,6 +860,10 @@ export default function FloatingMenu({
   // unwind what it was holding for one. Only the Mac spelling of the chrome
   // shortcut needs it, and only because Command is in it. See useRemoteDesktop.
   onLocalShortcut: () => void;
+  // Hands the keyboard back to the remote desktop surface, which is where the key
+  // listeners live — they are scoped to the focused surface rather than the window,
+  // so a control that keeps focus keeps the keys too. See useRemoteDesktop.
+  onFocusDesktop: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -1070,6 +1099,17 @@ export default function FloatingMenu({
     sizeWindowToDesktop(size, size.scale);
   }, [size]);
 
+  // Entering the mode has to hand the keyboard over along with the screen. The button
+  // just clicked otherwise keeps focus, and the remote's key listeners sit on the
+  // desktop surface rather than the window — so the Super key the lock just won would
+  // land on the drawer and reach nothing at all. Closing the drawer by itself drops
+  // focus on the body, which is the same silence. Leaving is the same handover in
+  // reverse; only a refused request keeps the drawer, which is where it says why.
+  const onFullscreenSettled = useCallback(() => {
+    onFocusDesktop();
+    setOpen(false);
+  }, [onFocusDesktop]);
+
   // Same deal for the clipboard panel, except it cannot open straight away: it
   // fetches first and waits for the answer, so it appears already showing what
   // the remote holds right now. Without that it would open on whatever arrived
@@ -1158,7 +1198,7 @@ export default function FloatingMenu({
 
       {open && !hidden && (
         <div className="toolbar" style={toolbarStyle}>
-          <FullscreenSection />
+          <FullscreenSection onSettled={onFullscreenSettled} />
 
           <WindowSection size={size} onSize={onSizeWindow} />
 

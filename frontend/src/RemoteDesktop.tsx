@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
 import TargetPicker from "./TargetPicker.tsx";
 import {
@@ -30,6 +30,13 @@ export default function RemoteDesktop({
   const gridRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const pointerRef = useRef<HTMLImageElement>(null);
+  // The keyboard belongs to the overlay, whose key listeners are scoped to it
+  // rather than the window; the menu calls this when a control of its own has
+  // taken focus and is done with it. See FloatingMenu and useRemoteDesktop.
+  const focusDesktop = useCallback(
+    () => overlayRef.current?.focus({ preventScroll: true }),
+    [],
+  );
   const {
     status,
     mode,
@@ -189,6 +196,7 @@ export default function RemoteDesktop({
           touchActive={touchActive}
           onTouchChange={setTouchEnabled}
           onLocalShortcut={onLocalShortcut}
+          onFocusDesktop={focusDesktop}
         />
       )}
 
