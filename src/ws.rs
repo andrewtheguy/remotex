@@ -1205,6 +1205,7 @@ mod tests {
             height: Some(1),
             security: None,
             egfx: None,
+            allow_plain_tls: None,
             resize: false,
             clipboard: false,
             audio,

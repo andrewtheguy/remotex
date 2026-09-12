@@ -45,8 +45,8 @@ impl Security {
 }
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
-/// the same browser protocol (docs/architecture.md): `rdp` via FreeRDP
-/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
+/// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
+/// client (src/rdp.rs over src/rdp_client), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
 /// with `subtype = "ard"`, Apple Screen Sharing Standard mode over RFB 3.8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -735,6 +735,16 @@ pub struct TargetConfig {
     /// time instead of accepted and left inert, the same rule as `egfx`.
     #[serde(default)]
     pub security: Option<Security>,
+    /// Let this target log on over plain TLS — TLS without NLA — whether chosen
+    /// with `security = "tls"` or picked by the server under `"auto"`. Off by
+    /// default because the RDP client verifies no server certificate: without NLA
+    /// the credentials travel in the logon PDU to whoever answered, where NLA
+    /// binds them to the server's TLS key so an interceptor cannot use them. xrdp
+    /// speaks no NLA and needs this. RDP only, and `Option` so that setting it on
+    /// a VNC target is refused at parse time, the same rule as `security`; `None`
+    /// reads as off ([`TargetConfig::allow_plain_tls`]).
+    #[serde(default)]
+    pub allow_plain_tls: Option<bool>,
     /// Allow client-driven resize: hand this target's desktop size to the
     /// client's window. A desktop client reports every window change while this
     /// is on; there is no client-side mode, manual resize command, or second
@@ -752,18 +762,22 @@ pub struct TargetConfig {
     /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
-    /// RDP's graphics pipeline (EGFX), on by default and decoupled from
-    /// [`Self::resize`]. With both on, a resize is a Display Control monitor
-    /// layout under the pipeline — a graphics reset, no reactivation and no
-    /// reconnect — which is what makes handing the size to the window cheap
-    /// enough to do on every drag. The trade is a Windows host's text staying
-    /// soft after an EGFX resize, where the legacy path's reactivation
-    /// re-renders it sharp: set `egfx = false` to buy sharp text at the price
-    /// of a reactivation per resize (and a reconnect where sound negotiated on
-    /// the dynamic `rdpsnd` transport). `Option` rather than a bare default so
-    /// that setting it on a VNC target, which has no graphics pipeline to
-    /// switch, is refused at parse time instead of accepted and left inert;
-    /// `None` reads as on ([`TargetConfig::egfx`]).
+    /// RDP's graphics pipeline (EGFX), off by default and decoupled from
+    /// [`Self::resize`]. Off, a resize is a Deactivation-Reactivation Sequence,
+    /// and a Windows host re-renders the desktop sharp at the new size. On, a
+    /// resize is a Display Control monitor layout under the pipeline — a
+    /// graphics reset, no reactivation and no reconnect — which is cheaper on
+    /// every drag, at the price of text staying soft afterward.
+    ///
+    /// The default is off because the pipeline's RFX Progressive decoder still
+    /// fails on some Windows hosts mid-session, which ends the session; the
+    /// legacy bitmap path decodes everything this client needs. Turn it on to
+    /// trade that risk for the cheaper resize.
+    ///
+    /// `Option` rather than a bare default so that setting it on a VNC target,
+    /// which has no graphics pipeline to switch, is refused at parse time
+    /// instead of accepted and left inert; `None` reads as off
+    /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
     /// Clipboard bridge: let the browser read and write this target's
@@ -1029,9 +1043,15 @@ impl TargetConfig {
         self.pinned_size().unwrap_or(DEFAULT_SIZE)
     }
 
-    /// RDP's graphics pipeline switch, on unless the operator traded it away.
+    /// RDP's graphics pipeline switch, off unless the operator asked for it.
     pub fn egfx(&self) -> bool {
-        self.egfx.unwrap_or(true)
+        self.egfx.unwrap_or(false)
+    }
+
+    /// Whether a plain-TLS logon is allowed, off unless the operator opted in —
+    /// see [`Self::allow_plain_tls`](TargetConfig::allow_plain_tls).
+    pub fn allow_plain_tls(&self) -> bool {
+        self.allow_plain_tls.unwrap_or(false)
     }
 
     /// [`Self::security`] resolved: [`Security::Auto`] unless the operator chose.
@@ -1640,6 +1660,23 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
+            // Sound and the clipboard are what this gateway's own RDP client does
+            // not carry. Both keys turn something on in the browser — an audio
+            // socket, the Clipboard panel — so accepting one on a target that can
+            // never answer it builds a control that does nothing. Refused where it
+            // would be inert, the same rule as every other key above.
+            anyhow::ensure!(
+                !target.audio || target.protocol != Protocol::Rdp,
+                "target {:?} asks for audio, which this gateway's RDP client does not carry \
+                 yet. Remove the key.",
+                target.name
+            );
+            anyhow::ensure!(
+                !target.clipboard || target.protocol != Protocol::Rdp,
+                "target {:?} asks for clipboard, which this gateway's RDP client does not \
+                 carry yet. Remove the key.",
+                target.name
+            );
             // And the security mode: TLS and NLA are RDP's negotiation, where
             // RFB settles its own in the handshake, so on a VNC target the key
             // names a choice nothing would read.
@@ -1649,6 +1686,23 @@ impl ConfigFile {
                  nla — RFB settles its own security in the handshake. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            anyhow::ensure!(
+                target.allow_plain_tls.is_none() || target.protocol == Protocol::Rdp,
+                "target {:?} sets allow_plain_tls on a {} target, and only rdp logs on over \
+                 tls. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
+            // Plain TLS hands the credentials to a server whose certificate nobody
+            // checked, so asking for it and nothing else needs the opt-in too — a
+            // session that could only ever fail at logon is better refused here.
+            anyhow::ensure!(
+                target.security() != Security::Tls || target.allow_plain_tls(),
+                "target {:?} sets security = \"tls\", which sends its credentials to a server \
+                 whose certificate is not verified. Use \"nla\" or \"auto\", or set \
+                 allow_plain_tls = true to accept that.",
+                target.name
             );
             // Audio is carried by three paths and refused elsewhere rather than
             // ignored: MS-RDPEA on RDP, the QEMU Audio extension on a generic VNC
@@ -2497,7 +2551,7 @@ mod tests {
         assert_eq!(t.security(), Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
-        assert!(t.egfx(), "the graphics pipeline is on unless the operator trades it away");
+        assert!(!t.egfx(), "the graphics pipeline is opt-in");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.audio, "remote audio is opt-in");
     }
@@ -4510,7 +4564,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_is_accepted_for_both_protocols() {
+    fn clipboard_is_vncs_alone_until_the_rdp_client_carries_it() {
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -4529,8 +4583,10 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].clipboard);
 
-        // Clipboard is accepted for both engines, including RDP via MS-RDPECLIP.
-        let config = ConfigFile::parse(&format!(
+        // MS-RDPECLIP is not in this gateway's RDP client yet, so the key is
+        // refused there rather than opening a Clipboard panel with nothing behind
+        // it.
+        let err = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
@@ -4543,10 +4599,10 @@ mod tests {
             "#,
             site_passwd_line()
         ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].clipboard);
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("clipboard"), "{rendered}");
+        assert!(rendered.contains("does not carry"), "{rendered}");
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key
@@ -4613,6 +4669,7 @@ mod tests {
             protocol = "rdp"
             host = "10.0.0.5"
             security = "tls"
+            allow_plain_tls = true
 
             [[targets]]
             name = "bare"
@@ -4625,6 +4682,30 @@ mod tests {
         assert_eq!(cfg.targets[0].security, Some(Security::Tls));
         assert_eq!(cfg.targets[1].security, None);
         assert_eq!(cfg.targets[1].security(), Security::Auto);
+        assert!(!cfg.targets[1].allow_plain_tls(), "plain TLS is off unless asked for");
+    }
+
+    /// Plain TLS sends credentials to a server whose certificate nobody checked,
+    /// so a target that asks for it and nothing else has to say it accepts that —
+    /// and the opt-in is RDP's, refused on VNC even when false.
+    #[test]
+    fn plain_tls_needs_its_opt_in_and_the_opt_in_is_rdps() {
+        let parse = |target: &str| {
+            ConfigFile::parse(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"t\"\nhost = \"h\"\n{target}\n",
+                site_passwd_line()
+            ))
+        };
+        let err = parse("protocol = \"rdp\"\nsecurity = \"tls\"").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("allow_plain_tls"), "the way out is named: {rendered}");
+        assert!(parse("protocol = \"rdp\"\nsecurity = \"tls\"\nallow_plain_tls = true").is_ok());
+        // Under "auto" the opt-in is optional: NLA is still on offer.
+        assert!(parse("protocol = \"rdp\"\nallow_plain_tls = true").is_ok());
+        for value in ["true", "false"] {
+            let err = parse(&format!("protocol = \"vnc\"\nallow_plain_tls = {value}")).unwrap_err();
+            assert!(format!("{err:#}").contains("allow_plain_tls"), "{err:#}");
+        }
     }
 
     /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is
@@ -4635,7 +4716,7 @@ mod tests {
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]
-    fn audio_belongs_to_rdp_and_to_generic_vnc() {
+    fn audio_belongs_to_generic_vnc_and_is_refused_on_rdp() {
         // A plain `vnc` target asks a generic server for the QEMU Audio
         // extension, and gets silence from one that does not speak it. That is
         // discovery, not a config error.
@@ -4661,7 +4742,10 @@ mod tests {
             crate::vnc_qemu_audio::SOURCE_FORMAT
         );
 
-        let config = ConfigFile::parse(&format!(
+        // RDP's own audio channel is not in this gateway's client yet, and a key
+        // that would open a silent socket in the browser is a config error rather
+        // than a preference.
+        let err = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
@@ -4674,10 +4758,10 @@ mod tests {
             "#,
             site_passwd_line()
         ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].audio);
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("audio"), "{rendered}");
+        assert!(rendered.contains("does not carry"), "{rendered}");
     }
 
     /// Standard mode has no audio to offer — Apple's media stream is High
@@ -4752,8 +4836,10 @@ mod tests {
     /// asked for, 48 kHz stereo is what the Mac's AAC-ELD decodes to.
     #[test]
     fn the_audio_source_format_is_the_engines() {
+        // Without the key, which RDP is refused until its client carries sound —
+        // the format is the protocol's, and is what that client will be asked for.
         let rdp = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\naudio = true\n",
+            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\n",
             site_passwd_line()
         ))
         .unwrap()
@@ -4794,8 +4880,8 @@ mod tests {
             {}
 
             [[targets]]
-            name = "win"
-            protocol = "rdp"
+            name = "box"
+            protocol = "vnc"
             host = "10.0.0.5"
             audio = true
             audio_codec = "pcm"
@@ -4856,6 +4942,25 @@ mod tests {
     // ---- the adaptive dials --------------------------------------------------
 
     /// One valid target body per test below, parameterized by the keys under test.
+    /// The same, on the protocol that carries sound — every audio key is refused
+    /// on RDP, whose client does not have it yet.
+    fn parse_audio_target(body: &str) -> anyhow::Result<AppConfig> {
+        ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "t"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            {body}
+            "#,
+            site_passwd_line()
+        ))?
+        .resolve()
+    }
+
     fn parse_target(body: &str) -> anyhow::Result<AppConfig> {
         ConfigFile::parse(&format!(
             r#"
@@ -4981,17 +5086,17 @@ mod tests {
     /// walk was asked for.
     #[test]
     fn the_audio_plan_resolves_defaults_and_the_adaptive_floor() {
-        let cfg = parse_target("audio = true").expect("bare audio");
+        let cfg = parse_audio_target("audio = true").expect("bare audio");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
         assert_eq!(cfg.targets[0].audio_plan().bitrate_bps, 96_000);
 
-        let cfg = parse_target("audio = true\naudio_bitrate = 128").expect("a rate");
+        let cfg = parse_audio_target("audio = true\naudio_bitrate = 128").expect("a rate");
         assert_eq!(
             cfg.targets[0].audio_plan(),
             AudioPlan { codec: AudioCodec::Opus, bitrate_bps: 128_000, adaptive_floor_bps: None }
         );
 
-        let cfg = parse_target("audio = true\naudio_adaptive = true").expect("adaptive");
+        let cfg = parse_audio_target("audio = true\naudio_adaptive = true").expect("adaptive");
         assert_eq!(
             cfg.targets[0].audio_plan(),
             AudioPlan {
@@ -5001,7 +5106,7 @@ mod tests {
             }
         );
 
-        let cfg = parse_target(
+        let cfg = parse_audio_target(
             "audio = true\naudio_bitrate = 64\naudio_adaptive = true\naudio_bitrate_min = 24",
         )
         .expect("adaptive with both rates");
@@ -5018,36 +5123,36 @@ mod tests {
     /// Passthrough has no encoder: every key that tunes one is refused beside it.
     #[test]
     fn the_bitrate_keys_are_opus_only() {
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_codec = \"pcm\"\naudio_bitrate = 96",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("audio_bitrate"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_codec = \"pcm\"\naudio_adaptive = true",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("audio_adaptive"));
 
         // And without audio at all, same rule one step up.
-        let err = parse_target("audio_bitrate = 96").unwrap_err();
+        let err = parse_audio_target("audio_bitrate = 96").unwrap_err();
         assert!(format!("{err:#}").contains("audio_bitrate"));
     }
 
     /// The floor needs the walk, has a range, and must sit under the ceiling.
     #[test]
     fn the_audio_floor_is_validated_against_the_walk_and_the_ceiling() {
-        let err = parse_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
+        let err = parse_audio_target("audio = true\naudio_bitrate_min = 24").unwrap_err();
         assert!(format!("{err:#}").contains("audio_adaptive"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_adaptive = true\naudio_bitrate_min = 4",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("6–510"));
 
-        let err = parse_target(
+        let err = parse_audio_target(
             "audio = true\naudio_bitrate = 48\naudio_adaptive = true\naudio_bitrate_min = 48",
         )
         .unwrap_err();
@@ -5056,10 +5161,10 @@ mod tests {
         // The *default* floor above a low ceiling is no contradiction — the
         // operator never wrote it. It parses, and the walk clamps it to the
         // ceiling (`AudioCongestion::new`) instead.
-        parse_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
+        parse_audio_target("audio = true\naudio_bitrate = 8\naudio_adaptive = true")
             .expect("a default floor clamps instead of refusing");
 
-        let err = parse_target("audio = true\naudio_bitrate = 999").unwrap_err();
+        let err = parse_audio_target("audio = true\naudio_bitrate = 999").unwrap_err();
         assert!(format!("{err:#}").contains("6–510"));
     }
 }

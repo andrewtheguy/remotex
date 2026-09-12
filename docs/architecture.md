@@ -14,7 +14,7 @@ browser SPA over loopback or the network
    │  /ws/audio: the audio format, then binary audio frames
    ▼
 axum server ── single session slot ── protocol engine
-                                         ├─ RDP through FreeRDP
+                                         ├─ RDP through the built-in client
                                          └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
@@ -23,7 +23,7 @@ or as VP9 streams, according to the target's render plan. Tiles are lossless
 PNG by default, with JPEG or WebP available at fixed quality. A Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the
-`ard-high-performance` RFB 003.889 path. Redirected RDP audio is either encoded as
+`ard-high-performance` RFB 003.889 path. Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 
 ## Constraints
@@ -43,13 +43,13 @@ Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queu
 | `server.rs`, `auth.rs` | HTTP routes, SPA serving, login sessions |
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
-| `rdp.rs` | RDP session over FreeRDP: framebuffer, input, cursor, clipboard, resize |
+| `rdp.rs` | RDP engine: damage, tiles, input, cursor, resize, over `rdp_client` |
+| `rdp_client/` | the RDP client on IronRDP: connection, graphics paths, framebuffer, input queue |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
 | `vp9.rs` | libvpx — the video codec |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling |
-| `rdp_audio.rs` | the adapter between FreeRDP's `rdpsnd` device and that queue |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -833,7 +833,7 @@ does not reset the table.
 
 ### Audio frames
 
-Remote audio is opt-in per target — `audio = true` on an RDP target, on a plain
+Remote audio is opt-in per target — `audio = true` on a plain
 `vnc` target, or on an Apple High Performance target in a gateway built with the
 `apple-hp-audio` feature (see the VNC engine below) — and it has a socket of its
 own. **Opening
@@ -904,28 +904,12 @@ kbps is well clear of audible loss on this material. Guacamole carries desktop
 audio this way and only this way (its single encoder emits
 `audio/L16;rate=44100,channels=2`), which is where the option came from.
 
-An RDP engine without audio still says something about sound. The wrapper's
-`AudioMode` is mstsc's three positions — redirect, leave on the host, mute — each
-one Client Info PDU flag or none; `rdp_audio::connect` picks `LeaveOnHost` for a
-target without audio, so the PDU carries `INFO_REMOTECONSOLEAUDIO` and Windows
-plays the session's sound on the host's own speakers rather than giving the
-session no audio device, which is what `INFO_NOAUDIOPLAYBACK` would do. The mode
-is read once at logon and cannot change mid-session.
+The RDP engine carries no sound. Its Client Info PDU says `INFO_NOAUDIOPLAYBACK`,
+so the session has no audio device at all, and `audio = true` is refused on an rdp
+target at config parse rather than opening a socket that would never carry a
+sample.
 
-An audio-enabled RDP engine negotiates one 44.1 kHz, 16-bit stereo PCM format
-when it connects, and offers no other — MS-RDPEA identifies a buffer's format by
-index, so one advertised format makes the index unambiguous. The gateway does not
-implement the channel itself: it registers as FreeRDP's `rdpsnd` output *device*,
-the piece an ordinary client points at ALSA or CoreAudio (`src/rdp_audio.rs`).
-Both transports are registered — the static `rdpsnd` channel and the dynamic
-`AUDIO_PLAYBACK_DVC` — because which one a server drives is the server's choice,
-and the wrapper lets only the first to open fill the queue. Windows also requires
-`rdpdr` to be advertised alongside them. Under `opus` the gateway resamples that PCM to
-48 kHz in exact 882-to-960 groups (`src/pcm48.rs`) and cuts packets out of the
-result; under `pcm` it does neither, and the buffer is only cut on a frame
-boundary so a split sample cannot transpose the channels.
-
-The queue never blocks the RDP read loop. `AudioBridge` retains sixteen remote
+The queue never blocks an engine's read loop. `AudioBridge` retains sixteen remote
 wave buffers (about three seconds at the measured Windows cadence) and drops the
 oldest when a listener falls behind; no receiver means audio is discarded. Between
 the bridge and the socket sits a second, shallower two-buffer FIFO
@@ -991,7 +975,7 @@ an engine without it drops them all, and the client sends them exactly
 when `connected` said `resize` — on every window change, with no toggle, no
 manual button and no remembered preference beside it. Standard `ard` rejects
 `resize` at config parse because it shares physical displays. On RDP the `egfx`
-key (default true) keeps the graphics pipeline on, making each resize a graphics
+key (default false) turns the graphics pipeline on, making each resize a graphics
 reset instead of a reactivation; that trade is the operator's, not the client's.
 
 The opening size is one rule for every engine that can ask for one: the pinned
@@ -1064,7 +1048,9 @@ holds the latest remote value and its observed change time:
   while a fetch is pending, the normal framebuffer cycle finishes its one
   outstanding response and pauses before requesting another, leaving the ordered
   server stream free to deliver the pasteboard reply;
-- RDP requests `CF_UNICODETEXT` after a remote format announcement.
+- RDP carries no clipboard; `clipboard = true` is refused on an rdp target at
+  config parse, and an engine asked for one anyway answers a Fetch as a remote
+  that has copied nothing.
 
 Clients may request the current value after attaching, since they may have
 missed earlier pushes. Replies to that explicit request are marked separately
@@ -1097,23 +1083,30 @@ Nagle holds back is that window stalled for a round trip.
 
 ### RDP
 
-A statically prebuilt **FreeRDP 3** does the protocol, behind the safe wrapper in
-the `freerdp` crate (`github.com/andrewtheguy/libfreerdp-prebuilt`) — the same
-prebuilt-archive bargain libvpx and libopus already strike here, so this build
-needs no cmake, no pkg-config, no OpenSSL and no libclang. FreeRDP owns the socket
-and does TCP, TLS and optional NLA/CredSSP on a thread of its own, keeping a
-complete framebuffer in Rust-owned memory and posting an event per damaged
-rectangle. The engine compares those rectangles with a shadow of pixels already
+The protocol is the gateway's own client, `src/rdp_client/`, on IronRDP's crates
+(`github.com/Devolutions/IronRDP`, pinned by revision): IronRDP supplies the
+connection sequence, TLS, NLA/CredSSP, the legacy bitmap codecs, the graphics
+pipeline with its codecs and compositor, and Display Control; the client owns one
+thread per session, a complete framebuffer copied out of the decoders, and an event
+per damaged rectangle. Its socket comes from `engine::tcp_connect`, so an RDP host
+that goes silent is noticed on the same keepalive schedule as every other engine's.
+The engine (`src/rdp.rs`) compares those rectangles with a shadow of pixels already
 sent, splits the remainder into bands, and encodes off the event loop. Input is
-mapped from DOM codes to scancodes and queued to FreeRDP's thread.
+mapped from DOM codes to scancodes and queued to the client's thread as fast-path
+events.
+
+The client carries the desktop, the pointer, keyboard, mouse and resize, and
+nothing else: no sound, no clipboard, no touch. A target with `audio = true` or
+`clipboard = true` connects and says in the log that the engine carries neither;
+the Clipboard panel's Fetch is answered as a remote that has copied nothing.
 
 Damage is flushed at the server's own frame boundaries where the server marks
-them, which every server measured so far does: the wrapper requests both legacy
-frame-marker capabilities and surfaces the END — and EGFX's once-per-frame surface
-flush — as a `Frame` event. On the first one, the engine stops guessing: the
-16 ms coalescer (`DAMAGE_INTERVAL`) that reconstructed boundaries by timing
-demotes to a 100 ms safety net under the marker, so a frame is presented when the
-server says it is whole, not up to 16 ms later and never cut in half.
+them: the graphics pipeline's `EndFrame` surfaces as a `Frame` event. On the first
+one, the engine stops guessing: the 16 ms coalescer (`DAMAGE_INTERVAL`) that
+reconstructed boundaries by timing demotes to a 100 ms safety net under the
+marker, so a frame is presented when the server says it is whole, not up to 16 ms
+later and never cut in half. The legacy path marks no frames and keeps the
+coalescer.
 
 Under a plan that takes copies, each flush first searches the damage for regions
 the client already holds elsewhere on its canvas (`src/copies.rs`, guacamole-
@@ -1122,21 +1115,22 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-It replaced IronRDP, which was not stable enough against real Windows hosts.
-The `egfx` target key controls the Graphics Pipeline and defaults to true,
-independently of `resize`. EGFX is advertised with RemoteFX beside it, and that
-pairing is load-bearing: the pipeline advertised *alone* was
-measured broken — against a Windows 11 host, FreeRDP decoded 21 surface commands
-with no errors into a framebuffer that summed to exactly black — and the codec
-next to the flag is what guacamole-server ships against the same Windows
-generation. With the pair, the same measurement is a painted desktop. Under EGFX,
-a resize is a graphics reset with no reactivation or reconnect; the trade is that
-a Windows host's text stays soft afterward. `egfx = false` selects the legacy
-bitmap path, whose full reactivation re-renders the desktop sharp. Servers without
-the pipeline (xrdp among them here) also use that legacy path, which the wrapper
-keeps working through resizes by resizing FreeRDP's decoder contexts alongside the
-framebuffer — FreeRDP itself sizes them once, at connect, which is an upstream bug
-this repository stops carrying at its own layer.
+The `egfx` target key controls the Graphics Pipeline and defaults to false,
+independently of `resize`. The default is the legacy bitmap path, where a resize is
+a full reactivation that makes a Windows host re-render the desktop sharp, and
+where the decoding is the interleaved and planar bitmap codecs alone — the client
+announces no drawing orders, so that path is bitmaps throughout. Servers without
+the pipeline (xrdp among them) use it regardless of the key. It is also what the
+pipeline's RFX Progressive decoder costs to avoid: that decoder still fails partway
+through a session on some Windows hosts, and a decode error ends the session.
+
+`egfx = true` offers the pipeline, without an H.264 decoder, so a server picks among
+the codecs IronRDP decodes in Rust; a resize is then a graphics reset with no
+reactivation or reconnect, at the price of text staying soft afterward. The pipeline
+is wrapped rather than registered directly (`src/rdp_client/egfx.rs`): IronRDP's
+session composites pipeline output into an image sized at connect and never resized,
+so a graphics reset to a larger desktop would drop every region outside the old one;
+the wrapper drains the compositor itself and applies the reset first.
 
 The pointer is not part of that framebuffer. RDP servers send the cursor's shape
 rather than drawing it, and each shape goes to the client as `cursor`, which draws
@@ -1153,38 +1147,21 @@ twice the pixels with the host's UI drawn at 200% rather than the same UI
 stretched. The opening RDP handshake is always 1x; the client applies its screen
 density after `connected`, so a Retina client costs a graphics reset on the default
 EGFX path or a reactivation on the legacy path. RDP reports no scale factor back,
-so the density here is declared rather than measured. With `clipboard = true`,
-MS-RDPECLIP carries `CF_UNICODETEXT` with CRLF/LF conversion.
+so the density here is declared rather than measured. The layout is built by the
+client rather than IronRDP's helper, which marks a monitor taller than it is wide
+as portrait-rotated.
 
-With `audio = true`, `rdpsnd` carries the remote's sound — see [Audio
-frames](#audio-frames). Enabling it has one side effect worth knowing: a Windows
-host starts measuring the link, and this gateway has declined to be measured
-(`ConnectionType` is declared a LAN rather than probed, because a server's own
-estimate of the hop between it and a gateway beside it throttled updates badly).
-Declining the answer is not enough on its own — the message channel those PDUs
-arrive on has to be closed too, or the session dies when one is asked. That is
-the wrapper's business, and it is measured there.
+`ConnectionType` is declared a LAN rather than probed, because a server's own
+estimate of the hop between it and a gateway beside it throttled updates badly, and
+no multitransport is offered; the RTT probes a Windows host sends anyway are
+answered by IronRDP.
 
 A size change that is *real* costs a graphics reset on EGFX. On the legacy path it
-costs a full Deactivation-Reactivation Sequence; FreeRDP runs it internally and
-reports a new desktop size. A Windows host cannot carry sound across the legacy
-event: its audio redirector dies at reactivation — measured
-mid-playback, five
-resizes of six left the channel open and mute, the last wave within a second of
-the reactivation, no close, no re-announce, and nothing in MS-RDPEA for a client
-to restart it with. The wrapper therefore resizes such a session — recognised by
-its sound having negotiated on the dynamic `rdpsnd` transport, which is how
-Windows and only Windows carries it — by *reconnecting* at the new size, the way
-Guacamole's `resize-method: reconnect` does: ~800 ms measured, channels and sound
-renegotiated, surfacing as the same resize it always was, with one line on stderr
-saying a reconnect is what it cost. The wrapper debounces reconnect-resizes for
-300 ms. xrdp's static-channel audio rides out its reactivation, so it keeps the
-plain monitor-layout resize untouched, as does any legacy session without sound.
-Asking twice for the same size triggers one change, and a request equal to the
-current size never triggers one. A layout is asked for on a bounded schedule rather
-than once, because a Windows host discards one sent before the session it is
-starting has settled and acknowledges nothing either way — measured through both
-engines.
+costs a full Deactivation-Reactivation Sequence, which the client runs and reports
+as a new desktop size. Asking twice for the same size triggers one change, and a
+request equal to the current size never triggers one. A layout is asked for on a
+bounded schedule rather than once, because a Windows host discards one sent before
+the session it is starting has settled and acknowledges nothing either way.
 
 ### VNC
 
@@ -1397,22 +1374,14 @@ use fit-to-width presentation, pinch zoom, pan, a virtual cursor, and
 multi-finger gestures without changing framebuffer coordinates.
 
 That touch layer is a trackpad, and there is a second one that is a touchscreen.
-Against a Windows host the RDP engine offers MS-RDPEI (`Connect::touch`, always
-on), and when the host opens the channel the gateway says `touchReady`; a
-touch-capable client then shows a **Touchscreen** switch (remembered, off by
-default) that forwards fingers as `touch` contacts — down, move, up, cancel, in
-framebuffer pixels, named by small slot ids — instead of interpreting them. The
-guest recognises the gestures itself: Windows' tap, drag, press-and-hold, pinch,
-two-finger scroll and edge swipes are its own. VNC has no touch and never sends
-`touchReady`; a reattach re-announces it and cancels the contacts of whoever was
-attached before. See `frontend/src/touchPassthrough.ts` and `src/rdp.rs`.
-
-Measured against Windows 11 Enterprise 26100 through the gateway from a
-touch-emulating Chromium, press-and-hold opened the desktop context menu at the
-contact and a tap on Start opened Start—guest touch semantics a mouse path could
-not produce. That host opened the channel about 1.4 seconds after connect. The
-libfreerdp end-to-end binary's `rdpei not offered` result against such a host is
-its own early exit, not a negative answer from the host.
+When an engine's host opens a touch channel (MS-RDPEI on RDP), the gateway says
+`touchReady`; a touch-capable client then shows a **Touchscreen** switch
+(remembered, off by default) that forwards fingers as `touch` contacts — down,
+move, up, cancel, in framebuffer pixels, named by small slot ids — instead of
+interpreting them, and the guest recognises the gestures itself. A reattach
+re-announces it. No engine opens one today — the RDP client does not offer
+MS-RDPEI and VNC has no touch — so no session sends `touchReady` and the switch
+stays hidden. See `frontend/src/touchPassthrough.ts`.
 
 On a Mac host connected to a non-Mac remote, selected Command shortcuts are
 translated to Control. A Mac-keyboard toggle disables translation, and the

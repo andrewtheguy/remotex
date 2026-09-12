@@ -96,6 +96,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             height: Some(DEFAULT_H as u16),
             security: None, // RDP-only knob, refused for VNC
             egfx: None,
+            allow_plain_tls: None,
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all

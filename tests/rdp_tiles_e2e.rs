@@ -10,11 +10,9 @@
 //! frames, which this test validates byte-for-byte against the wire layout
 //! documented in `src/protocol.rs` / `frontend/src/protocol.ts`.
 //!
-//! That login screen's *text* arrives as glyph orders whether or not the
-//! client consented — xrdp keys glyph usage off having drawing orders at all
-//! — so this test also depends on the `freerdp` crate announcing glyph
-//! support (`FreeRDP_GlyphSupportLevel` in libfreerdp-prebuilt's
-//! `session.rs`); without it the session dies on the first glyph.
+//! xrdp paints that screen's text with glyph orders once a client announces
+//! drawing orders at all. The RDP client announces none, so the whole screen
+//! arrives as bitmaps.
 
 mod common;
 
@@ -84,6 +82,8 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             height: Some(800),
             security: None,
             egfx: None,
+            // xrdp speaks no NLA, so its logon is plain TLS.
+            allow_plain_tls: Some(true),
             resize: false,
             clipboard: false,
             audio: false,
