@@ -50,7 +50,7 @@
 //!
 //! # What this does not do
 //!
-//! - **No sound and no touch.** Neither channel is opened.
+//! - **No touch.** MS-RDPEI is never asked for.
 //! - **No H.264.** The graphics pipeline is offered with AVC disabled, so a server
 //!   draws with the codecs this module decodes in Rust.
 //! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a

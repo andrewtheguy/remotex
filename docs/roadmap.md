@@ -41,10 +41,9 @@ restored.
 
 #### Touch (MS-RDPEI)
 
-The smallest, because MS-RDPEI is a *dynamic* channel and that transport is
-already here: `proto/dvc.rs` carries Display Control over `drdynvc`, and the
-session answers every Create Request it does not want with `NO_LISTENER`
-(`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
+MS-RDPEI is a *dynamic* channel and that transport is already here:
+`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
+every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
 touch event's contact frames — and the contact state machine are the work.
 
 The rest is waiting for it. A host that opens the channel becomes
@@ -55,34 +54,6 @@ can report one. Held contacts must be released when a client goes away, or the
 remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
 xrdp never does, which is the reason this stays an always-offered capability
 rather than a key.
-
-#### Sound (MS-RDPEA)
-
-The larger of the two, and the least of a shared story with the other. The
-server chooses between two transports, so both have to exist: the static `rdpsnd`
-channel, which also wants `rdpdr` registered beside it, and the dynamic
-`AUDIO_PLAYBACK_DVC`. Over them: version and the server's format list, the client's
-answer, training and its confirm, Wave and Wave2 with their confirms, quality mode,
-volume and pitch. Both earlier engines took these PDUs from a library, so all of it
-is new here even though `src/rdp_audio.rs` has twice been written.
-
-What does not change is everything downstream. One format is advertised —
-`PCM_CD_QUALITY`, 44.1 kHz 16-bit stereo — and `AudioBridge`, the Opus and
-passthrough encoders, the socket and the claim it is bound to stay exactly as the
-VNC engines leave them. Two rules come with the bridge: a wave buffer must never
-block the decode loop (`AudioBridge::wave` drops its oldest rather than waiting,
-the same bargain the damage path makes), and the Client Info PDU has to stop saying
-`INFO_NOAUDIOPLAYBACK` — with that flag set the session has no audio device to
-redirect at all.
-
-#### The channel plumbing the clipboard already paid for
-
-`rdpsnd`'s static transport needs a third *static* virtual channel, and nothing
-about that is new work now: `CS_NET` names every channel a session asked for,
-`connect.rs` pairs the server's numbers back up with those names, and
-`proto/channel.rs` splits an outbound PDU of any length and reassembles an inbound
-one. A third channel is a name, a reassembler and a dispatch arm. Touch needs none
-of this — MS-RDPEI is a dynamic channel.
 
 ### Render dial — what the region streams do not decide yet
 

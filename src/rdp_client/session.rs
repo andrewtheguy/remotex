@@ -818,11 +818,13 @@ impl<'a> Active<'a> {
                 }
                 // The channel is gone, and with it every surface and the history the
                 // compressor was working from; a channel opened again starts afresh.
+                // A server's Close is answered with one, which is what lets it finish
+                // closing the channel and open the name again later.
                 dvc::Message::Close { channel } if dynamics.graphics == Some(channel) => {
                     debug!("rdp: the host closed the graphics channel");
                     dynamics.graphics = None;
                     *graphics = Some(Graphics::new());
-                    (Vec::new(), Vec::new())
+                    (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
                 // reply the conversation earns goes back on the same channel.
@@ -842,7 +844,7 @@ impl<'a> Active<'a> {
                     if let Some(sound) = sound {
                         sound.sink.closed();
                     }
-                    (Vec::new(), Vec::new())
+                    (vec![dvc::close(channel)], Vec::new())
                 }
                 message => (answer(message, dynamics)?, Vec::new()),
             }
@@ -1470,12 +1472,17 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
                 vec![dvc::create_response(channel, dvc::NO_LISTENER)]
             }
         }
+        // A Close is both the request and its answer ([MS-RDPEDYC] 3.3.5.2): a channel
+        // this end holds is given up and the Close echoed, so the server can finish
+        // closing it; one this end never accepted earns nothing, as in FreeRDP.
         dvc::Message::Close { channel } => {
             if dynamics.control == Some(channel) {
                 dynamics.control = None;
                 dynamics.caps = None;
+                vec![dvc::close(channel)]
+            } else {
+                Vec::new()
             }
-            Vec::new()
         }
         dvc::Message::Data { channel, data } => {
             if dynamics.control == Some(channel) {
@@ -1602,7 +1609,9 @@ mod tests {
     }
 
     /// A channel the server closes takes its capabilities with it: what it said it
-    /// would lay out was about a channel that no longer exists.
+    /// would lay out was about a channel that no longer exists. The Close is echoed,
+    /// which is the response the server waits for; one for a channel never held earns
+    /// nothing.
     #[test]
     fn closing_display_control_forgets_what_it_said_it_would_do() {
         let said = display::Capabilities { monitors: 1, area: 4 };
@@ -1611,7 +1620,8 @@ mod tests {
         let elsewhere = dvc::Message::Close { channel: 12 };
         assert!(answer(elsewhere, &mut dynamics).unwrap().is_empty());
         assert_eq!(dynamics.control, Some(11), "another channel closing says nothing about this one");
-        answer(dvc::Message::Close { channel: 11 }, &mut dynamics).unwrap();
+        let replies = answer(dvc::Message::Close { channel: 11 }, &mut dynamics).unwrap();
+        assert_eq!(replies, vec![dvc::close(11)], "the Close is echoed");
         assert_eq!((dynamics.control, dynamics.caps), (None, None));
     }
 }
