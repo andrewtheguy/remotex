@@ -1120,9 +1120,10 @@ mapped from DOM codes to scancodes and queued to the client's thread as fast-pat
 events.
 
 The client carries the desktop, the pointer, keyboard, mouse and resize, and
-nothing else: no sound, no clipboard, no touch. A target with `audio = true` or
-`clipboard = true` connects and says in the log that the engine carries neither;
-the Clipboard panel's Fetch is answered as a remote that has copied nothing.
+nothing else: no sound, no clipboard, no touch. `audio = true` and
+`clipboard = true` are refused on an rdp target at config parse, and touch is
+announced only by a host that opens MS-RDPEI, which this client never asks for.
+What each of the three would take is in [`roadmap.md`](roadmap.md).
 
 Bitmap updates carry no frame boundary, so damage is flushed on a guess: the
 16 ms coalescer (`DAMAGE_INTERVAL`) reconstructs boundaries by timing — a quiet
