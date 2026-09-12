@@ -14,7 +14,8 @@
 //!   cargo test --test rdp_proto_probe -- --ignored --nocapture
 //! ```
 //!
-//! It goes as far as the new stack can carry a connection and stops there. What it
+//! It goes as far as the new stack can carry a connection and stops there — at the
+//! moment the channels are open and the session's own PDUs would begin. What it
 //! proves at each step is the step a server is the only judge of: that the host
 //! accepts what we sent, and that what it sends back decodes.
 
@@ -23,11 +24,12 @@ mod common;
 use std::time::Duration;
 
 use remotex::rdp_client::proto::credssp::{self, Credentials};
-use remotex::rdp_client::proto::tls;
+use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
+use remotex::rdp_client::proto::{mcs, tls};
 use remotex::rdp_client::proto::x224::{
     ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER, frame_length,
 };
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
 /// Which target in `tmp/test_uat.toml` to dial — see the module docs.
@@ -41,9 +43,17 @@ const BUDGET: Duration = Duration::from_secs(30);
 /// `rdp_client::proto`.
 const OFFERED: Security = Security::HYBRID;
 
+/// The static virtual channels this client asks for. One, and it is the transport the
+/// Display Control resize channel later rides on.
+const CHANNELS: [Channel; 1] = [Channel::DYNAMIC];
+
+/// A size to open at. Nothing in this probe depends on it; the server just has to
+/// accept it.
+const DESKTOP: (u16, u16) = (1920, 1080);
+
 #[tokio::test]
 #[ignore = "requires a real Windows host from tmp/test_uat.toml"]
-async fn a_windows_host_authenticates_our_connection_sequence() {
+async fn a_windows_host_opens_the_channels_our_connection_sequence_asks_for() {
     common::init_logging();
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
@@ -95,19 +105,70 @@ async fn a_windows_host_authenticates_our_connection_sequence() {
             .await
             .expect("the host to accept the credentials");
         println!("authenticated as {}", target.username);
+
+        // 4. MCS Connect-Initial, carrying the GCC conference. The answer is the one
+        //    that matters: it numbers every channel the session will use.
+        let conference = ConferenceCreateRequest {
+            width: DESKTOP.0,
+            height: DESKTOP.1,
+            client_name: "remotex",
+            keyboard_layout: 0x0409,
+            selected_protocol: protocol.bits(),
+            channels: &CHANNELS,
+        }
+        .encode();
+        let initial = mcs::connect_initial(&conference).expect("the conference fits a frame");
+        println!("-> MCS Connect-Initial, {} bytes", initial.len());
+        stream.write_all(&initial).await.expect("send the Connect-Initial");
+        stream.flush().await.expect("send the Connect-Initial");
+
+        let frame = read_frame(&mut stream).await;
+        println!("<- MCS Connect-Response, {} bytes", frame.len());
+        let answer = mcs::connect_response(&frame).expect("an MCS Connect-Response");
+        let ConferenceCreateResponse { io_channel, channels } =
+            ConferenceCreateResponse::decode(answer).expect("a GCC Conference Create Response");
+        println!("I/O channel {io_channel}, virtual channels {channels:?}");
+        assert_eq!(
+            channels.len(),
+            CHANNELS.len(),
+            "the server numbers exactly the channels that were asked for"
+        );
+
+        // 5. Erect the domain — unanswered — and attach a user to it.
+        stream.write_all(&mcs::erect_domain_request()).await.expect("send the Erect Domain");
+        stream.write_all(&mcs::attach_user_request()).await.expect("send the Attach User");
+        stream.flush().await.expect("send the Attach User");
+
+        let frame = read_frame(&mut stream).await;
+        let user = mcs::attach_user_confirm(&frame).expect("an MCS Attach User Confirm");
+        println!("attached as user {user}");
+
+        // 6. Join every channel, the user's own first. Each is its own round trip,
+        //    and the server may answer with a different number than was asked for.
+        for channel in std::iter::once(user).chain(std::iter::once(io_channel)).chain(channels) {
+            stream
+                .write_all(&mcs::channel_join_request(user, channel))
+                .await
+                .expect("send a Channel Join Request");
+            stream.flush().await.expect("send a Channel Join Request");
+            let frame = read_frame(&mut stream).await;
+            let joined = mcs::channel_join_confirm(&frame).expect("an MCS Channel Join Confirm");
+            println!("joined channel {joined}");
+            assert_eq!(joined, channel, "the server joined the channel that was asked for");
+        }
     })
     .await
     .expect("the connection sequence finished within its budget");
 }
 
 /// One whole TPKT frame: the header, then exactly the length it announces.
-async fn read_frame(tcp: &mut TcpStream) -> Vec<u8> {
+async fn read_frame(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Vec<u8> {
     let mut header = [0_u8; TPKT_HEADER];
-    tcp.read_exact(&mut header).await.expect("read a TPKT header");
+    stream.read_exact(&mut header).await.expect("read a TPKT header");
     let length = frame_length(&header).expect("the answer is a TPKT frame");
     let mut frame = vec![0_u8; length];
     frame[..TPKT_HEADER].copy_from_slice(&header);
-    tcp.read_exact(&mut frame[TPKT_HEADER..]).await.expect("read the rest of the frame");
+    stream.read_exact(&mut frame[TPKT_HEADER..]).await.expect("read the rest of the frame");
     frame
 }
 

@@ -6,11 +6,15 @@
 //! certificate, BER for MCS, which for what RDP sends differ only in whether a length
 //! may be written longer than it needs to be.
 //!
-//! This is a reader for that shape and nothing more. There is no schema here and no
-//! object identifiers: a decoder walks the structure it already knows, naming the tag
-//! it expects at each step, and anything else ends the connection.
+//! There is no schema here and no object identifiers: a codec walks the structure it
+//! already knows, naming the tag it expects at each step, and anything else ends the
+//! connection. Writing is the same walk in reverse — with the wrinkle that a length
+//! comes before the bytes it measures, so a nested structure is built into its own
+//! [`Writer`] and prefixed once its size is known.
+//!
+//! [`Writer`]: super::wire::Writer
 
-use super::wire::{Malformed, Reader};
+use super::wire::{Malformed, Reader, Writer};
 
 pub const BOOLEAN: u8 = 0x01;
 pub const INTEGER: u8 = 0x02;
@@ -49,17 +53,22 @@ pub fn skip(r: &mut Reader<'_>) -> Result<(), Malformed> {
 }
 
 /// The tag and the length of the next value, leaving the reader at its contents.
+pub fn header(r: &mut Reader<'_>) -> Result<(u8, usize), Malformed> {
+    let tag = r.u8()?;
+    Ok((tag, read_length(r)?))
+}
+
+/// The length of the value whose tag has just been read.
 ///
 /// Only the definite forms: a short length is one byte under 128, a long one is a
 /// count of length bytes followed by that many. The indefinite form — length `0x80`,
 /// terminated by two zero bytes — is legal BER that neither X.509 nor anything RDP
 /// sends uses, and accepting it would mean scanning for a terminator inside data this
 /// module does not parse.
-pub fn header(r: &mut Reader<'_>) -> Result<(u8, usize), Malformed> {
-    let tag = r.u8()?;
+pub fn read_length(r: &mut Reader<'_>) -> Result<usize, Malformed> {
     let first = r.u8()?;
     if first < 0x80 {
-        return Ok((tag, usize::from(first)));
+        return Ok(usize::from(first));
     }
     let count = usize::from(first & 0x7F);
     // `0x80` is the indefinite form and `0xFF` is reserved; a length longer than a
@@ -71,7 +80,7 @@ pub fn header(r: &mut Reader<'_>) -> Result<(u8, usize), Malformed> {
     for byte in r.bytes(count)? {
         length = (length << 8) | usize::from(*byte);
     }
-    Ok((tag, length))
+    Ok(length)
 }
 
 /// The public key out of a DER-encoded X.509 certificate: the `subjectPublicKey` bit
@@ -113,6 +122,103 @@ pub fn certificate_public_key(der: &[u8]) -> Result<Vec<u8>, Malformed> {
         });
     }
     Ok(key.to_vec())
+}
+
+/// The contents of an `[APPLICATION n]` value, which is how MCS names its two connect
+/// PDUs.
+///
+/// Only the long tag form, `0x7F` followed by the number: the numbers RDP uses — 101
+/// and 102 — are past the 30 that fit the tag byte itself.
+pub fn expect_application<'a>(r: &mut Reader<'a>, tag: u8) -> Result<&'a [u8], Malformed> {
+    let first = r.u8()?;
+    if first != APPLICATION_LONG {
+        return Err(r.refuse("an ASN.1 tag", first));
+    }
+    let found = r.u8()?;
+    if found != tag {
+        return Err(r.refuse("an ASN.1 application tag", found));
+    }
+    let length = read_length(r)?;
+    r.bytes(length)
+}
+
+/// An INTEGER, read as the unsigned number RDP always means by one.
+pub fn read_integer(r: &mut Reader<'_>) -> Result<u32, Malformed> {
+    let bytes = expect(r, INTEGER)?;
+    // Four bytes plus a leading zero is the longest a 32-bit value can be written.
+    if bytes.is_empty() || bytes.len() > 5 {
+        return Err(r.refuse("an INTEGER of", u64::try_from(bytes.len()).unwrap_or(u64::MAX)));
+    }
+    let mut value = 0_u64;
+    for byte in bytes {
+        value = (value << 8) | u64::from(*byte);
+    }
+    u32::try_from(value).map_err(|_| r.refuse("an INTEGER", value))
+}
+
+/// An ENUMERATED, which is always one byte in what RDP sends.
+pub fn read_enumerated(r: &mut Reader<'_>) -> Result<u8, Malformed> {
+    let bytes = expect(r, ENUMERATED)?;
+    match bytes {
+        [value] => Ok(*value),
+        other => Err(r.refuse("an ENUMERATED of", u64::try_from(other.len()).unwrap_or(u64::MAX))),
+    }
+}
+
+/// The first byte of a long-form tag: application class, constructed, tag number to
+/// follow.
+const APPLICATION_LONG: u8 = 0x7F;
+
+/// A definite length, in the shortest form that holds it.
+pub fn write_length(w: &mut Writer, length: usize) {
+    match u8::try_from(length) {
+        Ok(byte) if byte <= 0x7F => w.u8(byte),
+        Ok(byte) => {
+            w.u8(0x81);
+            w.u8(byte);
+        }
+        Err(_) => {
+            w.u8(0x82);
+            w.u16_be(u16::try_from(length).expect("a connect PDU fits the TPKT length before this"));
+        }
+    }
+}
+
+/// A tag and the length of the value that follows it.
+pub fn write_tag(w: &mut Writer, tag: u8, length: usize) {
+    w.u8(tag);
+    write_length(w, length);
+}
+
+/// An `[APPLICATION n]` tag and the length of the value that follows it.
+pub fn write_application_tag(w: &mut Writer, tag: u8, length: usize) {
+    w.u8(APPLICATION_LONG);
+    w.u8(tag);
+    write_length(w, length);
+}
+
+pub fn write_octet_string(w: &mut Writer, bytes: &[u8]) {
+    write_tag(w, OCTET_STRING, bytes.len());
+    w.bytes(bytes);
+}
+
+pub fn write_boolean(w: &mut Writer, value: bool) {
+    write_tag(w, BOOLEAN, 1);
+    w.u8(if value { 0xFF } else { 0x00 });
+}
+
+/// An INTEGER: the fewest bytes that hold the value, big-endian, with a leading zero
+/// when the top bit would otherwise make it negative.
+pub fn write_integer(w: &mut Writer, value: u32) {
+    let bytes = value.to_be_bytes();
+    let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len() - 1);
+    let digits = &bytes[first..];
+    let pad = usize::from(digits[0] & 0x80 != 0);
+    write_tag(w, INTEGER, digits.len() + pad);
+    if pad == 1 {
+        w.u8(0);
+    }
+    w.bytes(digits);
 }
 
 #[cfg(test)]
@@ -164,6 +270,61 @@ mod tests {
             expect(&mut Reader::new("a test", &bytes), SEQUENCE).unwrap_err(),
             Malformed::Refused { field: "an ASN.1 tag", value: 2, .. }
         ));
+    }
+
+    fn written(f: impl FnOnce(&mut Writer)) -> Vec<u8> {
+        let mut w = Writer::new();
+        f(&mut w);
+        w.finish()
+    }
+
+    #[test]
+    fn a_written_length_takes_the_shortest_form_and_reads_back() {
+        assert_eq!(written(|w| write_length(w, 0x7F)), vec![0x7F]);
+        assert_eq!(written(|w| write_length(w, 0x80)), vec![0x81, 0x80]);
+        assert_eq!(written(|w| write_length(w, 0x1234)), vec![0x82, 0x12, 0x34]);
+        for length in [0_usize, 1, 0x7F, 0x80, 0xFF, 0x100, 0xFFFF] {
+            let bytes = written(|w| write_length(w, length));
+            assert_eq!(read_length(&mut Reader::new("a test", &bytes)).unwrap(), length);
+        }
+    }
+
+    /// The values MCS writes, and the one that needs a leading zero so a positive
+    /// number is not read as a negative one.
+    #[test]
+    fn an_integer_is_written_as_the_positive_number_it_is() {
+        assert_eq!(written(|w| write_integer(w, 0)), vec![INTEGER, 1, 0]);
+        assert_eq!(written(|w| write_integer(w, 2)), vec![INTEGER, 1, 2]);
+        assert_eq!(written(|w| write_integer(w, 0x80)), vec![INTEGER, 2, 0x00, 0x80]);
+        assert_eq!(written(|w| write_integer(w, 0xFFFF)), vec![INTEGER, 3, 0x00, 0xFF, 0xFF]);
+        assert_eq!(written(|w| write_integer(w, 0xFC17)), vec![INTEGER, 3, 0x00, 0xFC, 0x17]);
+
+        for value in [0_u32, 1, 0x7F, 0x80, 0xFF, 0x420, 0xFC17, 0xFFFF, u32::MAX] {
+            let bytes = written(|w| write_integer(w, value));
+            assert_eq!(read_integer(&mut Reader::new("a test", &bytes)).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn an_application_tag_is_written_and_read_by_its_number() {
+        let bytes = written(|w| {
+            write_application_tag(w, 101, 2);
+            w.bytes(b"hi");
+        });
+        assert_eq!(bytes, vec![0x7F, 101, 2, b'h', b'i']);
+        assert_eq!(expect_application(&mut Reader::new("a test", &bytes), 101).unwrap(), b"hi");
+        let err = expect_application(&mut Reader::new("a test", &bytes), 102).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "an ASN.1 application tag", .. }));
+    }
+
+    #[test]
+    fn a_boolean_and_an_octet_string_are_written_the_way_mcs_sends_them() {
+        assert_eq!(written(|w| write_boolean(w, true)), vec![BOOLEAN, 1, 0xFF]);
+        assert_eq!(written(|w| write_octet_string(w, &[1])), vec![OCTET_STRING, 1, 1]);
+        assert_eq!(
+            read_enumerated(&mut Reader::new("a test", &[ENUMERATED, 1, 0])).unwrap(),
+            0
+        );
     }
 
     /// A certificate shaped like the ones a Windows host sends: a version tag, five
