@@ -974,6 +974,12 @@ async fn active_loop(
                             layout_retry_at = Some(Instant::now());
                         }
                     }
+                    // Display Control closed: layouts wait for the next
+                    // `ResizeReady` rather than spend attempts on no channel.
+                    Event::ResizeGone => {
+                        debug!("rdp: the remote withdrew dynamic resize");
+                        resize_ready = false;
+                    }
                     // The server renegotiated the desktop — its answer to a
                     // monitor layout, and the only confirmation a layout ever
                     // gets. It also arrives unprompted when a server resizes a

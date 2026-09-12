@@ -29,6 +29,8 @@ const WHAT: &str = "a Progressive graphics PDU";
 const TILE: usize = 64;
 /// Coefficients per component of a tile.
 const COEFFS: usize = TILE * TILE;
+/// What one [`Tile`] holds: its pixels, then two coefficient arrays of `i16`.
+const TILE_BYTES: usize = COEFFS * 4 + COEFFS * 3 * 2 * 2;
 /// Bytes of `BGRX32` per tile row.
 const TILE_STRIDE: usize = TILE * 4;
 
@@ -168,13 +170,17 @@ struct Grid {
     height: u32,
     cols: usize,
     tiles: Vec<Option<Box<Tile>>>,
+    /// How many of `tiles` have been made.
+    made: usize,
+    /// How many this grid may have made, set before each PDU from the budget.
+    limit: usize,
 }
 
 impl Grid {
     fn new(width: u32, height: u32) -> Self {
         let cols = (width as usize).div_ceil(TILE);
         let rows = (height as usize).div_ceil(TILE);
-        Self { width, height, cols, tiles: (0..cols * rows).map(|_| None).collect() }
+        Self { width, height, cols, tiles: (0..cols * rows).map(|_| None).collect(), made: 0, limit: 0 }
     }
 
     fn index(&self, x: u16, y: u16) -> Option<usize> {
@@ -231,22 +237,31 @@ impl Progressive {
         self.surfaces.remove(&surface);
     }
 
+    /// The bytes every surface's tiles hold but `surface`'s.
+    pub fn held_except(&self, surface: u16) -> usize {
+        self.surfaces.iter().filter(|(id, _)| **id != surface).map(|(_, grid)| grid.made * TILE_BYTES).sum()
+    }
+
     /// Decode one PDU's worth of blocks for a surface of `width`×`height`, and hand
     /// each repainted rectangle to `paint` as `(rect, rows, stride)`: `rows` starts
     /// at the rectangle's top-left `BGRX32` pixel and each row is `stride` bytes
-    /// after the last.
+    /// after the last. Every surface's tiles together stay within `budget` bytes; a
+    /// tile past it is refused.
     pub fn decompress(
         &mut self,
         surface: u16,
         width: u32,
         height: u32,
         src: &[u8],
+        budget: usize,
         mut paint: impl FnMut(Rect16, &[u8], usize),
     ) -> Result<(), Malformed> {
+        let others = self.held_except(surface);
         let grid = self.surfaces.entry(surface).or_insert_with(|| Grid::new(width, height));
         if grid.width != width || grid.height != height {
             *grid = Grid::new(width, height);
         }
+        grid.limit = budget.saturating_sub(others) / TILE_BYTES;
         let mut r = Reader::new(WHAT, src);
         while !r.is_empty() {
             let kind = r.u16_le()?;
@@ -395,6 +410,12 @@ fn tile_header<'g>(r: &mut Reader<'_>, grid: &'g mut Grid) -> Result<(TileHeader
     let Some(index) = grid.index(x, y) else {
         return Err(refuse("a tile outside its surface", (u64::from(x) << 16) | u64::from(y)));
     };
+    if grid.tiles[index].is_none() {
+        if grid.made >= grid.limit {
+            return Err(refuse("a tile past the memory this client will hold", grid.made as u64));
+        }
+        grid.made += 1;
+    }
     let tile = grid.tiles[index].get_or_insert_with(|| Box::new(Tile::new()));
     Ok((TileHeader { quant, x, y }, index, tile))
 }
@@ -1121,7 +1142,7 @@ mod tests {
     /// Every paint call, as (rect, the pixels inside it, packed).
     fn collect(p: &mut Progressive, surface: u16, w: u32, h: u32, src: &[u8]) -> Result<Vec<(Rect16, Vec<u8>)>, Malformed> {
         let mut paints = Vec::new();
-        p.decompress(surface, w, h, src, |rect, rows, stride| {
+        p.decompress(surface, w, h, src, usize::MAX, |rect, rows, stride| {
             let mut packed = Vec::new();
             for row in 0..usize::from(rect.height()) {
                 packed.extend_from_slice(&rows[row * stride..row * stride + usize::from(rect.width()) * 4]);
@@ -1129,6 +1150,22 @@ mod tests {
             paints.push((rect, packed));
         })?;
         Ok(paints)
+    }
+
+    /// Tiles are made only within the budget, a tile already made is drawn again
+    /// without spending more of it, and a forgotten surface gives its share back.
+    #[test]
+    fn tiles_past_the_budget_are_refused() {
+        let mut p = Progressive::new();
+        let one = pdu(&[region(&[(0, 0, 128, 64)], 1, &[flat_tile(WBT_TILE_SIMPLE, 0, 0, 9)])]);
+        let two = pdu(&[region(&[(0, 0, 128, 64)], 1, &[flat_tile(WBT_TILE_SIMPLE, 1, 0, 9)])]);
+        p.decompress(1, 128, 64, &one, TILE_BYTES, |_, _, _| {}).unwrap();
+        p.decompress(1, 128, 64, &one, TILE_BYTES, |_, _, _| {}).unwrap();
+        assert!(p.decompress(1, 128, 64, &two, TILE_BYTES, |_, _, _| {}).is_err());
+        assert!(p.decompress(2, 128, 64, &one, TILE_BYTES, |_, _, _| {}).is_err());
+        assert_eq!(p.held_except(2), TILE_BYTES);
+        p.forget(1);
+        p.decompress(2, 128, 64, &one, TILE_BYTES, |_, _, _| {}).unwrap();
     }
 
     /// RLGR1 comes back as it went in: long zero runs, small and large magnitudes of

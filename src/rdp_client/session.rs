@@ -135,6 +135,9 @@ pub enum Event {
     /// `max_area` is the largest total monitor area the server will accept, in
     /// pixels; this client asks for one monitor, so it bounds `width * height`.
     ResizeReady { max_area: u64 },
+    /// The server closed Display Control after [`Event::ResizeReady`]: a resize has
+    /// nowhere to go until another `ResizeReady` arrives.
+    ResizeGone,
     /// The remote's clipboard channel is open, so the clipboard side of [`Input`]
     /// now has somewhere to go. Only ever sent on a session configured with
     /// [`Connect::clipboard`], and not at all by a server that does not implement
@@ -881,6 +884,12 @@ impl<'a> Active<'a> {
                 }
             }
         }
+        // A closed Display Control withdraws the offer, so one opened again is
+        // announced again.
+        if self.resize_ready && self.dynamics.control.is_none() {
+            self.resize_ready = false;
+            self.send(Event::ResizeGone).await;
+        }
         // Display Control is usable once its capabilities have arrived, and a size
         // asked for before then has been waiting for exactly this.
         if !self.resize_ready
@@ -1119,14 +1128,13 @@ impl<'a> Active<'a> {
         if !self.resize_ready {
             return Ok(()); // held until the channel is ready
         }
-        let Some((width, height, scale)) = self.pending_resize.take() else {
+        // Kept pending while nothing can carry it: a Display Control opened again
+        // sends it.
+        let (Some(control), Some(dynamic)) = (self.dynamics.control, self.dynamic) else {
             return Ok(());
         };
-        let Some(control) = self.dynamics.control else {
-            return Ok(()); // the server closed the channel; nothing can carry it
-        };
-        let Some(dynamic) = self.dynamic else {
-            return Ok(()); // no channel was asked for, so nothing opened one
+        let Some((width, height, scale)) = self.pending_resize.take() else {
+            return Ok(());
         };
         debug!("rdp: sending a {width}x{height} monitor layout at {scale}%");
         let layout = display::monitor_layout(width, height, scale);

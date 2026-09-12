@@ -211,6 +211,7 @@ async fn pump(
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
+            Event::ResizeGone => tally.resize_ready = false,
             Event::ClipboardReady => tally.clipboard_ready = true,
             // Asked for at once, which is what the engine does and for the same
             // reason: a copy on the remote should be in hand before anybody asks.
@@ -255,7 +256,7 @@ fn dump(session: &Session, name: &str) {
     let path = std::path::Path::new(&dir).join(format!("{name}.png"));
     let bytes = session.framebuffer().with(|frame| {
         let mut rgba = frame.pixels.clone();
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             px[3] = 0xFF;
         }
         let mut out = Vec::new();

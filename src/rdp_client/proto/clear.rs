@@ -349,7 +349,7 @@ fn subcode_raw(
     if data.len() != sw * sh * 3 {
         return Err(refuse("a raw subcodec of the wrong size", data.len() as u64));
     }
-    for (n, bgr) in data.chunks_exact(3).enumerate() {
+    for (n, bgr) in data.as_chunks::<3>().0.iter().enumerate() {
         dst.put(x0 + n % sw, y0 + n / sw, [bgr[0], bgr[1], bgr[2]]);
     }
     Ok(())
