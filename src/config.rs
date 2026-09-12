@@ -1771,7 +1771,16 @@ impl ConfigFile {
                     target.name,
                     subtype.name()
                 ),
-                (Protocol::Rdp, None) => {}
+                // The client offers only NLA, and CredSSP has nothing to log on
+                // with unless both are set.
+                (Protocol::Rdp, None) => {
+                    anyhow::ensure!(
+                        !target.username.is_empty() && !target.password.is_empty(),
+                        "target {:?} is protocol \"rdp\" and needs both username and password — \
+                         this client logs on only through NLA, which carries the two together",
+                        target.name
+                    );
+                }
             }
             if target.protocol != Protocol::Vnc {
                 anyhow::ensure!(
@@ -2441,6 +2450,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2467,7 +2478,7 @@ mod tests {
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
         assert_eq!(t.pinned_size(), None, "an unpinned size follows the client's screen");
         assert_eq!(t.default_size(), DEFAULT_SIZE);
-        assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
+        assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
         assert!(!t.resize, "dynamic resize is opt-in");
         assert!(t.egfx(), "the graphics pipeline is on unless turned off");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
@@ -2485,6 +2496,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2715,6 +2728,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2873,6 +2888,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
         "#;
         let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
@@ -2894,6 +2911,8 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
         "#;
         let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
@@ -2912,10 +2931,14 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h1"
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h2"
             "#,
         )
@@ -2931,6 +2954,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             passwd = "oops"
             "#,
@@ -2982,6 +3007,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -3005,6 +3032,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "jpeg"
@@ -3039,6 +3068,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "webp"
@@ -3066,6 +3097,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "webp"
             "#,
@@ -3085,6 +3118,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_subtype = "classify"
                 render_subtype_quality = 60
@@ -3133,6 +3168,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {keys}
                 "#
@@ -3156,6 +3193,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_subtype = "{subtype}"
                 render_subtype_quality = 90
@@ -3187,6 +3226,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "jpeg"
             render_subtype_quality = 60
@@ -3214,6 +3255,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "classify"
@@ -3244,6 +3287,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "classify"
             "#,
@@ -3261,6 +3306,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype = "classify"
@@ -3295,6 +3342,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_stream_quality = 100
@@ -3322,6 +3371,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_stream_quality = 30
@@ -3354,6 +3405,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {keys}
                 render_chroma = "444"
@@ -3369,6 +3422,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             render_stream_quality = 100
@@ -3391,6 +3446,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {render}
                 render_chroma = "auto"
@@ -3427,6 +3484,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_chroma = "auto"
             "#,
@@ -3446,6 +3505,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_stream_quality = 60
@@ -3470,6 +3531,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -3488,6 +3551,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {render}
                 render_grid_debug = true
@@ -3509,6 +3574,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -3521,6 +3588,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             render_stream_quality = 60
@@ -3542,6 +3611,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "classify"
             render_subtype_quality = 60
@@ -3567,6 +3638,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "jpeg"
             render_subtype_quality = 60
@@ -3584,6 +3657,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_subtype = "jpeg"
             "#,
@@ -3600,6 +3675,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_subtype = "jpeg"
                 render_subtype_quality = {q}
@@ -3617,6 +3694,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             render_stream_quality = 60
@@ -3633,6 +3712,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "video"
             "#,
@@ -3649,6 +3730,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_stream_quality = {q}
@@ -3674,6 +3757,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_type = "video"
                 render_subtype = "{subtype}"
@@ -3701,11 +3786,11 @@ mod tests {
             "render_motion = true\nrender_stream_quality = 30",
         ] {
             let explicit = format!(
-                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n\
+                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n\
                  render_subtype = \"png\"\n"
             );
             let implicit = format!(
-                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n"
+                "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n"
             );
             let explicit = ConfigFile::parse(&explicit).unwrap_or_else(|e| panic!("{keys}: {e:#}"));
             let implicit = ConfigFile::parse(&implicit).unwrap_or_else(|e| panic!("{keys}: {e:#}"));
@@ -3748,6 +3833,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 {keys}render_subtype_quality = 50
                 "#
@@ -3764,6 +3851,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "adaptive"
             "#,
@@ -3785,6 +3874,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_stream_quality = 10
@@ -3817,6 +3908,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype = "jpeg"
@@ -3919,7 +4012,7 @@ mod tests {
         for (what, keys, expected) in cases {
             let toml = format!(
                 "[server]\n{}\n\n[[targets]]\nname = \"t\"\nprotocol = \"rdp\"\n\
-                 host = \"192.0.2.10\"\n{keys}\n",
+                 host = \"192.0.2.10\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n",
                 site_passwd_line()
             );
             let cfg = ConfigFile::parse(&toml)
@@ -3948,6 +4041,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             "#,
@@ -3964,6 +4059,8 @@ mod tests {
                 [[targets]]
                 name = "a"
                 protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "h"
                 render_motion = true
                 render_stream_quality = {q}
@@ -3985,6 +4082,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype = "jpeg"
@@ -4004,6 +4103,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_stream_quality = 10
@@ -4018,6 +4119,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             "#,
         )
@@ -4032,6 +4135,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion_debug = true
             "#,
@@ -4049,6 +4154,8 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_motion = true
             render_subtype_quality = 60
@@ -4166,11 +4273,15 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
 
             [[targets]]
             name = "b"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "h"
             render_type = "tiles"
             render_subtype = "jpeg"
@@ -4254,6 +4365,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "192.0.2.10"
             {extra}
             "#,
@@ -4469,6 +4582,8 @@ mod tests {
             [[targets]]
             name = "pc"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             vnc_password = "hunter2"
             "#,
@@ -4477,6 +4592,21 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
+    }
+
+    /// The RDP client logs on only through NLA, so a target without both halves of
+    /// its credential could never connect and is refused up front.
+    #[test]
+    fn an_rdp_target_needs_username_and_password() {
+        for keys in ["", "username = \"u\"", "password = \"p\""] {
+            let err = ConfigFile::parse(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n",
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("username") && msg.contains("password"), "{keys}: {msg}");
+        }
     }
 
     /// The clipboard is every engine's: generic VNC's Extended Clipboard, Apple's
@@ -4493,6 +4623,8 @@ mod tests {
                 name = "box"
                 protocol = "{protocol}"
                 host = "{host}"
+                username = "u"
+                password = "p"
                 clipboard = true
                 "#,
                 site_passwd_line()
@@ -4549,6 +4681,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             audio = true
             "#,
@@ -4594,6 +4728,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             egfx = false
             "#,
@@ -4680,7 +4816,7 @@ mod tests {
         // Without the key, which RDP is refused until its client carries sound —
         // the format is the protocol's, and is what that client will be asked for.
         let rdp = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\n",
+            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n",
             site_passwd_line()
         ))
         .unwrap()
@@ -4748,6 +4884,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             audio_codec = "pcm"
             "#,
@@ -4769,6 +4907,8 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             audio = true
             audio_codec = "mp3"
@@ -4811,6 +4951,8 @@ mod tests {
             [[targets]]
             name = "t"
             protocol = "rdp"
+            username = "u"
+            password = "p"
             host = "10.0.0.5"
             {body}
             "#,

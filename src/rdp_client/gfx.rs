@@ -348,7 +348,8 @@ impl Graphics {
                     .iter()
                     .filter(|(id, _)| **id != surface)
                     .map(|(_, held)| held.pixels.len())
-                    .sum();
+                    .sum::<usize>()
+                    + self.progressive.as_ref().map_or(0, |progressive| progressive.held_except(surface));
                 anyhow::ensure!(
                     held + bytes <= MAX_DESKTOP_BYTES,
                     "the host created a {width}x{height} graphics surface, which with the {} MiB \
@@ -510,6 +511,8 @@ impl Graphics {
     /// A Progressive PDU for a surface: its blocks carry their own rectangles, in
     /// surface coordinates, and the decoder keeps the tiles between PDUs.
     fn draw_progressive(&mut self, surface: u16, format: u8, data: &[u8]) {
+        // The tiles share the surfaces' budget: what the surfaces hold is not theirs.
+        let surfaces: usize = self.surfaces.values().map(|held| held.pixels.len()).sum();
         let Some(found) = self.surfaces.get_mut(&surface) else {
             warn!("rdp: the host drew into graphics surface {surface}, which does not exist");
             return;
@@ -519,7 +522,8 @@ impl Graphics {
             return;
         }
         let progressive = self.progressive.get_or_insert_with(|| Box::new(progressive::Progressive::new()));
-        let outcome = progressive.decompress(surface, found.width, found.height, data, |rect, rows, stride| {
+        let budget = MAX_DESKTOP_BYTES.saturating_sub(surfaces);
+        let outcome = progressive.decompress(surface, found.width, found.height, data, budget, |rect, rows, stride| {
             found.write_rows(rect, rows, stride);
         });
         if let Err(e) = outcome {
@@ -950,7 +954,7 @@ mod tests {
         let expected = { let g = grey(9); [g[2], g[1], g[0], 0] };
         framebuffer.with(|frame| {
             for row in frame.rows(painted) {
-                for px in row.chunks_exact(4) {
+                for px in row.as_chunks::<4>().0 {
                     assert_eq!(px, &expected);
                 }
             }
@@ -980,7 +984,7 @@ mod tests {
         assert_eq!(updates, vec![Update::Paint(painted), Update::Frame { id: 1, decoded: 1 }]);
         framebuffer.with(|frame| {
             for row in frame.rows(painted) {
-                for px in row.chunks_exact(4) {
+                for px in row.as_chunks::<4>().0 {
                     assert_eq!(px, &[10, 20, 30, 0]);
                 }
             }
