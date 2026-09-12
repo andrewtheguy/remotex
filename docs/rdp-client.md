@@ -24,10 +24,9 @@ alone would have produced a client that connects and then quietly does nothing.
 
 ## What it carries
 
-The desktop, the pointer, keyboard, mouse, resize and the clipboard. No sound and
-no touch: `audio = true` is refused on an rdp target at config parse, and touch is
-announced only by a host that opens MS-RDPEI, which this client never asks for.
-What each of the two would take is in [`roadmap.md`](roadmap.md).
+The desktop, the pointer, keyboard, mouse, resize, the clipboard and sound. No
+touch: it is announced only by a host that opens MS-RDPEI, which this client never
+asks for. What it would take is in [`roadmap.md`](roadmap.md).
 
 ## The connection sequence
 
@@ -71,9 +70,10 @@ a session that has gone out of scope has really stopped.
 
 ## Static virtual channels
 
-Two are asked for, each by a key: `drdynvc` for `resize = true`, which is the
-transport Display Control rides on, and `cliprdr` for `clipboard = true`. A
-session that wants neither asks for no channel at all.
+Each is asked for by a key: `drdynvc` for `resize = true` or `egfx = true`, which
+is the transport Display Control and the graphics pipeline ride on, `cliprdr` for
+`clipboard = true`, and `rdpsnd` with `rdpdr` for `audio = true` — see
+[Sound](#sound-ms-rdpea). A session that wants none asks for no channel at all.
 
 `SC_NET` numbers the channels in the order `CS_NET` named them and says nothing
 else about which is which, so `connect.rs` pairs the numbers back up with the
@@ -294,12 +294,44 @@ chords open the remote's Run dialog, paste, copy the paste back and close it. Wh
 comes back is a `clipboard` message the gateway pushed unprompted, carrying the
 text that went out — the Fetch, the push, the paste and the copy, in one run.
 
+## Sound (MS-RDPEA)
+
+`audio = true` asks for two more static channels, `rdpsnd` and `rdpdr`, and leaves
+`INFO_NOAUDIOPLAYBACK` out of the Client Info PDU. The key absent or false sets the
+flag and names neither channel, so the host's own audio settings are not touched
+and the session has no audio device to redirect. That is the whole of the choice:
+redirect, or leave alone.
+
+`rdpdr` is device redirection with no devices in it (`proto/rdpdr.rs`). A Windows
+host redirects no sound to a client that did not name it — measured here as a
+session numbered an `rdpsnd` channel the host never spoke on, and recorded in
+FreeRDP as "rdpsnd requires rdpdr to be registered" — so the client walks the
+channel's opening handshake, announce, name and capabilities, and there is nothing
+after it: no device list to announce, no I/O request that could arrive.
+
+A current Windows host carries the conversation on a dynamic channel,
+`AUDIO_PLAYBACK_DVC`, rather than the static one, and the client accepts it when
+audio was asked for. `proto/rdpsnd.rs` is the conversation, fed whole PDUs from
+whichever transport they arrive on. The host speaks first at every step: it sends
+its format list, this end answers with 44.1 kHz 16-bit stereo PCM alone and asks
+for high quality; the host sends a training probe, echoed back; then Wave2
+buffers, each confirmed by block number and each handed to the engine's
+`AudioSink` — from there to the same `AudioBridge` every other engine feeds, on the
+client's thread, never through the event queue. Close clears the format.
+
+The measured part: a Windows host negotiates nothing until something plays. A
+session opened onto a quiet desktop shows the dynamic channel opened and not a byte
+on it, for as long as the desktop stays quiet, and a probe that asserts on the
+format list fails there through no fault in the client. `tests/rdp_client_probe.rs`
+asserts the negotiation only under `REMOTEX_UAT_AUDIO=1`, which is the run's word
+that a sound is playing on the remote; without it the counts are printed.
+
 ## What a host will not tell you
 
-Three of the decisions above are measured, and they share a shape: the host does
+Four of the decisions above are measured, and they share a shape: the host does
 not refuse, it simply stops answering. `CHANNEL_FLAG_SHOW_PROTOCOL` on the wrong
-channel, a monitor layout sent too early, and a Format Data Request left
-unanswered all look from here exactly like a working session in which nothing
-happens. That is why the probes assert on what the *host* does — that it opens a
+channel, a monitor layout sent too early, a Format Data Request left unanswered,
+and `rdpsnd` named without `rdpdr` all look from here exactly like a working
+session in which nothing happens. That is why the probes assert on what the *host* does — that it opens a
 channel, takes a format list, rebuilds a desktop at the size that was asked for —
 rather than on what this client sent.

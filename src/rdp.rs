@@ -29,7 +29,7 @@ use log::{debug, info, warn};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
-use crate::audio::AudioBridge;
+use crate::audio::{AudioBridge, PcmFormat};
 use crate::config::{RenderPlan, TargetConfig};
 use crate::copies;
 use crate::encode::TileSink;
@@ -39,8 +39,10 @@ use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay,
     MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED,
 };
+use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
-    self as client, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton, Session,
+    self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
+    Session,
 };
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
 use crate::tiles::{self, Rect, Shadow};
@@ -136,9 +138,9 @@ fn connect_budget() -> Duration {
 /// would put the browser back on the picker with nothing to explain why. The body has
 /// several early returns; this has one exit, and [`TileSink::finish`] is on it.
 ///
-/// `audio` is `Some` exactly for a target that opted in. The RDP client opens no sound
-/// channel, so such a session is silent, and the line below says so once rather
-/// than leaving an empty audio socket to explain itself.
+/// `audio` is `Some` exactly for a target that opted in: the RDP client then asks the
+/// host to redirect its sound and hands every buffer to the bridge from its own
+/// thread — see [`Sound`] — so the pictures' event queue below never carries a sample.
 ///
 /// The event channel from the RDP client is bounded, and a slow consumer makes the
 /// rectangles coarser rather than the queue longer: while it is full the client
@@ -153,21 +155,43 @@ pub async fn run(
     audio: Option<Arc<AudioBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    if audio.is_some() {
-        warn!("rdp: this engine carries no sound; the session will be silent");
-    }
     let sink = TileSink::new("rdp", frame_tx, plan, feedback);
-    session(config, display, input_rx, &sink).await;
+    session(config, display, input_rx, audio, &sink).await;
     sink.finish().await;
+}
+
+/// The remote's sound, from the RDP client's thread into the bridge the audio socket
+/// reads. Every call is a non-blocking send: the bridge drops its oldest buffer
+/// rather than wait, the same bargain the damage path makes and for the same
+/// reason — a dropped buffer is a hole, a buffer that waits is a stall in the desktop.
+struct Sound(Arc<AudioBridge>);
+
+impl AudioSink for Sound {
+    fn negotiated(&self, format: rdpsnd::Format) {
+        self.0.publish_format(PcmFormat {
+            channels: format.channels,
+            sample_rate: format.sample_rate,
+            bits_per_sample: format.bits_per_sample,
+        });
+    }
+
+    fn wave(&self, samples: Vec<u8>) {
+        self.0.wave(samples);
+    }
+
+    fn closed(&self) {
+        self.0.clear_format();
+    }
 }
 
 async fn session(
     config: TargetConfig,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
+    audio: Option<Arc<AudioBridge>>,
     sink: &TileSink,
 ) {
-    let (session, mut events) = Session::start(connect_config(&config, display));
+    let (session, mut events) = Session::start(connect_config(&config, display, audio));
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
         return;
@@ -281,7 +305,7 @@ async fn await_desktop(
 }
 
 /// Everything the RDP client needs to open this target's session.
-fn connect_config(config: &TargetConfig, display: Option<HostDisplay>) -> Connect {
+fn connect_config(config: &TargetConfig, display: Option<HostDisplay>, audio: Option<Arc<AudioBridge>>) -> Connect {
     // The opening size, in points at 1x: the pinned config size, else the full
     // resolution of the client's own screen — the same rule every engine
     // resolves. The density this session ends up at remains the client's to
@@ -304,6 +328,7 @@ fn connect_config(config: &TargetConfig, display: Option<HostDisplay>) -> Connec
         resize: config.resize,
         egfx: config.egfx(),
         clipboard: config.clipboard,
+        audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
     }
 }
 

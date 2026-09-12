@@ -45,16 +45,26 @@
 //! and a client that gets its chunk flags wrong loses the *other* channel rather than
 //! this one.
 //!
+//! ## Sound
+//!
+//! The session asks for sound redirection and counts what arrives. A Windows host
+//! negotiates nothing until something plays over there, so the negotiation is asserted
+//! only under [`AUDIO_ENV`], set when a sound is playing on the remote; otherwise the
+//! counts are printed and a quiet host is not a failure.
+//!
 //! ```sh
-//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> \
+//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> REMOTEX_UAT_AUDIO=1 \
 //!   cargo test --test rdp_client_probe -- --ignored --nocapture --test-threads 1
 //! ```
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::{Connect, Event, Input, Session};
+use remotex::rdp_client::proto::rdpsnd;
+use remotex::rdp_client::{AudioSink, Connect, Event, Input, Session};
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use tokio::sync::mpsc::Receiver;
 
@@ -64,6 +74,11 @@ const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 /// Whether to offer the graphics pipeline: anything but `0` or `false` does, and so
 /// does leaving it unset.
 const EGFX_ENV: &str = "REMOTEX_UAT_EGFX";
+
+/// Whether a sound is playing on the remote for this run — set it to `1` when one is.
+/// A Windows host sends its format list only once something plays, so the
+/// negotiation is asserted only when this says it can be, and printed otherwise.
+const AUDIO_ENV: &str = "REMOTEX_UAT_AUDIO";
 
 /// The opening size, and the one each case asks to move to. Both even, both well
 /// inside what any host accepts.
@@ -95,13 +110,49 @@ fn egfx() -> bool {
     !matches!(std::env::var(EGFX_ENV).as_deref(), Ok("0") | Ok("false"))
 }
 
-fn connect() -> (Session, Receiver<Event>) {
+/// Whether this run was told a sound is playing on the remote — see [`AUDIO_ENV`].
+fn audio_playing() -> bool {
+    matches!(std::env::var(AUDIO_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"))
+}
+
+/// Where the session's sound goes: counted, never played. What the host redirects
+/// depends on what happens to be playing over there, so the numbers are printed
+/// rather than asserted; the negotiation is asserted when [`AUDIO_ENV`] says
+/// something is playing, which is the one condition under which a host does it.
+#[derive(Default, Debug)]
+struct Ear {
+    negotiated: AtomicBool,
+    buffers: AtomicU64,
+    bytes: AtomicU64,
+    closes: AtomicU64,
+}
+
+struct Listen(Arc<Ear>);
+
+impl AudioSink for Listen {
+    fn negotiated(&self, format: rdpsnd::Format) {
+        assert_eq!(format, rdpsnd::CD_QUALITY);
+        self.0.negotiated.store(true, Ordering::Relaxed);
+    }
+
+    fn wave(&self, samples: Vec<u8>) {
+        self.0.buffers.fetch_add(1, Ordering::Relaxed);
+        self.0.bytes.fetch_add(samples.len() as u64, Ordering::Relaxed);
+    }
+
+    fn closed(&self) {
+        self.0.closes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn connect() -> (Session, Receiver<Event>, Arc<Ear>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
     let target = common::uat_target(&name);
     println!("rdp_client_probe: {name} ({}:{}), egfx {}", target.host, target.port, egfx());
-    Session::start(Connect {
+    let ear = Arc::new(Ear::default());
+    let (session, events) = Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
         username: target.username.clone(),
@@ -112,7 +163,9 @@ fn connect() -> (Session, Receiver<Event>) {
         resize: true,
         egfx: egfx(),
         clipboard: true,
-    })
+        audio: Some(Box::new(Listen(Arc::clone(&ear)))),
+    });
+    (session, events, ear)
 }
 
 /// What a stretch of the session did.
@@ -255,7 +308,7 @@ async fn resize_to(
 
 async fn case() {
     common::init_logging();
-    let (session, mut events) = connect();
+    let (session, mut events, ear) = connect();
 
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
@@ -350,6 +403,16 @@ async fn case() {
     for format in &tally.pastes[before..] {
         assert_eq!(*format, CF_UNICODETEXT, "the host asked for a format never offered");
     }
+    println!("  sound: {ear:?}");
+    if audio_playing() {
+        assert!(
+            ear.negotiated.load(Ordering::Relaxed),
+            "the host never negotiated sound redirection, though {AUDIO_ENV} says a sound is \
+             playing on the remote"
+        );
+    } else if !ear.negotiated.load(Ordering::Relaxed) {
+        println!("  (no sound negotiated: a quiet host sends no format list; set {AUDIO_ENV}=1 with a sound playing to assert it)");
+    }
 
     drop(session);
     // The drop disconnected and joined the thread, so its last word is here.
@@ -397,7 +460,7 @@ fn chord(input: &Input, modifiers: &[(u8, bool)], key: u8, extended: bool) {
 ///   reads, and the bytes that come back are the bytes that went out.
 async fn round_trip() {
     common::init_logging();
-    let (session, mut events) = connect();
+    let (session, mut events, _ear) = connect();
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
         .expect("no first event within 60s")

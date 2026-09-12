@@ -1623,16 +1623,6 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
-            // Sound is what this gateway's own RDP client does not carry. The key
-            // turns an audio socket on in the browser, so accepting it on a target
-            // that can never answer it builds a control that does nothing. Refused
-            // where it would be inert, the same rule as every other key above.
-            anyhow::ensure!(
-                !target.audio || target.protocol != Protocol::Rdp,
-                "target {:?} asks for audio, which this gateway's RDP client does not carry \
-                 yet. Remove the key.",
-                target.name
-            );
             // Audio is carried by three paths and refused elsewhere rather than
             // ignored: MS-RDPEA on RDP, the QEMU Audio extension on a generic VNC
             // target ([`crate::vnc_qemu_audio`]), and Apple's media stream on High
@@ -4522,7 +4512,7 @@ mod tests {
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]
-    fn audio_belongs_to_generic_vnc_and_is_refused_on_rdp() {
+    fn audio_belongs_to_rdp_and_generic_vnc() {
         // A plain `vnc` target asks a generic server for the QEMU Audio
         // extension, and gets silence from one that does not speak it. That is
         // discovery, not a config error.
@@ -4548,10 +4538,10 @@ mod tests {
             crate::vnc_qemu_audio::SOURCE_FORMAT
         );
 
-        // RDP's own audio channel is not in this gateway's client yet, and a key
-        // that would open a silent socket in the browser is a config error rather
-        // than a preference.
-        let err = ConfigFile::parse(&format!(
+        // An rdp target negotiates MS-RDPEA when it connects, and what the host
+        // redirects is CD-quality PCM, which is the source format the encoder is
+        // built from.
+        let config = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
@@ -4564,10 +4554,11 @@ mod tests {
             "#,
             site_passwd_line()
         ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("audio"), "{rendered}");
-        assert!(rendered.contains("does not carry"), "{rendered}");
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].audio);
+        assert_eq!(config.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key

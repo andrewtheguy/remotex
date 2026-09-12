@@ -140,6 +140,24 @@ impl Channel {
         options: 0x8000_0000 | 0x4000_0000 | 0x0080_0000 | SHOW_PROTOCOL,
     };
 
+    /// Sound redirection's static channel (MS-RDPEA). A current Windows host carries
+    /// the conversation on a dynamic channel instead, but opens that one only for a
+    /// client that named this one: naming it is what asks for the sound at all.
+    pub const AUDIO: Self = Self {
+        name: "rdpsnd",
+        // Initialized, and encrypted at the server's discretion — FreeRDP's own two.
+        options: 0x8000_0000 | 0x4000_0000,
+    };
+
+    /// Device redirection (MS-RDPEFS), named beside [`Channel::AUDIO`] and for its
+    /// sake alone: a Windows host redirects no sound to a client without it, and
+    /// nothing is redirected over it — see [`super::rdpdr`].
+    pub const DEVICES: Self = Self {
+        name: "rdpdr",
+        // Initialized, compressed and encrypted at the server's discretion.
+        options: 0x8000_0000 | 0x4000_0000 | 0x0080_0000,
+    };
+
     /// What every chunk of this channel's own PDUs wears beyond the first and last
     /// markers: [`channel::SHOW_PROTOCOL`] for a channel whose options asked for it,
     /// and nothing for one that did not.

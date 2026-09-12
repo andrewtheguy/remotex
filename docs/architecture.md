@@ -905,10 +905,29 @@ kbps is well clear of audible loss on this material. Guacamole carries desktop
 audio this way and only this way (its single encoder emits
 `audio/L16;rate=44100,channels=2`), which is where the option came from.
 
-The RDP engine carries no sound. Its Client Info PDU says `INFO_NOAUDIOPLAYBACK`,
-so the session has no audio device at all, and `audio = true` is refused on an rdp
-target at config parse rather than opening a socket that would never carry a
-sample.
+The RDP engine carries sound over MS-RDPEA (`rdp_client/proto/rdpsnd.rs`).
+`audio = true` names the `rdpsnd` and `rdpdr` static channels and leaves
+`INFO_NOAUDIOPLAYBACK` out of the Client Info PDU; the host opens
+`AUDIO_PLAYBACK_DVC`, negotiates 44.1 kHz 16-bit stereo PCM the moment something
+plays, and every Wave2 buffer reaches `AudioBridge` from the client's own thread,
+never through the event queue. `audio` absent or false sets the flag and names
+neither channel, so the host's audio settings are left exactly as they were and the
+session has no audio device at all.
+
+Two rules of the Windows host, both measured and neither in the specification, and
+each has been rediscovered the hard way more than once:
+
+- **A quiet host negotiates nothing.** Windows sends its format list only once
+  something is playing on the remote. Until then the sound channel is open and
+  silent, the gateway logs "arming audio, the remote's audio channel is not up
+  yet", and the browser's Audio button has nothing to play. A session with no
+  sound is not, by that alone, a session with anything wrong; start a sound on the
+  remote before deciding the client is broken; `tests/rdp_client_probe.rs` asserts
+  the negotiation only under `REMOTEX_UAT_AUDIO=1`, which says one is playing.
+- **No `rdpdr`, no sound.** A host redirects no audio to a client that named
+  `rdpsnd` without also naming the device-redirection channel, even with no device
+  to redirect. `rdp_client/proto/rdpdr.rs` is that channel's opening handshake and
+  nothing after it, and it exists for this reason alone.
 
 The queue never blocks an engine's read loop. `AudioBridge` retains sixteen remote
 wave buffers (about three seconds at the measured Windows cadence) and drops the
@@ -1115,14 +1134,14 @@ compares those rectangles with a shadow of pixels already sent, splits the
 remainder into bands, and encodes off the event loop. Input is mapped from DOM
 codes to scancodes and queued to the client's thread as fast-path events.
 
-The client carries the desktop, the pointer, keyboard, mouse, resize and the
-clipboard, and nothing else: no sound and no touch. `audio = true` is refused on an
-rdp target at config parse, and touch is announced only by a host that opens
-MS-RDPEI, which this client never asks for. What each of the two would take is in
+The client carries the desktop, the pointer, keyboard, mouse, resize, the
+clipboard and sound, and no touch: touch is announced only by a host that opens
+MS-RDPEI, which this client never asks for. What it would take is in
 [`roadmap.md`](roadmap.md).
 
-Two static virtual channels are asked for, each by a key: `drdynvc` for
-`resize = true` or the default `egfx = true`, and `cliprdr` for `clipboard = true`.
+Static virtual channels are asked for by key: `drdynvc` for `resize = true` or the
+default `egfx = true`, `cliprdr` for `clipboard = true`, and `rdpsnd` with `rdpdr`
+for `audio = true`.
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
@@ -1138,7 +1157,7 @@ On either path the pointer travels as its own shape rather than in the framebuff
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
 connection sequence, the channels and the chunk flags a Windows host silently
-requires, the codec and damage path, resize and density, and the clipboard.
+requires, the codec and damage path, resize and density, the clipboard, and sound.
 
 [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 

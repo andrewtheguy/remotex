@@ -50,6 +50,12 @@ fn wanted_channels(config: &Connect) -> Vec<Channel> {
     if config.clipboard {
         channels.push(Channel::CLIPBOARD);
     }
+    if config.audio.is_some() {
+        // Both, because a Windows host redirects sound only to a client that named
+        // device redirection too — see `proto/rdpdr.rs`.
+        channels.push(Channel::AUDIO);
+        channels.push(Channel::DEVICES);
+    }
     channels
 }
 
@@ -202,6 +208,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         password: &config.password,
         domain: config.domain.as_deref(),
         address: client_address,
+        audio: config.audio.is_some(),
     }
     .encode()?;
     send(&mut writer, user, io_channel, &logon).await.context("sending the Client Info PDU")?;

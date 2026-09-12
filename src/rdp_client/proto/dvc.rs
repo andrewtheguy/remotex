@@ -235,8 +235,8 @@ pub fn close(channel: u32) -> Vec<u8> {
 }
 
 /// A payload for one channel. Refused rather than split if it does not fit one PDU:
-/// the only thing this client sends on a dynamic channel is a monitor layout, which
-/// is sixty-four bytes.
+/// what this client sends on a dynamic channel is a monitor layout, sixty-four
+/// bytes, and the sound conversation's replies, each shorter than that.
 pub fn data(channel: u32, payload: &[u8]) -> Result<Vec<u8>, TooLong> {
     if payload.len() > MAX_DATA {
         return Err(TooLong(payload.len()));

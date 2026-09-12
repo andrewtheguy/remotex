@@ -31,6 +31,10 @@
 //! - [`gfx`] — the graphics pipeline's own PDUs: surfaces, frames, and the codecs
 //!   that fill them.
 //! - [`cliprdr`] — the clipboard, on a static channel of its own.
+//! - [`rdpsnd`] — the remote's sound, as PCM, on a static channel or the dynamic one
+//!   a current Windows host prefers.
+//! - [`rdpdr`] — device redirection with no devices in it, because a Windows host
+//!   redirects no sound to a client that did not name it.
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
 //! - [`info`] — the logon: who the session belongs to and what it should look like.
@@ -91,6 +95,8 @@ pub mod per;
 pub mod planar;
 pub mod pointer;
 pub mod progressive;
+pub mod rdpdr;
+pub mod rdpsnd;
 pub mod share;
 pub mod tls;
 pub mod wire;

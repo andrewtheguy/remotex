@@ -10,27 +10,27 @@ is the only place they can be read in context.
 
 ### What the RDP client does not carry yet
 
-The client carries the desktop, the pointer, keyboard, mouse, resize and the
-clipboard. Sound and touch were both carried by the engines before it, and neither
-was carried *here*: sound came from a library's channel client — IronRDP's
-`rdpsnd`, then FreeRDP's — and touch from FreeRDP's `rdpei` plugin. `proto` is the
-gateway's own now, so each is a channel to write rather than a dependency to
-configure, and each is refused where it would otherwise build a control with
-nothing behind it: `audio = true` at config parse, touch by having no key at all —
-whether touch exists is the host's answer, and this client never asks.
+The client carries the desktop, the pointer, keyboard, mouse, resize, the
+clipboard and sound. Touch was carried by the engine before it, from FreeRDP's
+`rdpei` plugin, and is not carried *here*: `proto` is the gateway's own now, so it
+is a channel to write rather than a dependency to configure, and it is refused
+where it would otherwise build a control with nothing behind it, by having no key
+at all — whether touch exists is the host's answer, and this client never asks.
 
-Everything on either side of both channels is already written and shipped. The
-browser's touch passthrough layer (`touchPassthrough.ts`), the `/ws/audio` socket,
-the audio queue and both its encoders are protocol-agnostic; so are
-`ServerMsg::TouchReady` and `ClientMsg::Touch`. Nothing below the wire needs
-designing for either of them.
+Everything on either side of the channel is already written and shipped: the
+browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
+and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
+designing for it.
 
-The clipboard was the third of these and is done: MS-RDPECLIP is
-`rdp_client/proto/cliprdr.rs`, the channel plumbing the two static channels needed
-is in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on
+The clipboard and sound were the other two of these and are done. MS-RDPECLIP is
+`rdp_client/proto/cliprdr.rs`, the channel plumbing the static channels needed is
+in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on
 Ready, ask the moment the remote's format list arrives, answer every paste request
 including with nothing, retry a `CB_RESPONSE_FAIL` on a bounded ladder — is
-`ClipboardState` in `src/rdp.rs`. What it took is recorded in
+`ClipboardState` in `src/rdp.rs`. MS-RDPEA is `rdp_client/proto/rdpsnd.rs`, with
+the device-redirection handshake a Windows host requires beside it in
+`proto/rdpdr.rs`, and its buffers reach the same `AudioBridge` every other engine
+feeds. What each took is recorded in
 [The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
 
 EGFX is in, measured as [the plan](rdp-egfx-plan.md) records; what is left of it
@@ -41,10 +41,9 @@ restored.
 
 #### Touch (MS-RDPEI)
 
-The smallest, because MS-RDPEI is a *dynamic* channel and that transport is
-already here: `proto/dvc.rs` carries Display Control over `drdynvc`, and the
-session answers every Create Request it does not want with `NO_LISTENER`
-(`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
+MS-RDPEI is a *dynamic* channel and that transport is already here:
+`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
+every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
 touch event's contact frames — and the contact state machine are the work.
 
 The rest is waiting for it. A host that opens the channel becomes
@@ -55,34 +54,6 @@ can report one. Held contacts must be released when a client goes away, or the
 remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
 xrdp never does, which is the reason this stays an always-offered capability
 rather than a key.
-
-#### Sound (MS-RDPEA)
-
-The larger of the two, and the least of a shared story with the other. The
-server chooses between two transports, so both have to exist: the static `rdpsnd`
-channel, which also wants `rdpdr` registered beside it, and the dynamic
-`AUDIO_PLAYBACK_DVC`. Over them: version and the server's format list, the client's
-answer, training and its confirm, Wave and Wave2 with their confirms, quality mode,
-volume and pitch. Both earlier engines took these PDUs from a library, so all of it
-is new here even though `src/rdp_audio.rs` has twice been written.
-
-What does not change is everything downstream. One format is advertised —
-`PCM_CD_QUALITY`, 44.1 kHz 16-bit stereo — and `AudioBridge`, the Opus and
-passthrough encoders, the socket and the claim it is bound to stay exactly as the
-VNC engines leave them. Two rules come with the bridge: a wave buffer must never
-block the decode loop (`AudioBridge::wave` drops its oldest rather than waiting,
-the same bargain the damage path makes), and the Client Info PDU has to stop saying
-`INFO_NOAUDIOPLAYBACK` — with that flag set the session has no audio device to
-redirect at all.
-
-#### The channel plumbing the clipboard already paid for
-
-`rdpsnd`'s static transport needs a third *static* virtual channel, and nothing
-about that is new work now: `CS_NET` names every channel a session asked for,
-`connect.rs` pairs the server's numbers back up with those names, and
-`proto/channel.rs` splits an outbound PDU of any length and reassembles an inbound
-one. A third channel is a name, a reassembler and a dispatch arm. Touch needs none
-of this — MS-RDPEI is a dynamic channel.
 
 ### Render dial — what the region streams do not decide yet
 

@@ -23,7 +23,7 @@ use super::proto::frame::Frames;
 use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
-use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, tls};
+use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
 
 // ------------------------------------------------------------------ configuration
@@ -63,6 +63,30 @@ pub struct Connect {
     /// A session that did not ask for the channel reports none of the clipboard
     /// events and drops every clipboard command.
     pub clipboard: bool,
+    /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
+    ///
+    /// Asked for, the client names the `rdpsnd` channel, takes the dynamic channel a
+    /// current Windows host opens in its place, agrees to 44.1 kHz 16-bit stereo PCM
+    /// and hands every buffer to the sink from the session's own thread. `None`
+    /// names no channel and tells the host in the logon that there is nothing here
+    /// to play sound, so it leaves the sound where it is.
+    pub audio: Option<Box<dyn AudioSink>>,
+}
+
+/// Where a session's redirected sound goes.
+///
+/// Called on the session's thread, in step with the desktop being decoded, so
+/// nothing here may wait: a buffer the sink cannot take is the sink's to drop, and
+/// never held against the decoder.
+pub trait AudioSink: Send {
+    /// The host agreed to redirect its sound in this format. Said once per
+    /// negotiation, which a host may repeat.
+    fn negotiated(&self, format: rdpsnd::Format);
+    /// One buffer of interleaved samples in the negotiated format.
+    fn wave(&self, samples: Vec<u8>);
+    /// The host has nothing playing, or closed the channel. Not the end of the
+    /// sound: the next buffer resumes it without a new negotiation.
+    fn closed(&self);
 }
 
 // ------------------------------------------------------------------ events
@@ -344,7 +368,9 @@ async fn run(
     framebuffer.resize(width, height);
     // The first event of the session, so there is room for it.
     let _ = events.send(Event::Connected { width, height }).await;
-    Active::new(connected, &config, framebuffer, events, stop).run(commands).await
+    let mut config = config;
+    let audio = config.audio.take();
+    Active::new(connected, &config, audio, framebuffer, events, stop).run(commands).await
 }
 
 /// Resolves once the caller has asked this session to stop, or dropped every
@@ -415,6 +441,16 @@ struct Active<'a> {
     /// The static virtual channel the clipboard travels on, for a session that asked
     /// for one.
     clipboard: Option<Joined>,
+    /// The static sound channel, for a session that asked for sound. A current host
+    /// opens a dynamic channel for the conversation instead — [`Dynamics::sound`] —
+    /// but only for a client that named this one.
+    audio: Option<Joined>,
+    /// The sound conversation and where its buffers go, for a session that asked.
+    sound: Option<Sound>,
+    /// Device redirection's channel, named for the sound's sake alone, and its
+    /// handshake — see [`rdpdr`].
+    devices: Option<Joined>,
+    rdpdr: rdpdr::Rdpdr,
     share: Share,
 
     /// The pieces of a fast-path update that arrived cut up.
@@ -433,6 +469,10 @@ struct Active<'a> {
     /// of two PDUs never interleave on one channel, and these are a separate
     /// sequence from the dynamic channel's.
     clip_chunks: channel::Reassembly,
+    /// The static sound channel's own chunks, for the same reason, and device
+    /// redirection's.
+    audio_chunks: channel::Reassembly,
+    device_chunks: channel::Reassembly,
     /// The dynamic channels this client takes, by the numbers the server gave them.
     dynamics: Dynamics,
     /// The graphics pipeline's surfaces and decompressor, for a session that offered
@@ -481,18 +521,62 @@ struct Dynamics {
     caps: Option<display::Capabilities>,
     /// The Graphics channel, once the server has opened it.
     graphics: Option<u32>,
+    /// Whether sound is wanted at all — [`Connect::audio`].
+    audio: bool,
+    /// The sound channel, once the server has opened it.
+    sound: Option<u32>,
+}
+
+/// The sound conversation, and where its buffers go.
+struct Sound {
+    proto: rdpsnd::Rdpsnd,
+    sink: Box<dyn AudioSink>,
+}
+
+impl Sound {
+    /// One whole PDU from either transport: what it meant goes to the sink at once,
+    /// and what it earned goes back to the caller to send on the channel it came in
+    /// on.
+    fn push(&mut self, pdu: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let rdpsnd::Turn { replies, output } = self.proto.push(pdu)?;
+        match output {
+            rdpsnd::Output::Negotiated => {
+                let format = rdpsnd::CD_QUALITY;
+                info!(
+                    "rdp: the host will redirect its sound as {} Hz {}-bit PCM, {} channels",
+                    format.sample_rate, format.bits_per_sample, format.channels
+                );
+                self.sink.negotiated(format);
+            }
+            rdpsnd::Output::NoFormat { offered } => warn!(
+                "rdp: the host offers no 44.1 kHz 16-bit stereo PCM among its {offered} sound \
+                 formats, so it will redirect nothing"
+            ),
+            rdpsnd::Output::Wave(samples) => self.sink.wave(samples),
+            rdpsnd::Output::Closed => {
+                debug!("rdp: the host closed its sound: nothing is playing");
+                self.sink.closed();
+            }
+            rdpsnd::Output::Nothing => {}
+        }
+        Ok(replies)
+    }
 }
 
 impl<'a> Active<'a> {
     fn new(
         connected: Connected,
         config: &Connect,
+        sink: Option<Box<dyn AudioSink>>,
         framebuffer: &'a Framebuffer,
         events: &'a mpsc::Sender<Event>,
         stop: watch::Receiver<bool>,
     ) -> Self {
         let dynamic = connected.channel(Channel::DYNAMIC);
         let clipboard = connected.channel(Channel::CLIPBOARD);
+        let audio = connected.channel(Channel::AUDIO);
+        let devices = connected.channel(Channel::DEVICES);
+        let wants_audio = sink.is_some();
         let Connected { frames, writer, user, io_channel, demand, deferred, .. } = connected;
         Self {
             frames,
@@ -502,6 +586,10 @@ impl<'a> Active<'a> {
             io_channel,
             dynamic,
             clipboard,
+            audio,
+            sound: sink.map(|sink| Sound { proto: rdpsnd::Rdpsnd::new(), sink }),
+            devices,
+            rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
             fragments: Fragments::new(demand.multifragment),
             scratch: bitmap::Scratch::default(),
@@ -510,7 +598,14 @@ impl<'a> Active<'a> {
             chunks: channel::Reassembly::new(),
             incoming: dvc::Incoming::new(),
             clip_chunks: channel::Reassembly::new(),
-            dynamics: Dynamics { resize: config.resize, egfx: config.egfx, ..Dynamics::default() },
+            audio_chunks: channel::Reassembly::new(),
+            device_chunks: channel::Reassembly::new(),
+            dynamics: Dynamics {
+                resize: config.resize,
+                egfx: config.egfx,
+                audio: wants_audio,
+                ..Dynamics::default()
+            },
             graphics: config.egfx.then(Graphics::new),
             resize_ready: false,
             pending_resize: None,
@@ -619,6 +714,12 @@ impl<'a> Active<'a> {
         if self.clipboard.is_some_and(|clipboard| clipboard.number == channel) {
             return self.on_clipboard(payload).await;
         }
+        if self.audio.is_some_and(|audio| audio.number == channel) {
+            return self.on_audio(payload).await;
+        }
+        if self.devices.is_some_and(|devices| devices.number == channel) {
+            return self.on_devices(payload).await;
+        }
         // A channel this client neither asked for nor joined. A server does not send
         // one, and a PDU on one is nothing this session can act on.
         debug!("rdp: ignoring {} bytes on channel {channel}", payload.len());
@@ -691,7 +792,7 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, framebuffer, .. } = self;
+            let Self { chunks, incoming, dynamics, graphics, sound, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -717,11 +818,37 @@ impl<'a> Active<'a> {
                 }
                 // The channel is gone, and with it every surface and the history the
                 // compressor was working from; a channel opened again starts afresh.
+                // A server's Close is answered with one, which is what lets it finish
+                // closing the channel and open the name again later.
                 dvc::Message::Close { channel } if dynamics.graphics == Some(channel) => {
                     debug!("rdp: the host closed the graphics channel");
                     dynamics.graphics = None;
                     *graphics = Some(Graphics::new());
-                    (Vec::new(), Vec::new())
+                    (vec![dvc::close(channel)], Vec::new())
+                }
+                // The sound, on the channel a current host prefers for it. Every
+                // reply the conversation earns goes back on the same channel.
+                dvc::Message::Data { channel, data } if dynamics.sound == Some(channel) => {
+                    let Some(sound) = sound else {
+                        bail!("the host sent sound on a channel this client never accepted");
+                    };
+                    let mut replies = Vec::new();
+                    for reply in sound.push(data)? {
+                        replies.push(dvc::data(channel, &reply)?);
+                    }
+                    (replies, Vec::new())
+                }
+                // The conversation went with the channel: a reopened one starts with a
+                // fresh format list, and a Wave Info left waiting for its Wave must not
+                // swallow the first PDU on it.
+                dvc::Message::Close { channel } if dynamics.sound == Some(channel) => {
+                    debug!("rdp: the host closed the sound channel");
+                    dynamics.sound = None;
+                    if let Some(sound) = sound {
+                        sound.proto = rdpsnd::Rdpsnd::new();
+                        sound.sink.closed();
+                    }
+                    (vec![dvc::close(channel)], Vec::new())
                 }
                 message => (answer(message, dynamics)?, Vec::new()),
             }
@@ -816,6 +943,53 @@ impl<'a> Active<'a> {
         }
         if let Some(event) = event {
             self.send(event).await;
+        }
+        Ok(())
+    }
+
+    /// The static sound channel. The host speaks first at every step, every PDU is
+    /// answered on the channel it came in on, and the buffers go to the sink.
+    async fn on_audio(&mut self, payload: &[u8]) -> Result<()> {
+        let replies = {
+            let Self { audio_chunks, sound, .. } = self;
+            let pdu = match audio_chunks.push(payload)? {
+                Chunk::Whole(pdu) => pdu,
+                Chunk::Partial => return Ok(()),
+                Chunk::Dropped { length } => {
+                    warn!("rdp: dropping a {length}-byte sound PDU, which is absurd");
+                    return Ok(());
+                }
+            };
+            let Some(sound) = sound else {
+                bail!("the host sent sound on a channel this client never asked for");
+            };
+            sound.push(pdu)?
+        };
+        if let Some(audio) = self.audio {
+            for reply in replies {
+                self.write_channel(audio, &reply).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Device redirection's channel: its handshake, answered, and nothing after it.
+    async fn on_devices(&mut self, payload: &[u8]) -> Result<()> {
+        let replies = {
+            let Self { device_chunks, rdpdr, .. } = self;
+            match device_chunks.push(payload)? {
+                Chunk::Whole(pdu) => rdpdr.push(pdu)?,
+                Chunk::Partial => return Ok(()),
+                Chunk::Dropped { length } => {
+                    warn!("rdp: dropping a {length}-byte device redirection PDU, which is absurd");
+                    return Ok(());
+                }
+            }
+        };
+        if let Some(devices) = self.devices {
+            for reply in replies {
+                self.write_channel(devices, &reply).await?;
+            }
         }
         Ok(())
     }
@@ -1294,16 +1468,25 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
                 // direction is bulk-compressed.
                 let caps = gfx_proto::caps_advertise();
                 vec![dvc::create_response(channel, dvc::ACCEPTED), dvc::data(channel, &caps)?]
+            } else if name == rdpsnd::DVC_NAME && dynamics.audio {
+                debug!("rdp: the host opened sound redirection on dynamic channel {channel}");
+                dynamics.sound = Some(channel);
+                vec![dvc::create_response(channel, dvc::ACCEPTED)]
             } else {
                 vec![dvc::create_response(channel, dvc::NO_LISTENER)]
             }
         }
+        // A Close is both the request and its answer ([MS-RDPEDYC] 3.3.5.2): a channel
+        // this end holds is given up and the Close echoed, so the server can finish
+        // closing it; one this end never accepted earns nothing, as in FreeRDP.
         dvc::Message::Close { channel } => {
             if dynamics.control == Some(channel) {
                 dynamics.control = None;
                 dynamics.caps = None;
+                vec![dvc::close(channel)]
+            } else {
+                Vec::new()
             }
-            Vec::new()
         }
         dvc::Message::Data { channel, data } => {
             if dynamics.control == Some(channel) {
@@ -1430,7 +1613,9 @@ mod tests {
     }
 
     /// A channel the server closes takes its capabilities with it: what it said it
-    /// would lay out was about a channel that no longer exists.
+    /// would lay out was about a channel that no longer exists. The Close is echoed,
+    /// which is the response the server waits for; one for a channel never held earns
+    /// nothing.
     #[test]
     fn closing_display_control_forgets_what_it_said_it_would_do() {
         let said = display::Capabilities { monitors: 1, area: 4 };
@@ -1439,7 +1624,8 @@ mod tests {
         let elsewhere = dvc::Message::Close { channel: 12 };
         assert!(answer(elsewhere, &mut dynamics).unwrap().is_empty());
         assert_eq!(dynamics.control, Some(11), "another channel closing says nothing about this one");
-        answer(dvc::Message::Close { channel: 11 }, &mut dynamics).unwrap();
+        let replies = answer(dvc::Message::Close { channel: 11 }, &mut dynamics).unwrap();
+        assert_eq!(replies, vec![dvc::close(11)], "the Close is echoed");
         assert_eq!((dynamics.control, dynamics.caps), (None, None));
     }
 }
