@@ -974,9 +974,7 @@ sent — in points, the window's CSS pixels, rendered at the engine's own densit
 an engine without it drops them all, and the client sends them exactly
 when `connected` said `resize` — on every window change, with no toggle, no
 manual button and no remembered preference beside it. Standard `ard` rejects
-`resize` at config parse because it shares physical displays. On RDP the `egfx`
-key (default false) turns the graphics pipeline on, making each resize a graphics
-reset instead of a reactivation; that trade is the operator's, not the client's.
+`resize` at config parse because it shares physical displays.
 
 The opening size is one rule for every engine that can ask for one: the pinned
 `width`/`height` when the config sets both, else the full resolution of the
@@ -1118,13 +1116,10 @@ nothing else: no sound, no clipboard, no touch. A target with `audio = true` or
 `clipboard = true` connects and says in the log that the engine carries neither;
 the Clipboard panel's Fetch is answered as a remote that has copied nothing.
 
-Damage is flushed at the server's own frame boundaries where the server marks
-them: the graphics pipeline's `EndFrame` surfaces as a `Frame` event. On the first
-one, the engine stops guessing: the 16 ms coalescer (`DAMAGE_INTERVAL`) that
-reconstructed boundaries by timing demotes to a 100 ms safety net under the
-marker, so a frame is presented when the server says it is whole, not up to 16 ms
-later and never cut in half. The legacy path marks no frames and keeps the
-coalescer.
+Bitmap updates carry no frame boundary, so damage is flushed on a guess: the
+16 ms coalescer (`DAMAGE_INTERVAL`) reconstructs boundaries by timing — a quiet
+screen's damage leaves on the spot, and everything within one interval after it
+waits for the deadline, coalesced.
 
 Under a plan that takes copies, each flush first searches the damage for regions
 the client already holds elsewhere on its canvas (`src/copies.rs`, guacamole-
@@ -1133,22 +1128,13 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-The `egfx` target key controls the Graphics Pipeline and defaults to false,
-independently of `resize`. The default is the legacy bitmap path, where a resize is
-a full reactivation that makes a Windows host re-render the desktop sharp, and
-where the decoding is the interleaved and planar bitmap codecs alone — the client
-announces no drawing orders, so that path is bitmaps throughout. Servers without
-the pipeline (xrdp among them) use it regardless of the key. It is also what the
-pipeline's RFX Progressive decoder costs to avoid: that decoder still fails partway
-through a session on some Windows hosts, and a decode error ends the session.
-
-`egfx = true` offers the pipeline, without an H.264 decoder, so a server picks among
-the codecs IronRDP decodes in Rust; a resize is then a graphics reset with no
-reactivation or reconnect, at the price of text staying soft afterward. The pipeline
-is wrapped rather than registered directly (`src/rdp_client/egfx.rs`): IronRDP's
-session composites pipeline output into an image sized at connect and never resized,
-so a graphics reset to a larger desktop would drop every region outside the old one;
-the wrapper drains the compositor itself and applies the reset first.
+The Graphics Pipeline (MS-RDPEGFX) is not advertised at all, so every server —
+Windows hosts and xrdp alike — draws with bitmap updates, decoded by the
+interleaved and planar bitmap codecs. The client announces no drawing orders
+either, so the path is bitmaps throughout. That is what makes a resize a full
+reactivation, after which a Windows host re-renders the desktop sharp; it is also
+what avoids the pipeline's RFX Progressive decoder, which still fails partway
+through a session on some Windows hosts, where a decode error ends the session.
 
 The pointer is not part of that framebuffer. RDP servers send the cursor's shape
 rather than drawing it, and each shape goes to the client as `cursor`, which draws
@@ -1163,8 +1149,8 @@ desktop-size requests, and also matches the client's display density: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
 stretched. The opening RDP handshake is always 1x; the client applies its screen
-density after `connected`, so a Retina client costs a graphics reset on the default
-EGFX path or a reactivation on the legacy path. RDP reports no scale factor back,
+density after `connected`, so a Retina client costs a reactivation. RDP reports no
+scale factor back,
 so the density here is declared rather than measured. The layout is built by the
 client rather than IronRDP's helper, which marks a monitor taller than it is wide
 as portrait-rotated.
@@ -1174,9 +1160,8 @@ estimate of the hop between it and a gateway beside it throttled updates badly, 
 no multitransport is offered; the RTT probes a Windows host sends anyway are
 answered by IronRDP.
 
-A size change that is *real* costs a graphics reset on EGFX. On the legacy path it
-costs a full Deactivation-Reactivation Sequence, which the client runs and reports
-as a new desktop size. Asking twice for the same size triggers one change, and a
+A size change that is *real* costs a full Deactivation-Reactivation Sequence,
+which the client runs and reports as a new desktop size. Asking twice for the same size triggers one change, and a
 request equal to the current size never triggers one. A layout is asked for on a
 bounded schedule rather than once, because a Windows host discards one sent before
 the session it is starting has settled and acknowledges nothing either way.

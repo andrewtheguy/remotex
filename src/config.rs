@@ -747,7 +747,8 @@ pub struct TargetConfig {
     /// as [`Security::Auto`] ([`TargetConfig::security`]). RDP only — RFB
     /// negotiates its own security per the handshake — and `Option` rather than
     /// a bare default so that setting it on a VNC target is refused at parse
-    /// time instead of accepted and left inert, the same rule as `egfx`.
+    /// time instead of accepted and left inert, the same rule as every other
+    /// key one protocol alone reads.
     #[serde(default)]
     pub security: Option<Security>,
     /// Let this target log on over plain TLS — TLS without NLA — whether chosen
@@ -777,24 +778,6 @@ pub struct TargetConfig {
     /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
-    /// RDP's graphics pipeline (EGFX), off by default and decoupled from
-    /// [`Self::resize`]. Off, a resize is a Deactivation-Reactivation Sequence,
-    /// and a Windows host re-renders the desktop sharp at the new size. On, a
-    /// resize is a Display Control monitor layout under the pipeline — a
-    /// graphics reset, no reactivation and no reconnect — which is cheaper on
-    /// every drag, at the price of text staying soft afterward.
-    ///
-    /// The default is off because the pipeline's RFX Progressive decoder still
-    /// fails on some Windows hosts mid-session, which ends the session; the
-    /// legacy bitmap path decodes everything this client needs. Turn it on to
-    /// trade that risk for the cheaper resize.
-    ///
-    /// `Option` rather than a bare default so that setting it on a VNC target,
-    /// which has no graphics pipeline to switch, is refused at parse time
-    /// instead of accepted and left inert; `None` reads as off
-    /// ([`TargetConfig::egfx`]).
-    #[serde(default)]
-    pub egfx: Option<bool>,
     /// Clipboard bridge: let the browser read and write this target's
     /// clipboard, through the floating menu's Clipboard panel. Off by default —
     /// a remote desktop's clipboard often holds whatever was last copied there,
@@ -1056,11 +1039,6 @@ impl TargetConfig {
     /// size, or the same default a sizeless session would have opened at.
     pub fn default_size(&self) -> (u16, u16) {
         self.pinned_size().unwrap_or(DEFAULT_SIZE)
-    }
-
-    /// RDP's graphics pipeline switch, off unless the operator asked for it.
-    pub fn egfx(&self) -> bool {
-        self.egfx.unwrap_or(false)
     }
 
     /// Whether a plain-TLS logon is allowed, off unless the operator opted in —
@@ -1664,16 +1642,6 @@ impl ConfigFile {
                  target render_type = \"video\" or render_motion = true, or remove the \
                  key",
                 target.name
-            );
-            // The graphics pipeline is RDP's alone: EGFX is an RDP
-            // channel, so on a VNC target the key could only be a belief about
-            // the wrong protocol, and either value would be silently inert.
-            anyhow::ensure!(
-                target.egfx.is_none() || target.protocol == Protocol::Rdp,
-                "target {:?} sets egfx on a {} target, and only rdp has a graphics pipeline \
-                 to switch. Remove the key.",
-                target.name,
-                target.protocol.name()
             );
             // Sound and the clipboard are what this gateway's own RDP client does
             // not carry. Both keys turn something on in the browser — an audio
@@ -2566,7 +2534,6 @@ mod tests {
         assert_eq!(t.security(), Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
-        assert!(!t.egfx(), "the graphics pipeline is opt-in");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.audio, "remote audio is opt-in");
     }
@@ -4618,31 +4585,6 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("clipboard"), "{rendered}");
         assert!(rendered.contains("does not carry"), "{rendered}");
-    }
-
-    /// EGFX is RDP's, and refused on VNC by name — either value, since a key
-    /// that could not do anything is a config error, not a preference.
-    #[test]
-    fn egfx_belongs_to_rdp_and_is_refused_on_vnc() {
-        for value in ["true", "false"] {
-            let err = ConfigFile::parse(&format!(
-                r#"
-                [server]
-                {}
-
-                [[targets]]
-                name = "nope"
-                protocol = "vnc"
-                host = "10.0.0.5"
-                egfx = {value}
-                "#,
-                site_passwd_line()
-            ))
-            .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains("egfx"), "{rendered}");
-            assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
-        }
     }
 
     /// The security mode is RDP's negotiation, and refused on VNC by name —

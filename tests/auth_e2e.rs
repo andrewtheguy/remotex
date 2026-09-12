@@ -34,7 +34,6 @@ async fn spawn_app() -> SocketAddr {
             width: Some(1280),
             height: Some(800),
             security: None,
-            egfx: None,
             allow_plain_tls: None,
             resize: false,
             clipboard: false,

@@ -1,18 +1,16 @@
-//! The RDP client against a real host, with and without the graphics pipeline.
+//! The RDP client against a real host.
 //!
-//! No container stands in here: what this exercises — EGFX surfaces and codecs, a
-//! graphics reset, a Deactivation-Reactivation Sequence — is a Windows host's
-//! behaviour, and xrdp's is a different one. So, like `classify_render_e2e`, it
+//! No container stands in here: what this exercises — bitmap updates and a
+//! Deactivation-Reactivation Sequence — is a Windows host's behaviour, and xrdp's
+//! is a different one. So, like `classify_render_e2e`, it
 //! borrows a target from the operator's `tmp/test_uat.toml`, named by
 //! [`TARGET_ENV`] rather than written here, and drives [`remotex::rdp_client`]
 //! directly with no gateway in front of it.
 //!
-//! Each case connects, waits for a painted desktop, asks for a new size the way
-//! the engine does — repeating the layout until the host answers, because a
-//! Windows host ignores the first few seconds of them — then puts the size back
-//! and disconnects. The second case therefore reconnects to the session the first
-//! one left disconnected on the host, which is the path a browser takes every time
-//! it picks the target again.
+//! It connects, waits for a painted desktop, asks for a new size the way the
+//! engine does — repeating the layout until the host answers, because a Windows
+//! host ignores the first few seconds of them — then puts the size back and
+//! disconnects.
 //!
 //! What is asserted is the client's contract: a desktop arrives, gets painted,
 //! and a requested size comes back as a resize of that size with a framebuffer to
@@ -43,12 +41,12 @@ const RESIZED: (u32, u32) = (1600, 900);
 const RESIZE_BUDGET: Duration = Duration::from_secs(30);
 const RESIZE_RETRY: Duration = Duration::from_secs(2);
 
-fn connect(egfx: bool) -> (Session, Receiver<Event>) {
+fn connect() -> (Session, Receiver<Event>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
     let target = common::uat_target(&name);
-    println!("rdp_client_probe: {name} ({}:{}), egfx {egfx}", target.host, target.port);
+    println!("rdp_client_probe: {name} ({}:{})", target.host, target.port);
     Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
@@ -60,7 +58,6 @@ fn connect(egfx: bool) -> (Session, Receiver<Event>) {
         security: target.security(),
         allow_plain_tls: target.allow_plain_tls(),
         resize: true,
-        egfx,
     })
 }
 
@@ -68,7 +65,6 @@ fn connect(egfx: bool) -> (Session, Receiver<Event>) {
 #[derive(Default, Debug)]
 struct Tally {
     paints: u64,
-    frames: u64,
     cursors: u64,
     resizes: Vec<(u32, u32)>,
     resize_ready: bool,
@@ -89,7 +85,6 @@ async fn pump(
         };
         match event.expect("the event channel closed without an Ended") {
             Event::Paint(_) => tally.paints += 1,
-            Event::Frame => tally.frames += 1,
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
@@ -101,7 +96,7 @@ async fn pump(
 }
 
 /// How many of the framebuffer's pixels are not black: a desktop that decoded to
-/// nothing — the classic failure of a pipeline with no working codec — is all 0.
+/// nothing — the classic failure of a codec that is not really working — is all 0.
 fn lit(session: &Session) -> (u64, u64) {
     session.framebuffer().with(|frame| {
         let lit = frame.pixels.as_chunks::<4>().0.iter().filter(|px| px[..3] != [0, 0, 0]).count();
@@ -135,9 +130,9 @@ async fn resize_to(
     }
 }
 
-async fn case(egfx: bool) {
+async fn case() {
     common::init_logging();
-    let (session, mut events) = connect(egfx);
+    let (session, mut events) = connect();
 
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
@@ -206,7 +201,6 @@ async fn case(egfx: bool) {
 
 #[tokio::test]
 #[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
-async fn a_real_host_paints_and_resizes_with_and_without_egfx() {
-    case(true).await;
-    case(false).await;
+async fn a_real_host_paints_and_resizes() {
+    case().await;
 }

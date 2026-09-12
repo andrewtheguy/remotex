@@ -2774,7 +2774,6 @@ dependencies = [
  "flate2",
  "futures-util",
  "ironrdp",
- "ironrdp-egfx",
  "ironrdp-tls",
  "ironrdp-tokio",
  "jpeg-encoder",

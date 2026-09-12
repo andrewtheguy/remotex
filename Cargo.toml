@@ -194,16 +194,14 @@ socket2 = { version = "0.6", features = ["all"] }
 #
 # Every IronRDP crate is pinned to the same revision of the upstream repository,
 # because they are released together and the session, connector and channel crates
-# share types across their public APIs. The client uses the graphics pipeline
-# (`ironrdp-egfx`, offered with no H.264 decoder), Display Control, and the tokio
-# framing (`ironrdp-tokio`, without its reqwest-based Kerberos client — CredSSP
-# runs NTLM here).
+# share types across their public APIs. The client takes bitmap updates, Display
+# Control, and the tokio framing (`ironrdp-tokio`, without its reqwest-based
+# Kerberos client — CredSSP runs NTLM here). The graphics pipeline is not offered.
 #
 # TLS is `ironrdp-tls` over rustls with `ring`, and rustls needs that provider
 # installed as the process default before the first handshake: `tokio-rustls` is a
 # direct dependency only so src/rdp_client can install it.
 ironrdp = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35", features = ["connector", "session", "graphics", "dvc", "svc", "displaycontrol"] }
-ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35" }
 ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35" }
 ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP.git", rev = "be39881eacdfed336f781d8c9a6ca4368da0dd35", features = ["rustls-ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
