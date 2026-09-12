@@ -60,6 +60,7 @@ const CLIP_CAPS: u16 = 0x0007;
 /// client reads the absence of `CB_RESPONSE_OK` as the failure it is rather than
 /// taking the body of a PDU nobody vouched for.
 const RESPONSE_OK: u16 = 0x0001;
+const RESPONSE_FAIL: u16 = 0x0002;
 
 /// The type, the flags and the length every PDU on this channel starts with.
 const HEADER: usize = 8;
@@ -256,13 +257,14 @@ pub fn data_request(format: u32) -> Vec<u8> {
 /// `None` is the answer to a format this end cannot produce, and it is an answer —
 /// the remote is blocked in its paste until one arrives.
 pub fn data_response(data: Option<&[u8]>) -> Vec<u8> {
-    let data = data.unwrap_or_default();
-    let flags = match data.is_empty() {
-        // Empty *and* successful is a legal response, but this client only ever
-        // produces bytes for text it holds, so an empty one is the refusal.
-        true => 0,
-        false => RESPONSE_OK,
+    // The flag comes from whether there is an answer at all, not from how long it
+    // is: a response wears exactly one of the two flags, and an empty body under
+    // `CB_RESPONSE_OK` is a legal answer for a format whose value is empty.
+    let flags = match data {
+        Some(_) => RESPONSE_OK,
+        None => RESPONSE_FAIL,
     };
+    let data = data.unwrap_or_default();
     let mut w = Writer::with_capacity(HEADER + data.len());
     header(&mut w, FORMAT_DATA_RESPONSE, flags, data.len());
     w.bytes(data);
@@ -446,16 +448,23 @@ mod tests {
         assert_eq!(decode(&empty).unwrap(), Message::Data(None));
     }
 
+    /// The flag, and not only what this client's own decoder makes of it: a peer
+    /// reads `msgFlags`, and a refusal that left it at zero would be a response
+    /// wearing neither of the two a peer is told to expect.
     #[test]
     fn what_this_client_answers_a_paste_with_says_which_of_the_two_it_is() {
         let bytes = [b'h', 0, b'i', 0, 0, 0];
         let (answered, refused, empty) =
             (data_response(Some(&bytes)), data_response(None), data_response(Some(&[])));
+        assert_eq!(&answered[..4], [0x05, 0x00, 0x01, 0x00]);
+        assert_eq!(&refused[..4], [0x05, 0x00, 0x02, 0x00]);
         assert_eq!(decode(&answered).unwrap(), Message::Data(Some(&bytes[..])));
         assert_eq!(decode(&refused).unwrap(), Message::Data(None));
-        // An empty answer is the refusal too: this client only ever has bytes for
-        // text it is holding.
-        assert_eq!(decode(&empty).unwrap(), Message::Data(None));
+        // Nothing at all is what this client sends for a format it cannot produce,
+        // where an empty *answer* says the format's value is empty. This client
+        // never produces the second, but the two are not the same PDU.
+        assert_eq!(&empty[..4], [0x05, 0x00, 0x01, 0x00]);
+        assert_eq!(decode(&empty).unwrap(), Message::Data(Some(&[][..])));
     }
 
     #[test]

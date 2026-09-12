@@ -423,6 +423,17 @@ struct Active<'a> {
     /// recent, since a resize supersedes every earlier one rather than queueing
     /// behind it.
     pending_resize: Option<(u32, u32, u32)>,
+    /// Whether the server has sent Monitor Ready, which is what opens the clipboard:
+    /// nothing may be said on that channel before this end's capabilities answer it.
+    clip_ready: bool,
+    /// The most recent formats offered before that happened — the most recent only,
+    /// for [`Self::pending_resize`]'s reason: each advertisement replaces the last.
+    pending_formats: Option<Vec<u32>>,
+    /// PDUs that arrived on a static virtual channel while the share was not live —
+    /// the capability exchange, where a server opens the clipboard, and the wait for
+    /// a Demand Active before it. Acted on in order once it is, because nothing on a
+    /// channel can be asked for again — see [`connect::activate`].
+    deferred: Vec<(u16, Vec<u8>)>,
 
     framebuffer: &'a Framebuffer,
     events: &'a mpsc::Sender<Event>,
@@ -443,7 +454,7 @@ impl<'a> Active<'a> {
     ) -> Self {
         let dynamic = connected.channel(Channel::DYNAMIC);
         let clipboard = connected.channel(Channel::CLIPBOARD);
-        let Connected { frames, writer, user, io_channel, demand, .. } = connected;
+        let Connected { frames, writer, user, io_channel, demand, deferred, .. } = connected;
         Self {
             frames,
             writer,
@@ -464,6 +475,9 @@ impl<'a> Active<'a> {
             caps: None,
             resize_ready: false,
             pending_resize: None,
+            clip_ready: false,
+            pending_formats: None,
+            deferred,
             framebuffer,
             events,
             damage: Vec::new(),
@@ -477,6 +491,11 @@ impl<'a> Active<'a> {
         // before this client has the Font Map that ends the sequence — so the desktop
         // is asked for again here, the way it is after a reactivation.
         self.refresh().await?;
+        // What arrived on a channel in the same window was kept instead, because a
+        // channel's PDUs cannot be asked for again.
+        for (channel, payload) in std::mem::take(&mut self.deferred) {
+            self.on_channel(channel, &payload).await?;
+        }
         loop {
             tokio::select! {
                 read = self.frames.next(&mut self.frame) => {
@@ -538,28 +557,33 @@ impl<'a> Active<'a> {
                     false => Err(anyhow!("the host ended the session: {reason}")),
                 }))
             }
-            mcs::Indication::Data(data)
-                if self.dynamic.is_some_and(|channel| channel.number == data.channel) =>
-            {
-                self.on_dynamic(data.payload).await?;
-                Ok(None)
-            }
-            mcs::Indication::Data(data)
-                if self.clipboard.is_some_and(|channel| channel.number == data.channel) =>
-            {
-                self.on_clipboard(data.payload).await?;
-                Ok(None)
-            }
             mcs::Indication::Data(data) if data.channel == self.io_channel => {
                 self.on_share(data.payload).await
             }
-            // A channel this client neither asked for nor joined. A server does not
-            // send one, and a PDU on one is nothing this session can act on.
             mcs::Indication::Data(data) => {
-                debug!("rdp: ignoring {} bytes on channel {}", data.payload.len(), data.channel);
+                self.on_channel(data.channel, data.payload).await?;
                 Ok(None)
             }
         }
+    }
+
+    /// One PDU on a static virtual channel, by the number the server gave it.
+    ///
+    /// The same routing wherever a channel's PDU is read from — the main loop, the
+    /// capability exchange it was kept from, the reactivation that would otherwise
+    /// have dropped it — so that a channel stays open across everything the share
+    /// does.
+    async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
+        if self.dynamic.is_some_and(|dynamic| dynamic.number == channel) {
+            return self.on_dynamic(payload).await;
+        }
+        if self.clipboard.is_some_and(|clipboard| clipboard.number == channel) {
+            return self.on_clipboard(payload).await;
+        }
+        // A channel this client neither asked for nor joined. A server does not send
+        // one, and a PDU on one is nothing this session can act on.
+        debug!("rdp: ignoring {} bytes on channel {channel}", payload.len());
+        Ok(())
     }
 
     /// The fast path: everything the server draws.
@@ -687,6 +711,15 @@ impl<'a> Active<'a> {
         };
         if let (Some(reply), Some(clipboard)) = (reply, self.clipboard) {
             self.write_channel(clipboard, &reply).await?;
+        }
+        // The reply above is this end's capabilities, and it has gone: from here the
+        // channel carries what the caller asks it to, including anything it asked
+        // for early — see [`Self::send_clipboard`].
+        if matches!(event, Some(Event::ClipboardReady)) {
+            self.clip_ready = true;
+            if let Some(formats) = self.pending_formats.take() {
+                self.send_clipboard(Clipboard::Advertise(formats)).await?;
+            }
         }
         if let Some(event) = event {
             self.send(event).await;
@@ -848,20 +881,18 @@ impl<'a> Active<'a> {
                 read = frames.next(frame) => read,
             };
             read?;
-            // Updates for a desktop that is about to be replaced, and whatever else
-            // the slow path carries: none of it is what this is waiting for. What is
-            // dropped with them is asked for again below.
+            // Updates for a desktop that is about to be replaced: not what this is
+            // waiting for, and what is dropped with them is asked for again below.
             if fastpath::is_output(self.frame[0]) {
                 continue;
             }
-            let mcs::Indication::Data(data) = mcs::send_data_indication(&self.frame)? else {
-                bail!("the host left the conference while rebuilding the desktop");
-            };
-            if data.channel != self.io_channel {
-                continue;
-            }
-            if let Pdu::DemandActive(body) = share::decode(data.payload)? {
-                break DemandActive::decode(body)?;
+            // Read out of `self` and acted on outside it, as the main loop's frames
+            // are: answering one writes to the very channel it came off.
+            let frame = std::mem::take(&mut self.frame);
+            let demand = self.reactivating(&frame).await;
+            self.frame = frame;
+            if let Some(demand) = demand? {
+                break demand;
             }
         };
         info!("rdp: reactivated, desktop {}x{}", demand.width, demand.height);
@@ -870,13 +901,14 @@ impl<'a> Active<'a> {
         // The same wait as above, for the same reason: the capability exchange ends
         // with a Font Map the server owes and may never send, and a session nobody is
         // watching must not be held open by it.
-        tokio::select! {
+        let deferred = tokio::select! {
             biased;
             _ = stop.wait_for(|&stop| stop) => return Ok(true),
             activated = connect::activate(frames, writer, frame, *user, *io_channel, &demand) => {
-                activated?;
+                activated?
             }
-        }
+        };
+        self.deferred.extend(deferred);
 
         self.share = Share::from(&demand);
         self.fragments = Fragments::new(demand.multifragment);
@@ -884,7 +916,42 @@ impl<'a> Active<'a> {
         // The desktop is blank and the updates that would have filled it were read
         // past above, so the repaint is asked for here rather than waited for.
         self.refresh().await?;
+        // And what a channel carried while all that happened, in the order it came.
+        for (channel, payload) in std::mem::take(&mut self.deferred) {
+            self.on_channel(channel, &payload).await?;
+        }
         Ok(false)
+    }
+
+    /// One frame read while the server is rebuilding the desktop. `Some` is the
+    /// Demand Active that ends the wait.
+    ///
+    /// A resize is not the whole session, and a channel is not the share's: what
+    /// arrives on one while this is waiting is either answered here or kept for
+    /// afterwards, never dropped. The clipboard is answered here, because a Format
+    /// Data Request is a remote application stopped inside its own paste and it has
+    /// no idea a desktop is being rebuilt. Every other channel waits for the share
+    /// to be live, where acting on one cannot ask a server busy rebuilding a desktop
+    /// for another layout of it.
+    ///
+    /// Only the share's own PDUs are read past — the updates for a desktop that is
+    /// going away, and the acks for one.
+    async fn reactivating(&mut self, frame: &[u8]) -> Result<Option<DemandActive>> {
+        let mcs::Indication::Data(data) = mcs::send_data_indication(frame)? else {
+            bail!("the host left the conference while rebuilding the desktop");
+        };
+        if self.clipboard.is_some_and(|clipboard| clipboard.number == data.channel) {
+            self.on_clipboard(data.payload).await?;
+            return Ok(None);
+        }
+        if data.channel != self.io_channel {
+            self.deferred.push((data.channel, data.payload.to_vec()));
+            return Ok(None);
+        }
+        match share::decode(data.payload)? {
+            Pdu::DemandActive(body) => Ok(Some(DemandActive::decode(body)?)),
+            _ => Ok(None),
+        }
     }
 
     /// `first`, then whatever else is already queued behind it, with consecutive
@@ -940,10 +1007,25 @@ impl<'a> Active<'a> {
     /// Dropped when there is no channel — a session that did not ask for one, or a
     /// server that never opened it — which is the same bargain every other input
     /// makes on a session that cannot carry it.
+    ///
+    /// Held when the channel is joined but the server has not sent Monitor Ready
+    /// yet. The caller learns the clipboard is usable from [`Event::ClipboardReady`],
+    /// but it can be told the *session* is up before that and copy something, and a
+    /// format list ahead of the capability exchange is a list sent before either end
+    /// has said which shape its lists are in. Only an advertisement can be early —
+    /// the other two answer a server PDU, which cannot arrive before it opens the
+    /// channel — so holding the most recent one is holding all there is.
     async fn send_clipboard(&mut self, what: Clipboard) -> Result<()> {
         let Some(clipboard) = self.clipboard else {
             return Ok(());
         };
+        if !self.clip_ready {
+            if let Clipboard::Advertise(formats) = what {
+                debug!("rdp: holding clipboard formats {formats:?} until the channel opens");
+                self.pending_formats = Some(formats);
+            }
+            return Ok(());
+        }
         let pdu = match what {
             Clipboard::Advertise(formats) => {
                 debug!("rdp: advertising clipboard formats {formats:?}");

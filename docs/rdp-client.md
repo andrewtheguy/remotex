@@ -88,6 +88,17 @@ clipboard needs the flag on every chunk and the dynamic channel must not carry i
 set it on both and Display Control never opens, set it on neither and the
 clipboard never answers. `channel::SHOW_PROTOCOL` records both failures.
 
+A channel belongs to the connection, not to the share, and nothing on one can be
+asked for again — there is no repaint for a clipboard. So nothing on a channel is
+dropped in the two windows where the share is busy with itself, the capability
+exchange and the wait for a Demand Active that precedes it. `connect::activate`
+hands back what arrived on a channel and the session acts on it once the share is
+live; the clipboard alone is answered in place, because a Format Data Request is a
+remote application stopped inside its own paste and it has no idea a desktop is
+being rebuilt. A server opens the clipboard as soon as the channel is up, which can
+be mid-finalization, and a Monitor Ready read past there is a session whose
+clipboard never starts.
+
 A channel PDU of any length travels either way. Half a megabyte of clipboard text
 is a megabyte of UTF-16 against a 1600-byte chunk floor, so `proto/channel.rs`
 splits an outbound PDU into chunks that each carry the whole length, and
@@ -186,6 +197,12 @@ A `CB_RESPONSE_FAIL`, which a Windows peer sends without saying why and often
 answers a second ask for, is retried on a bounded ladder
 (`CLIPBOARD_READ_RETRY_DELAYS`) rather than forwarded to the browser as empty
 text, which would wipe the panel over a transient refusal.
+
+Monitor Ready is what opens the channel, and this end says nothing on it before
+answering that with its own capabilities: the two capability sets are what settle
+the shape of every format list after them. The browser can be told the session is
+up before the channel is, so a copy that arrives early is held — the most recent
+one, since each advertisement replaces the last — and sent when the channel opens.
 
 Short format names are what is spoken. `CB_USE_LONG_FORMAT_NAMES` is not offered,
 which by MS-RDPECLIP 3.1.5.2 settles the form of every list in either direction;

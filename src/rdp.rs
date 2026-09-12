@@ -652,8 +652,16 @@ impl ClipboardState {
     }
 
     /// The bytes of a read that was asked for.
+    ///
+    /// Only of one still outstanding: the browser taking the clipboard over cancels
+    /// the read of what the remote used to hold, and an answer already on the wire
+    /// when it did would otherwise be published afterwards as a fresh remote copy —
+    /// pushing the older remote text over the newer browser one.
     async fn remote_data(&mut self, data: &[u8], sink: &TileSink) -> anyhow::Result<()> {
-        self.pending = None;
+        if self.pending.take().is_none() {
+            debug!("rdp: a remote clipboard answer arrived for a read nothing is waiting on");
+            return Ok(());
+        }
         self.retry_at = None;
         // Invalid bytes cannot become valid by asking the same question again, so a
         // malformed payload keeps the last good value and schedules nothing.
@@ -681,7 +689,11 @@ impl ClipboardState {
     /// channel will carry. The same report as one the ceiling above refused: what was
     /// copied is known, and only its size.
     async fn oversized(&mut self, bytes: u64, sink: &TileSink) -> anyhow::Result<()> {
-        self.pending = None;
+        // Outstanding or nothing, for the reason [`Self::remote_data`] gives.
+        if self.pending.take().is_none() {
+            debug!("rdp: an oversized clipboard answer arrived for a read nothing waits on");
+            return Ok(());
+        }
         self.retry_at = None;
         let snapshot = ClipboardSnapshot::oversized(bytes, self.remote.as_ref());
         self.publish(snapshot, sink).await
@@ -1765,8 +1777,6 @@ mod tests {
         assert!(pointer.change().is_none());
     }
 
-    /// The edge convention flips here, and getting it wrong is a one-pixel seam
-    /// down the right and bottom of every tile — visible, and easy to stare past.
     /// The ladder a refused remote clipboard read climbs, and the fact that it ends.
     /// A Windows peer refuses a read it can satisfy a moment later, and one it will
     /// never satisfy looks identical — so the asking has to stop.
@@ -1779,6 +1789,47 @@ mod tests {
         assert_eq!(read.format, CF_UNICODETEXT, "the format asked for never changes");
     }
 
+    /// A read is answered once, and only while it is outstanding. The browser taking
+    /// the clipboard over cancels the read of what the remote used to hold — and the
+    /// answer to it may already be on the wire, which published would push the older
+    /// remote text back over the newer browser one.
+    #[tokio::test]
+    async fn a_clipboard_answer_nothing_is_waiting_on_is_not_published() {
+        let (frame_tx, _frames) = mpsc::channel(4);
+        let plan = crate::config::RenderPlan::Tiles {
+            base: crate::config::TileCodec::Png,
+            motion: None,
+            debug: false,
+            adaptive: None,
+        };
+        let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
+        let sink = TileSink::new("test", frame_tx, plan, feedback);
+
+        // The remote copied and this end asked for the bytes.
+        let mut clipboard = ClipboardState {
+            pending: Some(PendingClipboardRead::new(CF_UNICODETEXT)),
+            ..Default::default()
+        };
+        let taken = rdp_clipboard::encode_unicode("what the remote copied");
+        clipboard.remote_data(&taken, &sink).await.unwrap();
+        assert_eq!(clipboard.snapshot().text, "what the remote copied");
+
+        // Then the browser copied, which is what clears `pending`, and the remote's
+        // answer to the read that was cancelled turns up behind it.
+        clipboard.pending = None;
+        let stale = rdp_clipboard::encode_unicode("older text from over there");
+        clipboard.remote_data(&stale, &sink).await.unwrap();
+        assert_eq!(
+            clipboard.snapshot().text,
+            "what the remote copied",
+            "a cancelled read's answer is not a new remote copy"
+        );
+        // And the same for the answer that was too big to carry: reported only as
+        // the size of a read somebody is waiting on.
+        clipboard.oversized(9_000_000, &sink).await.unwrap();
+        assert_eq!(clipboard.snapshot().oversized_bytes, None);
+    }
+
     /// Before the remote has copied anything the panel's Fetch is still answered, and
     /// with the one answer that is honest: empty text and no time.
     #[test]
@@ -1788,6 +1839,8 @@ mod tests {
         assert!(snapshot.text.is_empty() && snapshot.changed_at_ms.is_none());
     }
 
+    /// The edge convention flips here, and getting it wrong is a one-pixel seam
+    /// down the right and bottom of every tile — visible, and easy to stare past.
     #[test]
     fn a_damage_rectangle_becomes_inclusive_on_every_edge() {
         let r = damaged(client::Rect { x: 10, y: 20, width: 4, height: 2 });

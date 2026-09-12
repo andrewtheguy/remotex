@@ -76,6 +76,9 @@ pub(super) struct Connected {
     pub channels: Vec<(Channel, u16)>,
     /// What the server said when it opened the share.
     pub demand: DemandActive,
+    /// PDUs that arrived on a static virtual channel while the share was being
+    /// finalized, in the order they came — see [`activate`].
+    pub deferred: Vec<(u16, Vec<u8>)>,
 }
 
 impl Connected {
@@ -217,9 +220,10 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         "rdp: the host opened a {}x{} desktop, share {:#x}",
         demand.width, demand.height, demand.share_id
     );
-    activate(&mut frames, &mut writer, &mut frame, user, io_channel, &demand).await?;
+    let deferred =
+        activate(&mut frames, &mut writer, &mut frame, user, io_channel, &demand).await?;
 
-    Ok(Connected { frames, writer, user, io_channel, channels: numbered, demand })
+    Ok(Connected { frames, writer, user, io_channel, channels: numbered, demand, deferred })
 }
 
 /// The capability exchange and the handshake after it: everything between a Demand
@@ -232,6 +236,12 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 /// Fast-path updates that arrive part-way through are read past: the server may start
 /// painting a desktop before it has finished agreeing on one, and what is dropped
 /// here is asked for again by whoever called this.
+///
+/// A static virtual channel is not the share's, and nothing on one can be asked for
+/// again: a server opens the clipboard as soon as the channel is up, which is before
+/// this exchange ends, and a Monitor Ready read past here would be a session whose
+/// clipboard never started. So those are handed back rather than dropped, for the
+/// caller to act on once it can.
 pub(super) async fn activate(
     frames: &mut Frames<ReadHalf<tls::Stream>>,
     writer: &mut WriteHalf<tls::Stream>,
@@ -239,7 +249,7 @@ pub(super) async fn activate(
     user: u16,
     io_channel: u16,
     demand: &DemandActive,
-) -> Result<()> {
+) -> Result<Vec<(u16, Vec<u8>)>> {
     let confirm = ConfirmActive {
         share_id: demand.share_id,
         width: demand.width,
@@ -257,6 +267,7 @@ pub(super) async fn activate(
         let framed = mcs::send_data_request(user, io_channel, &request)?;
         writer.write_all(&framed).await.context("sending a finalization PDU")?;
     }
+    let mut deferred = Vec::new();
     loop {
         frames.next(frame).await?;
         if fastpath::is_output(frame[0]) {
@@ -264,7 +275,10 @@ pub(super) async fn activate(
         }
         let payload = match mcs::send_data_indication(frame)? {
             mcs::Indication::Data(data) if data.channel == io_channel => data.payload,
-            mcs::Indication::Data(_) => continue,
+            mcs::Indication::Data(data) => {
+                deferred.push((data.channel, data.payload.to_vec()));
+                continue;
+            }
             mcs::Indication::Disconnect(reason) => {
                 bail!("the host ended the connection before the desktop was ready: {reason}")
             }
@@ -273,7 +287,7 @@ pub(super) async fn activate(
             bail!("the host deactivated the share during connection finalization");
         };
         if finalization::response(&data)? == Response::FontMap {
-            return Ok(());
+            return Ok(deferred);
         }
     }
 }
