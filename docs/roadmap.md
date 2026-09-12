@@ -33,7 +33,8 @@ the device-redirection handshake a Windows host requires beside it in
 feeds. What each took is recorded in
 [The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
 
-EGFX is in, measured as [the plan](rdp-egfx-plan.md) records; what is left of it
+EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+describes; what is left of it
 beyond the decoders is under
 [Source payloads](#source-payloads-the-gateway-decodes-instead-of-forwarding)
 rather than here, because that payoff is a transcode removed, not a control
@@ -173,8 +174,8 @@ has an answer rather than being rediscovered.
 - **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
   the surface compositor with its caches and copies, the frame marks, and the
   decoders a current Windows host draws with: ClearCodec with NSCodec inside it,
-  RemoteFX Progressive, planar and uncompressed ([the plan](rdp-egfx-plan.md)
-  records the measurement each was picked from). Beyond the decoders lies AVC420
+  RemoteFX Progressive, planar and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+  describes each). Beyond the decoders lies AVC420
   pass-through — handing the host's H.264 to the browser
   rather than decoding it and encoding VP9. What makes that large is that it is a
   second graphics pipeline beside the one every engine shares, not an option on

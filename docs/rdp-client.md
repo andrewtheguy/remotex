@@ -12,7 +12,11 @@ The only thing under that boundary not written here is the CredSSP exchange
 itself (`sspi`), because NLA is not optional on a current Windows host and NTLM is
 the one mechanism a user name and a password can drive.
 
-The target is a current Windows host and only that. Where [MS-RDPBCGR] is silent
+The target is a current Windows host and only that: no xrdp or other RDP server's
+behavior, and no legacy fallbacks for older hosts. Only what such a host was seen
+to send is implemented, and anything else — a codec, subcodec or PDU this client
+lacks — is refused by name in the log rather than guessed at, so it shows up as a
+named refusal instead of a wrong picture. Where [MS-RDPBCGR] is silent
 or wrong about what such a host really does — and it is, in places, about both —
 the reference is FreeRDP's `libfreerdp/core`, and the arbiter is a real host:
 `tests/rdp_proto_probe.rs` and `tests/rdp_client_probe.rs` drive one named in the
@@ -144,7 +148,8 @@ framebuffer and surfaces as `Event::Resize` — no reactivation, and the channel
 untouched.
 
 The compositor decodes everything a current Windows host sends, measured against
-one ([the plan](rdp-egfx-plan.md) records the tally). Uncompressed rectangles and
+one with `tests/rdp_client_probe.rs`, which prints the host's codec and command
+tally. Uncompressed rectangles and
 the planar codec — the same `proto/planar.rs` a bitmap update uses, with the rows
 the right way up. ClearCodec (`proto/clear.rs`), the desktop's primary codec here:
 its residual, band and glyph layers with their caches, and all three subcodecs,
