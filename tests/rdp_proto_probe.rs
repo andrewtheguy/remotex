@@ -32,13 +32,17 @@ mod common;
 
 use std::time::Duration;
 
+use ironrdp::core::{Decode as _, ReadCursor};
+use ironrdp::graphics::pointer::{DecodedPointer, PointerBitmapTarget};
 use ironrdp::graphics::rdp6::BitmapStreamDecoder;
+use ironrdp::pdu::pointer::{ColorPointerAttribute, LargePointerAttribute, PointerAttribute};
 use remotex::rdp_client::proto::bitmap::{self, Scratch};
 use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
 use remotex::rdp_client::proto::credssp::{self, Credentials};
 use remotex::rdp_client::proto::fastpath::{self, Fragments};
 use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
+use remotex::rdp_client::proto::pointer::{self, Pointer, Shape};
 use remotex::rdp_client::proto::info::ClientInfo;
 use remotex::rdp_client::proto::share::{self, Pdu};
 use remotex::rdp_client::proto::{license, mcs, tls};
@@ -319,6 +323,7 @@ async fn watch(
     let mut pixels = Vec::new();
     let mut ironrdp = BitmapStreamDecoder::default();
     let mut reference = Vec::new();
+    let mut cursors = pointer::Cache::new();
 
     let mut seen: Vec<(&str, usize)> = Vec::new();
     let mut rectangles = 0_usize;
@@ -357,6 +362,23 @@ async fn watch(
                 continue;
             };
             count(&mut seen, name(update.code));
+            if is_pointer(update.code) {
+                // Every pointer update is decoded, and every shape the server sends
+                // fresh is decoded a second time by IronRDP and compared. A cursor is
+                // small enough to print one line each: there are a dozen in a quiet
+                // five seconds, and their depth is what decides this module's scope.
+                let decoded = cursors.update(update.code, update.data).expect("a pointer update");
+                match &decoded {
+                    Pointer::Shape(shape) => {
+                        println!("<- {}: xorBpp {}, {shape:?}", name(update.code), depth(update.code, update.data));
+                        if update.code != fastpath::CACHED_POINTER {
+                            check_pointer(update.code, update.data, shape);
+                        }
+                    }
+                    other => println!("<- {}: {other:?}", name(update.code)),
+                }
+                continue;
+            }
             if update.code != fastpath::BITMAP {
                 continue;
             }
@@ -382,6 +404,64 @@ async fn watch(
 
     assert!(rectangles > 0, "a live share paints itself, and nothing arrived");
     assert!(covered > 0, "rectangles arrived and none of them landed on the desktop");
+}
+
+/// The pointer updates, which [`pointer::Cache`] is the whole reader of.
+fn is_pointer(code: u8) -> bool {
+    matches!(
+        code,
+        fastpath::POINTER_HIDDEN
+            | fastpath::POINTER_DEFAULT
+            | fastpath::POINTER_POSITION
+            | fastpath::COLOR_POINTER
+            | fastpath::CACHED_POINTER
+            | fastpath::NEW_POINTER
+            | fastpath::LARGE_POINTER
+    )
+}
+
+/// The `xorBpp` an update carries, which a Colour Pointer Update does not: it is
+/// always 24. A cached one carries no shape of its own at all.
+fn depth(code: u8, body: &[u8]) -> u16 {
+    match code {
+        fastpath::COLOR_POINTER => 24,
+        fastpath::CACHED_POINTER => 0,
+        _ => u16::from_le_bytes([body[0], body[1]]),
+    }
+}
+
+/// Decode the same shape with IronRDP, and insist the two agree.
+///
+/// The two masks are where a pointer decoder goes quietly wrong: the row order is
+/// reversed for a colour shape and not for a monochrome one, the scanlines are padded,
+/// and the andMask bit means two different things depending on the colour under it.
+/// None of that shows up as a failure — it shows up as a cursor that looks nearly
+/// right — so it is checked against the stack being replaced while that stack is still
+/// here.
+fn check_pointer(code: u8, body: &[u8], ours: &Shape) {
+    let target = PointerBitmapTarget::Accelerated;
+    let mut src = ReadCursor::new(body);
+    let theirs = match code {
+        fastpath::COLOR_POINTER => {
+            let attribute = ColorPointerAttribute::decode(&mut src).expect("a colour pointer");
+            DecodedPointer::decode_color_pointer_attribute(&attribute, target)
+        }
+        fastpath::NEW_POINTER => {
+            let attribute = PointerAttribute::decode(&mut src).expect("a new pointer");
+            DecodedPointer::decode_pointer_attribute(&attribute, target)
+        }
+        _ => {
+            let attribute = LargePointerAttribute::decode(&mut src).expect("a large pointer");
+            DecodedPointer::decode_large_pointer_attribute(&attribute, target)
+        }
+    }
+    .expect("IronRDP decodes the shape too");
+    assert_eq!(
+        (ours.width, ours.height, ours.hotspot_x, ours.hotspot_y),
+        (theirs.width, theirs.height, theirs.hotspot_x, theirs.hotspot_y),
+        "the two decoders disagree about the shape's size"
+    );
+    assert_eq!(ours.rgba, theirs.bitmap_data, "the two decoders disagree about the pixels");
 }
 
 /// Decode the same rectangle with IronRDP, and insist the two agree.

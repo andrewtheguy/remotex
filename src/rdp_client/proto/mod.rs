@@ -33,6 +33,8 @@
 //! - [`fastpath`] — the framing the server's updates arrive in once it is live.
 //! - [`bitmap`] — the rectangles of pixels those updates carry, and where they go.
 //! - [`planar`] — the codec a 32-bit session compresses a rectangle with.
+//! - [`pointer`] — the cursor, which travels as its own shape and is never drawn
+//!   into the desktop.
 //!
 //! # One kind of server
 //!
@@ -65,6 +67,7 @@ pub mod license;
 pub mod mcs;
 pub mod per;
 pub mod planar;
+pub mod pointer;
 pub mod share;
 pub mod tls;
 pub mod wire;
