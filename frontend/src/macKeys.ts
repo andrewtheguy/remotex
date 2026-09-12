@@ -6,8 +6,8 @@
 // What differs from the viewer, and why:
 //
 //   - **The full Command table is always active.** A Chrome app window delivers the
-//     six chords a normal browser tab reserves, and an automatic Keyboard Lock
-//     supplies them to a fullscreen tab. A windowed tab never sends
+//     six chords a normal browser tab reserves, and immersive full screen supplies
+//     them to a tab through Keyboard Lock (`fullscreen.ts`). A windowed tab never sends
 //     those keydowns to the page, so including them here changes nothing there; it
 //     means every chord that does arrive has one stable meaning regardless of window
 //     or fullscreen state.
@@ -47,7 +47,8 @@ export type SourceKey = {
 };
 
 // Command chords delivered to every page that become Control chords. The browser-
-// reserved additions live below so Keyboard Lock can use the exact same list.
+// reserved additions live below, kept apart for what the header says about them
+// rather than for any difference in how they translate.
 const COMMON_COMMAND_MAPS_TO_CONTROL: readonly string[] = [
   "KeyA", // select all
   "KeyC", // copy
@@ -62,9 +63,10 @@ const COMMON_COMMAND_MAPS_TO_CONTROL: readonly string[] = [
 /// The six the header says a browser keeps for itself, and the whole of what a
 /// host can add.
 ///
-/// Exported because the translation table and the automatic Keyboard Lock must agree
-/// on exactly this list.
-export const BROWSER_RESERVED_CHORD_CODES: readonly string[] = [
+/// Not exported: the lock this list once fed asks for every key rather than a list
+/// (`keyboardLock.ts`), and the only thing left that has to agree with it is the
+/// translation table below.
+const BROWSER_RESERVED_CHORD_CODES: readonly string[] = [
   "KeyL", // address bar in a browser; focus/lock in a guest
   "KeyN", // new window
   "KeyO", // open

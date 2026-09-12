@@ -1,24 +1,23 @@
-// Keyboard Lock is an automatic enhancement for a browser tab, not a user-facing
-// mode. The Command translator always uses its complete table; this lock only makes
-// the browser-reserved members of that table reach the page when Chromium permits it.
+// Keyboard Lock is what immersive full screen is *for*, and it is not a control of its
+// own: `fullscreen.ts` is the control, this file is the consequence. Nothing here is
+// reported to the user, because a lock is never the difference between a working
+// session and a broken one — only between a chord the remote receives and one the host
+// acts on first.
 //
-// Chromium restricts Keyboard Lock to fullscreen. Installed app windows do not
-// need it in windowed mode because they reserve no browser shortcuts. A normal
-// windowed tab keeps those shortcuts before any page code can see them.
+// Chromium activates a lock in `WebContentsImpl::RequestKeyboardLock` only while
+// `IsFullscreenForTabOrPending` holds, which is element full screen and nothing else.
+// The browser's own full screen is deliberately not watched here: a
+// `(display-mode: fullscreen)` query matches it, and arming on that took a lock
+// Chromium never made active — a session that looked full screen and still lost
+// Super+E, Alt+Tab and ⌘W to the host. See `fullscreen.ts`.
 //
-// Two events report fullscreen because there are two routes into it. The Fullscreen
-// API fires `fullscreenchange`; the browser's own shortcut is visible through the
-// display-mode query. Either route is only a chance to ask for the lock — rejection is
-// a browser decision and leaves the session running with every key it can receive.
+// Every key is locked rather than a list, because that is the whole of the mode: the
+// Super key, Alt+Tab and the six chords a browser reserves all belong to the remote
+// while it is on, and Escape stops being a key the browser keeps — it leaves the mode
+// by being *held* instead. Rejection remains a valid browser outcome and leaves the
+// session running with every key it can still receive.
 
-import { BROWSER_RESERVED_CHORD_CODES } from "./macKeys.ts";
-
-export const DEFAULT_LOCK_CODES: readonly string[] = [
-  ...BROWSER_RESERVED_CHORD_CODES,
-  // Q is intentionally not translated: a Mac remote wants Command-Q. Locking it is
-  // what lets that chord reach the remote instead of quitting the local browser.
-  "KeyQ",
-];
+import { isFullscreen, onFullscreenChange } from "./fullscreen.ts";
 
 interface KeyboardLockApi {
   lock: (codes?: readonly string[]) => Promise<void>;
@@ -32,23 +31,14 @@ function keyboardApi(): KeyboardLockApi | undefined {
   return (navigator as Navigator & { keyboard?: KeyboardLockApi }).keyboard;
 }
 
-const FULLSCREEN_QUERY = "(display-mode: fullscreen)";
-
-function fullscreenQuery(): MediaQueryList | undefined {
-  if (
-    typeof window === "undefined" ||
-    typeof window.matchMedia !== "function"
-  ) {
-    return undefined;
-  }
-  return window.matchMedia(FULLSCREEN_QUERY);
-}
-
-function fullscreenNow(): boolean {
-  if (typeof document !== "undefined" && document.fullscreenElement) {
-    return true;
-  }
-  return fullscreenQuery()?.matches === true;
+// Whether this browser has the API at all. That is the half of "will every key
+// reach the remote" that can be answered before anyone is standing in front of a
+// full screen, and the page says it out loud: a browser without the lock still
+// gets the larger desktop, and the host still takes Super and Alt+Tab out of the
+// stream. A lock this browser has and then refuses stays unreported, for the
+// reason at the top of this file.
+export function keyboardLockSupported(): boolean {
+  return keyboardApi() !== undefined;
 }
 
 let held = false;
@@ -66,20 +56,21 @@ function arm(): Promise<void> {
     return Promise.resolve();
   }
   const attempt = keyboard
-    .lock(DEFAULT_LOCK_CODES)
+    .lock()
     .then(
       () => {
-        // Fullscreen may have ended while Chromium was deciding. Hand a late grant
+        // Full screen may have ended while Chromium was deciding. Hand a late grant
         // straight back instead of leaving an untracked lock behind.
-        if (fullscreenNow()) {
+        if (isFullscreen()) {
           held = true;
         } else {
           keyboard.unlock();
         }
       },
       () => {
-        // Unsupported or refused is a valid browser outcome. The app/window hosts
-        // still deliver every chord, and a tab keeps the keys it normally exposes.
+        // Unsupported or refused is a valid browser outcome. An app window still
+        // delivers the browser's own chords windowed, and a tab keeps the keys it
+        // normally exposes.
       },
     )
     .finally(() => {
@@ -100,15 +91,12 @@ function disarm(): void {
 }
 
 function sync(): void {
-  if (fullscreenNow()) {
+  if (isFullscreen()) {
     void arm();
   } else {
     disarm();
   }
 }
 
-if (typeof document !== "undefined") {
-  document.addEventListener("fullscreenchange", sync);
-  fullscreenQuery()?.addEventListener?.("change", sync);
-  sync();
-}
+onFullscreenChange(sync);
+sync();

@@ -1,15 +1,16 @@
-// The lock is a passive browser enhancement. These tests cover its fullscreen
-// boundary without browser timing or UI: the fixed Command table is tested separately
-// in macKeys.test.ts.
+// The lock follows immersive full screen and asks for everything. These tests cover
+// that boundary without browser timing or UI: the fixed Command table is tested
+// separately in macKeys.test.ts, and the control itself in fullscreen.test.ts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 type Listener = () => void;
 
 const fullscreenListeners: Listener[] = [];
+// Watched only to assert nothing subscribes to it. The browser's own full screen is
+// the one this module must not arm on.
 const mediaListeners: Listener[] = [];
 let fullscreenElement: unknown = null;
-let displayModeFullscreen = false;
 let lockCalls = 0;
 let unlocks = 0;
 let lockedCodes: readonly string[] | undefined;
@@ -29,14 +30,13 @@ const fakeDocument = {
       fullscreenListeners.push(listener);
     }
   },
+  removeEventListener() {},
 };
 
 const fakeWindow = {
-  matchMedia(query: string) {
+  matchMedia(_query: string) {
     return {
-      get matches() {
-        return query === "(display-mode: fullscreen)" && displayModeFullscreen;
-      },
+      matches: true,
       addEventListener(type: string, listener: Listener) {
         if (type === "change") {
           mediaListeners.push(listener);
@@ -73,46 +73,52 @@ function settle(): Promise<void> {
 
 function enterFullscreen(): void {
   fullscreenElement = fakeDocument;
-  displayModeFullscreen = true;
   fireFullscreenChange();
-  for (const listener of mediaListeners) {
-    listener();
-  }
 }
 
 function leaveFullscreen(): void {
   fullscreenElement = null;
-  displayModeFullscreen = false;
   fireFullscreenChange();
-  for (const listener of mediaListeners) {
-    listener();
-  }
 }
 
-const { DEFAULT_LOCK_CODES } = await import("./keyboardLock.ts");
-const { BROWSER_RESERVED_CHORD_CODES } = await import("./macKeys.ts");
+const { keyboardLockSupported } = await import("./keyboardLock.ts");
 
 test("windowed startup does not ask for a lock", () => {
   assert.equal(lockCalls, 0);
 });
 
-test("the lock covers every browser-reserved chord plus Command-Q", () => {
-  assert.deepEqual(
-    [...DEFAULT_LOCK_CODES].sort(),
-    [...BROWSER_RESERVED_CHORD_CODES, "KeyQ"].sort(),
-  );
+test("the browser's own full screen is not a route into the lock", () => {
+  // `(display-mode: fullscreen)` matches for every query this fake answers, so a module
+  // that watched it would have subscribed by now — and would have armed a lock Chromium
+  // never activates, which is the bug this file is the guard for.
+  assert.equal(mediaListeners.length, 0);
+  assert.equal(lockCalls, 0);
 });
 
-test("fullscreen automatically takes one lock even when reported twice", async () => {
+test("element full screen takes one lock even when reported twice", async () => {
   enterFullscreen();
+  fireFullscreenChange();
   await settle();
 
   assert.equal(lockCalls, 1);
-  assert.deepEqual(lockedCodes, DEFAULT_LOCK_CODES);
+  // No list: every key Chromium will hand over, the Super key included.
+  assert.equal(lockedCodes, undefined);
 });
 
-test("leaving fullscreen releases the automatic lock", () => {
+test("leaving full screen releases the lock", () => {
   const before = unlocks;
   leaveFullscreen();
   assert.equal(unlocks, before + 1);
+});
+
+test("the API's presence is reported, because the page promises keys on it", () => {
+  // Not whether a lock took — that stays unreported by design — but whether this
+  // browser has one to take, which is what the menu and the Help card word
+  // themselves from.
+  assert.equal(keyboardLockSupported(), true);
+  const navigator = fakeNavigator as { keyboard?: unknown };
+  const api = navigator.keyboard;
+  navigator.keyboard = undefined;
+  assert.equal(keyboardLockSupported(), false);
+  navigator.keyboard = api;
 });
