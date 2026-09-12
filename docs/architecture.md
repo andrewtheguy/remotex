@@ -979,9 +979,13 @@ manual button and no remembered preference beside it. Standard `ard` rejects
 The opening size is one rule for every engine that can ask for one: the pinned
 `width`/`height` when the config sets both, else the full resolution of the
 client's own screen — carried in the `connect` message so it exists before the
-engine's handshake — else `DEFAULT_SIZE`, 1920×1080 points. A mobile
-`HostDisplay::fit` client has no screen suitable for laying out a desktop, so it
-uses the pinned size or that default while its density still counts. See
+engine's handshake — else `DEFAULT_SIZE`, 1440×900 points. That default is
+sized for what an unasked-for session costs at 2x: a HiDPI client renders it at
+twice the points, so 1920×1080 would mean capturing, scaling and encoding 4K
+every frame, where 1440×900 comes to 2880×1800. An operator who wants the larger
+desk pins `width`/`height`. A mobile `HostDisplay::fit` client has no screen
+suitable for laying out a desktop, so it uses the pinned size or that default
+while its density still counts. See
 `TargetConfig::opening_size`; `width` and `height` remain options because whether
 the operator specified them is meaningful.
 

@@ -138,7 +138,7 @@ password = "change-me"
 # virtual display at it, and a generic VNC server is asked for it once, as soon as
 # it declares SetDesktopSize support. With neither key, RDP and High Performance
 # instead open at the full resolution of the connecting client's own screen,
-# falling back to 1920×1080 only when the client supplies no screen; an unpinned
+# falling back to 1440×900 only when the client supplies no screen; an unpinned
 # generic VNC server is asked for no size at all and keeps its own.
 #
 # This is independent of `resize` below, which decides only whether the browser

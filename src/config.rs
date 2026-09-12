@@ -1125,16 +1125,20 @@ impl TargetConfig {
 /// named a size: no screen to measure, no operator to ask, one desk-shaped
 /// answer.
 ///
-/// Points, not backing pixels, and 16:9 rather than the 16:10 a working surface
-/// would prefer, because of what it becomes at 2x: 3840×2160, exactly the 4K a
-/// video stream encodes with the margin it has ([`crate::video::MAX_LONG_SIDE`]),
-/// and the size every 4K panel and Mac virtual display is built around. It is
-/// also what a phone gets: a touch client asks for this rather than its own
-/// screen, which is portrait and far too small to be a desktop
-/// (`sendMobileSize` in `frontend/src/useRemoteDesktop.ts`) — and a phone is
-/// a 2x or 3x screen, so this is the one opening size that lands on the ceiling
-/// rather than past it.
-pub const DEFAULT_SIZE: (u16, u16) = (1920, 1080);
+/// Points, not backing pixels, and chosen for what it costs at 2x rather than
+/// for the shape it makes at 1x: a HiDPI client renders this desktop at twice
+/// the points, and 1920×1080 at 2x is 3840×2160 — 4K to capture, scale and
+/// encode every frame, which is more than a gateway should take on for a
+/// session nobody asked to be that large. 1440×900 is 2880×1800 at 2x,
+/// five-eighths of the pixels, and the shape a working surface prefers besides.
+///
+/// It is also what a phone or tablet gets: a touch client asks for this rather
+/// than its own screen, which is portrait and far too small to be a desktop
+/// (`sendMobileSize` in `frontend/src/useRemoteDesktop.ts`). An operator who
+/// wants the larger desk pins `width`/`height` and pays for it deliberately,
+/// up to the ceiling a video stream encodes within
+/// ([`crate::video::MAX_LONG_SIDE`]).
+pub const DEFAULT_SIZE: (u16, u16) = (1440, 900);
 
 /// The port this project answers on when nothing says otherwise, in either
 /// shape: [`DEFAULT_LISTEN`] below, and the TUI control plane's `--port`.
