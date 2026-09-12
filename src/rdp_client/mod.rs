@@ -49,6 +49,7 @@ mod error;
 mod framebuffer;
 mod input;
 mod pointer;
+pub mod proto;
 mod session;
 
 pub use error::Error;
