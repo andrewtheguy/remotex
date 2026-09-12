@@ -502,8 +502,9 @@ fn outline(out: &mut [u8], w: usize, h: usize, colour: [u8; 3]) {
 /// line the task logged on its own way out would be cancelled before it printed.
 struct Shared {
     /// Why the order task gave up, so the engine's next push can report it rather
-    /// than a bare closed channel. See [`TileSink::closed`].
-    failure: Mutex<Option<String>>,
+    /// than a bare closed channel. The error itself, so the cause chain survives
+    /// the hop from the task to the push. See [`TileSink::closed`].
+    failure: Mutex<Option<anyhow::Error>>,
     motion: Mutex<Motion>,
     /// A `tokio` mutex rather than a `std` one because several of its critical
     /// sections span awaits. It is *not* held across the encode any more: a round
@@ -1279,7 +1280,7 @@ impl TileSink {
     /// message later than before, with the same outcome.
     fn closed(&self) -> anyhow::Error {
         match self.shared.failure.lock().unwrap().take() {
-            Some(message) => anyhow::anyhow!(message),
+            Some(error) => error,
             None => anyhow::anyhow!("frame channel closed"),
         }
     }
@@ -1420,7 +1421,7 @@ async fn flush_cleanups(
                 continue;
             }
             Err(e) => {
-                give_up(engine, shared, format!("tile encoder stopped: {e}"));
+                give_up(engine, shared, anyhow::Error::new(e).context("tile encoder stopped"));
                 return false;
             }
         };
@@ -1497,7 +1498,11 @@ async fn order_loop(
                     // Only reachable by cancellation — `panic = "abort"` in release
                     // means a panicking worker never gets this far.
                     Err(e) => {
-                        give_up(engine, &shared, format!("video encoder stopped: {e}"));
+                        give_up(
+                            engine,
+                            &shared,
+                            anyhow::Error::new(e).context("video encoder stopped"),
+                        );
                         break;
                     }
                 };
@@ -1533,7 +1538,7 @@ async fn order_loop(
                     // coarse ones, and the shadow already counts the real ones as
                     // delivered.
                     Err(e) => {
-                        give_up(engine, &shared, format!("video encode failed: {e}"));
+                        give_up(engine, &shared, e.context("video encode failed"));
                         break;
                     }
                 };
@@ -1607,13 +1612,17 @@ async fn order_loop(
                     // Ends the session, as encoding on the read loop did: the
                     // shadow already counts those pixels as delivered.
                     Ok(Err(e)) => {
-                        give_up(engine, &shared, format!("tile encode failed: {e}"));
+                        give_up(engine, &shared, e.context("tile encode failed"));
                         break;
                     }
                     // Only reachable by cancellation — `panic = "abort"` in release
                     // means a panicking worker never gets this far.
                     Err(e) => {
-                        give_up(engine, &shared, format!("tile encoder stopped: {e}"));
+                        give_up(
+                            engine,
+                            &shared,
+                            anyhow::Error::new(e).context("tile encoder stopped"),
+                        );
                         break;
                     }
                 }
@@ -1626,9 +1635,9 @@ async fn order_loop(
 }
 
 /// Record why the queue stopped, for the engine's next push to report.
-fn give_up(engine: &str, shared: &Shared, message: String) {
-    warn!("{engine}: {message}");
-    *shared.failure.lock().unwrap() = Some(message);
+fn give_up(engine: &str, shared: &Shared, error: anyhow::Error) {
+    warn!("{engine}: {error:#}");
+    *shared.failure.lock().unwrap() = Some(error);
 }
 
 fn micros(since: Instant) -> u64 {

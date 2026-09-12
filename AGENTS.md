@@ -18,7 +18,10 @@ documentation.
 - After Playwright changes, run `bun run typecheck` in `tests/playwright/`.
 - Put temporary files and test configuration under `tmp/`. Always run local
   Python through `uv` (GitHub Actions excluded).
-- Use `anyhow` for application errors and `thiserror` for typed API errors.
+- Errors are `anyhow` by default, and `thiserror` wherever a caller branches on
+  the kind instead of reporting it. Carry the cause: add `.context()` on the way
+  up, keep an error typed rather than flattening it to a `String` and rebuilding
+  one, and drop a source only when it says nothing the message does not.
 - Keep end-to-end tests under `tests/`; dummy RDP/VNC servers may use Docker or
   Podman.
 
