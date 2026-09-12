@@ -10,18 +10,20 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 
-use super::connect::{self, Connected};
+use super::connect::{self, Connected, Joined};
 use super::error::Error;
 use super::framebuffer::{Framebuffer, Rect};
-use super::input::{Command, Input};
+use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
 use super::proto::bitmap::MAX_DESKTOP_BYTES;
 use super::proto::capabilities::DemandActive;
+use super::proto::channel::Chunk;
 use super::proto::fastpath::{self, Fragments, Update};
 use super::proto::frame::Frames;
+use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
-use super::proto::{bitmap, channel, desktop, display, dvc, input, mcs, tls};
+use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, tls};
 
 // ------------------------------------------------------------------ configuration
 
@@ -44,6 +46,14 @@ pub struct Connect {
     /// which it renders the new size from scratch. This client sees one
     /// [`Event::Resize`] at the end of it.
     pub resize: bool,
+    /// Whether to open MS-RDPECLIP, which is what makes the clipboard side of
+    /// [`Input`] do anything.
+    ///
+    /// A server opens the channel a moment after the desktop and says so with
+    /// [`Event::ClipboardReady`]; nothing crosses it until one end announces a copy.
+    /// A session that did not ask for the channel reports none of the clipboard
+    /// events and drops every clipboard command.
+    pub clipboard: bool,
 }
 
 // ------------------------------------------------------------------ events
@@ -81,6 +91,35 @@ pub enum Event {
     /// `max_area` is the largest total monitor area the server will accept, in
     /// pixels; this client asks for one monitor, so it bounds `width * height`.
     ResizeReady { max_area: u64 },
+    /// The remote's clipboard channel is open, so the clipboard side of [`Input`]
+    /// now has somewhere to go. Only ever sent on a session configured with
+    /// [`Connect::clipboard`], and not at all by a server that does not implement
+    /// MS-RDPECLIP.
+    ///
+    /// The caller answers by advertising what its own clipboard holds —
+    /// [`Input::advertise_clipboard`] — including nothing, which is what tells the
+    /// remote there is a clipboard on this end at all.
+    ClipboardReady,
+    /// The remote copied something, and these are the format ids it can produce it
+    /// in. Nothing has been transferred: the bytes cost an
+    /// [`Input::request_clipboard`] and a second round trip.
+    ClipboardFormats(Vec<u32>),
+    /// The bytes of the format [`Input::request_clipboard`] asked for.
+    ClipboardData(Vec<u8>),
+    /// The remote would not produce the bytes that were asked for, and does not say
+    /// why. A Windows peer answers a second ask for the same format often enough
+    /// that a bounded retry is worth having — see [`Input::request_clipboard`].
+    ClipboardRefused,
+    /// A remote copy too large for this client to hold, dropped unread — see
+    /// [`channel::MAX_PDU`]. `bytes` is the size it announced, which is all there is
+    /// left to report, and the honest thing to report: a truncated paste cannot be
+    /// told from a whole one.
+    ClipboardOversized { bytes: u64 },
+    /// The remote is pasting and **is waiting** for the bytes of `format`. Every one
+    /// of these has to be answered with [`Input::send_clipboard`], including with
+    /// nothing — the application on the far end is blocked inside its own paste
+    /// handler until it is.
+    ClipboardWanted { format: u32 },
     Cursor(Cursor),
     /// The session is over, and the channel is about to close. `Ok(())` is an
     /// orderly disconnection from either side.
@@ -350,7 +389,10 @@ struct Active<'a> {
     io_channel: u16,
     /// The static virtual channel dynamic channels are opened over, for a session
     /// that asked to be resizable.
-    dynamic: Option<u16>,
+    dynamic: Option<Joined>,
+    /// The static virtual channel the clipboard travels on, for a session that asked
+    /// for one.
+    clipboard: Option<Joined>,
     share: Share,
 
     /// The pieces of a fast-path update that arrived cut up.
@@ -365,6 +407,10 @@ struct Active<'a> {
     /// share's.
     chunks: channel::Reassembly,
     incoming: dvc::Incoming,
+    /// The clipboard channel's own chunks. One reassembler per channel: the pieces
+    /// of two PDUs never interleave on one channel, and these are a separate
+    /// sequence from the dynamic channel's.
+    clip_chunks: channel::Reassembly,
     /// The number the server's Create Request gave Display Control, once it has
     /// opened it.
     control: Option<u32>,
@@ -395,7 +441,9 @@ impl<'a> Active<'a> {
         events: &'a mpsc::Sender<Event>,
         stop: watch::Receiver<bool>,
     ) -> Self {
-        let Connected { frames, writer, user, io_channel, dynamic, demand } = connected;
+        let dynamic = connected.channel(Channel::DYNAMIC);
+        let clipboard = connected.channel(Channel::CLIPBOARD);
+        let Connected { frames, writer, user, io_channel, demand, .. } = connected;
         Self {
             frames,
             writer,
@@ -403,6 +451,7 @@ impl<'a> Active<'a> {
             user,
             io_channel,
             dynamic,
+            clipboard,
             share: Share::from(&demand),
             fragments: Fragments::new(demand.multifragment),
             scratch: bitmap::Scratch::default(),
@@ -410,6 +459,7 @@ impl<'a> Active<'a> {
             cursors: pointer::Cache::new(),
             chunks: channel::Reassembly::new(),
             incoming: dvc::Incoming::new(),
+            clip_chunks: channel::Reassembly::new(),
             control: None,
             caps: None,
             resize_ready: false,
@@ -488,8 +538,16 @@ impl<'a> Active<'a> {
                     false => Err(anyhow!("the host ended the session: {reason}")),
                 }))
             }
-            mcs::Indication::Data(data) if Some(data.channel) == self.dynamic => {
+            mcs::Indication::Data(data)
+                if self.dynamic.is_some_and(|channel| channel.number == data.channel) =>
+            {
                 self.on_dynamic(data.payload).await?;
+                Ok(None)
+            }
+            mcs::Indication::Data(data)
+                if self.clipboard.is_some_and(|channel| channel.number == data.channel) =>
+            {
+                self.on_clipboard(data.payload).await?;
                 Ok(None)
             }
             mcs::Indication::Data(data) if data.channel == self.io_channel => {
@@ -571,16 +629,23 @@ impl<'a> Active<'a> {
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let reply = {
             let Self { chunks, incoming, control, caps, .. } = self;
-            let Some(pdu) = chunks.push(payload)? else {
-                return Ok(());
+            let pdu = match chunks.push(payload)? {
+                Chunk::Whole(pdu) => pdu,
+                Chunk::Partial => return Ok(()),
+                // Every PDU on this channel is tens of bytes, so this is a server
+                // that has lost the thread rather than a payload worth having.
+                Chunk::Dropped { length } => {
+                    warn!("rdp: dropping a {length}-byte dynamic channel PDU, which is absurd");
+                    return Ok(());
+                }
             };
             let Some(message) = incoming.push(pdu)? else {
                 return Ok(());
             };
             answer(message, control, caps)?
         };
-        if let Some(reply) = reply {
-            self.write_channel(&reply).await?;
+        if let (Some(reply), Some(dynamic)) = (reply, self.dynamic) {
+            self.write_channel(dynamic, &reply).await?;
         }
         // Display Control is usable once its capabilities have arrived, and a size
         // asked for before then has been waiting for exactly this.
@@ -591,6 +656,40 @@ impl<'a> Active<'a> {
             self.resize_ready = true;
             self.send(Event::ResizeReady { max_area: caps.area }).await;
             self.send_layout().await?;
+        }
+        Ok(())
+    }
+
+    /// The clipboard channel. Both ends announce a copy and neither transfers
+    /// anything until somebody pastes, so most of what arrives here is answered by
+    /// handing the caller one event and waiting.
+    ///
+    /// What crosses this boundary is a format id and bytes. Which format is text, and
+    /// what its bytes mean, belong to the caller — see [`crate::rdp_clipboard`].
+    async fn on_clipboard(&mut self, payload: &[u8]) -> Result<()> {
+        // Read inside this borrow and acted on outside it: the answers below are
+        // written to the very channel the chunk came off.
+        let (reply, event) = {
+            let pdu = match self.clip_chunks.push(payload)? {
+                Chunk::Whole(pdu) => pdu,
+                Chunk::Partial => return Ok(()),
+                // A copy on the far end larger than this client holds. Almost
+                // certainly the answer to a request, which is what the caller is
+                // waiting on, so it is reported as a size rather than a silence —
+                // and the channel carries on.
+                Chunk::Dropped { length } => {
+                    warn!("rdp: a {length}-byte clipboard PDU is more than this client holds");
+                    self.send(Event::ClipboardOversized { bytes: length as u64 }).await;
+                    return Ok(());
+                }
+            };
+            answer_clipboard(pdu)?
+        };
+        if let (Some(reply), Some(clipboard)) = (reply, self.clipboard) {
+            self.write_channel(clipboard, &reply).await?;
+        }
+        if let Some(event) = event {
+            self.send(event).await;
         }
         Ok(())
     }
@@ -685,15 +784,14 @@ impl<'a> Active<'a> {
         self.write(&frame).await
     }
 
-    /// One PDU out on the static virtual channel, wearing the chunk header that
-    /// channel's payloads wear.
-    async fn write_channel(&mut self, pdu: &[u8]) -> Result<()> {
-        let Some(dynamic) = self.dynamic else {
-            return Ok(()); // no channel was asked for, so nothing opened one
-        };
-        let chunk = channel::pdu(pdu, self.share.chunk)?;
-        let frame = mcs::send_data_request(self.user, dynamic, &chunk)?;
-        self.write(&frame).await
+    /// One PDU out on a static virtual channel, split into as many chunks as that
+    /// channel takes and each wearing the header those chunks wear.
+    async fn write_channel(&mut self, channel: Joined, pdu: &[u8]) -> Result<()> {
+        for chunk in channel::chunks(pdu, self.share.chunk, channel.flags)? {
+            let frame = mcs::send_data_request(self.user, channel.number, &chunk)?;
+            self.write(&frame).await?;
+        }
+        Ok(())
     }
 
     /// The desktop is now `width` × `height`: the framebuffer starts again, blank,
@@ -722,9 +820,12 @@ impl<'a> Active<'a> {
         let Some(control) = self.control else {
             return Ok(()); // the server closed the channel; nothing can carry it
         };
+        let Some(dynamic) = self.dynamic else {
+            return Ok(()); // no channel was asked for, so nothing opened one
+        };
         debug!("rdp: sending a {width}x{height} monitor layout at {scale}%");
         let layout = display::monitor_layout(width, height, scale);
-        self.write_channel(&dvc::data(control, &layout)?).await
+        self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 
     /// The Deactivation-Reactivation Sequence: the server tore the desktop down and
@@ -810,6 +911,7 @@ impl<'a> Active<'a> {
                             self.pending_resize = Some((width, height, scale_percent));
                             self.send_layout().await?;
                         }
+                        Command::Clipboard(what) => self.send_clipboard(what).await?,
                         Command::Input(_) => unreachable!("matched above"),
                     }
                 }
@@ -831,6 +933,26 @@ impl<'a> Active<'a> {
         }
         batch.clear();
         Ok(())
+    }
+
+    /// One thing the caller wants said on the clipboard channel.
+    ///
+    /// Dropped when there is no channel — a session that did not ask for one, or a
+    /// server that never opened it — which is the same bargain every other input
+    /// makes on a session that cannot carry it.
+    async fn send_clipboard(&mut self, what: Clipboard) -> Result<()> {
+        let Some(clipboard) = self.clipboard else {
+            return Ok(());
+        };
+        let pdu = match what {
+            Clipboard::Advertise(formats) => {
+                debug!("rdp: advertising clipboard formats {formats:?}");
+                cliprdr::format_list(&formats)
+            }
+            Clipboard::Request(format) => cliprdr::data_request(format),
+            Clipboard::Respond(data) => cliprdr::data_response(data.as_deref()),
+        };
+        self.write_channel(clipboard, &pdu).await
     }
 
     /// Ask the server to paint the whole desktop again, by whichever means it said
@@ -920,6 +1042,49 @@ fn draw(
             Ok(None)
         }
     }
+}
+
+/// What to say back to one clipboard PDU, and what to tell the caller about it.
+///
+/// A pure function for the same reason [`answer`] is: everything this channel does is
+/// decided here, and a decision on its own is a thing a test can make.
+fn answer_clipboard(pdu: &[u8]) -> Result<(Option<Vec<u8>>, Option<Event>)> {
+    Ok(match cliprdr::decode(pdu)? {
+        // Read and said out loud, and nothing more: what a server can do does not
+        // change what this client speaks.
+        cliprdr::Message::Capabilities { version, flags } => {
+            debug!("rdp: the host's clipboard is version {version}, flags {flags:#x}");
+            (None, None)
+        }
+        // This end's capabilities go first and they go from here: they are what
+        // settles the shape of every format list after them, and the caller has
+        // nothing to say about them.
+        cliprdr::Message::MonitorReady => {
+            debug!("rdp: the host opened the clipboard channel");
+            (Some(cliprdr::capabilities()), Some(Event::ClipboardReady))
+        }
+        cliprdr::Message::Formats(list) => {
+            let formats = cliprdr::formats(list)?;
+            debug!("rdp: the remote clipboard now holds {formats:?}");
+            (Some(cliprdr::format_list_response()), Some(Event::ClipboardFormats(formats)))
+        }
+        cliprdr::Message::DataRequest { format } => (None, Some(Event::ClipboardWanted { format })),
+        cliprdr::Message::Data(Some(bytes)) => (None, Some(Event::ClipboardData(bytes.to_vec()))),
+        cliprdr::Message::Data(None) => (None, Some(Event::ClipboardRefused)),
+        // A list this end sent that the server would not take. Nothing to retry — the
+        // next copy sends another one — and worth a line, because it is the far end
+        // saying it has ignored a copy.
+        cliprdr::Message::ListResponse { ok } => {
+            if !ok {
+                warn!("rdp: the host refused this end's clipboard advertisement");
+            }
+            (None, None)
+        }
+        cliprdr::Message::Ignored(kind) => {
+            debug!("rdp: ignoring a clipboard PDU of type {kind:#06x}");
+            (None, None)
+        }
+    })
 }
 
 /// What to say back to one dynamic channel PDU.
@@ -1018,6 +1183,78 @@ mod tests {
         let reply = answer(create(display::CHANNEL_NAME), &mut control, &mut caps).unwrap();
         assert_eq!(reply, Some(dvc::create_response(11, dvc::ACCEPTED)));
         assert_eq!(control, Some(11));
+    }
+
+    /// The opening PDU of the clipboard negotiation is answered from inside the
+    /// client — the capabilities are what settle the form of every format list after
+    /// them — and the caller is told the channel is live in the same breath.
+    #[test]
+    fn the_clipboards_opening_pdu_is_answered_here_and_reported_up() {
+        let (reply, event) = answer_clipboard(&monitor_ready()).unwrap();
+        assert_eq!(reply, Some(cliprdr::capabilities()));
+        assert!(matches!(event, Some(Event::ClipboardReady)));
+    }
+
+    /// A remote copy: answered on the wire, because a format list is owed a
+    /// response, and handed up, because only the caller knows what to ask for.
+    #[test]
+    fn a_remote_copy_is_acknowledged_and_its_formats_handed_up() {
+        let list = cliprdr::format_list(&[13, 1]);
+        let (reply, event) = answer_clipboard(&list).unwrap();
+        assert_eq!(reply, Some(cliprdr::format_list_response()));
+        let Some(Event::ClipboardFormats(formats)) = event else { panic!("{event:?}") };
+        assert_eq!(formats, vec![13, 1]);
+    }
+
+    /// A paste on the far end. Nothing is answered from here: the bytes are the
+    /// caller's, and the caller has to be the one to send them — or to refuse.
+    #[test]
+    fn a_paste_on_the_remote_is_the_callers_to_answer() {
+        let (reply, event) = answer_clipboard(&cliprdr::data_request(13)).unwrap();
+        assert_eq!(reply, None);
+        assert!(matches!(event, Some(Event::ClipboardWanted { format: 13 })));
+    }
+
+    /// The two answers to a read this end asked for, which the caller tells apart
+    /// because it treats them differently: bytes are a clipboard, and a refusal is
+    /// worth asking again about.
+    #[test]
+    fn the_two_answers_to_a_read_reach_the_caller_as_different_events() {
+        let bytes = vec![b'h', 0, b'i', 0, 0, 0];
+        let (reply, event) = answer_clipboard(&cliprdr::data_response(Some(&bytes))).unwrap();
+        assert_eq!(reply, None);
+        let Some(Event::ClipboardData(data)) = event else { panic!("{event:?}") };
+        assert_eq!(data, bytes);
+
+        let (_, event) = answer_clipboard(&cliprdr::data_response(None)).unwrap();
+        assert!(matches!(event, Some(Event::ClipboardRefused)));
+    }
+
+    /// The rest of MS-RDPECLIP, which this client asked for none of: nothing is
+    /// said back and nobody is told, and in particular the session does not end.
+    #[test]
+    fn the_clipboard_pdus_this_client_asked_for_none_of_are_answered_with_nothing() {
+        // A file contents request, and the response to a list this end sent.
+        for pdu in [clipboard_pdu(0x0008, 0, &[0; 24]), clipboard_pdu(0x0003, 0x0002, &[])] {
+            let (reply, event) = answer_clipboard(&pdu).unwrap();
+            assert_eq!(reply, None);
+            assert!(event.is_none(), "{event:?}");
+        }
+    }
+
+    /// One clipboard PDU as a server writes one, for the two tests above that need a
+    /// shape [`cliprdr`] does not write from this end.
+    fn clipboard_pdu(kind: u16, flags: u16, body: &[u8]) -> Vec<u8> {
+        let mut pdu = Vec::new();
+        pdu.extend_from_slice(&kind.to_le_bytes());
+        pdu.extend_from_slice(&flags.to_le_bytes());
+        pdu.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        pdu.extend_from_slice(body);
+        pdu
+    }
+
+    fn monitor_ready() -> Vec<u8> {
+        clipboard_pdu(0x0001, 0, &[])
     }
 
     /// A channel the server closes takes its capabilities with it: what it said it

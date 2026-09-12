@@ -178,8 +178,10 @@ password = "change-me"
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
 # all. On a target that transfers a clipboard, the Clipboard panel works
 # regardless, and is the way to move text when automatic sync cannot run.
-# RDP carries no clipboard: its client does not have MS-RDPECLIP yet, so the key
-# is refused on an rdp target rather than opening a panel with nothing behind it.
+# RDP carries Unicode text over MS-RDPECLIP. Both directions of that protocol are
+# lazy — a copy announces the formats it can be had in and the bytes follow on
+# request — which the gateway hides: a copy on the remote is fetched at once, and a
+# copy here is handed over when the remote pastes.
 # VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".

@@ -28,6 +28,7 @@
 //!   is live.
 //! - [`display`] — the one dynamic channel this client takes, which is how a desktop
 //!   is resized.
+//! - [`cliprdr`] — the clipboard, on a static channel of its own.
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
 //! - [`info`] — the logon: who the session belongs to and what it should look like.
@@ -67,6 +68,7 @@
 pub mod bitmap;
 pub mod capabilities;
 pub mod channel;
+pub mod cliprdr;
 pub mod credssp;
 pub mod der;
 pub mod desktop;

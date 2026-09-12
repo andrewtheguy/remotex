@@ -1,7 +1,7 @@
 //! A headless RDP client, protocol and all.
 //!
-//! Screen, pointer, keyboard, mouse and resize, and nothing else. There is no
-//! window and no drawing: [`Session::start`] connects, keeps a complete framebuffer
+//! Screen, pointer, keyboard, mouse, resize and the clipboard, and nothing else.
+//! There is no window and no drawing: [`Session::start`] connects, keeps a complete framebuffer
 //! up to date in memory the caller can read, and posts an [`Event`] whenever a
 //! rectangle of it changes. What the caller does with those pixels is not this
 //! module's business — [`crate::rdp`] is the caller, and it encodes them.
@@ -35,9 +35,18 @@
 //! Deactivation-Reactivation Sequence — it tears the desktop down and builds it
 //! again at the new size, which surfaces here as one [`Event::Resize`].
 //!
+//! # The clipboard
+//!
+//! MS-RDPECLIP, on a static virtual channel of its own, and only for a session that
+//! asked for it with [`Connect::clipboard`]. Both directions are lazy: a copy on
+//! either end announces *which formats* it can be had in, and the bytes cost a second
+//! round trip that happens only when somebody pastes. This module carries format ids
+//! and bytes and decides nothing about either — which format is text, and what its
+//! bytes mean, is [`crate::rdp_clipboard`]'s.
+//!
 //! # What this does not do
 //!
-//! - **No sound, no clipboard, no touch.** None of those channels is opened.
+//! - **No sound and no touch.** Neither channel is opened.
 //! - **No graphics pipeline.** MS-RDPEGFX is not advertised, so no surface
 //!   commands, no RemoteFX Progressive and no H.264.
 //! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a

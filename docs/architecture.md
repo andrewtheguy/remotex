@@ -43,8 +43,9 @@ Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queu
 | `server.rs`, `auth.rs` | HTTP routes, SPA serving, login sessions |
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
-| `rdp.rs` | RDP engine: damage, tiles, input, cursor, resize, over `rdp_client` |
+| `rdp.rs` | RDP engine: damage, tiles, input, cursor, resize, clipboard, over `rdp_client` |
 | `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue |
+| `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
@@ -1068,9 +1069,12 @@ holds the latest remote value and its observed change time:
   while a fetch is pending, the normal framebuffer cycle finishes its one
   outstanding response and pauses before requesting another, leaving the ordered
   server stream free to deliver the pasteboard reply;
-- RDP carries no clipboard; `clipboard = true` is refused on an rdp target at
-  config parse, and an engine asked for one anyway answers a Fetch as a remote
-  that has copied nothing.
+- RDP opens MS-RDPECLIP and carries `CF_UNICODETEXT` alone. Both directions of
+  that protocol are lazy — a copy announces *which formats* it can be had in, and
+  the bytes cost a second round trip — so the gateway asks the moment the remote's
+  format list arrives, which is what makes a remote copy reach the browser
+  unprompted as it does on the other two engines. See
+  [The clipboard](rdp-client.md#the-clipboard-ms-rdpeclip).
 
 Clients may request the current value after attaching, since they may have
 missed earlier pushes. Replies to that explicit request are marked separately
@@ -1104,74 +1108,32 @@ Nagle holds back is that window stalled for a round trip.
 ### RDP
 
 The protocol is the gateway's own client, `src/rdp_client/`, down to the wire
-format: `rdp_client/proto/` encodes and decodes every PDU against [MS-RDPBCGR] —
-the connection sequence, TLS, NLA/CredSSP, MCS and its channels, the planar bitmap
-codec, the cursor, fast-path input, and Display Control — and `rdp_client/` owns one
-thread per session, a complete framebuffer painted from those decoders, and an event
-per damaged rectangle. The only thing under it that is not written here is the
-CredSSP exchange itself (`sspi`), because NLA is not optional on a current Windows
-host and NTLM is the one mechanism a user name and a password can drive.
-The security negotiation offers `HYBRID` and nothing else, so a server that cannot
-do NLA is refused rather than logged on to some other way. Its socket comes from `engine::tcp_connect`, so an RDP host
-that goes silent is noticed on the same keepalive schedule as every other engine's.
-The engine (`src/rdp.rs`) compares those rectangles with a shadow of pixels already
-sent, splits the remainder into bands, and encodes off the event loop. Input is
-mapped from DOM codes to scancodes and queued to the client's thread as fast-path
-events.
+format: `rdp_client/proto/` encodes and decodes every PDU against [MS-RDPBCGR],
+and `rdp_client/` owns one thread per session, a complete framebuffer painted from
+those decoders, and an event per damaged rectangle. The engine (`src/rdp.rs`)
+compares those rectangles with a shadow of pixels already sent, splits the
+remainder into bands, and encodes off the event loop. Input is mapped from DOM
+codes to scancodes and queued to the client's thread as fast-path events.
 
-The client carries the desktop, the pointer, keyboard, mouse and resize, and
-nothing else: no sound, no clipboard, no touch. `audio = true` and
-`clipboard = true` are refused on an rdp target at config parse, and touch is
-announced only by a host that opens MS-RDPEI, which this client never asks for.
-What each of the three would take is in [`roadmap.md`](roadmap.md).
+The client carries the desktop, the pointer, keyboard, mouse, resize and the
+clipboard, and nothing else: no sound and no touch. `audio = true` is refused on an
+rdp target at config parse, and touch is announced only by a host that opens
+MS-RDPEI, which this client never asks for. What each of the two would take is in
+[`roadmap.md`](roadmap.md).
 
-Bitmap updates carry no frame boundary, so damage is flushed on a guess: the
-16 ms coalescer (`DAMAGE_INTERVAL`) reconstructs boundaries by timing — a quiet
-screen's damage leaves on the spot, and everything within one interval after it
-waits for the deadline, coalesced.
+Two static virtual channels are asked for, each by a key: `drdynvc` for
+`resize = true` and `cliprdr` for `clipboard = true`. The Graphics Pipeline is not
+advertised at all, so the server draws with bitmap updates, and the pointer travels
+as its own shape rather than in the framebuffer. Damage is flushed on a 16 ms
+guess, because bitmap updates carry no frame boundary. A resize is a full
+Deactivation-Reactivation Sequence, which is what lets a Windows host re-render the
+desktop sharp at the new size and density.
 
-Under a plan that takes copies, each flush first searches the damage for regions
-the client already holds elsewhere on its canvas (`src/copies.rs`, guacamole-
-server's cell-hash search over this gateway's shadow): a scroll goes out as a few
-`COPY` records instead of image bytes, and the tile pass carries only what the
-copies did not — including repainting anything a copy got wrong, which is what
-makes a wrong copy waste rather than corruption.
+Read [The RDP client, written here](rdp-client.md) for the whole of it: the
+connection sequence, the channels and the chunk flags a Windows host silently
+requires, the codec and damage path, resize and density, and the clipboard.
 
-The Graphics Pipeline (MS-RDPEGFX) is not advertised at all, so the server draws
-with bitmap updates, decoded by the planar bitmap codec. The client announces no
-drawing orders either, so the path is bitmaps throughout. That is what makes a resize a full
-reactivation, after which a Windows host re-renders the desktop sharp; it is also
-what avoids the pipeline's RFX Progressive decoder, which still fails partway
-through a session on some Windows hosts, where a decode error ends the session.
-
-The pointer is not part of that framebuffer. RDP servers send the cursor's shape
-rather than drawing it, and each shape goes to the client as `cursor`, which draws
-it on its own hardware pointer. A mouse move therefore costs the session nothing
-at all, where compositing the pointer into the framebuffer put every one of them
-through damage, the flush interval, an encode, the socket, a decode and a paint.
-The server's own pointer *positions* are dropped: the browser's pointer is already
-where the mouse is, and nothing here can move a hardware pointer.
-
-With `resize = true`, the Display Control Virtual Channel applies explicit
-desktop-size requests, and also matches the client's display density: a monitor
-layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
-twice the pixels with the host's UI drawn at 200% rather than the same UI
-stretched. The opening RDP handshake is always 1x; the client applies its screen
-density after `connected`, so a Retina client costs a reactivation. RDP reports no
-scale factor back, so the density here is declared rather than measured. The layout
-always says a monitor is upright: a window taller than it is wide is not a rotated
-screen, and a server told otherwise turns the desktop on its side.
-
-`ConnectionType` is declared a LAN rather than probed, because a server's own
-estimate of the hop between it and a gateway beside it throttled updates badly, and
-no multitransport is offered. The auto-detect PDUs a Windows host sends anyway go
-unanswered, which it treats as a link it cannot measure.
-
-A size change that is *real* costs a full Deactivation-Reactivation Sequence,
-which the client runs and reports as a new desktop size. Asking twice for the same size triggers one change, and a
-request equal to the current size never triggers one. A layout is asked for on a
-bounded schedule rather than once, because a Windows host discards one sent before
-the session it is starting has settled and acknowledges nothing either way.
+[MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
 ### VNC
 

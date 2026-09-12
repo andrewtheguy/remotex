@@ -36,12 +36,13 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay, MAX_CURSOR_DIM,
-    MouseButton, ServerMsg, TileGrid, UNSCALED,
+    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED,
 };
 use crate::rdp_client::{
     self as client, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton, Session,
 };
+use crate::rdp_clipboard::{self, CF_UNICODETEXT};
 use crate::tiles::{self, Rect, Shadow};
 
 // A layout — a size, a density, or both — the remote has been asked for and has
@@ -166,9 +167,6 @@ async fn session(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) {
-    if config.clipboard {
-        warn!("rdp: this engine carries no clipboard; the target's clipboard stays on the host");
-    }
     let (session, mut events) = Session::start(connect_config(&config, display));
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
@@ -199,6 +197,7 @@ async fn session(
         events,
         Flags {
             resize: config.resize,
+            clipboard: config.clipboard,
             default_size: config.default_size(),
             video: config.streams_video(),
         },
@@ -303,6 +302,7 @@ fn connect_config(config: &TargetConfig, display: Option<HostDisplay>) -> Connec
         width,
         height,
         resize: config.resize,
+        clipboard: config.clipboard,
     }
 }
 
@@ -311,6 +311,11 @@ fn connect_config(config: &TargetConfig, display: Option<HostDisplay>) -> Connec
 /// only ever read from the same place.
 struct Flags {
     resize: bool,
+    /// Whether this target bridges its clipboard ([`TargetConfig::clipboard`]), which
+    /// is what opened the channel — so a browser that sends the clipboard pair anyway
+    /// is answered as a session with no clipboard rather than as one with an empty
+    /// one.
+    clipboard: bool,
     /// What [`ClientMsg::DefaultSize`] means here —
     /// [`TargetConfig::default_size`], in *points*: the pinned config size or
     /// the built-in default. Points rather than pixels because the density can
@@ -565,6 +570,225 @@ fn shape_of(image: &client::CursorImage) -> Option<CursorShape> {
     }
 }
 
+// A Windows peer can advertise Unicode text, fail the first Format Data Request, and
+// satisfy a retry a moment later. Retrying only after that explicit failure keeps the
+// normal path fast, and stays entirely separate from a remote *paste*, which arrives
+// as `Event::ClipboardWanted` instead.
+const CLIPBOARD_READ_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(150),
+    Duration::from_millis(400),
+];
+
+/// A read of the remote's clipboard that has been asked for and not answered.
+struct PendingClipboardRead {
+    format: u32,
+    failures: usize,
+}
+
+impl PendingClipboardRead {
+    fn new(format: u32) -> Self {
+        Self { format, failures: 0 }
+    }
+
+    fn retry_after_failure(&mut self) -> Option<Duration> {
+        let delay = CLIPBOARD_READ_RETRY_DELAYS.get(self.failures).copied();
+        if delay.is_some() {
+            self.failures += 1;
+        }
+        delay
+    }
+}
+
+/// Both ends of the clipboard bridge, as this engine has to hold them.
+///
+/// MS-RDPECLIP is lazy in both directions — a copy announces its formats and the
+/// bytes cost a second round trip — so each direction needs somewhere to keep what it
+/// has, and the browser protocol is not lazy at all: a `clipboardRequest` expects an
+/// answer now, and a remote copy is pushed to the browser unprompted the way the VNC
+/// engines push theirs.
+#[derive(Default)]
+struct ClipboardState {
+    /// The remote's clipboard as last seen, which is what answers the panel's Fetch.
+    /// There is no "read it now" on this protocol, so the last thing that arrived is
+    /// the only answer there is.
+    remote: Option<ClipboardSnapshot>,
+    /// What the browser last put on the remote's clipboard, held because the remote
+    /// asks for the bytes only when somebody pastes.
+    local: Option<String>,
+    /// A read asked for and not answered, and when to ask again.
+    pending: Option<PendingClipboardRead>,
+    retry_at: Option<Instant>,
+}
+
+impl ClipboardState {
+    /// The channel is open. Advertising even an empty clipboard is what tells the
+    /// remote there is a client on this end at all.
+    fn ready(&self, input: &Input) {
+        debug!("rdp: the remote opened its clipboard channel");
+        self.advertise(input);
+    }
+
+    /// The remote copied something. Asked for straight away rather than waiting for
+    /// the panel's Fetch, so a copy over there reaches the browser unprompted exactly
+    /// as it does on the two VNC engines.
+    fn remote_copied(&mut self, input: &Input, formats: &[u32]) {
+        self.retry_at = None;
+        match rdp_clipboard::pick_text_format(formats) {
+            Some(format) => {
+                self.pending = Some(PendingClipboardRead::new(format));
+                input.request_clipboard(format);
+            }
+            // An image or a file list. Recorded as a change with nothing in it, and
+            // deliberately not pushed: the panel keeps what it had rather than
+            // blanking over a copy this gateway has no way to carry.
+            None => {
+                self.pending = None;
+                debug!("rdp: the remote copied no text format this gateway can carry");
+                let empty = ClipboardSnapshot::changed(String::new(), self.remote.as_ref());
+                self.remote = Some(empty);
+            }
+        }
+    }
+
+    /// The bytes of a read that was asked for.
+    async fn remote_data(&mut self, data: &[u8], sink: &TileSink) -> anyhow::Result<()> {
+        self.pending = None;
+        self.retry_at = None;
+        // Invalid bytes cannot become valid by asking the same question again, so a
+        // malformed payload keeps the last good value and schedules nothing.
+        let Some(text) = rdp_clipboard::decode_unicode(data) else {
+            warn!("rdp: undecodable clipboard text from the remote, {} bytes", data.len());
+            return Ok(());
+        };
+        let snapshot = match rdp_clipboard::from_remote(&text) {
+            Ok(text) => {
+                debug!("rdp: remote clipboard updated, {} bytes", text.len());
+                ClipboardSnapshot::changed(text, self.remote.as_ref())
+            }
+            // Reported as its size rather than as the first 512 KiB of it: the panel
+            // can say what happened, where a truncated paste could not be told from a
+            // whole one.
+            Err(bytes) => {
+                debug!("rdp: remote clipboard is {bytes} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit");
+                ClipboardSnapshot::oversized(bytes, self.remote.as_ref())
+            }
+        };
+        self.publish(snapshot, sink).await
+    }
+
+    /// A remote copy that never arrived at all, because it was larger than the
+    /// channel will carry. The same report as one the ceiling above refused: what was
+    /// copied is known, and only its size.
+    async fn oversized(&mut self, bytes: u64, sink: &TileSink) -> anyhow::Result<()> {
+        self.pending = None;
+        self.retry_at = None;
+        let snapshot = ClipboardSnapshot::oversized(bytes, self.remote.as_ref());
+        self.publish(snapshot, sink).await
+    }
+
+    /// `CB_RESPONSE_FAIL`, which does not say why.
+    ///
+    /// Nothing is forwarded — empty text would wipe the panel over a transient
+    /// refusal — and the same advertised format is asked for again on a bounded
+    /// ladder, which is what a live Windows peer was observed to recover on.
+    fn refused(&mut self) {
+        let Some(read) = self.pending.as_mut() else {
+            return; // nothing was asked for, so this answers nothing
+        };
+        match read.retry_after_failure() {
+            Some(delay) => {
+                debug!("rdp: retrying a refused remote clipboard read in {}ms", delay.as_millis());
+                self.retry_at = Some(Instant::now() + delay);
+            }
+            None => {
+                debug!("rdp: the remote clipboard read exhausted its retries");
+                self.pending = None;
+                self.retry_at = None;
+            }
+        }
+    }
+
+    /// The retry deadline came round: ask for the same format again.
+    fn retry(&mut self, input: &Input) {
+        self.retry_at = None;
+        if let Some(read) = self.pending.as_ref() {
+            input.request_clipboard(read.format);
+        }
+    }
+
+    /// The remote is pasting and **is waiting**. Every one of these is answered,
+    /// including with nothing: a request left unanswered is a remote application
+    /// stopped inside its own paste handler, which on Windows is a window that has
+    /// stopped repainting rather than an error anybody sees.
+    fn wanted(&self, input: &Input, format: u32) {
+        let data = match self.local.as_deref() {
+            Some(text) if format == CF_UNICODETEXT => {
+                debug!("rdp: handing {} bytes to the remote's paste", text.len());
+                Some(rdp_clipboard::encode_unicode(text))
+            }
+            Some(_) => {
+                warn!("rdp: the remote asked for clipboard format {format}, never offered here");
+                None
+            }
+            None => None,
+        };
+        input.send_clipboard(data);
+    }
+
+    /// The browser copied: take the remote clipboard over by advertising the one
+    /// format this gateway carries. Nothing is transferred — the remote asks for the
+    /// bytes if and when someone pastes.
+    fn take(&mut self, input: &Input, text: &str) {
+        // Ownership is changing hands, so a read of what the remote used to hold is
+        // no longer worth anything.
+        self.pending = None;
+        self.retry_at = None;
+        match rdp_clipboard::to_remote(text) {
+            Some(text) => {
+                debug!("rdp: advertising {} bytes to the remote clipboard", text.len());
+                self.local = Some(text);
+                self.advertise(input);
+            }
+            // Refused, so the remote keeps whatever it had: advertising a partial
+            // copy would hand out a paste that looks complete. The browser refuses
+            // this and says why before it ever reaches the gateway.
+            None => warn!(
+                "rdp: refusing {} bytes to the remote clipboard, over the {MAX_CLIPBOARD_BYTES} \
+                 byte limit",
+                text.len()
+            ),
+        }
+    }
+
+    /// Tell the remote what this end holds. `None` advertises nothing, which is the
+    /// honest answer before the browser has sent anything and is still worth sending.
+    fn advertise(&self, input: &Input) {
+        let formats = match self.local.is_some() {
+            true => vec![CF_UNICODETEXT],
+            false => Vec::new(),
+        };
+        input.advertise_clipboard(formats);
+    }
+
+    /// The answer to the panel's Fetch. Empty until the remote copies something,
+    /// which reads in the panel as "nothing has been copied over there yet".
+    fn snapshot(&self) -> ClipboardSnapshot {
+        self.remote.clone().unwrap_or_else(ClipboardSnapshot::unobserved)
+    }
+
+    async fn publish(&mut self, snapshot: ClipboardSnapshot, sink: &TileSink) -> anyhow::Result<()> {
+        self.remote = Some(snapshot.clone());
+        sink.msg(ServerMsg::Clipboard {
+            text: snapshot.text,
+            changed_at_ms: snapshot.changed_at_ms,
+            requested: false,
+            oversized_bytes: snapshot.oversized_bytes,
+        })
+        .await
+    }
+}
+
 async fn active_loop(
     session: &Session,
     mut events: mpsc::Receiver<Event>,
@@ -573,7 +797,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, default_size, video } = flags;
+    let Flags { resize, clipboard: clipboard_enabled, default_size, video } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -615,6 +839,10 @@ async fn active_loop(
     let mut pending_layout: Option<PendingLayout> = None;
     let mut layout_retry_at: Option<Instant> = None;
 
+    // Both ends of the clipboard bridge. Empty on a target that did not opt in, where
+    // no channel was opened and none of the events below can arrive.
+    let mut clipboard = ClipboardState::default();
+
     // Damage accumulated toward the next tile flush, and its deadline. A busy RDP
     // server reports damage far faster than anything presents it — ~126 batches a
     // second measured against a 60 Hz screen, back when the pointer was composited
@@ -630,6 +858,14 @@ async fn active_loop(
     loop {
         let layout_retry = async {
             match layout_retry_at {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        // A remote clipboard read the peer refused, waiting out its rung of the
+        // ladder — see `CLIPBOARD_READ_RETRY_DELAYS`.
+        let clipboard_retry = async {
+            match clipboard.retry_at {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -728,6 +964,21 @@ async fn active_loop(
                         // finished and the connection can carry client PDUs again.
                         input.refresh();
                     }
+                    // The clipboard channel, whose six events are the whole of
+                    // MS-RDPECLIP as this end sees it. None of them can arrive on a
+                    // target that did not opt in, because no channel was asked for.
+                    Event::ClipboardReady => clipboard.ready(input),
+                    Event::ClipboardFormats(formats) => {
+                        clipboard.remote_copied(input, &formats);
+                    }
+                    Event::ClipboardData(data) => {
+                        clipboard.remote_data(&data, sink).await?;
+                    }
+                    Event::ClipboardRefused => clipboard.refused(),
+                    Event::ClipboardOversized { bytes } => {
+                        clipboard.oversized(bytes, sink).await?;
+                    }
+                    Event::ClipboardWanted { format } => clipboard.wanted(input, format),
                     Event::Ended(result) => {
                         info!("rdp: session ended: {result:?}");
                         // Best effort, and only for the pixels still pending: the
@@ -867,11 +1118,26 @@ async fn active_loop(
                     }
                     continue;
                 }
-                // A panel's Fetch waits for an answer. This engine opens no
-                // clipboard channel, so the honest one is the one a remote that has
-                // copied nothing gives — and a browser copy has nowhere to go.
+                // The clipboard pair, intercepted here for the same reason as the
+                // two above: they act on a virtual channel rather than translating to
+                // input. Both are no-ops on a target that did not opt in — the
+                // browser hides the panel then, so this is the belt to that UI's
+                // braces — except that a Fetch is still answered, because a panel
+                // that asked is waiting.
+                if let ClientMsg::Clipboard { text } = &msg {
+                    if clipboard_enabled {
+                        clipboard.take(input, text);
+                    }
+                    continue;
+                }
                 if matches!(msg, ClientMsg::ClipboardRequest) {
-                    let snapshot = ClipboardSnapshot::unobserved();
+                    // Answered from what the channel last carried, which is empty
+                    // until the remote copies something — and on a target with no
+                    // clipboard at all, empty for the life of the session.
+                    let snapshot = match clipboard_enabled {
+                        true => clipboard.snapshot(),
+                        false => ClipboardSnapshot::unobserved(),
+                    };
                     sink.msg(ServerMsg::Clipboard {
                         text: snapshot.text,
                         changed_at_ms: snapshot.changed_at_ms,
@@ -883,6 +1149,10 @@ async fn active_loop(
                 for event in translate_input(msg, &mut last_pos) {
                     event.apply(input);
                 }
+                continue;
+            }
+            _ = clipboard_retry => {
+                clipboard.retry(input);
                 continue;
             }
             _ = layout_retry => {
@@ -1187,8 +1457,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
         }
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
-        // A request is answered by the active loop before translation; a browser
-        // copy has no clipboard channel to go to on this engine.
+        // Both halves of the clipboard pair are answered by the active loop, on the
+        // clipboard channel, before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
@@ -1497,6 +1767,27 @@ mod tests {
 
     /// The edge convention flips here, and getting it wrong is a one-pixel seam
     /// down the right and bottom of every tile — visible, and easy to stare past.
+    /// The ladder a refused remote clipboard read climbs, and the fact that it ends.
+    /// A Windows peer refuses a read it can satisfy a moment later, and one it will
+    /// never satisfy looks identical — so the asking has to stop.
+    #[test]
+    fn a_refused_clipboard_read_is_retried_on_a_ladder_that_runs_out() {
+        let mut read = PendingClipboardRead::new(CF_UNICODETEXT);
+        let climbed: Vec<Duration> = std::iter::from_fn(|| read.retry_after_failure()).collect();
+        assert_eq!(climbed, CLIPBOARD_READ_RETRY_DELAYS.to_vec());
+        assert_eq!(read.retry_after_failure(), None, "and it stays given up on");
+        assert_eq!(read.format, CF_UNICODETEXT, "the format asked for never changes");
+    }
+
+    /// Before the remote has copied anything the panel's Fetch is still answered, and
+    /// with the one answer that is honest: empty text and no time.
+    #[test]
+    fn an_unobserved_remote_clipboard_answers_a_fetch_with_nothing() {
+        let snapshot = ClipboardState::default().snapshot();
+        assert_eq!(snapshot, ClipboardSnapshot::unobserved());
+        assert!(snapshot.text.is_empty() && snapshot.changed_at_ms.is_none());
+    }
+
     #[test]
     fn a_damage_rectangle_becomes_inclusive_on_every_edge() {
         let r = damaged(client::Rect { x: 10, y: 20, width: 4, height: 2 });

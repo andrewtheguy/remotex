@@ -38,7 +38,8 @@ use remotex::rdp_client::proto::credssp::{self, Credentials};
 use remotex::rdp_client::proto::fastpath::{self, Fragments};
 use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
-use remotex::rdp_client::proto::{channel, display, dvc};
+use remotex::rdp_client::proto::channel::Chunk;
+use remotex::rdp_client::proto::{channel, cliprdr, display, dvc};
 use remotex::rdp_client::proto::input::{self, Button, Event};
 use remotex::rdp_client::proto::pointer::{self, Pointer};
 use remotex::rdp_client::proto::info::ClientInfo;
@@ -63,7 +64,7 @@ const OFFERED: Security = Security::HYBRID;
 
 /// The static virtual channels this client asks for. One, and it is the transport the
 /// Display Control resize channel later rides on.
-const CHANNELS: [Channel; 1] = [Channel::DYNAMIC];
+const CHANNELS: [Channel; 2] = [Channel::DYNAMIC, Channel::CLIPBOARD];
 
 /// A size to open at. Nothing in this probe depends on it; the server just has to
 /// accept it.
@@ -179,9 +180,10 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
 
         // 6. Join every channel, the user's own first. Each is its own round trip,
         //    and the server may answer with a different number than was asked for.
-        // The one virtual channel that was asked for, numbered by the server. It is
-        // what Display Control will be opened over.
-        let dynamic = channels[0];
+        // The virtual channels that were asked for, numbered by the server in the
+        // order they were named: the transport Display Control is opened over, and
+        // the clipboard's own.
+        let (dynamic, clipboard) = (channels[0], channels[1]);
         for channel in std::iter::once(user).chain(std::iter::once(io_channel)).chain(channels) {
             stream
                 .write_all(&mcs::channel_join_request(user, channel))
@@ -268,20 +270,39 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         // 11. The updates. Nothing is asked for: a share that has just gone live
         //     paints itself, and what arrives is whatever the host decided to send —
         //     including the dynamic channel it opens, which is answered as it comes.
-        let display = watch(&mut stream, &demand, user, io_channel, dynamic).await;
+        let watched =
+            watch(&mut stream, &demand, user, Channels { io_channel, dynamic, clipboard }).await;
+        let display = watched.display;
 
         // 12. The resize. A monitor layout is the one thing this client says on a
         //     virtual channel, and the host's answer is to tear the share down and
         //     build it again at the size that was asked for — which is the only way
         //     to see from out here that every layer under it was right.
+        // The clipboard is the host's answer too: it opens the channel a moment after
+        // the share goes live, and the Format List Response is it vouching for
+        // everything underneath — the channel's options and chunk flags, the
+        // capabilities, and a list written in the short-name form the capability
+        // exchange settled on. A host that disliked any of those would answer nothing
+        // at all and never say why, so this assertion is the whole of what the far end
+        // can be asked about this channel.
+        assert!(watched.clipboard_ready, "the host opened its clipboard channel");
+        assert_eq!(
+            watched.clipboard_list_taken,
+            Some(true),
+            "the host took the format list this client advertised"
+        );
+
         let control = display.channel.expect("the host opened Display Control");
         assert!(
             display.caps.is_some(),
             "Display Control is not usable until its capabilities arrive"
         );
         let layout = display::monitor_layout(RESIZED.0.into(), RESIZED.1.into(), 100);
-        let chunk = channel::pdu(&dvc::data(control, &layout).unwrap(), demand.chunk).unwrap();
-        send(&mut stream, user, dynamic, &chunk).await;
+        let pdu = dvc::data(control, &layout).unwrap();
+        for chunk in channel::chunks(&pdu, demand.chunk, Channel::DYNAMIC.chunk_flags()).unwrap()
+        {
+            send(&mut stream, user, dynamic, &chunk).await;
+        }
         println!("-> a monitor layout of {}x{}", RESIZED.0, RESIZED.1);
 
         let demand = reactivation(&mut stream, io_channel).await;
@@ -346,9 +367,9 @@ async fn watch(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     demand: &DemandActive,
     user: u16,
-    io_channel: u16,
-    dynamic: u16,
-) -> Display {
+    channels: Channels,
+) -> Watched {
+    let Channels { io_channel, dynamic, clipboard } = channels;
     let (width, height) = (usize::from(demand.width), usize::from(demand.height));
     let mut desktop = vec![0_u8; width * height * 4];
     let mut painted = vec![false; width * height];
@@ -359,7 +380,8 @@ async fn watch(
     let mut cursors = pointer::Cache::new();
     let mut chunks = channel::Reassembly::new();
     let mut incoming = dvc::Incoming::new();
-    let mut display = Display::default();
+    let mut clip_chunks = channel::Reassembly::new();
+    let mut watched = Watched::default();
 
     let mut seen: Vec<(&str, usize)> = Vec::new();
     let mut rectangles = 0_usize;
@@ -382,17 +404,82 @@ async fn watch(
                 // channel whose Create Request goes unanswered is never opened — and
                 // Display Control is the one this client is after.
                 let reply = {
-                    let Some(pdu) = chunks.push(data.payload).expect("a channel PDU") else {
-                        continue;
+                    let pdu = match chunks.push(data.payload).expect("a channel PDU") {
+                        Chunk::Whole(pdu) => pdu,
+                        other => {
+                            assert_eq!(other, Chunk::Partial, "a dynamic channel PDU was dropped");
+                            continue;
+                        }
                     };
                     let Some(message) = incoming.push(pdu).expect("a dynamic channel PDU") else {
                         continue;
                     };
-                    answer(message, &mut display)
+                    answer(message, &mut watched.display)
                 };
                 if let Some(reply) = reply {
-                    let chunk = channel::pdu(&reply, demand.chunk).expect("a reply of a few bytes");
-                    send(stream, user, dynamic, &chunk).await;
+                    let flags = Channel::DYNAMIC.chunk_flags();
+                    for chunk in
+                        channel::chunks(&reply, demand.chunk, flags).expect("a short reply")
+                    {
+                        send(stream, user, dynamic, &chunk).await;
+                    }
+                }
+                continue;
+            }
+            if data.channel == clipboard {
+                // The clipboard channel, which the host also opens on its own once
+                // the share is live. Its opening PDU is the only one that needs an
+                // answer, and the answer is what settles the form of every format
+                // list either end sends afterwards.
+                let replies = {
+                    let pdu = match clip_chunks.push(data.payload).expect("a channel PDU") {
+                        Chunk::Whole(pdu) => pdu,
+                        other => {
+                            assert_eq!(other, Chunk::Partial, "a clipboard PDU was dropped");
+                            continue;
+                        }
+                    };
+                    match cliprdr::decode(pdu).expect("a clipboard PDU") {
+                        cliprdr::Message::Capabilities { version, flags } => {
+                            println!("<- cliprdr: version {version}, flags {flags:#x}");
+                            Vec::new()
+                        }
+                        cliprdr::Message::MonitorReady => {
+                            println!("<- cliprdr: monitor ready");
+                            watched.clipboard_ready = true;
+                            // The capabilities, then an empty format list: this end
+                            // has copied nothing, and saying so is what tells the
+                            // host there is a clipboard here at all.
+                            vec![cliprdr::capabilities(), cliprdr::format_list(&[])]
+                        }
+                        cliprdr::Message::ListResponse { ok } => {
+                            println!("<- cliprdr: format list response, ok {ok}");
+                            watched.clipboard_list_taken = Some(ok);
+                            Vec::new()
+                        }
+                        cliprdr::Message::Formats(list) => {
+                            let formats = cliprdr::formats(list).expect("a format list");
+                            println!("<- cliprdr: the remote holds {formats:?}");
+                            watched.clipboard_formats = Some(formats);
+                            vec![cliprdr::format_list_response()]
+                        }
+                        other => {
+                            println!("<- cliprdr: {other:?}");
+                            Vec::new()
+                        }
+                    }
+                };
+                for reply in replies {
+                    // The clipboard's chunks wear `CHANNEL_FLAG_SHOW_PROTOCOL` and the
+                    // dynamic channel's must not. A host that disagrees with either
+                    // stops answering that channel and says nothing about why, which is
+                    // most of what this branch is here to catch.
+                    let flags = Channel::CLIPBOARD.chunk_flags();
+                    for chunk in
+                        channel::chunks(&reply, demand.chunk, flags).expect("a short reply")
+                    {
+                        send(stream, user, clipboard, &chunk).await;
+                    }
                 }
                 continue;
             }
@@ -454,7 +541,30 @@ async fn watch(
 
     assert!(rectangles > 0, "a live share paints itself, and nothing arrived");
     assert!(covered > 0, "rectangles arrived and none of them landed on the desktop");
-    display
+    watched
+}
+
+/// The virtual channels one session's PDUs are addressed to.
+#[derive(Clone, Copy)]
+struct Channels {
+    io_channel: u16,
+    dynamic: u16,
+    clipboard: u16,
+}
+
+/// What the host said on its two virtual channels while the desktop painted.
+#[derive(Debug, Default)]
+struct Watched {
+    display: Display,
+    /// Whether the host opened its clipboard and sent the Monitor Ready that starts
+    /// the negotiation.
+    clipboard_ready: bool,
+    /// What it made of the format list this end advertised, which is the host
+    /// vouching for the short-name form it was written in.
+    clipboard_list_taken: Option<bool>,
+    /// What the remote clipboard held, if a copy happened to be announced while this
+    /// was watching. Nothing provokes one, so it is usually `None`.
+    clipboard_formats: Option<Vec<u32>>,
 }
 
 /// The Display Control channel, once the server has opened it.
