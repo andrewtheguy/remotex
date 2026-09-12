@@ -56,6 +56,25 @@ remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI an
 xrdp never does, which is the reason this stays an always-offered capability
 rather than a key.
 
+#### Licensing on a Remote Desktop Session Host
+
+The licensing step accepts exactly one PDU: an `ERROR_ALERT` carrying
+`STATUS_VALID_CLIENT`, which is what every Windows host this client has been
+pointed at sends. Anything else is refused by name in
+`proto/license.rs`, and the connection ends before `DemandActive`.
+
+A Session Host with the Remote Desktop Session Host role and per-device CAL
+licensing does not send that. It opens a real exchange: `LICENSE_REQUEST`, the
+client's new or upgrade licence request, the platform challenge and its response,
+and the issued licence. This client would disconnect at the first of those. The
+exchange is written in FreeRDP 3.30.0's `libfreerdp/core/license.c`, the version
+`main` builds against, and a copy is in the local reference checkout under
+`tmp/references/`.
+
+How many real deployments this reaches is not known, and no host in use has shown
+it. What would settle it is one connection to an RDSH configured for per-device
+CALs; the work is only worth taking once a host that needs it turns up.
+
 ### Render dial — what the region streams do not decide yet
 
 `render_motion = true` ships: the motion detection chooses the regions,
