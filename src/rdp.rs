@@ -867,10 +867,12 @@ async fn active_loop(
     let mut pending_damage: Vec<Rect> = Vec::new();
     let mut damage_flushed = Instant::now() - DAMAGE_INTERVAL;
     let mut damage_due: Option<Instant> = None;
-    // Whether this server has ever marked a frame boundary (`Event::Frame`). Once it
-    // has, the marker is the flush signal and the interval above demotes to a safety
-    // net — see the flush scheduling at the bottom of the loop. A property of the
-    // server, so it survives resizes and never unlearns.
+    // Whether this server marks frame boundaries: said outright when it confirms the
+    // graphics pipeline (`Event::FramesMarked`), ahead of its first paint, and
+    // learned from the first `Event::Frame` regardless. Once it does, the marker is
+    // the flush signal and the interval above demotes to a safety net — see the
+    // flush scheduling at the bottom of the loop. A property of the server, so it
+    // survives resizes and never unlearns.
     let mut frame_marks = false;
 
     loop {
@@ -933,6 +935,9 @@ async fn active_loop(
                         damage_flushed = Instant::now();
                         damage_due = None;
                     }
+                    // Known before the first marked paint arrives, so that paint is
+                    // never the leading-edge flush of a frame still being drawn.
+                    Event::FramesMarked => frame_marks = true,
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_area} pixels");

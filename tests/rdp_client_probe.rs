@@ -154,6 +154,7 @@ async fn pump(
         match event.expect("the event channel closed without an Ended") {
             Event::Paint(_) => tally.paints += 1,
             Event::Frame => tally.frames += 1,
+            Event::FramesMarked => {}
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
@@ -197,6 +198,7 @@ const DUMP_ENV: &str = "REMOTEX_UAT_DUMP";
 /// Write the framebuffer as `<dir>/<name>.png` when [`DUMP_ENV`] names a directory.
 fn dump(session: &Session, name: &str) {
     let Ok(dir) = std::env::var(DUMP_ENV) else { return };
+    std::fs::create_dir_all(&dir).expect("creating the framebuffer dump directory");
     let path = std::path::Path::new(&dir).join(format!("{name}.png"));
     let bytes = session.framebuffer().with(|frame| {
         let mut rgba = frame.pixels.clone();

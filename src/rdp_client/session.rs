@@ -85,6 +85,11 @@ pub enum Event {
     /// marks no frames, so a consumer keeps whatever pacing it had and treats this as
     /// the upgrade it is.
     Frame,
+    /// The server confirmed the graphics pipeline, so every [`Event::Paint`] from
+    /// here on arrives inside a frame that ends in an [`Event::Frame`]. Sent before
+    /// the first such paint, so a consumer pacing frames itself stops guessing
+    /// before there is a frame to cut in half.
+    FramesMarked,
     /// The desktop was redefined — resized, or rebuilt at the same size — and the
     /// framebuffer has already been resized and cleared, so everything is about to
     /// be repainted.
@@ -367,7 +372,9 @@ const COMMANDS_PER_TURN: usize = input::MAX_EVENTS;
 ///
 /// All of it is replaced wholesale when the server rebuilds the desktop, which is
 /// why it is one struct: after a Deactivation-Reactivation Sequence the share
-/// identifier, the size and the limits are all the new share's.
+/// identifier, the size and the limits are all the new share's. The size alone
+/// also moves with a graphics pipeline reset, which resizes the output without
+/// rebuilding the share.
 struct Share {
     /// Names the share, and every data PDU either side sends carries it.
     id: u32,
@@ -726,10 +733,18 @@ impl<'a> Active<'a> {
         }
         for update in updates {
             match update {
+                // The host confirmed the pipeline, so every paint from here on
+                // arrives inside a marked frame; said before the first of them.
+                gfx::Update::Confirmed => self.send(Event::FramesMarked).await,
                 // The framebuffer is already the new size; the caller is told now,
-                // before the paints that follow in the same PDU.
+                // before the paints that follow in the same PDU. The share's size
+                // follows too: a Refresh Rect asked for later — and one is, after
+                // every resize — is in the coordinates of this desktop, not the one
+                // the Demand Active described.
                 gfx::Update::Reset { width, height } => {
                     info!("rdp: graphics reset, desktop {width}x{height}");
+                    self.share.width = width;
+                    self.share.height = height;
                     self.announce_desktop(width, height).await;
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),

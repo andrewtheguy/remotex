@@ -43,6 +43,10 @@ const DAMAGE_CAP: usize = 64;
 /// happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Update {
+    /// The host confirmed the pipeline: everything it draws from here on comes
+    /// inside a frame. Reported before the first paint, which is what a consumer
+    /// that paces frames itself needs to know before it receives one.
+    Confirmed,
     /// The output is now this size. The framebuffer has already been resized and
     /// cleared; the caller is what tells the world.
     Reset { width: u32, height: u32 },
@@ -311,6 +315,7 @@ impl Graphics {
             Message::CapsConfirm { version, flags } => {
                 self.tally.command(gfx::CMD_CAPS_CONFIRM);
                 info!("rdp: the host confirmed graphics pipeline version {version:#010x}, flags {flags:#x}");
+                updates.push(Update::Confirmed);
             }
             Message::ResetGraphics { width, height, monitors } => {
                 self.tally.command(gfx::CMD_RESET_GRAPHICS);
@@ -329,10 +334,21 @@ impl Graphics {
             Message::CreateSurface { surface, width, height, format } => {
                 self.tally.command(gfx::CMD_CREATE_SURFACE);
                 let bytes = usize::from(width) * usize::from(height) * 4;
+                // One budget for every surface together: a host may create as many
+                // as it likes, each small enough on its own, and the allocation that
+                // fails is the process. A surface created under a number in use
+                // replaces the old one, so that one's bytes come back first.
+                let held: usize = self
+                    .surfaces
+                    .iter()
+                    .filter(|(id, _)| **id != surface)
+                    .map(|(_, held)| held.pixels.len())
+                    .sum();
                 anyhow::ensure!(
-                    bytes <= MAX_DESKTOP_BYTES,
-                    "the host created a {width}x{height} graphics surface, which is more than \
-                     the {} MiB this client will hold",
+                    held + bytes <= MAX_DESKTOP_BYTES,
+                    "the host created a {width}x{height} graphics surface, which with the {} MiB \
+                     of surfaces it already has is more than the {} MiB this client will hold",
+                    held >> 20,
                     MAX_DESKTOP_BYTES >> 20
                 );
                 debug!("rdp: graphics surface {surface} created, {width}x{height}, format {format:#04x}");
@@ -634,7 +650,7 @@ impl Drop for Graphics {
 mod tests {
     use super::*;
     use crate::rdp_client::proto::gfx::{
-        CMD_CACHE_TO_SURFACE, CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT,
+        CMD_CACHE_TO_SURFACE, CMD_CAPS_CONFIRM, CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT,
         CMD_RESET_GRAPHICS, CMD_SOLID_FILL, CMD_START_FRAME, CMD_SURFACE_TO_CACHE,
         CMD_SURFACE_TO_SURFACE, CMD_WIRE_TO_SURFACE_1, CMD_WIRE_TO_SURFACE_2, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
         CODEC_UNCOMPRESSED, PIXEL_XRGB_8888, pdu,
@@ -1017,5 +1033,36 @@ mod tests {
         assert!(format!("{err}").contains("32766x32766"), "{err}");
         let err = graphics.receive(&packet(&[reset(32766, 32766)]), &framebuffer).unwrap_err();
         assert!(format!("{err}").contains("32766x32766"), "{err}");
+    }
+
+    /// Every surface a host creates draws on one budget: a second one that takes the
+    /// total past it is refused however small it is on its own, and a surface created
+    /// again under its own number replaces rather than adds.
+    #[test]
+    fn surfaces_share_one_budget() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        // Exactly the budget, in one surface. Zeroed pages the kernel hands out
+        // lazily, so this costs the test nothing but address space.
+        receive(&mut graphics, &framebuffer, &[create(1, 16384, 8192)]);
+        let err = graphics.receive(&packet(&[create(2, 1, 1)]), &framebuffer).unwrap_err();
+        assert!(format!("{err}").contains("512 MiB of surfaces"), "{err}");
+        receive(&mut graphics, &framebuffer, &[create(1, 16384, 8192)]);
+        assert_eq!(graphics.surfaces.len(), 1);
+    }
+
+    /// The host's CapsConfirm is the moment the session learns that its frames will
+    /// be marked, and it is reported ahead of anything drawn.
+    #[test]
+    fn a_caps_confirm_is_reported_before_the_first_paint() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        let mut w = Writer::new();
+        w.u32_le(0x000A_0002); // version 10.2
+        w.u32_le(4); // capsDataLength
+        w.u32_le(0); // flags
+        let confirm = pdu(CMD_CAPS_CONFIRM, &w.finish());
+        let updates = receive(&mut graphics, &framebuffer, &[confirm, reset(4, 4)]);
+        assert_eq!(updates, vec![Update::Confirmed, Update::Reset { width: 4, height: 4 }]);
     }
 }

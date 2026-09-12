@@ -78,7 +78,8 @@ pub struct TooLong(pub usize);
 /// desktop's worth of RemoteFX Progressive tiles, or an uncompressed rectangle of
 /// it — and a few megabytes is a big one. Sixty-four is past any frame a real host
 /// sends and well short of what one bad length field could make this process
-/// allocate.
+/// allocate. It bounds the payloads of every channel gathering at once, together,
+/// so a server cannot multiply it by opening channels.
 pub const MAX_PAYLOAD: usize = 64 << 20;
 
 /// The server's side of the dynamic channel, one PDU at a time.
@@ -153,6 +154,11 @@ impl Incoming {
                 }
                 if self.gathering.iter().any(|gathering| gathering.channel == channel) {
                     return Err(self.abandon(channel, "a first piece inside an unfinished payload for channel", channel));
+                }
+                let in_flight: usize = self.gathering.iter().map(|gathering| gathering.total).sum();
+                if in_flight + total > MAX_PAYLOAD {
+                    let together = u64::try_from(in_flight + total).unwrap_or(u64::MAX);
+                    return Err(self.abandon(channel, "payloads in flight together announcing", together));
                 }
                 let mut buffer = Vec::with_capacity(total);
                 buffer.extend_from_slice(data);
@@ -444,6 +450,23 @@ mod tests {
         rest.push(1);
         let err = incoming.push(&server(DATA_FIRST, LONG, BYTE, &rest)).unwrap_err();
         assert!(matches!(err, Malformed::Refused { field: "a payload announcing", .. }), "{err}");
+    }
+
+    /// The payloads gathering on every channel share the one budget: a second channel
+    /// announcing what would take them past it together is refused, however modest
+    /// its own announcement.
+    #[test]
+    fn payloads_in_flight_share_one_budget() {
+        let mut incoming = Incoming::new();
+        let whole = u32::try_from(MAX_PAYLOAD).unwrap().to_le_bytes();
+        let mut rest = vec![0x03];
+        rest.extend_from_slice(&whole);
+        rest.push(1);
+        assert_eq!(incoming.push(&server(DATA_FIRST, LONG, BYTE, &rest)).unwrap(), None);
+        let err = incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x04, 0x08, 1, 2])).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "payloads in flight together announcing", .. }), "{err}");
+        // The first channel is still gathering; only the newcomer was turned away.
+        assert_eq!(incoming.gathering.len(), 1);
     }
 
     #[test]

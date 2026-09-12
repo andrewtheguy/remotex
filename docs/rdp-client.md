@@ -125,8 +125,11 @@ Every PDU on the channel is wrapped in RDP 8 bulk compression (`proto/zgfx.rs`),
 port of FreeRDP's decoder: a fixed Huffman table over literals, matches into a
 2.5 MB history shared by every PDU for the channel's life, and runs of unencoded
 bytes. One wrapper may hold several RDPGFX PDUs, each eight-byte-headed with its
-own length, and `proto/gfx.rs` decodes them in order. The client's own PDUs go back
-uncompressed inside the same wrapper, which the specification permits.
+own length, and `proto/gfx.rs` decodes them in order. Only the server-to-client
+direction is wrapped: the client's own PDUs — the caps advertise, each frame
+acknowledgement — go out raw, because a Windows host reads the RDPGFX header
+straight off the channel and fails its graphics subsystem when it finds a wrapper
+there instead.
 
 The host does not paint the desktop; it paints *surfaces* it creates and sizes,
 maps them onto the output at an origin, and brackets drawing in StartFrame and
