@@ -1126,9 +1126,11 @@ Two static virtual channels are asked for, each by a key: `drdynvc` for
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
-with a graphics reset. The pipeline's decoders are landing in stages: uncompressed
-and planar rectangles paint today, and every other codec the host sends is counted
-and left unpainted until its decoder lands. `egfx = false` is the bitmap path: the
+with a graphics reset. Its decoders cover what a current Windows host draws with —
+ClearCodec and the NSCodec inside it, RemoteFX Progressive, planar, uncompressed —
+and its compositor carries the copies and caches between them, so the desktop is
+lit and sharp; a rectangle that will not decode is left for the host to draw again,
+not made the end of the session. `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
 carry no frame boundary, and a resize is a full Deactivation-Reactivation Sequence,
 after which a Windows host re-renders the desktop sharp at the new size and density.

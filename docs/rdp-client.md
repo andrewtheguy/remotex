@@ -140,15 +140,24 @@ built to guess at. A monitor layout is answered by ResetGraphics, which resizes 
 framebuffer and surfaces as `Event::Resize` — no reactivation, and the channels
 untouched.
 
-The decoders are landing in stages ([the plan](rdp-egfx-plan.md)). Today the
-compositor paints uncompressed rectangles and the planar codec — the same
-`proto/planar.rs` a bitmap update uses, with the rows the right way up — and counts
-every other codec and every copy or cache command the host sends, saying each once
-in the log and summarising all of them when the channel ends. A codec with no
-decoder leaves its rectangle unpainted and the session running; a PDU that does not
-decode ends the session, as any malformed PDU does. A host that draws entirely in
-RemoteFX Progressive therefore paints nothing yet, and `egfx = false` is the way
-back to a picture until that decoder lands.
+The compositor decodes everything a current Windows host sends, measured against
+one ([the plan](rdp-egfx-plan.md) records the tally). Uncompressed rectangles and
+the planar codec — the same `proto/planar.rs` a bitmap update uses, with the rows
+the right way up. ClearCodec (`proto/clear.rs`), the desktop's primary codec here:
+its residual, band and glyph layers with their caches, and all three subcodecs,
+raw, RLEX and NSCodec (`proto/nsc.rs`), the last carrying most pictures and
+anti-aliased text. RemoteFX Progressive (`proto/progressive.rs`), which arrives on
+WireToSurface2 with its own rectangles: the decoder keeps every tile of every
+surface between PDUs — its coefficients and their signs — so an upgrade pass adds
+bits to what a first pass left, and only the reduce-extrapolate wavelet and RLGR1 a
+modern host uses are implemented; a region asking for the classic RemoteFX wavelet
+is refused by name. The copies and caches that make a desktop cheap are acted on:
+SurfaceToSurface reads its source whole before writing so a scroll over itself does
+not smear, SurfaceToCache and CacheToSurface keep rectangles by slot, SolidFill
+clips to the surface. A rectangle that will not decode is left unpainted with a
+warning and the session runs on, since the host draws it again; a PDU whose framing
+is wrong ends the session, as any malformed PDU does. The channel says which codecs
+and commands it carried when it ends, at `info`.
 
 ### Bitmap updates
 

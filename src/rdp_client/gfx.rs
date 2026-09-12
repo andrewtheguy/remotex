@@ -33,7 +33,7 @@ use super::framebuffer::{Framebuffer, Rect, affordable};
 use super::proto::bitmap::MAX_DESKTOP_BYTES;
 use super::proto::gfx::{self, Message, Point16, Rect16};
 use super::proto::wire::Malformed;
-use super::proto::{clear, planar, zgfx};
+use super::proto::{clear, planar, progressive, zgfx};
 
 /// Most rectangles a surface holds as changed before it collapses them to one
 /// bounding box — coarser, never longer.
@@ -78,12 +78,19 @@ impl Surface {
         u32::from(rect.right) <= self.width && u32::from(rect.bottom) <= self.height
     }
 
-    /// Write one rectangle of `BGRX32` rows, top row first, swizzling into the
-    /// framebuffer's order on the way.
+    /// Write one rectangle of packed `BGRX32` rows, top row first, swizzling into
+    /// the framebuffer's order on the way.
     fn write(&mut self, rect: Rect16, bgrx: &[u8]) {
+        self.write_rows(rect, bgrx, usize::from(rect.width()) * 4);
+    }
+
+    /// Write one rectangle of `BGRX32` rows that start `stride` bytes apart — a
+    /// window onto a larger buffer — swizzling into the framebuffer's order.
+    fn write_rows(&mut self, rect: Rect16, bgrx: &[u8], src_stride: usize) {
         let width = usize::from(rect.width());
         let stride = self.stride();
-        for (row, src) in bgrx.chunks_exact(width * 4).take(usize::from(rect.height())).enumerate() {
+        for row in 0..usize::from(rect.height()) {
+            let src = &bgrx[row * src_stride..row * src_stride + width * 4];
             let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 4;
             let dst = &mut self.pixels[at..at + width * 4];
             for (out, px) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
@@ -248,6 +255,8 @@ pub(super) struct Graphics {
     /// ClearCodec's state and caches, made on the first ClearCodec rectangle since a
     /// channel may never draw one.
     clear: Option<Box<clear::Clear>>,
+    /// Progressive's per-surface tiles, made on the first Progressive PDU.
+    progressive: Option<Box<progressive::Progressive>>,
 }
 
 impl Graphics {
@@ -265,6 +274,7 @@ impl Graphics {
             planes: Vec::new(),
             pixels: Vec::new(),
             clear: None,
+            progressive: None,
         }
     }
 
@@ -336,11 +346,17 @@ impl Graphics {
                 // A server may create a surface under a number still in use; the
                 // new one replaces the old.
                 self.surfaces.insert(surface, created);
+                if let Some(progressive) = &mut self.progressive {
+                    progressive.forget(surface);
+                }
             }
             Message::DeleteSurface { surface } => {
                 self.tally.command(gfx::CMD_DELETE_SURFACE);
                 if self.surfaces.remove(&surface).is_none() {
                     debug!("rdp: the host deleted graphics surface {surface}, which did not exist");
+                }
+                if let Some(progressive) = &mut self.progressive {
+                    progressive.forget(surface);
                 }
             }
             Message::MapSurfaceToOutput { surface, x, y } => {
@@ -374,10 +390,14 @@ impl Graphics {
                 self.tally.codec(codec);
                 self.draw(surface, codec, format, rect, data);
             }
-            Message::WireToSurface2 { codec, .. } => {
+            Message::WireToSurface2 { surface, codec, format, data, .. } => {
                 self.tally.command(gfx::CMD_WIRE_TO_SURFACE_2);
                 self.tally.codec(codec);
-                self.tally.unhandled("codec", codec, gfx::codec_name(codec));
+                if codec == gfx::CODEC_CAPROGRESSIVE {
+                    self.draw_progressive(surface, format, data);
+                } else {
+                    self.tally.unhandled("codec", codec, gfx::codec_name(codec));
+                }
             }
             Message::SolidFill { surface, color, rects } => {
                 self.tally.command(gfx::CMD_SOLID_FILL);
@@ -399,19 +419,18 @@ impl Graphics {
                 self.tally.command(gfx::CMD_EVICT_CACHE_ENTRY);
                 self.caches.remove(&slot);
             }
-            Message::DeleteEncodingContext { .. } => self.unhandled(gfx::CMD_DELETE_ENCODING_CONTEXT),
+            Message::DeleteEncodingContext { .. } => {
+                // Nothing to delete: the one codec with a context, Progressive,
+                // keeps its state by surface, not by context, and the surface's
+                // deletion drops it.
+                self.tally.command(gfx::CMD_DELETE_ENCODING_CONTEXT);
+            }
             Message::Other { command, length } => {
                 self.tally.command(command);
                 debug!("rdp: ignoring a {length}-byte graphics PDU of type {command:#06x}");
             }
         }
         Ok(())
-    }
-
-    /// A command that is counted and not acted on — yet.
-    fn unhandled(&mut self, command: u16) {
-        self.tally.command(command);
-        self.tally.unhandled("command", command, gfx::command_name(command));
     }
 
     /// One rectangle of pixels for a surface, in whichever codec the server chose.
@@ -462,6 +481,28 @@ impl Graphics {
             Ok(bgrx) => found.write(rect, bgrx),
             // One rectangle the server will draw again; not the session.
             Err(e) => warn!("rdp: leaving a {width}x{height} {} rectangle unpainted: {e}", gfx::codec_name(codec)),
+        }
+    }
+
+    /// A Progressive PDU for a surface: its blocks carry their own rectangles, in
+    /// surface coordinates, and the decoder keeps the tiles between PDUs.
+    fn draw_progressive(&mut self, surface: u16, format: u8, data: &[u8]) {
+        let Some(found) = self.surfaces.get_mut(&surface) else {
+            warn!("rdp: the host drew into graphics surface {surface}, which does not exist");
+            return;
+        };
+        if format != gfx::PIXEL_XRGB_8888 && format != gfx::PIXEL_ARGB_8888 {
+            warn!("rdp: dropping a graphics draw in pixel format {format:#04x}");
+            return;
+        }
+        let progressive = self.progressive.get_or_insert_with(|| Box::new(progressive::Progressive::new()));
+        let outcome = progressive.decompress(surface, found.width, found.height, data, |rect, rows, stride| {
+            found.write_rows(rect, rows, stride);
+        });
+        if let Err(e) = outcome {
+            // The regions before the fault are painted; the host will draw the rest
+            // again. Not the session.
+            warn!("rdp: leaving part of a Progressive update to graphics surface {surface} unpainted: {e}");
         }
     }
 
@@ -595,7 +636,7 @@ mod tests {
     use crate::rdp_client::proto::gfx::{
         CMD_CACHE_TO_SURFACE, CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT,
         CMD_RESET_GRAPHICS, CMD_SOLID_FILL, CMD_START_FRAME, CMD_SURFACE_TO_CACHE,
-        CMD_SURFACE_TO_SURFACE, CMD_WIRE_TO_SURFACE_1, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
+        CMD_SURFACE_TO_SURFACE, CMD_WIRE_TO_SURFACE_1, CMD_WIRE_TO_SURFACE_2, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
         CODEC_UNCOMPRESSED, PIXEL_XRGB_8888, pdu,
     };
     use crate::rdp_client::proto::wire::Writer;
@@ -650,6 +691,17 @@ mod tests {
         w.u32_le(u32::try_from(data.len()).unwrap());
         w.bytes(data);
         pdu(CMD_WIRE_TO_SURFACE_1, &w.finish())
+    }
+
+    fn wire2(surface: u16, codec: u16, data: &[u8]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16_le(surface);
+        w.u16_le(codec);
+        w.u32_le(0); // codecContextId
+        w.u8(PIXEL_XRGB_8888);
+        w.u32_le(u32::try_from(data.len()).unwrap());
+        w.bytes(data);
+        pdu(CMD_WIRE_TO_SURFACE_2, &w.finish())
     }
 
     fn solidfill(surface: u16, bgra: [u8; 4], rects: &[(u16, u16, u16, u16)]) -> Vec<u8> {
@@ -841,6 +893,35 @@ mod tests {
             assert_eq!(&frame.pixels[60..], &[7, 6, 5, 0]);
             assert!(frame.pixels[..60].iter().all(|b| *b == 0), "the old picture is gone");
         });
+    }
+
+    /// A Progressive PDU on the second wire-to-surface command paints its tiles into
+    /// the surface at the region's rectangles, and the framebuffer shows them at
+    /// EndFrame; the tiles are kept, so a later PDU on the same surface finds them.
+    #[test]
+    fn a_progressive_pdu_paints_its_region_and_keeps_its_tiles() {
+        use crate::rdp_client::proto::progressive::testing::{empty_upgrade, flat_tile, grey, pdu as progressive, region};
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(100, 70), create(1, 100, 70), map(1, 0, 0)]);
+        let first = progressive(&[region(&[(60, 66, 100, 100)], 1, &[flat_tile(0xCCC6, 1, 1, 9)])]);
+        let updates = receive(&mut graphics, &framebuffer, &[start(1), wire2(1, CODEC_CAPROGRESSIVE, &first), end(1)]);
+        let painted = Rect { x: 64, y: 66, width: 36, height: 4 };
+        assert_eq!(updates, vec![Update::Paint(painted), Update::Frame { id: 1, decoded: 1 }]);
+        let expected = { let g = grey(9); [g[2], g[1], g[0], 0] };
+        framebuffer.with(|frame| {
+            for row in frame.rows(painted) {
+                for px in row.chunks_exact(4) {
+                    assert_eq!(px, &expected);
+                }
+            }
+            // The pixel left of the region is untouched.
+            assert_eq!(&frame.pixels[(66 * 100 + 63) * 4..(66 * 100 + 64) * 4], &[0, 0, 0, 0]);
+        });
+        // An upgrade with nothing to add finds the tile and repaints it, not a refusal.
+        let again = progressive(&[region(&[(64, 64, 36, 6)], 1, &[empty_upgrade(1, 1)])]);
+        let updates = receive(&mut graphics, &framebuffer, &[start(2), wire2(1, CODEC_CAPROGRESSIVE, &again), end(2)]);
+        assert_eq!(updates, vec![Update::Paint(Rect { x: 64, y: 64, width: 36, height: 6 }), Update::Frame { id: 2, decoded: 2 }]);
     }
 
     /// A solid fill paints one colour, and a rectangle that pokes past the surface

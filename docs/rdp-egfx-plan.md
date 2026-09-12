@@ -145,17 +145,40 @@ The codec/command distribution over ~253 frames diverges from the guess above an
 | SolidFill | 13 | — |
 | SurfaceToSurface | 7 | — |
 
-No PLANAR, no UNCOMPRESSED, no NSCodec, no plain RemoteFX (CAVIDEO). So on this
-host **ClearCodec is the primary desktop codec and the caches are load-bearing** —
-the desktop is dark until both are decoded, which is why Stage 1's probe asserts
-frames rather than lit pixels under EGFX. Progressive alone (the plan's Stage 2)
-paints only a small share; ClearCodec and CacheToSurface/SurfaceToCache (the plan's
-Stage 3) are what a lit desktop needs here. The two later stages are best taken
-together, or Stage 3 first, rather than in the written order.
+No PLANAR, no UNCOMPRESSED, no standalone NSCodec, no plain RemoteFX (CAVIDEO). So
+on this host **ClearCodec is the primary desktop codec and the caches are
+load-bearing** — the desktop is dark until both are decoded, which is why Stage 1's
+probe asserted frames rather than lit pixels under EGFX. Progressive alone (the
+plan's Stage 2) paints only a small share; ClearCodec and
+CacheToSurface/SurfaceToCache (the plan's Stage 3) are what a lit desktop needs
+here. Stage 3 was therefore taken first.
 
-## Stage 2 — RemoteFX Progressive (PR 2)
+### Stages 3 and 2 — measured (2026-09-12, `windows-ent-sandbox`)
 
-The decoder that actually paints the desktop. New `src/rdp_client/proto/progressive.rs`
+Both landed and QA'd against the same host. With ClearCodec's raw and RLEX
+subcodecs, the caches and copies, and Progressive in, the first full run lit
+≈84% of the desktop and left 56 ClearCodec rectangles unpainted, every one
+refusing **subcodec 1, NSCodec** — the Stage-1 tally had counted codecs, not the
+subcodecs inside ClearCodec, and this host draws its pictures and anti-aliased text
+through that one. `proto/nsc.rs` (RLE planes, colour-loss recovery, 2×2 chroma
+subsampling, YCoCg→RGB) closed it: **≈99.5% lit at open and after each resize, zero
+unpainted rectangles, zero Progressive refusals** over 356 frames (821 ClearCodec,
+35 Progressive, 2100 CacheToSurface, 656 SurfaceToCache, 22 SurfaceToSurface, 15
+SolidFill). The framebuffer, dumped by the probe as PNG (`REMOTEX_UAT_DUMP`), shows
+the desktop as Edge draws it: photographs sharp with correct colour through
+Progressive, text crisp through ClearCodec. Every Progressive region the host sent
+carried the reduce-extrapolate flag, and every tile kind — simple, first, upgrade —
+appeared, so the decoder implements only those: the classic RemoteFX wavelet,
+RLGR3 and Progressive V2 are refused by name rather than carried unexercised.
+
+One session-ending bug surfaced during the runs and is fixed in the same change:
+the `drdynvc` layer refused a Data First PDU whose first piece was already the whole
+announced length. Windows sends those; FreeRDP delivers them at once, and now so
+does this client.
+
+## Stage 2 — RemoteFX Progressive (PR 2, landed after Stage 3)
+
+The decoder for the desktop's pictures. New `src/rdp_client/proto/progressive.rs`
 (with the RFX helpers it needs — RLGR1 decode, differential decode, scalar
 dequantization, the 3-level inverse DWT, YCbCr→RGB), porting `progressive.c` +
 `rfx_rlgr.c` + `rfx_dwt.c` + `rfx_quantization.c` + `rfx_differential.h`. Per-surface
@@ -165,13 +188,14 @@ it). Unit tests on the transforms with known vectors; QA proves the desktop rend
 sharp, resizes via ResetGraphics, and survives a long session (the failure mode the
 old decoder had).
 
-## Stage 3 — Caches, copies, ClearCodec (PR 3)
+## Stage 3 — Caches, copies, ClearCodec (PR 3, landed)
 
 `gfx.rs` gains SurfaceToSurface, SurfaceToCache, CacheToSurface, SolidFill, EvictCache
 (scroll and repeat, the common case). New `src/rdp_client/proto/clear.rs` (ClearCodec:
-glyph/vBar/short-vBar caches, RLEX and NSCodec subcodecs) wired for CLEARCODEC. Add
-`proto/nsc.rs` only if the Stage-1 tally showed the host actually sends NSCodec. QA: a
-full desktop with menus and scrolling, no holes, over an extended run.
+glyph/vBar/short-vBar caches, RLEX and NSCodec subcodecs) wired for CLEARCODEC.
+`proto/nsc.rs` was to be added only if the host actually sends NSCodec; it does, as a
+ClearCodec subcodec (see the measurement above). QA: a full desktop with menus and
+scrolling, no holes, over an extended run.
 
 ## Verification (each stage)
 

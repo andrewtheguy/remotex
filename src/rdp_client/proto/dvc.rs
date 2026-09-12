@@ -140,8 +140,13 @@ impl Incoming {
                 let announced = read_field(&mut r, sp)?;
                 let total = usize::try_from(announced).unwrap_or(usize::MAX);
                 let data = r.rest();
-                if data.len() >= total {
-                    return Err(self.abandon(channel, "a first piece already as long as its", announced));
+                if data.len() > total {
+                    return Err(self.abandon(channel, "a first piece longer than its", announced));
+                }
+                if data.len() == total {
+                    // Windows sends a whole message as a Data First now and then;
+                    // FreeRDP delivers it at once, and so does this.
+                    return Ok(Some(Message::Data { channel, data }));
                 }
                 if total > MAX_PAYLOAD {
                     return Err(self.abandon(channel, "a payload announcing", announced));
@@ -383,6 +388,29 @@ mod tests {
         );
 
         // The sequence is gone, so the next PDU for the channel stands on its own.
+        assert_eq!(
+            incoming.push(&server(DATA, BYTE, BYTE, &[0x03, 9])).unwrap(),
+            Some(Message::Data { channel: 3, data: &[9] })
+        );
+    }
+
+    /// A Data First whose piece is already the whole announced length is one message,
+    /// delivered at once — Windows sends these — while one longer than it announces is
+    /// refused.
+    #[test]
+    fn a_first_piece_that_is_the_whole_payload_is_delivered_at_once() {
+        let mut incoming = Incoming::new();
+        assert_eq!(
+            incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x02, 1, 2])).unwrap(),
+            Some(Message::Data { channel: 3, data: &[1, 2] })
+        );
+        let err = incoming.push(&server(DATA_FIRST, BYTE, BYTE, &[0x03, 0x01, 1, 2])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "a dynamic virtual channel PDU carries a first piece longer than its 0x1, which this \
+             client does not accept"
+        );
+        // Nothing was left gathering for the channel.
         assert_eq!(
             incoming.push(&server(DATA, BYTE, BYTE, &[0x03, 9])).unwrap(),
             Some(Message::Data { channel: 3, data: &[9] })

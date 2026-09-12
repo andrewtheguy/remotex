@@ -20,14 +20,13 @@
 //! ## The graphics pipeline, measured
 //!
 //! [`EGFX_ENV`] chooses the path, and the pipeline is the default, as it is in the
-//! gateway. Under it the client decodes uncompressed and planar rectangles today and
-//! counts every other codec the host sends, so what this probe proves there is the
-//! channel: it opens, the host confirms a capability set, frames arrive and are
-//! acknowledged, and a monitor layout comes back as a graphics reset. Whether the
-//! desktop is *lit* is printed rather than asserted, because a host that draws
-//! entirely in RemoteFX Progressive paints nothing yet — and which codecs it chose is
-//! the measurement the next decoder is picked from. The client says it at the end of
-//! the session, at `info`, so run with `RUST_LOG=remotex=info` to read it.
+//! gateway. Under it the client decodes every codec the sandbox sends — ClearCodec
+//! with all three subcodecs, RemoteFX Progressive, planar and uncompressed — so the
+//! probe asserts a lit desktop there as it does on the bitmap path, and after each
+//! resize. Which codecs and commands the host chose is still the measurement, said at
+//! the end of the session at `info`: run with `RUST_LOG=remotex=info` to read it, and
+//! set [`DUMP_ENV`] to a directory to get the framebuffer as PNG at each stage, for
+//! the check only eyes can make.
 //!
 //! ## The clipboard
 //!
@@ -191,6 +190,32 @@ async fn pump(
     true
 }
 
+/// Directory to write the framebuffer to as PNG at each stage, for eyes to check
+/// what the counts cannot: that the decoded desktop looks like a desktop.
+const DUMP_ENV: &str = "REMOTEX_UAT_DUMP";
+
+/// Write the framebuffer as `<dir>/<name>.png` when [`DUMP_ENV`] names a directory.
+fn dump(session: &Session, name: &str) {
+    let Ok(dir) = std::env::var(DUMP_ENV) else { return };
+    let path = std::path::Path::new(&dir).join(format!("{name}.png"));
+    let bytes = session.framebuffer().with(|frame| {
+        let mut rgba = frame.pixels.clone();
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 0xFF;
+        }
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, frame.width, frame.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        writer.finish().expect("png finish");
+        out
+    });
+    std::fs::write(&path, bytes).expect("writing the framebuffer dump");
+    println!("  framebuffer written to {}", path.display());
+}
+
 /// How many of the framebuffer's pixels are not black: a desktop that decoded to
 /// nothing — the classic failure of a codec that is not really working — is all 0.
 fn lit(session: &Session) -> (u64, u64) {
@@ -240,8 +265,7 @@ async fn case() {
     println!("  connected at {width}x{height}");
 
     // A desktop worth of drawing, and Display Control, before anything is resized.
-    // Under the pipeline the drawing shows as frames, which arrive whether or not
-    // this client can decode what is in them; on the bitmap path it shows as paint.
+    // Under the pipeline the drawing shows as frames; on the bitmap path, as paint.
     let egfx = egfx();
     let drawn = |t: &Tally| if egfx { t.frames > 0 } else { t.paints > 0 };
     let mut tally = Tally::default();
@@ -254,10 +278,9 @@ async fn case() {
         .await;
     let (on, total) = lit(&session);
     println!("  opening: {tally:?}, {on} of {total} pixels lit");
+    dump(&session, "opening");
     assert!(drawn(&tally), "the host drew nothing");
-    // The pipeline's decoders are being measured, not asserted — see the module
-    // docs — so a black desktop under it is a finding rather than a failure.
-    assert!(egfx || on > 0, "the desktop decoded to pure black");
+    assert!(on > 0, "the desktop decoded to pure black");
     assert!(tally.resize_ready, "the host never offered Display Control");
     assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
 
@@ -279,9 +302,10 @@ async fn case() {
             tally.paints,
             tally.frames,
         );
+        dump(&session, &format!("resized-{}x{}", size.0, size.1));
         assert_eq!(framebuffer, size, "the framebuffer did not follow the resize");
         assert!(drawn(&tally), "nothing was drawn after the resize");
-        assert!(egfx || on > 0, "the resized desktop decoded to pure black");
+        assert!(on > 0, "the resized desktop decoded to pure black");
     }
 
     // Typing and pointing must not upset the session: a few moves and a key that

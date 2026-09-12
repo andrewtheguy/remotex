@@ -16,17 +16,17 @@
 //! # What is and is not read
 //!
 //! Everything a modern Windows RDS host sends: the residual run-length layer, the
-//! banded vertical bars with both their caches, the glyph cache, and the raw and RLEX
-//! subcodecs. The NSCodec subcodec is *not* decoded — the sandbox never sends it (see
-//! the Stage-1 measurement in `docs/rdp-egfx-plan.md`), and pulling in a whole second
-//! codec for a case that does not arise is scope this client does without. A rectangle
-//! that asks for it is refused, which the caller turns into one unpainted rectangle
+//! banded vertical bars with both their caches, the glyph cache, and all three
+//! subcodecs — raw, RLEX, and NSCodec, which lives in [`super::nsc`] and which the
+//! sandbox turned out to lean on for pictures and anti-aliased text. A rectangle that
+//! cannot be read is refused, which the caller turns into one unpainted rectangle
 //! rather than the end of the session.
 //!
 //! Ported from FreeRDP's `libfreerdp/codec/clear.c`.
 //!
 //! [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
 
+use super::nsc::Nsc;
 use super::wire::{Malformed, Reader};
 
 const WHAT: &str = "a ClearCodec rectangle";
@@ -76,6 +76,8 @@ pub struct Clear {
     vbar_cursor: usize,
     short_vbars: Vec<VBar>,
     short_cursor: usize,
+    /// The NSCodec subcodec's plane buffers.
+    nsc: Nsc,
 }
 
 impl Default for Clear {
@@ -103,6 +105,7 @@ impl Clear {
             vbar_cursor: 0,
             short_vbars: vec![VBar::default(); VBAR_SHORT_SIZE],
             short_cursor: 0,
+            nsc: Nsc::default(),
         }
     }
 
@@ -163,7 +166,7 @@ impl Clear {
         }
         if subcodec > 0 {
             let section = r.bytes(subcodec)?;
-            subcodec_data(section, w, h, out)?;
+            subcodec_data(section, w, h, out, &mut self.nsc)?;
         }
 
         if let Glyphish::Store(slot) = glyph {
@@ -308,10 +311,9 @@ fn residual_data(section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(
     Ok(())
 }
 
-/// The subcodec layer: raw `BGR24` or the RLEX run-length subcodec, each over a
-/// sub-rectangle. [MS-RDPEGFX] 2.2.4.3. The NSCodec subcodec is refused (see the
-/// module note).
-fn subcodec_data(section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(), Malformed> {
+/// The subcodec layer: raw `BGR24`, NSCodec, or the RLEX run-length subcodec, each
+/// over a sub-rectangle. [MS-RDPEGFX] 2.2.4.3.
+fn subcodec_data(section: &[u8], w: usize, h: usize, out: &mut [u8], nsc: &mut Nsc) -> Result<(), Malformed> {
     let mut r = Reader::new(WHAT, section);
     let mut dst = Dst { out, w, h };
     while !r.is_empty() {
@@ -327,6 +329,7 @@ fn subcodec_data(section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(
         }
         match id {
             0 => subcode_raw(data, sw, sh, x0, y0, &mut dst)?,
+            1 => nsc.decode(data, sw, sh, |x, y, bgr| dst.put(x0 + x, y0 + y, bgr))?,
             2 => subcode_rlex(data, sw, sh, x0, y0, &mut dst)?,
             other => return Err(refuse("an unsupported ClearCodec subcodec", u64::from(other))),
         }
@@ -595,22 +598,36 @@ mod tests {
         assert_eq!(out, vec![3, 2, 1, 0, 6, 5, 4, 0]);
     }
 
-    /// The NSCodec subcodec is out of scope and refused, so the caller can leave the
-    /// rectangle a hole rather than end the session.
+    /// The NSCodec subcodec paints its sub-rectangle where the layer puts it; one
+    /// that cannot be read is refused, so the caller can leave the rectangle a hole
+    /// rather than end the session.
     #[test]
-    fn the_nscodec_subcodec_is_refused() {
+    fn the_nscodec_subcodec_paints_and_a_broken_one_is_refused() {
+        // A 1×1 NSCodec bitmap: raw planes Y = 100, Co = 20, Cg = -10, alpha.
+        let mut nsc = Vec::new();
+        for plane in [1u32, 1, 1, 1] {
+            nsc.extend_from_slice(&plane.to_le_bytes());
+        }
+        nsc.extend_from_slice(&[1, 0, 0, 0, 100, 20, 0xF6, 0xFF]);
+        let subrect = |data: &[u8]| {
+            let mut sub = Vec::new();
+            sub.extend_from_slice(&1u16.to_le_bytes()); // x
+            sub.extend_from_slice(&0u16.to_le_bytes()); // y
+            sub.extend_from_slice(&1u16.to_le_bytes());
+            sub.extend_from_slice(&1u16.to_le_bytes());
+            sub.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            sub.push(1); // NSCodec
+            sub.extend_from_slice(data);
+            sub
+        };
         let mut clear = Clear::new();
         let mut out = Vec::new();
-        let mut sub = Vec::new();
-        sub.extend_from_slice(&0u16.to_le_bytes());
-        sub.extend_from_slice(&0u16.to_le_bytes());
-        sub.extend_from_slice(&1u16.to_le_bytes());
-        sub.extend_from_slice(&1u16.to_le_bytes());
-        sub.extend_from_slice(&1u32.to_le_bytes());
-        sub.push(1); // NSCodec
-        sub.push(0);
-        let src = rect(0, 0, None, &[], &[], &sub);
-        let err = clear.decompress(&src, &mut out, 1, 1).unwrap_err();
-        assert!(matches!(err, Malformed::Refused { .. }), "{err}");
+        let src = rect(0, 0, None, &[], &[], &subrect(&nsc));
+        clear.decompress(&src, &mut out, 2, 1).unwrap();
+        assert_eq!(out, [0, 0, 0, 0, 90, 90, 130, 0]);
+
+        let src = rect(0, 1, None, &[], &[], &subrect(&[0]));
+        let err = clear.decompress(&src, &mut out, 2, 1).unwrap_err();
+        assert!(matches!(err, Malformed::Short { .. }), "{err}");
     }
 }
