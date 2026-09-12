@@ -32,9 +32,13 @@ mod common;
 
 use std::time::Duration;
 
-use ironrdp::core::{Decode as _, ReadCursor};
+use ironrdp::core::{Decode as _, ReadCursor, encode_vec};
 use ironrdp::graphics::pointer::{DecodedPointer, PointerBitmapTarget};
 use ironrdp::graphics::rdp6::BitmapStreamDecoder;
+use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
+use ironrdp::pdu::input::mouse::PointerFlags;
+use ironrdp::pdu::input::mouse_x::PointerXFlags;
+use ironrdp::pdu::input::{MousePdu, MouseXPdu};
 use ironrdp::pdu::pointer::{ColorPointerAttribute, LargePointerAttribute, PointerAttribute};
 use remotex::rdp_client::proto::bitmap::{self, Scratch};
 use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
@@ -42,6 +46,7 @@ use remotex::rdp_client::proto::credssp::{self, Credentials};
 use remotex::rdp_client::proto::fastpath::{self, Fragments};
 use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
+use remotex::rdp_client::proto::input::{self, Button, Event};
 use remotex::rdp_client::proto::pointer::{self, Pointer, Shape};
 use remotex::rdp_client::proto::info::ClientInfo;
 use remotex::rdp_client::proto::share::{self, Pdu};
@@ -578,4 +583,107 @@ async fn read_any(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Vec<u8>
     frame.resize(length, 0);
     stream.read_exact(&mut frame[at..]).await.expect("read the rest of a fast-path frame");
     frame
+}
+
+/// Every input event this client can send, encoded by both stacks and compared byte
+/// for byte.
+///
+/// Input is the half of the protocol a probe cannot check by watching: the host does
+/// not echo a keystroke back, and a mouse event with the wrong bit set moves the
+/// pointer somewhere plausible rather than failing. What can be checked is that the
+/// bytes are the ones the stack being replaced would have sent — that stack having
+/// driven this host for months — so that is what this does. It needs no server.
+#[test]
+fn our_input_events_encode_to_the_bytes_ironrdp_sends() {
+    let ours = [
+        Event::Key { scancode: 0x1E, extended: false, down: true },
+        Event::Key { scancode: 0x1E, extended: false, down: false },
+        Event::Key { scancode: 0x48, extended: true, down: true },
+        Event::Key { scancode: 0x5B, extended: true, down: false },
+        Event::Move { x: 0, y: 0 },
+        Event::Move { x: 1919, y: 1079 },
+        Event::Button { button: Button::Left, down: true, x: 10, y: 20 },
+        Event::Button { button: Button::Left, down: false, x: 10, y: 20 },
+        Event::Button { button: Button::Middle, down: true, x: 30, y: 40 },
+        Event::Button { button: Button::Right, down: true, x: 50, y: 60 },
+        Event::Button { button: Button::Right, down: false, x: 50, y: 60 },
+        Event::Button { button: Button::X1, down: true, x: 70, y: 80 },
+        Event::Button { button: Button::X2, down: false, x: 70, y: 80 },
+        Event::Wheel { rotation: 120, horizontal: false, x: 1, y: 2 },
+        Event::Wheel { rotation: -120, horizontal: false, x: 1, y: 2 },
+        Event::Wheel { rotation: 255, horizontal: true, x: 3, y: 4 },
+        Event::Wheel { rotation: -255, horizontal: true, x: 3, y: 4 },
+        Event::Wheel { rotation: 0, horizontal: false, x: 5, y: 6 },
+    ];
+
+    // One event at a time, so a disagreement names the event that caused it.
+    for event in ours {
+        let mine = input::pdus(&[event]).next().expect("one event is one PDU");
+        let theirs = encode_vec(&FastPathInput::single(translate(event))).expect("IronRDP encodes it");
+        assert_eq!(hex(&mine), hex(&theirs), "{event:?}");
+    }
+
+    // Then all of them twice over in one PDU, which crosses both the fifteen-event
+    // count and the 127-byte length — the two places the header changes shape.
+    let batch: Vec<_> = ours.iter().chain(ours.iter()).copied().collect();
+    let mine = input::pdus(&batch).next().expect("one PDU holds them all");
+    assert!(mine.len() > 0x7F, "the batch is long enough to need a two-byte length");
+    let events: Vec<_> = batch.iter().copied().map(translate).collect();
+    let theirs = encode_vec(&FastPathInput::new(events).expect("a batch")).expect("IronRDP encodes it");
+    assert_eq!(hex(&mine), hex(&theirs), "a batch of {} events", batch.len());
+}
+
+/// The same event, said IronRDP's way.
+fn translate(event: Event) -> FastPathInputEvent {
+    let mouse = |flags, rotation, x, y| {
+        FastPathInputEvent::MouseEvent(MousePdu {
+            flags,
+            number_of_wheel_rotation_units: rotation,
+            x_position: x,
+            y_position: y,
+        })
+    };
+    match event {
+        Event::Key { scancode, extended, down } => {
+            let mut flags = KeyboardFlags::empty();
+            if extended {
+                flags |= KeyboardFlags::EXTENDED;
+            }
+            if !down {
+                flags |= KeyboardFlags::RELEASE;
+            }
+            FastPathInputEvent::KeyboardEvent(flags, scancode)
+        }
+        Event::Move { x, y } => mouse(PointerFlags::MOVE, 0, x, y),
+        Event::Button { button: button @ (Button::X1 | Button::X2), down, x, y } => {
+            let mut flags = if button == Button::X1 {
+                PointerXFlags::BUTTON1
+            } else {
+                PointerXFlags::BUTTON2
+            };
+            if down {
+                flags |= PointerXFlags::DOWN;
+            }
+            FastPathInputEvent::MouseEventEx(MouseXPdu { flags, x_position: x, y_position: y })
+        }
+        Event::Button { button, down, x, y } => {
+            let mut flags = match button {
+                Button::Left => PointerFlags::LEFT_BUTTON,
+                Button::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                _ => PointerFlags::RIGHT_BUTTON,
+            };
+            if down {
+                flags |= PointerFlags::DOWN;
+            }
+            mouse(flags, 0, x, y)
+        }
+        Event::Wheel { rotation, horizontal, x, y } => {
+            let flags = if horizontal {
+                PointerFlags::HORIZONTAL_WHEEL
+            } else {
+                PointerFlags::VERTICAL_WHEEL
+            };
+            mouse(flags, rotation, x, y)
+        }
+    }
 }

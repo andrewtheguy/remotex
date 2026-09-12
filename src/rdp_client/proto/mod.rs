@@ -25,6 +25,7 @@
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
 //! - [`info`] — the logon: who the session belongs to and what it should look like.
+//! - [`input`] — keystrokes and mouse events, on the fast path back to the host.
 //! - [`license`] — the one licensing PDU a Windows host sends, which says none is
 //!   needed.
 //! - [`capabilities`] — what the two ends agree to send each other, exchanged once
@@ -63,6 +64,7 @@ pub mod fastpath;
 pub mod finalization;
 pub mod gcc;
 pub mod info;
+pub mod input;
 pub mod license;
 pub mod mcs;
 pub mod per;
