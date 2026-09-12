@@ -22,7 +22,7 @@ impl Rect {
 /// One complete frame, in `RGBX32`: four bytes per pixel, red first, the fourth
 /// byte unused.
 ///
-/// That byte order is the decoder's own — IronRDP's `RgbA32` image stores R,G,B in
+/// That byte order is the decoder's own — [`super::proto::bitmap`] writes R, G, B in
 /// memory order — so a paint is a row copy with no swizzle, and a consumer that
 /// encodes finds the channels in the order every encoder wants.
 pub struct Frame {
@@ -111,13 +111,17 @@ impl Framebuffer {
         frame.pixels.resize(bytes, 0);
     }
 
-    /// Copy `rect` out of a buffer laid out like the desktop itself — the decoded
-    /// image, whose pixel (x, y) sits at `y * stride + x * 4`.
+    /// Copy one decoded rectangle in, from a buffer holding nothing but that
+    /// rectangle: `rect.width * rect.height` pixels, top row first, packed.
     ///
-    /// `false`, with the reason logged, for a rectangle that does not fit either
-    /// side: that can only mean the two disagree about the desktop's size, which is
-    /// a missed resize, and clamping would paint a sheared image and hide it.
-    pub(super) fn blit(&self, src: &[u8], src_stride: usize, rect: Rect) -> bool {
+    /// That is the shape a bitmap update decodes to, one rectangle at a time, so
+    /// nothing between the decoder and here has to know the desktop's own stride.
+    ///
+    /// `false`, with the reason logged, for a rectangle that does not fit the frame
+    /// or a source that is not the size it claims: the first can only mean the two
+    /// disagree about the desktop's size, which is a missed resize, and clamping
+    /// would paint a sheared image and hide it.
+    pub(super) fn blit(&self, src: &[u8], rect: Rect) -> bool {
         let mut frame = self.lock();
         if rect.x.saturating_add(rect.width) > frame.width
             || rect.y.saturating_add(rect.height) > frame.height
@@ -130,20 +134,22 @@ impl Framebuffer {
             return false;
         }
         let bytes = rect.width as usize * 4;
+        if src.len() != bytes * rect.height as usize {
+            warn!(
+                "rdp: dropping a {}x{}+{}+{} paint carrying {} bytes",
+                rect.width,
+                rect.height,
+                rect.x,
+                rect.y,
+                src.len()
+            );
+            return false;
+        }
         let left = rect.x as usize * 4;
         let stride = frame.stride;
         for row in 0..rect.height as usize {
-            let from = (rect.y as usize + row) * src_stride + left;
-            let Some(src) = src.get(from..from + bytes) else {
-                warn!(
-                    "rdp: dropping the rest of a {}x{}+{}+{} paint whose pixels ran out at row \
-                     {row}",
-                    rect.width, rect.height, rect.x, rect.y
-                );
-                return false;
-            };
             let to = (rect.y as usize + row) * stride + left;
-            frame.pixels[to..to + bytes].copy_from_slice(src);
+            frame.pixels[to..to + bytes].copy_from_slice(&src[row * bytes..(row + 1) * bytes]);
         }
         true
     }
@@ -157,8 +163,8 @@ mod tests {
     fn a_blit_lands_where_the_rectangle_says() {
         let fb = Framebuffer::new();
         fb.resize(4, 4);
-        let src = vec![0xAB; 4 * 4 * 4];
-        assert!(fb.blit(&src, 16, Rect { x: 1, y: 2, width: 2, height: 1 }));
+        let src = vec![0xAB; 8];
+        assert!(fb.blit(&src, Rect { x: 1, y: 2, width: 2, height: 1 }));
 
         fb.with(|frame| {
             // Row 2, columns 1 and 2 — and nothing else.
@@ -177,18 +183,19 @@ mod tests {
         let fb = Framebuffer::new();
         fb.resize(2, 2);
         let src = vec![0xFF; 4 * 4 * 4];
-        assert!(!fb.blit(&src, 16, Rect { x: 0, y: 0, width: 4, height: 4 }));
+        assert!(!fb.blit(&src, Rect { x: 0, y: 0, width: 4, height: 4 }));
         fb.with(|frame| assert!(frame.pixels.iter().all(|b| *b == 0)));
     }
 
-    /// A source shorter than the rectangle it claims to cover stops the copy rather
-    /// than panicking on the slice.
+    /// A source that is not the size its own rectangle asks for stops the copy
+    /// rather than panicking on the slice — or, worse, shearing the picture.
     #[test]
-    fn a_source_too_short_for_its_rectangle_is_not_a_panic() {
+    fn a_source_that_is_not_its_rectangles_size_is_not_a_panic() {
         let fb = Framebuffer::new();
         fb.resize(4, 4);
-        // Two rows of a 16-byte stride, from a buffer that holds one.
-        assert!(!fb.blit(&[0; 16], 16, Rect { x: 0, y: 0, width: 4, height: 2 }));
+        // Two rows of four pixels, from a buffer that holds one row.
+        assert!(!fb.blit(&[0; 16], Rect { x: 0, y: 0, width: 4, height: 2 }));
+        assert!(!fb.blit(&[0; 48], Rect { x: 0, y: 0, width: 4, height: 2 }));
     }
 
     #[test]

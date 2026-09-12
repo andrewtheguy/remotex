@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 
 use super::Handshake;
 use crate::config::{
-    DEFAULT_AUDIO_BITRATE_KBPS, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, Security, TargetConfig,
+    DEFAULT_AUDIO_BITRATE_KBPS, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -641,14 +641,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     ));
 
     if target.protocol == Protocol::Rdp {
-        lines.push(spec(
-            "security",
-            match target.security() {
-                Security::Auto => "auto — the server picks tls or nla",
-                Security::Nla => "nla required",
-                Security::Tls => "tls only; the remote shows its login window",
-            },
-        ));
+        lines.push(spec("security", "nla — the credentials are checked before the session"));
     }
 
     // Beside the clipboard rather than inside the block above: sound is the

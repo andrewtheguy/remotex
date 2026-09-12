@@ -156,19 +156,6 @@ password = "change-me"
 #width = 1920
 #height = 1080
 
-# Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
-# RDP only — VNC negotiates VncAuth (password set) or None per the handshake, so the
-# key is refused on a vnc target rather than ignored, whatever its value.
-#security = "auto"
-
-# Allow a logon over TLS without NLA — "tls" above, or a server that picks it under
-# "auto". The gateway verifies no server certificate, so without NLA the
-# credentials go to whoever answered; with NLA they are bound to the server's TLS
-# key and useless to an interceptor. So it is refused unless this is set, and a
-# session that uses it says so in the log. xrdp speaks no NLA and needs it.
-# RDP only.
-#allow_plain_tls = false
-
 # Dynamic resize (opt-in): hand the remote desktop's size to the client's window.
 # The client reports every window change while connected. There is no client-side
 # resize toggle, one-shot "Resize to window" button or remembered preference: this

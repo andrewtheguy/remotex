@@ -1,16 +1,15 @@
-//! The remote mouse cursor.
+//! The remote mouse cursor, as a caller sees it.
 //!
-//! RDP sends a cursor as a pair of AND and XOR masks — the encoding Windows has
-//! used since it drew cursors by XORing into the framebuffer — and IronRDP decodes
-//! them. Asked for the *accelerated* target, as this client always does, it hands
-//! back straight-alpha RGBA ready for a compositor rather than drawing the pointer
-//! into the desktop, which is what lets a browser wear it on its own hardware
-//! pointer.
+//! [`super::proto::pointer`] does the decoding — the AND and XOR masks Windows has
+//! used since it drew cursors by XORing into the framebuffer, turned into
+//! straight-alpha `RGBA`. This is the shape that leaves this crate: the same pixels,
+//! counted in `u32` like every other size a caller of [`super::Session`] is handed,
+//! and never drawn into the desktop, which is what lets a browser wear the pointer on
+//! its own hardware cursor.
 
 use std::fmt;
 
-use ironrdp::graphics::pointer::DecodedPointer;
-use log::warn;
+use super::proto::pointer::Shape;
 
 /// A cursor bitmap, in straight-alpha `RGBA`.
 #[derive(Clone, PartialEq, Eq)]
@@ -44,6 +43,20 @@ impl fmt::Debug for CursorImage {
     }
 }
 
+/// A decoded shape, which the decoder has already bounded to RDP's own 384×384 and
+/// sized to its own dimensions — so there is nothing left to check here.
+impl From<Shape> for CursorImage {
+    fn from(shape: Shape) -> Self {
+        Self {
+            width: u32::from(shape.width),
+            height: u32::from(shape.height),
+            hotspot_x: u32::from(shape.hotspot_x),
+            hotspot_y: u32::from(shape.hotspot_y),
+            rgba: shape.rgba,
+        }
+    }
+}
+
 /// What the pointer should look like now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cursor {
@@ -57,63 +70,26 @@ pub enum Cursor {
     Image(CursorImage),
 }
 
-/// The largest cursor this will hand on.
-///
-/// RDP's own limit is 384×384. This is a gate on what a consumer is asked to hold,
-/// sitting behind a decoder that sized its output from numbers that arrived over
-/// the network, not a second check of protocol validity.
-const MAX_DIMENSION: u16 = 384;
-
-/// A decoded pointer as the image this crate hands out, or `None` for one that is
-/// empty, oversized, or not the size its own header claims.
-pub(super) fn image(pointer: &DecodedPointer) -> Option<CursorImage> {
-    let (width, height) = (pointer.width, pointer.height);
-    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-        warn!("rdp: refusing a {width}x{height} cursor (limit {MAX_DIMENSION})");
-        return None;
-    }
-    if pointer.bitmap_data.len() != usize::from(width) * usize::from(height) * 4 {
-        warn!(
-            "rdp: refusing a {width}x{height} cursor carrying {} bytes",
-            pointer.bitmap_data.len()
-        );
-        return None;
-    }
-    Some(CursorImage {
-        width: u32::from(width),
-        height: u32::from(height),
-        hotspot_x: u32::from(pointer.hotspot_x),
-        hotspot_y: u32::from(pointer.hotspot_y),
-        rgba: pointer.bitmap_data.clone(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn decoded(width: u16, height: u16, bytes: usize) -> DecodedPointer {
-        DecodedPointer { width, height, hotspot_x: 3, hotspot_y: 4, bitmap_data: vec![7; bytes] }
+    fn shape(width: u16, height: u16) -> Shape {
+        let rgba = vec![7; usize::from(width) * usize::from(height) * 4];
+        Shape { width, height, hotspot_x: 3, hotspot_y: 4, rgba }
     }
 
     #[test]
     fn a_pointer_keeps_its_hotspot_and_pixels() {
-        let image = image(&decoded(2, 3, 24)).expect("a well-formed pointer");
+        let image = CursorImage::from(shape(2, 3));
         assert_eq!((image.width, image.height, image.hotspot_x, image.hotspot_y), (2, 3, 3, 4));
         assert_eq!(image.rgba, vec![7; 24]);
-    }
-
-    #[test]
-    fn a_pointer_that_is_not_its_own_size_is_refused() {
-        assert!(image(&decoded(0, 3, 0)).is_none(), "empty");
-        assert!(image(&decoded(MAX_DIMENSION + 1, 1, usize::from(MAX_DIMENSION + 1) * 4)).is_none());
-        assert!(image(&decoded(2, 3, 23)).is_none(), "short of its header");
     }
 
     /// A 384×384 cursor must not print 590 KB of integers into a log line.
     #[test]
     fn debug_prints_the_size_not_the_pixels() {
-        let text = format!("{:?}", image(&decoded(2, 3, 24)).unwrap());
+        let text = format!("{:?}", CursorImage::from(shape(2, 3)));
         assert_eq!(text, "CursorImage { 2x3, hotspot 3,4, 24 bytes }");
     }
 }

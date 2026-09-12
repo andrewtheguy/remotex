@@ -1,4 +1,4 @@
-//! Keyboard and mouse, encoded here and sent on the session thread.
+//! Keyboard and mouse, queued here and encoded on the session thread.
 //!
 //! Every method on [`Input`] turns one call into one fast-path input event and
 //! queues it for the session thread, which batches whatever has queued up into as
@@ -9,29 +9,14 @@
 
 use std::sync::Arc;
 
-use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
-use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
-use ironrdp::pdu::input::mouse::PointerFlags;
-use ironrdp::pdu::input::mouse_x::PointerXFlags;
-use ironrdp::pdu::input::{MousePdu, MouseXPdu};
 use tokio::sync::{mpsc, watch};
 
-/// A mouse button, in the three the RDP fast-path mouse event encodes directly
-/// plus the two extended ones.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MouseButton {
-    Left,
-    Middle,
-    Right,
-    /// "Back" on most mice.
-    X1,
-    /// "Forward" on most mice.
-    X2,
-}
+use super::proto::display;
+use super::proto::input::{Button, Event, MAX_ROTATION};
 
 /// One thing for the session thread to do next time it wakes.
 pub(super) enum Command {
-    Input(FastPathInputEvent),
+    Input(Event),
     /// Ask the server to repaint the whole desktop.
     Refresh,
     /// Ask the server for a new desktop size, over Display Control.
@@ -54,11 +39,6 @@ pub struct Input {
     stop: Arc<watch::Sender<bool>>,
 }
 
-/// The largest rotation one wheel event carries: the wire field is nine-bit two's
-/// complement, and the magnitude is kept symmetric so a notch up and a notch down
-/// are always the same size.
-const MAX_WHEEL_ROTATION: i16 = 255;
-
 impl Input {
     pub(super) fn new(commands: mpsc::UnboundedSender<Command>) -> Self {
         Self { commands, stop: Arc::new(watch::channel(false).0) }
@@ -79,7 +59,7 @@ impl Input {
 
     /// Move the pointer, pressing nothing.
     pub fn mouse_move(&self, x: u16, y: u16) {
-        self.mouse(PointerFlags::MOVE, 0, x, y);
+        self.push(Command::Input(Event::Move { x, y }));
     }
 
     /// Press or release a button, at a position.
@@ -89,46 +69,19 @@ impl Input {
     /// because a click whose coordinates came from a *previous* event is the classic
     /// source of "it clicked the wrong thing" on a laggy link.
     pub fn mouse_button(&self, button: MouseButton, down: bool, x: u16, y: u16) {
-        let event = match button {
-            MouseButton::Left | MouseButton::Middle | MouseButton::Right => {
-                let mut flags = match button {
-                    MouseButton::Left => PointerFlags::LEFT_BUTTON,
-                    MouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                    _ => PointerFlags::RIGHT_BUTTON,
-                };
-                if down {
-                    flags |= PointerFlags::DOWN;
-                }
-                mouse_event(flags, 0, x, y)
-            }
-            // The two extra buttons go on a different event entirely, with their own
-            // DOWN bit.
-            MouseButton::X1 | MouseButton::X2 => {
-                let mut flags = if button == MouseButton::X1 {
-                    PointerXFlags::BUTTON1
-                } else {
-                    PointerXFlags::BUTTON2
-                };
-                if down {
-                    flags |= PointerXFlags::DOWN;
-                }
-                FastPathInputEvent::MouseEventEx(MouseXPdu { flags, x_position: x, y_position: y })
-            }
-        };
-        self.push(Command::Input(event));
+        self.push(Command::Input(Event::Button { button, down, x, y }));
     }
 
     /// Scroll, by a signed number of rotation units. 120 is one notch of a
     /// conventional wheel; positive is up (or right).
     ///
     /// The rotation shares its word with the event's flags on the wire, as a
-    /// nine-bit two's-complement value beside a separate negative bit. IronRDP
-    /// writes both from the signed number, so the only thing left to do here is
-    /// keep the magnitude inside nine bits — a larger one would wrap into the flag
-    /// bits and turn a scroll into some other event.
+    /// nine-bit two's-complement value beside a separate negative bit, so the
+    /// magnitude is held inside nine bits here: a larger one would wrap into the
+    /// flag bits and turn a scroll into some other event.
     pub fn wheel(&self, delta: i16, horizontal: bool, x: u16, y: u16) {
-        let flags = if horizontal { PointerFlags::HORIZONTAL_WHEEL } else { PointerFlags::VERTICAL_WHEEL };
-        self.mouse(flags, delta.clamp(-MAX_WHEEL_ROTATION, MAX_WHEEL_ROTATION), x, y);
+        let rotation = delta.clamp(-MAX_ROTATION, MAX_ROTATION);
+        self.push(Command::Input(Event::Wheel { rotation, horizontal, x, y }));
     }
 
     /// Press or release a key, by RDP scancode.
@@ -137,14 +90,7 @@ impl Input {
     /// Enter and slash, and the Windows keys — which the fast-path keyboard event
     /// carries as a flag beside the code.
     pub fn key(&self, scancode: u8, extended: bool, down: bool) {
-        let mut flags = KeyboardFlags::empty();
-        if extended {
-            flags |= KeyboardFlags::EXTENDED;
-        }
-        if !down {
-            flags |= KeyboardFlags::RELEASE;
-        }
-        self.push(Command::Input(FastPathInputEvent::KeyboardEvent(flags, scancode)));
+        self.push(Command::Input(Event::Key { scancode, extended, down }));
     }
 
     /// Ask the server to repaint the whole desktop.
@@ -195,10 +141,6 @@ impl Input {
         self.push(Command::Shutdown);
     }
 
-    fn mouse(&self, flags: PointerFlags, rotation: i16, x: u16, y: u16) {
-        self.push(Command::Input(mouse_event(flags, rotation, x, y)));
-    }
-
     fn push(&self, command: Command) {
         // A closed queue is a session that has ended, and a call after that is
         // dropped by design — see the module doc.
@@ -206,36 +148,18 @@ impl Input {
     }
 }
 
-fn mouse_event(flags: PointerFlags, rotation: i16, x: u16, y: u16) -> FastPathInputEvent {
-    FastPathInputEvent::MouseEvent(MousePdu {
-        flags,
-        number_of_wheel_rotation_units: rotation,
-        x_position: x,
-        y_position: y,
-    })
-}
+/// A mouse button, in the three the RDP fast-path mouse event encodes directly plus
+/// the two extended ones.
+pub type MouseButton = Button;
 
 /// Bring a requested desktop size inside what MS-RDPEDISP allows.
 ///
 /// Public because a caller that decides *whether to ask at all* has to compare
-/// against the size that would really be sent. Asking a server for the desktop it
-/// already has is not free — it answers with a full desktop resize — so a client
-/// that compares an unadjusted 1281 against a live 1280 asks again on every
-/// viewport report, forever.
-///
-/// Adjusted rather than refused: a caller sizing a desktop to a viewport has an
-/// arbitrary number of pixels, and refusing a resize because a window happens to be
-/// 1281 pixels wide would be a bug with no fix at the call site.
-///
-/// - **The width must be even** (MS-RDPEDISP 2.2.2.2.1). Rounded *down*, so the
-///   desktop stays inside the viewport that asked for it rather than growing a
-///   scrollbar by one pixel.
-/// - Both dimensions are clamped to 200..=8192.
-///
-/// IronRDP's own rule, so the comparison and the monitor layout that is encoded can
-/// never disagree.
+/// against the size that would really be sent — see [`display::adjust_size`], which
+/// is the same function the monitor layout itself is built with, so the comparison
+/// and the PDU can never disagree.
 pub fn sanitise_size(width: u32, height: u32) -> (u32, u32) {
-    MonitorLayoutEntry::adjust_display_size(width, height)
+    display::adjust_size(width, height)
 }
 
 /// Bring a requested `DesktopScaleFactor` inside the 100..=500 MS-RDPEDISP allows.
@@ -245,17 +169,15 @@ pub fn sanitise_size(width: u32, height: u32) -> (u32, u32) {
 /// invented density does not cost part of the request — it costs the whole scaling
 /// of the desktop, silently.
 pub fn sanitise_scale(percent: u32) -> u32 {
-    percent.clamp(100, 500)
+    percent.clamp(display::MIN_SCALE, display::MAX_SCALE)
 }
 
 #[cfg(test)]
 mod tests {
-    use ironrdp::core::encode_vec;
-
     use super::*;
 
     /// What one call put on the queue.
-    fn queued(call: impl FnOnce(&Input)) -> FastPathInputEvent {
+    fn queued(call: impl FnOnce(&Input)) -> Event {
         let (tx, mut rx) = mpsc::unbounded_channel();
         call(&Input::new(tx));
         match rx.try_recv() {
@@ -264,63 +186,37 @@ mod tests {
         }
     }
 
-    /// The flags word of a mouse event, as it goes on the wire.
-    fn mouse_flags(event: &FastPathInputEvent) -> u16 {
-        let FastPathInputEvent::MouseEvent(pdu) = event else { panic!("not a mouse event: {event:?}") };
-        let bytes = encode_vec(pdu).expect("a mouse event encodes");
-        u16::from_le_bytes([bytes[0], bytes[1]])
+    #[test]
+    fn a_call_becomes_the_event_the_wire_has_a_shape_for() {
+        assert_eq!(queued(|input| input.mouse_move(7, 9)), Event::Move { x: 7, y: 9 });
+        assert_eq!(
+            queued(|input| input.key(0x48, true, false)),
+            Event::Key { scancode: 0x48, extended: true, down: false }
+        );
+        assert_eq!(
+            queued(|input| input.mouse_button(MouseButton::X2, true, 5, 6)),
+            Event::Button { button: Button::X2, down: true, x: 5, y: 6 }
+        );
     }
 
-    /// The encoding that is easiest to get backwards: a negative rotation sets the
-    /// negative bit *and* carries a nine-bit two's-complement magnitude, so −120 is
-    /// `WHEEL | NEGATIVE | 0x88`.
+    /// The rotation shares its word with the event-type bits on the wire, so an
+    /// oversized delta that wrapped into them would turn a scroll into some other
+    /// event entirely.
     #[test]
-    fn a_negative_wheel_sets_the_negative_bit_and_a_nine_bit_magnitude() {
-        let down = mouse_flags(&queued(|input| input.wheel(-120, false, 0, 0)));
-        assert_eq!(down, 0x0200 | 0x0100 | 0x88);
-        let up = mouse_flags(&queued(|input| input.wheel(120, false, 0, 0)));
-        assert_eq!(up, 0x0200 | 120);
-        // And the two axes are different events, not the same one with a sign.
-        assert_eq!(mouse_flags(&queued(|input| input.wheel(120, true, 0, 0))) & 0x0400, 0x0400);
-    }
-
-    /// The rotation shares its word with the event-type bits, so an oversized delta
-    /// that wrapped into them would turn a scroll into some other event entirely.
-    #[test]
-    fn an_oversized_wheel_delta_cannot_reach_the_event_bits() {
+    fn an_oversized_wheel_delta_is_held_to_what_the_field_carries() {
         for delta in [i16::MIN, -32000, -400, 400, 32000, i16::MAX] {
-            let flags = mouse_flags(&queued(|input| input.wheel(delta, false, 0, 0)));
-            assert_eq!(flags & !0x01FF, 0x0200, "delta {delta} corrupted the event bits");
+            let Event::Wheel { rotation, .. } = queued(|input| input.wheel(delta, false, 0, 0))
+            else {
+                panic!("not a wheel event")
+            };
+            assert!(rotation.abs() <= MAX_ROTATION, "delta {delta} became {rotation}");
+            assert_eq!(rotation.signum(), delta.signum(), "delta {delta} changed direction");
         }
-    }
-
-    #[test]
-    fn a_key_carries_its_release_and_extended_bits() {
-        let FastPathInputEvent::KeyboardEvent(flags, code) = queued(|input| input.key(0x48, true, false))
-        else {
-            panic!("not a key event")
+        // And the two axes are different events, not the same one with a sign.
+        let Event::Wheel { horizontal, .. } = queued(|input| input.wheel(120, true, 0, 0)) else {
+            panic!("not a wheel event")
         };
-        assert_eq!(code, 0x48);
-        assert_eq!(flags, KeyboardFlags::EXTENDED | KeyboardFlags::RELEASE);
-        let FastPathInputEvent::KeyboardEvent(flags, _) = queued(|input| input.key(0x1E, false, true))
-        else {
-            panic!("not a key event")
-        };
-        assert!(flags.is_empty(), "a plain press carries no flags");
-    }
-
-    /// The side buttons go on the extended mouse event; the other three never do.
-    #[test]
-    fn the_side_buttons_ride_the_extended_mouse_event() {
-        let FastPathInputEvent::MouseEventEx(pdu) =
-            queued(|input| input.mouse_button(MouseButton::X2, true, 5, 6))
-        else {
-            panic!("X2 is an extended mouse event")
-        };
-        assert_eq!(pdu.flags, PointerXFlags::BUTTON2 | PointerXFlags::DOWN);
-        assert_eq!((pdu.x_position, pdu.y_position), (5, 6));
-        let flags = mouse_flags(&queued(|input| input.mouse_button(MouseButton::Left, false, 0, 0)));
-        assert_eq!(flags, 0x1000, "a left release is the button bit and no DOWN");
+        assert!(horizontal);
     }
 
     /// Every one of these is a size a viewport really produces, and an odd width is

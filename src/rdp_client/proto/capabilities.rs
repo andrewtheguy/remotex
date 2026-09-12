@@ -137,6 +137,11 @@ pub struct DemandActive {
     /// Virtual Channel capability. A server that names none is taken to mean the
     /// smallest, which is what [MS-RDPBCGR] says every server accepts.
     pub chunk: usize,
+    /// Whether the server reads a Refresh Rect PDU, out of its General capability.
+    pub refresh_rect: bool,
+    /// Whether it reads a Suppress Output PDU. See [`super::desktop`] for what a
+    /// client does with the two.
+    pub suppress_output: bool,
 }
 
 impl DemandActive {
@@ -155,6 +160,7 @@ impl DemandActive {
         let mut desktop = None;
         let mut multifragment = None;
         let mut chunk = None;
+        let mut repaint = (false, false);
         for _ in 0..count {
             let kind = r.u16_le()?;
             let length = r.u16_le()?;
@@ -163,6 +169,14 @@ impl DemandActive {
                 None => return Err(r.refuse("a capability set length", length)),
             };
             match kind {
+                GENERAL => {
+                    let mut r = Reader::new("a server General capability set", body);
+                    // The operating system it runs, the protocol version, the
+                    // compression it would use and the ways it would update the
+                    // desktop: nothing this client varies with.
+                    r.skip(18)?;
+                    repaint = (r.u8()? != 0, r.u8()? != 0);
+                }
                 BITMAP => {
                     let mut r = Reader::new("a server Bitmap capability set", body);
                     let depth = r.u16_le()?;
@@ -204,6 +218,8 @@ impl DemandActive {
             height,
             multifragment: multifragment.unwrap_or(DEFAULT_MULTIFRAGMENT),
             chunk: chunk.unwrap_or(channel::MIN_CHUNK),
+            refresh_rect: repaint.0,
+            suppress_output: repaint.1,
         })
     }
 }
@@ -461,6 +477,16 @@ mod tests {
         w.finish()
     }
 
+    /// A General capability set, whose last two bytes are the only thing read from
+    /// it: whether the server repaints on request, and how.
+    fn general(refresh_rect: bool, suppress_output: bool) -> (u16, Vec<u8>) {
+        let mut w = Writer::new();
+        w.zeros(18);
+        w.u8(u8::from(refresh_rect));
+        w.u8(u8::from(suppress_output));
+        (GENERAL, w.finish())
+    }
+
     fn bitmap(width: u16, height: u16) -> (u16, Vec<u8>) {
         let mut w = Writer::new();
         w.u16_le(COLOR_DEPTH);
@@ -476,7 +502,7 @@ mod tests {
         // Asked for 1920x1080, given 1024x768, with sets either side that this client
         // has no use for and must still step over.
         let pdu = demand(&[
-            (GENERAL, vec![0; 20]),
+            general(true, true),
             bitmap(1024, 768),
             (ORDER, vec![0; 84]),
             (MULTIFRAGMENT, 0x0004_0000_u32.to_le_bytes().to_vec()),
@@ -491,6 +517,8 @@ mod tests {
                 height: 768,
                 multifragment: 0x0004_0000,
                 chunk: 16_256,
+                refresh_rect: true,
+                suppress_output: true,
             }
         );
     }
@@ -503,6 +531,21 @@ mod tests {
         let demanded = DemandActive::decode(&pdu).unwrap();
         assert_eq!(demanded.multifragment, DEFAULT_MULTIFRAGMENT);
         assert_eq!(demanded.chunk, channel::MIN_CHUNK);
+    }
+
+    /// The two ways of asking for a repaint, which a host answers only where it said
+    /// it would — and a server that sends no General capability set at all has said
+    /// it would answer neither.
+    #[test]
+    fn the_ways_a_server_will_repaint_are_taken_from_what_it_said_and_nowhere_else() {
+        for (refresh_rect, suppress_output) in [(false, false), (true, false), (false, true)] {
+            let pdu = demand(&[general(refresh_rect, suppress_output), bitmap(1920, 1080)]);
+            let demanded = DemandActive::decode(&pdu).unwrap();
+            let read = (demanded.refresh_rect, demanded.suppress_output);
+            assert_eq!(read, (refresh_rect, suppress_output));
+        }
+        let silent = DemandActive::decode(&demand(&[bitmap(1920, 1080)])).unwrap();
+        assert!(!silent.refresh_rect && !silent.suppress_output);
     }
 
     /// A chunk outside the range the specification gives is a server this client

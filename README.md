@@ -14,9 +14,9 @@ for rather than scaled on the client; plain `vnc`, Apple High Performance and
 `rdp` can all be handed the window. On RDP each resize reactivates the session, so
 a Windows host re-renders the desktop sharp at the new size.
 
-- RDP uses a built-in client on [IronRDP](https://github.com/Devolutions/IronRDP)'s
-  protocol crates: the desktop over plain bitmap updates, pointer, keyboard, mouse
-  and resize. It does not carry sound, the clipboard or touch.
+- RDP uses a built-in client, protocol and all: the desktop over plain bitmap
+  updates, pointer, keyboard, mouse and resize, spoken to a current Windows host
+  over NLA. It does not carry sound, the clipboard or touch.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
@@ -311,12 +311,17 @@ bun run check
 cd ..
 ```
 
-The container-backed RDP and VNC tests use Docker or Podman and do not start a
-browser. They are ignored by default; run them explicitly with:
+The container-backed VNC test uses Docker or Podman and does not start a
+browser. It is ignored by default; run it explicitly with:
 
 ```sh
-cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
+cargo test --test vnc_tiles_e2e -- --ignored
 ```
+
+RDP has no container to test against: the gateway's RDP client speaks NLA to a
+current Windows host and nothing else, so its end-to-end tests borrow a real
+machine — see [`tests/rdp_proto_probe.rs`](tests/rdp_proto_probe.rs) and
+[`tests/rdp_client_probe.rs`](tests/rdp_client_probe.rs).
 
 Stable headless browser checks for DOM/control-plane flows live under
 [`tests/playwright`](tests/playwright/README.md). They intentionally do not
@@ -327,13 +332,13 @@ For a remote Podman connection:
 ```sh
 CONTAINER_CONNECTION=workstation-wsl \
 REMOTEX_TEST_CONTAINER_HOST=<engine-host> \
-cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
+cargo test --test vnc_tiles_e2e -- --ignored
 ```
 
 `CONTAINER_CONNECTION` is the Podman system connection name.
 `REMOTEX_TEST_CONTAINER_HOST` is the engine host's IP address or DNS name as
 reachable from the machine running the tests; an SSH config alias is not
-resolved for the tests' direct RDP and VNC connections.
+resolved for the tests' direct VNC connections.
 
 ## Build
 

@@ -19,31 +19,6 @@ use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::{HostDisplay, JpegSampling};
 
-/// RDP security negotiation mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Security {
-    /// Advertise both TLS and NLA/CredSSP; the server picks the strongest.
-    #[default]
-    Auto,
-    /// Require NLA/CredSSP (network-level auth before the session).
-    Nla,
-    /// Plain TLS security only — no NLA; the remote shows a graphical login.
-    Tls,
-}
-
-impl Security {
-    /// `(enable_tls, enable_credssp)`, which is the shape both the config file
-    /// and the RDP engine's own security selection are written in.
-    pub fn flags(self) -> (bool, bool) {
-        match self {
-            Security::Auto => (true, true),
-            Security::Nla => (false, true),
-            Security::Tls => (true, false),
-        }
-    }
-}
-
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
 /// client (src/rdp.rs over src/rdp_client), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
@@ -743,24 +718,6 @@ pub struct TargetConfig {
     /// Pinned desktop height, in points. See [`Self::width`].
     #[serde(default)]
     pub height: Option<u16>,
-    /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`; `None` reads
-    /// as [`Security::Auto`] ([`TargetConfig::security`]). RDP only — RFB
-    /// negotiates its own security per the handshake — and `Option` rather than
-    /// a bare default so that setting it on a VNC target is refused at parse
-    /// time instead of accepted and left inert, the same rule as every other
-    /// key one protocol alone reads.
-    #[serde(default)]
-    pub security: Option<Security>,
-    /// Let this target log on over plain TLS — TLS without NLA — whether chosen
-    /// with `security = "tls"` or picked by the server under `"auto"`. Off by
-    /// default because the RDP client verifies no server certificate: without NLA
-    /// the credentials travel in the logon PDU to whoever answered, where NLA
-    /// binds them to the server's TLS key so an interceptor cannot use them. xrdp
-    /// speaks no NLA and needs this. RDP only, and `Option` so that setting it on
-    /// a VNC target is refused at parse time, the same rule as `security`; `None`
-    /// reads as off ([`TargetConfig::allow_plain_tls`]).
-    #[serde(default)]
-    pub allow_plain_tls: Option<bool>,
     /// Allow client-driven resize: hand this target's desktop size to the
     /// client's window. A desktop client reports every window change while this
     /// is on; there is no client-side mode, manual resize command, or second
@@ -1039,17 +996,6 @@ impl TargetConfig {
     /// size, or the same default a sizeless session would have opened at.
     pub fn default_size(&self) -> (u16, u16) {
         self.pinned_size().unwrap_or(DEFAULT_SIZE)
-    }
-
-    /// Whether a plain-TLS logon is allowed, off unless the operator opted in —
-    /// see [`Self::allow_plain_tls`](TargetConfig::allow_plain_tls).
-    pub fn allow_plain_tls(&self) -> bool {
-        self.allow_plain_tls.unwrap_or(false)
-    }
-
-    /// [`Self::security`] resolved: [`Security::Auto`] unless the operator chose.
-    pub fn security(&self) -> Security {
-        self.security.unwrap_or_default()
     }
 
     /// [`Self::render_subtype`] resolved: lossless PNG unless the operator chose.
@@ -1658,33 +1604,6 @@ impl ConfigFile {
                 !target.clipboard || target.protocol != Protocol::Rdp,
                 "target {:?} asks for clipboard, which this gateway's RDP client does not \
                  carry yet. Remove the key.",
-                target.name
-            );
-            // And the security mode: TLS and NLA are RDP's negotiation, where
-            // RFB settles its own in the handshake, so on a VNC target the key
-            // names a choice nothing would read.
-            anyhow::ensure!(
-                target.security.is_none() || target.protocol == Protocol::Rdp,
-                "target {:?} sets security on a {} target, and only rdp negotiates tls or \
-                 nla — RFB settles its own security in the handshake. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
-            anyhow::ensure!(
-                target.allow_plain_tls.is_none() || target.protocol == Protocol::Rdp,
-                "target {:?} sets allow_plain_tls on a {} target, and only rdp logs on over \
-                 tls. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
-            // Plain TLS hands the credentials to a server whose certificate nobody
-            // checked, so asking for it and nothing else needs the opt-in too — a
-            // session that could only ever fail at logon is better refused here.
-            anyhow::ensure!(
-                target.security() != Security::Tls || target.allow_plain_tls(),
-                "target {:?} sets security = \"tls\", which sends its credentials to a server \
-                 whose certificate is not verified. Use \"nla\" or \"auto\", or set \
-                 allow_plain_tls = true to accept that.",
                 target.name
             );
             // Audio is carried by three paths and refused elsewhere rather than
@@ -2531,7 +2450,6 @@ mod tests {
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
         assert_eq!(t.pinned_size(), None, "an unpinned size follows the client's screen");
         assert_eq!(t.default_size(), DEFAULT_SIZE);
-        assert_eq!(t.security(), Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
@@ -2906,7 +2824,6 @@ mod tests {
             domain = "CORP"
             width = 1920
             height = 1080
-            security = "nla"
 
             [[targets]]
             name = "other"
@@ -2923,7 +2840,6 @@ mod tests {
         assert_eq!(config.targets.len(), 2);
         let win = &config.targets[0];
         assert_eq!(win.name, "win");
-        assert_eq!(win.security(), Security::Nla);
         assert_eq!(win.domain.as_deref(), Some("CORP"));
         assert_eq!(win.pinned_size(), Some((1920, 1080)));
         let other = &config.targets[1];
@@ -4585,84 +4501,6 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("clipboard"), "{rendered}");
         assert!(rendered.contains("does not carry"), "{rendered}");
-    }
-
-    /// The security mode is RDP's negotiation, and refused on VNC by name —
-    /// every value, `auto` included, since the mistake is a key that nothing on
-    /// this protocol would read, not the value chosen for it.
-    #[test]
-    fn security_belongs_to_rdp_and_is_refused_on_vnc() {
-        for value in ["auto", "nla", "tls"] {
-            for subtype in ["", "subtype = \"ard\"\nusername = \"u\"\npassword = \"p\""] {
-                let err = ConfigFile::parse(&format!(
-                    r#"
-                    [server]
-                    {}
-
-                    [[targets]]
-                    name = "nope"
-                    protocol = "vnc"
-                    host = "10.0.0.5"
-                    security = "{value}"
-                    {subtype}
-                    "#,
-                    site_passwd_line()
-                ))
-                .unwrap_err();
-                let rendered = format!("{err:#}");
-                assert!(rendered.contains("security"), "{value}: {rendered}");
-                assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
-            }
-        }
-        // On RDP the key is read, and leaving it out is `auto` without being a
-        // choice.
-        let cfg = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            security = "tls"
-            allow_plain_tls = true
-
-            [[targets]]
-            name = "bare"
-            protocol = "rdp"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap();
-        assert_eq!(cfg.targets[0].security, Some(Security::Tls));
-        assert_eq!(cfg.targets[1].security, None);
-        assert_eq!(cfg.targets[1].security(), Security::Auto);
-        assert!(!cfg.targets[1].allow_plain_tls(), "plain TLS is off unless asked for");
-    }
-
-    /// Plain TLS sends credentials to a server whose certificate nobody checked,
-    /// so a target that asks for it and nothing else has to say it accepts that —
-    /// and the opt-in is RDP's, refused on VNC even when false.
-    #[test]
-    fn plain_tls_needs_its_opt_in_and_the_opt_in_is_rdps() {
-        let parse = |target: &str| {
-            ConfigFile::parse(&format!(
-                "[server]\n{}\n[[targets]]\nname = \"t\"\nhost = \"h\"\n{target}\n",
-                site_passwd_line()
-            ))
-        };
-        let err = parse("protocol = \"rdp\"\nsecurity = \"tls\"").unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("allow_plain_tls"), "the way out is named: {rendered}");
-        assert!(parse("protocol = \"rdp\"\nsecurity = \"tls\"\nallow_plain_tls = true").is_ok());
-        // Under "auto" the opt-in is optional: NLA is still on offer.
-        assert!(parse("protocol = \"rdp\"\nallow_plain_tls = true").is_ok());
-        for value in ["true", "false"] {
-            let err = parse(&format!("protocol = \"vnc\"\nallow_plain_tls = {value}")).unwrap_err();
-            assert!(format!("{err:#}").contains("allow_plain_tls"), "{err:#}");
-        }
     }
 
     /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is

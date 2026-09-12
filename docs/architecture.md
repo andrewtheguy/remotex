@@ -44,7 +44,7 @@ Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queu
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
 | `rdp.rs` | RDP engine: damage, tiles, input, cursor, resize, over `rdp_client` |
-| `rdp_client/` | the RDP client on IronRDP: connection, graphics paths, framebuffer, input queue |
+| `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
@@ -1099,12 +1099,16 @@ Nagle holds back is that window stalled for a round trip.
 
 ### RDP
 
-The protocol is the gateway's own client, `src/rdp_client/`, on IronRDP's crates
-(`github.com/Devolutions/IronRDP`, pinned by revision): IronRDP supplies the
-connection sequence, TLS, NLA/CredSSP, the legacy bitmap codecs, the graphics
-pipeline with its codecs and compositor, and Display Control; the client owns one
-thread per session, a complete framebuffer copied out of the decoders, and an event
-per damaged rectangle. Its socket comes from `engine::tcp_connect`, so an RDP host
+The protocol is the gateway's own client, `src/rdp_client/`, down to the wire
+format: `rdp_client/proto/` encodes and decodes every PDU against [MS-RDPBCGR] —
+the connection sequence, TLS, NLA/CredSSP, MCS and its channels, the planar bitmap
+codec, the cursor, fast-path input, and Display Control — and `rdp_client/` owns one
+thread per session, a complete framebuffer painted from those decoders, and an event
+per damaged rectangle. The only thing under it that is not written here is the
+CredSSP exchange itself (`sspi`), because NLA is not optional on a current Windows
+host and NTLM is the one mechanism a user name and a password can drive.
+The security negotiation offers `HYBRID` and nothing else, so a server that cannot
+do NLA is refused rather than logged on to some other way. Its socket comes from `engine::tcp_connect`, so an RDP host
 that goes silent is noticed on the same keepalive schedule as every other engine's.
 The engine (`src/rdp.rs`) compares those rectangles with a shadow of pixels already
 sent, splits the remainder into bands, and encodes off the event loop. Input is
@@ -1128,10 +1132,9 @@ server's cell-hash search over this gateway's shadow): a scroll goes out as a fe
 copies did not — including repainting anything a copy got wrong, which is what
 makes a wrong copy waste rather than corruption.
 
-The Graphics Pipeline (MS-RDPEGFX) is not advertised at all, so every server —
-Windows hosts and xrdp alike — draws with bitmap updates, decoded by the
-interleaved and planar bitmap codecs. The client announces no drawing orders
-either, so the path is bitmaps throughout. That is what makes a resize a full
+The Graphics Pipeline (MS-RDPEGFX) is not advertised at all, so the server draws
+with bitmap updates, decoded by the planar bitmap codec. The client announces no
+drawing orders either, so the path is bitmaps throughout. That is what makes a resize a full
 reactivation, after which a Windows host re-renders the desktop sharp; it is also
 what avoids the pipeline's RFX Progressive decoder, which still fails partway
 through a session on some Windows hosts, where a decode error ends the session.
@@ -1150,15 +1153,14 @@ layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
 stretched. The opening RDP handshake is always 1x; the client applies its screen
 density after `connected`, so a Retina client costs a reactivation. RDP reports no
-scale factor back,
-so the density here is declared rather than measured. The layout is built by the
-client rather than IronRDP's helper, which marks a monitor taller than it is wide
-as portrait-rotated.
+scale factor back, so the density here is declared rather than measured. The layout
+always says a monitor is upright: a window taller than it is wide is not a rotated
+screen, and a server told otherwise turns the desktop on its side.
 
 `ConnectionType` is declared a LAN rather than probed, because a server's own
 estimate of the hop between it and a gateway beside it throttled updates badly, and
-no multitransport is offered; the RTT probes a Windows host sends anyway are
-answered by IronRDP.
+no multitransport is offered. The auto-detect PDUs a Windows host sends anyway go
+unanswered, which it treats as a link it cannot measure.
 
 A size change that is *real* costs a full Deactivation-Reactivation Sequence,
 which the client runs and reports as a new desktop size. Asking twice for the same size triggers one change, and a

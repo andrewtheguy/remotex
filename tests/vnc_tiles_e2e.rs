@@ -7,7 +7,7 @@
 //! serves its root window with no session behind it, so the first
 //! non-incremental update request drives real pixels through the whole
 //! pipeline: RFB handshake + DES auth -> `ServerMsg::Tile` -> the same
-//! binary WS frames the RDP engine emits (tests/rdp_tiles_e2e.rs).
+//! binary WS frames the engines emit.
 //!
 //! This is also the ZRLE test of record — but only because the container paints a
 //! pattern on its root window (`tests/vnc-dummy/Containerfile`). TigerVNC sends a
@@ -94,8 +94,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             // the size a `defaultSize` request resolves to.
             width: Some(DEFAULT_W as u16),
             height: Some(DEFAULT_H as u16),
-            security: None, // RDP-only knob, refused for VNC
-            allow_plain_tls: None,
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all

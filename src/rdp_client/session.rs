@@ -1,49 +1,26 @@
 //! The session: its configuration, its thread, and the loop that drives it.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use anyhow::Context as _;
-use ironrdp::connector::connection_activation::{ConnectionActivationFactory, ConnectionActivationState};
-use ironrdp::connector::ClientConnectorState;
-use ironrdp::connector::sspi::generator::NetworkRequest;
-use ironrdp::connector::{
-    self, ClientConnector, ConnectionResult, ConnectorError, ConnectorErrorExt as _, ConnectorResult,
-    Credentials, DesktopSize, ServerName,
-};
-use ironrdp::core::{WriteBuf, encode_vec};
-use ironrdp::displaycontrol::client::DisplayControlClient;
-use ironrdp::displaycontrol::pdu::{
-    DeviceScaleFactor, DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry,
-};
-use ironrdp::dvc::{DrdynvcClient, DvcMessage, encode_dvc_messages};
-use ironrdp::graphics::image_processing::PixelFormat;
-use ironrdp::pdu::Action;
-use ironrdp::pdu::gcc::{ConnectionType, KeyboardType};
-use ironrdp::pdu::geometry::InclusiveRectangle;
-use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent};
-use ironrdp::pdu::mcs::{DisconnectProviderUltimatum, DisconnectReason, McsMessage};
-use ironrdp::pdu::nego::SecurityProtocol;
-use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
-use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp::pdu::x224::X224;
-use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput, GracefulDisconnectReason};
-use ironrdp::svc::ChannelFlags;
-use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed, single_sequence_step_read};
+use anyhow::{Result, anyhow, bail};
 use log::{debug, info, warn};
-use tokio::io::{ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncWriteExt as _, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 
+use super::connect::{self, Connected};
 use super::error::Error;
 use super::framebuffer::{Framebuffer, Rect};
 use super::input::{Command, Input};
-use super::pointer::{self, Cursor};
-use crate::config::Security;
-use crate::engine;
+use super::pointer::Cursor;
+use super::proto::capabilities::DemandActive;
+use super::proto::fastpath::{self, Fragments, Update};
+use super::proto::frame::Frames;
+use super::proto::pointer::{self, Pointer};
+use super::proto::share::{self, Pdu};
+use super::proto::{bitmap, channel, desktop, display, dvc, input, mcs, tls};
 
 // ------------------------------------------------------------------ configuration
 
@@ -58,12 +35,6 @@ pub struct Connect {
     /// which arrives as [`Event::Connected`] and, later, as [`Event::Resize`].
     pub width: u32,
     pub height: u32,
-    pub security: Security,
-    /// Whether a logon over plain TLS — no NLA — may go ahead. Any server
-    /// certificate is accepted, so without NLA the credentials go to whoever
-    /// answered; a session the server steers there without this is refused before
-    /// they are sent, and one allowed there says so in the log.
-    pub allow_plain_tls: bool,
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
@@ -135,10 +106,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Both numbers come from the server, and neither is bounded anywhere near this by
 /// the protocol — a negotiated desktop is two `u16`s — so a server that asks for an
-/// absurd desktop would otherwise have this process allocate gigabytes twice over
-/// (the framebuffer, and the decoder's own image) and be killed for it. 512 MiB is
-/// past any real desktop — 16384x8192 — and well short of a memory this process
-/// cannot find.
+/// absurd desktop would otherwise have this process allocate gigabytes and be killed
+/// for it. 512 MiB is past any real desktop — 16384x8192 — and well short of a
+/// memory this process cannot find.
 const MAX_DESKTOP_BYTES: usize = 512 << 20;
 
 /// How long dropping a [`Session`] waits for its thread before leaving it behind.
@@ -295,26 +265,35 @@ async fn thread_main(
     events: &mpsc::Sender<Event>,
     stop: watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    let display = DisplayCaps::default();
-    let (result, framed) = tokio::select! {
+    run(config, &mut commands, framebuffer, events, stop).await.map_err(Error::from)
+}
+
+/// The same, in the errors the protocol modules raise. They become the session's one
+/// sentence at the boundary above, where a caller sees them.
+async fn run(
+    config: Connect,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    framebuffer: &Framebuffer,
+    events: &mpsc::Sender<Event>,
+    stop: watch::Receiver<bool>,
+) -> Result<()> {
+    let connected = tokio::select! {
         // Biased so a session dropped mid-connect stops at the next await rather
         // than finishing a handshake nobody is waiting for.
         biased;
-        () = shutdown_requested(&mut commands) => {
-            return Err(Error::new("the session was ended before it connected"));
+        () = shutdown_requested(commands) => {
+            bail!("the session was ended before it connected");
         }
-        connected = connect(&config, &display) => connected?,
+        connected = connect::connect(&config) => connected?,
     };
-    let desktop = result.desktop_size;
-    info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
-    // Before the framebuffer and, below, the decoder's image are sized to it.
-    affordable(u32::from(desktop.width), u32::from(desktop.height))?;
-    framebuffer.resize(u32::from(desktop.width), u32::from(desktop.height));
+    let (width, height) = (u32::from(connected.demand.width), u32::from(connected.demand.height));
+    info!("rdp: connected, desktop {width}x{height}");
+    // Before the framebuffer is sized to it.
+    affordable(width, height)?;
+    framebuffer.resize(width, height);
     // The first event of the session, so there is room for it.
-    let _ = events
-        .send(Event::Connected { width: u32::from(desktop.width), height: u32::from(desktop.height) })
-        .await;
-    Active::new(result, framed, framebuffer, events, display, stop).run(&mut commands).await
+    let _ = events.send(Event::Connected { width, height }).await;
+    Active::new(connected, framebuffer, events, stop).run(commands).await
 }
 
 /// Resolves once the caller has asked this session to stop, or dropped every
@@ -328,188 +307,6 @@ async fn shutdown_requested(commands: &mut mpsc::UnboundedReceiver<Command>) {
     }
 }
 
-// ------------------------------------------------------------------ connecting
-
-type Tls = ironrdp_tls::TlsStream<TcpStream>;
-type Reader = TokioFramed<ReadHalf<Tls>>;
-type Writer = TokioFramed<WriteHalf<Tls>>;
-
-/// What the Display Control channel reports when the server's capabilities
-/// arrive: the largest monitor area it accepts. Written from inside the channel's
-/// callback, which only IronRDP can call.
-#[derive(Clone, Default)]
-struct DisplayCaps(Arc<Mutex<Option<u64>>>);
-
-impl DisplayCaps {
-    fn max_area(&self) -> u64 {
-        self.0.lock().map_or(0, |caps| caps.unwrap_or(0))
-    }
-}
-
-/// TCP, X.224 negotiation, the TLS upgrade, then CredSSP and the rest of the
-/// connection sequence up to the first desktop.
-///
-/// The socket is [`engine::tcp_connect`]'s, so an RDP host that is switched off is
-/// noticed on the same keepalive schedule as every other engine's.
-async fn connect(
-    config: &Connect,
-    display: &DisplayCaps,
-) -> Result<(ConnectionResult, TokioFramed<Tls>), Error> {
-    let dest = engine::host_port(&config.host, config.port);
-    let stream = engine::tcp_connect(&dest).await?;
-    let client_addr = stream.local_addr().context("reading the local address")?;
-    // The name the certificate and CredSSP are checked against. A bracketed IPv6
-    // literal is how `host_port` writes one, not a name either check understands.
-    let server_name = config.host.trim_start_matches('[').trim_end_matches(']').to_owned();
-
-    let mut framed = TokioFramed::new(stream);
-    let mut connector = ClientConnector::new(connector_config(config), client_addr);
-    if config.resize {
-        // Display Control is the one dynamic channel this client opens, and
-        // `drdynvc` is what carries it.
-        let caps = display.clone();
-        let drdynvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(move |received| {
-            if let Ok(mut slot) = caps.0.lock() {
-                *slot = Some(received.max_monitor_area());
-            }
-            Ok(Vec::new())
-        }));
-        connector = connector.with_static_channel(drdynvc);
-    }
-
-    let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
-        .await
-        .map_err(|e| Error::chain("RDP negotiation", &e))?;
-    // Nothing secret has crossed yet. Without NLA the credentials would go in the
-    // logon PDU, over a TLS session whose certificate is never checked — and a
-    // server can steer an `"auto"` session there by selecting plain TLS — so that
-    // is refused here unless the target accepted it.
-    if let ClientConnectorState::EnhancedSecurityUpgrade { selected_protocol } = &connector.state {
-        let nla = selected_protocol.intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX);
-        if !nla {
-            if !config.allow_plain_tls {
-                return Err(Error::new(format!(
-                    "{dest} offered only TLS without NLA, which would send the credentials to a \
-                     server whose certificate is not verified; set allow_plain_tls = true on \
-                     this target to accept that"
-                )));
-            }
-            warn!(
-                "rdp: logging on to {dest} over TLS without NLA; the credentials go to a server \
-                 whose certificate is not verified (allow_plain_tls = true)"
-            );
-        }
-    }
-    let (tcp, leftover) = framed.into_inner();
-    // Any certificate is accepted, for this session only — see the module doc.
-    let (tls, certificate) = ironrdp_tls::upgrade(tcp, &server_name)
-        .await
-        .map_err(|e| Error::chain("TLS upgrade", &e))?;
-    let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-    let mut framed = TokioFramed::new_with_leftover(tls, leftover);
-    let server_public_key = ironrdp_tls::extract_tls_server_public_key(&certificate)
-        .ok_or_else(|| Error::new("TLS upgrade: the server certificate carries no public key"))?
-        .to_owned();
-
-    let result = ironrdp_tokio::connect_finalize(
-        upgraded,
-        connector,
-        &mut framed,
-        &mut NoKerberos,
-        ServerName::new(server_name),
-        server_public_key,
-        None,
-    )
-    .await
-    .map_err(|e| Error::chain("RDP activation", &e))?;
-    Ok((result, framed))
-}
-
-/// CredSSP's network client, which only Kerberos needs — to reach a KDC. A target
-/// carries a user name and a password, which is NTLM, so there is nothing for this
-/// to fetch; a server that insists on Kerberos gets an answer that says so rather
-/// than a hang.
-struct NoKerberos;
-
-impl NetworkClient for NoKerberos {
-    async fn send(&mut self, _request: &NetworkRequest) -> ConnectorResult<Vec<u8>> {
-        Err(ConnectorError::general(
-            "Kerberos is not supported; the target needs an account NTLM can authenticate",
-        ))
-    }
-}
-
-fn connector_config(config: &Connect) -> connector::Config {
-    let (enable_tls, enable_credssp) = config.security.flags();
-    connector::Config {
-        desktop_size: DesktopSize { width: narrow(config.width), height: narrow(config.height) },
-        monitor_layout: None,
-        desktop_scale_factor: 0,
-        enable_tls,
-        enable_credssp,
-        enable_standard_rdp_security: false,
-        credentials: Credentials::UsernamePassword {
-            username: config.username.clone(),
-            password: config.password.clone(),
-        },
-        domain: config.domain.clone(),
-        client_build: 0,
-        client_name: "remotex".to_owned(),
-        keyboard_type: KeyboardType::IBM_ENHANCED,
-        keyboard_subtype: 0,
-        keyboard_functional_keys_count: 12,
-        keyboard_layout: 0,
-        // **The link is a LAN, and this says so rather than letting the server
-        // measure it.** A gateway sits beside the hosts it serves and re-encodes for
-        // whatever link the *browser* is on, pacing that itself; a server pacing its
-        // own updates from an estimate of this hop throttles a stream nobody asked
-        // it to. With no multitransport offered either, the server has nothing to
-        // probe but RTT, which IronRDP answers on its own.
-        connection_type: ConnectionType::Lan,
-        ime_file_name: String::new(),
-        // No bitmap codecs: this client takes plain bitmaps, which are lossless.
-        bitmap: None,
-        dig_product_id: String::new(),
-        client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
-        alternate_shell: String::new(),
-        work_dir: String::new(),
-        remote_application_mode: false,
-        rail_support_level: RailSupportLevel::empty(),
-        #[cfg(windows)]
-        platform: MajorPlatformType::WINDOWS,
-        #[cfg(target_os = "macos")]
-        platform: MajorPlatformType::MACINTOSH,
-        #[cfg(not(any(windows, target_os = "macos")))]
-        platform: MajorPlatformType::UNIX,
-        hardware_id: None,
-        request_data: None,
-        // INFO_AUTOLOGON: a target always carries credentials, so the server should
-        // use them rather than show its own logon screen pre-filled with them.
-        autologon: true,
-        enable_audio_playback: false,
-        enable_audio_capture: false,
-        // Wallpaper, theming, full-window drag and menu animations all off. Every
-        // position of a dragged window is a full window of damage through decode,
-        // diff, encode, socket and paint, all for pixels that are gone the moment
-        // the drag ends; damage that is never created needs no other optimization
-        // downstream.
-        performance_flags: PerformanceFlags::DISABLE_WALLPAPER
-            | PerformanceFlags::DISABLE_FULLWINDOWDRAG
-            | PerformanceFlags::DISABLE_MENUANIMATIONS
-            | PerformanceFlags::DISABLE_THEMING,
-        license_cache: None,
-        timezone_info: TimezoneInfo::default(),
-        compression_type: None,
-        // Take the server's pointer as a shape rather than drawn into the desktop —
-        // see `pointer`.
-        enable_server_pointer: true,
-        pointer_software_rendering: false,
-        multitransport_flags: None,
-        // The graphics pipeline is not offered: this client decodes bitmaps.
-        support_dyn_vc_gfx_protocol: false,
-    }
-}
-
 // ------------------------------------------------------------------ the active session
 
 /// Most rectangles the waiting paint holds before it collapses to one bounding box.
@@ -518,30 +315,82 @@ const DAMAGE_CAP: usize = 32;
 /// How many queued commands one turn of the loop takes before it goes back to the
 /// socket: enough to fill a fast-path input PDU, few enough that a burst of input
 /// cannot starve the desktop.
-const COMMANDS_PER_TURN: usize = FastPathInput::MAX_EVENTS;
+const COMMANDS_PER_TURN: usize = input::MAX_EVENTS;
 
-struct Active<'a> {
-    stage: ActiveStage,
-    /// The decoded desktop. `ActiveStage` paints bitmap updates into it and names
-    /// the rectangle, which is then copied into `framebuffer`.
-    image: DecodedImage,
-    reader: Reader,
-    writer: Writer,
-    activation: ConnectionActivationFactory,
+/// What the server said about the share this client is looking at.
+///
+/// All of it is replaced wholesale when the server rebuilds the desktop, which is
+/// why it is one struct: after a Deactivation-Reactivation Sequence the share
+/// identifier, the size and the limits are all the new share's.
+struct Share {
+    /// Names the share, and every data PDU either side sends carries it.
+    id: u32,
+    width: u32,
+    height: u32,
+    /// The largest chunk a virtual channel PDU may be split into.
+    chunk: usize,
+    /// Which of the two ways of asking for a repaint this server reads — see
+    /// [`desktop::repaint`].
     refresh_rect: bool,
     suppress_output: bool,
-    framebuffer: &'a Framebuffer,
-    events: &'a mpsc::Sender<Event>,
-    /// Painted rectangles not yet handed to the caller, folded together while the
-    /// event queue is full — see [`EVENT_QUEUE`].
-    damage: Vec<Rect>,
-    display: DisplayCaps,
+}
+
+impl From<&DemandActive> for Share {
+    fn from(demand: &DemandActive) -> Self {
+        Self {
+            id: demand.share_id,
+            width: u32::from(demand.width),
+            height: u32::from(demand.height),
+            chunk: demand.chunk,
+            refresh_rect: demand.refresh_rect,
+            suppress_output: demand.suppress_output,
+        }
+    }
+}
+
+struct Active<'a> {
+    frames: Frames<ReadHalf<tls::Stream>>,
+    writer: WriteHalf<tls::Stream>,
+    /// The frame being read, kept across turns so the buffer is allocated once.
+    frame: Vec<u8>,
+    /// This client's own MCS user, which every PDU it sends names as its source.
+    user: u16,
+    io_channel: u16,
+    /// The static virtual channel dynamic channels are opened over, for a session
+    /// that asked to be resizable.
+    dynamic: Option<u16>,
+    share: Share,
+
+    /// The pieces of a fast-path update that arrived cut up.
+    fragments: Fragments,
+    scratch: bitmap::Scratch,
+    /// One decoded rectangle, reused: every bitmap update fills it and empties it.
+    pixels: Vec<u8>,
+    cursors: pointer::Cache,
+
+    /// The chunks of a virtual channel PDU, and the dynamic channel PDUs inside
+    /// them. Both outlive a reactivation: the channel is the connection's, not the
+    /// share's.
+    chunks: channel::Reassembly,
+    incoming: dvc::Incoming,
+    /// The number the server's Create Request gave Display Control, once it has
+    /// opened it.
+    control: Option<u32>,
+    /// What Display Control said it would lay out, which arrives after the channel
+    /// is open and before a layout may be sent.
+    caps: Option<display::Capabilities>,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
     /// recent, since a resize supersedes every earlier one rather than queueing
     /// behind it.
     pending_resize: Option<(u32, u32, u32)>,
+
+    framebuffer: &'a Framebuffer,
+    events: &'a mpsc::Sender<Event>,
+    /// Painted rectangles not yet handed to the caller, folded together while the
+    /// event queue is full — see [`EVENT_QUEUE`].
+    damage: Vec<Rect>,
     /// Raised once the session has been asked to stop, which is what lets a wait
     /// for room in the caller's queue end — see [`Self::deliver`].
     stop: watch::Receiver<bool>,
@@ -549,52 +398,43 @@ struct Active<'a> {
 
 impl<'a> Active<'a> {
     fn new(
-        result: ConnectionResult,
-        framed: TokioFramed<Tls>,
+        connected: Connected,
         framebuffer: &'a Framebuffer,
         events: &'a mpsc::Sender<Event>,
-        display: DisplayCaps,
         stop: watch::Receiver<bool>,
     ) -> Self {
-        let desktop = result.desktop_size;
-        let (reader, writer) = ironrdp_tokio::split_tokio_framed(framed);
-        let stage = ActiveStageBuilder {
-            static_channels: result.static_channels,
-            user_channel_id: result.user_channel_id,
-            io_channel_id: result.io_channel_id,
-            message_channel_id: result.message_channel_id,
-            share_id: result.share_id,
-            compression_type: result.compression_type,
-            enable_server_pointer: result.enable_server_pointer,
-            pointer_software_rendering: result.pointer_software_rendering,
-        }
-        .build();
+        let Connected { frames, writer, user, io_channel, dynamic, demand } = connected;
         Self {
-            stage,
-            image: DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height),
-            reader,
+            frames,
             writer,
-            activation: result.activation_factory,
-            refresh_rect: result.refresh_rect_support,
-            suppress_output: result.suppress_output_support,
+            frame: Vec::new(),
+            user,
+            io_channel,
+            dynamic,
+            share: Share::from(&demand),
+            fragments: Fragments::new(demand.multifragment),
+            scratch: bitmap::Scratch::default(),
+            pixels: Vec::new(),
+            cursors: pointer::Cache::new(),
+            chunks: channel::Reassembly::new(),
+            incoming: dvc::Incoming::new(),
+            control: None,
+            caps: None,
+            resize_ready: false,
+            pending_resize: None,
             framebuffer,
             events,
             damage: Vec::new(),
-            display,
-            resize_ready: false,
-            pending_resize: None,
             stop,
         }
     }
 
-    async fn run(mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<(), Error> {
+    async fn run(mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<()> {
         loop {
             tokio::select! {
-                pdu = self.reader.read_pdu() => {
-                    let (action, frame) = pdu.map_err(|e| {
-                        Error::new(format!("the connection to the host failed: {e}"))
-                    })?;
-                    if let Some(ended) = self.on_pdu(action, &frame).await? {
+                read = self.frames.next(&mut self.frame) => {
+                    read?;
+                    if let Some(ended) = self.on_frame().await? {
                         return ended;
                     }
                 }
@@ -623,6 +463,139 @@ impl<'a> Active<'a> {
                 }
             }
         }
+    }
+
+    /// One frame off the wire. `Some` is the session's end.
+    ///
+    /// The frame is taken out of `self` for the duration and put back afterwards, so
+    /// that reading it and acting on it — which is most of this file — do not both
+    /// need the whole session at once.
+    async fn on_frame(&mut self) -> Result<Option<Result<()>>> {
+        let frame = std::mem::take(&mut self.frame);
+        let outcome = self.dispatch(&frame).await;
+        self.frame = frame;
+        outcome
+    }
+
+    async fn dispatch(&mut self, frame: &[u8]) -> Result<Option<Result<()>>> {
+        // A frame with no first byte is not one [`Frames`] hands out.
+        if fastpath::is_output(frame[0]) {
+            self.on_updates(frame).await?;
+            return Ok(None);
+        }
+        match mcs::send_data_indication(frame)? {
+            mcs::Indication::Disconnect(reason) => {
+                info!("rdp: the host left the conference: {reason}");
+                Ok(Some(match reason.is_orderly() {
+                    true => Ok(()),
+                    false => Err(anyhow!("the host ended the session: {reason}")),
+                }))
+            }
+            mcs::Indication::Data(data) if Some(data.channel) == self.dynamic => {
+                self.on_dynamic(data.payload).await?;
+                Ok(None)
+            }
+            mcs::Indication::Data(data) if data.channel == self.io_channel => {
+                self.on_share(data.payload).await
+            }
+            // A channel this client neither asked for nor joined. A server does not
+            // send one, and a PDU on one is nothing this session can act on.
+            mcs::Indication::Data(data) => {
+                debug!("rdp: ignoring {} bytes on channel {}", data.payload.len(), data.channel);
+                Ok(None)
+            }
+        }
+    }
+
+    /// The fast path: everything the server draws.
+    async fn on_updates(&mut self, frame: &[u8]) -> Result<()> {
+        let mut painted = Vec::new();
+        for piece in fastpath::updates(frame)? {
+            let piece = piece?;
+            let cursor = {
+                // Disjoint pieces of the session, so that an update may borrow the
+                // reassembler it came out of while the decoders it feeds are used.
+                let Self { fragments, scratch, pixels, cursors, framebuffer, share, .. } = self;
+                let Some(update) = fragments.push(piece)? else {
+                    continue;
+                };
+                draw(update, scratch, pixels, cursors, framebuffer, share, &mut painted)?
+            };
+            for rect in painted.drain(..) {
+                self.paint(rect);
+            }
+            if let Some(cursor) = cursor {
+                self.send(Event::Cursor(cursor)).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// The slow path on the I/O channel: everything that is not a picture.
+    async fn on_share(&mut self, payload: &[u8]) -> Result<Option<Result<()>>> {
+        match share::decode(payload)? {
+            Pdu::DeactivateAll => {
+                let stopped = self.reactivate().await?;
+                if stopped {
+                    // Asked to stop mid-sequence: leave as politely as the loop
+                    // itself does, rather than dropping the connection.
+                    self.disconnect().await;
+                    return Ok(Some(Ok(())));
+                }
+                Ok(None)
+            }
+            // A share this client did not ask to be rebuilt: the server sends the
+            // Deactivate All first, and `reactivate` reads the Demand Active.
+            Pdu::DemandActive(_) => {
+                bail!("the host demanded a share without deactivating the last one")
+            }
+            Pdu::Data(data) if data.kind == share::SET_ERROR_INFO => {
+                match desktop::error_info(data.body) {
+                    Ok(()) => Ok(None),
+                    Err(reported) => {
+                        info!("rdp: {reported}");
+                        Ok(Some(Err(reported.into())))
+                    }
+                }
+            }
+            // Who logged on, how the server's own monitors are arranged, what it
+            // measured the link at, what it would like the keyboard lights to do:
+            // nothing here acts on any of them.
+            Pdu::Data(data) => {
+                debug!("rdp: ignoring a share data PDU of type {:#04x}", data.kind);
+                Ok(None)
+            }
+        }
+    }
+
+    /// The dynamic virtual channel, which the server opens as soon as the share is
+    /// live. Everything it says is answered, because a channel whose Create Request
+    /// goes unanswered is never opened.
+    async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
+        let reply = {
+            let Self { chunks, incoming, control, caps, .. } = self;
+            let Some(pdu) = chunks.push(payload)? else {
+                return Ok(());
+            };
+            let Some(message) = incoming.push(pdu)? else {
+                return Ok(());
+            };
+            answer(message, control, caps)?
+        };
+        if let Some(reply) = reply {
+            self.write_channel(&reply).await?;
+        }
+        // Display Control is usable once its capabilities have arrived, and a size
+        // asked for before then has been waiting for exactly this.
+        if !self.resize_ready
+            && self.control.is_some()
+            && let Some(caps) = self.caps
+        {
+            self.resize_ready = true;
+            self.send(Event::ResizeReady { max_area: caps.area }).await;
+            self.send_layout().await?;
+        }
+        Ok(())
     }
 
     /// Hand the caller an event, after every rectangle painted before it — waiting
@@ -693,94 +666,46 @@ impl<'a> Active<'a> {
         }
     }
 
-    async fn write(&mut self, frame: &[u8]) -> Result<(), Error> {
+    /// One frame out, bounded so a host that stops reading cannot hold this thread.
+    async fn write(&mut self, frame: &[u8]) -> Result<()> {
         if frame.is_empty() {
             return Ok(());
         }
         match tokio::time::timeout(WRITE_TIMEOUT, self.writer.write_all(frame)).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(Error::new(format!("the connection to the host failed: {e}"))),
-            Err(_) => Err(Error::new(format!(
+            Ok(Err(e)) => Err(anyhow!("the connection to the host failed: {e}")),
+            Err(_) => Err(anyhow!(
                 "the connection to the host failed: it accepted nothing for {}s",
                 WRITE_TIMEOUT.as_secs()
-            ))),
+            )),
         }
     }
 
-    /// One PDU from the server. `Some` is the session's end.
-    async fn on_pdu(&mut self, action: Action, frame: &[u8]) -> Result<Option<Result<(), Error>>, Error> {
-        let outputs = self
-            .stage
-            .process(&mut self.image, action, frame)
-            .map_err(|e| Error::chain("the session", &e))?;
-        for output in outputs {
-            match output {
-                ActiveStageOutput::ResponseFrame(frame) => self.write(&frame).await?,
-                ActiveStageOutput::GraphicsUpdate(region) => self.paint_image(region),
-                ActiveStageOutput::PointerBitmap(decoded) => {
-                    if let Some(image) = pointer::image(&decoded) {
-                        self.send(Event::Cursor(Cursor::Image(image))).await;
-                    }
-                }
-                ActiveStageOutput::PointerHidden => self.send(Event::Cursor(Cursor::Hidden)).await,
-                ActiveStageOutput::PointerDefault => self.send(Event::Cursor(Cursor::Default)).await,
-                ActiveStageOutput::Terminate(reason) => {
-                    info!("rdp: the server ended the session: {reason}");
-                    return Ok(Some(match reason {
-                        GracefulDisconnectReason::UserInitiated
-                        | GracefulDisconnectReason::ServerInitiated => Ok(()),
-                        GracefulDisconnectReason::Other(why) => Err(Error::new(why)),
-                    }));
-                }
-                ActiveStageOutput::DeactivateAll => {
-                    let stopped = self.reactivate().await?;
-                    if stopped {
-                        // Asked to stop mid-sequence: leave as politely as the loop
-                        // itself does, rather than dropping the connection.
-                        self.disconnect().await;
-                        return Ok(Some(Ok(())));
-                    }
-                }
-                // Where the server thinks the pointer is, the server's own view of its
-                // monitors, logon and reconnect bookkeeping, and network measurements:
-                // nothing here acts on any of them.
-                _ => {}
-            }
-        }
-        // A malformed bitmap was dropped, so part of the desktop is stale until the
-        // server paints it again.
-        if self.stage.take_bitmap_recovery_request() {
-            debug!("rdp: a bitmap update was discarded; asking for a repaint");
-            self.refresh().await?;
-        }
-        self.poll_display_control().await?;
-        Ok(None)
+    /// One PDU out on the I/O channel, which is where everything but an update and
+    /// a keystroke goes.
+    async fn write_io(&mut self, pdu: &[u8]) -> Result<()> {
+        let frame = mcs::send_data_request(self.user, self.io_channel, pdu)?;
+        self.write(&frame).await
     }
 
-    /// Copy a rectangle the decoder painted into `image` out to the framebuffer.
-    fn paint_image(&mut self, region: InclusiveRectangle) {
-        if region.right < region.left || region.bottom < region.top {
-            return;
-        }
-        let rect = Rect {
-            x: u32::from(region.left),
-            y: u32::from(region.top),
-            width: u32::from(region.right - region.left) + 1,
-            height: u32::from(region.bottom - region.top) + 1,
+    /// One PDU out on the static virtual channel, wearing the chunk header that
+    /// channel's payloads wear.
+    async fn write_channel(&mut self, pdu: &[u8]) -> Result<()> {
+        let Some(dynamic) = self.dynamic else {
+            return Ok(()); // no channel was asked for, so nothing opened one
         };
-        if self.framebuffer.blit(self.image.data(), self.image.stride(), rect) {
-            self.paint(rect);
-        }
+        let chunk = channel::pdu(pdu, self.share.chunk)?;
+        let frame = mcs::send_data_request(self.user, dynamic, &chunk)?;
+        self.write(&frame).await
     }
 
-    /// The desktop is now `width` × `height`: both copies of it start again, blank,
+    /// The desktop is now `width` × `height`: the framebuffer starts again, blank,
     /// and the caller is told.
     ///
-    /// A size this client cannot afford to hold ends the session instead: the two
-    /// images below are one allocation each, sized by the server.
-    async fn redefine_desktop(&mut self, width: u32, height: u32) -> Result<(), Error> {
+    /// A size this client cannot afford to hold ends the session instead: the
+    /// framebuffer is one allocation, sized by the server.
+    async fn redefine_desktop(&mut self, width: u32, height: u32) -> Result<()> {
         affordable(width, height)?;
-        self.image = DecodedImage::new(PixelFormat::RgbA32, narrow(width), narrow(height));
         self.framebuffer.resize(width, height);
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
@@ -789,116 +714,69 @@ impl<'a> Active<'a> {
         Ok(())
     }
 
-    /// Announce Display Control the first time it is ready, and send whatever size
-    /// was asked for while it was not.
-    async fn poll_display_control(&mut self) -> Result<(), Error> {
-        if !self.resize_ready && self.stage.display_control_ready() == Some(true) {
-            self.resize_ready = true;
-            self.send(Event::ResizeReady { max_area: self.display.max_area() }).await;
-            self.send_layout().await?;
-        }
-        Ok(())
-    }
-
     /// Send the pending monitor layout, if there is one and a channel to carry it.
-    ///
-    /// Built here rather than with `ActiveStage::encode_resize`, which marks a
-    /// monitor taller than it is wide as portrait-rotated: a phone held upright
-    /// would ask the host to turn its desktop on its side. Orientation stays 0, as
-    /// every desktop client sends it, and the physical size stays 0 — MS-RDPEDISP's
-    /// "unknown", which is the honest answer from a client with no display of its
-    /// own. `DeviceScaleFactor` is pinned to 100 beside the caller's
-    /// `DesktopScaleFactor`, because a server that finds either out of range ignores
-    /// both.
-    async fn send_layout(&mut self) -> Result<(), Error> {
+    async fn send_layout(&mut self) -> Result<()> {
         if !self.resize_ready {
             return Ok(()); // held until the channel is ready
         }
-        let Some((width, height, scale_percent)) = self.pending_resize.take() else {
+        let Some((width, height, scale)) = self.pending_resize.take() else {
             return Ok(());
         };
-        let Some(channel) = self.stage.get_dvc::<DisplayControlClient>() else {
+        let Some(control) = self.control else {
             return Ok(()); // the server closed the channel; nothing can carry it
         };
-        let channel_id = channel.channel_id();
-        let messages = MonitorLayoutEntry::new_primary(width, height)
-            .and_then(|entry| entry.with_desktop_scale_factor(scale_percent))
-            .map(|entry| entry.with_device_scale_factor(DeviceScaleFactor::Scale100Percent))
-            .and_then(|entry| DisplayControlMonitorLayout::new(&[entry]))
-            .and_then(|layout| {
-                let pdu: DvcMessage = Box::new(DisplayControlPdu::from(layout));
-                encode_dvc_messages(channel_id, vec![pdu], ChannelFlags::empty())
-            });
-        let messages = match messages {
-            Ok(messages) => messages,
-            Err(e) => {
-                warn!("rdp: could not encode a {width}x{height} layout at {scale_percent}%: {e}");
-                return Ok(());
-            }
-        };
-        let frame = self
-            .stage
-            .encode_dvc_messages(messages)
-            .map_err(|e| Error::chain("encoding a monitor layout", &e))?;
-        debug!("rdp: sending a {width}x{height} monitor layout at {scale_percent}%");
-        self.write(&frame).await
+        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%");
+        let layout = display::monitor_layout(width, height, scale);
+        self.write_channel(&dvc::data(control, &layout)?).await
     }
 
     /// The Deactivation-Reactivation Sequence: the server tore the desktop down and
-    /// is building it again — its answer to a monitor layout.
+    /// is building it again — its answer to a monitor layout, and the only way a
+    /// desktop ever changes size.
     ///
     /// `true` means the session was asked to stop part-way through. A server owes
     /// this sequence a reply it can take as long as it likes over — and a server
     /// that never sends one leaves the read below waiting forever — so the wait
     /// gives way to a shutdown here as the main loop's does, rather than holding a
     /// connection nobody is watching until a write finally times out.
-    async fn reactivate(&mut self) -> Result<bool, Error> {
+    async fn reactivate(&mut self) -> Result<bool> {
         debug!("rdp: the server deactivated the desktop; reactivating");
-        let mut sequence = self.activation.create();
-        let mut buf = WriteBuf::new();
-        loop {
-            let step = {
-                let Self { stop, reader, .. } = &mut *self;
-                tokio::select! {
-                    biased;
-                    _ = stop.wait_for(|&stop| stop) => return Ok(true),
-                    step = single_sequence_step_read(reader, &mut sequence, &mut buf) => step,
-                }
+        let demand = loop {
+            let Self { stop, frames, frame, .. } = self;
+            let read = tokio::select! {
+                biased;
+                _ = stop.wait_for(|&stop| stop) => return Ok(true),
+                read = frames.next(frame) => read,
             };
-            let written = step.map_err(|e| Error::chain("reactivation", &e))?;
-            if written.size().is_some() {
-                let frame = buf.filled().to_vec();
-                self.write(&frame).await?;
+            read?;
+            // Updates for a desktop that is about to be replaced, and whatever else
+            // the slow path carries: none of it is what this is waiting for. What is
+            // dropped with them is asked for again below.
+            if fastpath::is_output(self.frame[0]) {
+                continue;
             }
-            if let ConnectionActivationState::Finalized {
-                desktop_size,
-                share_id,
-                enable_server_pointer,
-                pointer_software_rendering,
-                static_channel_chunk_size,
-                refresh_rect_support,
-                suppress_output_support,
-                ..
-            } = sequence.connection_activation_state()
-            {
-                if !self.stage.reactivate(
-                    sequence.io_channel_id(),
-                    sequence.user_channel_id(),
-                    share_id,
-                    enable_server_pointer,
-                    pointer_software_rendering,
-                    static_channel_chunk_size,
-                ) {
-                    return Err(Error::new("reactivation: the server sent an invalid channel chunk size"));
-                }
-                self.refresh_rect = refresh_rect_support;
-                self.suppress_output = suppress_output_support;
-                info!("rdp: reactivated, desktop {}x{}", desktop_size.width, desktop_size.height);
-                self.redefine_desktop(u32::from(desktop_size.width), u32::from(desktop_size.height))
-                    .await?;
-                return Ok(false);
+            let mcs::Indication::Data(data) = mcs::send_data_indication(&self.frame)? else {
+                bail!("the host left the conference while rebuilding the desktop");
+            };
+            if data.channel != self.io_channel {
+                continue;
             }
-        }
+            if let Pdu::DemandActive(body) = share::decode(data.payload)? {
+                break DemandActive::decode(body)?;
+            }
+        };
+        info!("rdp: reactivated, desktop {}x{}", demand.width, demand.height);
+
+        let Self { frames, writer, frame, user, io_channel, .. } = self;
+        connect::activate(frames, writer, frame, *user, *io_channel, &demand).await?;
+
+        self.share = Share::from(&demand);
+        self.fragments = Fragments::new(demand.multifragment);
+        self.redefine_desktop(u32::from(demand.width), u32::from(demand.height)).await?;
+        // The desktop is blank and the updates that would have filled it were read
+        // past above, so the repaint is asked for here rather than waited for.
+        self.refresh().await?;
+        Ok(false)
     }
 
     /// `first`, then whatever else is already queued behind it, with consecutive
@@ -907,7 +785,7 @@ impl<'a> Active<'a> {
         &mut self,
         first: Command,
         commands: &mut mpsc::UnboundedReceiver<Command>,
-    ) -> Result<bool, Error> {
+    ) -> Result<bool> {
         let mut batch = Vec::new();
         let mut next = Some(first);
         let mut taken = 0;
@@ -937,37 +815,34 @@ impl<'a> Active<'a> {
         Ok(false)
     }
 
-    async fn send_input(&mut self, batch: &mut Vec<FastPathInputEvent>) -> Result<(), Error> {
+    async fn send_input(&mut self, batch: &mut Vec<input::Event>) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
-        let outputs = self
-            .stage
-            .process_fastpath_input(&mut self.image, batch)
-            .map_err(|e| Error::chain("encoding input", &e))?;
-        batch.clear();
-        for output in outputs {
-            if let ActiveStageOutput::ResponseFrame(frame) = output {
-                self.write(&frame).await?;
-            }
+        for pdu in input::pdus(batch).collect::<Vec<_>>() {
+            self.write(&pdu).await?;
         }
+        batch.clear();
         Ok(())
     }
 
-    /// Ask for the whole desktop again, by whichever means this server allows —
-    /// IronRDP prefers the Suppress Output toggle, the documented workaround for
-    /// hosts that ignore Refresh Rect.
-    async fn refresh(&mut self) -> Result<(), Error> {
-        let (width, height) = (self.image.width(), self.image.height());
+    /// Ask the server to paint the whole desktop again, by whichever means it said
+    /// it would answer. A server that offers neither is asked for nothing.
+    async fn refresh(&mut self) -> Result<()> {
+        let (width, height) = (self.share.width, self.share.height);
         if width == 0 || height == 0 {
             return Ok(());
         }
-        let frames = self
-            .stage
-            .request_full_redraw(width, height, self.refresh_rect, self.suppress_output)
-            .map_err(|e| Error::chain("requesting a repaint", &e))?;
-        for frame in frames {
-            self.write(&frame).await?;
+        let pdus = desktop::repaint(
+            self.user,
+            self.share.id,
+            narrow(width),
+            narrow(height),
+            self.share.refresh_rect,
+            self.share.suppress_output,
+        );
+        for pdu in pdus {
+            self.write_io(&pdu).await?;
         }
         Ok(())
     }
@@ -977,21 +852,109 @@ impl<'a> Active<'a> {
     /// stays on the host, logged on, for the next connection — then a TLS close.
     /// Best effort and bounded, because the connection may already be gone.
     async fn disconnect(&mut self) {
-        let ultimatum = McsMessage::DisconnectProviderUltimatum(DisconnectProviderUltimatum::from_reason(
-            DisconnectReason::UserRequested,
-        ));
         let goodbye = async {
-            if let Ok(frame) = encode_vec(&X224(ultimatum)) {
-                let _ = self.writer.write_all(&frame).await;
-            }
-            let (stream, _) = self.writer.get_inner_mut();
-            let _ = tokio::io::AsyncWriteExt::shutdown(stream).await;
+            let ultimatum = mcs::disconnect_provider_ultimatum(mcs::Reason::USER_REQUESTED);
+            let _ = self.writer.write_all(&ultimatum).await;
+            let _ = self.writer.shutdown().await;
         };
         let _ = tokio::time::timeout(Duration::from_secs(1), goodbye).await;
     }
 }
 
-/// A desktop dimension as the `u16` IronRDP counts in, saturating rather than
+/// One reassembled fast-path update, decoded.
+///
+/// Rectangles of the desktop are painted straight into the framebuffer and their
+/// bounds appended to `painted`; a cursor comes back to be handed on. Everything
+/// else a server sends on this path — drawing orders this client did not ask for, a
+/// palette a 32-bit session has no use for, where the server thinks the pointer is —
+/// is nothing this session acts on.
+fn draw(
+    update: Update<'_>,
+    scratch: &mut bitmap::Scratch,
+    pixels: &mut Vec<u8>,
+    cursors: &mut pointer::Cache,
+    framebuffer: &Framebuffer,
+    share: &Share,
+    painted: &mut Vec<Rect>,
+) -> Result<Option<Cursor>> {
+    match update.code {
+        fastpath::BITMAP => {
+            for rectangle in bitmap::update(update.data)? {
+                rectangle.decode(scratch, pixels)?;
+                let rect = Rect {
+                    x: u32::from(rectangle.x),
+                    y: u32::from(rectangle.y),
+                    width: u32::from(rectangle.paint_width),
+                    height: u32::from(rectangle.paint_height),
+                };
+                if !rect.is_empty() && framebuffer.blit(pixels, rect) {
+                    painted.push(rect);
+                }
+            }
+            Ok(None)
+        }
+        fastpath::POINTER_HIDDEN
+        | fastpath::POINTER_DEFAULT
+        | fastpath::POINTER_POSITION
+        | fastpath::COLOR_POINTER
+        | fastpath::CACHED_POINTER
+        | fastpath::NEW_POINTER
+        | fastpath::LARGE_POINTER => Ok(match cursors.update(update.code, update.data)? {
+            Pointer::Hidden => Some(Cursor::Hidden),
+            Pointer::Default => Some(Cursor::Default),
+            Pointer::Shape(shape) => Some(Cursor::Image(shape.into())),
+            // A client that draws its own pointer has no use for where the server
+            // has put one.
+            Pointer::Position { .. } => None,
+        }),
+        other => {
+            let desktop = (share.width, share.height);
+            debug!("rdp: ignoring a fast-path update of type {other:#x} on a {desktop:?} desktop");
+            Ok(None)
+        }
+    }
+}
+
+/// What to say back to one dynamic channel PDU.
+///
+/// The one channel this client takes is Display Control; every other name a Windows
+/// host offers — a printer, a smart card, a camera — is refused by name, which is
+/// what a client with nothing behind them does.
+fn answer(
+    message: dvc::Message<'_>,
+    control: &mut Option<u32>,
+    caps: &mut Option<display::Capabilities>,
+) -> Result<Option<Vec<u8>>> {
+    Ok(match message {
+        dvc::Message::Capabilities { version } => Some(dvc::capabilities_response(version)),
+        dvc::Message::Create { channel, name } => {
+            let wanted = name == display::CHANNEL_NAME;
+            if wanted {
+                debug!("rdp: the host opened Display Control on dynamic channel {channel}");
+                *control = Some(channel);
+            }
+            let status = if wanted { dvc::ACCEPTED } else { dvc::NO_LISTENER };
+            Some(dvc::create_response(channel, status))
+        }
+        dvc::Message::Close { channel } => {
+            if *control == Some(channel) {
+                *control = None;
+                *caps = None;
+            }
+            None
+        }
+        dvc::Message::Data { channel, data } => {
+            if *control == Some(channel) {
+                let read = display::capabilities(data)?;
+                debug!("rdp: Display Control will lay out {read:?}");
+                *caps = Some(read);
+            }
+            None
+        }
+    })
+}
+
+/// A desktop dimension as the `u16` the protocol counts in, saturating rather than
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
@@ -1000,7 +963,7 @@ fn narrow(v: u32) -> u16 {
 /// A desktop size the server named, refused before anything is allocated for it —
 /// see [`MAX_DESKTOP_BYTES`]. Both a real desktop's size and an absurd one are
 /// legal on the wire, so the difference is made here.
-fn affordable(width: u32, height: u32) -> Result<(), Error> {
+fn affordable(width: u32, height: u32) -> Result<()> {
     let bytes = usize::try_from(width)
         .ok()
         .zip(usize::try_from(height).ok())
@@ -1008,11 +971,11 @@ fn affordable(width: u32, height: u32) -> Result<(), Error> {
         .and_then(|pixels| pixels.checked_mul(4));
     match bytes {
         Some(bytes) if bytes <= MAX_DESKTOP_BYTES => Ok(()),
-        _ => Err(Error::new(format!(
+        _ => Err(anyhow!(
             "the server asked for a {width}x{height} desktop, which is more than the {} MiB \
              this client will hold",
             MAX_DESKTOP_BYTES >> 20
-        ))),
+        )),
     }
 }
 
@@ -1020,7 +983,7 @@ fn affordable(width: u32, height: u32) -> Result<(), Error> {
 mod tests {
     use super::*;
 
-    /// A server names the desktop, and this client allocates two images from what
+    /// A server names the desktop, and this client allocates a framebuffer from what
     /// it says. Both numbers are legal on the wire well past any real screen.
     #[test]
     fn a_desktop_too_large_to_hold_is_refused_rather_than_allocated() {
@@ -1034,5 +997,32 @@ mod tests {
         assert!(format!("{err}").contains("32766x32766"), "{err}");
         affordable(65535, 65535).expect_err("17 GB");
         affordable(u32::MAX, u32::MAX).expect_err("the arithmetic itself must not wrap");
+    }
+
+    /// The one channel this client takes, out of the dozen a Windows host offers.
+    #[test]
+    fn only_display_control_is_taken_and_every_other_channel_is_refused_by_name() {
+        let (mut control, mut caps) = (None, None);
+        let create = |name| dvc::Message::Create { channel: 11, name };
+        let reply = answer(create("AUDIO_PLAYBACK_DVC"), &mut control, &mut caps).unwrap();
+        assert_eq!(reply, Some(dvc::create_response(11, dvc::NO_LISTENER)));
+        assert_eq!(control, None, "a channel nothing listens on is not remembered");
+
+        let reply = answer(create(display::CHANNEL_NAME), &mut control, &mut caps).unwrap();
+        assert_eq!(reply, Some(dvc::create_response(11, dvc::ACCEPTED)));
+        assert_eq!(control, Some(11));
+    }
+
+    /// A channel the server closes takes its capabilities with it: what it said it
+    /// would lay out was about a channel that no longer exists.
+    #[test]
+    fn closing_display_control_forgets_what_it_said_it_would_do() {
+        let said = display::Capabilities { monitors: 1, area: 4 };
+        let (mut control, mut caps) = (Some(11), Some(said));
+        let elsewhere = dvc::Message::Close { channel: 12 };
+        assert_eq!(answer(elsewhere, &mut control, &mut caps).unwrap(), None);
+        assert_eq!(control, Some(11), "another channel closing says nothing about this one");
+        answer(dvc::Message::Close { channel: 11 }, &mut control, &mut caps).unwrap();
+        assert_eq!((control, caps), (None, None));
     }
 }

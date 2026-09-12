@@ -14,16 +14,16 @@
 //!   cargo test --test rdp_proto_probe -- --ignored --nocapture
 //! ```
 //!
-//! It goes as far as the new stack can carry a connection, and then watches the
-//! desktop paint itself. What it proves at each step is the step a server is the only
-//! judge of: that the host accepts what we sent, and that what it sends back decodes.
+//! It goes as far as the connection can be carried, and then watches the desktop
+//! paint itself. What it proves at each step is the step a server is the only judge
+//! of: that the host accepts what we sent, and that what it sends back decodes.
 //!
-//! The pixels get a second judge. Every compressed rectangle is decoded twice — once
-//! by [`remotex::rdp_client::proto::planar`] and once by IronRDP, which is the stack
-//! this one is replacing and which has been rendering this host correctly all along —
-//! and the two are compared. Plane order and row order are the two mistakes a planar
-//! decoder makes that produce a picture which is merely *wrong* rather than one that
-//! fails to decode, and neither is visible in a hex dump.
+//! Beside it are three tests that need no server at all. Every PDU this client sends
+//! whose shape a host never acknowledges — a keystroke, a mouse event, a dynamic
+//! channel PDU, a monitor layout — is compared against bytes recorded from IronRDP,
+//! the stack this one replaced and which drove this host for months. A wrong bit in
+//! any of them does not fail: it moves the pointer somewhere plausible, or has the
+//! host quietly never open a channel.
 //!
 //! What it decodes is also written out, as `tmp/rdp_proto_probe.ppm`, for an operator
 //! who would rather look at the desktop than read a coverage figure.
@@ -32,21 +32,6 @@ mod common;
 
 use std::time::Duration;
 
-use ironrdp::core::{Decode as _, ReadCursor, encode_vec};
-use ironrdp::graphics::pointer::{DecodedPointer, PointerBitmapTarget};
-use ironrdp::graphics::rdp6::BitmapStreamDecoder;
-use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
-use ironrdp::pdu::input::mouse::PointerFlags;
-use ironrdp::pdu::input::mouse_x::PointerXFlags;
-use ironrdp::pdu::input::{MousePdu, MouseXPdu};
-use ironrdp::displaycontrol::pdu::{
-    DeviceScaleFactor, DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry,
-};
-use ironrdp::dvc::pdu::{
-    CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus, DataPdu,
-    DrdynvcClientPdu, DrdynvcDataPdu,
-};
-use ironrdp::pdu::pointer::{ColorPointerAttribute, LargePointerAttribute, PointerAttribute};
 use remotex::rdp_client::proto::bitmap::{self, Scratch};
 use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
 use remotex::rdp_client::proto::credssp::{self, Credentials};
@@ -55,7 +40,7 @@ use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
 use remotex::rdp_client::proto::{channel, display, dvc};
 use remotex::rdp_client::proto::input::{self, Button, Event};
-use remotex::rdp_client::proto::pointer::{self, Pointer, Shape};
+use remotex::rdp_client::proto::pointer::{self, Pointer};
 use remotex::rdp_client::proto::info::ClientInfo;
 use remotex::rdp_client::proto::share::{self, Pdu};
 use remotex::rdp_client::proto::{license, mcs, tls};
@@ -329,7 +314,10 @@ async fn send(
 /// One PDU in, off the channel it was expected on.
 async fn receive(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), channel: u16) -> Vec<u8> {
     let frame = read_frame(stream).await;
-    let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
+    let mcs::Indication::Data(data) = mcs::send_data_indication(&frame).expect("a Send Data")
+    else {
+        panic!("the host left the conference");
+    };
     assert_eq!(data.channel, channel, "the PDU arrived on the channel it was expected on");
     data.payload.to_vec()
 }
@@ -368,8 +356,6 @@ async fn watch(
     let mut fragments = Fragments::new(demand.multifragment);
     let mut scratch = Scratch::default();
     let mut pixels = Vec::new();
-    let mut ironrdp = BitmapStreamDecoder::default();
-    let mut reference = Vec::new();
     let mut cursors = pointer::Cache::new();
     let mut chunks = channel::Reassembly::new();
     let mut incoming = dvc::Incoming::new();
@@ -385,7 +371,11 @@ async fn watch(
         if !fastpath::is_output(frame[0]) {
             // The slow path still carries everything that is not an update. During a
             // quiet session that is a Set Error Info saying nothing is wrong.
-            let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
+            let mcs::Indication::Data(data) =
+                mcs::send_data_indication(&frame).expect("a Send Data")
+            else {
+                panic!("the host left the conference");
+            };
             if data.channel == dynamic {
                 // The dynamic virtual channel, which the server opens as soon as the
                 // share is live. Everything it says is answered here, because a
@@ -427,17 +417,14 @@ async fn watch(
             };
             count(&mut seen, name(update.code));
             if is_pointer(update.code) {
-                // Every pointer update is decoded, and every shape the server sends
-                // fresh is decoded a second time by IronRDP and compared. A cursor is
-                // small enough to print one line each: there are a dozen in a quiet
-                // five seconds, and their depth is what decides this module's scope.
+                // Every pointer update is decoded. A cursor is small enough to print
+                // one line each: there are a dozen in a quiet five seconds, and their
+                // depth is what decides this module's scope.
                 let decoded = cursors.update(update.code, update.data).expect("a pointer update");
                 match &decoded {
                     Pointer::Shape(shape) => {
-                        println!("<- {}: xorBpp {}, {shape:?}", name(update.code), depth(update.code, update.data));
-                        if update.code != fastpath::CACHED_POINTER {
-                            check_pointer(update.code, update.data, shape);
-                        }
+                        let depth = depth(update.code, update.data);
+                        println!("<- {}: xorBpp {depth}, {shape:?}", name(update.code));
                     }
                     other => println!("<- {}: {other:?}", name(update.code)),
                 }
@@ -451,7 +438,6 @@ async fn watch(
                 assert_eq!(pixels.len(), rectangle.painted_bytes());
                 if rectangle.compressed {
                     compressed += 1;
-                    check(&mut ironrdp, &mut reference, &rectangle, &pixels);
                 }
                 blit(&mut desktop, &mut painted, width, &rectangle, &pixels);
                 rectangles += 1;
@@ -541,7 +527,10 @@ async fn reactivation(
         if fastpath::is_output(frame[0]) {
             continue;
         }
-        let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
+        let mcs::Indication::Data(data) = mcs::send_data_indication(&frame).expect("a Send Data")
+        else {
+            panic!("the host left the conference");
+        };
         if data.channel != io_channel {
             continue;
         }
@@ -581,68 +570,6 @@ fn depth(code: u8, body: &[u8]) -> u16 {
         fastpath::CACHED_POINTER => 0,
         _ => u16::from_le_bytes([body[0], body[1]]),
     }
-}
-
-/// Decode the same shape with IronRDP, and insist the two agree.
-///
-/// The two masks are where a pointer decoder goes quietly wrong: the row order is
-/// reversed for a colour shape and not for a monochrome one, the scanlines are padded,
-/// and the andMask bit means two different things depending on the colour under it.
-/// None of that shows up as a failure — it shows up as a cursor that looks nearly
-/// right — so it is checked against the stack being replaced while that stack is still
-/// here.
-fn check_pointer(code: u8, body: &[u8], ours: &Shape) {
-    let target = PointerBitmapTarget::Accelerated;
-    let mut src = ReadCursor::new(body);
-    let theirs = match code {
-        fastpath::COLOR_POINTER => {
-            let attribute = ColorPointerAttribute::decode(&mut src).expect("a colour pointer");
-            DecodedPointer::decode_color_pointer_attribute(&attribute, target)
-        }
-        fastpath::NEW_POINTER => {
-            let attribute = PointerAttribute::decode(&mut src).expect("a new pointer");
-            DecodedPointer::decode_pointer_attribute(&attribute, target)
-        }
-        _ => {
-            let attribute = LargePointerAttribute::decode(&mut src).expect("a large pointer");
-            DecodedPointer::decode_large_pointer_attribute(&attribute, target)
-        }
-    }
-    .expect("IronRDP decodes the shape too");
-    assert_eq!(
-        (ours.width, ours.height, ours.hotspot_x, ours.hotspot_y),
-        (theirs.width, theirs.height, theirs.hotspot_x, theirs.hotspot_y),
-        "the two decoders disagree about the shape's size"
-    );
-    assert_eq!(ours.rgba, theirs.bitmap_data, "the two decoders disagree about the pixels");
-}
-
-/// Decode the same rectangle with IronRDP, and insist the two agree.
-///
-/// IronRDP hands back the whole bitmap as `RGB24` in the order it was stored — bottom
-/// row first — so the comparison applies the same turn and the same crop that
-/// [`bitmap::Bitmap::decode`] does. Getting either of those wrong is the failure this
-/// is here to catch.
-fn check(
-    ironrdp: &mut BitmapStreamDecoder,
-    reference: &mut Vec<u8>,
-    rectangle: &bitmap::Bitmap<'_>,
-    ours: &[u8],
-) {
-    let (width, height) = (usize::from(rectangle.width), usize::from(rectangle.height));
-    reference.clear();
-    ironrdp
-        .decode_bitmap_stream_to_rgb24(rectangle.data, reference, width, height)
-        .expect("IronRDP to decode the same rectangle");
-
-    let mut expected = Vec::with_capacity(rectangle.painted_bytes());
-    for row in (height - usize::from(rectangle.paint_height)..height).rev() {
-        for column in 0..usize::from(rectangle.paint_width) {
-            let at = (row * width + column) * 3;
-            expected.extend_from_slice(&[reference[at], reference[at + 1], reference[at + 2], 0]);
-        }
-    }
-    assert_eq!(ours, expected, "a {width}x{height} planar rectangle decoded two ways");
 }
 
 /// Paint one decoded rectangle onto the desktop, and remember that it was painted.
@@ -733,166 +660,122 @@ async fn read_any(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Vec<u8>
     frame
 }
 
-/// Every input event this client can send, encoded by both stacks and compared byte
-/// for byte.
+/// Every input event this client can send, against the bytes IronRDP sent for it.
 ///
 /// Input is the half of the protocol a probe cannot check by watching: the host does
 /// not echo a keystroke back, and a mouse event with the wrong bit set moves the
 /// pointer somewhere plausible rather than failing. What can be checked is that the
-/// bytes are the ones the stack being replaced would have sent — that stack having
-/// driven this host for months — so that is what this does. It needs no server.
+/// bytes are the ones the stack this one replaced would have sent — that stack having
+/// driven this host for months — so these were recorded from it and frozen. They need
+/// no server.
 #[test]
 fn our_input_events_encode_to_the_bytes_ironrdp_sends() {
-    let ours = [
-        Event::Key { scancode: 0x1E, extended: false, down: true },
-        Event::Key { scancode: 0x1E, extended: false, down: false },
-        Event::Key { scancode: 0x48, extended: true, down: true },
-        Event::Key { scancode: 0x5B, extended: true, down: false },
-        Event::Move { x: 0, y: 0 },
-        Event::Move { x: 1919, y: 1079 },
-        Event::Button { button: Button::Left, down: true, x: 10, y: 20 },
-        Event::Button { button: Button::Left, down: false, x: 10, y: 20 },
-        Event::Button { button: Button::Middle, down: true, x: 30, y: 40 },
-        Event::Button { button: Button::Right, down: true, x: 50, y: 60 },
-        Event::Button { button: Button::Right, down: false, x: 50, y: 60 },
-        Event::Button { button: Button::X1, down: true, x: 70, y: 80 },
-        Event::Button { button: Button::X2, down: false, x: 70, y: 80 },
-        Event::Wheel { rotation: 120, horizontal: false, x: 1, y: 2 },
-        Event::Wheel { rotation: -120, horizontal: false, x: 1, y: 2 },
-        Event::Wheel { rotation: 255, horizontal: true, x: 3, y: 4 },
-        Event::Wheel { rotation: -255, horizontal: true, x: 3, y: 4 },
-        Event::Wheel { rotation: 0, horizontal: false, x: 5, y: 6 },
+    /// One event, and the whole fast-path PDU IronRDP wrapped it in.
+    const SINGLES: [(Event, &str); 18] = [
+        (Event::Key { scancode: 0x1E, extended: false, down: true }, "0404001e"),
+        (Event::Key { scancode: 0x1E, extended: false, down: false }, "0404011e"),
+        (Event::Key { scancode: 0x48, extended: true, down: true }, "04040248"),
+        (Event::Key { scancode: 0x5B, extended: true, down: false }, "0404035b"),
+        (Event::Move { x: 0, y: 0 }, "040920000800000000"),
+        (Event::Move { x: 1919, y: 1079 }, "04092000087f073704"),
+        (Event::Button { button: Button::Left, down: true, x: 10, y: 20 }, "04092000900a001400"),
+        (Event::Button { button: Button::Left, down: false, x: 10, y: 20 }, "04092000100a001400"),
+        (Event::Button { button: Button::Middle, down: true, x: 30, y: 40 }, "04092000c01e002800"),
+        (Event::Button { button: Button::Right, down: true, x: 50, y: 60 }, "04092000a032003c00"),
+        (Event::Button { button: Button::Right, down: false, x: 50, y: 60 }, "040920002032003c00"),
+        (Event::Button { button: Button::X1, down: true, x: 70, y: 80 }, "040940018046005000"),
+        (Event::Button { button: Button::X2, down: false, x: 70, y: 80 }, "040940020046005000"),
+        (Event::Wheel { rotation: 120, horizontal: false, x: 1, y: 2 }, "040920780201000200"),
+        (Event::Wheel { rotation: -120, horizontal: false, x: 1, y: 2 }, "040920880301000200"),
+        (Event::Wheel { rotation: 255, horizontal: true, x: 3, y: 4 }, "040920ff0403000400"),
+        (Event::Wheel { rotation: -255, horizontal: true, x: 3, y: 4 }, "040920010503000400"),
+        (Event::Wheel { rotation: 0, horizontal: false, x: 5, y: 6 }, "040920000205000600"),
     ];
 
     // One event at a time, so a disagreement names the event that caused it.
-    for event in ours {
+    for (event, theirs) in SINGLES {
         let mine = input::pdus(&[event]).next().expect("one event is one PDU");
-        let theirs = encode_vec(&FastPathInput::single(translate(event))).expect("IronRDP encodes it");
-        assert_eq!(hex(&mine), hex(&theirs), "{event:?}");
+        assert_eq!(hex(&mine).replace(' ', ""), theirs, "{event:?}");
     }
 
     // Then all of them twice over in one PDU, which crosses both the fifteen-event
     // count and the 127-byte length — the two places the header changes shape.
-    let batch: Vec<_> = ours.iter().chain(ours.iter()).copied().collect();
+    let ours: Vec<Event> = SINGLES.iter().map(|(event, _)| *event).collect();
+    let batch: Vec<Event> = ours.iter().chain(ours.iter()).copied().collect();
     let mine = input::pdus(&batch).next().expect("one PDU holds them all");
     assert!(mine.len() > 0x7F, "the batch is long enough to need a two-byte length");
-    let events: Vec<_> = batch.iter().copied().map(translate).collect();
-    let theirs = encode_vec(&FastPathInput::new(events).expect("a batch")).expect("IronRDP encodes it");
-    assert_eq!(hex(&mine), hex(&theirs), "a batch of {} events", batch.len());
+    assert_eq!(hex(&mine).replace(' ', ""), BATCH, "a batch of {} events", batch.len());
 }
 
-/// The same event, said IronRDP's way.
-fn translate(event: Event) -> FastPathInputEvent {
-    let mouse = |flags, rotation, x, y| {
-        FastPathInputEvent::MouseEvent(MousePdu {
-            flags,
-            number_of_wheel_rotation_units: rotation,
-            x_position: x,
-            y_position: y,
-        })
-    };
-    match event {
-        Event::Key { scancode, extended, down } => {
-            let mut flags = KeyboardFlags::empty();
-            if extended {
-                flags |= KeyboardFlags::EXTENDED;
-            }
-            if !down {
-                flags |= KeyboardFlags::RELEASE;
-            }
-            FastPathInputEvent::KeyboardEvent(flags, scancode)
-        }
-        Event::Move { x, y } => mouse(PointerFlags::MOVE, 0, x, y),
-        Event::Button { button: button @ (Button::X1 | Button::X2), down, x, y } => {
-            let mut flags = if button == Button::X1 {
-                PointerXFlags::BUTTON1
-            } else {
-                PointerXFlags::BUTTON2
-            };
-            if down {
-                flags |= PointerXFlags::DOWN;
-            }
-            FastPathInputEvent::MouseEventEx(MouseXPdu { flags, x_position: x, y_position: y })
-        }
-        Event::Button { button, down, x, y } => {
-            let mut flags = match button {
-                Button::Left => PointerFlags::LEFT_BUTTON,
-                Button::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                _ => PointerFlags::RIGHT_BUTTON,
-            };
-            if down {
-                flags |= PointerFlags::DOWN;
-            }
-            mouse(flags, 0, x, y)
-        }
-        Event::Wheel { rotation, horizontal, x, y } => {
-            let flags = if horizontal {
-                PointerFlags::HORIZONTAL_WHEEL
-            } else {
-                PointerFlags::VERTICAL_WHEEL
-            };
-            mouse(flags, rotation, x, y)
-        }
-    }
-}
+/// The 36 events of [`our_input_events_encode_to_the_bytes_ironrdp_sends`] in one
+/// PDU, as IronRDP wrote it.
+const BATCH: &str = concat!(
+    "0080d824001e011e0248035b200008000000002000087f0737042000900a0014002000100a0014002000c01e0028",
+    "002000a032003c0020002032003c004001804600500040020046005000207802010002002088030100020020ff04",
+    "030004002001050300040020000205000600001e011e0248035b200008000000002000087f0737042000900a0014",
+    "002000100a0014002000c01e0028002000a032003c0020002032003c004001804600500040020046005000207802",
+    "010002002088030100020020ff04030004002001050300040020000205000600",
+);
 
-/// Every PDU this client sends on a virtual channel, encoded by both stacks and
-/// compared byte for byte.
+/// Every PDU this client sends on a virtual channel, against the bytes IronRDP sent.
 ///
 /// The dynamic channel's first byte packs a command and the width of the two fields
 /// after it, so a channel number that crosses a width boundary changes the shape of
 /// the PDU rather than one field in it — which is exactly the kind of mistake a live
-/// host answers by quietly never opening the channel.
+/// host answers by quietly never opening the channel. Every boundary is here.
 #[test]
 fn our_dynamic_channel_pdus_encode_to_the_bytes_ironrdp_sends() {
-    for (version, theirs) in [(1, CapsVersion::V1), (2, CapsVersion::V2), (3, CapsVersion::V3)] {
-        let theirs = DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(theirs));
-        assert_eq!(dvc::capabilities_response(version), encode_vec(&theirs).unwrap());
+    for (version, theirs) in [(1, "50000100"), (2, "50000200"), (3, "50000300")] {
+        assert_eq!(hex(&dvc::capabilities_response(version)).replace(' ', ""), theirs);
     }
 
-    for channel in [0x03_u32, 0xFF, 0x0100, 0xFFFF, 0x0001_0000, u32::MAX] {
-        let accepted = CreateResponsePdu::new(channel, CreationStatus::OK);
-        assert_eq!(
-            dvc::create_response(channel, dvc::ACCEPTED),
-            encode_vec(&DrdynvcClientPdu::Create(accepted)).unwrap(),
-            "a create response for channel {channel:#x}"
-        );
-        let refused = CreateResponsePdu::new(channel, CreationStatus::NO_LISTENER);
-        assert_eq!(
-            dvc::create_response(channel, dvc::NO_LISTENER),
-            encode_vec(&DrdynvcClientPdu::Create(refused)).unwrap(),
-            "a refusal for channel {channel:#x}"
-        );
-        assert_eq!(
-            dvc::close(channel),
-            encode_vec(&DrdynvcClientPdu::Close(ClosePdu::new(channel))).unwrap(),
-            "a close for channel {channel:#x}"
-        );
-        let data = DrdynvcDataPdu::Data(DataPdu::new(channel, vec![1, 2, 3]));
-        assert_eq!(
-            dvc::data(channel, &[1, 2, 3]).unwrap(),
-            encode_vec(&DrdynvcClientPdu::Data(data)).unwrap(),
-            "a data PDU for channel {channel:#x}"
-        );
+    /// A channel number, then the accepted create response, the refusal, the close
+    /// and a three-byte data PDU for it.
+    const CHANNELS: [(u32, &str, &str, &str, &str); 6] = [
+        (0x3, "100300000000", "1003010000c0", "4003", "3003010203"),
+        (0xFF, "10ff00000000", "10ff010000c0", "40ff", "30ff010203"),
+        (0x100, "11000100000000", "110001010000c0", "410001", "310001010203"),
+        (0xFFFF, "11ffff00000000", "11ffff010000c0", "41ffff", "31ffff010203"),
+        (0x0001_0000, "120000010000000000", "1200000100010000c0", "4200000100", "3200000100010203"),
+        (u32::MAX, "12ffffffff00000000", "12ffffffff010000c0", "42ffffffff", "32ffffffff010203"),
+    ];
+    for (channel, accepted, refused, closed, data) in CHANNELS {
+        let ours = dvc::create_response(channel, dvc::ACCEPTED);
+        assert_eq!(hex(&ours).replace(' ', ""), accepted, "a create response for {channel:#x}");
+        let ours = dvc::create_response(channel, dvc::NO_LISTENER);
+        assert_eq!(hex(&ours).replace(' ', ""), refused, "a refusal for {channel:#x}");
+        assert_eq!(hex(&dvc::close(channel)).replace(' ', ""), closed, "a close for {channel:#x}");
+        let ours = dvc::data(channel, &[1, 2, 3]).unwrap();
+        assert_eq!(hex(&ours).replace(' ', ""), data, "a data PDU for {channel:#x}");
     }
 }
 
-/// The monitor layout, against the one the session builds today.
+/// The monitor layout, against the one IronRDP built from the same request.
 ///
 /// This is the whole of what this client says on a dynamic channel, and the fields it
-/// leaves at zero — orientation, physical size — are the ones the stack being replaced
+/// leaves at zero — orientation, physical size — are the ones the stack it replaced
 /// was already being told to leave at zero.
 #[test]
 fn our_monitor_layout_encodes_to_the_bytes_ironrdp_sends() {
-    for (width, height, scale) in [(1280, 800, 100), (1920, 1080, 150), (3840, 2160, 500)] {
-        let entry = MonitorLayoutEntry::new_primary(width, height)
-            .and_then(|entry| entry.with_desktop_scale_factor(scale))
-            .map(|entry| entry.with_device_scale_factor(DeviceScaleFactor::Scale100Percent))
-            .expect("a layout entry the other stack accepts");
-        let theirs = DisplayControlPdu::from(DisplayControlMonitorLayout::new(&[entry]).unwrap());
+    const LAYOUTS: [(u32, u32, u32, &str); 3] = [
+        (1280, 800, 100, concat!(
+            "02000000380000002800000001000000010000000000000000000000",
+            "00050000200300000000000000000000000000006400000064000000"
+        )),
+        (1920, 1080, 150, concat!(
+            "02000000380000002800000001000000010000000000000000000000",
+            "80070000380400000000000000000000000000009600000064000000"
+        )),
+        (3840, 2160, 500, concat!(
+            "02000000380000002800000001000000010000000000000000000000",
+            "000f000070080000000000000000000000000000f401000064000000"
+        )),
+    ];
+    for (width, height, scale, theirs) in LAYOUTS {
+        let ours = display::monitor_layout(width, height, scale);
         assert_eq!(
-            display::monitor_layout(width, height, scale),
-            encode_vec(&theirs).unwrap(),
+            hex(&ours).replace(' ', ""),
+            theirs,
             "a {width}x{height} layout at {scale}%"
         );
     }

@@ -33,8 +33,6 @@ async fn spawn_app() -> SocketAddr {
             domain: None,
             width: Some(1280),
             height: Some(800),
-            security: None,
-            allow_plain_tls: None,
             resize: false,
             clipboard: false,
             audio: false,
