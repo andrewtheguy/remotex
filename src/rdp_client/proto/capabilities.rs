@@ -22,12 +22,16 @@
 //!
 //! # Reading the server's list
 //!
-//! Only two things in the server's list change what this client does: the desktop
-//! size it decided on, which may not be the size that was asked for, and how large a
-//! reassembled fast-path update may be. Everything else is stepped over by its own
-//! declared length, which is what lets a server announce capabilities from a decade
-//! this client has never heard of without ending the connection.
+//! Three things in the server's list are read. The desktop size it decided on, which
+//! may not be the size that was asked for; how large a reassembled fast-path update
+//! may be; and the colour depth, which is the one field here that is refused rather
+//! than recorded — [`super::bitmap`] decodes a 32-bit session and only that, so a
+//! server that opened a shallower one is a sentence during the capability exchange
+//! instead of a desktop whose pixels cannot be read. Everything else is stepped over
+//! by its own declared length, which is what lets a server announce capabilities from
+//! a decade this client has never heard of without ending the connection.
 
+use super::bitmap;
 use super::wire::{Malformed, Reader, Writer};
 
 /// `originatorId`, which [MS-RDPBCGR] requires to be the server's own MCS channel.
@@ -81,7 +85,7 @@ const EXTRA_FLAGS: u16 = 0x0001 | 0x0400;
 const DRAWING_FLAGS: u8 = 0x08;
 
 /// What this client renders, and what it asks the desktop to be.
-const COLOR_DEPTH: u16 = 32;
+const COLOR_DEPTH: u16 = bitmap::DEPTH;
 
 /// `orderFlags`: `NEGOTIATEORDERSUPPORT`, so the empty support array below is read as
 /// the refusal it is, and `ZEROBOUNDSDELTASSUPPORT`, which every client sets.
@@ -155,9 +159,12 @@ impl DemandActive {
             match kind {
                 BITMAP => {
                     let mut r = Reader::new("a server Bitmap capability set", body);
-                    // The preferred colour depth, and the three flags for the depths
-                    // an ancient client could receive.
-                    r.skip(8)?;
+                    let depth = r.u16_le()?;
+                    if depth != COLOR_DEPTH {
+                        return Err(r.refuse("a colour depth", depth));
+                    }
+                    // The three flags for the depths an ancient client could receive.
+                    r.skip(6)?;
                     desktop = Some((r.u16_le()?, r.u16_le()?));
                 }
                 MULTIFRAGMENT => {
@@ -433,7 +440,8 @@ mod tests {
 
     fn bitmap(width: u16, height: u16) -> (u16, Vec<u8>) {
         let mut w = Writer::new();
-        w.zeros(8);
+        w.u16_le(COLOR_DEPTH);
+        w.zeros(6);
         w.u16_le(width);
         w.u16_le(height);
         w.zeros(12);
@@ -474,6 +482,21 @@ mod tests {
         assert_eq!(
             DemandActive::decode(&pdu).unwrap_err().to_string(),
             "an RDP Demand Active PDU does not carry a Bitmap capability set"
+        );
+    }
+
+    /// The session's depth is the server's to decide, and a shallower one is a
+    /// decoder that cannot read a pixel — so it is refused here, where the server says
+    /// so, rather than later where a bitmap would.
+    #[test]
+    fn a_session_that_is_not_32_bit_is_refused_where_the_server_declares_it() {
+        let mut pdu = demand(&[bitmap(1920, 1080)]);
+        let at = 4 + 2 + 2 + 4 + 2 + 2 + 4;
+        pdu[at..at + 2].copy_from_slice(&16_u16.to_le_bytes());
+        assert_eq!(
+            DemandActive::decode(&pdu).unwrap_err().to_string(),
+            "a server Bitmap capability set carries a colour depth 0x10, which this client does \
+             not accept"
         );
     }
 

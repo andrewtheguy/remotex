@@ -30,6 +30,9 @@
 //! - [`capabilities`] — what the two ends agree to send each other, exchanged once
 //!   before any pixel moves.
 //! - [`finalization`] — the four PDUs between a confirmed share and a desktop.
+//! - [`fastpath`] — the framing the server's updates arrive in once it is live.
+//! - [`bitmap`] — the rectangles of pixels those updates carry, and where they go.
+//! - [`planar`] — the codec a 32-bit session compresses a rectangle with.
 //!
 //! # One kind of server
 //!
@@ -50,15 +53,18 @@
 //!
 //! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
+pub mod bitmap;
 pub mod capabilities;
 pub mod credssp;
 pub mod der;
+pub mod fastpath;
 pub mod finalization;
 pub mod gcc;
 pub mod info;
 pub mod license;
 pub mod mcs;
 pub mod per;
+pub mod planar;
 pub mod share;
 pub mod tls;
 pub mod wire;
