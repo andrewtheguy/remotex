@@ -21,7 +21,23 @@ pub(super) enum Command {
     Refresh,
     /// Ask the server for a new desktop size, over Display Control.
     Resize { width: u32, height: u32, scale_percent: u32 },
+    /// Something for the clipboard channel, in the three shapes a clipboard has.
+    Clipboard(Clipboard),
     Shutdown,
+}
+
+/// One thing to say on the clipboard channel.
+///
+/// Format ids and bytes, and nothing about what either means: which format is text
+/// and how it is encoded belong to whoever is bridging a real clipboard —
+/// [`crate::rdp_clipboard`] — not to the wire.
+pub(super) enum Clipboard {
+    /// Tell the remote what this end's clipboard now holds.
+    Advertise(Vec<u32>),
+    /// Ask the remote for the bytes of a format it advertised.
+    Request(u32),
+    /// Answer a paste the remote is waiting on.
+    Respond(Option<Vec<u8>>),
 }
 
 /// The input side of a [`Session`](super::Session).
@@ -132,6 +148,44 @@ impl Input {
     pub fn resize(&self, width: u32, height: u32, scale_percent: u32) {
         let (width, height) = sanitise_size(width, height);
         self.push(Command::Resize { width, height, scale_percent: sanitise_scale(scale_percent) });
+    }
+
+    /// Tell the remote what this end's clipboard now holds, as Windows format ids.
+    ///
+    /// An empty list is a real thing to say and the one to say first: it announces an
+    /// empty clipboard, where saying nothing announces that there is no clipboard on
+    /// this end at all. Nothing is transferred here — the remote asks for the bytes
+    /// when somebody actually pastes, which arrives as
+    /// [`Event::ClipboardWanted`](super::Event::ClipboardWanted).
+    ///
+    /// Needs [`Connect::clipboard`](super::Connect::clipboard) and a server that
+    /// opened the channel, which is announced as
+    /// [`Event::ClipboardReady`](super::Event::ClipboardReady). Anything sent before
+    /// that is dropped, like every other input on a session that cannot carry it.
+    pub fn advertise_clipboard(&self, formats: Vec<u32>) {
+        self.push(Command::Clipboard(Clipboard::Advertise(formats)));
+    }
+
+    /// Ask the remote for the bytes of a format it advertised.
+    ///
+    /// The answer arrives as [`Event::ClipboardData`](super::Event::ClipboardData),
+    /// or as [`Event::ClipboardRefused`](super::Event::ClipboardRefused) — which a
+    /// Windows peer sends without saying why, and sometimes answers a second ask for
+    /// the same format. The retry is the caller's, for the same reason
+    /// [`Input::resize`]'s is: it needs a clock and a policy.
+    pub fn request_clipboard(&self, format: u32) {
+        self.push(Command::Clipboard(Clipboard::Request(format)));
+    }
+
+    /// Answer the paste in [`Event::ClipboardWanted`](super::Event::ClipboardWanted),
+    /// with the bytes or with nothing.
+    ///
+    /// **Every one of those events has to be answered**, `None` included. The remote
+    /// application asking is blocked inside its own paste handler until this arrives,
+    /// which on Windows is a window that has stopped repainting rather than an error
+    /// anybody sees.
+    pub fn send_clipboard(&self, data: Option<Vec<u8>>) {
+        self.push(Command::Clipboard(Clipboard::Respond(data)));
     }
 
     pub(super) fn shutdown(&self) {

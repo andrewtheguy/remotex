@@ -33,10 +33,35 @@ use crate::engine;
 /// bookkeeping the server keeps rather than anything input depends on.
 const KEYBOARD_LAYOUT: u32 = 0x0409;
 
-/// The static virtual channel this client asks for, and the only one: it is the
-/// transport the Display Control resize channel later rides on. A session that will
-/// not be resized asks for none.
-const RESIZE_CHANNELS: [Channel; 1] = [Channel::DYNAMIC];
+/// The static virtual channels a session asks for, each one a capability the caller
+/// turned on: [`Channel::DYNAMIC`] is the transport Display Control rides on, and
+/// [`Channel::CLIPBOARD`] is MS-RDPECLIP itself. A session that wants neither asks
+/// for no channel at all.
+///
+/// The order is what makes the server's answer readable: `SC_NET` numbers the
+/// channels in the order `CS_NET` named them and says nothing else about which is
+/// which, so the numbers are paired back up with the names here — see
+/// [`Connected::channel`].
+fn wanted_channels(config: &Connect) -> Vec<Channel> {
+    let mut channels = Vec::new();
+    if config.resize {
+        channels.push(Channel::DYNAMIC);
+    }
+    if config.clipboard {
+        channels.push(Channel::CLIPBOARD);
+    }
+    channels
+}
+
+/// A static virtual channel this session joined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Joined {
+    /// The number the server gave it, which every PDU on it is addressed to.
+    pub number: u16,
+    /// What every chunk of this channel's PDUs wears beyond first and last — see
+    /// [`Channel::chunk_flags`].
+    pub flags: u32,
+}
 
 /// A live share, and everything later PDUs are addressed with.
 pub(super) struct Connected {
@@ -46,10 +71,25 @@ pub(super) struct Connected {
     pub user: u16,
     /// Where the desktop and everything about it travels.
     pub io_channel: u16,
-    /// The static virtual channel, for a session that asked to be resizable.
-    pub dynamic: Option<u16>,
+    /// Every static virtual channel that was asked for, with the number the server
+    /// gave it — read by name through [`Connected::channel`].
+    pub channels: Vec<(Channel, u16)>,
     /// What the server said when it opened the share.
     pub demand: DemandActive,
+    /// PDUs that arrived on a static virtual channel while the share was being
+    /// finalized, in the order they came — see [`activate`].
+    pub deferred: Vec<(u16, Vec<u8>)>,
+}
+
+impl Connected {
+    /// One channel as it was joined, or `None` for a channel this session never asked
+    /// for.
+    pub fn channel(&self, wanted: Channel) -> Option<Joined> {
+        self.channels
+            .iter()
+            .find(|(channel, _)| *channel == wanted)
+            .map(|(channel, number)| Joined { number: *number, flags: channel.chunk_flags() })
+    }
 }
 
 /// TCP, X.224, TLS, CredSSP, MCS, the logon, and the capability exchange — up to the
@@ -105,14 +145,14 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 
     // 4. MCS Connect-Initial, carrying the GCC conference. The answer numbers every
     //    channel the session will use.
-    let channels: &[Channel] = if config.resize { &RESIZE_CHANNELS } else { &[] };
+    let wanted = wanted_channels(config);
     let conference = ConferenceCreateRequest {
         width: narrow(config.width),
         height: narrow(config.height),
         client_name: "remotex",
         keyboard_layout: KEYBOARD_LAYOUT,
         selected_protocol: protocol.bits(),
-        channels,
+        channels: &wanted,
     }
     .encode();
     writer
@@ -123,11 +163,17 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     let answer = mcs::connect_response(&frame)?;
     let answer = ConferenceCreateResponse::decode(answer)?;
     let ConferenceCreateResponse { io_channel, channels } = answer;
-    let asked = conference_channels(config);
-    if channels.len() != asked {
+    if channels.len() != wanted.len() {
+        let asked = wanted.len();
         bail!("the host numbered {} channels, and {asked} were asked for", channels.len());
     }
-    let dynamic = channels.first().copied();
+    // Paired with the names in the order both sides listed them, which is the only
+    // thing that says which number is which channel.
+    let numbered: Vec<(Channel, u16)> =
+        wanted.iter().copied().zip(channels.iter().copied()).collect();
+    for (channel, number) in &numbered {
+        debug!("rdp: the host numbered {} channel {number}", channel.name);
+    }
 
     // 5. Erect the domain — which is not answered — and attach a user to it.
     writer.write_all(&mcs::erect_domain_request()).await.context("sending the MCS Erect Domain")?;
@@ -174,9 +220,10 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         "rdp: the host opened a {}x{} desktop, share {:#x}",
         demand.width, demand.height, demand.share_id
     );
-    activate(&mut frames, &mut writer, &mut frame, user, io_channel, &demand).await?;
+    let deferred =
+        activate(&mut frames, &mut writer, &mut frame, user, io_channel, &demand).await?;
 
-    Ok(Connected { frames, writer, user, io_channel, dynamic, demand })
+    Ok(Connected { frames, writer, user, io_channel, channels: numbered, demand, deferred })
 }
 
 /// The capability exchange and the handshake after it: everything between a Demand
@@ -189,6 +236,12 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 /// Fast-path updates that arrive part-way through are read past: the server may start
 /// painting a desktop before it has finished agreeing on one, and what is dropped
 /// here is asked for again by whoever called this.
+///
+/// A static virtual channel is not the share's, and nothing on one can be asked for
+/// again: a server opens the clipboard as soon as the channel is up, which is before
+/// this exchange ends, and a Monitor Ready read past here would be a session whose
+/// clipboard never started. So those are handed back rather than dropped, for the
+/// caller to act on once it can.
 pub(super) async fn activate(
     frames: &mut Frames<ReadHalf<tls::Stream>>,
     writer: &mut WriteHalf<tls::Stream>,
@@ -196,7 +249,7 @@ pub(super) async fn activate(
     user: u16,
     io_channel: u16,
     demand: &DemandActive,
-) -> Result<()> {
+) -> Result<Vec<(u16, Vec<u8>)>> {
     let confirm = ConfirmActive {
         share_id: demand.share_id,
         width: demand.width,
@@ -214,6 +267,7 @@ pub(super) async fn activate(
         let framed = mcs::send_data_request(user, io_channel, &request)?;
         writer.write_all(&framed).await.context("sending a finalization PDU")?;
     }
+    let mut deferred = Vec::new();
     loop {
         frames.next(frame).await?;
         if fastpath::is_output(frame[0]) {
@@ -221,7 +275,10 @@ pub(super) async fn activate(
         }
         let payload = match mcs::send_data_indication(frame)? {
             mcs::Indication::Data(data) if data.channel == io_channel => data.payload,
-            mcs::Indication::Data(_) => continue,
+            mcs::Indication::Data(data) => {
+                deferred.push((data.channel, data.payload.to_vec()));
+                continue;
+            }
             mcs::Indication::Disconnect(reason) => {
                 bail!("the host ended the connection before the desktop was ready: {reason}")
             }
@@ -230,14 +287,9 @@ pub(super) async fn activate(
             bail!("the host deactivated the share during connection finalization");
         };
         if finalization::response(&data)? == Response::FontMap {
-            return Ok(());
+            return Ok(deferred);
         }
     }
-}
-
-/// How many virtual channels were asked for, which the server must number exactly.
-fn conference_channels(config: &Connect) -> usize {
-    if config.resize { RESIZE_CHANNELS.len() } else { 0 }
 }
 
 /// One PDU out, addressed to a channel.

@@ -1593,21 +1593,14 @@ impl ConfigFile {
                  key",
                 target.name
             );
-            // Sound and the clipboard are what this gateway's own RDP client does
-            // not carry. Both keys turn something on in the browser — an audio
-            // socket, the Clipboard panel — so accepting one on a target that can
-            // never answer it builds a control that does nothing. Refused where it
-            // would be inert, the same rule as every other key above.
+            // Sound is what this gateway's own RDP client does not carry. The key
+            // turns an audio socket on in the browser, so accepting it on a target
+            // that can never answer it builds a control that does nothing. Refused
+            // where it would be inert, the same rule as every other key above.
             anyhow::ensure!(
                 !target.audio || target.protocol != Protocol::Rdp,
                 "target {:?} asks for audio, which this gateway's RDP client does not carry \
                  yet. Remove the key.",
-                target.name
-            );
-            anyhow::ensure!(
-                !target.clipboard || target.protocol != Protocol::Rdp,
-                "target {:?} asks for clipboard, which this gateway's RDP client does not \
-                 carry yet. Remove the key.",
                 target.name
             );
             // Audio is carried by three paths and refused elsewhere rather than
@@ -4465,46 +4458,29 @@ mod tests {
         assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
     }
 
+    /// The clipboard is every engine's: generic VNC's Extended Clipboard, Apple's
+    /// pasteboard, and MS-RDPECLIP on the RDP client's own channel.
     #[test]
-    fn clipboard_is_vncs_alone_until_the_rdp_client_carries_it() {
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
+    fn clipboard_is_taken_by_every_protocol() {
+        for (protocol, host) in [("vnc", "10.0.0.4"), ("rdp", "10.0.0.5")] {
+            let config = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
 
-            [[targets]]
-            name = "box"
-            protocol = "vnc"
-            host = "10.0.0.4"
-            clipboard = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].clipboard);
-
-        // MS-RDPECLIP is not in this gateway's RDP client yet, so the key is
-        // refused there rather than opening a Clipboard panel with nothing behind
-        // it.
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            clipboard = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("clipboard"), "{rendered}");
-        assert!(rendered.contains("does not carry"), "{rendered}");
+                [[targets]]
+                name = "box"
+                protocol = "{protocol}"
+                host = "{host}"
+                clipboard = true
+                "#,
+                site_passwd_line()
+            ))
+            .unwrap()
+            .resolve()
+            .unwrap();
+            assert!(config.targets[0].clipboard, "{protocol}");
+        }
     }
 
     /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is

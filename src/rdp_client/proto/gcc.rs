@@ -21,7 +21,7 @@
 //! layout, so the server has nothing to answer about them.
 
 use super::wire::{Malformed, Reader, Writer};
-use super::per;
+use super::{channel, per};
 
 /// `ConnectData` up to the connectPDU length, which never varies: a CHOICE selecting
 /// the object-identifier form of the key, and the identifier itself — T.124 (02/98),
@@ -98,6 +98,11 @@ const RNS_UD_COLOR_8BPP: u16 = 0xCA01;
 /// `SASSequence`: Ctrl+Alt+Del, the only value the field has ever had.
 const RNS_UD_SAS_DEL: u16 = 0xAA03;
 
+/// `CHANNEL_OPTION_SHOW_PROTOCOL`, which every client sets on the clipboard and on
+/// nothing else. The server is told here, and reminded on every chunk — see
+/// [`Channel::chunk_flags`].
+const SHOW_PROTOCOL: u32 = 0x0020_0000;
+
 /// A static virtual channel, asked for by name in `CS_NET` and given a number by the
 /// server in `SC_NET`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +121,33 @@ impl Channel {
         // The two security bits are historical: under TLS the server ignores them.
         options: 0x8000_0000 | 0x4000_0000 | 0x0080_0000,
     };
+
+    /// The clipboard, which is a static channel of its own rather than a dynamic one:
+    /// MS-RDPECLIP predates that transport, and a server opens this channel because
+    /// the client named it here.
+    pub const CLIPBOARD: Self = Self {
+        name: "cliprdr",
+        // The same three as above, and the one that is not decoration: without
+        // `CHANNEL_OPTION_SHOW_PROTOCOL` — and the matching flag on every chunk — a
+        // Windows host answers nothing at all on this channel. See
+        // [`Channel::chunk_flags`].
+        options: 0x8000_0000 | 0x4000_0000 | 0x0080_0000 | SHOW_PROTOCOL,
+    };
+
+    /// What every chunk of this channel's own PDUs wears beyond the first and last
+    /// markers: [`channel::SHOW_PROTOCOL`] for a channel whose options asked for it,
+    /// and nothing for one that did not.
+    ///
+    /// Derived from the options rather than written twice, because the two must agree:
+    /// a Windows host reads nothing off a chunk whose header disagrees with what the
+    /// channel was opened as — in *either* direction of disagreement. See
+    /// [`channel::SHOW_PROTOCOL`], which records what each mistake looks like.
+    pub fn chunk_flags(self) -> u32 {
+        match self.options & SHOW_PROTOCOL != 0 {
+            true => channel::SHOW_PROTOCOL,
+            false => 0,
+        }
+    }
 
     /// The eight bytes the name occupies on the wire.
     fn wire_name(&self) -> [u8; 8] {

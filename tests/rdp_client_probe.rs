@@ -10,12 +10,29 @@
 //!
 //! It connects, waits for a painted desktop, asks for a new size the way the
 //! engine does — repeating the layout until the host answers, because a Windows
-//! host ignores the first few seconds of them — then puts the size back and
-//! disconnects.
+//! host ignores the first few seconds of them — puts the size back, takes the
+//! remote clipboard over, and disconnects.
 //!
 //! What is asserted is the client's contract: a desktop arrives, gets painted,
 //! and a requested size comes back as a resize of that size with a framebuffer to
 //! match. Counts are printed, not asserted — they are the host's business.
+//!
+//! ## The clipboard
+//!
+//! Both directions of MS-RDPECLIP are lazy — a copy announces which formats it can be
+//! had in, and the bytes cost a second round trip that happens only when somebody
+//! pastes — so the thing worth proving against a real host is that laziness, in both
+//! directions, and the second test here does it: this end takes the remote clipboard
+//! over, the remote pastes it and copies what it pasted, and the bytes that come back
+//! are compared with the bytes that went out. See [`round_trip`], which drives the one
+//! application every Windows desktop has to do it.
+//!
+//! The first test carries the clipboard channel without provoking it: it asserts the
+//! host opens the channel and negotiates, answers any paste that happens to arrive,
+//! and reports the rest. That the session survives all of it beside the desktop, the
+//! pointer and two resizes is its own claim — a clipboard is a second static channel,
+//! and a client that gets its chunk flags wrong loses the *other* channel rather than
+//! this one.
 //!
 //! ```sh
 //! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> \
@@ -26,7 +43,8 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::{Connect, Event, Session};
+use remotex::rdp_client::{Connect, Event, Input, Session};
+use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use tokio::sync::mpsc::Receiver;
 
 /// Which target in `tmp/test_uat.toml` to drive — see the module docs.
@@ -41,6 +59,21 @@ const RESIZED: (u32, u32) = (1600, 900);
 /// the layout is repeated meanwhile.
 const RESIZE_BUDGET: Duration = Duration::from_secs(30);
 const RESIZE_RETRY: Duration = Duration::from_secs(2);
+
+/// What this end puts on the remote's clipboard. Non-ASCII on purpose: the payload is
+/// UTF-16 and a host that mangles it says so in the bytes that come back. One line,
+/// because the round trip below pastes it into a single-line box on the remote.
+const COPIED: &str = "remotex probe — 画面 ☕ round trip";
+
+/// The scancodes the round trip needs. Driving the remote's own clipboard is the one
+/// thing this end cannot do for itself, and a keystroke is all it has to do it with.
+const LWIN: u8 = 0x5B;
+const ESCAPE: u8 = 0x01;
+const LCTRL: u8 = 0x1D;
+const KEY_R: u8 = 0x13;
+const KEY_A: u8 = 0x1E;
+const KEY_C: u8 = 0x2E;
+const KEY_V: u8 = 0x2F;
 
 fn connect() -> (Session, Receiver<Event>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
@@ -57,6 +90,7 @@ fn connect() -> (Session, Receiver<Event>) {
         width: OPENING.0,
         height: OPENING.1,
         resize: true,
+        clipboard: true,
     })
 }
 
@@ -67,11 +101,23 @@ struct Tally {
     cursors: u64,
     resizes: Vec<(u32, u32)>,
     resize_ready: bool,
+    /// The host opened its clipboard channel and started the negotiation.
+    clipboard_ready: bool,
+    /// What the remote clipboard announced, each time it announced something.
+    remote_formats: Vec<Vec<u32>>,
+    /// The formats the remote asked this end for — a paste over there, answered as
+    /// it arrived.
+    pastes: Vec<u32>,
+    /// Text that came back from the remote clipboard, and the two ways it did not.
+    remote_text: Vec<String>,
+    refusals: u64,
+    oversized: Vec<u64>,
 }
 
 /// Read events until `until` says stop or `deadline` passes. Panics on an ended
 /// session: every case here expects the session to survive.
 async fn pump(
+    session: &Session,
     events: &mut Receiver<Event>,
     tally: &mut Tally,
     deadline: Instant,
@@ -87,6 +133,32 @@ async fn pump(
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
+            Event::ClipboardReady => tally.clipboard_ready = true,
+            // Asked for at once, which is what the engine does and for the same
+            // reason: a copy on the remote should be in hand before anybody asks.
+            Event::ClipboardFormats(formats) => {
+                if formats.contains(&CF_UNICODETEXT) {
+                    session.input().request_clipboard(CF_UNICODETEXT);
+                }
+                tally.remote_formats.push(formats);
+            }
+            Event::ClipboardData(data) => {
+                let text = rdp_clipboard::decode_unicode(&data)
+                    .expect("the remote's clipboard text decodes as UTF-16");
+                tally.remote_text.push(text);
+            }
+            Event::ClipboardRefused => tally.refusals += 1,
+            Event::ClipboardOversized { bytes } => tally.oversized.push(bytes),
+            // Answered here, and now: the application pasting on the far end is
+            // blocked until this arrives. Answered the way the engine answers —
+            // the one text format, encoded — so what the host reads back is what
+            // the gateway would really hand it.
+            Event::ClipboardWanted { format } => {
+                tally.pastes.push(format);
+                let data = (format == CF_UNICODETEXT)
+                    .then(|| rdp_clipboard::encode_unicode(COPIED));
+                session.input().send_clipboard(data);
+            }
             Event::Connected { .. } => panic!("a second Connected"),
             Event::Ended(result) => panic!("the session ended: {result:?}"),
         }
@@ -116,7 +188,7 @@ async fn resize_to(
     loop {
         session.input().resize(size.0, size.1, 100);
         let retry = (Instant::now() + RESIZE_RETRY).min(deadline);
-        if pump(events, tally, retry, |t| t.resizes.last() == Some(&size)).await {
+        if pump(session, events, tally, retry, |t| t.resizes.last() == Some(&size)).await {
             return started.elapsed();
         }
         assert!(
@@ -144,23 +216,26 @@ async fn case() {
 
     // A desktop worth of paint, and Display Control, before anything is resized.
     let mut tally = Tally::default();
-    pump(&mut events, &mut tally, Instant::now() + Duration::from_secs(8), |t| {
-        t.resize_ready && t.paints > 0
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(8), |t| {
+        t.resize_ready && t.clipboard_ready && t.paints > 0
     })
     .await;
     // And a moment more, so a desktop still arriving is counted whole.
-    pump(&mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false).await;
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
     let (on, total) = lit(&session);
     println!("  opening: {tally:?}, {on} of {total} pixels lit");
     assert!(tally.paints > 0, "nothing was painted");
     assert!(on > 0, "the desktop decoded to pure black");
     assert!(tally.resize_ready, "the host never offered Display Control");
+    assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
 
     for size in [RESIZED, OPENING] {
         let took = resize_to(&session, &mut events, &mut tally, size).await;
         // Let the repaint after the resize land.
         tally.paints = 0;
-        pump(&mut events, &mut tally, Instant::now() + Duration::from_secs(3), |_| false).await;
+        pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(3), |_| false)
+            .await;
         let (on, total) = lit(&session);
         let framebuffer = session.framebuffer().with(|frame| (frame.width, frame.height));
         println!(
@@ -183,8 +258,38 @@ async fn case() {
     }
     input.key(0x2A, false, true);
     input.key(0x2A, false, false);
-    pump(&mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false).await;
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
     println!("  after input: {} cursor updates in all", tally.cursors);
+
+    // The clipboard. Taking it over is this end's half of the bargain: one format
+    // list, no bytes, and the host asks for those if and when anything over there
+    // pastes. Whether it does is the host's business — Windows with clipboard
+    // history on reads a newly owned clipboard itself — so what is *asserted* is
+    // that the session survives the exchange, and that a paste that did arrive was
+    // answered with the format it asked for.
+    let before = tally.pastes.len();
+    input.advertise_clipboard(vec![CF_UNICODETEXT]);
+    // And ask the remote for whatever it holds. Nothing over there has copied
+    // anything, and this end has just taken the clipboard over, so what comes back is
+    // nothing at all — a Windows host does not answer a request for a format nobody
+    // advertised, not even with the `CB_RESPONSE_FAIL` the specification allows. The
+    // point of asking is that the session must not mind.
+    input.request_clipboard(CF_UNICODETEXT);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(4), |_| false)
+        .await;
+    println!(
+        "  clipboard: the remote announced {:?}, asked this end for {:?}, sent {:?} \
+         ({} refusals, oversized {:?})",
+        tally.remote_formats,
+        tally.pastes,
+        tally.remote_text,
+        tally.refusals,
+        tally.oversized,
+    );
+    for format in &tally.pastes[before..] {
+        assert_eq!(*format, CF_UNICODETEXT, "the host asked for a format never offered");
+    }
 
     drop(session);
     // The drop disconnected and joined the thread, so its last word is here.
@@ -198,8 +303,126 @@ async fn case() {
     assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
 }
 
+/// Tap one key, with modifiers held around it.
+///
+/// Held and released here rather than left down: a modifier this end forgets is one
+/// the remote desktop keeps, and every keystroke after it — including a person's,
+/// later — arrives wearing it.
+fn chord(input: &Input, modifiers: &[(u8, bool)], key: u8, extended: bool) {
+    for &(scancode, ext) in modifiers {
+        input.key(scancode, ext, true);
+    }
+    input.key(key, extended, true);
+    input.key(key, extended, false);
+    for &(scancode, ext) in modifiers.iter().rev() {
+        input.key(scancode, ext, false);
+    }
+}
+
+/// The clipboard, all the way around and back.
+///
+/// The half this end cannot do for itself is the remote's: something over there has to
+/// paste, and something has to copy. The Run dialog is the application every Windows
+/// desktop has — Win+R opens it, Ctrl+V pastes into its one-line box, Ctrl+A and
+/// Ctrl+C copy that back out, and Escape closes it — so the whole round trip is five
+/// keystrokes and no typing. Nothing is entered and no Enter is sent, so the dialog
+/// leaves the desktop as it found it.
+///
+/// Both halves of the protocol's laziness are what this proves:
+///
+/// - the paste makes the host ask this end to render the text it advertised, which is
+///   delayed rendering in the direction that matters — a request left unanswered is an
+///   application over there stopped inside its own paste;
+/// - the copy makes the host announce a format list, which this end asks for and
+///   reads, and the bytes that come back are the bytes that went out.
+async fn round_trip() {
+    common::init_logging();
+    let (session, mut events) = connect();
+    let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
+        .await
+        .expect("no first event within 60s")
+        .expect("the event channel closed");
+    assert!(matches!(first, Event::Connected { .. }), "the session did not connect: {first:?}");
+
+    let mut tally = Tally::default();
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(10), |t| {
+        t.clipboard_ready && t.paints > 0
+    })
+    .await;
+    assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
+
+    // 1. Take the remote clipboard over. Nothing is transferred: the host now knows
+    //    this end holds text, and will ask for it if anything pastes.
+    let input = session.input();
+    input.advertise_clipboard(vec![CF_UNICODETEXT]);
+
+    // 2. Open the Run dialog and paste into it. The dialog needs a moment to exist
+    //    and take focus before the paste can land in it.
+    chord(input, &[(LWIN, true)], KEY_R, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
+    // Select what the dialog pre-filled itself with before pasting over it: it opens
+    // holding whatever was last run on that desktop, and a paste that landed beside
+    // it would be read back as somebody else's text with this end's appended.
+    chord(input, &[(LCTRL, false)], KEY_A, false);
+    chord(input, &[(LCTRL, false)], KEY_V, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(4), |t| {
+        !t.pastes.is_empty()
+    })
+    .await;
+    assert_eq!(
+        tally.pastes,
+        vec![CF_UNICODETEXT],
+        "the remote never asked this end to render what it had advertised; the Run dialog \
+         may not have taken the paste"
+    );
+
+    // 3. Select what was pasted and copy it, which hands the clipboard back to the
+    //    remote — and this end asks for it the moment the format list arrives.
+    chord(input, &[(LCTRL, false)], KEY_A, false);
+    chord(input, &[(LCTRL, false)], KEY_C, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(6), |t| {
+        !t.remote_text.is_empty()
+    })
+    .await;
+
+    // 4. Close the dialog, whatever happened above, before anything is asserted: an
+    //    open dialog left on the desktop is this test's litter.
+    chord(input, &[], ESCAPE, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
+
+    println!(
+        "  round trip: pasted {:?}, the remote then announced {:?} and sent {:?} \
+         ({} refusals, oversized {:?})",
+        tally.pastes, tally.remote_formats, tally.remote_text, tally.refusals, tally.oversized,
+    );
+    let announced = tally.remote_formats.last().expect("the remote announced its copy");
+    assert!(announced.contains(&CF_UNICODETEXT), "the copy carried no Unicode text: {announced:?}");
+    assert_eq!(
+        tally.remote_text,
+        vec![COPIED.to_owned()],
+        "what came back off the remote clipboard is not what went out"
+    );
+
+    drop(session);
+    let mut ended = None;
+    while let Ok(event) = events.try_recv() {
+        if let Event::Ended(result) = event {
+            ended = Some(result);
+        }
+    }
+    assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
+}
+
 #[tokio::test]
 #[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
 async fn a_real_host_paints_and_resizes() {
     case().await;
+}
+
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml, and its Run dialog"]
+async fn a_real_host_round_trips_the_clipboard() {
+    round_trip().await;
 }

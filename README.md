@@ -16,7 +16,8 @@ a Windows host re-renders the desktop sharp at the new size.
 
 - RDP uses a built-in client, protocol and all: the desktop over plain bitmap
   updates, pointer, keyboard, mouse and resize, spoken to a current Windows host
-  over NLA. It does not carry sound, the clipboard or touch.
+  over NLA. It carries the clipboard, and does not carry sound or touch. See
+  [`docs/rdp-client.md`](docs/rdp-client.md).
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.

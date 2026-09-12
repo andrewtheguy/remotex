@@ -10,51 +10,32 @@ is the only place they can be read in context.
 
 ### What the RDP client does not carry yet
 
-The client carries the desktop, the pointer, keyboard, mouse and resize. Sound,
-the clipboard and touch were all carried by the engines before it, and none of
-them was carried *here*: the clipboard and sound came from a library's channel
-client — IronRDP's `cliprdr` and `rdpsnd`, then FreeRDP's — and touch from
-FreeRDP's `rdpei` plugin. `proto` is the gateway's own now, so each of the three
-is a channel to write rather than a dependency to configure, and each is refused
-where it would otherwise build a control with nothing behind it: `audio = true`
-and `clipboard = true` at config parse, touch by having no key at all — whether
-touch exists is the host's answer, and this client never asks.
+The client carries the desktop, the pointer, keyboard, mouse, resize and the
+clipboard. Sound and touch were both carried by the engines before it, and neither
+was carried *here*: sound came from a library's channel client — IronRDP's
+`rdpsnd`, then FreeRDP's — and touch from FreeRDP's `rdpei` plugin. `proto` is the
+gateway's own now, so each is a channel to write rather than a dependency to
+configure, and each is refused where it would otherwise build a control with
+nothing behind it: `audio = true` at config parse, touch by having no key at all —
+whether touch exists is the host's answer, and this client never asks.
 
-Everything on either side of all three channels is already written and shipped.
-The browser's Clipboard panel, its touch passthrough layer (`touchPassthrough.ts`),
-the `/ws/audio` socket, the audio queue and both its encoders are
-protocol-agnostic; so are `ServerMsg::TouchReady`, `ClientMsg::Touch` and the
-clipboard message pair. Nothing below the wire needs designing for any of them.
+Everything on either side of both channels is already written and shipped. The
+browser's touch passthrough layer (`touchPassthrough.ts`), the `/ws/audio` socket,
+the audio queue and both its encoders are protocol-agnostic; so are
+`ServerMsg::TouchReady` and `ClientMsg::Touch`. Nothing below the wire needs
+designing for either of them.
 
-EGFX is the fourth thing this client does not carry, and it is under
+The clipboard was the third of these and is done: MS-RDPECLIP is
+`rdp_client/proto/cliprdr.rs`, the channel plumbing the two static channels needed
+is in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on
+Ready, ask the moment the remote's format list arrives, answer every paste request
+including with nothing, retry a `CB_RESPONSE_FAIL` on a bounded ladder — is
+`ClipboardState` in `src/rdp.rs`. What it took is recorded in
+[The RDP client](rdp-client.md#the-clipboard-ms-rdpeclip) rather than here.
+
+EGFX is the third thing this client does not carry, and it is under
 [Source payloads](#source-payloads-the-gateway-decodes-instead-of-forwarding)
 rather than here: its payoff is a transcode removed, not a control restored.
-
-#### The clipboard (MS-RDPECLIP)
-
-The nearest of the three, because only the wire is missing:
-
-- `src/rdp_clipboard.rs` is the format decision and the `CF_UNICODETEXT`
-  conversions either direction needs, with its tests, compiled and called by
-  nothing.
-- The engine's half of it was written for the FreeRDP era and removed with that
-  engine — `git show 7d76b5d^:src/rdp.rs`. Advertise on Ready, ask the moment the
-  remote's format list arrives so a remote copy reaches the browser unprompted as
-  it does on the other two engines, answer every paste request including with
-  nothing, and retry a `CB_RESPONSE_FAIL` on a bounded ladder. It wants
-  re-targeting at the new client's event stream and command queue, not rewriting.
-
-New here: Monitor Ready, Clipboard Capabilities, Format List and its response,
-Format Data Request and Response. Short format names and the one text format are
-the whole of what this gateway speaks, and there is no library to take the PDUs
-from now that the client is its own.
-
-Delayed rendering is what to verify against a real host rather than a container.
-Both directions are lazy on the wire, and the bounded retry above is a scar from a
-live Windows peer: xrdp's cliprdr is not a proxy for what a Windows paste handler
-does, and a request left unanswered is a remote application frozen in its own
-paste. `tests/rdp_client_probe.rs` against the Windows host in `tmp/test_uat.toml`
-is where a round trip belongs.
 
 #### Touch (MS-RDPEI)
 
@@ -75,7 +56,7 @@ rather than a key.
 
 #### Sound (MS-RDPEA)
 
-The largest of the three, and the least of a shared story with the other two. The
+The larger of the two, and the least of a shared story with the other. The
 server chooses between two transports, so both have to exist: the static `rdpsnd`
 channel, which also wants `rdpdr` registered beside it, and the dynamic
 `AUDIO_PLAYBACK_DVC`. Over them: version and the server's format list, the client's
@@ -92,22 +73,14 @@ the same bargain the damage path makes), and the Client Info PDU has to stop say
 `INFO_NOAUDIOPLAYBACK` — with that flag set the session has no audio device to
 redirect at all.
 
-#### The channel plumbing the first of them pays for
+#### The channel plumbing the clipboard already paid for
 
-The clipboard and `rdpsnd`'s static transport both need a second *static* virtual
-channel, which this client has never had:
-
-- `CS_NET` asks for `drdynvc` alone and `connect.rs` takes the first number the
-  server hands back as it. A second channel makes that resolution by name, and
-  gives the session a second reassembler, a dispatch arm and a channel id on the
-  way out.
-- `proto/channel.rs` writes one chunk and refuses a payload that would need a
-  second, because everything this client sends on a channel is a sixty-four byte
-  monitor layout. Half a megabyte of clipboard text is a megabyte of UTF-16
-  against a 1600-byte floor, so the splitter deliberately left out has to exist.
-
-Inbound reassembly of any length is already there, and so is the Virtual Channel
-capability set. Touch needs none of this.
+`rdpsnd`'s static transport needs a third *static* virtual channel, and nothing
+about that is new work now: `CS_NET` names every channel a session asked for,
+`connect.rs` pairs the server's numbers back up with those names, and
+`proto/channel.rs` splits an outbound PDU of any length and reassembles an inbound
+one. A third channel is a name, a reassembler and a dispatch arm. Touch needs none
+of this — MS-RDPEI is a dynamic channel.
 
 ### Render dial — what the region streams do not decide yet
 
