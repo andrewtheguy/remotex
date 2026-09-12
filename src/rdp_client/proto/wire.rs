@@ -30,6 +30,10 @@ pub enum Malformed {
     /// A field carries a value this client will not go on from.
     #[error("{what} carries {field} {value:#x}, which this client does not accept")]
     Refused { what: &'static str, field: &'static str, value: u64 },
+    /// The structure is whole and well formed, and does not contain something this
+    /// client cannot continue without.
+    #[error("{what} does not carry {field}")]
+    Missing { what: &'static str, field: &'static str },
 }
 
 /// A buffer being taken apart, front to back.
@@ -105,6 +109,12 @@ impl<'a> Reader<'a> {
     /// The error for a field whose value this client will not go on from.
     pub fn refuse(&self, field: &'static str, value: impl Into<u64>) -> Malformed {
         Malformed::Refused { what: self.what, field, value: value.into() }
+    }
+
+    /// The error for something a well-formed structure should have carried and did
+    /// not.
+    pub fn missing(&self, field: &'static str) -> Malformed {
+        Malformed::Missing { what: self.what, field }
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], Malformed> {
@@ -209,6 +219,15 @@ mod tests {
         assert_eq!(
             r.refuse("its version", 5_u8).to_string(),
             "a TPKT header carries its version 0x5, which this client does not accept"
+        );
+    }
+
+    #[test]
+    fn a_missing_field_names_what_was_not_there() {
+        let r = Reader::new("a GCC Conference Create Response", &[]);
+        assert_eq!(
+            r.missing("a server network block").to_string(),
+            "a GCC Conference Create Response does not carry a server network block"
         );
     }
 
