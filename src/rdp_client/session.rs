@@ -838,10 +838,14 @@ impl<'a> Active<'a> {
                     }
                     (replies, Vec::new())
                 }
+                // The conversation went with the channel: a reopened one starts with a
+                // fresh format list, and a Wave Info left waiting for its Wave must not
+                // swallow the first PDU on it.
                 dvc::Message::Close { channel } if dynamics.sound == Some(channel) => {
                     debug!("rdp: the host closed the sound channel");
                     dynamics.sound = None;
                     if let Some(sound) = sound {
+                        sound.proto = rdpsnd::Rdpsnd::new();
                         sound.sink.closed();
                     }
                     (vec![dvc::close(channel)], Vec::new())

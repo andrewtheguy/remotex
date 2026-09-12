@@ -10,7 +10,11 @@
 //! bytes and a headerless **Wave** PDU carrying the rest behind a four-byte pad. Each
 //! buffer is confirmed by block number, which is how the server paces itself.
 //! **Close** says the host has nothing playing; the next buffer resumes without a
-//! new negotiation.
+//! new negotiation. That is deliberate and matches FreeRDP, whose Close handler
+//! closes the playback device and touches the agreed formats not at all: a Windows
+//! host sends its format list once per channel and a Close after every stream, so a
+//! client that forgot the format on Close would drop every buffer after the first
+//! stream ended.
 //!
 //! The same conversation runs on either of two transports, and the server picks:
 //! the static virtual channel named `rdpsnd`, or the dynamic channel
@@ -27,9 +31,9 @@
 //! channel — see [`super::rdpdr`]. And it negotiates **nothing until something
 //! plays**: a session opened onto a quiet desktop shows the dynamic channel opened
 //! and not a byte on it, for as long as the desktop stays quiet. The format list
-//! arrives with the first sound, so a probe that asserts on it has to be run with a
-//! sound playing on the remote, and a session that stays silent is not, by that
-//! alone, a session with anything wrong.
+//! arrives with the first sound, so the probe asserts on it only when told a sound is
+//! playing on the remote, and a session that stays silent is not, by that alone, a
+//! session with anything wrong.
 //!
 //! [MS-RDPEA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpea/bea2d5cf-e3b9-4419-92e5-0e074ff9bc5b
 
@@ -129,7 +133,8 @@ pub enum Output {
     NoFormat { offered: u16 },
     /// One buffer of samples in [`CD_QUALITY`].
     Wave(Vec<u8>),
-    /// The host has nothing playing.
+    /// The host has nothing playing. The agreed format stands; the next buffer is
+    /// played without a new format list, which the host will not send.
     Closed,
     Nothing,
 }
@@ -473,12 +478,18 @@ mod tests {
         assert_eq!(turn.replies, vec![vec![SNDC_WAVECONFIRM, 0, 4, 0, 0x11, 0x22, 3, 0]]);
     }
 
-    /// Close is reported and needs no answer; a PDU cut short is an error rather
-    /// than a guess.
+    /// Close is reported and needs no answer, and the format agreed before it stands
+    /// for the buffer after it; a PDU cut short is an error rather than a guess.
     #[test]
     fn a_close_is_reported_and_a_short_pdu_refused() {
         let mut snd = Rdpsnd::new();
+        snd.push(&server_formats(8, &[cd()])).unwrap();
         assert_eq!(snd.push(&server(SNDC_CLOSE, &[])).unwrap().output, Output::Closed);
+        assert_eq!(
+            snd.push(&wave2(0, 1, &[1, 2, 3, 4])).unwrap().output,
+            Output::Wave(vec![1, 2, 3, 4]),
+            "the next stream needs no new format list"
+        );
         assert!(snd.push(&[SNDC_WAVE2, 0, 20, 0, 1, 2]).is_err());
         assert!(snd.push(&[SNDC_WAVE2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err(), "a body too small for its fields");
     }

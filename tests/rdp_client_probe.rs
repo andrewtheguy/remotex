@@ -45,8 +45,15 @@
 //! and a client that gets its chunk flags wrong loses the *other* channel rather than
 //! this one.
 //!
+//! ## Sound
+//!
+//! The session asks for sound redirection and counts what arrives. A Windows host
+//! negotiates nothing until something plays over there, so the negotiation is asserted
+//! only under [`AUDIO_ENV`], set when a sound is playing on the remote; otherwise the
+//! counts are printed and a quiet host is not a failure.
+//!
 //! ```sh
-//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> \
+//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> REMOTEX_UAT_AUDIO=1 \
 //!   cargo test --test rdp_client_probe -- --ignored --nocapture --test-threads 1
 //! ```
 
@@ -67,6 +74,11 @@ const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 /// Whether to offer the graphics pipeline: anything but `0` or `false` does, and so
 /// does leaving it unset.
 const EGFX_ENV: &str = "REMOTEX_UAT_EGFX";
+
+/// Whether a sound is playing on the remote for this run — set it to `1` when one is.
+/// A Windows host sends its format list only once something plays, so the
+/// negotiation is asserted only when this says it can be, and printed otherwise.
+const AUDIO_ENV: &str = "REMOTEX_UAT_AUDIO";
 
 /// The opening size, and the one each case asks to move to. Both even, both well
 /// inside what any host accepts.
@@ -98,9 +110,15 @@ fn egfx() -> bool {
     !matches!(std::env::var(EGFX_ENV).as_deref(), Ok("0") | Ok("false"))
 }
 
+/// Whether this run was told a sound is playing on the remote — see [`AUDIO_ENV`].
+fn audio_playing() -> bool {
+    matches!(std::env::var(AUDIO_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"))
+}
+
 /// Where the session's sound goes: counted, never played. What the host redirects
 /// depends on what happens to be playing over there, so the numbers are printed
-/// rather than asserted; the negotiation is the part a host always does.
+/// rather than asserted; the negotiation is asserted when [`AUDIO_ENV`] says
+/// something is playing, which is the one condition under which a host does it.
 #[derive(Default, Debug)]
 struct Ear {
     negotiated: AtomicBool,
@@ -386,11 +404,15 @@ async fn case() {
         assert_eq!(*format, CF_UNICODETEXT, "the host asked for a format never offered");
     }
     println!("  sound: {ear:?}");
-    assert!(
-        ear.negotiated.load(Ordering::Relaxed),
-        "the host never negotiated sound redirection; a Windows host sends its format list only \
-         once something plays, so start a sound on the remote before running this probe"
-    );
+    if audio_playing() {
+        assert!(
+            ear.negotiated.load(Ordering::Relaxed),
+            "the host never negotiated sound redirection, though {AUDIO_ENV} says a sound is \
+             playing on the remote"
+        );
+    } else if !ear.negotiated.load(Ordering::Relaxed) {
+        println!("  (no sound negotiated: a quiet host sends no format list; set {AUDIO_ENV}=1 with a sound playing to assert it)");
+    }
 
     drop(session);
     // The drop disconnected and joined the thread, so its last word is here.

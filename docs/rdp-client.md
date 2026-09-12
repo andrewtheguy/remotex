@@ -323,7 +323,8 @@ The measured part: a Windows host negotiates nothing until something plays. A
 session opened onto a quiet desktop shows the dynamic channel opened and not a byte
 on it, for as long as the desktop stays quiet, and a probe that asserts on the
 format list fails there through no fault in the client. `tests/rdp_client_probe.rs`
-asserts the negotiation, so it must be run with a sound playing on the remote.
+asserts the negotiation only under `REMOTEX_UAT_AUDIO=1`, which is the run's word
+that a sound is playing on the remote; without it the counts are printed.
 
 ## What a host will not tell you
 

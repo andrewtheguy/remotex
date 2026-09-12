@@ -922,8 +922,8 @@ each has been rediscovered the hard way more than once:
   silent, the gateway logs "arming audio, the remote's audio channel is not up
   yet", and the browser's Audio button has nothing to play. A session with no
   sound is not, by that alone, a session with anything wrong; start a sound on the
-  remote before deciding the client is broken, and before running
-  `tests/rdp_client_probe.rs`, which asserts the negotiation.
+  remote before deciding the client is broken; `tests/rdp_client_probe.rs` asserts
+  the negotiation only under `REMOTEX_UAT_AUDIO=1`, which says one is playing.
 - **No `rdpdr`, no sound.** A host redirects no audio to a client that named
   `rdpsnd` without also naming the device-redirection channel, even with no device
   to redirect. `rdp_client/proto/rdpdr.rs` is that channel's opening handshake and
