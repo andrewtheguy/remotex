@@ -134,12 +134,21 @@ password = "change-me"
 
 # Optional pinned opening size. Set both keys or neither.
 #
-# RDP connects at the pinned size, and `subtype = "ard-high-performance"` creates
-# its virtual display at it. With neither key, both instead open at the full
-# resolution of the connecting client's own screen, falling back to 1920×1200 only
-# when the client supplies no screen. A generic VNC server and `subtype = "ard"`
-# keep the remote's own size; for them these keys only answer a later default-size
-# request, which still requires `resize = true` before it can be applied.
+# RDP connects at the pinned size, `subtype = "ard-high-performance"` creates its
+# virtual display at it, and a generic VNC server is asked for it once, as soon as
+# it declares SetDesktopSize support. With neither key, RDP and High Performance
+# instead open at the full resolution of the connecting client's own screen,
+# falling back to 1920×1080 only when the client supplies no screen; an unpinned
+# generic VNC server is asked for no size at all and keeps its own.
+#
+# This is independent of `resize` below, which decides only whether the browser
+# window drives the size afterwards. Pinned alone stays at the pin. Pinned with
+# `resize = true` opens at the pin and then follows the window on RDP and High
+# Performance, which name a size at connect; a generic VNC server is asked only
+# for the window, because the browser reports it before the server can declare
+# SetDesktopSize support and the newer size supersedes the pin. `subtype = "ard"`
+# is the exception — it exposes the Mac's physical displays, which this gateway
+# never resizes, so there these keys only answer a later default-size request.
 #
 # These are points, not backing pixels. RDP opens at 1x and, with `resize`, a
 # Retina client then asks for twice the pixels. High Performance opens at the

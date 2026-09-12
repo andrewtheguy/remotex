@@ -1118,6 +1118,24 @@ uses the pinned size or that default while its density still counts. See
 `TargetConfig::opening_size`; `width` and `height` remain options because whether
 the operator specified them is meaningful.
 
+A pin is spent whether or not `resize` is granted, because the two answer
+different questions: the pin is the size the session *opens* at, and `resize` is
+whether the browser window drives it afterwards. RDP connects at the pin, High
+Performance builds its virtual display at it, and generic VNC asks for it with a
+single `SetDesktopSize` as soon as the server declares support — seeded into the
+same held-request slot a viewport report uses, so it goes out on the first
+`ExtendedDesktopSize` rect and no earlier. A pinned target without `resize` stays
+at the pin on all three. With `resize`, RDP and High Performance open at the pin
+and then follow the window, because they state a size at connect and no report
+can precede that; generic VNC cannot state one until the server declares support,
+by which time the browser — which reports its window as soon as `connected`
+reaches it — has superseded the held pin with the size it actually wants, so the
+session opens at the window and the pin is left answering a later default-size
+request. That supersede is the same rule any stale hold gets: a replay must never
+ask for a desktop the window has already left. Standard `ard` is the only engine
+with nothing to spend a pin on, and there `width`/`height` only answer a later
+default-size request.
+
 What is engine-specific is the mechanism:
 
 | Engine | With `resize` |

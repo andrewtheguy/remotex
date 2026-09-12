@@ -716,8 +716,23 @@ pub struct TargetConfig {
     /// ([`ConfigFile::parse`]). Also the answer to
     /// [`crate::protocol::ClientMsg::DefaultSize`], a client with no
     /// desktop-shaped window of its own asking for whatever size this end
-    /// considers right. A generic or Standard-mode VNC server keeps its own
-    /// size at connect and is never asked.
+    /// considers right.
+    ///
+    /// How the pin is spent depends on the engine, because a pin is an opening
+    /// size and each has its own way of stating one: RDP connects at it, High
+    /// Performance creates its virtual display at it, and a generic VNC server
+    /// is asked for it with one `SetDesktopSize`, as soon as it declares support
+    /// (`Flags::pinned` in src/vnc.rs). Independent of [`Self::resize`], which
+    /// governs whether the *window* drives the size afterwards: without it the
+    /// session stays at the pin, and with it RDP and High Performance open at
+    /// the pin and then follow the browser, because both state a size at connect
+    /// and no report can precede that. Generic VNC cannot state one until the
+    /// server declares support, by which time a `resize` browser has already
+    /// reported its window and superseded the pin, so such a session opens at
+    /// the window and the pin is left answering `DefaultSize`. Standard `ard` is
+    /// the exception with nothing to spend a pin on — it exposes the Mac's
+    /// physical displays, which this gateway never resizes — and there the keys
+    /// only answer a later default-size request.
     ///
     /// Points rather than pixels, because the density can move underneath it:
     /// an RDP connect happens at 1x and a Retina client then asks for twice
