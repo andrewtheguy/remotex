@@ -741,7 +741,7 @@ async fn active_loop(
                             }
                         }
                         let _ = sink.frame().await;
-                        return result.map_err(|e| anyhow::anyhow!("{e}"));
+                        return result.map_err(anyhow::Error::new);
                     }
                     // Only ever the first event, which `await_desktop` consumed.
                     Event::Connected { .. } => {}
