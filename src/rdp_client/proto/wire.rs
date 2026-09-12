@@ -13,15 +13,18 @@
 //! big-endian, so both orders appear within a few bytes of each other during the
 //! connection sequence.
 
-/// Why a PDU could not be read.
+/// Why a PDU could not be read, or could not be gone on from.
 ///
-/// Both variants mean the same thing to a caller — this connection cannot continue —
+/// Every variant means the same thing to a caller — this connection cannot continue —
 /// so the value of separating them is in the sentence each one writes. A [`Short`]
 /// names a buffer that ended early; a [`Refused`] names the field whose value stopped
-/// us, which is the one a person needs when a particular server does not work.
+/// us, which is the one a person needs when a particular server does not work; a
+/// [`Reported`] is not a fault in the PDU at all, but the server saying in a
+/// well-formed one why it is ending the session.
 ///
 /// [`Short`]: Malformed::Short
 /// [`Refused`]: Malformed::Refused
+/// [`Reported`]: Malformed::Reported
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Malformed {
     /// The buffer ended in the middle of a field.
@@ -34,6 +37,10 @@ pub enum Malformed {
     /// client cannot continue without.
     #[error("{what} does not carry {field}")]
     Missing { what: &'static str, field: &'static str },
+    /// The structure is whole and well formed, and carries the other end's own
+    /// account of why the session is over.
+    #[error("{what}: {reason} ({code:#010x})")]
+    Reported { what: &'static str, reason: &'static str, code: u32 },
 }
 
 /// A buffer being taken apart, front to back.
@@ -115,6 +122,11 @@ impl<'a> Reader<'a> {
     /// not.
     pub fn missing(&self, field: &'static str) -> Malformed {
         Malformed::Missing { what: self.what, field }
+    }
+
+    /// The error for a structure whose whole purpose was to say the session is over.
+    pub fn report(&self, reason: &'static str, code: u32) -> Malformed {
+        Malformed::Reported { what: self.what, reason, code }
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], Malformed> {
@@ -228,6 +240,15 @@ mod tests {
         assert_eq!(
             r.missing("a server network block").to_string(),
             "a GCC Conference Create Response does not carry a server network block"
+        );
+    }
+
+    #[test]
+    fn a_reported_end_is_the_servers_sentence_and_its_number() {
+        let r = Reader::new("the server ended the session", &[]);
+        assert_eq!(
+            r.report("another connection took it over", 5).to_string(),
+            "the server ended the session: another connection took it over (0x00000005)"
         );
     }
 

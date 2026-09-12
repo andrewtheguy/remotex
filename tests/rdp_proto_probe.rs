@@ -15,17 +15,21 @@
 //! ```
 //!
 //! It goes as far as the new stack can carry a connection and stops there — at the
-//! moment the channels are open and the session's own PDUs would begin. What it
-//! proves at each step is the step a server is the only judge of: that the host
-//! accepts what we sent, and that what it sends back decodes.
+//! moment the desktop is live and the first update would arrive. What it proves at
+//! each step is the step a server is the only judge of: that the host accepts what we
+//! sent, and that what it sends back decodes.
 
 mod common;
 
 use std::time::Duration;
 
+use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
 use remotex::rdp_client::proto::credssp::{self, Credentials};
+use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
-use remotex::rdp_client::proto::{mcs, tls};
+use remotex::rdp_client::proto::info::ClientInfo;
+use remotex::rdp_client::proto::share::{self, Pdu};
+use remotex::rdp_client::proto::{license, mcs, tls};
 use remotex::rdp_client::proto::x224::{
     ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER, frame_length,
 };
@@ -51,9 +55,12 @@ const CHANNELS: [Channel; 1] = [Channel::DYNAMIC];
 /// accept it.
 const DESKTOP: (u16, u16) = (1920, 1080);
 
+/// US English, which every Windows host has.
+const KEYBOARD_LAYOUT: u32 = 0x0409;
+
 #[tokio::test]
 #[ignore = "requires a real Windows host from tmp/test_uat.toml"]
-async fn a_windows_host_opens_the_channels_our_connection_sequence_asks_for() {
+async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
     common::init_logging();
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
@@ -68,6 +75,8 @@ async fn a_windows_host_opens_the_channels_our_connection_sequence_asks_for() {
         let mut tcp = TcpStream::connect((server_name.as_str(), target.port))
             .await
             .expect("connect to the host");
+        // This end of the socket, which the Client Info PDU tells the server about.
+        let client_address = tcp.local_addr().expect("the local address of the socket").ip();
 
         // 1. The X.224 negotiation, in the clear.
         let request =
@@ -112,7 +121,7 @@ async fn a_windows_host_opens_the_channels_our_connection_sequence_asks_for() {
             width: DESKTOP.0,
             height: DESKTOP.1,
             client_name: "remotex",
-            keyboard_layout: 0x0409,
+            keyboard_layout: KEYBOARD_LAYOUT,
             selected_protocol: protocol.bits(),
             channels: &CHANNELS,
         }
@@ -156,9 +165,100 @@ async fn a_windows_host_opens_the_channels_our_connection_sequence_asks_for() {
             println!("joined channel {joined}");
             assert_eq!(joined, channel, "the server joined the channel that was asked for");
         }
+
+        // 7. The logon. The credentials went through CredSSP already; this says to
+        //    use them rather than to show a logon screen.
+        let logon = ClientInfo {
+            username: &target.username,
+            password: &target.password,
+            domain: target.domain.as_deref(),
+            address: client_address,
+        }
+        .encode()
+        .expect("the Client Info PDU fits a frame");
+        send(&mut stream, user, io_channel, &logon).await;
+        println!("-> Client Info, {} bytes", logon.len());
+
+        // 8. Licensing, which on a host like this one is a single PDU saying there is
+        //    none.
+        let payload = receive(&mut stream, io_channel).await;
+        license::accept(&payload).expect("the host to say no licence is needed");
+        println!("<- licensing: no licence needed");
+
+        // 9. The capability exchange. The server's Demand Active is the first PDU
+        //    that says what the session will actually be.
+        let payload = receive(&mut stream, io_channel).await;
+        let Pdu::DemandActive(body) = share::decode(&payload).expect("a share control PDU") else {
+            panic!("the server did not demand a share once licensing was done");
+        };
+        let demand = DemandActive::decode(body).expect("an RDP Demand Active PDU");
+        println!(
+            "<- Demand Active: share {:#x}, desktop {}x{}, fragments up to {} bytes",
+            demand.share_id, demand.width, demand.height, demand.multifragment
+        );
+        assert_eq!(
+            (demand.width, demand.height),
+            DESKTOP,
+            "the host opened the desktop that was asked for"
+        );
+
+        let confirm = ConfirmActive {
+            share_id: demand.share_id,
+            width: demand.width,
+            height: demand.height,
+            keyboard_layout: KEYBOARD_LAYOUT,
+            multifragment: demand.multifragment,
+        }
+        .encode();
+        let confirm = share::confirm_active(user, &confirm);
+        send(&mut stream, user, io_channel, &confirm).await;
+        println!("-> Confirm Active, {} bytes", confirm.len());
+
+        // 10. The finalization handshake. All four go out without waiting; the
+        //     server's four come back in its own time, with session PDUs among them.
+        for request in finalization::requests(user, demand.share_id) {
+            stream.write_all(&mcs::send_data_request(user, io_channel, &request).unwrap())
+                .await
+                .expect("send a finalization PDU");
+        }
+        stream.flush().await.expect("send the finalization PDUs");
+        println!("-> synchronize, cooperate, request control, font list");
+
+        loop {
+            let payload = receive(&mut stream, io_channel).await;
+            let Pdu::Data(data) = share::decode(&payload).expect("a share control PDU") else {
+                panic!("the server deactivated the share during finalization");
+            };
+            let response = finalization::response(&data).expect("a finalization PDU");
+            println!("<- {response:?}");
+            if response == Response::FontMap {
+                break;
+            }
+        }
+        println!("the desktop is live");
     })
     .await
     .expect("the connection sequence finished within its budget");
+}
+
+/// One PDU out, addressed to a channel.
+async fn send(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    user: u16,
+    channel: u16,
+    pdu: &[u8],
+) {
+    let frame = mcs::send_data_request(user, channel, pdu).expect("the PDU fits one Send Data");
+    stream.write_all(&frame).await.expect("send a PDU");
+    stream.flush().await.expect("send a PDU");
+}
+
+/// One PDU in, off the channel it was expected on.
+async fn receive(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), channel: u16) -> Vec<u8> {
+    let frame = read_frame(stream).await;
+    let data = mcs::send_data_indication(&frame).expect("an MCS Send Data Indication");
+    assert_eq!(data.channel, channel, "the PDU arrived on the channel it was expected on");
+    data.payload.to_vec()
 }
 
 /// One whole TPKT frame: the header, then exactly the length it announces.
