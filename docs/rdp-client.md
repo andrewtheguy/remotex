@@ -175,6 +175,18 @@ announces no drawing orders either, so the path is bitmaps throughout. That is w
 makes a resize a full reactivation, after which a Windows host re-renders the
 desktop sharp. Every server that is not Windows takes this path whatever the key.
 
+The path is 32 bits per pixel and nothing else: the planar codec is the only one
+decoded, and the interleaved run-length coding a shallower session would use is
+not. The depth is asked for in the GCC conference and in the Confirm Active, but
+the server's listener has the last word, and a Demand Active naming any other depth
+is refused during the capability exchange. Measured on Windows Server 2025
+Datacenter: its `RDP-Tcp` listener limits colour depth to 16 bits out of the box,
+so `egfx = false` against it ends with *a server Bitmap capability set carries a
+colour depth 0x10*. The same host connects and paints under the pipeline, which
+negotiates its own pixel formats and ignores that limit. A Windows workstation's
+listener allows 32 bits and takes either path. Such a server is reached with
+`egfx = true`, or with its "Limit maximum color depth" setting raised to 32 bits.
+
 Bitmap updates carry no frame boundary, so the engine flushes damage on a guess:
 the 16 ms coalescer (`DAMAGE_INTERVAL` in `src/rdp.rs`) reconstructs boundaries by
 timing — a quiet screen's damage leaves on the spot, and everything within one
