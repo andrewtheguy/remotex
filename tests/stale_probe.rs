@@ -419,12 +419,17 @@ const SETTLED: Duration = Duration::from_secs(3);
 const APART: i32 = 32;
 
 /// Cells that disagree with the repaint, cut by how long they had gone unwritten.
+#[allow(clippy::too_many_arguments)]
 fn report_stale(
     before: &Canvas,
     after: &Canvas,
     touched: &HashMap<(u16, u16), Instant>,
     formats: &[HashMap<(u16, u16), u8>; 2],
     refresh: Instant,
+    units: u64,
+    tiles: u64,
+    refs: u64,
+    kib: u64,
 ) {
     let mut recoded = 0usize;
     let mut swaps: HashMap<(Option<u8>, Option<u8>), usize> = HashMap::new();
@@ -478,6 +483,31 @@ fn report_stale(
     }
     settled.sort_by_key(|(_, _, differs, _)| std::cmp::Reverse(*differs));
     println!(
+        "  RESULT arm={} units={} tiles={} refs={} kib={} recoded={} lossy_to_lossless={} stale={}",
+        std::env::var("REMOTEX_STALE_ARM").unwrap_or_else(|_| "unnamed".into()),
+        units,
+        tiles,
+        refs,
+        kib,
+        recoded,
+        swaps
+            .iter()
+            .filter(|((from, to), _)| *from == Some(3) && *to == Some(1))
+            .map(|(_, count)| *count)
+            .sum::<usize>(),
+        settled.len(),
+    );
+    // A run the remote spent still proves nothing about a path that only exists
+    // while something moves, and comparing one against a run that had a video in it
+    // is how a measurement lies. Said outright rather than left to be inferred from
+    // the counts.
+    if units < 200 {
+        println!(
+            "  WARNING: only {units} video units arrived — nothing was really playing on the \
+             remote, so this run is not comparable with one that was"
+        );
+    }
+    println!(
         "  {} cells disagree after settling for {SETTLED:?}; {fresh} more were still being written, \
          {recoded} were encoded differently in the two passes",
         settled.len()
@@ -508,6 +538,7 @@ async fn a_repaint_matches_what_was_delivered() {
     let mut phase = 0; // 0 = running, 1 = repaint after refresh
     let mut before: Option<Canvas> = None;
     let mut touched_before: HashMap<(u16, u16), Instant> = HashMap::new();
+    let (mut units_before, mut tiles_before, mut refs_before, mut kib_before) = (0u64, 0u64, 0u64, 0u64);
     let mut deadline = Instant::now() + run;
     let mut first_batch: Option<Instant> = None;
     let mut refresh_at: Option<Instant> = None;
@@ -535,6 +566,8 @@ async fn a_repaint_matches_what_was_delivered() {
                     }
                     model.coverage = Some(common::TileCoverage::new(canvas.w as u32, canvas.h as u32));
                     before = Some(canvas);
+                    (units_before, tiles_before, refs_before, kib_before) =
+                        (model.videos, model.tiles, model.refs, model.bytes / 1024);
                     touched_before = model.touched.clone();
                     model.phase = 1;
                     ws.send(Message::Text(r#"{"type":"refresh"}"#.into())).await.unwrap();
@@ -601,6 +634,16 @@ async fn a_repaint_matches_what_was_delivered() {
     }
     let before = before.as_ref().unwrap();
     compare(before, &after, dump.as_deref());
-    report_stale(before, &after, &touched_before, &model.formats, refresh_at.unwrap());
+    report_stale(
+        before,
+        &after,
+        &touched_before,
+        &model.formats,
+        refresh_at.unwrap(),
+        units_before,
+        tiles_before,
+        refs_before,
+        kib_before,
+    );
     ws.close(None).await.ok();
 }
