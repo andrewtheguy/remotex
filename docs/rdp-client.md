@@ -154,7 +154,11 @@ the planar codec — the same `proto/planar.rs` a bitmap update uses, with the r
 the right way up. ClearCodec (`proto/clear.rs`), the desktop's primary codec here:
 its residual, band and glyph layers with their caches, and all three subcodecs,
 raw, RLEX and NSCodec (`proto/nsc.rs`), the last carrying most pictures and
-anti-aliased text. RemoteFX Progressive (`proto/progressive.rs`), which arrives on
+anti-aliased text. A ClearCodec rectangle is decoded onto the surface over what it
+already holds, as FreeRDP decodes it: the host leaves pixels no layer paints to the
+surface underneath, stores a glyph as the surface looks once its layers are done,
+and places band columns that can land beside the rectangle — so every one of those
+is invalidated with it. RemoteFX Progressive (`proto/progressive.rs`), which arrives on
 WireToSurface2 with its own rectangles: the decoder keeps every tile of every
 surface between PDUs — its coefficients and their signs — so an upgrade pass adds
 bits to what a first pass left, and only the reduce-extrapolate wavelet and RLGR1 a

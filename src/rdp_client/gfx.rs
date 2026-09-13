@@ -486,8 +486,29 @@ impl Graphics {
                     .map(|()| &self.pixels[..])
             }
             gfx::CODEC_CLEARCODEC => {
+                // Onto the surface itself, over what it holds: the host encodes a
+                // ClearCodec rectangle against that picture (see `clear`).
                 let clear = self.clear.get_or_insert_with(|| Box::new(clear::Clear::new()));
-                clear.decompress(data, &mut self.pixels, width, height).map(|()| &self.pixels[..])
+                let (surface_width, surface_height) = (found.width as usize, found.height as usize);
+                let mut canvas = clear::Canvas::new(&mut found.pixels, surface_width, surface_height);
+                let outcome =
+                    clear.decompress(data, &mut canvas, usize::from(rect.left), usize::from(rect.top), width, height);
+                let spilled = canvas.painted();
+                // Whatever the outcome: the layers before a fault are on the surface
+                // already, and a band's columns can land beside the rectangle.
+                found.invalidate(Rect {
+                    x: u32::from(rect.left),
+                    y: u32::from(rect.top),
+                    width: u32::from(width),
+                    height: u32::from(height),
+                });
+                if let Some((x, y, w, h)) = spilled {
+                    found.invalidate(Rect { x: x as u32, y: y as u32, width: w as u32, height: h as u32 });
+                }
+                if let Err(e) = outcome {
+                    warn!("rdp: leaving part of a {width}x{height} ClearCodec rectangle unpainted: {e}");
+                }
+                return;
             }
             other => {
                 self.tally.unhandled("codec", other, gfx::codec_name(other));

@@ -7,11 +7,16 @@
 //! a per-rectangle palette. On the sandbox this client is written against it is the
 //! desktop's primary codec, so a lit desktop needs it.
 //!
-//! A rectangle is decoded whole into a packed `BGRX32` buffer, top row first, the way
-//! [`super::planar`] produces one, so the surface above swizzles it into the
-//! framebuffer's order with the same path. The decoder keeps its caches — the glyph
-//! cache, and the two vertical-bar caches — for the life of the channel, because a
-//! later rectangle refers back to them by index.
+//! A rectangle is decoded straight onto the surface it is for, in the surface's own
+//! `RGBX32`, the way the reference decodes it. That is not a detail of the port: the
+//! layers are painted *over* the surface, so a pixel no layer touches is whatever the
+//! surface already held, and a glyph is stored as the surface looked once the layers
+//! were done. The host encodes against that picture. A decoder that composed each
+//! rectangle over black instead painted black — and cached black, and stamped it
+//! elsewhere later — wherever the host had counted on what was underneath, which is
+//! how stale shapes turned up beside text a page had scrolled. The decoder keeps its
+//! caches — the glyph cache, and the two vertical-bar caches — for the life of the
+//! channel, because a later rectangle refers back to them by index.
 //!
 //! # What is and is not read
 //!
@@ -20,7 +25,8 @@
 //! subcodecs — raw, RLEX, and NSCodec, which lives in [`super::nsc`] and which the
 //! sandbox turned out to lean on for pictures and anti-aliased text. A rectangle that
 //! cannot be read is refused, which the caller turns into one unpainted rectangle
-//! rather than the end of the session.
+//! rather than the end of the session — though the layers decoded before the fault
+//! are already on the surface, and [`Canvas::painted`] still says where.
 //!
 //! Ported from FreeRDP's `libfreerdp/codec/clear.c`.
 //!
@@ -53,7 +59,12 @@ fn refuse(field: &'static str, value: u64) -> Malformed {
     Malformed::Refused { what: WHAT, field, value }
 }
 
-/// A rectangle stored under a glyph index, in packed `BGRX32`.
+/// One wire colour, `[b, g, r]`, as a surface pixel.
+fn pixel(bgr: [u8; 3]) -> [u8; 4] {
+    [bgr[2], bgr[1], bgr[0], 0]
+}
+
+/// A rectangle stored under a glyph index, in the surface's `RGBX32`.
 #[derive(Clone, Default)]
 struct Glyph {
     pixels: Vec<u8>,
@@ -61,10 +72,64 @@ struct Glyph {
     count: usize,
 }
 
-/// One vertical bar's pixels, packed `BGRX32`; its height is `pixels.len() / 4`.
+/// One vertical bar's pixels, `RGBX32`; its height is `pixels.len() / 4`.
 #[derive(Clone, Default)]
 struct VBar {
     pixels: Vec<u8>,
+}
+
+/// The surface a rectangle is decoded onto: `RGBX32`, `width * 4` bytes a row.
+pub struct Canvas<'a> {
+    pixels: &'a mut [u8],
+    width: usize,
+    height: usize,
+    /// The bounds of every band column written, as `(left, top, right, bottom)`
+    /// exclusive — which, unlike every other layer, can reach past the rectangle.
+    columns: Option<(usize, usize, usize, usize)>,
+}
+
+impl<'a> Canvas<'a> {
+    /// `pixels` must hold `width * height` pixels.
+    pub fn new(pixels: &'a mut [u8], width: usize, height: usize) -> Self {
+        debug_assert_eq!(pixels.len(), width * height * 4);
+        Self { pixels, width, height, columns: None }
+    }
+
+    /// Where band columns were written, as `(x, y, width, height)`: the one layer
+    /// that paints past its rectangle, as the reference lets it. Everything else a
+    /// decode writes is inside the rectangle it was given.
+    pub fn painted(&self) -> Option<(usize, usize, usize, usize)> {
+        self.columns.map(|(left, top, right, bottom)| (left, top, right - left, bottom - top))
+    }
+
+    fn at(&self, x: usize, y: usize) -> usize {
+        (y * self.width + x) * 4
+    }
+}
+
+/// One rectangle of a [`Canvas`], which every layer but the bands stays inside.
+struct Dst<'c, 'a> {
+    canvas: &'c mut Canvas<'a>,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+impl Dst<'_, '_> {
+    /// Write one wire colour at `(x, y)` of the rectangle, dropping it if outside.
+    fn put(&mut self, x: usize, y: usize, bgr: [u8; 3]) {
+        if x < self.w && y < self.h {
+            let at = self.canvas.at(self.x + x, self.y + y);
+            self.canvas.pixels[at..at + 4].copy_from_slice(&pixel(bgr));
+        }
+    }
+
+    /// Row `row` of the rectangle's pixels.
+    fn row(&mut self, row: usize) -> &mut [u8] {
+        let at = self.canvas.at(self.x, self.y + row);
+        &mut self.canvas.pixels[at..at + self.w * 4]
+    }
 }
 
 /// The codec's state, kept for the life of the channel.
@@ -109,18 +174,20 @@ impl Clear {
         }
     }
 
-    /// Decode one rectangle into `out` as `width * height` packed `BGRX32`, top row
-    /// first.
+    /// Decode one `width` × `height` rectangle onto `canvas` at `(x, y)`, over what
+    /// the canvas already holds there. The rectangle must lie inside the canvas.
     pub fn decompress(
         &mut self,
         src: &[u8],
-        out: &mut Vec<u8>,
+        canvas: &mut Canvas<'_>,
+        x: usize,
+        y: usize,
         width: u16,
         height: u16,
     ) -> Result<(), Malformed> {
         let (w, h) = (usize::from(width), usize::from(height));
-        out.clear();
-        out.resize(w * h * 4, 0);
+        debug_assert!(x + w <= canvas.width && y + h <= canvas.height);
+        let mut dst = Dst { canvas, x, y, w, h };
 
         let mut r = Reader::new(WHAT, src);
         let glyph_flags = r.u8()?;
@@ -141,7 +208,7 @@ impl Clear {
             self.short_cursor = 0;
         }
 
-        let glyph = self.glyph_prologue(&mut r, glyph_flags, w, h, out)?;
+        let glyph = self.glyph_prologue(&mut r, glyph_flags, &mut dst)?;
 
         // A glyph hit with no room for a composition header is the whole rectangle.
         if r.rest().len() < 12 {
@@ -158,33 +225,33 @@ impl Clear {
 
         if residual > 0 {
             let section = r.bytes(residual)?;
-            residual_data(section, w, h, out)?;
+            residual_data(section, &mut dst)?;
         }
         if bands > 0 {
             let section = r.bytes(bands)?;
-            self.bands_data(section, w, h, out)?;
+            self.bands_data(section, &mut dst)?;
         }
         if subcodec > 0 {
             let section = r.bytes(subcodec)?;
-            subcodec_data(section, w, h, out, &mut self.nsc)?;
+            subcodec_data(section, &mut dst, &mut self.nsc)?;
         }
 
         if let Glyphish::Store(slot) = glyph {
-            self.glyphs[slot] = Glyph { pixels: out.clone(), count: w * h };
+            // The rectangle as the surface now shows it — including every pixel no
+            // layer painted — which is what a later hit is meant to stamp back down.
+            let mut pixels = Vec::with_capacity(w * h * 4);
+            for row in 0..h {
+                pixels.extend_from_slice(dst.row(row));
+            }
+            self.glyphs[slot] = Glyph { pixels, count: w * h };
         }
         Ok(())
     }
 
-    /// Read the glyph header, and either fill `out` from the cache (a hit) or return
-    /// the slot the decoded rectangle is to be stored under.
-    fn glyph_prologue(
-        &mut self,
-        r: &mut Reader<'_>,
-        flags: u8,
-        w: usize,
-        h: usize,
-        out: &mut [u8],
-    ) -> Result<Glyphish, Malformed> {
+    /// Read the glyph header, and either paint the rectangle from the cache (a hit)
+    /// or return the slot the decoded rectangle is to be stored under.
+    fn glyph_prologue(&mut self, r: &mut Reader<'_>, flags: u8, dst: &mut Dst<'_, '_>) -> Result<Glyphish, Malformed> {
+        let (w, h) = (dst.w, dst.h);
         if flags & FLAG_GLYPH_HIT != 0 && flags & FLAG_GLYPH_INDEX == 0 {
             return Err(refuse("a glyph hit without a glyph index, flags", u64::from(flags)));
         }
@@ -203,7 +270,9 @@ impl Clear {
             if entry.pixels.is_empty() || w * h > entry.count {
                 return Err(refuse("a glyph hit on an entry too small, index", index as u64));
             }
-            out[..w * h * 4].copy_from_slice(&entry.pixels[..w * h * 4]);
+            for row in 0..h {
+                dst.row(row).copy_from_slice(&entry.pixels[row * w * 4..(row + 1) * w * 4]);
+            }
             return Ok(Glyphish::Hit);
         }
         Ok(Glyphish::Store(index))
@@ -211,9 +280,8 @@ impl Clear {
 
     /// The banded vertical bars: the layer that carries the desktop's structure and
     /// leans on the two vertical-bar caches. [MS-RDPEGFX] 2.2.4.2 and 3.1.8.2.3.
-    fn bands_data(&mut self, section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(), Malformed> {
+    fn bands_data(&mut self, section: &[u8], dst: &mut Dst<'_, '_>) -> Result<(), Malformed> {
         let mut r = Reader::new(WHAT, section);
-        let mut dst = Dst { out, w, h };
         while !r.is_empty() {
             let x_start = r.u16_le()?;
             let x_end = r.u16_le()?;
@@ -255,7 +323,7 @@ impl Clear {
                     let mut short_pixels = Vec::with_capacity(short_count * 4);
                     for _ in 0..short_count {
                         let (b, g, red) = (r.u8()?, r.u8()?, r.u8()?);
-                        short_pixels.extend_from_slice(&[b, g, red, 0]);
+                        short_pixels.extend_from_slice(&pixel([b, g, red]));
                     }
                     self.short_vbars[self.short_cursor] = VBar { pixels: short_pixels.clone() };
                     self.short_cursor = (self.short_cursor + 1) % VBAR_SHORT_SIZE;
@@ -272,7 +340,7 @@ impl Clear {
                     return Err(refuse("an invalid vBar header", u64::from(header)));
                 };
 
-                draw_column(&mut dst, usize::from(x_start), y_start, i, &column, vbar_height);
+                draw_column(dst, usize::from(x_start), y_start, i, &column)?;
             }
         }
         Ok(())
@@ -289,9 +357,9 @@ impl Clear {
 
 /// The residual layer: a run-length fill of the whole rectangle, one colour a run.
 /// [MS-RDPEGFX] 2.2.4.1.1.
-fn residual_data(section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(), Malformed> {
+fn residual_data(section: &[u8], dst: &mut Dst<'_, '_>) -> Result<(), Malformed> {
     let mut r = Reader::new(WHAT, section);
-    let pixels = w * h;
+    let pixels = dst.w * dst.h;
     let mut at = 0;
     while !r.is_empty() {
         let color = [r.u8()?, r.u8()?, r.u8()?]; // B, G, R
@@ -301,7 +369,7 @@ fn residual_data(section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(
             return Err(refuse("a residual run past the rectangle", run as u64));
         }
         for _ in 0..run {
-            put(out, at, color);
+            dst.put(at % dst.w, at / dst.w, color);
             at += 1;
         }
     }
@@ -313,9 +381,8 @@ fn residual_data(section: &[u8], w: usize, h: usize, out: &mut [u8]) -> Result<(
 
 /// The subcodec layer: raw `BGR24`, NSCodec, or the RLEX run-length subcodec, each
 /// over a sub-rectangle. [MS-RDPEGFX] 2.2.4.3.
-fn subcodec_data(section: &[u8], w: usize, h: usize, out: &mut [u8], nsc: &mut Nsc) -> Result<(), Malformed> {
+fn subcodec_data(section: &[u8], dst: &mut Dst<'_, '_>, nsc: &mut Nsc) -> Result<(), Malformed> {
     let mut r = Reader::new(WHAT, section);
-    let mut dst = Dst { out, w, h };
     while !r.is_empty() {
         let x0 = usize::from(r.u16_le()?);
         let y0 = usize::from(r.u16_le()?);
@@ -324,13 +391,13 @@ fn subcodec_data(section: &[u8], w: usize, h: usize, out: &mut [u8], nsc: &mut N
         let count = r.u32_le()? as usize;
         let id = r.u8()?;
         let data = r.bytes(count)?;
-        if x0 + sw > w || y0 + sh > h {
+        if x0 + sw > dst.w || y0 + sh > dst.h {
             return Err(refuse("a subcodec rectangle past its tile", (x0 + sw).max(y0 + sh) as u64));
         }
         match id {
-            0 => subcode_raw(data, sw, sh, x0, y0, &mut dst)?,
+            0 => subcode_raw(data, sw, sh, x0, y0, dst)?,
             1 => nsc.decode(data, sw, sh, |x, y, bgr| dst.put(x0 + x, y0 + y, bgr))?,
-            2 => subcode_rlex(data, sw, sh, x0, y0, &mut dst)?,
+            2 => subcode_rlex(data, sw, sh, x0, y0, dst)?,
             other => return Err(refuse("an unsupported ClearCodec subcodec", u64::from(other))),
         }
     }
@@ -344,7 +411,7 @@ fn subcode_raw(
     sh: usize,
     x0: usize,
     y0: usize,
-    dst: &mut Dst<'_>,
+    dst: &mut Dst<'_, '_>,
 ) -> Result<(), Malformed> {
     if data.len() != sw * sh * 3 {
         return Err(refuse("a raw subcodec of the wrong size", data.len() as u64));
@@ -363,7 +430,7 @@ fn subcode_rlex(
     sh: usize,
     x0: usize,
     y0: usize,
-    dst: &mut Dst<'_>,
+    dst: &mut Dst<'_, '_>,
 ) -> Result<(), Malformed> {
     let mut r = Reader::new(WHAT, data);
     let palette_count = r.u8()?;
@@ -431,17 +498,11 @@ fn run_length(r: &mut Reader<'_>, first: u8) -> Result<u32, Malformed> {
 /// Build one full-height column: background above `yon`, the short bar's pixels from
 /// `yon`, background below, each clamped so the column is exactly `height` tall.
 fn build_column(height: usize, yon: usize, short_pixels: &[u8], bkg: [u8; 3]) -> Vec<u8> {
-    let mut column = vec![0u8; height * 4];
+    let mut column = pixel(bkg).repeat(height);
     let short_count = short_pixels.len() / 4;
-    for row in 0..yon.min(height) {
-        put(&mut column, row, bkg);
-    }
-    let seg = if height > yon { short_count.min(height - yon) } else { 0 };
-    for k in 0..seg {
-        column[(yon + k) * 4..(yon + k) * 4 + 4].copy_from_slice(&short_pixels[k * 4..k * 4 + 4]);
-    }
-    for row in (yon + short_count)..height {
-        put(&mut column, row, bkg);
+    if height > yon {
+        let seg = short_count.min(height - yon);
+        column[yon * 4..(yon + seg) * 4].copy_from_slice(&short_pixels[..seg * 4]);
     }
     column
 }
@@ -454,43 +515,33 @@ fn fit_column(stored: &[u8], height: usize) -> Vec<u8> {
     column
 }
 
-/// Draw column `i` of a band down onto the rectangle at `(x_start + i, y_start..)`,
-/// clipped to the rectangle. The reference decodes straight onto the surface and lets
-/// a band spill past the rectangle onto it; here the spill has nowhere to go and is
-/// dropped, rather than costing the whole rectangle.
-fn draw_column(dst: &mut Dst<'_>, x_start: usize, y_start: usize, i: usize, column: &[u8], height: usize) {
-    let x = x_start + i;
-    if x >= dst.w {
-        return;
+/// Draw column `i` of a band down onto the surface at `(x_start + i, y_start..)` of
+/// the rectangle, as the reference draws it: only a band's first `w` columns, each at
+/// most `h` rows, and clipped to the *surface* rather than to the rectangle — a band
+/// the host places near the rectangle's edge lands on the surface beside it. A column
+/// that would leave the surface refuses the rectangle, as the reference does.
+fn draw_column(dst: &mut Dst<'_, '_>, x_start: usize, y_start: usize, i: usize, column: &[u8]) -> Result<(), Malformed> {
+    if i >= dst.w {
+        return Ok(());
     }
-    let count = height.min(dst.h.saturating_sub(y_start));
+    let count = (column.len() / 4).min(dst.h);
+    let x = dst.x + x_start + i;
+    let top = dst.y + y_start;
+    if x >= dst.canvas.width || top + count > dst.canvas.height {
+        return Err(refuse("a band column past the surface", x as u64));
+    }
     for row in 0..count {
-        let at = ((y_start + row) * dst.w + x) * 4;
-        dst.out[at..at + 4].copy_from_slice(&column[row * 4..row * 4 + 4]);
+        let at = dst.canvas.at(x, top + row);
+        dst.canvas.pixels[at..at + 4].copy_from_slice(&column[row * 4..row * 4 + 4]);
     }
-}
-
-/// Write one `BGRX` pixel at a linear index of a packed buffer.
-fn put(out: &mut [u8], index: usize, bgr: [u8; 3]) {
-    let at = index * 4;
-    out[at..at + 4].copy_from_slice(&[bgr[0], bgr[1], bgr[2], 0]);
-}
-
-/// The rectangle being decoded into: its packed `BGRX32` pixels and its size, so the
-/// layers that draw sub-rectangles into it carry one argument, not three.
-struct Dst<'a> {
-    out: &'a mut [u8],
-    w: usize,
-    h: usize,
-}
-
-impl Dst<'_> {
-    /// Write one `BGRX` pixel at `(x, y)`, dropping it if outside the rectangle.
-    fn put(&mut self, x: usize, y: usize, bgr: [u8; 3]) {
-        if x < self.w && y < self.h {
-            put(self.out, y * self.w + x, bgr);
-        }
+    if count > 0 {
+        let bounds = (x, top, x + 1, top + count);
+        dst.canvas.columns = Some(match dst.canvas.columns {
+            Some((l, t, r, b)) => (l.min(bounds.0), t.min(bounds.1), r.max(bounds.2), b.max(bounds.3)),
+            None => bounds,
+        });
     }
+    Ok(())
 }
 
 /// Advance a raster cursor one pixel, wrapping to the next row at width `w`.
@@ -521,95 +572,168 @@ mod tests {
         v
     }
 
-    /// The residual layer fills the whole rectangle by runs, top row first.
+    /// A surface of `w`×`h` pixels all `fill`, `RGBX32`.
+    fn surface(w: usize, h: usize, fill: [u8; 4]) -> Vec<u8> {
+        fill.repeat(w * h)
+    }
+
+    /// The pixel at `(x, y)` of a `w`-wide surface.
+    fn at(pixels: &[u8], w: usize, x: usize, y: usize) -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    }
+
+    /// One raw `BGR24` sub-rectangle of the subcodec layer.
+    fn raw(x: u16, y: u16, w: u16, h: u16, bgr: &[u8]) -> Vec<u8> {
+        let mut sub = Vec::new();
+        for v in [x, y, w, h] {
+            sub.extend_from_slice(&v.to_le_bytes());
+        }
+        sub.extend_from_slice(&(bgr.len() as u32).to_le_bytes());
+        sub.push(0); // raw
+        sub.extend_from_slice(bgr);
+        sub
+    }
+
+    const GREY: [u8; 4] = [7, 7, 7, 0];
+
+    /// The residual layer fills the whole rectangle by runs, where the rectangle is
+    /// on the surface, and nowhere else.
     #[test]
-    fn a_residual_run_fills_the_rectangle() {
+    fn a_residual_run_fills_the_rectangle_where_it_is() {
         let mut clear = Clear::new();
-        let mut out = Vec::new();
+        let mut pixels = surface(4, 3, GREY);
         // One run of four pixels: B=30, G=20, R=10.
         let src = rect(0, 0, None, &[30, 20, 10, 4], &[], &[]);
-        clear.decompress(&src, &mut out, 2, 2).unwrap();
-        assert_eq!(out, [30, 20, 10, 0].repeat(4));
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 4, 3), 1, 1, 2, 2).unwrap();
+        for y in 0..3 {
+            for x in 0..4 {
+                let inside = (1..3).contains(&x) && (1..3).contains(&y);
+                assert_eq!(at(&pixels, 4, x, y), if inside { [10, 20, 30, 0] } else { GREY }, "{x},{y}");
+            }
+        }
+    }
+
+    /// A pixel no layer paints is the surface's: the host encodes against the picture
+    /// it knows is there, so painting it any other colour is painting the wrong one.
+    #[test]
+    fn a_pixel_no_layer_paints_keeps_the_surface() {
+        let mut clear = Clear::new();
+        let mut pixels = surface(2, 1, GREY);
+        let src = rect(0, 0, None, &[], &[], &raw(1, 0, 1, 1, &[3, 2, 1]));
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1).unwrap();
+        assert_eq!(pixels, [GREY, [1, 2, 3, 0]].concat());
     }
 
     /// The RLEX subcodec paints a run and then a colour suite off its palette.
     #[test]
     fn an_rlex_suite_walks_its_palette() {
         let mut clear = Clear::new();
-        let mut out = Vec::new();
+        let mut pixels = surface(2, 1, GREY);
         // Palette of two: colour 0 = B3 G2 R1, colour 1 = B6 G5 R4. numBits = 1.
         // tmp = 0x03: stopIndex 1, suiteDepth 1, startIndex 0; run 0, then a suite of
         // two — palette[0] then palette[1].
         let rlex = [2u8, 3, 2, 1, 6, 5, 4, 0x03, 0];
         let mut sub = Vec::new();
-        sub.extend_from_slice(&0u16.to_le_bytes()); // xStart
-        sub.extend_from_slice(&0u16.to_le_bytes()); // yStart
-        sub.extend_from_slice(&2u16.to_le_bytes()); // width
-        sub.extend_from_slice(&1u16.to_le_bytes()); // height
+        for v in [0u16, 0, 2, 1] {
+            sub.extend_from_slice(&v.to_le_bytes());
+        }
         sub.extend_from_slice(&(rlex.len() as u32).to_le_bytes());
         sub.push(2); // RLEX
         sub.extend_from_slice(&rlex);
         let src = rect(0, 0, None, &[], &[], &sub);
-        clear.decompress(&src, &mut out, 2, 1).unwrap();
-        assert_eq!(out, vec![3, 2, 1, 0, 6, 5, 4, 0]);
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1).unwrap();
+        assert_eq!(pixels, vec![1, 2, 3, 0, 4, 5, 6, 0]);
     }
 
-    /// A rectangle stored under a glyph index and then hit paints from the cache.
+    /// A glyph is the rectangle as the surface showed it once the layers were done —
+    /// the pixels no layer painted included — and a hit stamps exactly that back
+    /// down, wherever the hit is.
     #[test]
-    fn a_glyph_is_stored_and_hit_from_the_cache() {
+    fn a_glyph_is_what_the_surface_showed_and_a_hit_stamps_it() {
         let mut clear = Clear::new();
-        let mut out = Vec::new();
-        let store = rect(FLAG_GLYPH_INDEX, 0, Some(5), &[30, 20, 10, 4], &[], &[]);
-        clear.decompress(&store, &mut out, 2, 2).unwrap();
-        assert_eq!(out, [30, 20, 10, 0].repeat(4));
+        let mut pixels = surface(4, 1, GREY);
+        let store = rect(FLAG_GLYPH_INDEX, 0, Some(5), &[], &[], &raw(1, 0, 1, 1, &[3, 2, 1]));
+        clear.decompress(&store, &mut Canvas::new(&mut pixels, 4, 1), 0, 0, 2, 1).unwrap();
 
-        // A hit carries only the glyph header; the composition sections are absent.
+        // Somewhere else, on a different background. A hit carries only the glyph
+        // header; the composition sections are absent.
+        pixels[8..].copy_from_slice(&[9, 9, 9, 0, 9, 9, 9, 0]);
         let mut hit = vec![FLAG_GLYPH_HIT | FLAG_GLYPH_INDEX, 1];
         hit.extend_from_slice(&5u16.to_le_bytes());
-        let mut lit = Vec::new();
-        clear.decompress(&hit, &mut lit, 2, 2).unwrap();
-        assert_eq!(lit, [30, 20, 10, 0].repeat(4));
+        clear.decompress(&hit, &mut Canvas::new(&mut pixels, 4, 1), 2, 0, 2, 1).unwrap();
+        assert_eq!(pixels, [GREY, [1, 2, 3, 0], GREY, [1, 2, 3, 0]].concat());
     }
 
     /// A banded short vertical bar, cache miss, paints its own pixels down a column.
     #[test]
     fn a_short_vbar_band_paints_a_column() {
         let mut clear = Clear::new();
-        let mut out = Vec::new();
+        let mut pixels = surface(1, 2, GREY);
         let mut band = Vec::new();
-        band.extend_from_slice(&0u16.to_le_bytes()); // xStart
-        band.extend_from_slice(&0u16.to_le_bytes()); // xEnd
-        band.extend_from_slice(&0u16.to_le_bytes()); // yStart
-        band.extend_from_slice(&1u16.to_le_bytes()); // yEnd (height 2)
+        for v in [0u16, 0, 0, 1] {
+            band.extend_from_slice(&v.to_le_bytes()); // x 0..=0, y 0..=1
+        }
         band.extend_from_slice(&[0, 0, 0]); // background B, G, R
         band.extend_from_slice(&0x0200u16.to_le_bytes()); // yOn 0, yOff 2 -> short miss
         band.extend_from_slice(&[3, 2, 1]); // pixel 0: B3 G2 R1
         band.extend_from_slice(&[6, 5, 4]); // pixel 1: B6 G5 R4
         let src = rect(0, 0, None, &[], &band, &[]);
-        clear.decompress(&src, &mut out, 1, 2).unwrap();
-        assert_eq!(out, vec![3, 2, 1, 0, 6, 5, 4, 0]);
+        let mut canvas = Canvas::new(&mut pixels, 1, 2);
+        clear.decompress(&src, &mut canvas, 0, 0, 1, 2).unwrap();
+        assert_eq!(canvas.painted(), Some((0, 0, 1, 2)));
+        assert_eq!(pixels, vec![1, 2, 3, 0, 4, 5, 6, 0]);
     }
 
-    /// A band that spills past the rectangle paints the rows and columns that fit,
-    /// as the reference lets it spill onto the surface, rather than refusing the
-    /// whole rectangle.
-    #[test]
-    fn a_band_past_the_rectangle_is_clipped_to_it() {
-        let mut clear = Clear::new();
-        let mut out = Vec::new();
+    /// One band of `columns` short-bar columns, `rows` tall, starting at column
+    /// `x_start` and row `y_start` of its rectangle, every pixel `[b, g, r]`.
+    fn band(x_start: u16, columns: u16, y_start: u16, rows: u16, bgr: [u8; 3]) -> Vec<u8> {
         let mut band = Vec::new();
-        band.extend_from_slice(&0u16.to_le_bytes()); // xStart
-        band.extend_from_slice(&1u16.to_le_bytes()); // xEnd: two columns, one past a 1-wide rectangle
-        band.extend_from_slice(&0u16.to_le_bytes()); // yStart
-        band.extend_from_slice(&3u16.to_le_bytes()); // yEnd: four rows, two past a 2-tall rectangle
-        band.extend_from_slice(&[0, 0, 0]); // background
-        for _ in 0..2 {
-            band.extend_from_slice(&0x0400u16.to_le_bytes()); // yOn 0, yOff 4 -> short miss
-            band.extend_from_slice(&[3, 2, 1, 6, 5, 4, 9, 8, 7, 12, 11, 10]);
+        for v in [x_start, x_start + columns - 1, y_start, y_start + rows - 1] {
+            band.extend_from_slice(&v.to_le_bytes());
         }
-        let src = rect(0, 0, None, &[], &band, &[]);
-        clear.decompress(&src, &mut out, 1, 2).unwrap();
-        assert_eq!(out, vec![3, 2, 1, 0, 6, 5, 4, 0]);
+        band.extend_from_slice(&[0, 0, 0]); // background
+        for _ in 0..columns {
+            band.extend_from_slice(&(rows << 8).to_le_bytes()); // yOn 0, yOff rows -> short miss
+            for _ in 0..rows {
+                band.extend_from_slice(&bgr);
+            }
+        }
+        band
+    }
+
+    /// A band placed past its rectangle lands on the surface beside it, as the
+    /// reference draws it — its first `width` columns, each at most `height` rows —
+    /// and says where, because a pixel painted and never reported is a pixel a
+    /// client never receives.
+    #[test]
+    fn a_band_past_the_rectangle_lands_on_the_surface_and_says_where() {
+        let mut clear = Clear::new();
+        let mut pixels = surface(4, 4, GREY);
+        // A 2×2 rectangle at (1, 1). Three columns from its column 1, four rows from
+        // its row 1: the third column is past `width`, and rows past `height` are cut.
+        let src = rect(0, 0, None, &[], &band(1, 3, 1, 4, [3, 2, 1]), &[]);
+        let mut canvas = Canvas::new(&mut pixels, 4, 4);
+        clear.decompress(&src, &mut canvas, 1, 1, 2, 2).unwrap();
+        assert_eq!(canvas.painted(), Some((2, 2, 2, 2)));
+        for y in 0..4 {
+            for x in 0..4 {
+                let painted = (2..4).contains(&x) && (2..4).contains(&y);
+                assert_eq!(at(&pixels, 4, x, y), if painted { [1, 2, 3, 0] } else { GREY }, "{x},{y}");
+            }
+        }
+    }
+
+    /// A band column that would leave the surface refuses the rectangle, as the
+    /// reference does, rather than writing past the surface's edge.
+    #[test]
+    fn a_band_column_past_the_surface_is_refused() {
+        let mut clear = Clear::new();
+        let mut pixels = surface(2, 2, GREY);
+        let src = rect(0, 0, None, &[], &band(1, 2, 0, 1, [3, 2, 1]), &[]);
+        let err = clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 2), 1, 0, 1, 1);
+        // Column 0 of the band is at x 2, off a 2-wide surface.
+        assert!(matches!(err, Err(Malformed::Refused { .. })), "{err:?}");
     }
 
     /// The NSCodec subcodec paints its sub-rectangle where the layer puts it; one
@@ -625,23 +749,22 @@ mod tests {
         nsc.extend_from_slice(&[1, 0, 0, 0, 100, 20, 0xF6, 0xFF]);
         let subrect = |data: &[u8]| {
             let mut sub = Vec::new();
-            sub.extend_from_slice(&1u16.to_le_bytes()); // x
-            sub.extend_from_slice(&0u16.to_le_bytes()); // y
-            sub.extend_from_slice(&1u16.to_le_bytes());
-            sub.extend_from_slice(&1u16.to_le_bytes());
+            for v in [1u16, 0, 1, 1] {
+                sub.extend_from_slice(&v.to_le_bytes());
+            }
             sub.extend_from_slice(&(data.len() as u32).to_le_bytes());
             sub.push(1); // NSCodec
             sub.extend_from_slice(data);
             sub
         };
         let mut clear = Clear::new();
-        let mut out = Vec::new();
+        let mut pixels = surface(2, 1, GREY);
         let src = rect(0, 0, None, &[], &[], &subrect(&nsc));
-        clear.decompress(&src, &mut out, 2, 1).unwrap();
-        assert_eq!(out, [0, 0, 0, 0, 90, 90, 130, 0]);
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1).unwrap();
+        assert_eq!(pixels, [GREY, [130, 90, 90, 0]].concat());
 
         let src = rect(0, 1, None, &[], &[], &subrect(&[0]));
-        let err = clear.decompress(&src, &mut out, 2, 1).unwrap_err();
+        let err = clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1).unwrap_err();
         assert!(matches!(err, Malformed::Short { .. }), "{err}");
     }
 }
