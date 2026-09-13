@@ -224,6 +224,9 @@ export type ControlMsg =
       // Capability only, like `audio` — enabling is this client's move, made
       // afresh each session by opening /ws/camera, never persisted.
       camera: boolean;
+      // Whether this target redirects the browser's microphone to the remote. The
+      // camera's twin: enabled afresh each session by opening /ws/mic.
+      microphone: boolean;
       // The render dial this session resolved to, in one line — `tiles · jpeg q60`,
       // `motion · base png, moving stream q40`, `video q60`. The *resolved plan*
       // rather than the config keys, which the reader may not have and which take a
@@ -309,7 +312,11 @@ export type ControlMsg =
       fpsDenominator: number;
     }
   | { type: "cameraStop" }
-  | { type: "cameraKeyframe" };
+  | { type: "cameraKeyframe" }
+  // Mic-socket traffic only: an application on the remote started recording
+  // from the microphone (`micOpen`), so encode and send, or stopped (`micClose`).
+  | { type: "micOpen" }
+  | { type: "micClose" };
 
 export interface TileMsg {
   x: number;
@@ -398,6 +405,7 @@ const AUDIO_HEADER_LEN = 4;
 const AUDIO_PACKET_HEADER_LEN = 2;
 const CAMERA_FRAME_KIND = 0x04;
 const CAMERA_KEYFRAME = 0x01;
+const MIC_FRAME_KIND = 0x05;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
@@ -645,6 +653,21 @@ export function encodeCameraFrame(
   frame[0] = CAMERA_FRAME_KIND;
   frame[1] = keyframe ? CAMERA_KEYFRAME : 0;
   frame.set(unit, 2);
+  return frame;
+}
+
+// Build one microphone frame (matching `mic` in `src/protocol.rs`): the kind
+// byte 0x05, then one Opus packet to the end of the frame. An empty packet is
+// null, which the gateway's parser would reject anyway.
+export function encodeMicFrame(
+  packet: Uint8Array,
+): Uint8Array<ArrayBuffer> | null {
+  if (packet.byteLength === 0) {
+    return null;
+  }
+  const frame = new Uint8Array(1 + packet.byteLength);
+  frame[0] = MIC_FRAME_KIND;
+  frame.set(packet, 1);
   return frame;
 }
 

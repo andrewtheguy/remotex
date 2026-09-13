@@ -305,6 +305,7 @@ pub(crate) fn router_with_sessions(
                 // The camera, going the other way, on its own socket for the same
                 // reason — and opening it is the per-session enable (see crate::ws).
                 .route("/ws/camera", any(ws::camera_handler))
+                .route("/ws/mic", any(ws::mic_handler))
                 .route_layer(require_auth),
         );
 
@@ -895,6 +896,7 @@ mod tests {
                 audio: false,
                 audio_codec: None,
                 camera: false,
+                microphone: false,
                 render_type: crate::config::RenderType::Tiles,
                 render_subtype: None,
                 render_stream_quality: None,
@@ -1164,6 +1166,7 @@ mod tests {
             audio: true,
             audio_codec: tone_codec,
             camera: false,
+            microphone: false,
             render_type: crate::config::RenderType::Tiles,
             render_subtype: None,
             render_stream_quality: None,

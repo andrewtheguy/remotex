@@ -35,12 +35,15 @@
 //! the next session starts with the camera off, and closing it unplugs the device
 //! from the remote.
 //!
+//! `/ws/mic?session=<token>` is the browser's microphone, under the camera socket's
+//! rules: binary Opus packets in, the host's `micOpen` / `micClose` out.
+//!
 //! Close codes tell the browser why any socket ended:
 //! - `4000` — the token is missing or superseded; claim again.
-//! - `4001` — evicted: another browser claimed the slot, or a newer audio/camera
-//!   socket replaced this one.
-//! - `4002` — the running target does not carry this socket's medium (camera on a
-//!   target without `camera = true`, or no engine running).
+//! - `4001` — evicted: another browser claimed the slot, or a newer audio, camera or
+//!   microphone socket replaced this one.
+//! - `4002` — the running target does not carry this socket's medium (a camera or
+//!   microphone the target does not carry, or no engine running).
 //!
 //! Any other close on the session socket detaches the browser. The owner reattaching
 //! within the grace period restores the picker or live engine; a different claim's
@@ -69,9 +72,10 @@ use crate::{
     camera::{CameraFormat, CameraSignal},
     config::Chroma,
     feedback::LinkFeedback,
+    mic::MicSignal,
     protocol::{self, ClientMsg, ServerMsg, WireFrame},
     server::AppState,
-    session::{AttachEvent, CameraRefused, REATTACH_GRACE_PERIOD, SessionManager},
+    session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
     wire::Wire,
 };
 
@@ -643,14 +647,14 @@ async fn camera(
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_camera(&token),
-        None => Err(CameraRefused::InvalidToken),
+        None => Err(UplinkRefused::InvalidToken),
     };
     let attachment = match attachment {
         Ok(attachment) => attachment,
         Err(refused) => {
             let (code, reason) = match refused {
-                CameraRefused::InvalidToken => (CLOSE_INVALID_TOKEN, "invalid session token"),
-                CameraRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no camera"),
+                UplinkRefused::InvalidToken => (CLOSE_INVALID_TOKEN, "invalid session token"),
+                UplinkRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no camera"),
             };
             warn!("ws: rejected a camera connection: {reason}");
             let _ = socket
@@ -780,6 +784,117 @@ async fn camera(
     }
     sessions.detach_camera(camera_id);
     info!("ws: the camera socket closed after {samples_seen} sample(s) from the browser");
+}
+
+pub async fn mic_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsParams>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS))
+}
+
+/// The microphone socket: the enable, the browser's Opus, and the remote's decisions.
+///
+/// The camera socket's rules: opening it is the enable, it is refused with `4002` when the
+/// running target carries no microphone, and it closes with the engine. Inbound are binary
+/// Opus packets alone; outbound go `micOpen` and `micClose`.
+async fn mic(
+    mut socket: WebSocket,
+    sessions: Arc<SessionManager>,
+    token: Option<String>,
+    heartbeat_timings: HeartbeatTimings,
+) {
+    let attachment = match token {
+        Some(token) => sessions.attach_mic(&token),
+        None => Err(UplinkRefused::InvalidToken),
+    };
+    let attachment = match attachment {
+        Ok(attachment) => attachment,
+        Err(refused) => {
+            let (code, reason) = match refused {
+                UplinkRefused::InvalidToken => (CLOSE_INVALID_TOKEN, "invalid session token"),
+                UplinkRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no microphone"),
+            };
+            warn!("ws: rejected a microphone connection: {reason}");
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
+                .await;
+            return;
+        }
+    };
+
+    info!("ws: a microphone socket attached");
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mic_id, mut signals, mut evicted) = (attachment.id, attachment.signals, attachment.evicted);
+    let mut heartbeat = interval(heartbeat_timings.interval);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_heartbeat = Instant::now();
+    // What the browser sent, logged at close: the first question a silent microphone asks.
+    let (mut packets, mut bytes) = (0u64, 0u64);
+
+    loop {
+        tokio::select! {
+            // Eviction first, for the camera socket's reason: a taken-over browser must
+            // stop feeding a desktop it no longer holds.
+            biased;
+            _ = &mut evicted => {
+                info!("ws: microphone socket evicted");
+                let _ = ws_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_EVICTED,
+                        reason: "session taken over".into(),
+                    })))
+                    .await;
+                break;
+            }
+            signal = signals.recv() => {
+                // `None`: the engine ended, and the enable with it.
+                let Some(signal) = signal else { break };
+                let msg = match signal {
+                    MicSignal::Open(_) => ServerMsg::MicOpen,
+                    MicSignal::Close => ServerMsg::MicClose,
+                };
+                let Some(json) = msg.text_frame() else { continue };
+                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            frame = ws_rx.next() => {
+                match frame {
+                    Some(Ok(Message::Binary(frame))) => {
+                        // Malformed frames are dropped quietly, as the camera's are.
+                        if let Some(packet) = protocol::mic::parse(&frame) {
+                            packets += 1;
+                            bytes += packet.len() as u64;
+                            sessions.mic_packet(mic_id, packet);
+                        }
+                    }
+                    Some(Ok(Message::Text(_))) => {
+                        warn!("ws: the microphone socket takes no text messages");
+                    }
+                    Some(Ok(Message::Pong(_))) => last_heartbeat = Instant::now(),
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
+            _ = heartbeat.tick() => {
+                if last_heartbeat.elapsed() >= heartbeat_timings.timeout {
+                    warn!(
+                        "ws: microphone socket heartbeat timed out after {}s",
+                        heartbeat_timings.timeout.as_secs()
+                    );
+                    break;
+                }
+                if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    sessions.detach_mic(mic_id);
+    info!("ws: the microphone socket closed after {packets} packet(s), {bytes} bytes of Opus");
 }
 
 async fn session(
@@ -1388,6 +1503,7 @@ mod tests {
             audio,
             audio_codec: None,
             camera: false,
+            microphone: false,
             render_type: crate::config::RenderType::Tiles,
             render_subtype: None,
             render_stream_quality: None,

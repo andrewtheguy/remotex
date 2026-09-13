@@ -25,7 +25,8 @@ use super::proto::frame::Frames;
 use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
-use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpecam, rdpsnd, tls};
+use super::microphone::{MicrophoneFeed, MicrophoneSink};
+use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
 
 // ------------------------------------------------------------------ configuration
@@ -81,6 +82,14 @@ pub struct Connect {
     /// it go to its sink from the session's own thread. `None` refuses the channel by
     /// name, so the host is offered no camera from this end.
     pub camera: Option<Camera>,
+    /// Where the host's decisions about a microphone go, for a target that asked for one
+    /// (MS-RDPEAI).
+    ///
+    /// Asked for, the logon says this client captures audio, and the client takes the
+    /// audio input channel a Windows host opens — which it does only once something over
+    /// there records — and feeds it the PCM handed to [`Session::microphone`] while it
+    /// does. `None` refuses the channel by name.
+    pub microphone: Option<Box<dyn MicrophoneSink>>,
 }
 
 /// Where a session's redirected sound goes.
@@ -224,6 +233,8 @@ pub struct Session {
     finished: std::sync::mpsc::Receiver<()>,
     /// The camera feed, for a session configured with [`Connect::camera`].
     camera: Option<CameraFeed>,
+    /// The microphone feed, for a session configured with [`Connect::microphone`].
+    microphone: Option<MicrophoneFeed>,
 }
 
 impl Session {
@@ -248,6 +259,14 @@ impl Session {
             }
             None => (None, None),
         };
+        let (microphone, mic_queue) = match config.microphone {
+            Some(_) => {
+                let (feed, queue) = MicrophoneFeed::new();
+                (Some(feed), Some(queue))
+            }
+            None => (None, None),
+        };
+        let feeds = Feeds { camera: camera_queues, microphone: mic_queue };
 
         let spawned = std::thread::Builder::new().name("rdp".into()).spawn({
             let framebuffer = Arc::clone(&framebuffer);
@@ -271,7 +290,7 @@ impl Session {
                 // event, and the caller would wait on the receiver forever. Converted
                 // into the disconnection it really is.
                 let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    runtime.block_on(thread_main(config, commands, camera_queues, &framebuffer, &events, stop))
+                    runtime.block_on(thread_main(config, commands, feeds, &framebuffer, &events, stop))
                 }));
                 let result = outcome
                     .unwrap_or_else(|_| Err(Error::new("the RDP session thread panicked")));
@@ -304,7 +323,7 @@ impl Session {
                 None
             }
         };
-        (Self { input, framebuffer, thread, finished, camera }, receiver)
+        (Self { input, framebuffer, thread, finished, camera, microphone }, receiver)
     }
 
     /// Keyboard, mouse, refresh and resize.
@@ -321,6 +340,11 @@ impl Session {
     /// device, hand it samples, unplug it.
     pub fn camera(&self) -> Option<&CameraFeed> {
         self.camera.as_ref()
+    }
+
+    /// The microphone feed, for a session configured with [`Connect::microphone`].
+    pub fn microphone(&self) -> Option<&MicrophoneFeed> {
+        self.microphone.as_ref()
     }
 }
 
@@ -364,12 +388,19 @@ fn install_crypto_provider() {
 async fn thread_main(
     config: Connect,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    camera: Option<CameraQueues>,
+    feeds: Feeds,
     framebuffer: &Framebuffer,
     events: &mpsc::Sender<Event>,
     stop: watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    run(config, &mut commands, camera, framebuffer, events, stop).await.map_err(Error::from)
+    run(config, &mut commands, feeds, framebuffer, events, stop).await.map_err(Error::from)
+}
+
+/// The session thread's ends of the caller's media feeds, each only for a session that
+/// asked for it.
+struct Feeds {
+    camera: Option<CameraQueues>,
+    microphone: Option<mpsc::Receiver<Vec<u8>>>,
 }
 
 /// The same, in the errors the protocol modules raise. They become the session's one
@@ -377,7 +408,7 @@ async fn thread_main(
 async fn run(
     config: Connect,
     commands: &mut mpsc::UnboundedReceiver<Command>,
-    camera: Option<CameraQueues>,
+    feeds: Feeds,
     framebuffer: &Framebuffer,
     events: &mpsc::Sender<Event>,
     stop: watch::Receiver<bool>,
@@ -401,7 +432,8 @@ async fn run(
     let mut config = config;
     let audio = config.audio.take();
     let capture = config.camera.take();
-    Active::new(connected, &config, audio, capture, framebuffer, events, stop).run(commands, camera).await
+    let recorder = config.microphone.take();
+    Active::new(connected, &config, audio, capture, recorder, framebuffer, events, stop).run(commands, feeds).await
 }
 
 /// The next thing a camera feed wants, for a session that has one; a session that does
@@ -409,6 +441,14 @@ async fn run(
 async fn next_camera(camera: &mut Option<CameraQueues>) -> Option<CameraInput> {
     match camera {
         Some(queues) => queues.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next buffer of microphone PCM, the same way.
+async fn next_microphone(microphone: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+    match microphone {
+        Some(queue) => queue.recv().await,
         None => std::future::pending().await,
     }
 }
@@ -512,6 +552,8 @@ struct Active<'a> {
     sound: Option<Sound>,
     /// The camera and where the host's decisions about it go, for a session that asked.
     capture: Option<Capture>,
+    /// The microphone and where the host's decisions about it go, for a session that asked.
+    recorder: Option<Recorder>,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
     devices: Option<Joined>,
@@ -680,12 +722,61 @@ impl Capture {
     }
 }
 
+/// The microphone, and where the host's decisions about it go.
+struct Recorder {
+    proto: rdpeai::Rdpeai,
+    sink: Box<dyn MicrophoneSink>,
+}
+
+impl Recorder {
+    /// What a turn meant goes to the sink at once, and what it put on the wire comes back
+    /// as the dynamic channel PDUs that carry it on `channel` — a packet of audio is
+    /// usually longer than one.
+    fn settle(&self, channel: u32, turn: rdpeai::Turn) -> Result<Vec<Vec<u8>>> {
+        for output in turn.outputs {
+            match output {
+                rdpeai::Output::Negotiated { version } => {
+                    info!("rdp: the host offers microphone redirection, MS-RDPEAI version {version}");
+                    self.sink.negotiated(version);
+                }
+                rdpeai::Output::Offered(format) => info!(
+                    "rdp: offered the host a {} Hz, {}-channel 16-bit PCM microphone",
+                    format.sample_rate, format.channels
+                ),
+                rdpeai::Output::NoFormat { offered } => warn!(
+                    "rdp: none of the host's {offered} recording formats is 16-bit PCM this \
+                     client produces, so it is offered no microphone"
+                ),
+                rdpeai::Output::Opened(format) => {
+                    info!(
+                        "rdp: the host started recording the microphone at {} Hz, {} channels",
+                        format.sample_rate, format.channels
+                    );
+                    self.sink.opened(format);
+                }
+                rdpeai::Output::Closed => {
+                    info!("rdp: the host stopped recording the microphone");
+                    self.sink.closed();
+                }
+            }
+        }
+        let mut pdus = Vec::new();
+        for message in turn.replies {
+            pdus.extend(dvc::pieces(channel, &message)?);
+        }
+        Ok(pdus)
+    }
+}
+
 impl<'a> Active<'a> {
+    // The connection, the target's switches, and one sink per redirected medium.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         connected: Connected,
         config: &Connect,
         sink: Option<Box<dyn AudioSink>>,
         camera: Option<Camera>,
+        microphone: Option<Box<dyn MicrophoneSink>>,
         framebuffer: &'a Framebuffer,
         events: &'a mpsc::Sender<Event>,
         stop: watch::Receiver<bool>,
@@ -707,6 +798,7 @@ impl<'a> Active<'a> {
             audio,
             sound: sink.map(|sink| Sound { proto: rdpsnd::Rdpsnd::new(), sink }),
             capture: camera.map(|camera| Capture { proto: rdpecam::Rdpecam::new(&camera.name), sink: camera.sink }),
+            recorder: microphone.map(|sink| Recorder { proto: rdpeai::Rdpeai::new(), sink }),
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
@@ -741,8 +833,9 @@ impl<'a> Active<'a> {
     async fn run(
         mut self,
         commands: &mut mpsc::UnboundedReceiver<Command>,
-        mut camera: Option<CameraQueues>,
+        feeds: Feeds,
     ) -> Result<()> {
+        let Feeds { mut camera, mut microphone } = feeds;
         // Updates that arrived while the share was being finalized were read past
         // there — the server may start painting once it has the Font List, which is
         // before this client has the Font Map that ends the sequence — so the desktop
@@ -778,6 +871,11 @@ impl<'a> Active<'a> {
                     Some(input) => self.on_camera(input).await?,
                     // Every feed is gone, so nothing more will come.
                     None => camera = None,
+                },
+                // The caller's microphone: PCM for the host, if it is recording.
+                pcm = next_microphone(&mut microphone) => match pcm {
+                    Some(pcm) => self.on_microphone(&pcm).await?,
+                    None => microphone = None,
                 },
                 command = commands.recv() => {
                     let stop = match command {
@@ -921,7 +1019,7 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8], arrived: Instant) -> Result<()> {
         let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, sound, capture, framebuffer, .. } = self;
+            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1006,6 +1104,30 @@ impl<'a> Active<'a> {
                     replies.push(dvc::close(channel));
                     (replies, Vec::new())
                 }
+                // The microphone's channel, for a session that carries one.
+                dvc::Message::Create { channel, name } if name == rdpeai::CHANNEL_NAME && recorder.is_some() => {
+                    let recorder = recorder.as_mut().expect("the guard found a microphone");
+                    let turn = recorder.proto.opened(channel);
+                    let mut replies = vec![dvc::create_response(channel, dvc::ACCEPTED)];
+                    replies.extend(recorder.settle(channel, turn)?);
+                    (replies, Vec::new())
+                }
+                dvc::Message::Data { channel, data }
+                    if recorder.as_ref().is_some_and(|recorder| recorder.proto.owns(channel)) =>
+                {
+                    let recorder = recorder.as_mut().expect("the guard found a microphone");
+                    let turn = recorder.proto.push(data);
+                    (recorder.settle(channel, turn)?, Vec::new())
+                }
+                dvc::Message::Close { channel }
+                    if recorder.as_ref().is_some_and(|recorder| recorder.proto.owns(channel)) =>
+                {
+                    let recorder = recorder.as_mut().expect("the guard found a microphone");
+                    let turn = recorder.proto.closed();
+                    let mut replies = recorder.settle(channel, turn)?;
+                    replies.push(dvc::close(channel));
+                    (replies, Vec::new())
+                }
                 message => (answer(message, dynamics)?, Vec::new()),
             }
         };
@@ -1073,6 +1195,23 @@ impl<'a> Active<'a> {
         let Some(dynamic) = self.dynamic else {
             return Ok(());
         };
+        for pdu in pdus {
+            self.write_channel(dynamic, &pdu).await?;
+        }
+        Ok(())
+    }
+
+    /// One buffer of the caller's microphone: sent as whole packets while the host
+    /// records, and dropped otherwise.
+    async fn on_microphone(&mut self, pcm: &[u8]) -> Result<()> {
+        let (Some(recorder), Some(dynamic)) = (&mut self.recorder, self.dynamic) else {
+            return Ok(());
+        };
+        let Some(channel) = recorder.proto.channel() else {
+            return Ok(());
+        };
+        let turn = recorder.proto.sample(pcm);
+        let pdus = recorder.settle(channel, turn)?;
         for pdu in pdus {
             self.write_channel(dynamic, &pdu).await?;
         }
@@ -1645,6 +1784,7 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
                 dynamics.sound = Some(channel);
                 vec![dvc::create_response(channel, dvc::ACCEPTED)]
             } else {
+                debug!("rdp: refusing the host's dynamic channel {name:?}");
                 vec![dvc::create_response(channel, dvc::NO_LISTENER)]
             }
         }

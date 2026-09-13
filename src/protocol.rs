@@ -526,6 +526,28 @@ pub mod camera {
     }
 }
 
+/// The layout of a client -> server **microphone** frame: one Opus packet, on `/ws/mic`
+/// and nowhere else.
+///
+/// ```text
+/// offset 0: u8  frame kind, always 0x05 (microphone packet)
+/// offset 1: the Opus packet, to the end of the WebSocket frame
+/// ```
+///
+/// Mono speech from the browser's `AudioEncoder`, which the gateway decodes to the PCM
+/// the host records in. No flags: an Opus packet decodes on its own.
+pub mod mic {
+    pub const FRAME_KIND: u8 = 0x05;
+
+    /// The packet in one microphone frame, or `None` for another kind or an empty packet.
+    pub fn parse(frame: &[u8]) -> Option<&[u8]> {
+        match frame {
+            [FRAME_KIND, packet @ ..] if !packet.is_empty() => Some(packet),
+            _ => None,
+        }
+    }
+}
+
 /// The tile grid's pitch in *points*: 64 on each axis.
 ///
 /// Points rather than pixels because the grid is a unit of work, and work on a
@@ -1165,6 +1187,9 @@ pub enum ServerMsg {
         /// Capability only, like `audio` — enabling is the client's move, made
         /// afresh each session by opening `/ws/camera`, and never remembered.
         camera: bool,
+        /// Whether this target redirects the browser's microphone to the remote. The
+        /// camera's twin: enabled afresh each session by opening `/ws/mic`.
+        microphone: bool,
         /// The render dial this session resolved to, as one line — see
         /// [`crate::config::RenderPlan::describe`].
         ///
@@ -1313,6 +1338,12 @@ pub enum ServerMsg {
     /// Samples were dropped and the stream cannot resume mid-GOP: the next
     /// frame the browser sends must be a keyframe.
     CameraKeyframe,
+    /// An application on the remote started recording from the microphone, so the
+    /// browser should encode and send. Mic-socket traffic only, like
+    /// [`ServerMsg::MicClose`].
+    MicOpen,
+    /// The remote stopped recording. Sending can stop; another open may follow.
+    MicClose,
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -1359,6 +1390,7 @@ enum ControlMsg<'a> {
         clipboard: bool,
         audio: bool,
         camera: bool,
+        microphone: bool,
         render: &'a str,
         #[serde(rename = "gridDebug")]
         grid_debug: bool,
@@ -1406,6 +1438,8 @@ enum ControlMsg<'a> {
     },
     CameraStop,
     CameraKeyframe,
+    MicOpen,
+    MicClose,
 }
 
 /// [`DisplayInfo`] as it goes out: `virtual_display` is `virtual` on the wire,
@@ -1467,6 +1501,7 @@ impl ServerMsg {
                 clipboard,
                 audio,
                 camera,
+                microphone,
                 render,
                 grid_debug,
             } => control(&ControlMsg::Connected {
@@ -1477,6 +1512,7 @@ impl ServerMsg {
                 clipboard: *clipboard,
                 audio: *audio,
                 camera: *camera,
+                microphone: *microphone,
                 render,
                 grid_debug: *grid_debug,
             }),
@@ -1494,6 +1530,8 @@ impl ServerMsg {
             }),
             ServerMsg::CameraStop => control(&ControlMsg::CameraStop),
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
+            ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
+            ServerMsg::MicClose => control(&ControlMsg::MicClose),
             ServerMsg::VideoFormat { stream, decode } => {
                 control(&ControlMsg::VideoFormat { stream: *stream, decode })
             }
@@ -1820,6 +1858,18 @@ mod tests {
         );
     }
 
+    /// The microphone frame parser, against the bytes `encodeMicFrame` in
+    /// frontend/src/protocol.ts builds, and the two decisions the mic socket relays.
+    #[test]
+    fn a_mic_frame_is_kind_then_the_packet() {
+        assert_eq!(mic::parse(&[0x05, 0xF8, 0xFF]), Some(&[0xF8u8, 0xFF][..]));
+        assert_eq!(mic::parse(&[0x05]), None, "an empty packet");
+        assert_eq!(mic::parse(&[0x04, 0x00, 7]), None, "a camera sample is not a packet");
+        assert_eq!(mic::parse(&[]), None);
+        assert_eq!(ServerMsg::MicOpen.text_frame().as_deref(), Some(r#"{"type":"micOpen"}"#));
+        assert_eq!(ServerMsg::MicClose.text_frame().as_deref(), Some(r#"{"type":"micClose"}"#));
+    }
+
     /// The camera socket's one inbound text message parses with the field names
     /// the browser sends.
     #[test]
@@ -1863,6 +1913,7 @@ mod tests {
             clipboard: true,
             audio: false,
             camera: false,
+            microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: false,
         })
@@ -1870,7 +1921,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"render":"tiles · lossless png","gridDebug":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1884,6 +1935,7 @@ mod tests {
             clipboard: false,
             audio: false,
             camera: false,
+            microphone: false,
             render: "video q60".to_owned(),
             grid_debug: false,
         })
@@ -1902,6 +1954,7 @@ mod tests {
             clipboard: false,
             audio: false,
             camera: false,
+            microphone: false,
             render: "tiles · lossless png".to_owned(),
             grid_debug: true,
         })

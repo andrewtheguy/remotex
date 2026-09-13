@@ -209,11 +209,20 @@ connection itself, and a server that does not — wayvnc, TigerVNC, x11vnc — g
 the desktop and no sound. wlshare speaks it, capturing the default sink's
 monitor from PipeWire. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
-One RDP redirection sends this browser's own media the other way and is
+Two RDP redirections send this browser's own media the other way and are
 **experimental**, for lack of tests: `camera = true` offers the remote a virtual
-webcam over MS-RDPECAM. It is off by default, enabled per session from the
-floating menu and never remembered, and refused on VNC. Its socket rules, its
-control messages and the channel's wire format are tested like everything else.
+webcam over MS-RDPECAM, and `microphone = true` offers it a microphone over
+MS-RDPEAI. They serve a different purpose from the rest of the session. The
+screen and the remote's sound aim to match sitting at the desktop and spend the
+bandwidth that takes on a fast link; the camera and the microphone are for
+someone who needs one for a while — a call, a recording — and are sent as
+cheaply as that allows on any link. The microphone goes as mono speech Opus at
+16 kbit/s, which the gateway decodes to the PCM the host records in. Both are off
+by default, enabled per session from the floating menu and never remembered, and
+refused on VNC. A Windows host starts the microphone only once something on it
+records. Their socket rules,
+control messages and channel wire formats are tested like everything else, and
+`a_real_host_records_the_microphone` feeds a host's recording device.
 `a_real_host_streams_the_camera` in `tests/rdp_client_probe.rs` carries H.264
 frames to a host's Camera app, but it is ignored by default and does not check
 the pixels the host displays. The camera channel is created only by a Windows

@@ -61,6 +61,10 @@ const FLAGS: u32 = 0x0000_0001
 /// `INFO_NOAUDIOPLAYBACK`.
 const NO_AUDIO: u32 = 0x0008_0000;
 
+/// `INFO_AUDIOCAPTURE`: this client redirects a microphone, so the host may open audio
+/// input — said only for a target that asked for one.
+const AUDIO_CAPTURE: u32 = 0x0020_0000;
+
 /// `PERF_ENABLE_FONT_SMOOTHING` and `PERF_ENABLE_DESKTOP_COMPOSITION`, and none of
 /// the `PERF_DISABLE_*` flags. Font smoothing is off unless it is asked for, so
 /// leaving this zero would not leave the session alone either. See the module docs.
@@ -92,6 +96,8 @@ pub struct ClientInfo<'a> {
     /// Whether the target asked for the remote's sound. Without it the logon says
     /// there is nothing here to play audio, and the host redirects none.
     pub audio: bool,
+    /// Whether the target asked to redirect a microphone.
+    pub microphone: bool,
     /// The keyboard layout the GCC client core data named, whose low word is the
     /// language identifier `CodePage` carries.
     pub keyboard_layout: u32,
@@ -122,7 +128,9 @@ impl ClientInfo<'_> {
         // `CodePage`, which with `INFO_UNICODE` set MUST carry the active language
         // identifier in its low word ([MS-RDPBCGR] 2.2.1.11.1.1): the layout's own.
         w.u32_le(self.keyboard_layout & 0xFFFF);
-        w.u32_le(if self.audio { FLAGS } else { FLAGS | NO_AUDIO });
+        let audio = if self.audio { 0 } else { NO_AUDIO };
+        let capture = if self.microphone { AUDIO_CAPTURE } else { 0 };
+        w.u32_le(FLAGS | audio | capture);
         // Five lengths, then the five strings. A length counts the characters and
         // not the terminator that follows them; the two after the strings count the
         // terminator, because the fields they measure are allowed to be absent and a
@@ -182,8 +190,19 @@ mod tests {
             domain: None,
             address: IpAddr::from([10, 0, 0, 2]),
             audio: false,
+            microphone: false,
             keyboard_layout: 0x0001_0409,
         }
+    }
+
+    #[test]
+    fn the_audio_capture_flag_follows_whether_a_microphone_was_asked_for() {
+        let flags = |microphone: bool| {
+            let bytes = ClientInfo { microphone, ..logon() }.encode().unwrap();
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap())
+        };
+        assert_eq!(flags(false) & AUDIO_CAPTURE, 0);
+        assert_eq!(flags(true) & AUDIO_CAPTURE, AUDIO_CAPTURE);
     }
 
     /// A target that asked for sound leaves `INFO_NOAUDIOPLAYBACK` out; one that did

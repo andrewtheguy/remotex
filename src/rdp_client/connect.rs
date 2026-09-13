@@ -37,7 +37,7 @@ const KEYBOARD_LAYOUT: u32 = 0x0409;
 
 /// The static virtual channels a session asks for, each one a capability the caller
 /// turned on: [`Channel::DYNAMIC`] is the transport Display Control, the graphics
-/// pipeline and the camera's two channels ride on, and [`Channel::CLIPBOARD`] is
+/// pipeline, the camera's two channels and the microphone's ride on, and [`Channel::CLIPBOARD`] is
 /// MS-RDPECLIP itself. A session that wants none of them asks for no channel at all.
 ///
 /// The order is what makes the server's answer readable: `SC_NET` numbers the
@@ -46,7 +46,7 @@ const KEYBOARD_LAYOUT: u32 = 0x0409;
 /// [`Connected::channel`].
 fn wanted_channels(config: &Connect) -> Vec<Channel> {
     let mut channels = Vec::new();
-    if config.resize || config.egfx || config.camera.is_some() {
+    if config.resize || config.egfx || config.camera.is_some() || config.microphone.is_some() {
         channels.push(Channel::DYNAMIC);
     }
     if config.clipboard {
@@ -222,6 +222,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         domain: config.domain.as_deref(),
         address: client_address,
         audio: config.audio.is_some(),
+        microphone: config.microphone.is_some(),
         keyboard_layout: KEYBOARD_LAYOUT,
     }
     .encode()?;

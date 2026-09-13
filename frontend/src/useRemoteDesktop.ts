@@ -16,6 +16,7 @@ import {
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
+import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import type { AudioStreamInfo } from "./mediaLabel.ts";
@@ -481,6 +482,12 @@ export function useRemoteDesktop(
   // Whether the remote is consuming the camera right now — an application over
   // there has it open. UI feedback only; frames stop by themselves without it.
   const [cameraStreaming, setCameraStreaming] = useState(false);
+  // The microphone: the camera's twin, capability and per-session enable alike.
+  const [canMic, setCanMic] = useState(false);
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  // Whether the remote is recording from the microphone right now.
+  const [micStreaming, setMicStreaming] = useState(false);
   // Why this browser is showing nothing for a video target, or null.
   //
   // Kept apart from `connectError` because the session is fine — it is this client
@@ -708,6 +715,22 @@ export function useRemoteDesktop(
     sender?.stop();
     setCameraEnabled(false);
     setCameraStreaming(false);
+  }, []);
+
+  // The microphone sender, the camera's twin in every ref and guard.
+  const micSenderRef = useRef<MicSender | null>(null);
+  const micUrlRef = useRef<(() => string | null) | null>(null);
+  const micGenerationRef = useRef(0);
+  const micPendingRef = useRef<number | null>(null);
+
+  const stopMic = useCallback(() => {
+    micGenerationRef.current += 1;
+    micPendingRef.current = null;
+    const sender = micSenderRef.current;
+    micSenderRef.current = null;
+    sender?.stop();
+    setMicEnabled(false);
+    setMicStreaming(false);
   }, []);
 
   // The engine's latest pointer state, and where the touch gesture layer's
@@ -1389,6 +1412,12 @@ export function useRemoteDesktop(
         stopCamera();
         setCameraError(null);
       }
+      // The microphone follows the camera's rule.
+      setCanMic(msg.microphone);
+      if (!msg.microphone) {
+        stopMic();
+        setMicError(null);
+      }
       // What this session is, for the card. Nothing is checked here: whether this
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
@@ -1576,6 +1605,9 @@ export function useRemoteDesktop(
           setCanCamera(false);
           stopCamera();
           setCameraError(null);
+          setCanMic(false);
+          stopMic();
+          setMicError(null);
           // The stream itself goes with `clearDesktop` below; what has to be said
           // here is that the complaint goes too. Whatever this browser could not
           // decode is no longer on the screen, and the next target may not send
@@ -1629,6 +1661,8 @@ export function useRemoteDesktop(
     audioSocketRef.current = { open: openAudioSocket, close: closeAudioSocket };
     cameraUrlRef.current = () =>
       session ? gatewaySocketUrl("/ws/camera", session) : null;
+    micUrlRef.current = () =>
+      session ? gatewaySocketUrl("/ws/mic", session) : null;
     start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
@@ -1683,6 +1717,8 @@ export function useRemoteDesktop(
       audioWs?.close();
       cameraUrlRef.current = null;
       stopCamera();
+      micUrlRef.current = null;
+      stopMic();
       // The socket is going away, so nothing will answer a pending fetch.
       settleClipboardWaiters(null);
       clearTimeout(retryTimer);
@@ -1708,6 +1744,7 @@ export function useRemoteDesktop(
     settleClipboardWaiters,
     releaseAudio,
     stopCamera,
+    stopMic,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -1881,6 +1918,67 @@ export function useRemoteDesktop(
       );
     },
     [stopCamera],
+  );
+
+  // Start or stop offering this browser's microphone (the floating menu's
+  // Microphone button). The camera's twin, guard for guard, and like it
+  // **must be called from a click** for `getUserMedia`'s permission prompt.
+  const setMic = useCallback(
+    (enabled: boolean) => {
+      setMicError(null);
+      if (!enabled) {
+        stopMic();
+        return;
+      }
+      const url = micUrlRef.current?.();
+      if (!url || micSenderRef.current || micPendingRef.current !== null) {
+        return;
+      }
+      const generation = micGenerationRef.current;
+      micPendingRef.current = generation;
+      setMicEnabled(true);
+      void startMicSender(url, {
+        onStopped: (reason) => {
+          if (micGenerationRef.current !== generation) {
+            return;
+          }
+          stopMic();
+          if (reason) {
+            setMicError(reason);
+          }
+        },
+        onStreaming: (streaming) => {
+          if (micGenerationRef.current === generation) {
+            setMicStreaming(streaming);
+          }
+        },
+      }).then(
+        (sender) => {
+          if (micPendingRef.current === generation) {
+            micPendingRef.current = null;
+          }
+          if (micGenerationRef.current !== generation) {
+            sender.stop();
+            return;
+          }
+          micSenderRef.current = sender;
+        },
+        (e: unknown) => {
+          if (micPendingRef.current === generation) {
+            micPendingRef.current = null;
+          }
+          if (micGenerationRef.current === generation) {
+            setMicEnabled(false);
+            setMicError(
+              e instanceof Error
+                ? e.message
+                : "this browser cannot offer a microphone",
+            );
+          }
+        },
+      );
+    },
+    [stopMic],
   );
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
@@ -2346,6 +2444,10 @@ export function useRemoteDesktop(
     cameraEnabled,
     cameraError,
     cameraStreaming,
+    canMic,
+    micEnabled,
+    micError,
+    micStreaming,
     // The remembered "by default" preference and its setter, for the picker's
     // toggle.
     audioByDefault,
@@ -2374,6 +2476,7 @@ export function useRemoteDesktop(
     selectDisplay,
     setAudio,
     setCamera,
+    setMic,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,

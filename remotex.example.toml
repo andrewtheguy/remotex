@@ -280,6 +280,15 @@ password = "change-me"
 # one is simply never asked for a frame.
 #camera = false
 
+# Microphone redirection (RDP only): offer the remote this browser's microphone
+# over MS-RDPEAI. EXPERIMENTAL, like `camera`. Capability only: the recording
+# device is fed when a client turns the microphone on from the floating menu —
+# per session, never remembered. The browser sends mono speech Opus at a fixed
+# low bitrate and the gateway decodes it to the PCM the host records in, so there
+# is no codec or quality key beside this one. The host starts recording only
+# once an application on it does. A "vnc" target refuses the key.
+#microphone = false
+
 # A VNC target needs host and, usually, one of the two passwords; domain is
 # ignored, an explicit security is refused, and width/height only ever answer a
 # default-size request (see above). `vnc_password` is the server's own password

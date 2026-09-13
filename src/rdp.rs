@@ -30,7 +30,6 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
-use crate::camera::CameraBridge;
 use crate::config::{RenderPlan, TargetConfig};
 use crate::copies;
 use crate::encode::TileSink;
@@ -41,6 +40,8 @@ use crate::protocol::{
     MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED,
 };
 use crate::rdp_camera;
+use crate::rdp_mic;
+use crate::session::Uplinks;
 use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
     self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
@@ -144,9 +145,10 @@ fn connect_budget() -> Duration {
 /// host to redirect its sound and hands every buffer to the bridge from its own
 /// thread — see [`Sound`] — so the pictures' event queue below never carries a sample.
 ///
-/// `camera` is `Some` exactly for a target with `camera = true`: the RDP client then
-/// takes the host's camera enumeration channel, and the bridge's control becomes the
-/// session's camera feed — see [`rdp_camera`].
+/// `uplinks.camera` is `Some` exactly for a target with `camera = true`: the RDP client
+/// then takes the host's camera enumeration channel, and the bridge's control becomes the
+/// session's camera feed — see [`rdp_camera`]. `uplinks.microphone` is the same for
+/// `microphone = true` and the audio input channel — see [`rdp_mic`].
 ///
 /// The event channel from the RDP client is bounded, and a slow consumer makes the
 /// rectangles coarser rather than the queue longer: while it is full the client
@@ -161,11 +163,11 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
-    camera: Option<Arc<CameraBridge>>,
+    uplinks: Uplinks,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, plan, feedback);
-    session(config, display, input_rx, audio, camera, &sink).await;
+    session(config, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -198,16 +200,18 @@ async fn session(
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
-    camera: Option<Arc<CameraBridge>>,
+    uplinks: Uplinks,
     sink: &TileSink,
 ) {
-    let (session, mut events) =
-        Session::start(connect_config(&config, display, audio, camera.as_ref()));
-    // The feed exists from here, so the camera socket's traffic has somewhere to go
-    // before the desktop does: a plug made while the host is still connecting waits in
+    let (session, mut events) = Session::start(connect_config(&config, display, audio, &uplinks));
+    // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
+    // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
-    if let (Some(bridge), Some(feed)) = (&camera, session.camera()) {
+    if let (Some(bridge), Some(feed)) = (&uplinks.camera, session.camera()) {
         rdp_camera::attach(bridge, feed.clone());
+    }
+    if let (Some(bridge), Some(feed)) = (&uplinks.microphone, session.microphone()) {
+        rdp_mic::attach(bridge, feed.clone());
     }
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
@@ -326,7 +330,7 @@ fn connect_config(
     config: &TargetConfig,
     display: Option<HostDisplay>,
     audio: Option<Arc<AudioBridge>>,
-    camera: Option<&Arc<CameraBridge>>,
+    uplinks: &Uplinks,
 ) -> Connect {
     // The opening size, in points at 1x: the pinned config size, else the full
     // resolution of the client's own screen — the same rule every engine
@@ -351,7 +355,8 @@ fn connect_config(
         egfx: config.egfx(),
         clipboard: config.clipboard,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
-        camera: camera.map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
+        camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
+        microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
     }
 }
 
