@@ -75,6 +75,22 @@ How many real deployments this reaches is not known, and no host in use has show
 it. What would settle it is one connection to an RDSH configured for per-device
 CALs; the work is only worth taking once a host that needs it turns up.
 
+#### Verifying the server's certificate chain
+
+The TLS handshake accepts any certificate, for the session only, and verifies the
+handshake signature alone (`proto/tls.rs`). What stands in for the chain is
+CredSSP: the credential exchange is bound to the public key of the certificate
+that terminated this very handshake, so an interceptor holding a certificate of
+its own cannot complete it. That argument is spelled out in the module's header
+and holds only because plain TLS is never offered.
+
+What it does not give an operator is a way to say *which* host they expect. A
+Windows host's default listener certificate is self-signed and regenerated when
+the machine is renamed, so a public CA chain is the wrong check for most targets;
+a per-target pin — the certificate's public key or its SHA-256 fingerprint in the
+target's configuration, compared against what the handshake presented — is the
+one that fits. Absent a pin, today's behavior stands.
+
 ### Render dial — what the region streams do not decide yet
 
 `render_motion = true` ships: the motion detection chooses the regions,
@@ -259,6 +275,16 @@ as many records, and the queue the client actually waited on was the one past th
 socket, which the window now bounds. Shrinking a depth here would be another
 number adjusted in isolation, which is how the audit found these in the first
 place.
+
+### `THINCLIENT` in the graphics capability advertise
+
+`caps_advertise` in `proto/gfx.rs` sends versions 8 and 10 with the small cache
+and, on version 10, `AVC_DISABLED`, and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
+unset. A current Windows host, the only host this client targets, ignores the
+flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
+progressive form, are not supported, so there is nothing for the flag to change.
+The decision is recorded in
+[The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx).
 
 ### Multiple sessions
 
