@@ -279,3 +279,154 @@ async fn a_real_host_reports_every_pixel_it_paints() {
     }
     dump("leak-mask", shadow.width, shadow.height, &mask);
 }
+
+/// `x,y` to wheel at while the decode probe runs; unset leaves the remote's input alone.
+const SCROLL_ENV: &str = "REMOTEX_DAMAGE_SCROLL";
+
+/// How long the event stream must stay empty for the desktop to count as settled.
+const QUIET: Duration = Duration::from_millis(1500);
+
+/// Drain events until none has arrived for [`QUIET`], or `cap` passes; says which.
+async fn settle(events: &mut Receiver<Event>, cap: Duration) -> (u64, bool) {
+    let until = Instant::now() + cap;
+    let mut frames = 0;
+    while Instant::now() < until {
+        match tokio::time::timeout(QUIET, events.recv()).await {
+            Err(_) => return (frames, true),
+            Ok(Some(Event::Frame)) => frames += 1,
+            Ok(Some(Event::Ended(result))) => panic!("the session ended: {result:?}"),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the event stream closed"),
+        }
+    }
+    (frames, false)
+}
+
+/// Cells where two framebuffers disagree by more than [`TOLERANCE`], with their counts.
+fn differing_cells(width: u32, height: u32, a: &[u8], b: &[u8]) -> Vec<(u32, u32, u64)> {
+    let stride = width as usize * 4;
+    let mut out = Vec::new();
+    for y0 in (0..height).step_by(CELL as usize) {
+        for x0 in (0..width).step_by(CELL as usize) {
+            let mut differs = 0;
+            for y in y0..(y0 + CELL).min(height) {
+                for x in x0..(x0 + CELL).min(width) {
+                    let at = y as usize * stride + x as usize * 4;
+                    if (0..3).any(|c| (i32::from(a[at + c]) - i32::from(b[at + c])).abs() > TOLERANCE) {
+                        differs += 1;
+                    }
+                }
+            }
+            if differs > 0 {
+                out.push((x0, y0, differs));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the client's own decoders leave the framebuffer holding what the host drew.
+///
+/// Damage reporting can be perfect and the picture still wrong: a Progressive tile, a
+/// ClearCodec cache or a surface copy decoded wrongly writes wrong pixels *and reports
+/// them*, and the gateway's `refresh` repaints from this framebuffer, so neither the
+/// damage probe nor a browser reload can see it. Only the host can, by drawing the
+/// desktop again. So: settle, snapshot what was decoded, ask the host for a redraw
+/// twice, and count the cells where the decoded picture disagrees with a redraw that
+/// agrees with itself — the second redraw is what rules out a clock or an animation.
+///
+/// ```sh
+/// REMOTEX_UAT_TARGET=<rdp target> REMOTEX_DAMAGE_SCROLL=960,500 REMOTEX_DAMAGE_DUMP=tmp/qa/decode \
+///   cargo test --release --test rdp_damage_probe a_host_redraw -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a real Windows host, named by REMOTEX_UAT_TARGET"]
+async fn a_host_redraw_matches_what_was_decoded() {
+    common::init_logging();
+    let (session, mut events) = connect();
+    let (frames, _) = settle(&mut events, Duration::from_secs(30)).await;
+    println!("  connected; {frames} frames before the desktop settled");
+
+    let until = Instant::now() + Duration::from_secs(run_secs());
+    if let Ok(at) = std::env::var(SCROLL_ENV) {
+        let (x, y) = at.split_once(',').expect("REMOTEX_DAMAGE_SCROLL is x,y");
+        let (x, y): (u16, u16) = (x.parse().expect("scroll x"), y.parse().expect("scroll y"));
+        session.input().mouse_move(x, y);
+        if std::env::var("REMOTEX_DAMAGE_HOME").is_ok() {
+            // Home, so every run scrolls the same stretch of the page: a wheel cycle
+            // does not land back where it started, and runs drift down the page.
+            session.input().key(0x47, true, true);
+            session.input().key(0x47, true, false);
+            settle(&mut events, Duration::from_secs(20)).await;
+        }
+        let mut step = 0u64;
+        while Instant::now() < until {
+            // Three notches a tick, reversing every twenty ticks: down a page and back.
+            let delta = if (step / 20).is_multiple_of(2) { -360 } else { 360 };
+            session.input().wheel(delta, false, x, y);
+            step += 1;
+            let tick = Instant::now() + Duration::from_millis(120);
+            while let Ok(Some(event)) = tokio::time::timeout_at(tick.into(), events.recv()).await {
+                if let Event::Ended(result) = event {
+                    panic!("the session ended: {result:?}");
+                }
+            }
+        }
+        println!("  scrolled at {x},{y} for {step} ticks");
+        // Off whatever the wheel ended over: a pointer resting on a link grows a
+        // tooltip, which a redraw may leave out, and that would read as a decoder fault.
+        session.input().mouse_move(1900, 600);
+    } else {
+        while Instant::now() < until {
+            let left = until.saturating_duration_since(Instant::now());
+            if let Ok(Some(Event::Ended(result))) = tokio::time::timeout(left, events.recv()).await {
+                panic!("the session ended: {result:?}");
+            }
+        }
+    }
+    // A desktop that never goes quiet — a video playing — is snapshotted mid-picture,
+    // and its difference from a later redraw is the video moving, not a decoder fault.
+    let (frames, quiet) = settle(&mut events, Duration::from_secs(20)).await;
+    if !quiet {
+        println!("  RESULT inconclusive: the desktop never settled after {frames} frames");
+        return;
+    }
+    let (width, height, decoded) = snapshot(&session);
+    log::info!("PROBE-MARK decoded snapshot");
+    println!("  decoded snapshot after {frames} frames; settled");
+
+    let mut redraws = Vec::new();
+    for pass in 0..2 {
+        log::info!("PROBE-MARK redraw {pass}");
+        session.input().refresh();
+        let (frames, quiet) = settle(&mut events, Duration::from_secs(20)).await;
+        let (w, h, pixels) = snapshot(&session);
+        assert_eq!((w, h), (width, height), "the desktop resized during the probe");
+        println!("  host redraw took {frames} frames; {}", if quiet { "settled" } else { "NEVER SETTLED" });
+        // A redraw that drew nothing is the decoded picture compared with itself, and
+        // one that never went quiet is a picture caught mid-change.
+        if !quiet || frames == 0 {
+            println!("  RESULT inconclusive: host redraw {pass} did not complete");
+            return;
+        }
+        redraws.push(pixels);
+    }
+
+    let unsteady: std::collections::HashSet<_> =
+        differing_cells(width, height, &redraws[0], &redraws[1]).into_iter().map(|(x, y, _)| (x, y)).collect();
+    let wrong: Vec<_> = differing_cells(width, height, &decoded, &redraws[0])
+        .into_iter()
+        .filter(|(x, y, _)| !unsteady.contains(&(*x, *y)))
+        .collect();
+    let pixels: u64 = wrong.iter().map(|(_, _, n)| n).sum();
+    println!(
+        "  RESULT decoded_wrong_cells={} decoded_wrong_px={pixels} unsteady_cells={}",
+        wrong.len(),
+        unsteady.len()
+    );
+    for (x, y, n) in wrong.iter().take(40) {
+        println!("    cell at {x},{y}: {n} px differ from the host's redraw");
+    }
+    dump("decoded", width, height, &decoded);
+    dump("redraw", width, height, &redraws[0]);
+}
