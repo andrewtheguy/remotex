@@ -1359,18 +1359,31 @@ async fn flush_cleanups(
 ) -> bool {
     let mut due: Vec<(Rect, bool, Vec<u8>)> = Vec::new();
     let ended: Vec<u8>;
+    // One reading of the clock, and so one reading of the lag, for the whole tickful:
+    // these all go out together and are one moment's answer, not several.
+    let now = tokio::time::Instant::now();
+    let adapted = shared.adapted(base, now);
     {
         // One critical section for the whole tickful: `due` and the crops have to
         // agree about the mirror, and holding the lock across the encodes below would
         // make every `damage` wait on them.
         let mut video = shared.video.lock().await;
-        let now = tokio::time::Instant::now();
         // A screen that has stopped changing produces no frame boundary, so this is
         // the only thing that will ever notice its streams have gone quiet — and a
         // stream that never ends is a region that never comes due.
         video.regions.expire(now);
         ended = video.regions.drain_ended();
-        let rects = video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
+        // `due` takes the debt with it, and a cell that has stopped changing has
+        // nothing else coming for it — so paying one while the lag has `render_adaptive`
+        // below its ceiling would settle it at the floor for good. The debts stand
+        // until they can be paid at the quality the target asked for. The two rarely
+        // fight: a cell comes due after `CLEANUP_IDLE` of quiet, and quiet is what
+        // drains the lag.
+        let rects = if adapted == base {
+            video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK)
+        } else {
+            Vec::new()
+        };
         // Cut at `BAND_ROWS` like every other payload. A cleanup run is whole grid
         // cells, and a cell is 128 pixels tall on a 2x framebuffer — twice what a
         // record is allowed to be measured in bytes, which is the one thing the band
@@ -1400,15 +1413,12 @@ async fn flush_cleanups(
         }
     }
 
-    // One reading of the lag for the tickful: these all go out together, so they
-    // are one moment's answer, not several.
-    let base = shared.adapted(base, tokio::time::Instant::now());
     let started: Vec<(Rect, bool, JoinHandle<anyhow::Result<Tile>>)> = due
         .into_iter()
         .map(|(rect, keep_lossy, rgb)| {
             let rgb = Arc::new(rgb);
             let rgb = if debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
-            (rect, keep_lossy, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)))
+            (rect, keep_lossy, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, adapted)))
         })
         .collect();
 

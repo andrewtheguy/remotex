@@ -1088,24 +1088,31 @@ impl Regions {
     /// A piece no larger than a cell is not owed: its verdict *was* the cell's, and
     /// asking again would only spend an encode to arrive at the same answer.
     ///
-    /// **In full**, as [`Self::discharge`] means it: the cleanup crops whole cells
-    /// out of the mirror, and only a cell this piece covered entirely is one the
-    /// mirror certainly holds the current truth for.
+    /// Every cell the piece *touches*, where [`Self::discharge`] cancels only cells a
+    /// send covered in full — opposite rules for the same reason. Owing a cell the
+    /// piece merely clipped costs one redundant re-encode; failing to owe one leaves
+    /// the blur, which is the thing this exists to catch.
+    ///
+    /// Full coverage is also not a rule a payload can satisfy at every density. A band
+    /// is [`crate::tiles::BAND_ROWS`] pixels tall whatever the framebuffer, and a cell
+    /// is 128 pixels tall on a 2× one, so a Retina session that asked for containment
+    /// here would owe nothing at all and never clean up anything.
+    ///
+    /// What the cleanup crops is the mirror, and the mirror holds every rectangle that
+    /// has changed rather than only what a stream carries — so a cell this piece
+    /// covered in part is one it has the current truth for, like any other.
     ///
     /// A stream's debt is never downgraded to this one — a cell an access unit
     /// carried is owed a crisp copy outright, where this one is owed a question.
     pub fn owe(&mut self, sent: Rect, now: Instant) {
-        let Some((w, h)) = self.size else {
+        if self.size.is_none() {
             return;
-        };
+        }
         if sent.w() <= self.grid.w && sent.h() <= self.grid.h {
             return;
         }
         for piece in sent.cells(self.grid) {
             let key = piece.cell_key(self.grid);
-            if !CellBox::of(key).to_rect(w, h, self.grid).is_some_and(|cell| sent.contains(&cell)) {
-                continue;
-            }
             match self.debts.get(&key) {
                 Some(debt) if debt.owed == Owed::Stream => {}
                 _ => {
@@ -2299,6 +2306,31 @@ mod tests {
             "five cells of one row should be five rectangles, not one stripe"
         );
         assert!(due.iter().all(|due| !due.keep_lossy), "a piece's cell is owed a question");
+    }
+
+    /// A payload band is [`crate::tiles::BAND_ROWS`] pixels tall whatever the
+    /// density, and a 2× cell is twice that. A rule that owed only the cells a piece
+    /// covered in full therefore owed nothing at all on a Retina desktop, and no
+    /// `classify` verdict there was ever looked at a second time.
+    #[tokio::test]
+    async fn a_retina_band_owes_the_cells_it_covers_in_part() {
+        let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, None);
+        regions.want(256, 256, TileGrid::at(2.0));
+        regions
+            .blit(Rect { left: 0, top: 0, right: 255, bottom: 255 }, &vec![0; 256 * 256 * 3])
+            .expect("a full-desktop blit");
+        let t0 = Instant::now();
+        // One band of a lossy `classify` piece: full width, 64 rows — the top half of
+        // a row of 128-pixel cells.
+        regions.owe(Rect { left: 0, top: 0, right: 255, bottom: 63 }, t0);
+        assert_eq!(
+            due_rects(&mut regions, t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16),
+            vec![
+                Rect { left: 0, top: 0, right: 127, bottom: 127 },
+                Rect { left: 128, top: 0, right: 255, bottom: 127 },
+            ],
+            "both cells the band ran through should be owed a second look"
+        );
     }
 
     /// What `crate::encode` passes as the cleanup's idle threshold. Its own constant

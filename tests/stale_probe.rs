@@ -185,14 +185,17 @@ impl Vp9 {
                         let yy = *img.planes[0].add(y * img.stride[0] as usize + x) as f32;
                         let u = *img.planes[1].add((y >> ys) * img.stride[1] as usize + (x >> xs)) as f32;
                         let v = *img.planes[2].add((y >> ys) * img.stride[2] as usize + (x >> xs)) as f32;
-                        // Limited-range BT.709.
-                        let c = (yy - 16.0) * 1.164_384;
+                        // BT.601 studio swing, which is what `crate::vp9` declares in
+                        // the bitstream and what `crate::video` converted with. Reading
+                        // it back as BT.709 tints every decoded pixel, and this probe
+                        // counts pixels that differ.
+                        let c = (yy - 16.0) * 1.164_383;
                         let d = u - 128.0;
                         let e = v - 128.0;
                         let px = &mut rgb[(y * w + x) * 3..(y * w + x) * 3 + 3];
-                        px[0] = (c + 1.792_741 * e).clamp(0.0, 255.0) as u8;
-                        px[1] = (c - 0.213_249 * d - 0.532_909 * e).clamp(0.0, 255.0) as u8;
-                        px[2] = (c + 2.112_402 * d).clamp(0.0, 255.0) as u8;
+                        px[0] = (c + 1.596_027 * e).clamp(0.0, 255.0) as u8;
+                        px[1] = (c - 0.391_762 * d - 0.812_968 * e).clamp(0.0, 255.0) as u8;
+                        px[2] = (c + 2.017_232 * d).clamp(0.0, 255.0) as u8;
                     }
                 }
                 last = Some((w, h, rgb));
