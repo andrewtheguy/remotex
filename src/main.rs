@@ -7,6 +7,15 @@ use remotex::cli::{Cli, Commands};
 use remotex::config::{AppConfig, ListenAddr};
 use remotex::server;
 
+// jemalloc rather than glibc's malloc. Every session runs its engine on a thread of
+// its own and encodes on tokio's blocking pool, and glibc gives each allocating
+// thread an arena that keeps what it frees: over six motion sessions against one RDP
+// target the gateway sat at 289 MB between sessions and still climbing, where
+// jemalloc held 31–37 MB for the same run. Windows' heap has no such arenas.
+#[cfg(not(windows))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
