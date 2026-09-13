@@ -15,12 +15,11 @@
 //!
 //! # What the session is told to be
 //!
-//! Wallpaper, theming, full-window drag and menu animations are all turned off. Every
-//! position of a dragged window is a full window of damage through decode, diff,
-//! encode, socket and paint, for pixels that are gone the moment the drag ends;
-//! damage that is never created needs no optimizing downstream. Audio playback and
-//! video redirection are refused outright, because this client has nowhere to put
-//! them.
+//! Exactly what mstsc tells a server on a LAN: nothing of the desktop is turned off,
+//! and font smoothing and desktop composition are turned on. The session looks the
+//! way the user set it up to look, and the same as it does from Microsoft's own
+//! client. Audio playback and video redirection are refused outright, because this
+//! client has nowhere to put them.
 
 use std::net::IpAddr;
 
@@ -62,9 +61,10 @@ const FLAGS: u32 = 0x0000_0001
 /// `INFO_NOAUDIOPLAYBACK`.
 const NO_AUDIO: u32 = 0x0008_0000;
 
-/// `PERF_DISABLE_*`: wallpaper, full-window drag, menu animations and theming, in
-/// that order. See the module docs.
-const PERFORMANCE: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0008;
+/// `PERF_ENABLE_FONT_SMOOTHING` and `PERF_ENABLE_DESKTOP_COMPOSITION`, and none of
+/// the `PERF_DISABLE_*` flags. Font smoothing is off unless it is asked for, so
+/// leaving this zero would not leave the session alone either. See the module docs.
+const PERFORMANCE: u32 = 0x0000_0080 | 0x0000_0100;
 
 /// `clientDir`. The field is meant to be where the client is installed, and a Windows
 /// server logs it; mstsc's value is what every server has always been told, and there
@@ -237,10 +237,10 @@ mod tests {
     }
 
     #[test]
-    fn the_session_is_told_to_draw_as_little_as_it_can() {
+    fn the_session_looks_the_way_mstsc_would_leave_it() {
         let bytes = logon().encode().unwrap();
         let performance = u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap());
-        assert_eq!(performance, 0x0F, "wallpaper, drag, animations and theming all off");
+        assert_eq!(performance, 0x180, "font smoothing and composition on, nothing disabled");
         // And the time zone before it is the server's, not ours.
         let zone = bytes.len() - 4 - 4 - TIME_ZONE;
         assert!(bytes[zone..zone + TIME_ZONE].iter().all(|byte| *byte == 0));
