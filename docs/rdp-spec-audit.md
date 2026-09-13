@@ -15,10 +15,11 @@ Deliberate deviations already recorded in `rdp-client.md` or
 [the roadmap](roadmap.md) are listed as confirmed, not as findings.
 
 **Verdict:** the client puts no value on the wire the specifications forbid, reads
-no field with the wrong bits, and honors every client rule the audit compared. What
-remains is three questions only a real host can settle, the deviations the docs
-already record, and the places the client is more lenient than a server's
-constraints require.
+no field with the wrong bits, and honors every client rule the audit compared but
+one: it advertises the graphics pipeline without the network-characteristics
+detection that flag requires. What remains is three questions only a real host can
+settle, the deviations the docs already record, and the places the client is more
+lenient than a server's constraints require.
 
 ## Method
 
@@ -67,11 +68,14 @@ clipboard.
 ## Documented deviations, confirmed
 
 Each of these is a deliberate departure the docs already record, checked here
-against the spec text and found to be permitted or a SHOULD.
+against the spec text and found to be permitted or a SHOULD, except the one marked
+a non-conformance.
 
 - `PROTOCOL_HYBRID` offered without `PROTOCOL_SSL` (MS-RDPBCGR 2.2.1.1.1, SHOULD).
-- `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` set without network-detection support
-  (2.2.1.3.2 says the former "requires" the latter); auto-detect unanswered.
+- **Non-conformance:** `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` set without
+  network-detection support, where 2.2.1.3.2 says setting it "requires that the
+  client support network characteristics detection". Implementation status:
+  auto-detect unanswered.
 - The TLS certificate chain unverified; the handshake signature verified and the
   public key bound by CredSSP. MS-CSSP 3.1.5 step 1 requires no trusted root. On
   [the roadmap](roadmap.md#verifying-the-servers-certificate-chain).
