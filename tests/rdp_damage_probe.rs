@@ -26,7 +26,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::{Connect, Event, Session};
+use remotex::rdp_client::{AudioSink, Connect, Event, MouseButton, Session};
 use tokio::sync::mpsc::Receiver;
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
@@ -55,7 +55,12 @@ fn connect() -> (Session, Receiver<Event>) {
     let name = std::env::var(TARGET_ENV)
         .unwrap_or_else(|_| panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml"));
     let target = common::uat_target(&name);
-    println!("rdp_damage_probe: {name} ({}:{}) at {}x{}", target.host, target.port, SIZE.0, SIZE.1);
+    println!(
+        "rdp_damage_probe: {name} ({}:{}) at {}x{}, resize {} clipboard {} audio {}",
+        target.host, target.port, SIZE.0, SIZE.1, target.resize, target.clipboard, target.audio
+    );
+    // The session the gateway would open for this target, so the host draws for the
+    // same client: the channels it names change what the host sends.
     let (session, events) = Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
@@ -64,12 +69,21 @@ fn connect() -> (Session, Receiver<Event>) {
         domain: target.domain.clone(),
         width: SIZE.0,
         height: SIZE.1,
-        resize: true,
-        egfx: true,
-        clipboard: false,
-        audio: None,
+        resize: target.resize,
+        egfx: target.egfx(),
+        clipboard: target.clipboard,
+        audio: target.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
     });
     (session, events)
+}
+
+/// Audio the probe asks for, as the gateway does, and throws away.
+struct Silence;
+
+impl AudioSink for Silence {
+    fn negotiated(&self, _: remotex::rdp_client::proto::rdpsnd::Format) {}
+    fn wave(&self, _: Vec<u8>) {}
+    fn closed(&self) {}
 }
 
 /// The mirror, and how long each cell has disagreed with the framebuffer.
@@ -283,6 +297,27 @@ async fn a_real_host_reports_every_pixel_it_paints() {
 /// `x,y` to wheel at while the decode probe runs; unset leaves the remote's input alone.
 const SCROLL_ENV: &str = "REMOTEX_DAMAGE_SCROLL";
 
+/// `x,y` of a window's title bar to drag and cycle through maximize, restore and
+/// minimize while the decode probe runs.
+const DRAG_ENV: &str = "REMOTEX_DAMAGE_DRAG";
+
+/// RDP scancodes, with their E0 flag.
+const WIN: (u8, bool) = (0x5B, true);
+const SHIFT: (u8, bool) = (0x2A, false);
+const UP: (u8, bool) = (0x48, true);
+const DOWN: (u8, bool) = (0x50, true);
+const M: (u8, bool) = (0x32, false);
+
+/// Drain events for `for_`, failing if the session ends.
+async fn pump(events: &mut Receiver<Event>, for_: Duration) {
+    let until = Instant::now() + for_;
+    while let Ok(Some(event)) = tokio::time::timeout_at(until.into(), events.recv()).await {
+        if let Event::Ended(result) = event {
+            panic!("the session ended: {result:?}");
+        }
+    }
+}
+
 /// How long the event stream must stay empty for the desktop to count as settled.
 const QUIET: Duration = Duration::from_millis(1500);
 
@@ -375,6 +410,47 @@ async fn a_host_redraw_matches_what_was_decoded() {
         println!("  scrolled at {x},{y} for {step} ticks");
         // Off whatever the wheel ended over: a pointer resting on a link grows a
         // tooltip, which a redraw may leave out, and that would read as a decoder fault.
+        session.input().mouse_move(1900, 600);
+    } else if let Ok(at) = std::env::var(DRAG_ENV) {
+        let (x, y) = at.split_once(',').expect("REMOTEX_DAMAGE_DRAG is x,y");
+        let (x, y): (i32, i32) = (x.parse().expect("drag x"), y.parse().expect("drag y"));
+        let point = |px: i32, py: i32| {
+            (px.clamp(0, SIZE.0 as i32 - 1) as u16, py.clamp(0, SIZE.1 as i32 - 1) as u16)
+        };
+        let input = session.input();
+        let chord = |keys: &[(u8, bool)]| {
+            for &(code, extended) in keys {
+                input.key(code, extended, true);
+            }
+            for &(code, extended) in keys.iter().rev() {
+                input.key(code, extended, false);
+            }
+        };
+        let mut cycles = 0u64;
+        while Instant::now() < until {
+            // Round a circle by the title bar and back to where it started, so the
+            // window ends each cycle where the next one expects its title bar.
+            let (sx, sy) = point(x, y);
+            input.mouse_move(sx, sy);
+            pump(&mut events, Duration::from_millis(150)).await;
+            input.mouse_button(MouseButton::Left, true, sx, sy);
+            for step in 1..=32 {
+                let angle = f64::from(step) * std::f64::consts::TAU / 32.0;
+                let (px, py) = point(x + (260.0 * angle.sin()) as i32, y + (160.0 * (1.0 - angle.cos())) as i32);
+                input.mouse_move(px, py);
+                pump(&mut events, Duration::from_millis(25)).await;
+            }
+            input.mouse_button(MouseButton::Left, false, sx, sy);
+            pump(&mut events, Duration::from_millis(800)).await;
+            // Maximize, restore, minimize, and bring back what was minimized — each
+            // with the animation the host plays for it.
+            for keys in [&[WIN, UP][..], &[WIN, DOWN], &[WIN, DOWN], &[WIN, SHIFT, M]] {
+                chord(keys);
+                pump(&mut events, Duration::from_millis(1200)).await;
+            }
+            cycles += 1;
+        }
+        println!("  dragged from {x},{y} and cycled the window's states {cycles} times");
         session.input().mouse_move(1900, 600);
     } else {
         while Instant::now() < until {

@@ -147,7 +147,7 @@ struct Tile {
     bitpos: [Quant; 3],
     /// Whether a first or simple pass has landed; an upgrade needs one.
     started: bool,
-    /// Decoded since it was last written to the surface.
+    /// Decoded in the frame being drawn, and so in its grid's `updated`.
     dirty: bool,
 }
 
@@ -174,13 +174,27 @@ struct Grid {
     made: usize,
     /// How many this grid may have made, set before each PDU from the budget.
     limit: usize,
+    /// The tiles decoded since the graphics frame began, by grid index. A region is
+    /// painted from all of them, not only from its own: [MS-RDPEGFX] 2.2.4.2.1.5 lets
+    /// a region's rectangles be covered by tiles an earlier region of the same frame
+    /// carried — in an earlier PDU, even — and a region painted from its own tiles
+    /// alone leaves those rectangles holding whatever was there before.
+    updated: Vec<usize>,
 }
 
 impl Grid {
     fn new(width: u32, height: u32) -> Self {
         let cols = (width as usize).div_ceil(TILE);
         let rows = (height as usize).div_ceil(TILE);
-        Self { width, height, cols, tiles: (0..cols * rows).map(|_| None).collect(), made: 0, limit: 0 }
+        Self {
+            width,
+            height,
+            cols,
+            tiles: (0..cols * rows).map(|_| None).collect(),
+            made: 0,
+            limit: 0,
+            updated: Vec::new(),
+        }
     }
 
     fn index(&self, x: u16, y: u16) -> Option<usize> {
@@ -211,8 +225,6 @@ pub struct Progressive {
     work: Vec<i16>,
     /// The inverse wavelet's intermediate.
     temp: Vec<i16>,
-    /// Tiles decoded by the region being processed, by grid index.
-    touched: Vec<usize>,
 }
 
 impl Default for Progressive {
@@ -227,7 +239,17 @@ impl Progressive {
             surfaces: BTreeMap::new(),
             work: vec![0; COEFFS * 3],
             temp: vec![0; COEFFS],
-            touched: Vec::new(),
+        }
+    }
+
+    /// A graphics frame begins: no tile has been decoded in it yet.
+    pub fn start_frame(&mut self) {
+        for grid in self.surfaces.values_mut() {
+            for index in grid.updated.drain(..) {
+                if let Some(tile) = grid.tiles[index].as_deref_mut() {
+                    tile.dirty = false;
+                }
+            }
         }
     }
 
@@ -296,21 +318,15 @@ impl Progressive {
                 }
                 WBT_REGION => {
                     let grid = self.surfaces.get_mut(&surface).expect("inserted above");
-                    match read_region(&mut b, grid, &mut self.work, &mut self.temp, &mut self.touched) {
-                        Ok(region) => present(grid, &region, &mut self.touched, &mut paint),
-                        Err(e) => {
-                            // The tiles decoded before the fault are not written out;
-                            // left marked as if they had been, nothing would ever
-                            // write them out again.
-                            for &index in &self.touched {
-                                if let Some(tile) = grid.tiles[index].as_deref_mut() {
-                                    tile.dirty = false;
-                                }
-                            }
-                            self.touched.clear();
-                            return Err(e);
-                        }
+                    let mut updated = std::mem::take(&mut grid.updated);
+                    let outcome = read_region(&mut b, grid, &mut self.work, &mut self.temp, &mut updated);
+                    if let Ok(region) = &outcome {
+                        present(grid, region, &updated, &mut paint);
                     }
+                    // A refused region's decoded tiles stay among the frame's, for a
+                    // later region covering them to paint.
+                    grid.updated = updated;
+                    outcome?;
                 }
                 other => return Err(refuse("a block type", other)),
             }
@@ -323,7 +339,7 @@ impl Progressive {
 }
 
 /// Read a region's header, its rectangles and quantization tables, then decode each
-/// tile in it, recording which of the grid's tiles were touched.
+/// tile in it, adding each tile decoded to the frame's `touched`.
 fn read_region(
     r: &mut Reader<'_>,
     grid: &mut Grid,
@@ -375,7 +391,6 @@ fn read_region(
     let tiles = r.bytes(usize::try_from(tile_bytes).unwrap_or(usize::MAX))?;
     let mut t = Reader::new(WHAT, tiles);
     let mut count = 0u16;
-    touched.clear();
     while !t.is_empty() {
         let kind = t.u16_le()?;
         let len = t.u32_le()?;
@@ -925,12 +940,11 @@ fn clip(v: i64) -> u8 {
     v.clamp(0, 255) as u8
 }
 
-/// Write every tile the region touched to the surface, clipped to the region's
-/// rectangles and to the surface.
-fn present(grid: &mut Grid, region: &Region, touched: &mut Vec<usize>, paint: &mut impl FnMut(Rect16, &[u8], usize)) {
-    for &index in touched.iter() {
-        let Some(tile) = grid.tiles[index].as_deref_mut() else { continue };
-        tile.dirty = false;
+/// Write every tile decoded so far in the frame to the surface, clipped to the
+/// region's rectangles and to the surface — see [`Grid::updated`].
+fn present(grid: &Grid, region: &Region, updated: &[usize], paint: &mut impl FnMut(Rect16, &[u8], usize)) {
+    for &index in updated {
+        let Some(tile) = grid.tiles[index].as_deref() else { continue };
         let (tx, ty) = ((index % grid.cols) * TILE, (index / grid.cols) * TILE);
         let tile_rect = (tx, ty, (tx + TILE).min(grid.width as usize), (ty + TILE).min(grid.height as usize));
         for rect in &region.rects {
@@ -951,7 +965,6 @@ fn present(grid: &mut Grid, region: &Region, touched: &mut Vec<usize>, paint: &m
             paint(clipped, &tile.pixels[at..], TILE_STRIDE);
         }
     }
-    touched.clear();
 }
 
 /// Builders the tests here and the compositor's share: a Progressive PDU that draws
@@ -1140,7 +1153,14 @@ mod tests {
     use super::*;
 
     /// Every paint call, as (rect, the pixels inside it, packed).
+    /// Decode `src` as a graphics frame of its own, and gather what it paints.
     fn collect(p: &mut Progressive, surface: u16, w: u32, h: u32, src: &[u8]) -> Result<Vec<(Rect16, Vec<u8>)>, Malformed> {
+        p.start_frame();
+        in_frame(p, surface, w, h, src)
+    }
+
+    /// Decode `src` into the graphics frame already under way, and gather what it paints.
+    fn in_frame(p: &mut Progressive, surface: u16, w: u32, h: u32, src: &[u8]) -> Result<Vec<(Rect16, Vec<u8>)>, Malformed> {
         let mut paints = Vec::new();
         p.decompress(surface, w, h, src, usize::MAX, |rect, rows, stride| {
             let mut packed = Vec::new();
@@ -1267,6 +1287,30 @@ mod tests {
         let paints = collect(&mut p, 1, 64, 64, &again).unwrap();
         assert_eq!(paints.len(), 1);
         assert_eq!(paints[0].1, grey(7).repeat(COEFFS));
+    }
+
+    /// A region whose rectangles are covered by tiles an earlier region of the frame
+    /// carried paints those tiles — whether the earlier region came in the same PDU
+    /// or an earlier one — and a region in the next frame no longer does.
+    #[test]
+    fn a_region_paints_the_tiles_its_frame_already_carried() {
+        let mut p = Progressive::new();
+        let tiles = [flat_tile(WBT_TILE_FIRST, 0, 0, 5), flat_tile(WBT_TILE_FIRST, 1, 0, 9)];
+        let both = pdu(&[region(&[(0, 0, 64, 64)], 1, &tiles), region(&[(64, 0, 64, 64)], 1, &[])]);
+        let paints = collect(&mut p, 1, 128, 64, &both).unwrap();
+        assert_eq!(paints.len(), 2, "each region paints the tile under its rectangle");
+        assert_eq!(paints[1].0, Rect16 { left: 64, top: 0, right: 128, bottom: 64 });
+        assert_eq!(paints[1].1, grey(9).repeat(COEFFS));
+
+        let first = pdu(&[region(&[(0, 0, 64, 64)], 1, &tiles)]);
+        let second = pdu(&[region(&[(64, 0, 64, 64)], 1, &[])]);
+        collect(&mut p, 1, 128, 64, &first).unwrap();
+        let paints = in_frame(&mut p, 1, 128, 64, &second).unwrap();
+        assert_eq!(paints.len(), 1, "a later PDU of the same frame still has the tile");
+        assert_eq!(paints[0].1, grey(9).repeat(COEFFS));
+
+        let paints = collect(&mut p, 1, 128, 64, &second).unwrap();
+        assert!(paints.is_empty(), "a new frame carried no tile yet");
     }
 
     /// A tile difference adds to the coefficients held from the pass before.

@@ -24,6 +24,9 @@ operator's `tmp/test_uat.toml`. Several of the decisions below are marked as
 measured rather than read, and each of those is a place where the specification
 alone would have produced a client that connects and then quietly does nothing.
 
+Every specification this client cites is kept, with its link and the revision
+read, in [andrewtheguy/ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-specs).
+
 [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
 ## What it carries
@@ -163,7 +166,11 @@ WireToSurface2 with its own rectangles: the decoder keeps every tile of every
 surface between PDUs — its coefficients and their signs — so an upgrade pass adds
 bits to what a first pass left, and only the reduce-extrapolate wavelet and RLGR1 a
 modern host uses are implemented; a region asking for the classic RemoteFX wavelet
-is refused by name. The copies and caches that make a desktop cheap are acted on:
+is refused by name. A region is painted from every tile decoded since its graphics
+frame began, clipped to its rectangles, not from its own tiles alone: [MS-RDPEGFX]
+2.2.4.2.1.5 lets a region's rectangles be covered by tiles an earlier region of the
+frame carried, in an earlier PDU even, and a Windows host relies on it when a
+minimized or dragged window uncovers the desktop. The copies and caches that make a desktop cheap are acted on:
 SurfaceToSurface reads its source whole before writing so a scroll over itself does
 not smear, SurfaceToCache and CacheToSurface keep rectangles by slot, SolidFill
 clips to the surface. A rectangle that will not decode is left unpainted with a
