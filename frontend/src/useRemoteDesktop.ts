@@ -1377,13 +1377,18 @@ export function useRemoteDesktop(
       setCanTouch(false);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
-      // The camera never survives into a new session state: unlike sound there
-      // is no "by default" to seed from — enabling is explicit, every time.
-      // A `connected` is a new attachment or a new target either way, and the
-      // gateway has already dropped the old camera socket on its side.
+      // Nothing here turns a camera on: unlike sound there is no "by default"
+      // to seed from — enabling is explicit, every time. A target without one
+      // ends any camera still offered. One with a camera leaves it alone: an
+      // owner's reattach resumes the same engine, whose camera socket the
+      // gateway keeps, and every new engine or claim change has already closed
+      // that socket on the gateway's side, which the sender's `onStopped` turns
+      // into the camera going off.
       setCanCamera(msg.camera);
-      stopCamera();
-      setCameraError(null);
+      if (!msg.camera) {
+        stopCamera();
+        setCameraError(null);
+      }
       // What this session is, for the card. Nothing is checked here: whether this
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.

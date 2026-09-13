@@ -26,9 +26,13 @@ test("a 720p30 camera fits level 3.1", () => {
   assert.equal(h264Config(1280, 720, 30).codec, "avc1.42e01f");
 });
 
-test("1080p30 needs level 4.0 and 4K needs 5.0", () => {
+test("1080p30 needs level 4.0 and 4K needs 5.1 at any rate", () => {
   assert.equal(h264Config(1920, 1080, 30).codec, "avc1.42e028");
-  assert.equal(h264Config(3840, 2160, 30).codec, "avc1.42e032");
+  // 3840x2160 is 32,400 macroblocks a frame, past level 5.0's 22,080, even
+  // though 15 fps is inside its macroblock rate.
+  assert.equal(h264Config(3840, 2160, 15).codec, "avc1.42e033");
+  assert.equal(h264Config(3840, 2160, 30).codec, "avc1.42e033");
+  assert.equal(h264Config(3840, 2160, 60).codec, "avc1.42e034");
 });
 
 test("the bitrate is a tenth of a bit per pixel per frame, clamped", () => {

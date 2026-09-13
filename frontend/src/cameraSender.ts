@@ -66,9 +66,9 @@ const MAX_BUFFERED_BYTES = 256 * 1024;
 //
 // Constrained Baseline, because the far decoder is unknowable from here — it is
 // whatever camera stack the remote's application brings — and Constrained
-// Baseline is the profile everything decodes. The level is the smallest of
-// 3.1/4.0/5.0 that fits the geometry's macroblock rate, which is how the level
-// byte stays honest for a 4K camera without a table of every level. Bitrate at
+// Baseline is the profile everything decodes. The level is the smallest from
+// 3.1 up whose frame size and macroblock rate both fit the geometry, so the
+// level byte stays honest for a 4K camera. Bitrate at
 // 0.1 bits per pixel per frame — the usual realtime-video rule of thumb —
 // clamped to a floor a tiny capture still looks fine at and a ceiling a 4K one
 // cannot flood the uplink with.
@@ -79,8 +79,21 @@ export function h264Config(
 ): { codec: string; bitrate: number } {
   const macroblocks = Math.ceil(width / 16) * Math.ceil(height / 16);
   const mbRate = macroblocks * fps;
-  // Level limits from the H.264 spec's table A-1 (macroblocks per second).
-  const level = mbRate <= 108_000 ? "1f" : mbRate <= 245_760 ? "28" : "32";
+  // Level limits from the H.264 spec's table A-1: [level_idc, MaxFS in
+  // macroblocks, MaxMBPS]. Past 5.2, the largest is named and the encoder's
+  // support check refuses it.
+  const levels: [string, number, number][] = [
+    ["1f", 3_600, 108_000], // 3.1
+    ["20", 5_120, 216_000], // 3.2
+    ["28", 8_192, 245_760], // 4.0
+    ["2a", 8_704, 522_240], // 4.2
+    ["32", 22_080, 589_824], // 5.0
+    ["33", 36_864, 983_040], // 5.1
+    ["34", 36_864, 2_073_600], // 5.2
+  ];
+  const level = (levels.find(
+    ([, maxFs, maxMbps]) => macroblocks <= maxFs && mbRate <= maxMbps,
+  ) ?? levels[levels.length - 1])[0];
   const bitrate = Math.min(
     8_000_000,
     Math.max(300_000, width * height * fps * 0.1),
@@ -177,14 +190,39 @@ export async function startCameraSender(
       frameRate: { ideal: CAPTURE_FPS, max: CAPTURE_FPS },
     },
   });
-  const track = stream.getVideoTracks()[0];
-  if (!track) {
-    for (const t of stream.getTracks()) {
-      t.stop();
+  // From here on the camera light is on, so a setup step that throws must turn
+  // it off again: whatever was built after the capture, newest first, then the
+  // capture itself. Once the sender exists, its own `stop` owns all of it.
+  const undo: (() => void)[] = [
+    () => {
+      for (const t of stream.getTracks()) {
+        t.stop();
+      }
+    },
+  ];
+  try {
+    const track = stream.getVideoTracks()[0];
+    if (!track) {
+      throw new Error("the camera produced no video track");
     }
-    throw new Error("the camera produced no video track");
+    return await senderForTrack(url, callbacks, track, undo);
+  } catch (e) {
+    for (const release of undo.reverse()) {
+      release();
+    }
+    throw e;
   }
+}
 
+// The rest of `startCameraSender`, for one captured track. Each resource is
+// pushed to `undo` as it is built, for the caller to release if a later step
+// throws.
+async function senderForTrack(
+  url: string,
+  callbacks: CameraSenderCallbacks,
+  track: MediaStreamTrack,
+  undo: (() => void)[],
+): Promise<CameraSender> {
   const settings = track.getSettings();
   const width = settings.width ?? 640;
   const height = settings.height ?? 480;
@@ -209,7 +247,6 @@ export async function startCameraSender(
   };
   const support = await VideoEncoder.isConfigSupported(config);
   if (!support.supported) {
-    track.stop();
     throw new Error(
       `this browser cannot encode ${codec} at ${width}x${height}`,
     );
@@ -225,6 +262,7 @@ export async function startCameraSender(
 
   const socket = new WebSocket(url);
   socket.binaryType = "arraybuffer";
+  undo.push(() => socket.close());
 
   const encoder = new VideoEncoder({
     output: (chunk) => {
@@ -254,6 +292,11 @@ export async function startCameraSender(
       }
     },
     error: (e) => stop(e.message || "the H.264 encoder failed"),
+  });
+  undo.push(() => {
+    if (encoder.state !== "closed") {
+      encoder.close();
+    }
   });
   encoder.configure(config);
 
