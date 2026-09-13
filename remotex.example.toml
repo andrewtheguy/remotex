@@ -287,6 +287,14 @@ password = "change-me"
 # application on it starts capturing; the browser captures raw PCM to match and
 # the gateway passes it through, so there is no codec key beside this one. A
 # "vnc" target refuses it, as it refuses `camera`.
+#
+# It needs `audio = true` on the same target. Windows creates the session's
+# "Remote Audio" recording device only when playback is redirected too: with
+# audio off (mstsc's "play on remote computer") the host never opens the
+# microphone channel, applications on it see only its own physical microphones,
+# and an enabled microphone here is never asked for a sample. That is the
+# host's rule, not the gateway's, so the key is accepted either way — measured
+# against Windows 11, 2026-09-13.
 #microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is

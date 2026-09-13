@@ -1073,6 +1073,18 @@ direction. Downstream the host names the format, because MS-RDPEAI lets it pick:
 opened the stream with, and `micClose` ends it. There is no device layer to plug
 or unplug, so the microphone exists for as long as the channel is registered.
 
+The channel is registered on every microphone target, but Windows only opens
+it when playback is redirected too. The session's "Remote Audio" recording
+endpoint is created alongside the playback one, so a target with `audio =
+false` — which tells the host to keep playing on its own speakers — gets no
+recording endpoint at all: the host never opens the AUDIO_INPUT channel, an
+application on it enumerates only the host's own physical microphones, and the
+mic socket attaches and hears nothing. With `audio = true` the same host opens
+the channel during the handshake and "Remote Audio" appears as a microphone.
+Measured against a Windows 11 host on 2026-09-13; the gateway does not enforce
+the pairing, because the rule is the host's, and `remotex.example.toml` says so
+beside the key.
+
 The host opens audin once, during the RDP handshake, seconds before any mic
 socket connects, so `MicBridge` (`src/mic.rs`) latches the last open under the
 same lock as the socket's sender and replays it to a socket that subscribes

@@ -222,7 +222,10 @@ Two RDP redirections that send this browser's own media the other way are
 **experimental**, for lack of tests: `camera = true` offers the remote a virtual
 webcam over MS-RDPECAM, and `microphone = true` offers it a microphone over
 MS-RDPEAI. Both are off by default, both are enabled per session from the
-floating menu and never remembered, and both are refused on VNC. What is missing
+floating menu and never remembered, and both are refused on VNC. The microphone
+also needs `audio = true` on the same target: Windows creates the session's
+recording endpoint only when playback is redirected, so with audio off the host
+never opens the microphone channel. What is missing
 is coverage of the redirection itself — their socket rules and control messages
 are tested like everything else, and no test carries a frame or a sample to a
 host, because those channels are answered only by a real Windows host and the
