@@ -161,7 +161,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         let frame = read_frame(&mut stream).await;
         println!("<- MCS Connect-Response, {} bytes", frame.len());
         let answer = mcs::connect_response(&frame).expect("an MCS Connect-Response");
-        let ConferenceCreateResponse { io_channel, channels } =
+        let ConferenceCreateResponse { io_channel, channels, .. } =
             ConferenceCreateResponse::decode(answer).expect("a GCC Conference Create Response");
         println!("I/O channel {io_channel}, virtual channels {channels:?}");
         assert_eq!(
@@ -205,6 +205,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             domain: target.domain.as_deref(),
             address: client_address,
             audio: false,
+            keyboard_layout: KEYBOARD_LAYOUT,
         }
         .encode()
         .expect("the Client Info PDU fits a frame");
@@ -220,10 +221,11 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         // 9. The capability exchange. The server's Demand Active is the first PDU
         //    that says what the session will actually be.
         let payload = receive(&mut stream, io_channel).await;
-        let Pdu::DemandActive(body) = share::decode(&payload).expect("a share control PDU") else {
+        let Pdu::DemandActive { source, body } = share::decode(&payload).expect("a share control PDU")
+        else {
             panic!("the server did not demand a share once licensing was done");
         };
-        let demand = DemandActive::decode(body).expect("an RDP Demand Active PDU");
+        let demand = DemandActive::decode(source, body).expect("an RDP Demand Active PDU");
         println!(
             "<- Demand Active: share {:#x}, desktop {}x{}, fragments up to {} bytes",
             demand.share_id, demand.width, demand.height, demand.multifragment
@@ -248,7 +250,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
 
         // 10. The finalization handshake. All four go out without waiting; the
         //     server's four come back in its own time, with session PDUs among them.
-        for request in finalization::requests(user, demand.share_id) {
+        for request in finalization::requests(user, demand.server_channel, demand.share_id) {
             stream.write_all(&mcs::send_data_request(user, io_channel, &request).unwrap())
                 .await
                 .expect("send a finalization PDU");
@@ -489,7 +491,7 @@ async fn watch(
             // Named rather than printed: a Save Session Info PDU is a kilobyte of
             // Unicode, and what matters here is that it decoded and what it was.
             let what = match share::decode(data.payload).expect("a share control PDU") {
-                Pdu::DemandActive(body) => format!("a Demand Active of {} bytes", body.len()),
+                Pdu::DemandActive { body, .. } => format!("a Demand Active of {} bytes", body.len()),
                 Pdu::DeactivateAll => "a Deactivate All".to_owned(),
                 Pdu::Data(pdu) => {
                     format!("a data PDU of type {:#04x}, {} bytes", pdu.kind, pdu.body.len())
@@ -588,7 +590,7 @@ fn answer(message: dvc::Message<'_>, display: &mut Display) -> Option<Vec<u8>> {
     match message {
         dvc::Message::Capabilities { version } => {
             println!("<- drdynvc: capabilities version {version}");
-            Some(dvc::capabilities_response(version))
+            Some(dvc::capabilities_response(dvc::answer_version(version)))
         }
         dvc::Message::Create { channel, name } => {
             let wanted = name == display::CHANNEL_NAME;
@@ -651,9 +653,9 @@ async fn reactivation(
                 println!("<- Deactivate All: the host is rebuilding the desktop");
                 deactivated = true;
             }
-            Pdu::DemandActive(body) => {
+            Pdu::DemandActive { source, body } => {
                 assert!(deactivated, "a Demand Active without the Deactivate All before it");
-                return DemandActive::decode(body).expect("an RDP Demand Active PDU");
+                return DemandActive::decode(source, body).expect("an RDP Demand Active PDU");
             }
             Pdu::Data(_) => {}
         }

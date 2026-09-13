@@ -33,9 +33,9 @@
 //!
 //! - **Short format names.** `CB_USE_LONG_FORMAT_NAMES` is not asked for, so both
 //!   ends use the fixed thirty-six byte entry — an id and a name field this client
-//!   never reads. MS-RDPECLIP 3.1.5.2 makes long names the form only when *both*
-//!   ends offer them, so not offering settles the format of every list in either
-//!   direction.
+//!   never reads. MS-RDPECLIP 2.2.2.1.1.1 has the short variant used unless the
+//!   flag is set, and the long one only when *both* ends set it, so not offering
+//!   settles the format of every list in either direction.
 //! - **No file transfer and no locking.** `CB_STREAM_FILECLIP_ENABLED` and
 //!   `CB_CAN_LOCK_CLIPDATA` stay clear, so a server has no reason to send the file
 //!   contents and clipboard-lock PDUs; one that sends them anyway is ignored by name.

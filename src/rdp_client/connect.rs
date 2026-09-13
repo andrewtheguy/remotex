@@ -169,7 +169,17 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     frames.next(&mut frame).await?;
     let answer = mcs::connect_response(&frame)?;
     let answer = ConferenceCreateResponse::decode(answer)?;
-    let ConferenceCreateResponse { io_channel, channels } = answer;
+    let ConferenceCreateResponse { io_channel, channels, requested_protocols } = answer;
+    // The server's own record of what step 1 offered, sent inside TLS where a machine
+    // that rewrote the clear-text negotiation cannot reach it. [MS-RDPBCGR] 3.2.5.3.4
+    // says to drop a connection whose record disagrees.
+    if requested_protocols != request.protocols.bits() {
+        bail!(
+            "{dest} says the negotiation offered protocols {requested_protocols:#x}, and this \
+             client offered {:?}",
+            request.protocols
+        );
+    }
     if channels.len() != wanted.len() {
         let asked = wanted.len();
         bail!("the host numbered {} channels, and {asked} were asked for", channels.len());
@@ -209,6 +219,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         domain: config.domain.as_deref(),
         address: client_address,
         audio: config.audio.is_some(),
+        keyboard_layout: KEYBOARD_LAYOUT,
     }
     .encode()?;
     send(&mut writer, user, io_channel, &logon).await.context("sending the Client Info PDU")?;
@@ -220,10 +231,10 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // 9. The capability exchange, and 10. the four PDUs that make the share live.
     //     Both happen again, unchanged, every time the server rebuilds the desktop.
     let payload = receive(&mut frames, &mut frame, io_channel).await?;
-    let Pdu::DemandActive(body) = share::decode(payload)? else {
+    let Pdu::DemandActive { source, body } = share::decode(payload)? else {
         bail!("the host did not demand a share once licensing was done");
     };
-    let demand = DemandActive::decode(body)?;
+    let demand = DemandActive::decode(source, body)?;
     info!(
         "rdp: the host opened a {}x{} desktop, share {:#x}",
         demand.width, demand.height, demand.share_id
@@ -271,7 +282,7 @@ pub(super) async fn activate(
 
     // All four go out without waiting; the server's four come back in its own time,
     // with session PDUs among them.
-    for request in finalization::requests(user, demand.share_id) {
+    for request in finalization::requests(user, demand.server_channel, demand.share_id) {
         let framed = mcs::send_data_request(user, io_channel, &request)?;
         writer.write_all(&framed).await.context("sending a finalization PDU")?;
     }

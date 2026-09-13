@@ -416,6 +416,10 @@ struct Share {
     /// [`desktop::repaint`].
     refresh_rect: bool,
     suppress_output: bool,
+    /// Which pointer events beyond the ordinary ones this server takes — see
+    /// [`Share::takes`].
+    horizontal_wheel: bool,
+    extended_buttons: bool,
 }
 
 impl From<&DemandActive> for Share {
@@ -427,6 +431,24 @@ impl From<&DemandActive> for Share {
             chunk: demand.chunk,
             refresh_rect: demand.refresh_rect,
             suppress_output: demand.suppress_output,
+            horizontal_wheel: demand.horizontal_wheel,
+            extended_buttons: demand.extended_buttons,
+        }
+    }
+}
+
+impl Share {
+    /// Whether this server takes `event`. A horizontal wheel and the side buttons each
+    /// need a flag in the server's Input capability, and without it [MS-RDPBCGR] says
+    /// the event MUST NOT be sent — so it is dropped, as input a session cannot carry
+    /// always is.
+    fn takes(&self, event: &input::Event) -> bool {
+        match event {
+            input::Event::Wheel { horizontal: true, .. } => self.horizontal_wheel,
+            input::Event::Button { button: input::Button::X1 | input::Button::X2, .. } => {
+                self.extended_buttons
+            }
+            _ => true,
         }
     }
 }
@@ -542,7 +564,7 @@ impl Sound {
     /// and what it earned goes back to the caller to send on the channel it came in
     /// on.
     fn push(&mut self, pdu: &[u8]) -> Result<Vec<Vec<u8>>> {
-        let rdpsnd::Turn { replies, output } = self.proto.push(pdu)?;
+        let rdpsnd::Turn { mut replies, output } = self.proto.push(pdu)?;
         match output {
             rdpsnd::Output::Negotiated => {
                 let format = rdpsnd::CD_QUALITY;
@@ -556,7 +578,12 @@ impl Sound {
                 "rdp: the host offers no 44.1 kHz 16-bit stereo PCM among its {offered} sound \
                  formats, so it will redirect nothing"
             ),
-            rdpsnd::Output::Wave(samples) => self.sink.wave(samples),
+            rdpsnd::Output::Wave { samples, confirm } => {
+                self.sink.wave(samples);
+                // Once the sink has the buffer, and not before: the timestamp counts
+                // the time that took.
+                replies.push(confirm.encode());
+            }
             rdpsnd::Output::Closed => {
                 debug!("rdp: the host closed its sound: nothing is playing");
                 self.sink.closed();
@@ -769,7 +796,7 @@ impl<'a> Active<'a> {
             }
             // A share this client did not ask to be rebuilt: the server sends the
             // Deactivate All first, and `reactivate` reads the Demand Active.
-            Pdu::DemandActive(_) => {
+            Pdu::DemandActive { .. } => {
                 bail!("the host demanded a share without deactivating the last one")
             }
             Pdu::Data(data) if data.kind == share::SET_ERROR_INFO => {
@@ -1214,7 +1241,7 @@ impl<'a> Active<'a> {
             return Ok(None);
         }
         match share::decode(data.payload)? {
-            Pdu::DemandActive(body) => Ok(Some(DemandActive::decode(body)?)),
+            Pdu::DemandActive { source, body } => Ok(Some(DemandActive::decode(source, body)?)),
             _ => Ok(None),
         }
     }
@@ -1257,6 +1284,7 @@ impl<'a> Active<'a> {
     }
 
     async fn send_input(&mut self, batch: &mut Vec<input::Event>) -> Result<()> {
+        batch.retain(|event| self.share.takes(event));
         if batch.is_empty() {
             return Ok(());
         }
@@ -1447,7 +1475,9 @@ fn answer_clipboard(pdu: &[u8]) -> Result<(Option<Vec<u8>>, Option<Event>)> {
 /// session hands it to the compositor instead.
 fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<u8>>> {
     Ok(match message {
-        dvc::Message::Capabilities { version } => vec![dvc::capabilities_response(version)],
+        dvc::Message::Capabilities { version } => {
+            vec![dvc::capabilities_response(dvc::answer_version(version))]
+        }
         dvc::Message::Create { channel, name } => {
             if name == display::CHANNEL_NAME && dynamics.resize {
                 debug!("rdp: the host opened Display Control on dynamic channel {channel}");

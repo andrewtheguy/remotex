@@ -43,9 +43,6 @@ const WBT_TILE_SIMPLE: u16 = 0xCCC5;
 const WBT_TILE_FIRST: u16 = 0xCCC6;
 const WBT_TILE_UPGRADE: u16 = 0xCCC7;
 
-const SYNC_MAGIC: u32 = 0xCACC_ACCA;
-const SYNC_VERSION: u16 = 0x0100;
-
 /// Region flag: the wavelet is the reduce-extrapolate variant. The only one decoded.
 const DWT_REDUCE_EXTRAPOLATE: u8 = 0x01;
 /// Tile flag: the coefficients are a difference against the tile as last decoded.
@@ -77,7 +74,9 @@ fn refuse(field: &'static str, value: impl Into<u64>) -> Malformed {
 struct Quant([u8; 10]);
 
 impl Quant {
-    /// The five packed bytes of a `TS_RFX_CODEC_QUANT`, [MS-RDPRFX] 2.2.2.1.5.
+    /// The five packed bytes of an `RFX_COMPONENT_CODEC_QUANT`, [MS-RDPEGFX]
+    /// 2.2.4.2.1.5.2, whose bands run in a different order from the
+    /// `TS_RFX_CODEC_QUANT` of [MS-RDPRFX].
     fn read(r: &mut Reader<'_>) -> Result<Self, Malformed> {
         let b = [r.u8()?, r.u8()?, r.u8()?, r.u8()?, r.u8()?];
         Ok(Self([
@@ -294,14 +293,10 @@ impl Progressive {
             let mut b = Reader::new(WHAT, r.bytes(body)?);
             match kind {
                 WBT_SYNC => {
-                    let magic = b.u32_le()?;
-                    if magic != SYNC_MAGIC {
-                        return Err(refuse("a sync magic", magic));
-                    }
-                    let version = b.u16_le()?;
-                    if version != SYNC_VERSION {
-                        return Err(refuse("a sync version", version));
-                    }
+                    // The magic and the version, both of which [MS-RDPEGFX] 2.2.4.2.1.1
+                    // tells a decoder to ignore.
+                    b.u32_le()?;
+                    b.u16_le()?;
                 }
                 WBT_FRAME_BEGIN => {
                     b.u32_le()?; // frameIndex
@@ -1174,6 +1169,18 @@ mod tests {
 
     /// Tiles are made only within the budget, a tile already made is drawn again
     /// without spending more of it, and a forgotten surface gives its share back.
+    /// The sync block's magic and version are read past, as a decoder is told to: a
+    /// host that bumped either is decoded rather than dropped.
+    #[test]
+    fn a_sync_block_of_another_version_is_read_past() {
+        let mut src = pdu(&[region(&[(0, 0, 64, 64)], 1, &[flat_tile(WBT_TILE_SIMPLE, 0, 0, 5)])]);
+        // The sync block's six bytes of body follow its six-byte header.
+        src[6..12].copy_from_slice(&[0, 0, 0, 0, 0x00, 0x02]);
+        let mut painted = 0;
+        Progressive::new().decompress(1, 64, 64, &src, TILE_BYTES, |_, _, _| painted += 1).unwrap();
+        assert!(painted > 0);
+    }
+
     #[test]
     fn tiles_past_the_budget_are_refused() {
         let mut p = Progressive::new();

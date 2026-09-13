@@ -178,10 +178,12 @@ impl Zgfx {
             out.extend_from_slice(data);
             return Ok(());
         }
-        // The last byte says how many bits of the one before it are padding.
-        let Some((&padding, body)) = data.split_last() else {
+        // The last byte's low three bits say how many bits of the one before it are
+        // padding. Its five high bits are reserved ([MS-RDPEGFX] 3.1.9.1.2.4).
+        let Some((&trailer, body)) = data.split_last() else {
             return Err(Malformed::Short { what: WHAT, len: segment.len(), at: r.at(), need: 1 });
         };
+        let padding = trailer & 0x07;
         let bits = body.len() * 8;
         if usize::from(padding) > bits {
             return Err(r.refuse("a padding count past the segment's bits", padding));
@@ -458,6 +460,20 @@ mod tests {
         let mut pdu = vec![SINGLE, RDP8 | COMPRESSED];
         pdu.extend_from_slice(&(bits as u16).to_be_bytes());
         pdu.push(2);
+        assert_eq!(decompressed(&mut zgfx, &pdu), b"ababab");
+    }
+
+    /// Only the low three bits of the trailing byte count padding. The five above them
+    /// are reserved, and setting them changes nothing.
+    #[test]
+    fn the_reserved_bits_of_the_padding_byte_are_ignored() {
+        let mut zgfx = Zgfx::new();
+        assert_eq!(decompressed(&mut zgfx, &wrap(b"ab")), b"ab");
+        // The match of the test above, with every reserved bit of its trailer set.
+        let bits = 0b10_0010_0010_1010_u32 << 2;
+        let mut pdu = vec![SINGLE, RDP8 | COMPRESSED];
+        pdu.extend_from_slice(&(bits as u16).to_be_bytes());
+        pdu.push(0xF8 | 2);
         assert_eq!(decompressed(&mut zgfx, &pdu), b"ababab");
     }
 

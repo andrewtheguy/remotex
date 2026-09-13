@@ -6,8 +6,11 @@
 //! and this client measured the same: a session naming `rdpsnd` alone is numbered a
 //! channel the host never speaks on. So this is the channel's opening handshake and
 //! nothing after it. The server announces itself; the client confirms, gives its
-//! name, and answers the capability exchange with the general set alone. With no
-//! devices there is no device list to announce and no I/O request will ever arrive.
+//! name, answers the capability exchange with the general set alone, and announces a
+//! device list with nothing in it — [MS-RDPEFS] 3.1.3 has the list follow the
+//! server's client ID confirm whether or not there are devices, and FreeRDP, which
+//! skips an empty one, is laxer than the specification there. With no devices no I/O
+//! request will ever arrive.
 //!
 //! [MS-RDPEFS] 2.2.2, ported against FreeRDP's `channels/rdpdr/client`.
 //!
@@ -28,6 +31,7 @@ const CLIENT_NAME: u16 = 0x434E;
 const SERVER_CAPABILITY: u16 = 0x5350;
 const CLIENT_CAPABILITY: u16 = 0x4350;
 const USER_LOGGEDON: u16 = 0x554C;
+const DEVICELIST_ANNOUNCE: u16 = 0x4441;
 
 /// The protocol this client speaks: major 1, minor 13 — RDP 10's — or the server's
 /// if lower.
@@ -111,9 +115,9 @@ impl Rdpdr {
                 let minor = r.u16_le()?;
                 self.client_id = r.u32_le()?;
                 self.version = Some((major, minor));
-                // With no devices there is no list to announce, so the handshake
-                // ends here, as FreeRDP's does with nothing to redirect.
-                Ok(Vec::new())
+                // The list follows the confirm even with nothing in it, and ends the
+                // handshake.
+                Ok(vec![device_list_announce()])
             }
             USER_LOGGEDON => Ok(Vec::new()),
             other => {
@@ -144,6 +148,15 @@ fn client_name() -> Vec<u8> {
     w.u32_le(0); // CodePage
     w.u32_le(name.len() as u32);
     w.bytes(&name);
+    w.finish()
+}
+
+/// Client Device List Announce Request, of no devices.
+fn device_list_announce() -> Vec<u8> {
+    let mut w = Writer::with_capacity(8);
+    w.u16_le(CORE);
+    w.u16_le(DEVICELIST_ANNOUNCE);
+    w.u32_le(0); // DeviceCount
     w.finish()
 }
 
@@ -204,8 +217,8 @@ mod tests {
     }
 
     /// The capability request is answered with the general set alone, its I/O codes
-    /// the intersection with the server's; a client id confirm ends the handshake
-    /// with nothing to announce.
+    /// the intersection with the server's; a client id confirm is answered with a
+    /// device list of nothing, which ends the handshake.
     #[test]
     fn capabilities_are_answered_with_the_general_set_alone() {
         let mut rdpdr = Rdpdr::new();
@@ -230,7 +243,7 @@ mod tests {
         assert_eq!(caps.len(), 8 + 44);
 
         let confirm = rdpdr.push(&server(CLIENTID_CONFIRM, &[1, 0, 0x0D, 0, 9, 0, 0, 0])).unwrap();
-        assert!(confirm.is_empty());
+        assert_eq!(confirm, vec![vec![0x72, 0x44, 0x41, 0x44, 0, 0, 0, 0]], "a list of no devices");
         assert_eq!(rdpdr.client_id, 9);
     }
 

@@ -75,9 +75,10 @@ pub fn decode_unicode(bytes: &[u8]) -> Option<String> {
 
 /// A Rust string → `CF_UNICODETEXT` bytes.
 ///
-/// Terminated, because MS-RDPECLIP says the payload for this format is a
-/// null-terminated string and a Windows peer pasting an unterminated one gets
-/// whatever followed it in its own buffer.
+/// Terminated, because a Windows `CF_UNICODETEXT` is a null-terminated string —
+/// the clipboard format's own rule, which MS-RDPECLIP carries without restating —
+/// and a Windows peer pasting an unterminated one gets whatever followed it in its
+/// own buffer.
 pub fn encode_unicode(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() * 2 + 2);
     for unit in text.encode_utf16().chain(std::iter::once(0)) {

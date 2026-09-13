@@ -57,10 +57,10 @@ pub enum Response {
 }
 
 /// The four PDUs this client sends, in order, each already framed as a share data
-/// PDU on the I/O channel.
-pub fn requests(user: u16, share_id: u32) -> [Vec<u8>; 4] {
+/// PDU on the I/O channel. `server` is the channel the Demand Active came from.
+pub fn requests(user: u16, server: u16, share_id: u32) -> [Vec<u8>; 4] {
     [
-        share::data(share::SYNCHRONIZE, user, share_id, &synchronize(user)),
+        share::data(share::SYNCHRONIZE, user, share_id, &synchronize(server)),
         share::data(share::CONTROL, user, share_id, &control(COOPERATE)),
         share::data(share::CONTROL, user, share_id, &control(REQUEST_CONTROL)),
         share::data(share::FONT_LIST, user, share_id, &font_list()),
@@ -93,12 +93,12 @@ pub fn response(pdu: &Data<'_>) -> Result<Response, Malformed> {
     }
 }
 
-fn synchronize(user: u16) -> Vec<u8> {
+fn synchronize(server: u16) -> Vec<u8> {
     let mut w = Writer::with_capacity(4);
     w.u16_le(SYNCHRONIZE_MESSAGE);
-    // The target is this client's own user channel. The field exists because MCS
-    // conferences can have more than one user; an RDP session never does.
-    w.u16_le(user);
+    // `targetUser`: the server's channel, out of the Demand Active's `pduSource`, as
+    // [MS-RDPBCGR] 3.2.5.3.14 has it. A Windows host reads none of it.
+    w.u16_le(server);
     w.finish()
 }
 
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn the_four_requests_go_out_in_the_order_the_handshake_defines() {
-        let pdus = requests(1007, 0x0001_0021);
+        let pdus = requests(1007, 1002, 0x0001_0021);
         let kinds: Vec<_> = pdus.iter().map(|pdu| decoded(pdu).kind).collect();
         assert_eq!(kinds, vec![
             share::SYNCHRONIZE,
@@ -153,14 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn a_synchronize_names_this_clients_own_channel() {
-        let pdus = requests(1007, 1);
-        assert_eq!(decoded(&pdus[0]).body, &[0x01, 0x00, 0xEF, 0x03]);
+    fn a_synchronize_names_the_servers_channel_rather_than_this_clients() {
+        let pdus = requests(1007, 1002, 1);
+        assert_eq!(decoded(&pdus[0]).body, &[0x01, 0x00, 0xEA, 0x03]);
     }
 
     #[test]
     fn the_font_list_says_it_is_the_whole_list_of_nothing() {
-        let pdus = requests(1007, 1);
+        let pdus = requests(1007, 1002, 1);
         assert_eq!(decoded(&pdus[3]).body, &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x32, 0x00]);
     }
 

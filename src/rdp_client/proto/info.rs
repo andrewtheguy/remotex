@@ -92,6 +92,9 @@ pub struct ClientInfo<'a> {
     /// Whether the target asked for the remote's sound. Without it the logon says
     /// there is nothing here to play audio, and the host redirects none.
     pub audio: bool,
+    /// The keyboard layout the GCC client core data named, whose low word is the
+    /// language identifier `CodePage` carries.
+    pub keyboard_layout: u32,
 }
 
 impl ClientInfo<'_> {
@@ -116,9 +119,9 @@ impl ClientInfo<'_> {
 
         let mut w = Writer::with_capacity(total);
         share::write_security_header(&mut w, share::INFO_PACKET);
-        // The code page is read only when the GCC client core data asked for a
-        // keyboard layout of zero, and it did not.
-        w.u32_le(0);
+        // `CodePage`, which with `INFO_UNICODE` set MUST carry the active language
+        // identifier in its low word ([MS-RDPBCGR] 2.2.1.11.1.1): the layout's own.
+        w.u32_le(self.keyboard_layout & 0xFFFF);
         w.u32_le(if self.audio { FLAGS } else { FLAGS | NO_AUDIO });
         // Five lengths, then the five strings. A length counts the characters and
         // not the terminator that follows them; the two after the strings count the
@@ -179,6 +182,7 @@ mod tests {
             domain: None,
             address: IpAddr::from([10, 0, 0, 2]),
             audio: false,
+            keyboard_layout: 0x0001_0409,
         }
     }
 
@@ -198,7 +202,8 @@ mod tests {
     fn the_pdu_says_it_is_the_logon_and_asks_to_be_logged_on() {
         let bytes = logon().encode().unwrap();
         assert_eq!(&bytes[..4], &[0x40, 0x00, 0x00, 0x00]);
-        assert_eq!(&bytes[4..8], &[0x00; 4]);
+        // CodePage: the layout's language, and none of its high word.
+        assert_eq!(&bytes[4..8], &[0x09, 0x04, 0x00, 0x00]);
         let flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         assert_eq!(flags & 0x0000_0008, 0x0000_0008, "INFO_AUTOLOGON");
         assert_eq!(flags & 0x0000_0010, 0x0000_0010, "INFO_UNICODE");

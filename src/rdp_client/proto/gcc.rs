@@ -105,8 +105,8 @@ const RNS_UD_COLOR_8BPP: u16 = 0xCA01;
 const RNS_UD_SAS_DEL: u16 = 0xAA03;
 
 /// `CHANNEL_OPTION_SHOW_PROTOCOL`, which every client sets on the clipboard and on
-/// nothing else. The server is told here, and reminded on every chunk — see
-/// [`Channel::chunk_flags`].
+/// nothing else. [MS-RDPBCGR] 2.2.1.3.4.1 has the server ignore the option here; what
+/// is normative is the matching flag on every chunk — see [`Channel::chunk_flags`].
 const SHOW_PROTOCOL: u32 = 0x0020_0000;
 
 /// A static virtual channel, asked for by name in `CS_NET` and given a number by the
@@ -280,16 +280,23 @@ impl ConferenceCreateRequest<'_> {
     }
 }
 
-/// `CS_SECURITY`, which on this client says the same thing twice: no encryption.
+/// `encryptionMethods`: 40-, 128- and 56-bit RC4 and FIPS. [MS-RDPBCGR] 2.2.1.3.3 has
+/// the field name at least one method whatever the security negotiated, and this is
+/// the value Microsoft's own example in 4.1.3 sends under TLS.
+const ENCRYPTION_METHODS: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0008 | 0x0000_0010;
+
+/// `CS_SECURITY`: the RDP encryption methods, which under TLS nothing chooses between.
 ///
 /// The RDP security layer is what a connection uses when there is no TLS underneath
-/// it. There always is one here, so both method fields are zero — and a server that
-/// answered with a method anyway would be asking for an encryption this client does
-/// not implement, which [`ConferenceCreateResponse::decode`] refuses.
+/// it. There always is one here, and a server whose negotiation settled on TLS answers
+/// with no method and no level. The methods named are only the list the field is
+/// required to hold: a server that answered with one of them would be asking for an
+/// encryption this client does not implement, which
+/// [`ConferenceCreateResponse::decode`] refuses.
 fn security(w: &mut Writer) {
     block_header(w, CS_SECURITY, 8);
-    w.u32_le(0); // encryptionMethods
-    w.u32_le(0); // extEncryptionMethods
+    w.u32_le(ENCRYPTION_METHODS);
+    w.u32_le(0); // extEncryptionMethods, which only a French-locale client fills in
 }
 
 fn block_header(w: &mut Writer, block: u16, contents: u16) {
@@ -331,6 +338,10 @@ pub struct ConferenceCreateResponse {
     /// The channels asked for in `CS_NET`, numbered by the server, in the order they
     /// were asked for.
     pub channels: Vec<u16>,
+    /// What the server says the X.224 negotiation's `requestedProtocols` held, out of
+    /// `SC_CORE` — for the client to compare with what it sent, as [MS-RDPBCGR]
+    /// 3.2.5.3.4 has it. `PROTOCOL_RDP`, zero, when the server leaves the field off.
+    pub requested_protocols: u32,
 }
 
 impl ConferenceCreateResponse {
@@ -348,9 +359,11 @@ impl ConferenceCreateResponse {
         r.u8()?; // CHOICE: conferenceCreateResponse
         per::read_integer16(&mut r, 1001)?; // nodeID, which nothing addresses
         per::read_integer(&mut r)?; // tag
-        let result = r.u8()?; // ENUMERATED result
+        // ENUMERATED result: an extension bit and a three-bit index at the top of the
+        // byte, and padding below them — [MS-RDPBCGR] 4.1.4 annotates it.
+        let result = r.u8()? >> 4;
         if result != 0 {
-            return Err(r.refuse("a refusal to create the conference", result));
+            return Err(r.refuse("a refusal to create the conference, result", result));
         }
         r.u8()?; // SET OF count, which RDP always makes one
         r.u8()?; // CHOICE: h221NonStandard, value present
@@ -364,6 +377,7 @@ impl ConferenceCreateResponse {
         const WHAT: &str = "a GCC server data block";
         let mut r = Reader::new(WHAT, bytes);
         let mut network = None;
+        let mut requested_protocols = 0;
 
         while !r.is_empty() {
             let block = r.u16_le()?;
@@ -373,10 +387,7 @@ impl ConferenceCreateResponse {
                 .ok_or_else(|| r.refuse("a block length of", u64::try_from(length).unwrap_or(0)))?;
             let contents = Reader::new(WHAT, r.bytes(size)?);
             match block {
-                // The server's own version and capability flags. Nothing here reads
-                // them: this client claims the oldest version it can and asks for
-                // nothing a server has to opt into.
-                SC_CORE => {}
+                SC_CORE => requested_protocols = Self::core(contents)?,
                 SC_SECURITY => Self::security(contents)?,
                 SC_NET => network = Some(Self::network(contents)?),
                 // A block for something this client did not ask for. The server sends
@@ -386,7 +397,20 @@ impl ConferenceCreateResponse {
             }
         }
 
-        network.ok_or(Malformed::Missing { what: WHAT, field: "the channel numbers of SC_NET" })
+        let (io_channel, channels) = network
+            .ok_or(Malformed::Missing { what: WHAT, field: "the channel numbers of SC_NET" })?;
+        Ok(Self { io_channel, channels, requested_protocols })
+    }
+
+    /// `SC_CORE`: the `clientRequestedProtocols` in it. The server's version and its
+    /// early capability flags are not read — this client claims the oldest version it
+    /// can and asks for nothing a server has to opt into.
+    fn core(mut r: Reader<'_>) -> Result<u32, Malformed> {
+        r.u32_le()?; // version
+        if r.is_empty() {
+            return Ok(0);
+        }
+        r.u32_le()
     }
 
     /// `SC_SECURITY`, which must agree that there is no RDP encryption.
@@ -407,14 +431,15 @@ impl ConferenceCreateResponse {
         Ok(())
     }
 
-    fn network(mut r: Reader<'_>) -> Result<Self, Malformed> {
+    /// `SC_NET`: the I/O channel, and the numbers of the channels `CS_NET` named.
+    fn network(mut r: Reader<'_>) -> Result<(u16, Vec<u16>), Malformed> {
         let io_channel = r.u16_le()?;
         let count = usize::from(r.u16_le()?);
         let mut channels = Vec::with_capacity(count);
         for _ in 0..count {
             channels.push(r.u16_le()?);
         }
-        Ok(Self { io_channel, channels })
+        Ok((io_channel, channels))
     }
 }
 
@@ -510,13 +535,22 @@ mod tests {
         assert_eq!(&utf16_fixed::<4>("\u{1F600}x"), &[0, 0, 0, 0]);
     }
 
-    /// The server's answer, as a Windows host writes it: a core block, a security
-    /// block saying there is none, and the channel numbers.
+    /// The server's answer, as a Windows host writes it: a core block carrying what the
+    /// negotiation offered, a security block saying there is no encryption, and the
+    /// channel numbers.
     fn response(channels: &[u16], security: (u32, u32)) -> Vec<u8> {
+        answer(channels, security, Some(2))
+    }
+
+    /// [`response`], with `clientRequestedProtocols` as given or left off.
+    fn answer(channels: &[u16], security: (u32, u32), requested: Option<u32>) -> Vec<u8> {
         let mut blocks = Writer::new();
         blocks.u16_le(SC_CORE);
-        blocks.u16_le(8);
+        blocks.u16_le(if requested.is_some() { 12 } else { 8 });
         blocks.u32_le(0x0008_0004);
+        if let Some(requested) = requested {
+            blocks.u32_le(requested);
+        }
         blocks.u16_le(SC_SECURITY);
         blocks.u16_le(12);
         blocks.u32_le(security.0);
@@ -553,8 +587,34 @@ mod tests {
         let decoded = ConferenceCreateResponse::decode(&response(&[1004, 1005], (0, 0))).unwrap();
         assert_eq!(decoded, ConferenceCreateResponse {
             io_channel: 1003,
-            channels: vec![1004, 1005]
+            channels: vec![1004, 1005],
+            requested_protocols: 2,
         });
+    }
+
+    /// A server that leaves `clientRequestedProtocols` off is taken to mean
+    /// `PROTOCOL_RDP`, as [MS-RDPBCGR] 3.2.5.3.4 has the client assume.
+    #[test]
+    fn a_core_block_without_the_requested_protocols_means_protocol_rdp() {
+        let decoded = ConferenceCreateResponse::decode(&answer(&[1004], (0, 0), None)).unwrap();
+        assert_eq!(decoded.requested_protocols, 0);
+    }
+
+    /// The result is a three-bit index under an extension bit, at the top of its byte,
+    /// so a refusal is named by the index rather than by the byte.
+    #[test]
+    fn a_refused_conference_names_the_result_the_server_gave() {
+        let mut bytes = response(&[1004], (0, 0));
+        // After the object identifier, a one-byte connectPDU length, the CHOICE, the
+        // node ID and the tag.
+        let at = CONNECT_DATA.len() + 1 + 1 + 2 + 2;
+        assert_eq!(bytes[at], 0, "the success the response was written with");
+        bytes[at] = 0x10; // userRejected
+        assert_eq!(
+            ConferenceCreateResponse::decode(&bytes).unwrap_err().to_string(),
+            "a GCC Conference Create Response carries a refusal to create the conference, \
+             result 0x1, which this client does not accept"
+        );
     }
 
     /// A server asking for the RDP security layer is asking for something this client

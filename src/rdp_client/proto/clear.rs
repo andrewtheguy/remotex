@@ -352,8 +352,10 @@ impl Clear {
     }
 }
 
-/// The residual layer: a run-length fill of the whole rectangle, one colour a run.
-/// [MS-RDPEGFX] 2.2.4.1.1.
+/// The residual layer: a run-length fill of the rectangle in raster order, one colour
+/// a run. [MS-RDPEGFX] 2.2.4.1.1.1 bounds the pixels it encodes by the rectangle's and
+/// sets no floor, so a layer may stop short; what it does not reach is left to the
+/// layers after it and to the surface beneath.
 fn residual_data(section: &[u8], dst: &mut Dst<'_, '_>) -> Result<(), Malformed> {
     let mut r = Reader::new(WHAT, section);
     let pixels = dst.w * dst.h;
@@ -369,9 +371,6 @@ fn residual_data(section: &[u8], dst: &mut Dst<'_, '_>) -> Result<(), Malformed>
             dst.put(at % dst.w, at / dst.w, color);
             at += 1;
         }
-    }
-    if at != pixels {
-        return Err(refuse("a residual layer short of the rectangle, at", at as u64));
     }
     Ok(())
 }
@@ -601,6 +600,17 @@ mod tests {
                 assert_eq!(at(&pixels, 4, x, y), if inside { [10, 20, 30, 0] } else { GREY }, "{x},{y}");
             }
         }
+    }
+
+    /// A residual layer may encode fewer pixels than its rectangle holds, and the ones
+    /// it does not reach are the surface's.
+    #[test]
+    fn a_residual_layer_may_stop_short_of_the_rectangle() {
+        let mut clear = Clear::new();
+        let mut pixels = surface(2, 1, GREY);
+        let src = rect(0, 0, None, &[30, 20, 10, 1], &[], &[]);
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1).unwrap();
+        assert_eq!(pixels, [[10, 20, 30, 0], GREY].concat());
     }
 
     /// A pixel no layer paints is the surface's: the host encodes against the picture
