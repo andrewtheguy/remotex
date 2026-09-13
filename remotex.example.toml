@@ -262,12 +262,13 @@ password = "change-me"
 
 # Camera redirection (RDP only): offer the remote a virtual webcam whose frames
 # are this browser's, over MS-RDPECAM. EXPERIMENTAL, for lack of tests — the
-# socket's rules, its messages and the channel's wire are checked, and the
-# redirection itself is not, because only a Windows host that creates the camera
-# enumeration channel has anywhere to redirect to: a workstation, or a Windows
-# Server carrying the Remote Desktop Session Host role. No dummy server here has
-# one. Unlike `audio` above and the rest of the RDP features, which every test run
-# covers, it is verified by hand against such a host.
+# socket's rules, its messages and the channel's wire are checked. Only a Windows
+# host that creates the camera enumeration channel has anywhere to redirect to: a
+# workstation, or a Windows Server carrying the Remote Desktop Session Host role.
+# No dummy server here has one. `a_real_host_streams_the_camera` carries H.264
+# frames to such a host, but it is ignored by default and does not check the
+# pixels the host displays. Unlike `audio` above and the rest of the RDP features,
+# which every test run covers, the picture is verified by hand against such a host.
 #
 # Capability only. The device appears when a client turns the camera on from the
 # floating menu — explicitly, per session, never remembered — and is unplugged

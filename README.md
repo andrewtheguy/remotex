@@ -213,10 +213,12 @@ One RDP redirection sends this browser's own media the other way and is
 **experimental**, for lack of tests: `camera = true` offers the remote a virtual
 webcam over MS-RDPECAM. It is off by default, enabled per session from the
 floating menu and never remembered, and refused on VNC. Its socket rules, its
-control messages and the channel's wire format are tested like everything else;
-no test carries a frame to a host, because the camera channel is created only by
-a Windows host that redirects cameras — a workstation, or a Windows Server
-carrying the Remote Desktop Session Host role. It is verified by hand there, where
+control messages and the channel's wire format are tested like everything else.
+`a_real_host_streams_the_camera` in `tests/rdp_client_probe.rs` carries H.264
+frames to a host's Camera app, but it is ignored by default and does not check
+the pixels the host displays. The camera channel is created only by a Windows
+host that redirects cameras — a workstation, or a Windows Server carrying the
+Remote Desktop Session Host role. The picture is verified by hand there, where
 remote audio (`audio = true`) and the rest of the RDP feature set are exercised on
 every test run. Expect to re-check it by hand after a change.
 

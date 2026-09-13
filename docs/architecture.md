@@ -982,10 +982,12 @@ message encodings are unit tested like everything else here — the claim and
 engine binding, the eviction, the byte-for-byte control frames — and so is the
 MS-RDPECAM wire the RDP client speaks, against the specification's own examples.
 `tests/rdp_client_probe.rs` checks against a real host that the camera is
-negotiated and its device opened, but no test carries a frame to a host: a stream
-starts only when an application on the host opens the camera, and the dummy RDP
-server the container tests drive offers no camera at all. The stream is verified by
-hand against a Windows host and only that way, and a change here needs a hand check.
+negotiated and its device opened, and its `a_real_host_streams_the_camera` opens
+the host's Camera app and carries H.264 frames from a file to it. Like every real-host
+probe it is ignored by default, and it checks that the host started the stream
+and took samples, not the pixels the host displays. The dummy RDP server the
+container tests drive offers no camera at all. The displayed picture is verified
+by hand against a Windows host, and a change here needs a hand check.
 
 The browser's camera goes the other way, on a third socket, and only to an RDP
 target that opted in with `camera = true` (refused on VNC at parse time: the
