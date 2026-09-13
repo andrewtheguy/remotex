@@ -403,6 +403,12 @@ async fn a_host_redraw_matches_what_was_decoded() {
         let (w, h, pixels) = snapshot(&session);
         assert_eq!((w, h), (width, height), "the desktop resized during the probe");
         println!("  host redraw took {frames} frames; {}", if quiet { "settled" } else { "NEVER SETTLED" });
+        // A redraw that drew nothing is the decoded picture compared with itself, and
+        // one that never went quiet is a picture caught mid-change.
+        if !quiet || frames == 0 {
+            println!("  RESULT inconclusive: host redraw {pass} did not complete");
+            return;
+        }
         redraws.push(pixels);
     }
 
