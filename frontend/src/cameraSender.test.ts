@@ -6,11 +6,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  CAPTURE_FPS,
+  captureRate,
   h264Config,
   normalizeConstrainedBaseline,
   rationalFps,
 } from "./cameraSender";
 import { encodeCameraFrame } from "./protocol";
+
+test("the announced rate is the camera's, held to the capture ceiling", () => {
+  assert.equal(captureRate(10), 10);
+  assert.equal(captureRate(30), CAPTURE_FPS, "a camera that ignored the max");
+  assert.equal(captureRate(undefined), CAPTURE_FPS);
+  assert.equal(captureRate(0), CAPTURE_FPS);
+});
 
 test("a 720p30 camera fits level 3.1", () => {
   // 80x45 macroblocks at 30 fps = 108,000/s, exactly level 3.1's limit.

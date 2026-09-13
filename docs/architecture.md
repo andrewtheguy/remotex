@@ -1033,7 +1033,10 @@ socket holds it plugged.
 
 The gateway never transcodes — the PCM-passthrough bargain in the other
 direction. The browser encodes Annex B Constrained Baseline H.264
-(`frontend/src/cameraSender.ts`), the host's own camera stack decodes it, and the
+(`frontend/src/cameraSender.ts`) from a capture asked for at 640 pixels wide and at
+most 15 frames a second — a host without a GPU was measured taking samples below 30,
+and a faster camera only fills the queue until it drops to a keyframe — the host's
+own camera stack decodes it, and the
 gateway advertises exactly one media type: the announced geometry. There is no
 codec key beside `camera`, and a browser that cannot encode H.264 reports that by
 name instead of falling back.

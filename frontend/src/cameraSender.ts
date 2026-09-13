@@ -34,6 +34,23 @@ export interface CameraSender {
 // camera.
 const MAX_ENCODE_QUEUE = 2;
 
+// What the camera is asked for: a width, and a rate that is the ceiling of what
+// goes out. Low on purpose — a redirected camera is a video call's picture, and
+// a host without a GPU was measured asking for samples below 30 frames a
+// second, so a faster camera only fills the gateway's queue until it drops a
+// second's worth to the next keyframe.
+export const CAPTURE_WIDTH = 640;
+export const CAPTURE_FPS = 15;
+
+// The rate the encoder is configured for and the remote is told: what the
+// camera reports, held to CAPTURE_FPS, which is also what a camera that reports
+// nothing is taken to run at.
+export function captureRate(reported: number | undefined): number {
+  return reported && reported > 0
+    ? Math.min(reported, CAPTURE_FPS)
+    : CAPTURE_FPS;
+}
+
 // Bytes allowed to sit unsent in the socket before samples are dropped instead
 // of queued: `send` itself queues without limit, so a slow uplink would
 // otherwise become unbounded memory and a picture ever further behind the
@@ -149,8 +166,16 @@ export async function startCameraSender(
   // webcam means. Ideal rather than `exact`, so a webcam that reports no
   // facing mode at all — most external ones — is still eligible rather than
   // refused.
+  //
+  // The geometry and rate are asked for low, and as `ideal`/`max` so a camera
+  // without that exact mode still opens at its nearest: the width alone, so
+  // the camera keeps its own aspect ratio.
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "user" },
+    video: {
+      facingMode: "user",
+      width: { ideal: CAPTURE_WIDTH },
+      frameRate: { ideal: CAPTURE_FPS, max: CAPTURE_FPS },
+    },
   });
   const track = stream.getVideoTracks()[0];
   if (!track) {
@@ -163,8 +188,11 @@ export async function startCameraSender(
   const settings = track.getSettings();
   const width = settings.width ?? 640;
   const height = settings.height ?? 480;
-  const fps =
-    settings.frameRate && settings.frameRate > 0 ? settings.frameRate : 30;
+  const fps = captureRate(settings.frameRate);
+  // Frames closer together than the announced rate are skipped before the
+  // encoder, for a camera that ignored the `max` above.
+  const frameInterval = 1_000_000 / fps;
+  let lastEncoded = Number.NEGATIVE_INFINITY;
   const { numerator, denominator } = rationalFps(fps);
   const { codec, bitrate } = h264Config(width, height, fps);
 
@@ -305,6 +333,12 @@ export async function startCameraSender(
     if (!streaming || encoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
       return;
     }
+    // Timestamps are microseconds. A frame early by less than a millisecond is
+    // the camera's jitter, not a faster rate.
+    if (frame.timestamp - lastEncoded < frameInterval - 1000) {
+      return;
+    }
+    lastEncoded = frame.timestamp;
     if (droppingDeltas && socket.bufferedAmount <= MAX_BUFFERED_BYTES) {
       // The backlog cleared: resume at the IDR the far decoder needs.
       forceKeyframe = true;
