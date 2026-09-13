@@ -53,10 +53,11 @@ const COOKIE_PREFIX: &str = "Cookie: mstshash=";
 
 /// How much of the user name goes in the cookie.
 ///
-/// [\[MS-RDPBCGR\] 2.2.1.1] caps the whole cookie field at 28 bytes, and the prefix
-/// and the trailing CRLF account for 19 of them. `mstsc` truncates here too, so
-/// servers are used to seeing a short name; sending the untruncated one risks a
-/// strict server refusing a packet it is within its rights to refuse.
+/// [\[MS-RDPBCGR\] 2.2.1.1] puts no cap on the field beyond the TPDU's own. Nine is
+/// where every Microsoft client cuts the login name — footnote 44 to section 3.2.5.3.1
+/// — so it is the length servers are used to seeing. The name goes in as UTF-8 bytes
+/// where the section calls the field ANSI: which ANSI code page a host would expect a
+/// name outside ASCII in is not something a gateway can know.
 ///
 /// [\[MS-RDPBCGR\] 2.2.1.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/18a27ef9-6f9a-4501-b000-94b1fe3c2c10
 const COOKIE_IDENTIFIER_MAX: usize = 9;
@@ -149,8 +150,9 @@ impl ConfirmFlags {
     /// The server accepts the extended blocks in the GCC conference create request —
     /// the monitor layout among them. A server without this flag gets the short form.
     pub const EXTENDED_CLIENT_DATA: Self = Self(0x01);
-    /// The server would carry the graphics pipeline over a dynamic channel. This
-    /// client decodes bitmaps and does not open it.
+    /// The server would carry the graphics pipeline over a dynamic channel, which it
+    /// opens for a client whose GCC core data offered the pipeline — see
+    /// [`super::gcc`].
     pub const DYNVC_GFX: Self = Self(0x02);
 
     pub const fn bits(self) -> u8 {

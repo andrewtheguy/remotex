@@ -91,9 +91,9 @@ pub const MONITOR_LAYOUT: u8 = 0x37;
 /// One PDU off the I/O channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pdu<'a> {
-    /// The server's capabilities and the share identifier every later PDU names. See
-    /// [`super::capabilities`].
-    DemandActive(&'a [u8]),
+    /// The server's capabilities and the share identifier every later PDU names, and
+    /// the MCS channel the server sent them from. See [`super::capabilities`].
+    DemandActive { source: u16, body: &'a [u8] },
     /// The share is being torn down. Either a Demand Active follows and the session
     /// is rebuilt around a new size, or the connection is ending.
     DeactivateAll,
@@ -146,7 +146,7 @@ pub fn decode(payload: &[u8]) -> Result<Pdu<'_>, Malformed> {
     let mut r = Reader::new(WHAT, payload);
     let total = r.u16_le()?;
     let kind = r.u16_le()?;
-    let _source = r.u16_le()?;
+    let source = r.u16_le()?;
     if kind & !TYPE != VERSION {
         return Err(r.refuse("its version", kind & !TYPE));
     }
@@ -156,7 +156,7 @@ pub fn decode(payload: &[u8]) -> Result<Pdu<'_>, Malformed> {
     };
 
     match kind & TYPE {
-        DEMAND_ACTIVE => Ok(Pdu::DemandActive(body)),
+        DEMAND_ACTIVE => Ok(Pdu::DemandActive { source, body }),
         // The PDU carries a source descriptor this client has no use for: a server
         // deactivating a share says nothing about why in it.
         DEACTIVATE_ALL => Ok(Pdu::DeactivateAll),
@@ -238,6 +238,17 @@ mod tests {
     fn a_deactivate_all_is_recognised_without_its_descriptor() {
         let frame = [0x09, 0x00, 0x16, 0x00, 0xEA, 0x03, 0x01, 0x00, 0x00];
         assert_eq!(decode(&frame).unwrap(), Pdu::DeactivateAll);
+    }
+
+    /// The header's source is the server's channel, which the Synchronize PDU is
+    /// addressed to, so it travels with the body.
+    #[test]
+    fn a_demand_active_carries_the_channel_it_came_from() {
+        let frame = [0x0A, 0x00, 0x11, 0x00, 0xEA, 0x03, 0xAB, 0xCD, 0xEF, 0x01];
+        assert_eq!(
+            decode(&frame).unwrap(),
+            Pdu::DemandActive { source: 0x03EA, body: &[0xAB, 0xCD, 0xEF, 0x01] }
+        );
     }
 
     #[test]

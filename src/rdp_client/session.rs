@@ -2,6 +2,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Result, anyhow, bail};
 use log::{debug, info, warn};
@@ -416,6 +417,10 @@ struct Share {
     /// [`desktop::repaint`].
     refresh_rect: bool,
     suppress_output: bool,
+    /// Which pointer events beyond the ordinary ones this server takes — see
+    /// [`Share::takes`].
+    horizontal_wheel: bool,
+    extended_buttons: bool,
 }
 
 impl From<&DemandActive> for Share {
@@ -427,6 +432,24 @@ impl From<&DemandActive> for Share {
             chunk: demand.chunk,
             refresh_rect: demand.refresh_rect,
             suppress_output: demand.suppress_output,
+            horizontal_wheel: demand.horizontal_wheel,
+            extended_buttons: demand.extended_buttons,
+        }
+    }
+}
+
+impl Share {
+    /// Whether this server takes `event`. A horizontal wheel and the side buttons each
+    /// need a flag in the server's Input capability, and without it [MS-RDPBCGR] says
+    /// the event MUST NOT be sent — so it is dropped, as input a session cannot carry
+    /// always is.
+    fn takes(&self, event: &input::Event) -> bool {
+        match event {
+            input::Event::Wheel { horizontal: true, .. } => self.horizontal_wheel,
+            input::Event::Button { button: input::Button::X1 | input::Button::X2, .. } => {
+                self.extended_buttons
+            }
+            _ => true,
         }
     }
 }
@@ -497,8 +520,9 @@ struct Active<'a> {
     /// PDUs that arrived on a static virtual channel while the share was not live —
     /// the capability exchange, where a server opens the clipboard, and the wait for
     /// a Demand Active before it. Acted on in order once it is, because nothing on a
-    /// channel can be asked for again — see [`connect::activate`].
-    deferred: Vec<(u16, Vec<u8>)>,
+    /// channel can be asked for again — see [`connect::activate`]. Each keeps when it
+    /// arrived, which a sound buffer's confirm counts from.
+    deferred: Vec<(u16, Vec<u8>, Instant)>,
 
     framebuffer: &'a Framebuffer,
     events: &'a mpsc::Sender<Event>,
@@ -540,9 +564,9 @@ struct Sound {
 impl Sound {
     /// One whole PDU from either transport: what it meant goes to the sink at once,
     /// and what it earned goes back to the caller to send on the channel it came in
-    /// on.
-    fn push(&mut self, pdu: &[u8]) -> Result<Vec<Vec<u8>>> {
-        let rdpsnd::Turn { replies, output } = self.proto.push(pdu)?;
+    /// on. `arrived` is when the network PDU that completed it was read.
+    fn push(&mut self, pdu: &[u8], arrived: Instant) -> Result<Vec<Vec<u8>>> {
+        let rdpsnd::Turn { mut replies, output } = self.proto.push(pdu, arrived)?;
         match output {
             rdpsnd::Output::Negotiated => {
                 let format = rdpsnd::CD_QUALITY;
@@ -556,7 +580,12 @@ impl Sound {
                 "rdp: the host offers no 44.1 kHz 16-bit stereo PCM among its {offered} sound \
                  formats, so it will redirect nothing"
             ),
-            rdpsnd::Output::Wave(samples) => self.sink.wave(samples),
+            rdpsnd::Output::Wave { samples, confirm } => {
+                self.sink.wave(samples);
+                // Once the sink has the buffer, and not before: the timestamp counts
+                // the time that took.
+                replies.push(confirm.encode());
+            }
             rdpsnd::Output::Closed => {
                 debug!("rdp: the host closed its sound: nothing is playing");
                 self.sink.closed();
@@ -631,8 +660,8 @@ impl<'a> Active<'a> {
         self.refresh().await?;
         // What arrived on a channel in the same window was kept instead, because a
         // channel's PDUs cannot be asked for again.
-        for (channel, payload) in std::mem::take(&mut self.deferred) {
-            self.on_channel(channel, &payload).await?;
+        for (channel, payload, arrived) in std::mem::take(&mut self.deferred) {
+            self.on_channel(channel, &payload, arrived).await?;
         }
         loop {
             tokio::select! {
@@ -699,7 +728,7 @@ impl<'a> Active<'a> {
                 self.on_share(data.payload).await
             }
             mcs::Indication::Data(data) => {
-                self.on_channel(data.channel, data.payload).await?;
+                self.on_channel(data.channel, data.payload, Instant::now()).await?;
                 Ok(None)
             }
         }
@@ -710,16 +739,16 @@ impl<'a> Active<'a> {
     /// The same routing wherever a channel's PDU is read from — the main loop, the
     /// capability exchange it was kept from, the reactivation that would otherwise
     /// have dropped it — so that a channel stays open across everything the share
-    /// does.
-    async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
+    /// does. `arrived` is when it was read off the network, however long ago that was.
+    async fn on_channel(&mut self, channel: u16, payload: &[u8], arrived: Instant) -> Result<()> {
         if self.dynamic.is_some_and(|dynamic| dynamic.number == channel) {
-            return self.on_dynamic(payload).await;
+            return self.on_dynamic(payload, arrived).await;
         }
         if self.clipboard.is_some_and(|clipboard| clipboard.number == channel) {
             return self.on_clipboard(payload).await;
         }
         if self.audio.is_some_and(|audio| audio.number == channel) {
-            return self.on_audio(payload).await;
+            return self.on_audio(payload, arrived).await;
         }
         if self.devices.is_some_and(|devices| devices.number == channel) {
             return self.on_devices(payload).await;
@@ -769,7 +798,7 @@ impl<'a> Active<'a> {
             }
             // A share this client did not ask to be rebuilt: the server sends the
             // Deactivate All first, and `reactivate` reads the Demand Active.
-            Pdu::DemandActive(_) => {
+            Pdu::DemandActive { .. } => {
                 bail!("the host demanded a share without deactivating the last one")
             }
             Pdu::Data(data) if data.kind == share::SET_ERROR_INFO => {
@@ -794,7 +823,7 @@ impl<'a> Active<'a> {
     /// The dynamic virtual channel, which the server opens as soon as the share is
     /// live. Everything it says is answered, because a channel whose Create Request
     /// goes unanswered is never opened.
-    async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
+    async fn on_dynamic(&mut self, payload: &[u8], arrived: Instant) -> Result<()> {
         let (replies, updates) = {
             let Self { chunks, incoming, dynamics, graphics, sound, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
@@ -837,7 +866,7 @@ impl<'a> Active<'a> {
                         bail!("the host sent sound on a channel this client never accepted");
                     };
                     let mut replies = Vec::new();
-                    for reply in sound.push(data)? {
+                    for reply in sound.push(data, arrived)? {
                         replies.push(dvc::data(channel, &reply)?);
                     }
                     (replies, Vec::new())
@@ -959,7 +988,7 @@ impl<'a> Active<'a> {
 
     /// The static sound channel. The host speaks first at every step, every PDU is
     /// answered on the channel it came in on, and the buffers go to the sink.
-    async fn on_audio(&mut self, payload: &[u8]) -> Result<()> {
+    async fn on_audio(&mut self, payload: &[u8], arrived: Instant) -> Result<()> {
         let replies = {
             let Self { audio_chunks, sound, .. } = self;
             let pdu = match audio_chunks.push(payload)? {
@@ -973,7 +1002,7 @@ impl<'a> Active<'a> {
             let Some(sound) = sound else {
                 bail!("the host sent sound on a channel this client never asked for");
             };
-            sound.push(pdu)?
+            sound.push(pdu, arrived)?
         };
         if let Some(audio) = self.audio {
             for reply in replies {
@@ -1182,8 +1211,8 @@ impl<'a> Active<'a> {
         // past above, so the repaint is asked for here rather than waited for.
         self.refresh().await?;
         // And what a channel carried while all that happened, in the order it came.
-        for (channel, payload) in std::mem::take(&mut self.deferred) {
-            self.on_channel(channel, &payload).await?;
+        for (channel, payload, arrived) in std::mem::take(&mut self.deferred) {
+            self.on_channel(channel, &payload, arrived).await?;
         }
         Ok(false)
     }
@@ -1210,11 +1239,11 @@ impl<'a> Active<'a> {
             return Ok(None);
         }
         if data.channel != self.io_channel {
-            self.deferred.push((data.channel, data.payload.to_vec()));
+            self.deferred.push((data.channel, data.payload.to_vec(), Instant::now()));
             return Ok(None);
         }
         match share::decode(data.payload)? {
-            Pdu::DemandActive(body) => Ok(Some(DemandActive::decode(body)?)),
+            Pdu::DemandActive { source, body } => Ok(Some(DemandActive::decode(source, body)?)),
             _ => Ok(None),
         }
     }
@@ -1257,6 +1286,7 @@ impl<'a> Active<'a> {
     }
 
     async fn send_input(&mut self, batch: &mut Vec<input::Event>) -> Result<()> {
+        batch.retain(|event| self.share.takes(event));
         if batch.is_empty() {
             return Ok(());
         }
@@ -1447,7 +1477,9 @@ fn answer_clipboard(pdu: &[u8]) -> Result<(Option<Vec<u8>>, Option<Event>)> {
 /// session hands it to the compositor instead.
 fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<u8>>> {
     Ok(match message {
-        dvc::Message::Capabilities { version } => vec![dvc::capabilities_response(version)],
+        dvc::Message::Capabilities { version } => {
+            vec![dvc::capabilities_response(dvc::answer_version(version))]
+        }
         dvc::Message::Create { channel, name } => {
             if name == display::CHANNEL_NAME && dynamics.resize {
                 debug!("rdp: the host opened Display Control on dynamic channel {channel}");

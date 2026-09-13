@@ -125,9 +125,15 @@ pub fn connect_initial(conference: &[u8]) -> Result<Vec<u8>, TooLong> {
 }
 
 /// The GCC Conference Create Response inside an MCS Connect-Response.
+///
+/// Everything from the start of `userData` to the end of the Connect-Response,
+/// whatever length the field declares: [MS-RDPBCGR] 3.2.5.3.4 says the client MUST
+/// ignore that length, and the conference inside measures itself. The
+/// Connect-Response's own length is not that one, and still bounds it.
 pub fn connect_response(frame: &[u8]) -> Result<&[u8], Malformed> {
     const WHAT: &str = "an MCS Connect-Response";
-    let mut r = Reader::new(WHAT, x224::data_payload(frame)?);
+    let payload = x224::data_payload(frame)?;
+    let mut r = Reader::new(WHAT, payload);
     let mut fields = Reader::new(WHAT, der::expect_application(&mut r, CONNECT_RESPONSE)?);
 
     let result = der::read_enumerated(&mut fields)?;
@@ -136,7 +142,14 @@ pub fn connect_response(frame: &[u8]) -> Result<&[u8], Malformed> {
     }
     der::read_integer(&mut fields)?; // calledConnectId, which nothing addresses
     der::skip(&mut fields)?; // domainParameters: the server's answer, which changes nothing
-    der::expect(&mut fields, der::OCTET_STRING)
+    let (tag, _) = der::header(&mut fields)?; // userData, whose length is not read
+    if tag != der::OCTET_STRING {
+        return Err(fields.refuse("an ASN.1 tag", tag));
+    }
+    if !r.is_empty() {
+        return Err(r.refuse("bytes past its own length, numbering", r.rest().len() as u64));
+    }
+    Ok(fields.rest())
 }
 
 /// An Erect Domain Request. The server does not answer it.
@@ -156,8 +169,8 @@ pub fn attach_user_request() -> Vec<u8> {
 /// The user identifier the server assigned, out of an Attach User Confirm.
 pub fn attach_user_confirm(bytes: &[u8]) -> Result<u16, Malformed> {
     const WHAT: &str = "an MCS Attach User Confirm";
-    let mut r = domain_pdu(WHAT, bytes, ATTACH_USER_CONFIRM)?;
-    result(&mut r)?;
+    let (choice, mut r) = domain_pdu(WHAT, bytes, ATTACH_USER_CONFIRM)?;
+    result(choice, &mut r)?;
     // `initiator` is OPTIONAL, and a successful confirm always carries it — it is the
     // only thing the PDU is for.
     per::read_integer16(&mut r, BASE_USER)
@@ -179,8 +192,8 @@ pub fn channel_join_request(user: u16, channel: u16) -> Vec<u8> {
 /// the number comes back rather than being assumed.
 pub fn channel_join_confirm(bytes: &[u8]) -> Result<u16, Malformed> {
     const WHAT: &str = "an MCS Channel Join Confirm";
-    let mut r = domain_pdu(WHAT, bytes, CHANNEL_JOIN_CONFIRM)?;
-    result(&mut r)?;
+    let (choice, mut r) = domain_pdu(WHAT, bytes, CHANNEL_JOIN_CONFIRM)?;
+    result(choice, &mut r)?;
     per::read_integer16(&mut r, BASE_USER)?; // initiator, which is this client
     per::read_integer16(&mut r, 0)?; // requested, which is what we asked for
     per::read_integer16(&mut r, 0)
@@ -278,7 +291,7 @@ pub fn send_data_indication(frame: &[u8]) -> Result<Indication<'_>, Malformed> {
     if let Some(reason) = ultimatum(WHAT, payload)? {
         return Ok(Indication::Disconnect(reason));
     }
-    let mut r = domain_pdu(WHAT, frame, SEND_DATA_INDICATION)?;
+    let (_, mut r) = domain_pdu(WHAT, frame, SEND_DATA_INDICATION)?;
     per::read_integer16(&mut r, BASE_USER)?; // initiator, which is the server
     let channel = per::read_integer16(&mut r, 0)?;
     r.u8()?; // dataPriority and segmentation, which RDP never splits
@@ -293,17 +306,20 @@ fn frame(what: &'static str, pdu: &[u8]) -> Vec<u8> {
 
 /// The start of a domain PDU: unwrap the framing, check the CHOICE, and turn the one
 /// other thing a server may answer with into a sentence.
+///
+/// The CHOICE byte comes back with the reader, because its low two bits are not the
+/// CHOICE's: they belong to the fields after it.
 fn domain_pdu<'a>(
     what: &'static str,
     frame: &'a [u8],
     expected: u8,
-) -> Result<Reader<'a>, Malformed> {
+) -> Result<(u8, Reader<'a>), Malformed> {
     let payload = x224::data_payload(frame)?;
     let mut r = Reader::new(what, payload);
     let choice = r.u8()?;
     let found = choice >> 2;
     if found == expected {
-        return Ok(r);
+        return Ok((choice, r));
     }
     if let Some(reason) = ultimatum(what, payload)? {
         let field = "a Disconnect Provider Ultimatum instead, whose reason is";
@@ -325,9 +341,12 @@ fn ultimatum(what: &'static str, payload: &[u8]) -> Result<Option<Reason>, Malfo
     Ok(Some(Reason(((choice & 0x03) << 1) | (r.u8()? >> 7))))
 }
 
-/// The `result` field both confirms start with.
-fn result(r: &mut Reader<'_>) -> Result<(), Malformed> {
-    match r.u8()? {
+/// The `result` both confirms carry: a four-bit ENUMERATED straddling two bytes, its
+/// top bit the lowest of the CHOICE byte and the rest the top three of the next, as
+/// [MS-RDPBCGR] 4.1.7 annotates it. The CHOICE byte's other low bit says whether the
+/// OPTIONAL field after the result is present.
+fn result(choice: u8, r: &mut Reader<'_>) -> Result<(), Malformed> {
+    match ((choice & 0x01) << 3) | (r.u8()? >> 5) {
         0 => Ok(()),
         other => Err(r.refuse("an unsuccessful MCS result", other)),
     }
@@ -425,11 +444,42 @@ mod tests {
         );
     }
 
+    /// The result is four bits straddling two bytes. rt-domain-merging (1) sits wholly
+    /// in the second; rt-parameters-unacceptable (8) is the CHOICE byte's lowest bit
+    /// alone, and read off the second byte would look like success.
     #[test]
     fn an_unsuccessful_confirm_is_an_error_rather_than_a_channel_number() {
-        let err = channel_join_confirm(&server(&[0x3E, 0x03, 0x00, 0x06, 0x03, 0xEB, 0x00, 0x00]))
+        let err = channel_join_confirm(&server(&[0x3E, 0x20, 0x00, 0x06, 0x03, 0xEB, 0x00, 0x00]))
             .unwrap_err();
-        assert!(matches!(err, Malformed::Refused { field: "an unsuccessful MCS result", .. }));
+        assert!(matches!(err, Malformed::Refused { field: "an unsuccessful MCS result", value: 1, .. }), "{err}");
+        let err = attach_user_confirm(&server(&[0x2F, 0x00, 0x00, 0x06])).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "an unsuccessful MCS result", value: 8, .. }), "{err}");
+    }
+
+    /// The `userData` length is not read: the conference is everything from the field's
+    /// contents to the end of the Connect-Response, whatever the field says its length
+    /// is. The Connect-Response's own length is read, and bytes past it are refused.
+    #[test]
+    fn a_connect_response_user_data_length_is_ignored() {
+        let mut body = Writer::new();
+        der::write_tag(&mut body, der::ENUMERATED, 1);
+        body.u8(0); // rt-successful
+        der::write_integer(&mut body, 0); // calledConnectId
+        DomainParameters::TARGET.write(&mut body);
+        der::write_tag(&mut body, der::OCTET_STRING, 1); // one byte, it says
+        body.bytes(&[1, 2, 3]);
+        let body = body.finish();
+
+        let mut w = Writer::new();
+        der::write_application_tag(&mut w, CONNECT_RESPONSE, body.len());
+        w.bytes(&body);
+        let response = w.finish();
+        assert_eq!(connect_response(&server(&response)).unwrap(), &[1, 2, 3]);
+
+        let mut trailing = response;
+        trailing.extend_from_slice(&[9, 9]);
+        let err = connect_response(&server(&trailing)).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "bytes past its own length, numbering", value: 2, .. }), "{err}");
     }
 
     /// The answer a server that has decided to end the connection sends instead of

@@ -15,9 +15,10 @@
 
 use super::wire::{Malformed, Reader, Writer};
 
-/// The largest length the two-byte form can carry here — fifteen bits, not the
-/// fourteen PER specifies. See [`read_length`].
-pub const MAX_LENGTH: u16 = 0x7FFF;
+/// The largest length [`write_length`] writes: the fourteen bits of PER's two-byte
+/// form (X.691 10.9.3.7), past which PER fragments. The reader is laxer — see
+/// [`read_length`].
+pub const MAX_LENGTH: u16 = 0x3FFF;
 
 /// How many bytes [`write_length`] will use.
 ///
@@ -27,10 +28,11 @@ pub fn length_size(length: u16) -> usize {
     if length > 0x7F { 2 } else { 1 }
 }
 
-/// A length: one byte under 128, otherwise two with the top bit set. See
-/// [`read_length`] for why fifteen bits and not fourteen.
+/// A length: one byte under 128, otherwise two, `10` and fourteen bits. Nothing this
+/// client sends is long enough to need PER's fragmented form, so nothing here writes
+/// one.
 pub fn write_length(w: &mut Writer, length: u16) {
-    assert!(length <= MAX_LENGTH, "a PER length is fifteen bits");
+    assert!(length <= MAX_LENGTH, "a PER length this client writes is fourteen bits");
     if length > 0x7F {
         w.u16_be(length | 0x8000);
     } else {
@@ -45,8 +47,8 @@ pub fn write_length(w: &mut Writer, length: u16) {
 /// the whole low fifteen bits as the length, so a payload between 16K and 32K is one
 /// two-byte length whose second-highest bit is set rather than two fragments. Reading
 /// that bit as PER would mean rejecting PDUs every server sends, so it is read as part
-/// of the length — which is also what leaves no encoding free to mean "fragmented",
-/// and why nothing here can emit one.
+/// of the length — which is also what leaves no encoding free to mean "fragmented".
+/// [`write_length`] keeps to PER's fourteen.
 pub fn read_length(r: &mut Reader<'_>) -> Result<u16, Malformed> {
     let first = r.u8()?;
     if first & 0x80 == 0 {
@@ -139,7 +141,7 @@ mod tests {
     fn a_length_changes_form_at_128() {
         assert_eq!(written(|w| write_length(w, 0x7F)), vec![0x7F]);
         assert_eq!(written(|w| write_length(w, 0x80)), vec![0x80, 0x80]);
-        assert_eq!(written(|w| write_length(w, MAX_LENGTH)), vec![0xFF, 0xFF]);
+        assert_eq!(written(|w| write_length(w, MAX_LENGTH)), vec![0xBF, 0xFF]);
         assert_eq!(length_size(0x7F), 1);
         assert_eq!(length_size(0x80), 2);
 
@@ -150,11 +152,17 @@ mod tests {
         }
     }
 
-    /// The bit PER reserves for fragmentation, which RDP spends on length.
+    /// The bit PER reserves for fragmentation is read as length, which is how RDP
+    /// spends it — and never written.
     #[test]
-    fn the_two_byte_form_carries_fifteen_bits() {
+    fn the_two_byte_form_is_read_as_fifteen_bits() {
         assert_eq!(read_length(&mut Reader::new("a test", &[0xC1, 0x23])).unwrap(), 0x4123);
-        assert_eq!(written(|w| write_length(w, 0x4123)), vec![0xC1, 0x23]);
+    }
+
+    #[test]
+    #[should_panic(expected = "fourteen bits")]
+    fn a_length_past_fourteen_bits_is_not_written() {
+        written(|w| write_length(w, MAX_LENGTH + 1));
     }
 
     #[test]

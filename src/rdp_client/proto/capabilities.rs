@@ -117,21 +117,40 @@ const POINTER_CACHE: u16 = 32;
 /// what older hosts check; the second is what a high-density desktop needs.
 const LARGE_POINTER_FLAGS: u16 = 0x0001 | 0x0002;
 
+/// The least `MaxRequestSize` a client claiming `LARGE_POINTER_FLAG_384x384` may
+/// send, [MS-RDPBCGR] 2.2.7.2.7: room for one 384x384 32-bit pointer.
+const LARGE_POINTER_REQUEST: u32 = 608_299;
+
 /// What to ask for when the server names no maximum of its own: eight megabytes, which
 /// is more than a full-screen uncompressed update at any size this client opens.
 const DEFAULT_MULTIFRAGMENT: u32 = 8 * 1024 * 1024;
+
+/// The server's `inputFlags` that decide what this client may send it.
+/// `INPUT_FLAG_FASTPATH_INPUT` and `INPUT_FLAG_FASTPATH_INPUT2` each admit fast-path
+/// input — the first from an RDP 5.0 or 5.1 server, the second from every later one;
+/// `INPUT_FLAG_MOUSEX` admits the extended mouse event the side buttons ride; and
+/// `TS_INPUT_FLAG_MOUSE_HWHEEL` admits a horizontal wheel.
+const SERVER_MOUSEX: u16 = 0x0004;
+const SERVER_FASTPATH_INPUT: u16 = 0x0008;
+const SERVER_FASTPATH_INPUT2: u16 = 0x0020;
+const SERVER_MOUSE_HWHEEL: u16 = 0x0100;
 
 /// What the server said when it opened the share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DemandActive {
     /// Names the share, and every data PDU either side sends from now on carries it.
     pub share_id: u32,
+    /// The MCS channel the server sent the Demand Active from, which this client's
+    /// Synchronize PDU names as its target.
+    pub server_channel: u16,
     /// The desktop the server settled on, which is not always the one that was asked
     /// for: a server clamps to what its own session can be.
     pub width: u16,
     pub height: u16,
-    /// The largest fast-path update the server will reassemble into one, out of its
-    /// Multifragment Update capability.
+    /// The largest fast-path update this client will reassemble into one: the
+    /// server's Multifragment Update capability, raised to [`LARGE_POINTER_REQUEST`]
+    /// where it falls short, because that is the least a client claiming 384x384
+    /// pointers may ask for.
     pub multifragment: u32,
     /// The largest chunk a virtual channel PDU may be split into, out of the server's
     /// Virtual Channel capability. A server that names none is taken to mean the
@@ -142,11 +161,20 @@ pub struct DemandActive {
     /// Whether it reads a Suppress Output PDU. See [`super::desktop`] for what a
     /// client does with the two.
     pub suppress_output: bool,
+    /// Whether it takes a horizontal wheel, out of its Input capability.
+    /// [MS-RDPBCGR] 2.2.8.1.1.3.1.1.3: the event MUST NOT go to a server that does not.
+    pub horizontal_wheel: bool,
+    /// Whether it takes the extended mouse event the side buttons travel on.
+    pub extended_buttons: bool,
 }
 
 impl DemandActive {
-    /// Read a Demand Active PDU, given the body of its share control header.
-    pub fn decode(body: &[u8]) -> Result<Self, Malformed> {
+    /// Read a Demand Active PDU, given the channel its share control header names as
+    /// the source and the body after that header.
+    ///
+    /// A server whose Input capability admits no fast-path input is refused here:
+    /// every keystroke and pointer event this client sends travels that way.
+    pub fn decode(source: u16, body: &[u8]) -> Result<Self, Malformed> {
         const WHAT: &str = "an RDP Demand Active PDU";
 
         let mut r = Reader::new(WHAT, body);
@@ -161,6 +189,7 @@ impl DemandActive {
         let mut multifragment = None;
         let mut chunk = None;
         let mut repaint = (false, false);
+        let mut input = 0;
         for _ in 0..count {
             let kind = r.u16_le()?;
             let length = r.u16_le()?;
@@ -207,19 +236,31 @@ impl DemandActive {
                     }
                     chunk = Some(size);
                 }
+                INPUT => {
+                    let mut r = Reader::new("a server Input capability set", body);
+                    // `inputFlags`. The keyboard fields after them describe the
+                    // server's keyboard, which nothing sent from here depends on.
+                    input = r.u16_le()?;
+                }
                 _ => {}
             }
         }
 
         let (width, height) = desktop.ok_or_else(|| r.missing("a Bitmap capability set"))?;
+        if input & (SERVER_FASTPATH_INPUT | SERVER_FASTPATH_INPUT2) == 0 {
+            return Err(r.refuse("input flags admitting no fast-path input,", input));
+        }
         Ok(Self {
             share_id,
+            server_channel: source,
             width,
             height,
-            multifragment: multifragment.unwrap_or(DEFAULT_MULTIFRAGMENT),
+            multifragment: multifragment.unwrap_or(DEFAULT_MULTIFRAGMENT).max(LARGE_POINTER_REQUEST),
             chunk: chunk.unwrap_or(channel::MIN_CHUNK),
             refresh_rect: repaint.0,
             suppress_output: repaint.1,
+            horizontal_wheel: input & SERVER_MOUSE_HWHEEL != 0,
+            extended_buttons: input & SERVER_MOUSEX != 0,
         })
     }
 }
@@ -353,10 +394,11 @@ impl ConfirmActive {
         w.zeros(8);
 
         header(&mut w, VIRTUAL_CHANNEL, 12);
-        // No compression in either direction, and no chunk size of this client's own:
-        // the server's is the one that governs.
+        // No compression in either direction. The chunk size is the server's to govern
+        // and it ignores this one, but a `VCChunkSize` that is there MUST be within
+        // 1600 and 16256 ([MS-RDPBCGR] 2.2.7.1.10), so it names the least.
         w.u32_le(0);
-        w.u32_le(0);
+        w.u32_le(u32::try_from(channel::MIN_CHUNK).expect("1600 fits"));
 
         header(&mut w, SOUND, 8);
         // No beeps. Audio is refused in the Client Info PDU and refused again here.
@@ -497,6 +539,19 @@ mod tests {
         (BITMAP, w.finish())
     }
 
+    /// An Input capability set with these `inputFlags`, the keyboard fields after them
+    /// zero.
+    fn input(flags: u16) -> (u16, Vec<u8>) {
+        let mut w = Writer::new();
+        w.u16_le(flags);
+        w.zeros(82);
+        (INPUT, w.finish())
+    }
+
+    /// The `inputFlags` a Windows host sends: scancodes, the extended mouse event,
+    /// Unicode, fast-path input, a horizontal wheel and QoE timestamps.
+    const WINDOWS_INPUT: u16 = 0x0001 | 0x0004 | 0x0010 | 0x0020 | 0x0100 | 0x0200;
+
     #[test]
     fn the_desktop_the_server_settled_on_is_the_one_that_comes_back() {
         // Asked for 1920x1080, given 1024x768, with sets either side that this client
@@ -505,20 +560,24 @@ mod tests {
             general(true, true),
             bitmap(1024, 768),
             (ORDER, vec![0; 84]),
-            (MULTIFRAGMENT, 0x0004_0000_u32.to_le_bytes().to_vec()),
+            input(WINDOWS_INPUT),
+            (MULTIFRAGMENT, 0x0010_0000_u32.to_le_bytes().to_vec()),
             (VIRTUAL_CHANNEL, [0_u32.to_le_bytes(), 16_256_u32.to_le_bytes()].concat()),
             (0x1D, vec![0; 40]),
         ]);
         assert_eq!(
-            DemandActive::decode(&pdu).unwrap(),
+            DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap(),
             DemandActive {
                 share_id: 0x0001_0021,
+                server_channel: SERVER_CHANNEL,
                 width: 1024,
                 height: 768,
-                multifragment: 0x0004_0000,
+                multifragment: 0x0010_0000,
                 chunk: 16_256,
                 refresh_rect: true,
                 suppress_output: true,
+                horizontal_wheel: true,
+                extended_buttons: true,
             }
         );
     }
@@ -527,8 +586,12 @@ mod tests {
     /// them: ask for as much as it can take, and send as little as every server takes.
     #[test]
     fn a_server_that_names_neither_size_gets_one_asked_of_it_and_one_assumed() {
-        let pdu = demand(&[bitmap(1920, 1080), (VIRTUAL_CHANNEL, 0_u32.to_le_bytes().to_vec())]);
-        let demanded = DemandActive::decode(&pdu).unwrap();
+        let pdu = demand(&[
+            bitmap(1920, 1080),
+            input(WINDOWS_INPUT),
+            (VIRTUAL_CHANNEL, 0_u32.to_le_bytes().to_vec()),
+        ]);
+        let demanded = DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap();
         assert_eq!(demanded.multifragment, DEFAULT_MULTIFRAGMENT);
         assert_eq!(demanded.chunk, channel::MIN_CHUNK);
     }
@@ -539,13 +602,59 @@ mod tests {
     #[test]
     fn the_ways_a_server_will_repaint_are_taken_from_what_it_said_and_nowhere_else() {
         for (refresh_rect, suppress_output) in [(false, false), (true, false), (false, true)] {
-            let pdu = demand(&[general(refresh_rect, suppress_output), bitmap(1920, 1080)]);
-            let demanded = DemandActive::decode(&pdu).unwrap();
+            let pdu = demand(&[
+                general(refresh_rect, suppress_output),
+                bitmap(1920, 1080),
+                input(WINDOWS_INPUT),
+            ]);
+            let demanded = DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap();
             let read = (demanded.refresh_rect, demanded.suppress_output);
             assert_eq!(read, (refresh_rect, suppress_output));
         }
-        let silent = DemandActive::decode(&demand(&[bitmap(1920, 1080)])).unwrap();
+        let silent = demand(&[bitmap(1920, 1080), input(WINDOWS_INPUT)]);
+        let silent = DemandActive::decode(SERVER_CHANNEL, &silent).unwrap();
         assert!(!silent.refresh_rect && !silent.suppress_output);
+    }
+
+    /// A server maximum below what a 384x384 pointer needs is raised to it: this client
+    /// claims such pointers, and may not ask for less room than one takes.
+    #[test]
+    fn a_multifragment_size_too_small_for_the_largest_pointer_is_raised_to_it() {
+        let small = (MULTIFRAGMENT, 0x0004_0000_u32.to_le_bytes().to_vec());
+        let pdu = demand(&[bitmap(1920, 1080), input(WINDOWS_INPUT), small]);
+        let demanded = DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap();
+        assert_eq!(demanded.multifragment, 608_299);
+    }
+
+    /// Every event this client sends is fast-path input, so a server that takes none is
+    /// refused where it says so; the two optional pointer events follow their own flags.
+    #[test]
+    fn what_input_a_server_takes_is_read_from_its_input_flags() {
+        let plain = demand(&[bitmap(1920, 1080), input(0x0001 | 0x0008)]);
+        let plain = DemandActive::decode(SERVER_CHANNEL, &plain).unwrap();
+        assert!(!plain.horizontal_wheel && !plain.extended_buttons);
+
+        for flags in [0x0001_u16, 0x0001 | 0x0004 | 0x0100] {
+            let pdu = demand(&[bitmap(1920, 1080), input(flags)]);
+            assert_eq!(
+                DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap_err().to_string(),
+                format!(
+                    "an RDP Demand Active PDU carries input flags admitting no fast-path input, \
+                     {flags:#x}, which this client does not accept"
+                )
+            );
+        }
+    }
+
+    /// The Virtual Channel set carries `VCChunkSize`, so the value is one the field
+    /// allows.
+    #[test]
+    fn the_virtual_channel_set_names_a_chunk_size_the_field_allows() {
+        let sets = confirm().sets();
+        let at = 24 + 28 + 88 + 40 + 10 + 88 + 8 + 52 + 12;
+        assert_eq!(&sets[at..at + 4], &[0x14, 0x00, 0x0C, 0x00]);
+        let chunk = u32::from_le_bytes(sets[at + 8..at + 12].try_into().unwrap());
+        assert_eq!(chunk, 1600);
     }
 
     /// A chunk outside the range the specification gives is a server this client
@@ -557,7 +666,7 @@ mod tests {
             let chunk = [0_u32.to_le_bytes(), named.to_le_bytes()].concat();
             let pdu = demand(&[bitmap(1920, 1080), (VIRTUAL_CHANNEL, chunk)]);
             assert_eq!(
-                DemandActive::decode(&pdu).unwrap_err().to_string(),
+                DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap_err().to_string(),
                 format!(
                     "a server Virtual Channel capability set carries a channel chunk size \
                      {named:#x}, which this client does not accept"
@@ -570,7 +679,7 @@ mod tests {
     fn a_share_with_no_desktop_in_it_is_an_error_rather_than_a_guess() {
         let pdu = demand(&[(GENERAL, vec![0; 20])]);
         assert_eq!(
-            DemandActive::decode(&pdu).unwrap_err().to_string(),
+            DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap_err().to_string(),
             "an RDP Demand Active PDU does not carry a Bitmap capability set"
         );
     }
@@ -584,7 +693,7 @@ mod tests {
         let at = 4 + 2 + 2 + 4 + 2 + 2 + 4;
         pdu[at..at + 2].copy_from_slice(&16_u16.to_le_bytes());
         assert_eq!(
-            DemandActive::decode(&pdu).unwrap_err().to_string(),
+            DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap_err().to_string(),
             "a server Bitmap capability set carries a colour depth 0x10, which this client does \
              not accept"
         );
@@ -597,7 +706,7 @@ mod tests {
         let at = 4 + 2 + 2 + 4 + 2 + 2 + 2;
         pdu[at..at + 2].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
-            DemandActive::decode(&pdu).unwrap_err().to_string(),
+            DemandActive::decode(SERVER_CHANNEL, &pdu).unwrap_err().to_string(),
             "an RDP Demand Active PDU carries a capability set length 0x2, which this client does \
              not accept"
         );

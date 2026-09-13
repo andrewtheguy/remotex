@@ -128,15 +128,15 @@ cache, and version 10 with the small cache and `AVC_DISABLED`, so the host never
 sends H.264. `THINCLIENT` is deliberately not set. The host confirms one set and
 then draws.
 
-Every PDU on the channel is wrapped in RDP 8 bulk compression (`proto/zgfx.rs`), a
-port of FreeRDP's decoder: a fixed Huffman table over literals, matches into a
-2.5 MB history shared by every PDU for the channel's life, and runs of unencoded
-bytes. One wrapper may hold several RDPGFX PDUs, each eight-byte-headed with its
-own length, and `proto/gfx.rs` decodes them in order. Only the server-to-client
-direction is wrapped: the client's own PDUs — the caps advertise, each frame
-acknowledgement — go out raw, because a Windows host reads the RDPGFX header
-straight off the channel and fails its graphics subsystem when it finds a wrapper
-there instead.
+Every PDU the host sends on the channel is wrapped in RDP 8 bulk compression
+(`proto/zgfx.rs`), a port of FreeRDP's decoder: a fixed Huffman table over
+literals, matches into a 2.5 MB history shared by every PDU for the channel's life,
+and runs of unencoded bytes. One wrapper may hold several RDPGFX PDUs, each
+eight-byte-headed with its own length, and `proto/gfx.rs` decodes them in order.
+The client's own PDUs — the caps advertise, each frame acknowledgement — go out raw, as MS-RDPEGFX 2.1 specifies: "Client-to-server
+graphics messages are not encapsulated within any external structure". A Windows
+host reads the RDPGFX header straight off the channel and fails its graphics
+subsystem when it finds a wrapper there instead.
 
 The host does not paint the desktop; it paints *surfaces* it creates and sizes,
 maps them onto the output at an origin, and brackets drawing in StartFrame and
@@ -294,7 +294,7 @@ up before the channel is, so a copy that arrives early is held — the most rece
 one, since each advertisement replaces the last — and sent when the channel opens.
 
 Short format names are what is spoken. `CB_USE_LONG_FORMAT_NAMES` is not offered,
-which by MS-RDPECLIP 3.1.5.2 settles the form of every list in either direction;
+which by MS-RDPECLIP 2.2.2.1.1.1 settles the form of every list in either direction;
 a server that ignores that is still read, because a list that is not a whole
 number of short entries can only be long ones. Nothing branches on what the
 server's own capabilities say: they are read for the log, where a server that
@@ -334,8 +334,9 @@ redirect, or leave alone.
 host redirects no sound to a client that did not name it — measured here as a
 session numbered an `rdpsnd` channel the host never spoke on, and recorded in
 FreeRDP as "rdpsnd requires rdpdr to be registered" — so the client walks the
-channel's opening handshake, announce, name and capabilities, and there is nothing
-after it: no device list to announce, no I/O request that could arrive.
+channel's opening handshake, announce, name, capabilities and an empty device
+list, sent again when the host says the user is logged on, and there is nothing
+after it: no I/O request could arrive.
 
 A current Windows host carries the conversation on a dynamic channel,
 `AUDIO_PLAYBACK_DVC`, rather than the static one, and the client accepts it when
@@ -345,7 +346,11 @@ its format list, this end answers with 44.1 kHz 16-bit stereo PCM alone and asks
 for high quality; the host sends a training probe, echoed back; then Wave2
 buffers, each confirmed by block number and each handed to the engine's
 `AudioSink` — from there to the same `AudioBridge` every other engine feeds, on the
-client's thread, never through the event queue. Close clears the format.
+client's thread, never through the event queue. Each confirm goes out once its
+buffer is with the sink, its timestamp the host's plus the milliseconds since the
+PDU came off the network — held through a rebuilt share included — as MS-RDPEA
+3.2.5.2.1.6 has it. Close keeps the format: a Windows host sends its
+format list once per channel and a Close after every stream.
 
 The measured part: a Windows host negotiates nothing until something plays. A
 session opened onto a quiet desktop shows the dynamic channel opened and not a byte

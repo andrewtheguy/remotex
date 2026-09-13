@@ -10,6 +10,8 @@
 //! reader wants — what is sent, and what has to come back — would be the one thing not
 //! written down anywhere.
 
+use std::time::Instant;
+
 use anyhow::{Context as _, Result, bail};
 use log::{debug, info};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, WriteHalf};
@@ -83,8 +85,9 @@ pub(super) struct Connected {
     /// What the server said when it opened the share.
     pub demand: DemandActive,
     /// PDUs that arrived on a static virtual channel while the share was being
-    /// finalized, in the order they came — see [`activate`].
-    pub deferred: Vec<(u16, Vec<u8>)>,
+    /// finalized, in the order they came and each with when it arrived — see
+    /// [`activate`].
+    pub deferred: Vec<(u16, Vec<u8>, Instant)>,
 }
 
 impl Connected {
@@ -169,7 +172,17 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     frames.next(&mut frame).await?;
     let answer = mcs::connect_response(&frame)?;
     let answer = ConferenceCreateResponse::decode(answer)?;
-    let ConferenceCreateResponse { io_channel, channels } = answer;
+    let ConferenceCreateResponse { io_channel, channels, requested_protocols } = answer;
+    // The server's own record of what step 1 offered, sent inside TLS where a machine
+    // that rewrote the clear-text negotiation cannot reach it. [MS-RDPBCGR] 3.2.5.3.4
+    // says to drop a connection whose record disagrees.
+    if requested_protocols != request.protocols.bits() {
+        bail!(
+            "{dest} says the negotiation offered protocols {requested_protocols:#x}, and this \
+             client offered {:?}",
+            request.protocols
+        );
+    }
     if channels.len() != wanted.len() {
         let asked = wanted.len();
         bail!("the host numbered {} channels, and {asked} were asked for", channels.len());
@@ -209,6 +222,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         domain: config.domain.as_deref(),
         address: client_address,
         audio: config.audio.is_some(),
+        keyboard_layout: KEYBOARD_LAYOUT,
     }
     .encode()?;
     send(&mut writer, user, io_channel, &logon).await.context("sending the Client Info PDU")?;
@@ -220,10 +234,10 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // 9. The capability exchange, and 10. the four PDUs that make the share live.
     //     Both happen again, unchanged, every time the server rebuilds the desktop.
     let payload = receive(&mut frames, &mut frame, io_channel).await?;
-    let Pdu::DemandActive(body) = share::decode(payload)? else {
+    let Pdu::DemandActive { source, body } = share::decode(payload)? else {
         bail!("the host did not demand a share once licensing was done");
     };
-    let demand = DemandActive::decode(body)?;
+    let demand = DemandActive::decode(source, body)?;
     info!(
         "rdp: the host opened a {}x{} desktop, share {:#x}",
         demand.width, demand.height, demand.share_id
@@ -249,7 +263,8 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 /// again: a server opens the clipboard as soon as the channel is up, which is before
 /// this exchange ends, and a Monitor Ready read past here would be a session whose
 /// clipboard never started. So those are handed back rather than dropped, for the
-/// caller to act on once it can.
+/// caller to act on once it can, each with when it arrived: a sound buffer's confirm
+/// counts the time it was held.
 pub(super) async fn activate(
     frames: &mut Frames<ReadHalf<tls::Stream>>,
     writer: &mut WriteHalf<tls::Stream>,
@@ -257,7 +272,7 @@ pub(super) async fn activate(
     user: u16,
     io_channel: u16,
     demand: &DemandActive,
-) -> Result<Vec<(u16, Vec<u8>)>> {
+) -> Result<Vec<(u16, Vec<u8>, Instant)>> {
     let confirm = ConfirmActive {
         share_id: demand.share_id,
         width: demand.width,
@@ -271,7 +286,7 @@ pub(super) async fn activate(
 
     // All four go out without waiting; the server's four come back in its own time,
     // with session PDUs among them.
-    for request in finalization::requests(user, demand.share_id) {
+    for request in finalization::requests(user, demand.server_channel, demand.share_id) {
         let framed = mcs::send_data_request(user, io_channel, &request)?;
         writer.write_all(&framed).await.context("sending a finalization PDU")?;
     }
@@ -284,7 +299,7 @@ pub(super) async fn activate(
         let payload = match mcs::send_data_indication(frame)? {
             mcs::Indication::Data(data) if data.channel == io_channel => data.payload,
             mcs::Indication::Data(data) => {
-                deferred.push((data.channel, data.payload.to_vec()));
+                deferred.push((data.channel, data.payload.to_vec(), Instant::now()));
                 continue;
             }
             mcs::Indication::Disconnect(reason) => {

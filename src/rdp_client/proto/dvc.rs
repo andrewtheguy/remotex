@@ -7,7 +7,7 @@
 //! desktop is resized over — and a handful of PDUs to get there:
 //!
 //! 1. The server sends a **Capabilities Request** naming a version. The answer is the
-//!    same version back: there is nothing to negotiate, only to agree to.
+//!    same version back, or 2 when the server names 3 — see [`answer_version`].
 //! 2. The server sends a **Create Request** for each channel it wants open, by name.
 //!    A client answers **Create Response** with a status — accepted, or [`NO_LISTENER`]
 //!    for a channel it has no use for. Refusing is normal: a Windows host offers
@@ -56,7 +56,7 @@ const WHAT: &str = "a dynamic virtual channel PDU";
 /// What a server said on the dynamic channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
-    /// The version to agree to, which [`capabilities_response`] hands straight back.
+    /// The version the server offers, which [`answer_version`] turns into the answer.
     Capabilities { version: u16 },
     /// A channel the server wants open, and the name it goes by.
     Create { channel: u32, name: &'a str },
@@ -205,7 +205,20 @@ impl Incoming {
     }
 }
 
-/// Agree to the version the server asked for.
+/// The highest version this client claims: 2, which says it takes the server's
+/// channel priorities — a promise that asks nothing of a client. Version 3 adds
+/// compressed data, and [MS-RDPEDYC] 3.2.3.1 reserves it for a client that
+/// decompresses; this one refuses the compressed commands as it would any other it
+/// has no reader for.
+const VERSION: u16 = 2;
+
+/// The version to answer a Capabilities Request with: the server's, or this client's
+/// own when the server's is higher.
+pub fn answer_version(offered: u16) -> u16 {
+    offered.min(VERSION)
+}
+
+/// A Capabilities Response naming `version` — see [`answer_version`].
 pub fn capabilities_response(version: u16) -> Vec<u8> {
     let mut w = Writer::with_capacity(4);
     w.u8(header(CAPABILITIES, BYTE, BYTE));
@@ -299,7 +312,15 @@ mod tests {
             panic!("a capabilities request");
         };
         assert_eq!(version, 2);
-        assert_eq!(capabilities_response(version), vec![0x50, 0x00, 0x02, 0x00]);
+        assert_eq!(capabilities_response(answer_version(version)), vec![0x50, 0x00, 0x02, 0x00]);
+    }
+
+    /// Version 3 promises compressed data, which this client does not decompress, so a
+    /// server offering it is answered with 2; a server offering 1 is answered with 1.
+    #[test]
+    fn a_server_offering_compression_is_answered_without_it() {
+        assert_eq!(answer_version(3), 2);
+        assert_eq!(answer_version(1), 1);
     }
 
     #[test]

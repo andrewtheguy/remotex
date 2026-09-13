@@ -49,8 +49,9 @@ const FRAGMENT: u8 = 0x30;
 const COMPRESSION: u8 = 0xC0;
 
 /// `FASTPATH_OUTPUT_COMPRESSION_USED`, which means a compression flags byte follows
-/// the update header. The flags may still say the body was left alone.
-const COMPRESSION_USED: u8 = 0x40;
+/// the update header. The flags may still say the body was left alone. The field is
+/// the header's top two bits, and this is its value 2 ([MS-RDPBCGR] 2.2.9.1.2.1).
+const COMPRESSION_USED: u8 = 0x80;
 
 /// `PACKET_COMPRESSED`: the body really is compressed. A server may only compress
 /// what the Client Info PDU asked it to, and [`super::info`] asks for nothing.
@@ -381,17 +382,26 @@ mod tests {
     fn a_compressed_update_is_refused_and_an_uncompressed_one_wearing_the_flag_is_not() {
         // The flag says a byte of compression flags follows, and those flags say the
         // body was left alone after all.
-        let frame = wrap(&[BITMAP | COMPRESSION_USED, 0x00, 0x02, 0x00, 0xAB, 0xCD]);
+        // `compression` is the header's top two bits, and "used" is their value 2.
+        let frame = wrap(&[BITMAP | 0x80, 0x00, 0x02, 0x00, 0xAB, 0xCD]);
         let piece = updates(&frame).unwrap().next().unwrap().unwrap();
         assert_eq!(piece, Piece { code: BITMAP, fragment: Fragment::Single, data: &[0xAB, 0xCD] });
 
         // And when they say it really was compressed, it is refused: a server may
         // only compress what the Client Info PDU asked it to.
-        let frame = wrap(&[BITMAP | COMPRESSION_USED, PACKET_COMPRESSED, 0x02, 0x00, 0xAB, 0xCD]);
+        let frame = wrap(&[BITMAP | 0x80, PACKET_COMPRESSED, 0x02, 0x00, 0xAB, 0xCD]);
         assert_eq!(
             updates(&frame).unwrap().next().unwrap().unwrap_err().to_string(),
             "a fast-path update carries its compression flags 0x20, which this client does not \
              accept"
+        );
+
+        // The field's value 1 means nothing, so it is refused rather than read as
+        // either of the values that do.
+        let frame = wrap(&[BITMAP | 0x40, 0x02, 0x00, 0xAB, 0xCD]);
+        assert_eq!(
+            updates(&frame).unwrap().next().unwrap().unwrap_err().to_string(),
+            "a fast-path update carries its compression 0x40, which this client does not accept"
         );
     }
 
