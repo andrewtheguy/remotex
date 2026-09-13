@@ -1141,8 +1141,11 @@ impl Regions {
     ///
     /// Each run carries whether the cells in it were left lossy by a stream or by a
     /// `classify` still's verdict over a whole piece; [`Due::keep_lossy`] is what the
-    /// difference means to the caller. Runs are built within one kind, so a run never
-    /// has to answer for both.
+    /// difference means to the caller. Only a stream's cells are ever run together.
+    /// What a piece's cell is owed is a *second opinion*, and a verdict taken over a
+    /// run of cells is the same kind of verdict that caused the debt — the picture
+    /// carrying the text beside it — so a piece's cell comes back alone and is judged
+    /// alone.
     ///
     /// A cell a live stream still covers is never due: its stream is carrying it, and
     /// a crisp copy would be overwritten by the next access unit anyway.
@@ -1181,7 +1184,8 @@ impl Regions {
         for ((col, row), owed) in cells {
             match runs.last_mut() {
                 Some((run, run_owed))
-                    if *run_owed == owed
+                    if owed == Owed::Stream
+                        && *run_owed == owed
                         && run.r0 == row
                         && run.c1.checked_add(1) == Some(col) =>
                 {
@@ -2273,6 +2277,28 @@ mod tests {
             "the next five should be the bottom one"
         );
         assert!(due_rects(&mut regions, settled, CLEANUP_IDLE_FOR_TESTS, 5).is_empty());
+    }
+
+    /// A piece's cells are owed a second opinion, one cell at a time. Running them
+    /// together would hand the classifier the same too-wide rectangle whose verdict
+    /// put the text beside the picture through a lossy still in the first place, and
+    /// it would answer the same way. A stream's cells still coalesce — see
+    /// [`a_short_budget_takes_whole_stripes_first`] — because they are owed a crisp
+    /// copy outright and no question.
+    #[tokio::test]
+    async fn a_pieces_cells_come_due_one_at_a_time() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.owe(Rect { left: 0, top: 0, right: 319, bottom: 63 }, t0);
+        let due = regions.due(t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
+        assert_eq!(
+            due.iter().map(|due| due.rect).collect::<Vec<_>>(),
+            (0..5)
+                .map(|col| Rect { left: col * 64, top: 0, right: col * 64 + 63, bottom: 63 })
+                .collect::<Vec<_>>(),
+            "five cells of one row should be five rectangles, not one stripe"
+        );
+        assert!(due.iter().all(|due| !due.keep_lossy), "a piece's cell is owed a question");
     }
 
     /// What `crate::encode` passes as the cleanup's idle threshold. Its own constant

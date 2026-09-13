@@ -1436,7 +1436,13 @@ async fn flush_cleanups(
         // really is photographic and the client's copy is already the encode this
         // would send — so nothing goes out. A stream's cell is not offered the
         // choice: any still beats an inter-coded frame.
-        if !keep_lossy && tile.format != Tile::FORMAT_PNG {
+        //
+        // "Already the encode this would send" holds only while the dial stands
+        // still. Under `render_adaptive` the piece may have gone out at the lag's
+        // floor and the lag since cleared, leaving the client holding a coarser copy
+        // than the one encoded here — and a cell that has stopped changing is a cell
+        // nothing else will come back for. An adaptive plan therefore sends it.
+        if !keep_lossy && tile.format != Tile::FORMAT_PNG && shared.tile_floor.is_none() {
             shared.settled.fetch_add(1, Ordering::Relaxed);
             continue;
         }

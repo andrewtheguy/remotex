@@ -239,7 +239,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
         }
     }
 
-    let (_, _, frame) = snapshot(&session);
+    let (width, height, frame) = snapshot(&session);
     println!("  {paints} paints over {marks} frames, {reported} pixels reported");
     println!(
         "  {reported} px is {:.1} whole desktops; the average rectangle is {} px",
@@ -262,6 +262,14 @@ async fn a_real_host_reports_every_pixel_it_paints() {
         println!("    cell at {x},{y} disagreed for up to {worst} frames");
     }
     dump("mirror", shadow.width, shadow.height, &shadow.pixels);
+    // A resize between the last frame boundary and this read leaves a framebuffer
+    // that is not the mirror's desktop at all. Nothing below can say anything about
+    // it — the two do not describe the same pixels — and the leak counts above are
+    // already the run's answer.
+    if (width, height) != (shadow.width, shadow.height) || frame.len() != shadow.pixels.len() {
+        println!("  the desktop became {width}x{height} after the last frame; no mask for it");
+        return;
+    }
     dump("framebuffer", shadow.width, shadow.height, &frame);
     let mut mask = vec![0u8; shadow.pixels.len()];
     for (i, out) in mask.as_chunks_mut::<4>().0.iter_mut().enumerate() {
