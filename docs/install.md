@@ -184,13 +184,7 @@ sudo rm -rf /usr/local/share/remotex /usr/local/share/doc/remotex
 sudo pkgutil --forget com.andrewtheguy.remotex.gateway
 ```
 
-On Windows, remove remotex from **Apps & features**, or from an administrator's
-PowerShell with the package file or without it:
-
-```powershell
-msiexec /x remotex-windows-x86_64.msi
-Get-Package remotex | Uninstall-Package
-```
+On Windows, remove remotex from **Apps & features**.
 
 None of these touch the live config. Remove `/etc/remotex` on Linux,
 `/usr/local/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
