@@ -392,6 +392,9 @@ impl Graphics {
                 if let Some(open) = self.frame.replace(frame) {
                     debug!("rdp: graphics frame {frame} started inside frame {open}");
                 }
+                if let Some(progressive) = self.progressive.as_mut() {
+                    progressive.start_frame();
+                }
             }
             Message::EndFrame { frame } => {
                 self.tally.command(gfx::CMD_END_FRAME);
