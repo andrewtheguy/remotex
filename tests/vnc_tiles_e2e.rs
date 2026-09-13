@@ -38,8 +38,8 @@ const TILE_FORMAT_PNG: u8 = 1;
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
 
-/// The target's configured size, which is what a `defaultSize` request resolves
-/// to. Deliberately none of the other geometries this test sees — not the server's
+/// The target's pinned size, which the session opens at and a `defaultSize`
+/// request resolves to. Deliberately none of the other geometries this test sees — not the server's
 /// own 1024x768 and not the 800x600 the viewport asks for — so an assertion on it
 /// cannot pass by accident.
 const DEFAULT_W: u32 = 1280;
@@ -90,8 +90,9 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             password: String::new(),
             vnc_password: "secret42".to_owned(),
             domain: None,
-            // Not the connect-time size for VNC — the server keeps its own — but
-            // the size a `defaultSize` request resolves to.
+            // The pinned size: asked for once the server declares SetDesktopSize
+            // support, after it has announced its own, and the size a
+            // `defaultSize` request resolves to.
             width: Some(DEFAULT_W as u16),
             height: Some(DEFAULT_H as u16),
             resize: true,             // exercise the dynamic resize path
@@ -247,6 +248,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     common::connect_target(&mut ws, "tigervnc-dummy").await;
 
     let mut got_resize = false;
+    let mut pinned = false;
     let mut covered: u64 = 0;
     let mut cursor: Option<String> = None;
     // Resolves cache references, so `covered` counts pixels *painted* rather than
@@ -265,11 +267,19 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(covered, 0, "resize arrived after tiles");
-                        // The size announced must be the VNC server's actual
-                        // desktop, not the (RDP-oriented) configured 1280x800.
-                        assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
-                        got_resize = true;
+                        if got_resize {
+                            // The pin, asked for on the server's declaration of
+                            // SetDesktopSize support; its repaint starts afresh.
+                            assert_resize(&text, DEFAULT_W, DEFAULT_H, "the pinned size");
+                            pinned = true;
+                            covered = 0;
+                        } else {
+                            assert_eq!(covered, 0, "resize arrived after tiles");
+                            // The first size announced must be the VNC server's
+                            // actual desktop, before the pin is asked for.
+                            assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
+                            got_resize = true;
+                        }
                     }
                     if text.contains(r#""type":"cursor""#) {
                         check_cursor_msg(&text);
@@ -278,12 +288,14 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
-                    covered += check_tile_frame(&mut stream, &frame, DESKTOP_W, DESKTOP_H);
-                    // The first (non-incremental) update must repaint the whole
-                    // desktop; once that much area has arrived, the raw->tile
-                    // path is proven. The Cursor pseudo-encoding rides the same
+                    let (w, h) = if pinned { (DEFAULT_W, DEFAULT_H) } else { (DESKTOP_W, DESKTOP_H) };
+                    covered += check_tile_frame(&mut stream, &frame, w, h);
+                    // The desktop at the pinned size must be repainted whole;
+                    // once that much area has arrived, the raw->tile path is
+                    // proven. The Cursor pseudo-encoding rides the opening
                     // update, so wait for the pointer shape too.
-                    if covered >= u64::from(DESKTOP_W) * u64::from(DESKTOP_H)
+                    if pinned
+                        && covered >= u64::from(DEFAULT_W) * u64::from(DEFAULT_H)
                         && cursor.is_some()
                     {
                         return;
