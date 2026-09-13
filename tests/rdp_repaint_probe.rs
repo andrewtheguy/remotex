@@ -6,8 +6,9 @@
 //! out — a repaint is one frame's worth of bands pushed in a tight loop, and how much
 //! of that compresses at once is the whole question.
 //!
-//! It needs a real Windows host, which the gateway's RDP client speaks to and nothing
-//! else. The target comes out of a config file that is not in the tree:
+//! Unlike `rdp_bytes_probe`, this needs a **real** host: the dummy xrdp login screen
+//! is nearly blank, and a blank repaint encodes in microseconds no matter what the
+//! depth is. So the target comes out of a config file that is not in the tree:
 //!
 //!   REMOTEX_PROBE_CONFIG=tmp/test_config.toml \
 //!   REMOTEX_PROBE_TARGET=desktop-vnvgdaf \
@@ -23,7 +24,8 @@
 //!
 //! Two runs only compare at the same surface size — a repaint's cost is its pixels —
 //! so the line prints the desktop it measured. Byte counts are *not* comparable
-//! between runs: a real desktop draws its own clock while the probe watches. The record count is (13 bands each), and the timings
+//! between runs the way `rdp_bytes_probe`'s are: a real desktop draws its own clock
+//! while the probe watches. The record count is (13 bands each), and the timings
 //! are, which is what this measures.
 //!
 //! What it produced, on a 12-core arm64 Mac against a 1280x800 Windows desktop, is

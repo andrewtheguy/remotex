@@ -302,6 +302,12 @@ pub(crate) fn router_with_sessions(
                 // Sound, on a socket of its own so it never queues behind a picture.
                 // Same guard, same credential kinds; only the payload differs.
                 .route("/ws/audio", any(ws::audio_handler))
+                // The camera, going the other way, on its own socket for the same
+                // reason — and opening it is the per-session enable (see crate::ws).
+                .route("/ws/camera", any(ws::camera_handler))
+                // The microphone, the camera's twin: browser to remote, on its own
+                // socket, opening it the per-session enable.
+                .route("/ws/mic", any(ws::mic_handler))
                 .route_layer(require_auth),
         );
 
@@ -886,8 +892,9 @@ mod tests {
                 domain: None,
                 width: Some(1280),
                 height: Some(800),
-                resize: false,
+                security: None,
                 egfx: None,
+                resize: false,
                 clipboard: false,
                 audio: false,
                 audio_codec: None,
@@ -906,6 +913,8 @@ mod tests {
                 audio_bitrate: None,
                 audio_adaptive: false,
                 audio_bitrate_min: None,
+                camera: false,
+                microphone: false,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1154,8 +1163,9 @@ mod tests {
             domain: None,
             width: Some(640),
             height: Some(480),
-            resize: false,
+            security: None,
             egfx: None,
+            resize: false,
             clipboard: false,
             audio: true,
             audio_codec: tone_codec,
@@ -1174,6 +1184,8 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: false,
             audio_bitrate_min: None,
+            camera: false,
+            microphone: false,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its

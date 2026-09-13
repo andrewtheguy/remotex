@@ -33,8 +33,9 @@ async fn spawn_app() -> SocketAddr {
             domain: None,
             width: Some(1280),
             height: Some(800),
-            resize: false,
+            security: None,
             egfx: None,
+            resize: false,
             clipboard: false,
             audio: false,
             audio_codec: None,
@@ -53,6 +54,8 @@ async fn spawn_app() -> SocketAddr {
             audio_bitrate: None,
             audio_adaptive: false,
             audio_bitrate_min: None,
+            camera: false,
+            microphone: false,
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

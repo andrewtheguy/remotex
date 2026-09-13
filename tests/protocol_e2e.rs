@@ -1040,8 +1040,9 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         domain: None,
         width: Some(1280),
         height: Some(800),
-        resize: false,
+        security: None,
         egfx: None,
+        resize: false,
         clipboard,
         audio: false,
         audio_codec: None,
@@ -1060,6 +1061,8 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         audio_bitrate: None,
         audio_adaptive: false,
         audio_bitrate_min: None,
+        camera: false,
+        microphone: false,
     }
 }
 
