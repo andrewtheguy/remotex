@@ -511,6 +511,39 @@ fn free_id(taken: &[u8]) -> Option<u8> {
 }
 
 /// The mirror, the live streams, and the cells they owe.
+/// One run of cells the cleanup should look at again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Due {
+    /// The cells, as one rectangle snapped out to the grid.
+    pub rect: Rect,
+    /// Whether a re-encode that comes back lossy is still worth sending. True for a
+    /// stream's cells, where any still beats an inter-coded frame; false where the
+    /// lossy copy came from a `classify` still, since an answer that agrees with the
+    /// first one would re-send the same bytes to no effect.
+    pub keep_lossy: bool,
+}
+
+/// Where a cell's lossy rendition came from, which decides what a cleanup owes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// An access unit carried it. The cleanup always sends: a still at the base
+    /// encode is better than any frame of an inter-coded stream, whatever the base
+    /// turns out to be.
+    Stream,
+    /// A `classify` still judged the *piece* it was part of photographic and sent
+    /// the whole piece lossy. Whether that verdict holds for this cell alone is what
+    /// the cleanup re-asks, and a cell that answers the same way is left as it is —
+    /// re-sending identical bytes buys the picture nothing.
+    Piece,
+}
+
+/// One cell's lossy rendition: when it was sent, and by what.
+#[derive(Debug, Clone, Copy)]
+struct Debt {
+    at: Instant,
+    owed: Owed,
+}
+
 pub struct Regions {
     policy: Policy,
     /// The 1–100 dial a new stream starts at — the config's, unless the congestion loop
@@ -550,9 +583,9 @@ pub struct Regions {
     ended: Vec<u8>,
     /// Cells inside a live region, so [`Self::covers`] is a lookup rather than a scan.
     covered: HashSet<(u16, u16)>,
-    /// Cell → when an access unit last carried it. A cell in here is one the client
-    /// holds only a lossy copy of, and the gateway owes a crisp re-send.
-    debts: HashMap<(u16, u16), Instant>,
+    /// Cell → the lossy copy the client holds and when it was sent. A cell in here
+    /// is one the gateway owes a crisp re-send.
+    debts: HashMap<(u16, u16), Debt>,
     retuned_at: Option<Instant>,
     /// [`RETUNE`] and [`STREAM_IDLE`], held per table so a replay can sweep them
     /// ([`Self::with_timing`]); nothing in a session moves them.
@@ -1022,7 +1055,7 @@ impl Regions {
         // change or not, and nothing else is going to send them.
         if self.policy == Policy::Moving {
             for cell in &cells {
-                self.debts.entry(*cell).or_insert(now);
+                self.debts.insert(*cell, Debt { at: now, owed: Owed::Stream });
             }
         }
         Ok(Live {
@@ -1039,6 +1072,54 @@ impl Regions {
             announced: None,
             moving_at: now,
         })
+    }
+
+    /// A `classify` still went out lossy over `sent`, so every cell it covers in
+    /// full is owed a second look.
+    ///
+    /// The verdict that sent those pixels lossy was made over the whole piece, and a
+    /// piece is not a cell: a band cut from one report's damage can hold a moving
+    /// picture and the text beside it, read as photographic on the strength of the
+    /// picture, and take the text lossy with it. Since nothing about that text
+    /// changes afterwards, no later report covers it and the client keeps the blurred
+    /// copy for as long as the window is open. The cleanup is what comes back for it,
+    /// re-asking the classifier cell by cell.
+    ///
+    /// A piece no larger than a cell is not owed: its verdict *was* the cell's, and
+    /// asking again would only spend an encode to arrive at the same answer.
+    ///
+    /// Every cell the piece *touches*, where [`Self::discharge`] cancels only cells a
+    /// send covered in full — opposite rules for the same reason. Owing a cell the
+    /// piece merely clipped costs one redundant re-encode; failing to owe one leaves
+    /// the blur, which is the thing this exists to catch.
+    ///
+    /// Full coverage is also not a rule a payload can satisfy at every density. A band
+    /// is [`crate::tiles::BAND_ROWS`] pixels tall whatever the framebuffer, and a cell
+    /// is 128 pixels tall on a 2× one, so a Retina session that asked for containment
+    /// here would owe nothing at all and never clean up anything.
+    ///
+    /// What the cleanup crops is the mirror, and the mirror holds every rectangle that
+    /// has changed rather than only what a stream carries — so a cell this piece
+    /// covered in part is one it has the current truth for, like any other.
+    ///
+    /// A stream's debt is never downgraded to this one — a cell an access unit
+    /// carried is owed a crisp copy outright, where this one is owed a question.
+    pub fn owe(&mut self, sent: Rect, now: Instant) {
+        if self.size.is_none() {
+            return;
+        }
+        if sent.w() <= self.grid.w && sent.h() <= self.grid.h {
+            return;
+        }
+        for piece in sent.cells(self.grid) {
+            let key = piece.cell_key(self.grid);
+            match self.debts.get(&key) {
+                Some(debt) if debt.owed == Owed::Stream => {}
+                _ => {
+                    self.debts.insert(key, Debt { at: now, owed: Owed::Piece });
+                }
+            }
+        }
     }
 
     /// A crisp copy of `sent` has gone out, so nothing is owed for any cell it covers
@@ -1065,47 +1146,66 @@ impl Regions {
     /// rectangles for the caller to re-encode at the base quality — one per run of
     /// neighbouring cells in a row, not one per cell.
     ///
+    /// Each run carries whether the cells in it were left lossy by a stream or by a
+    /// `classify` still's verdict over a whole piece; [`Due::keep_lossy`] is what the
+    /// difference means to the caller. Only a stream's cells are ever run together.
+    /// What a piece's cell is owed is a *second opinion*, and a verdict taken over a
+    /// run of cells is the same kind of verdict that caused the debt — the picture
+    /// carrying the text beside it — so a piece's cell comes back alone and is judged
+    /// alone.
+    ///
     /// A cell a live stream still covers is never due: its stream is carrying it, and
     /// a crisp copy would be overwritten by the next access unit anyway.
-    pub fn due(&mut self, now: Instant, idle: Duration, max: usize) -> Vec<Rect> {
+    pub fn due(&mut self, now: Instant, idle: Duration, max: usize) -> Vec<Due> {
         let (w, h) = match self.size {
             Some(size) => size,
             None => return Vec::new(),
         };
-        let mut ready: Vec<((u16, u16), Instant)> = self
+        let mut ready: Vec<((u16, u16), Instant, Owed)> = self
             .debts
             .iter()
-            .filter(|(cell, at)| {
-                !self.covered.contains(*cell) && now.saturating_duration_since(**at) >= idle
+            .filter(|(cell, debt)| {
+                !self.covered.contains(*cell) && now.saturating_duration_since(debt.at) >= idle
             })
-            .map(|(cell, at)| (*cell, *at))
+            .map(|(cell, debt)| (*cell, debt.at, debt.owed))
             .collect();
         // Oldest first, and among cells owed since the same instant — every cell a
         // stream carried, once it ends — row by row rather than column by column, so
         // that what the budget cuts off is whole stripes: a stopped video sharpens
         // top-down a stripe at a time, not left-to-right in slivers a cell wide.
-        ready.sort_unstable_by_key(|((col, row), at)| (*at, *row, *col));
+        ready.sort_unstable_by_key(|((col, row), at, _)| (*at, *row, *col));
         ready.truncate(max);
-        let mut cells: Vec<(u16, u16)> = ready
+        let mut cells: Vec<((u16, u16), Owed)> = ready
             .into_iter()
-            .map(|(cell, _)| {
+            .map(|(cell, _, owed)| {
                 self.debts.remove(&cell);
-                cell
+                (cell, owed)
             })
             .collect();
         // The tickful goes out as runs: consecutive columns of one row are one
         // rectangle, so a stopped video is restored a stripe at a time rather than a
         // cell at a time, and pays PNG's fixed cost once per stripe. Age chose the
         // cells; it does not also have to order the tiles, which all leave together.
-        cells.sort_unstable_by_key(|(col, row)| (*row, *col));
-        let mut runs: Vec<CellBox> = Vec::new();
-        for (col, row) in cells {
+        cells.sort_unstable_by_key(|((col, row), _)| (*row, *col));
+        let mut runs: Vec<(CellBox, Owed)> = Vec::new();
+        for ((col, row), owed) in cells {
             match runs.last_mut() {
-                Some(run) if run.r0 == row && run.c1.checked_add(1) == Some(col) => run.c1 = col,
-                _ => runs.push(CellBox::of((col, row))),
+                Some((run, run_owed))
+                    if owed == Owed::Stream
+                        && *run_owed == owed
+                        && run.r0 == row
+                        && run.c1.checked_add(1) == Some(col) =>
+                {
+                    run.c1 = col;
+                }
+                _ => runs.push((CellBox::of((col, row)), owed)),
             }
         }
-        runs.into_iter().filter_map(|run| run.to_rect(w, h, self.grid)).collect()
+        runs.into_iter()
+            .filter_map(|(run, owed)| {
+                Some(Due { rect: run.to_rect(w, h, self.grid)?, keep_lossy: owed == Owed::Stream })
+            })
+            .collect()
     }
 
     /// Take the mirror and every stream, for an encode on a blocking worker.
@@ -1208,7 +1308,7 @@ impl Regions {
             for live in &self.live {
                 if live.carried {
                     for cell in &live.cells {
-                        self.debts.insert(*cell, now);
+                        self.debts.insert(*cell, Debt { at: now, owed: Owed::Stream });
                     }
                 }
             }
@@ -2065,7 +2165,7 @@ mod tests {
         regions.retune(&top_row(), t0).expect("a stream");
         assert!(regions.covers((0, 0)));
         assert!(
-            regions.due(t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8).is_empty(),
+            due_rects(&mut regions, t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8).is_empty(),
             "a cell a live stream is carrying was cleaned up underneath it"
         );
 
@@ -2074,7 +2174,7 @@ mod tests {
         regions.expire(later);
         assert!(regions.live.is_empty(), "a region with nothing moving kept its stream");
         assert!(!regions.covers((0, 0)));
-        let due = regions.due(later, CLEANUP_IDLE_FOR_TESTS, 8);
+        let due = due_rects(&mut regions, later, CLEANUP_IDLE_FOR_TESTS, 8);
         assert_eq!(due.len(), 1, "the cells it streamed are owed nothing");
         assert_eq!(due[0], Rect { left: 0, top: 0, right: 319, bottom: 63 });
     }
@@ -2092,7 +2192,7 @@ mod tests {
         // The whole row is owed, first cell included: a run from the left edge.
         regions.discharge(Rect { left: 0, top: 0, right: 15, bottom: 15 });
         assert_eq!(
-            regions.due(later, CLEANUP_IDLE_FOR_TESTS, 8),
+            due_rects(&mut regions, later, CLEANUP_IDLE_FOR_TESTS, 8),
             vec![Rect { left: 0, top: 0, right: 319, bottom: 63 }],
             "a sliver discharged the whole cell's debt"
         );
@@ -2103,7 +2203,7 @@ mod tests {
         regions.expire(later + STREAM_IDLE);
         regions.discharge(Rect { left: 0, top: 0, right: 63, bottom: 63 });
         assert_eq!(
-            regions.due(later + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8),
+            due_rects(&mut regions, later + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 8),
             vec![Rect { left: 64, top: 0, right: 319, bottom: 63 }],
             "a whole cell went out crisp and is still owed"
         );
@@ -2124,7 +2224,7 @@ mod tests {
         assert_eq!(only_rect(&regions).h(), 128);
         regions.expire(t0 + STREAM_IDLE);
         let mut due =
-            regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
+            due_rects(&mut regions, t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
         due.sort_unstable_by_key(|rect| rect.top);
         assert_eq!(
             due,
@@ -2146,7 +2246,7 @@ mod tests {
         assert_eq!(only_rect(&regions), Rect { left: 0, top: 0, right: 319, bottom: 127 });
         regions.expire(t0 + STREAM_IDLE);
         let mut due =
-            regions.due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
+            due_rects(&mut regions, t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
         due.sort_unstable_by_key(|rect| rect.top);
         assert_eq!(
             due,
@@ -2157,8 +2257,7 @@ mod tests {
             "ten cells in two rows should be two stripes"
         );
         assert!(
-            regions
-                .due(t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16)
+            due_rects(&mut regions, t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16)
                 .is_empty()
         );
     }
@@ -2175,21 +2274,74 @@ mod tests {
         regions.expire(t0 + STREAM_IDLE);
         let settled = t0 + STREAM_IDLE + CLEANUP_IDLE_FOR_TESTS;
         assert_eq!(
-            regions.due(settled, CLEANUP_IDLE_FOR_TESTS, 5),
+            due_rects(&mut regions, settled, CLEANUP_IDLE_FOR_TESTS, 5),
             vec![Rect { left: 0, top: 0, right: 319, bottom: 63 }],
             "five of ten cells should be the top stripe"
         );
         assert_eq!(
-            regions.due(settled, CLEANUP_IDLE_FOR_TESTS, 5),
+            due_rects(&mut regions, settled, CLEANUP_IDLE_FOR_TESTS, 5),
             vec![Rect { left: 0, top: 64, right: 319, bottom: 127 }],
             "the next five should be the bottom one"
         );
-        assert!(regions.due(settled, CLEANUP_IDLE_FOR_TESTS, 5).is_empty());
+        assert!(due_rects(&mut regions, settled, CLEANUP_IDLE_FOR_TESTS, 5).is_empty());
+    }
+
+    /// A piece's cells are owed a second opinion, one cell at a time. Running them
+    /// together would hand the classifier the same too-wide rectangle whose verdict
+    /// put the text beside the picture through a lossy still in the first place, and
+    /// it would answer the same way. A stream's cells still coalesce — see
+    /// [`a_short_budget_takes_whole_stripes_first`] — because they are owed a crisp
+    /// copy outright and no question.
+    #[tokio::test]
+    async fn a_pieces_cells_come_due_one_at_a_time() {
+        let mut regions = regions().await;
+        let t0 = Instant::now();
+        regions.owe(Rect { left: 0, top: 0, right: 319, bottom: 63 }, t0);
+        let due = regions.due(t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16);
+        assert_eq!(
+            due.iter().map(|due| due.rect).collect::<Vec<_>>(),
+            (0..5)
+                .map(|col| Rect { left: col * 64, top: 0, right: col * 64 + 63, bottom: 63 })
+                .collect::<Vec<_>>(),
+            "five cells of one row should be five rectangles, not one stripe"
+        );
+        assert!(due.iter().all(|due| !due.keep_lossy), "a piece's cell is owed a question");
+    }
+
+    /// A payload band is [`crate::tiles::BAND_ROWS`] pixels tall whatever the
+    /// density, and a 2× cell is twice that. A rule that owed only the cells a piece
+    /// covered in full therefore owed nothing at all on a Retina desktop, and no
+    /// `classify` verdict there was ever looked at a second time.
+    #[tokio::test]
+    async fn a_retina_band_owes_the_cells_it_covers_in_part() {
+        let mut regions = Regions::new(Policy::Moving, 60, Chroma::Subsampled, None);
+        regions.want(256, 256, TileGrid::at(2.0));
+        regions
+            .blit(Rect { left: 0, top: 0, right: 255, bottom: 255 }, &vec![0; 256 * 256 * 3])
+            .expect("a full-desktop blit");
+        let t0 = Instant::now();
+        // One band of a lossy `classify` piece: full width, 64 rows — the top half of
+        // a row of 128-pixel cells.
+        regions.owe(Rect { left: 0, top: 0, right: 255, bottom: 63 }, t0);
+        assert_eq!(
+            due_rects(&mut regions, t0 + CLEANUP_IDLE_FOR_TESTS, CLEANUP_IDLE_FOR_TESTS, 16),
+            vec![
+                Rect { left: 0, top: 0, right: 127, bottom: 127 },
+                Rect { left: 128, top: 0, right: 255, bottom: 127 },
+            ],
+            "both cells the band ran through should be owed a second look"
+        );
     }
 
     /// What `crate::encode` passes as the cleanup's idle threshold. Its own constant
     /// lives there, with the rest of the cleanup policy.
     const CLEANUP_IDLE_FOR_TESTS: Duration = Duration::from_millis(500);
+
+    /// [`Regions::due`]'s rectangles alone — every assertion below is about which
+    /// cells came back, not about whether a re-encode is worth sending.
+    fn due_rects(regions: &mut Regions, now: Instant, idle: Duration, max: usize) -> Vec<Rect> {
+        regions.due(now, idle, max).into_iter().map(|due| due.rect).collect()
+    }
 
     /// The geometry theorem, from the coalescing side: a box becomes a rectangle
     /// whose origin is on the grid and whose size is odd only where the desktop is.

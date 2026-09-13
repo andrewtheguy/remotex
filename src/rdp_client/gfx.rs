@@ -29,14 +29,14 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
 
-use super::framebuffer::{Framebuffer, Rect, affordable};
+use super::framebuffer::{Framebuffer, Rect, affordable, stage};
 use super::proto::bitmap::MAX_DESKTOP_BYTES;
 use super::proto::gfx::{self, Message, Point16, Rect16};
 use super::proto::wire::Malformed;
 use super::proto::{clear, planar, progressive, zgfx};
 
-/// Most rectangles a surface holds as changed before it collapses them to one
-/// bounding box — coarser, never longer.
+/// Most rectangles a surface holds as changed before two of them are merged to
+/// make room — coarser, never longer. See [`stage`] for which two.
 const DAMAGE_CAP: usize = 64;
 
 /// Most bytes the cache slots hold together. The caps this client advertises promise
@@ -158,17 +158,10 @@ impl Surface {
         self.invalidate(Rect { x, y, width, height });
     }
 
-    /// Record a rectangle drawn into, folding it into one it overlaps and
-    /// collapsing everything to a bounding box past [`DAMAGE_CAP`].
+    /// Record a rectangle drawn into — see [`stage`] for how the list is kept to
+    /// [`DAMAGE_CAP`].
     fn invalidate(&mut self, rect: Rect) {
-        if let Some(waiting) = self.invalid.iter_mut().find(|waiting| waiting.overlaps(&rect)) {
-            *waiting = waiting.union(rect);
-        } else if self.invalid.len() >= DAMAGE_CAP {
-            let whole = self.invalid.drain(..).fold(rect, Rect::union);
-            self.invalid.push(whole);
-        } else {
-            self.invalid.push(rect);
-        }
+        stage(&mut self.invalid, rect, DAMAGE_CAP);
     }
 }
 

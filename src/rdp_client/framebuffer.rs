@@ -28,6 +28,12 @@ impl Rect {
             && other.y < self.y + self.height
     }
 
+    /// The pixels this rectangle holds, wide enough that a desktop-sized union
+    /// cannot overflow the arithmetic [`stage`] does with it.
+    pub fn area(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+
     /// The smallest rectangle holding both.
     pub fn union(self, other: Rect) -> Rect {
         let (x, y) = (self.x.min(other.x), self.y.min(other.y));
@@ -123,6 +129,47 @@ impl Frame {
 /// the lock for longer than that copy.
 pub struct Framebuffer {
     frame: Mutex<Frame>,
+}
+
+/// Fold `rect` into the damage already staged, keeping the list to `cap`
+/// rectangles.
+///
+/// A rectangle overlapping one already there is unioned into it. Past the cap the
+/// list is kept bounded by merging `rect` into whichever rectangle wastes the
+/// fewest pixels — the neighbouring tile of the same damaged block, almost always,
+/// which unions with no waste at all.
+///
+/// **Not a bounding box over everything**, which is what this used to do and what
+/// the graphics pipeline cannot afford. EGFX reports a frame as disjoint 64x64
+/// tiles, so a box round a video in one corner and a clock in the other is most of
+/// the desktop; the gateway then cuts that box into full-width bands, and
+/// `render_subtype = "classify"` judges each band as one tile. Text swept in beside
+/// a moving picture reads as photographic and goes out lossy — and, being
+/// unchanged from then on, is never sent again. Merging the cheapest pair keeps the
+/// list bounded *and* the damage the shape the host drew it.
+pub(super) fn stage(pending: &mut Vec<Rect>, rect: Rect, cap: usize) {
+    debug_assert!(cap > 0, "a cap of zero has nowhere to put a rectangle");
+    if let Some(waiting) = pending.iter_mut().find(|waiting| waiting.overlaps(&rect)) {
+        *waiting = waiting.union(rect);
+        return;
+    }
+    if pending.len() < cap {
+        pending.push(rect);
+        return;
+    }
+    // Disjoint from every one of them — the overlap case returned above — so the
+    // waste of a merge is what the union adds beyond the two rectangles themselves,
+    // and a union of two disjoint rectangles can never be smaller than their sum.
+    let Some(pick) = pending
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, waiting)| waiting.union(rect).area() - waiting.area() - rect.area())
+        .map(|(at, _)| at)
+    else {
+        pending.push(rect);
+        return;
+    };
+    pending[pick] = pending[pick].union(rect);
 }
 
 impl Framebuffer {
