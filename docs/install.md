@@ -63,7 +63,7 @@ contains the gateway CLI and web client.
 
 ### Windows (`.msi`)
 
-Windows x86-64, from an administrator's PowerShell:
+Windows x86-64, from PowerShell 7 (`pwsh`) run as administrator:
 
 ```powershell
 Invoke-WebRequest https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-windows-x86_64.msi -OutFile remotex-windows-x86_64.msi
@@ -112,7 +112,7 @@ remotex gen-passwd admin
 ${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml
 ```
 
-On Windows, from a PowerShell opened after the install, where only the account
+On Windows, from PowerShell 7 (`pwsh`) opened after the install, where only the account
 that runs the gateway may read the file:
 
 ```powershell

@@ -121,6 +121,14 @@ libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built
 archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
 
+The one C library built from source is jemalloc, through `tikv-jemallocator`,
+the global allocator on every Unix build. It needs only a C compiler and `make`,
+which every Unix builder already has. glibc's malloc is not an option: it keeps
+freed memory in per-thread arenas, and the gateway's per-session threads grew it
+with every session. jemalloc fixes its page size at build time, and a 4K build
+will not start on the 16K and 64K kernels arm64 boards ship, so the linux-arm64
+release sets `JEMALLOC_SYS_WITH_LG_PAGE=16`. Windows keeps the system heap.
+
 The optional `apple-hp-audio` feature follows the same archive model through
 `fdk-aac-prebuilt`, but its non-OSI-approved license keeps it out of every release
 artifact. See [Audio frames](../docs/architecture.md#audio-frames) for the media

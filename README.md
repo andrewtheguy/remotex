@@ -96,7 +96,7 @@ sudo installer -pkg remotex-macos-arm64.pkg -target /
 The macOS package is unsigned and not notarized, so fetch it with `curl` as
 shown rather than through a browser. It installs the gateway CLI and web client.
 
-Windows x86-64, from an administrator's PowerShell:
+Windows x86-64, from PowerShell 7 (`pwsh`) run as administrator:
 
 ```powershell
 Invoke-WebRequest https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-windows-x86_64.msi -OutFile remotex-windows-x86_64.msi

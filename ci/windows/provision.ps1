@@ -19,6 +19,7 @@
 # sshd runs as its subsystem. Never Windows PowerShell 5.1: it reads a BOM-less UTF-8
 # file as ANSI (an em dash then ends a string early) and turns a native tool's stderr
 # — rustup's "info:" lines — into a terminating error.
+#Requires -Version 7
 $ErrorActionPreference = 'Stop'
 # Invoke-WebRequest is many times slower with the progress bar on.
 $ProgressPreference = 'SilentlyContinue'

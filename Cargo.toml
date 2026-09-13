@@ -220,6 +220,17 @@ rsa = { version = "0.10.0-rc.18", default-features = false }
 eax = "0.6"
 sha2 = "0.11"
 
+# The global allocator on every Unix build (src/main.rs): glibc's per-thread arenas
+# kept freed session memory, and the gateway grew with every session. Windows' heap
+# has no such arenas and keeps the system allocator.
+#
+# Unprefixed, so jemalloc is `malloc` itself and not only Rust's allocator. Most of a
+# session's memory is libvpx's and opus's, and they call `malloc`: with Rust alone on
+# jemalloc the gateway grew faster than it did on glibc.
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = "0.7"
+tikv-jemalloc-sys = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
+
 [[test]]
 name = "embedded_gateway_e2e"
 required-features = ["embedded-gateway"]

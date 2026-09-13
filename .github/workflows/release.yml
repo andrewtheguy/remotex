@@ -131,6 +131,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rpm
 
+      # jemalloc takes its page size from the build host, and a 4K build refuses to
+      # start on the 16K and 64K kernels arm64 boards ship (Raspberry Pi 5). 64K pages
+      # run on all three. Set for every later step, so the container binary gets it too.
+      - name: Build jemalloc for large arm64 pages
+        if: matrix.target-note == 'linux-arm64'
+        run: echo "JEMALLOC_SYS_WITH_LG_PAGE=16" >> "$GITHUB_ENV"
+
       - name: Build release artifacts (${{ matrix.target-note }})
         if: runner.os != 'Windows'
         run: |
