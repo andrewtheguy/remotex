@@ -12,7 +12,7 @@ use tokio::time::Duration;
 
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
-use super::framebuffer::{Framebuffer, Rect, affordable};
+use super::framebuffer::{Framebuffer, Rect, affordable, stage};
 use super::gfx::{self, Graphics};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
@@ -389,7 +389,8 @@ async fn shutdown_requested(commands: &mut mpsc::UnboundedReceiver<Command>) {
 
 // ------------------------------------------------------------------ the active session
 
-/// Most rectangles the waiting paint holds before it collapses to one bounding box.
+/// Most rectangles the waiting paint holds before two of them are merged to make
+/// room — see [`stage`].
 const DAMAGE_CAP: usize = 32;
 
 /// How many queued commands one turn of the loop takes before it goes back to the
@@ -1034,27 +1035,11 @@ impl<'a> Active<'a> {
     }
 
     /// Record a painted rectangle. It goes to the caller at once if the queue has
-    /// room, and otherwise folds into what is already waiting: one overlapping an
-    /// earlier rectangle becomes their union, and past [`DAMAGE_CAP`] everything
-    /// collapses to one bounding box — coarser, never longer.
+    /// room, and otherwise folds into what is already waiting — see [`stage`], which
+    /// keeps the list to [`DAMAGE_CAP`] by merging the pair that wastes the fewest
+    /// pixels rather than by boxing everything together.
     fn paint(&mut self, rect: Rect) {
-        let union = |a: Rect, b: Rect| {
-            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
-            let right = (a.x + a.width).max(b.x + b.width);
-            let bottom = (a.y + a.height).max(b.y + b.height);
-            Rect { x, y, width: right - x, height: bottom - y }
-        };
-        let overlaps = |a: &Rect, b: &Rect| {
-            a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
-        };
-        if let Some(waiting) = self.damage.iter_mut().find(|waiting| overlaps(waiting, &rect)) {
-            *waiting = union(*waiting, rect);
-        } else if self.damage.len() >= DAMAGE_CAP {
-            let whole = self.damage.drain(..).fold(rect, union);
-            self.damage.push(whole);
-        } else {
-            self.damage.push(rect);
-        }
+        stage(&mut self.damage, rect, DAMAGE_CAP);
         self.try_send_damage();
     }
 

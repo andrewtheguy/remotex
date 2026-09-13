@@ -544,6 +544,9 @@ struct Shared {
     /// Of [`Self::tiles`], those that are a settled cell being re-sent crisp.
     cleanups: AtomicU64,
     cleanup_bytes: AtomicU64,
+    /// Cleanups that asked the classifier again, got the same answer, and sent
+    /// nothing — see [`flush_cleanups`].
+    settled: AtomicU64,
     /// Access units, counted apart from tiles because they are not one: a tile is a
     /// picture and a unit is a link in a chain, and one number for both would compare
     /// a repaint's bands with a video's frames.
@@ -631,6 +634,7 @@ impl Shared {
             encoded_bytes: AtomicU64::new(0),
             cleanups: AtomicU64::new(0),
             cleanup_bytes: AtomicU64::new(0),
+            settled: AtomicU64::new(0),
             units: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
@@ -1353,7 +1357,7 @@ async fn flush_cleanups(
     debug: bool,
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> bool {
-    let mut due: Vec<(Rect, Vec<u8>)> = Vec::new();
+    let mut due: Vec<(Rect, bool, Vec<u8>)> = Vec::new();
     let ended: Vec<u8>;
     {
         // One critical section for the whole tickful: `due` and the crops have to
@@ -1373,10 +1377,12 @@ async fn flush_cleanups(
         // bounds. At 1x a run is already a single band and this splits nothing. The
         // budget stays a count of *cells*, so banding costs more records and not one
         // pixel more per tick.
-        for rect in rects.into_iter().flat_map(|rect| rect.bands()) {
+        for (rect, keep_lossy) in
+            rects.into_iter().flat_map(|run| run.rect.bands().map(move |band| (band, run.keep_lossy)))
+        {
             let mut rgb = Vec::new();
             match video.regions.crop(rect, &mut rgb) {
-                Ok(()) => due.push((rect, rgb)),
+                Ok(()) => due.push((rect, keep_lossy, rgb)),
                 // The debt is gone with the read that failed, and that is the safe
                 // direction: the cell keeps the stream's rendition until it changes
                 // again, which is the same state a dropped cleanup already leaves.
@@ -1397,16 +1403,16 @@ async fn flush_cleanups(
     // One reading of the lag for the tickful: these all go out together, so they
     // are one moment's answer, not several.
     let base = shared.adapted(base, tokio::time::Instant::now());
-    let started: Vec<(Rect, JoinHandle<anyhow::Result<Tile>>)> = due
+    let started: Vec<(Rect, bool, JoinHandle<anyhow::Result<Tile>>)> = due
         .into_iter()
-        .map(|(rect, rgb)| {
+        .map(|(rect, keep_lossy, rgb)| {
             let rgb = Arc::new(rgb);
             let rgb = if debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
-            (rect, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)))
+            (rect, keep_lossy, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)))
         })
         .collect();
 
-    for (rect, handle) in started {
+    for (rect, keep_lossy, handle) in started {
         let tile = match handle.await {
             Ok(Ok(tile)) => tile,
             Ok(Err(e)) => {
@@ -1425,6 +1431,15 @@ async fn flush_cleanups(
                 return false;
             }
         };
+        // The classifier has now answered for this cell alone. Where the lossy copy
+        // came from a *piece's* verdict, an answer that agrees with it means the cell
+        // really is photographic and the client's copy is already the encode this
+        // would send — so nothing goes out. A stream's cell is not offered the
+        // choice: any still beats an inter-coded frame.
+        if !keep_lossy && tile.format != Tile::FORMAT_PNG {
+            shared.settled.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
         let bytes = tile.data.len() as u64;
         shared.tiles.fetch_add(1, Ordering::Relaxed);
         shared.cleanups.fetch_add(1, Ordering::Relaxed);
@@ -1593,6 +1608,23 @@ async fn order_loop(
                 shared.waited_micros.fetch_add(micros(started), Ordering::Relaxed);
                 match joined {
                     Ok(Ok((tile, encode_micros))) => {
+                        // A `classify` still that came back lossy judged the whole
+                        // piece photographic, and a piece is not a cell. What that
+                        // costs, and why the debt is recorded here rather than where
+                        // the tile was pushed — this is the first point that knows
+                        // which way the classifier went — is `Regions::owe`.
+                        let judged =
+                            matches!(settling, Some((TileCodec::Classify { .. }, _)));
+                        if judged && tile.format != Tile::FORMAT_PNG {
+                            let rect = Rect {
+                                left: tile.x,
+                                top: tile.y,
+                                right: tile.x.saturating_add(tile.w).saturating_sub(1),
+                                bottom: tile.y.saturating_add(tile.h).saturating_sub(1),
+                            };
+                            let mut video = shared.video.lock().await;
+                            video.regions.owe(rect, tokio::time::Instant::now());
+                        }
                         shared.tiles.fetch_add(1, Ordering::Relaxed);
                         shared
                             .encoded_bytes
@@ -2821,7 +2853,12 @@ mod tests {
                 // they are set to, so the stream expires and its cells all come due.
                 let now = tokio::time::Instant::now() + Duration::from_secs(1);
                 video.regions.expire(now);
-                let taken = video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
+                let taken: Vec<Rect> = video
+                    .regions
+                    .due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK)
+                    .into_iter()
+                    .map(|due| due.rect)
+                    .collect();
                 assert!(!video.regions.covering(), "the stream should have expired");
                 assert!(!taken.is_empty(), "its cells should have come due");
             }
@@ -3347,7 +3384,7 @@ mod tests {
                 }
             }
             let rects = regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
-            for rect in rects.into_iter().flat_map(|rect| rect.bands()) {
+            for rect in rects.into_iter().flat_map(|due| due.rect.bands()) {
                 let mut rgb = Vec::new();
                 regions.crop(rect, &mut rgb).expect("a crop of the mirror");
                 let tile = Tile::from_rgb(rect.left, rect.top, rect.w(), rect.h(), &rgb)

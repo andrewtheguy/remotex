@@ -1571,9 +1571,15 @@ const DAMAGE_INTERVAL: Duration = Duration::from_millis(16);
 /// session, only bound the damage an unmarked tail can strand.
 const FRAME_NET: Duration = Duration::from_millis(100);
 
-/// Most rectangles the pending-damage list holds before collapsing to one bounding
-/// box. Slop from a collapse costs a pack and a `memcmp` on pixels that did not
-/// change — exactly what the shadow exists to absorb — never wire bytes.
+/// Most rectangles the pending-damage list holds before two of them are merged to
+/// make room.
+///
+/// Slop from a merge costs a pack and a `memcmp` on pixels that did not change —
+/// exactly what the shadow exists to absorb — never wire bytes. What it can cost
+/// beyond that is the reason the merge picks its pair rather than boxing the lot:
+/// a band cut from a loose rectangle is judged as one tile by
+/// `render_subtype = "classify"`, so damage stretched across unrelated content
+/// sends that content lossy.
 const DAMAGE_RECTS_CAP: usize = 32;
 
 /// Fold `rect` into the damage accumulated toward the next flush.
@@ -1581,7 +1587,11 @@ const DAMAGE_RECTS_CAP: usize = 32;
 /// A report overlapping one already staged is unioned into it — the common case,
 /// since a busy server re-reports the same regions many times per interval — and a
 /// disjoint one is kept apart, so a caret and a video at opposite corners do not
-/// conspire to repack the whole desktop.
+/// conspire to repack the whole desktop. Past [`DAMAGE_RECTS_CAP`] the list is kept
+/// bounded by merging the pair that wastes the fewest pixels, which is a
+/// neighbouring piece of the same damaged block and usually wastes none, rather
+/// than by boxing every rectangle together — the graphics pipeline reports a frame
+/// as disjoint tiles, and a box round all of them is most of the desktop.
 fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
     let union = |a: &Rect, b: &Rect| Rect {
         left: a.left.min(b.left),
@@ -1589,18 +1599,30 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
         right: a.right.max(b.right),
         bottom: a.bottom.max(b.bottom),
     };
+    let area = |r: &Rect| u64::from(r.w()) * u64::from(r.h());
     for staged in pending.iter_mut() {
         if staged.intersect(&rect).is_some() {
             *staged = union(staged, &rect);
             return;
         }
     }
-    if pending.len() >= DAMAGE_RECTS_CAP {
-        let whole = pending.drain(..).fold(rect, |acc, r| union(&acc, &r));
-        pending.push(whole);
-    } else {
+    if pending.len() < DAMAGE_RECTS_CAP {
         pending.push(rect);
+        return;
     }
+    // Disjoint from everything staged — the intersecting case returned above — so
+    // the waste of a merge is what the union adds beyond the two rectangles, and a
+    // union of two disjoint rectangles is never smaller than their sum.
+    let Some(pick) = pending
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, staged)| area(&union(staged, &rect)) - area(staged) - area(&rect))
+        .map(|(at, _)| at)
+    else {
+        pending.push(rect);
+        return;
+    };
+    pending[pick] = union(&pending[pick], &rect);
 }
 
 /// Drain the staged damage: copies first, tiles for the rest.
@@ -1959,16 +1981,50 @@ mod tests {
     }
 
     #[test]
-    fn past_the_cap_the_list_collapses_to_a_bounding_box() {
+    fn past_the_cap_one_pair_merges_and_the_rest_stay_apart() {
         let mut pending = Vec::new();
         for i in 0..DAMAGE_RECTS_CAP as u16 {
             stage_damage(&mut pending, rect(i * 20, 0, i * 20 + 5, 5));
         }
         assert_eq!(pending.len(), DAMAGE_RECTS_CAP);
+        // Far below the row of staged rectangles, so every merge wastes something and
+        // the cheapest is the one directly above it.
         stage_damage(&mut pending, rect(0, 100, 5, 105));
-        assert_eq!(pending.len(), 1, "the cap collapses the list");
-        assert_eq!(pending[0].top, 0);
-        assert_eq!(pending[0].bottom, 105);
+        assert_eq!(pending.len(), DAMAGE_RECTS_CAP, "the cap merges rather than collapses");
+        assert_eq!(
+            pending[0],
+            rect(0, 0, 5, 105),
+            "the new rectangle merged into the one it wastes the least with"
+        );
+        assert_eq!(
+            pending[1],
+            rect(20, 0, 25, 5),
+            "everything else was left the shape the host drew it"
+        );
+    }
+
+    /// The whole reason the cap merges a pair instead of boxing the list: the
+    /// graphics pipeline reports a frame as disjoint tiles, and a box round all of
+    /// them is most of the desktop — which `render_subtype = "classify"` then judges
+    /// as one tile. Neighbouring tiles merge for nothing, so the damage keeps its
+    /// shape however many of them arrive.
+    #[test]
+    fn neighbouring_tiles_merge_without_waste() {
+        let mut pending = Vec::new();
+        for i in 0..DAMAGE_RECTS_CAP as u16 + 8 {
+            stage_damage(&mut pending, rect(i * 64, 0, i * 64 + 63, 63));
+        }
+        assert_eq!(pending.len(), DAMAGE_RECTS_CAP);
+        let covered: u64 = pending.iter().map(|r| u64::from(r.w()) * u64::from(r.h())).sum();
+        assert_eq!(
+            covered,
+            u64::from(DAMAGE_RECTS_CAP as u16 + 8) * 64 * 64,
+            "a row of touching tiles coalesces into stripes and wastes not one pixel"
+        );
+        assert!(
+            pending.iter().all(|r| r.top == 0 && r.bottom == 63),
+            "nothing reached a row the host never drew"
+        );
     }
 
     #[test]
