@@ -89,7 +89,7 @@ webp = { version = "0.3", default-features = false }
 # build decodes it, proprietary-codec-free ones included.
 #
 # Its sys crate downloads a prebuilt static archive and compiles no C: the same bargain
-# `opus-prebuilt` below strikes, and for the same reason — libvpx's own build is
+# `fdk-aac-prebuilt` below strikes, and for the same reason — libvpx's own build is
 # `configure` + `make` and wants an assembler, which is a thing no check of this gateway
 # should have to have. Do not restore a source build, a vcpkg dependency, or bindgen:
 # the bindings are committed in that repository.
@@ -100,16 +100,16 @@ webp = { version = "0.3", default-features = false }
 vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260906161241-e55a2da" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
-# `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
-# prebuilt static archive its sys crate downloads, instead of compiling the
-# vendored C through cmake. That deletes the whole LIBOPUS_STATIC/LIBOPUS_NO_PKG/
-# CMAKE_POLICY_VERSION_MINIMUM dance the packaging scripts used to carry: there is
-# no C build on this path any more, and nothing links a system `libopus.dylib`, so
-# the binary is self-contained on every runner without any env coaxing. The lib is
-# still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260906161304-8dd83e8" }
+# `rusty-opus` is a pure-Rust Opus codec (a performance fork of `opus-rs`), so this
+# path links no libopus at all: no C, no sys crate, no prebuilt archive to download,
+# and nothing for a packaging script to coax. Its SIMD kernels dispatch at runtime
+# behind `is_x86_feature_detected!` with scalar fallbacks, which keeps the baseline
+# x86-64 floor packaging/README.md requires. The fork has no tags, so the pin is a
+# revision. Note the encoder's algorithmic delay is not libopus's: it is measured and
+# written into `OpusHead` by src/opus_stream.rs.
+rusty-opus = { git = "https://github.com/andrewtheguy/rusty-opus", rev = "0210317f1493b0d6a49918c122ca5edaabb47cf7" }
 # AAC-ELD, for Apple High Performance system audio, behind the `apple-hp-audio`
-# feature above. The same prebuilt bargain as `opus` and `vpx-sys`: a static
+# feature above. The same prebuilt bargain as `vpx-sys`: a static
 # archive the sys crate downloads from that repository's latest release, no C++
 # toolchain, no cmake. The tag pins the crate; the archives are the release's.
 # `fdk_aac` is the lib name, so `use fdk_aac::dec::…` is what src/aac_eld.rs writes.
@@ -125,7 +125,7 @@ fdk-aac = { package = "fdk-aac-prebuilt", git = "https://github.com/andrewtheguy
 # bytes to the socket, so there is no encoder to link and no codec licence to
 # carry. A second *encoder* was tried here and removed — see the pcm_stream module
 # doc for why compressing harder was the wrong axis.
-# 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
+# 44100 -> 48000, because Opus encodes only at 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
 rubato = "4"
@@ -225,8 +225,8 @@ sha2 = "0.11"
 # has no such arenas and keeps the system allocator.
 #
 # Unprefixed, so jemalloc is `malloc` itself and not only Rust's allocator. Most of a
-# session's memory is libvpx's and opus's, and they call `malloc`: with Rust alone on
-# jemalloc the gateway grew faster than it did on glibc.
+# session's memory is libvpx's, and it calls `malloc`: with Rust alone on jemalloc the
+# gateway grew faster than it did on glibc.
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.7"
 tikv-jemalloc-sys = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }

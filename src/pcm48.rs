@@ -27,7 +27,7 @@ use crate::audio::PcmFormat;
 
 /// The rate every codec here encodes at, and the rate the browser decodes at.
 ///
-/// Not a preference. libopus rejects anything outside 8/12/16/24/48 kHz, and 48 is
+/// Not a preference. Opus encodes only at 8/12/16/24/48 kHz, and 48 is
 /// the only one of those that is not a downgrade from what RDP delivers. It is
 /// also the rate the browser builds its `AudioContext` at, a round trip before it
 /// learns what it is getting — so an encoded stream needs no resampling at
@@ -170,7 +170,7 @@ impl Pcm48 {
         (self.ready.len() - self.ready_taken) / self.channels
     }
 
-    /// Take exactly `frames` interleaved frames as `f32`, which is what libopus wants.
+    /// Take exactly `frames` interleaved frames as `f32`, which is what the encoder wants.
     ///
     /// Panics if `frames` exceeds [`Self::ready_frames`] or `out` is too small —
     /// both are the caller's own arithmetic rather than anything the stream decides.

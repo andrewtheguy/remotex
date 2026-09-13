@@ -4,8 +4,9 @@
 //! [`crate::pcm48`]; this is only the codec. Each listener owns fresh codec state
 //! downstream of the nonblocking RDP queue; quiet remotes emit nothing.
 
+use anyhow::Context as _;
 use bytes::Bytes;
-use opus::{Application, Bitrate, Channels, Encoder};
+use rusty_opus::{Application, OpusEncoder};
 
 use crate::audio::PcmFormat;
 use crate::pcm48::{Pcm48, SAMPLE_RATE};
@@ -19,16 +20,26 @@ pub const OPUS_CODEC: &str = "opus";
 /// of the bitrate on packet overhead, longer ones add latency for nothing here.
 pub const FRAME_FRAMES: usize = 960;
 
-/// Ceiling for one encoded packet. libopus documents 4000 bytes as the largest
-/// worth allowing for; at the default 96 kbit/s a packet is nearer 240.
+/// Ceiling for one encoded packet. The Opus reference documents 4000 bytes as the
+/// largest worth allowing for; at the default 96 kbit/s a packet is nearer 240.
 const MAX_PACKET_BYTES: usize = 4000;
+
+/// The encoder's algorithmic delay at [`SAMPLE_RATE`], in samples.
+///
+/// rusty-opus has no accessor for it, and it is not libopus's 312: libopus puts
+/// a 4 ms delay-compensation buffer in front of the codec so SILK and CELT line
+/// up, and rusty-opus does not, leaving only CELT's 2.5 ms overlap. Measured by
+/// round trip, at every bitrate and complexity tried, and pinned by
+/// `pre_skip_is_the_measured_round_trip_delay` below so a codec bump that moves
+/// it fails here rather than in a browser trimming the wrong amount.
+const ENCODER_LOOKAHEAD: usize = 120;
 
 /// Turns PCM buffers into Opus packets.
 pub struct OpusStream {
-    encoder: Encoder,
+    encoder: OpusEncoder,
     /// Deinterleave and resample, which is codec-independent.
     pcm: Pcm48,
-    /// Scratch: one 20 ms frame, interleaved, as libopus wants it.
+    /// Scratch: one 20 ms frame, interleaved, as the encoder wants it.
     frame: Vec<f32>,
     /// Scratch: one encoded packet.
     packet: Vec<u8>,
@@ -44,36 +55,31 @@ impl OpusStream {
     /// per second), returning the encoder and the `OpusHead` bytes a decoder has
     /// to be configured with before the first packet.
     ///
-    /// Fails if libopus will not encode this shape — in practice only a channel
-    /// count other than 1 or 2, which the single advertised format rules out.
+    /// Fails if the encoder will not encode this shape — in practice only a
+    /// channel count other than 1 or 2, which the single advertised format rules
+    /// out.
     pub fn new(format: PcmFormat, bitrate_bps: i32) -> Result<(Self, Vec<u8>), anyhow::Error> {
-        let channels = match format.channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
-            other => anyhow::bail!("opus carries 1 or 2 channels, not {other}"),
-        };
         let channel_count = usize::from(format.channels);
+        anyhow::ensure!(
+            matches!(channel_count, 1 | 2),
+            "opus carries 1 or 2 channels, not {channel_count}"
+        );
 
-        let mut encoder = Encoder::new(SAMPLE_RATE, channels, Application::Audio)
-            .map_err(|e| anyhow::anyhow!("create the opus encoder: {e}"))?;
-        encoder
-            .set_bitrate(Bitrate::Bits(bitrate_bps))
-            .map_err(|e| anyhow::anyhow!("set the opus bitrate: {e}"))?;
-        // libopus defaults to complexity 9; 5 costs a fraction of the encoder CPU
-        // for no audible difference at this bitrate on desktop audio.
-        encoder
-            .set_complexity(5)
-            .map_err(|e| anyhow::anyhow!("set the opus complexity: {e}"))?;
+        let sample_rate = i32::try_from(SAMPLE_RATE).expect("48 kHz fits an i32");
+        let mut encoder = OpusEncoder::new(sample_rate, channel_count, Application::Audio)
+            .map_err(anyhow::Error::msg)
+            .context("create the opus encoder")?;
+        encoder.bitrate_bps = bitrate_bps;
+        // The encoder defaults to complexity 9, as libopus does; 5 costs a fraction
+        // of the encoder CPU for no audible difference at this bitrate on desktop
+        // audio, and stays under the threshold that turns on tonality analysis.
+        encoder.complexity = 5;
 
         let pcm = Pcm48::new(format)?;
         // The path's whole delay, in 48 kHz samples: the encoder's lookahead plus
         // the resampler's own transient. Written into `OpusHead` so a decoder
         // discards it instead of playing it as leading silence.
-        let lookahead = encoder
-            .get_lookahead()
-            .map_err(|e| anyhow::anyhow!("read the opus lookahead: {e}"))?
-            .max(0) as usize;
-        let pre_skip = u16::try_from(lookahead + pcm.output_delay())
+        let pre_skip = u16::try_from(ENCODER_LOOKAHEAD + pcm.output_delay())
             .expect("a lookahead and a resampler transient are a few hundred samples");
 
         let stream = Self {
@@ -111,12 +117,11 @@ impl OpusStream {
     ///
     /// Nothing else changes: packets stay 20 ms, `OpusHead` stays true, and every
     /// packet is independently decodable, so the decoder needs no announcement —
-    /// an Opus packet carries its own coding parameters. libopus applies the new
-    /// rate from the next `opus_encode` call.
-    pub fn set_bitrate(&mut self, bitrate_bps: i32) -> Result<(), anyhow::Error> {
-        self.encoder
-            .set_bitrate(Bitrate::Bits(bitrate_bps))
-            .map_err(|e| anyhow::anyhow!("move the opus bitrate: {e}"))
+    /// an Opus packet carries its own coding parameters. The encoder reads its
+    /// rate on every call, so the next packet is at the new one. Infallible: the
+    /// rate is a field, and the config has already bounded it.
+    pub fn set_bitrate(&mut self, bitrate_bps: i32) {
+        self.encoder.bitrate_bps = bitrate_bps;
     }
 
     /// Frames encoded so far.
@@ -128,8 +133,9 @@ impl OpusStream {
         self.pcm.take_f32(FRAME_FRAMES, &mut self.frame);
         let len = self
             .encoder
-            .encode_float(&self.frame, &mut self.packet)
-            .map_err(|e| anyhow::anyhow!("encode an opus packet: {e}"))?;
+            .encode(&self.frame, FRAME_FRAMES, &mut self.packet)
+            .map_err(anyhow::Error::msg)
+            .context("encode an opus packet")?;
         self.frames_encoded += 1;
         Ok(Bytes::copy_from_slice(&self.packet[..len]))
     }
@@ -159,6 +165,69 @@ mod tests {
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 
+    fn decoder(channels: usize) -> rusty_opus::OpusDecoder {
+        rusty_opus::OpusDecoder::new(SAMPLE_RATE as i32, channels).expect("decoder")
+    }
+
+    /// Decode one 20 ms packet into `out`, which is interleaved `f32` in ±1.0.
+    fn decode(decoder: &mut rusty_opus::OpusDecoder, packet: &[u8], out: &mut [f32]) {
+        let frames = decoder.decode(packet, FRAME_FRAMES, out).expect("decode");
+        assert_eq!(frames, FRAME_FRAMES, "one 20 ms packet decodes to one 20 ms frame");
+    }
+
+    /// `pre_skip` is a promise about the encoder's delay, and rusty-opus offers
+    /// no way to ask it, so this measures it: a click goes in at 48 kHz (no
+    /// resampler, so `pre_skip` is the encoder's lookahead alone), the packets
+    /// are decoded, and the lag that best aligns output with input has to be the
+    /// number `OpusHead` promised.
+    #[test]
+    fn pre_skip_is_the_measured_round_trip_delay() {
+        let format = PcmFormat {
+            channels: 2,
+            sample_rate: SAMPLE_RATE,
+            bits_per_sample: 16,
+        };
+        let (mut stream, head) = OpusStream::new(format, 96_000).expect("an encoder");
+        let pre_skip = usize::from(u16::from_le_bytes(head[10..12].try_into().unwrap()));
+        assert_eq!(pre_skip, ENCODER_LOOKAHEAD, "nothing but the encoder's delay at 48 kHz");
+
+        // Twenty frames of a soft tone with a click in the middle: the tone keeps
+        // the encoder out of any silence path, the click is what the correlation
+        // finds.
+        let total = FRAME_FRAMES * 20;
+        let click = FRAME_FRAMES * 10 + 100;
+        let mut input = vec![0f32; total];
+        let mut pcm = Vec::with_capacity(total * 4);
+        for (i, sample) in input.iter_mut().enumerate() {
+            let phase = (i % 109) as f32 / 109.0 * std::f32::consts::TAU;
+            *sample = if (click..click + 4).contains(&i) { 0.95 } else { phase.sin() * 0.3 };
+            let s = (*sample * 32767.0) as i16;
+            pcm.extend_from_slice(&s.to_le_bytes());
+            pcm.extend_from_slice(&s.to_le_bytes());
+        }
+        let packets = stream.push(&pcm).expect("push");
+        assert_eq!(packets.len(), 20);
+
+        let mut decoder = decoder(2);
+        let mut output = vec![0f32; total * 2];
+        for (packet, out) in packets.iter().zip(output.chunks_mut(FRAME_FRAMES * 2)) {
+            decode(&mut decoder, packet, out);
+        }
+        let left: Vec<f32> = output.iter().copied().step_by(2).collect();
+        let window = FRAME_FRAMES * 5..FRAME_FRAMES * 15;
+        let (lag, _) = (0..1_000usize)
+            .map(|lag| {
+                let dot: f64 = window
+                    .clone()
+                    .map(|i| f64::from(input[i]) * f64::from(left[i + lag]))
+                    .sum();
+                (lag, dot)
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("some lag");
+        assert_eq!(lag, pre_skip, "the delay a decoder should trim is the delay there is");
+    }
+
     #[test]
     fn the_stream_hands_back_a_usable_opus_head() {
         let (_stream, head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
@@ -167,7 +236,10 @@ mod tests {
         assert_eq!(head[8], 1, "version");
         assert_eq!(head[9], 2, "stereo");
         let pre_skip = u16::from_le_bytes(head[10..12].try_into().unwrap());
-        assert!(pre_skip > 0, "the encoder's lookahead, not a hardcoded zero");
+        assert!(
+            usize::from(pre_skip) > ENCODER_LOOKAHEAD,
+            "the encoder's lookahead plus the 44.1 kHz resampler's transient, got {pre_skip}"
+        );
         assert_eq!(
             u32::from_le_bytes(head[12..16].try_into().unwrap()),
             44_100,
@@ -214,11 +286,12 @@ mod tests {
     /// Encode a tone and decode it back, so the test fails if the bytes are
     /// well-framed nonsense — the failure a framing-only assertion would miss.
     ///
-    /// libopus is doing the decoding, which matters more than it did while there
-    /// was a container: `ffprobe` used to be the check that this agrees with
-    /// something other than itself, and without Ogg there is nothing for a third
-    /// party demuxer to read. The remaining outside readers are this decoder and
-    /// the browser's own (`server::tests::serve_a_test_tone`).
+    /// The decoder is rusty-opus's own, which upstream holds bit-exact against the
+    /// RFC 6716 conformance vectors, so it is a fair reader of what the encoder
+    /// wrote without being an independent one. `ffprobe` used to be the check that
+    /// this agrees with something other than itself, and without Ogg there is
+    /// nothing for a third party demuxer to read; the one outside reader left is
+    /// the browser's decoder (`server::tests::serve_a_test_tone`).
     #[test]
     fn a_tone_survives_the_round_trip() {
         let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
@@ -235,17 +308,17 @@ mod tests {
         let packets = stream.push(&pcm).expect("push");
         assert_eq!(packets.len(), 20);
 
-        let mut decoder = opus::Decoder::new(SAMPLE_RATE, Channels::Stereo).expect("decoder");
-        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        let mut decoder = decoder(2);
+        let mut decoded = vec![0f32; FRAME_FRAMES * 2];
         // Decode up to a packet in the middle: the first few are the encoder
         // settling, and a decoder needs the ones before it either way.
         for packet in &packets[..15] {
-            decoder.decode(packet, &mut decoded, false).expect("decode");
+            decode(&mut decoder, packet, &mut decoded);
         }
-        let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
+        let peak = decoded.iter().fold(0f32, |peak, s| peak.max(s.abs()));
         assert!(
-            peak > 6_000,
-            "the decoded frame should carry the tone, peak was {peak}"
+            peak > 0.18,
+            "the decoded frame should carry the tone (12000/32768 ≈ 0.37), peak was {peak}"
         );
     }
 
@@ -272,19 +345,20 @@ mod tests {
         }
         let packets = stream.push(&pcm).expect("push");
 
-        let mut decoder = opus::Decoder::new(SAMPLE_RATE, Channels::Stereo).expect("decoder");
-        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        let mut decoder = decoder(2);
+        let mut decoded = vec![0f32; FRAME_FRAMES * 2];
         // Past the encoder settling, so the silence on the right is really silence.
         for packet in packets.iter().take(15) {
-            decoder.decode(packet, &mut decoded, false).expect("decode");
+            decode(&mut decoder, packet, &mut decoded);
         }
-        let energy = |samples: &[i16]| -> f64 {
+        let energy = |samples: &[f32]| -> f64 {
             samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>()
                 / samples.len() as f64
         };
         let left = energy(&decoded.iter().copied().step_by(2).collect::<Vec<_>>());
         let right = energy(&decoded.iter().copied().skip(1).step_by(2).collect::<Vec<_>>());
-        assert!(left > 1_000_000.0, "the left channel should carry the tone: {left}");
+        // A full-scale sine has mean-square 0.5; this one is 0.37 of full scale.
+        assert!(left > 0.01, "the left channel should carry the tone: {left}");
         assert!(
             right * 10.0 < left,
             "the right channel should be far quieter than the left, got {right} against {left}"
@@ -313,13 +387,13 @@ mod tests {
         };
 
         let before = stream.push(&tone(10)).expect("push");
-        stream.set_bitrate(16_000).expect("move the bitrate");
+        stream.set_bitrate(16_000);
         let after = stream.push(&tone(10)).expect("push");
 
-        let mut decoder = opus::Decoder::new(SAMPLE_RATE, Channels::Stereo).expect("decoder");
-        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        let mut decoder = decoder(2);
+        let mut decoded = vec![0f32; FRAME_FRAMES * 2];
         for packet in before.iter().chain(&after) {
-            decoder.decode(packet, &mut decoded, false).expect("decode across the change");
+            decode(&mut decoder, packet, &mut decoded);
         }
         assert!(
             average(&after) * 2 < average(&before),

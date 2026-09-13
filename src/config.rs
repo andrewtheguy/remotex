@@ -282,7 +282,7 @@ pub enum ChromaChoice {
 }
 
 /// A target's audio keys as the encoder consumes them, resolved by
-/// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
+/// [`TargetConfig::audio_plan`]. In bits per second because that is the encoder's
 /// unit; the config speaks kbit/s because a person does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioPlan {
@@ -1088,7 +1088,7 @@ impl TargetConfig {
 
     /// The audio keys collapsed to what the encoder is built from, the same way
     /// [`Self::render_plan`] collapses the render dial: defaults resolved,
-    /// kilobits turned into the bits libopus speaks, and the adaptive floor
+    /// kilobits turned into the bits the encoder speaks, and the adaptive floor
     /// present exactly when the walk was asked for. Callers gate on
     /// [`Self::audio`] — a target without audio has no plan to resolve.
     pub fn audio_plan(&self) -> AudioPlan {

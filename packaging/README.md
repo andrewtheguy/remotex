@@ -112,12 +112,13 @@ binary's global CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
-download static archives instead of
+Release builds link `libvpx-prebuilt`, and `fdk-aac-prebuilt` behind the
+`apple-hp-audio` feature. Their sys crates download static archives instead of
 building vendored C, so this project needs no CMake, assembler, pkg-config,
-libclang, vcpkg, or system copies of those libraries. Do not restore
-`LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
-libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
+libclang, vcpkg, or system copies of those libraries. Opus is `rusty-opus`, pure
+Rust, so there is no libopus to link, download, or configure at all: do not
+restore a libopus dependency, a `LIBOPUS_*` variable, or a source Opus build in
+`build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built
 archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
 

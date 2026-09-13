@@ -41,7 +41,7 @@ const BITS_PER_SAMPLE: u16 = 16;
 /// Ceiling on one packet, because the wire writes a packet's length as a `u16`
 /// ([`crate::protocol::audio::frame`], which panics rather than truncate).
 ///
-/// An encoder makes this unreachable by construction — libopus caps a packet at
+/// An encoder makes this unreachable by construction — Opus caps a packet at
 /// 4000 bytes — but a passthrough packet is a whole wave buffer, and how large
 /// those get is the remote's business, not this gateway's. The tested Windows
 /// host sends 32 KiB, comfortably under; a host that sent 64 would otherwise take

@@ -1499,11 +1499,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libopus-prebuilt-sys"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
-
-[[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
 source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260906161241-e55a2da#e55a2da7624cc9c493165375c88079d85e49af5c"
@@ -1705,14 +1700,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "opus-prebuilt"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
-dependencies = [
- "libopus-prebuilt-sys",
-]
 
 [[package]]
 name = "p256"
@@ -2188,12 +2175,12 @@ dependencies = [
  "log",
  "md-5",
  "num-bigint 0.4.8",
- "opus-prebuilt",
  "png",
  "rand 0.10.2",
  "rpassword",
  "rsa",
  "rubato",
+ "rusty-opus",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -2407,6 +2394,11 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty-opus"
+version = "0.9.1"
+source = "git+https://github.com/andrewtheguy/rusty-opus?rev=0210317f1493b0d6a49918c122ca5edaabb47cf7#0210317f1493b0d6a49918c122ca5edaabb47cf7"
 
 [[package]]
 name = "ryu"

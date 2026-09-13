@@ -60,10 +60,10 @@ else
 fi
 
 echo ">> building release binary"
-# No env coaxing here for either prebuilt C library. Remote audio links
-# `opus-prebuilt` and VP9 links `libvpx-prebuilt` — each pulls a prebuilt static
-# archive rather than compiling vendored C, so neither needs cmake, pkg-config, a
-# system library or a `*_STATIC` variable set. The RDP client's TLS is rustls over
+# No env coaxing here for the prebuilt C library. VP9 links `libvpx-prebuilt`,
+# which pulls a prebuilt static archive rather than compiling vendored C, so it
+# needs no cmake, pkg-config, system library or `*_STATIC` variable; remote audio's
+# Opus codec is pure Rust and needs nothing. The RDP client's TLS is rustls over
 # `ring`, so there is no libssl to find either. The binary runs on
 # debian:trixie-slim, and there is no cmake_minimum_required for CMake 4 to reject.
 cargo build --release

@@ -289,20 +289,13 @@ impl AudioListener {
                 if let Some(signals) = &state.signals {
                     let desired = signals.desired_bps();
                     if desired != state.applied_bps {
-                        match state.encoder.set_bitrate(desired) {
-                            Ok(()) => {
-                                info!(
-                                    "audio: opus bitrate moved to {} kbit/s (from {})",
-                                    desired / 1000,
-                                    state.applied_bps / 1000
-                                );
-                                state.applied_bps = desired;
-                            }
-                            // The stream is still perfectly good at the rate it
-                            // already had; losing the ability to adapt is not a
-                            // reason to stop the sound.
-                            Err(e) => warn!("audio: could not move the opus bitrate: {e:#}"),
-                        }
+                        state.encoder.set_bitrate(desired);
+                        info!(
+                            "audio: opus bitrate moved to {} kbit/s (from {})",
+                            desired / 1000,
+                            state.applied_bps / 1000
+                        );
+                        state.applied_bps = desired;
                     }
                     // The catch-up the operator asked for: while the link is
                     // behind, silence is the one content whose loss cannot be
@@ -550,10 +543,10 @@ impl PacketEncoder {
     /// Forwarded to the Opus encoder. Passthrough has no rate to move, and no
     /// caller: [`AudioSignals`] exists only on a plan the config has already
     /// guaranteed is Opus.
-    fn set_bitrate(&mut self, bitrate_bps: i32) -> Result<(), anyhow::Error> {
+    fn set_bitrate(&mut self, bitrate_bps: i32) {
         match self {
             Self::Opus(stream) => stream.set_bitrate(bitrate_bps),
-            Self::Pcm(_) => Ok(()),
+            Self::Pcm(_) => {}
         }
     }
 
@@ -942,14 +935,16 @@ mod tests {
         bridge.wave(one_frame_of_tone());
         let packets = next(&mut stream).await.expect("packets");
         assert_eq!(packets.len(), 1, "the shed silence must not add a packet");
-        let mut decoder =
-            opus::Decoder::new(crate::pcm48::SAMPLE_RATE, opus::Channels::Stereo).expect("decoder");
-        let mut decoded = vec![0i16; crate::opus_stream::FRAME_FRAMES * 2];
-        decoder.decode(&packets[0], &mut decoded, false).expect("decode");
+        let mut decoder = rusty_opus::OpusDecoder::new(crate::pcm48::SAMPLE_RATE as i32, 2)
+            .expect("decoder");
+        let mut decoded = vec![0f32; crate::opus_stream::FRAME_FRAMES * 2];
+        decoder
+            .decode(&packets[0], crate::opus_stream::FRAME_FRAMES, &mut decoded)
+            .expect("decode");
         // The packet that came through is the tone, not the silence: with the
         // silent frame shed, the encoder's first packet carries signal.
-        let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
-        assert!(peak > 1_000, "the surviving packet should carry the tone, peak {peak}");
+        let peak = decoded.iter().fold(0f32, |peak, s| peak.max(s.abs()));
+        assert!(peak > 0.03, "the surviving packet should carry the tone, peak {peak}");
     }
 
     /// The desired rate published on the signals reaches the live encoder: the
