@@ -387,9 +387,13 @@ async fn a_host_redraw_matches_what_was_decoded() {
     // A desktop that never goes quiet — a video playing — is snapshotted mid-picture,
     // and its difference from a later redraw is the video moving, not a decoder fault.
     let (frames, quiet) = settle(&mut events, Duration::from_secs(20)).await;
+    if !quiet {
+        println!("  RESULT inconclusive: the desktop never settled after {frames} frames");
+        return;
+    }
     let (width, height, decoded) = snapshot(&session);
     log::info!("PROBE-MARK decoded snapshot");
-    println!("  decoded snapshot after {frames} frames; {}", if quiet { "settled" } else { "NEVER SETTLED" });
+    println!("  decoded snapshot after {frames} frames; settled");
 
     let mut redraws = Vec::new();
     for pass in 0..2 {

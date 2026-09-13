@@ -329,13 +329,10 @@ impl Clear {
                     self.short_cursor = (self.short_cursor + 1) % VBAR_SHORT_SIZE;
                     self.store_vbar(build_column(vbar_height, yon, &short_pixels, bkg))
                 } else if header & 0x8000 == 0x8000 {
-                    // Full vertical bar, cache hit: the stored column, fitted to the
-                    // band's height.
-                    let index = usize::from(header & 0x7FFF);
-                    if self.vbars[index].pixels.is_empty() {
-                        self.vbars[index].pixels = vec![0; vbar_height * 4];
-                    }
-                    fit_column(&self.vbars[index].pixels, vbar_height)
+                    // Full vertical bar, cache hit: the stored column, as many rows as
+                    // it holds. A row it does not hold keeps the surface, and an entry
+                    // never stored paints nothing — where the reference paints black.
+                    self.vbars[usize::from(header & 0x7FFF)].pixels.clone()
                 } else {
                     return Err(refuse("an invalid vBar header", u64::from(header)));
                 };
@@ -504,14 +501,6 @@ fn build_column(height: usize, yon: usize, short_pixels: &[u8], bkg: [u8; 3]) ->
         let seg = short_count.min(height - yon);
         column[yon * 4..(yon + seg) * 4].copy_from_slice(&short_pixels[..seg * 4]);
     }
-    column
-}
-
-/// Fit a cached column to a band's height: its own pixels, truncated or zero-padded.
-fn fit_column(stored: &[u8], height: usize) -> Vec<u8> {
-    let mut column = vec![0u8; height * 4];
-    let n = stored.len().min(height * 4);
-    column[..n].copy_from_slice(&stored[..n]);
     column
 }
 
@@ -722,6 +711,37 @@ mod tests {
                 assert_eq!(at(&pixels, 4, x, y), if painted { [1, 2, 3, 0] } else { GREY }, "{x},{y}");
             }
         }
+    }
+
+    /// A full-bar cache hit paints the rows its entry holds and no more, and an entry
+    /// never stored paints nothing: a row the cache cannot say is the surface's.
+    #[test]
+    fn a_cached_bar_paints_only_the_rows_it_holds() {
+        let mut clear = Clear::new();
+        let mut pixels = surface(1, 2, GREY);
+        // A one-row band stores a one-row column under vBar 0.
+        let src = rect(0, 0, None, &[], &band(0, 1, 0, 1, [3, 2, 1]), &[]);
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 1, 2), 0, 0, 1, 2).unwrap();
+
+        // A two-row band hits vBar 0, then the never-stored vBar 5.
+        pixels.copy_from_slice(&surface(1, 2, GREY));
+        let mut hits = Vec::new();
+        for v in [0u16, 0, 0, 1] {
+            hits.extend_from_slice(&v.to_le_bytes());
+        }
+        hits.extend_from_slice(&[0, 0, 0]);
+        hits.extend_from_slice(&0x8000u16.to_le_bytes());
+        let src = rect(0, 1, None, &[], &hits, &[]);
+        clear.decompress(&src, &mut Canvas::new(&mut pixels, 1, 2), 0, 0, 1, 2).unwrap();
+        assert_eq!(pixels, [[1, 2, 3, 0], GREY].concat());
+
+        hits.truncate(11);
+        hits.extend_from_slice(&0x8005u16.to_le_bytes());
+        let src = rect(0, 2, None, &[], &hits, &[]);
+        let mut canvas = Canvas::new(&mut pixels, 1, 2);
+        clear.decompress(&src, &mut canvas, 0, 0, 1, 2).unwrap();
+        assert_eq!(canvas.painted(), None);
+        assert_eq!(pixels, [[1, 2, 3, 0], GREY].concat());
     }
 
     /// A band column that would leave the surface refuses the rectangle, as the
