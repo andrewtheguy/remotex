@@ -31,8 +31,8 @@ read, in [andrewtheguy/ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-spec
 
 ## What it carries
 
-The desktop, the pointer, keyboard, mouse, resize, the clipboard and sound. No
-touch: it is announced only by a host that opens MS-RDPEI, which this client never
+The desktop, the pointer, keyboard, mouse, resize, the clipboard, sound, and a
+camera going the other way. No touch: it is announced only by a host that opens MS-RDPEI, which this client never
 asks for. What it would take is in [`roadmap.md`](roadmap.md).
 
 ## The connection sequence
@@ -77,8 +77,9 @@ a session that has gone out of scope has really stopped.
 
 ## Static virtual channels
 
-Each is asked for by a key: `drdynvc` for `resize = true` or `egfx = true`, which
-is the transport Display Control and the graphics pipeline ride on, `cliprdr` for
+Each is asked for by a key: `drdynvc` for `resize = true`, `egfx = true` or
+`camera = true`, which is the transport Display Control, the graphics pipeline and
+the camera ride on, `cliprdr` for
 `clipboard = true`, and `rdpsnd` with `rdpdr` for `audio = true` — see
 [Sound](#sound-ms-rdpea). A session that wants none asks for no channel at all.
 
@@ -321,6 +322,90 @@ uv run tests/ws_probe.py --port 52888 --target <rdp target> --user admin     --c
 chords open the remote's Run dialog, paste, copy the paste back and close it. What
 comes back is a `clipboard` message the gateway pushed unprompted, carrying the
 text that went out — the Fetch, the push, the paste and the copy, in one run.
+
+## Camera (MS-RDPECAM)
+
+**Experimental**, for the reason [Camera frames](architecture.md#camera-frames)
+gives: no container host can be redirected to, so the channel is unit tested against
+the specification's own examples and checked against a real host by the probe, and
+the stream itself — an application on the host opening the camera — is checked by
+hand.
+
+`camera = true` gives the session a camera to offer, and asks for `drdynvc` when
+nothing else did: MS-RDPECAM is two dynamic channels, and the host opens both. The
+first, `RDCamera_Device_Enumerator`, a Windows host creates by itself for a client
+with the dynamic channel transport. A Windows Server without the Remote Desktop
+Session Host role never creates it, and Microsoft's own client gets no camera
+against such a host either. On it the client asks for version 2, the host answers
+with the highest it speaks that is not higher, and nothing more is said until the
+browser enables its camera. That plug is what sends the Device Added Notification —
+a display name, `Remotex Camera`, and the name of a device channel — and the host
+then opens that channel by name. A version the client does not speak ends the
+protocol on that channel, as MS-RDPECAM 3.2.5.2 requires.
+
+`proto/rdpecam.rs` is the whole conversation, and a pure one: every host message and
+every browser action goes in, and what to send and what it meant comes out. The
+device keeps the three states of MS-RDPECAM 3.1.1 — Deactivated, Activated with a
+count of Activate requests not yet matched by a Deactivate, and Streaming — and
+answers every request the state does not take with the error the specification
+names: `NotInitialized` before activation, `InvalidRequest` for a Sample Request with
+no stream running, `InvalidMessage` for anything malformed or of an unknown kind, and
+a Sample Request's failures in the Sample Error Response it is always owed. A response
+from the host is never answered. Version 1 is spoken too, because a client must
+speak every version below the one it claims: under it the property requests do not
+exist, and under version 2 this device has no properties to report.
+
+The measured part: a host opens the device channel more than once, under the one
+name, and keeps every instance open. Against a Windows Enterprise host the Device
+Initialization sequence runs on the first instance, and before that instance is
+deactivated or closed a second is opened for the Device Control Initialization
+sequence. A client that took the second opening for a replacement would leave the
+first unanswered, and a stream started on it would never start. The device is still
+one device, so its state is kept once, as MS-RDPECAM 3.1.1 describes it and as
+FreeRDP's client keeps it: every request is answered on the instance it came in on,
+the Activate requests of every instance nest into one count, a Deactivate on any of
+them ends a stream, and samples go out on the instance that started the stream or last
+asked for one. An instance that closes gives back the activations it made, and the
+stream if the stream was its.
+
+The Windows Camera app leans on exactly that. It starts the stream on one instance and
+asks for samples on another it opens straight after, which it never activates: a
+client keeping a state per instance would answer those requests `NotInitialized`, and
+the stream would start and never carry a frame. The same app tears its first stream
+down a few seconds in — Deactivate, and every instance closed — then opens the device
+again and starts a second one that runs until the app closes. It also asks for samples
+more slowly than the rate the device announced, on a host without a GPU, so the queue
+fills and a second's worth of stream is dropped to the next keyframe at a time.
+
+The device is one color stream in one media type: H.264 at the geometry and rate the
+browser's encoder announced, decoded on the host. The host chooses from that list of
+one, so a Start Streams naming any other type is `InvalidMediaType`. The stream
+description says the stream cannot be shared, as FreeRDP's client tells a Windows
+host, because one encoder is behind it. Samples are one Annex B access unit each and
+are never looked inside.
+
+Samples are metered by the host: each Sample Request is owed one Sample Response, a
+sample that arrives with nothing owed waits in a queue of eight, and past that the
+queue is dropped whole and only a keyframe is taken until one comes — H.264 cannot
+resume mid-GOP — with the browser asked for one once per gap. A new stream opens the
+same way, on a keyframe. Unplugging answers every Sample Request still owed with an
+error before the Device Removed Notification, so no request is left without its
+response. A sample is far longer than one dynamic channel PDU, so it goes as a Data
+First announcing its length and the Data PDUs after it (`dvc::pieces`, MS-RDPEDYC
+2.2.3.1); every other message this client sends fits one.
+
+The session thread runs all of it beside everything else on the connection, fed from
+`rdp_client/camera.rs`: two queues, because a plug or an unplug must never be lost and
+a late sample is worthless, so the device's commands queue without limit and samples
+wait in a bounded queue that drops to a keyframe when it fills. The host's decisions
+go to a `CameraSink` on that thread. `src/rdp_camera.rs` is the gateway's adapter: the
+sink becomes `CameraBridge` signals, and the bridge's control becomes the session's
+feed.
+
+`tests/rdp_client_probe.rs` plugs a camera into a real host and, under
+`REMOTEX_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
+announced device's channel; `RUST_LOG=remotex=debug` shows the host's device queries
+and this end's answers.
 
 ## Sound (MS-RDPEA)
 

@@ -777,6 +777,25 @@ pub struct TargetConfig {
     /// of accepted and left inert.
     #[serde(default)]
     pub audio_codec: Option<AudioCodec>,
+    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC:
+    /// RFB has no equivalent channel, and unlike [`Self::audio`] there is no
+    /// extension carrying one either.
+    ///
+    /// **Experimental**, for lack of tests. The socket's session rules and its
+    /// message encodings are unit tested, and so is the channel's wire; the
+    /// redirection itself is exercised only against a real Windows host, because
+    /// only a host that creates the `RDCamera_Device_Enumerator` channel — a
+    /// workstation, or a Windows Server carrying the Remote Desktop Session Host
+    /// role — has anywhere to redirect a camera to, and the container dummies
+    /// are neither.
+    ///
+    /// Capability only. The device itself appears when a client enables the
+    /// camera — explicitly, per session, never remembered — by opening
+    /// `/ws/camera`; a target with this key and no such client offers the
+    /// remote nothing. The browser encodes H.264 and the gateway passes it
+    /// through, so there is no codec key beside this one.
+    #[serde(default)]
+    pub camera: bool,
     /// Opus bitrate in kbit/s (6–510); `None` reads as
     /// [`DEFAULT_AUDIO_BITRATE_KBPS`]. Opus only — passthrough PCM has no
     /// encoder to give a rate to, so the key is refused beside
@@ -1643,6 +1662,15 @@ impl ConfigFile {
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about the
             // *engine* and the *build* and not about any of them.
+            // The camera is RDP's alone: MS-RDPECAM is an RDP channel and RFB has
+            // nothing to redirect a client's camera onto.
+            anyhow::ensure!(
+                !target.camera || target.protocol == Protocol::Rdp,
+                "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
+                 is an RDP channel and RFB has no equivalent. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
             if target.audio && target.protocol == Protocol::Vnc {
                 anyhow::ensure!(
                     target.subtype != Some(Subtype::Ard),
@@ -4693,6 +4721,58 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].audio);
         assert_eq!(config.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
+    }
+
+    /// MS-RDPECAM is an RDP channel with no RFB counterpart and no extension
+    /// carrying one, so the key is refused on VNC at parse time and opt-in
+    /// (default off) on RDP.
+    #[test]
+    fn camera_belongs_to_rdp_and_is_refused_on_vnc() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "nope"
+            protocol = "vnc"
+            host = "10.0.0.5"
+            camera = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("camera"), "{rendered}");
+        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            username = "u"
+            password = "p"
+            host = "10.0.0.5"
+            camera = true
+
+            [[targets]]
+            name = "quiet"
+            protocol = "rdp"
+            username = "u"
+            password = "p"
+            host = "10.0.0.6"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].camera);
+        assert!(!config.targets[1].camera, "the camera is opt-in");
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key

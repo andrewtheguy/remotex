@@ -302,6 +302,9 @@ pub(crate) fn router_with_sessions(
                 // Sound, on a socket of its own so it never queues behind a picture.
                 // Same guard, same credential kinds; only the payload differs.
                 .route("/ws/audio", any(ws::audio_handler))
+                // The camera, going the other way, on its own socket for the same
+                // reason — and opening it is the per-session enable (see crate::ws).
+                .route("/ws/camera", any(ws::camera_handler))
                 .route_layer(require_auth),
         );
 
@@ -891,6 +894,7 @@ mod tests {
                 clipboard: false,
                 audio: false,
                 audio_codec: None,
+                camera: false,
                 render_type: crate::config::RenderType::Tiles,
                 render_subtype: None,
                 render_stream_quality: None,
@@ -1159,6 +1163,7 @@ mod tests {
             clipboard: false,
             audio: true,
             audio_codec: tone_codec,
+            camera: false,
             render_type: crate::config::RenderType::Tiles,
             render_subtype: None,
             render_stream_quality: None,
@@ -1183,7 +1188,7 @@ mod tests {
         // ends so the session layer sees a live engine.
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target.clone()],
-            |_target, input_rx, frame_tx, audio| {
+            |_target, input_rx, frame_tx, audio, _camera| {
                 let audio: Arc<AudioBridge> = audio.expect("the target opted into audio");
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;

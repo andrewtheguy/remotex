@@ -1045,6 +1045,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         clipboard,
         audio: false,
         audio_codec: None,
+        camera: false,
         render_type: remotex::config::RenderType::Tiles,
         render_subtype: None,
         render_stream_quality: None,

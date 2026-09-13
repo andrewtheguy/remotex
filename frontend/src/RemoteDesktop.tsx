@@ -53,6 +53,10 @@ export default function RemoteDesktop({
     videoError,
     audioStream,
     videoStreams,
+    canCamera,
+    cameraEnabled,
+    cameraError,
+    cameraStreaming,
     audioByDefault,
     setAudioByDefault,
     displays,
@@ -74,6 +78,7 @@ export default function RemoteDesktop({
     switchTarget,
     selectDisplay,
     setAudio,
+    setCamera,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
@@ -86,15 +91,19 @@ export default function RemoteDesktop({
     onUnauthorized,
   );
 
-  // A speaker on the tab title while sound is playing — the one place the
-  // desktop has room to say so, since the toggle lives in the drawer. At the
-  // *front*, not the end: a tab title is truncated from the right, so a suffix is
-  // the first thing to vanish. Desktop only, so the picker's tab stays the plain
-  // branding.
+  // A speaker on the tab title while sound is playing, and a camera while it is
+  // offered — the one place the desktop has room to say so, since the toggles
+  // live in the drawer, and for the camera it is also the honest little
+  // recording light. At the *front*, not the end: a tab title is truncated from
+  // the right, so a suffix is the first thing to vanish. Desktop only, so the
+  // picker's tab stays the plain branding.
   useEffect(() => {
-    const marks = mode === "desktop" && audioEnabled ? "🔊 " : "";
+    const marks =
+      mode === "desktop"
+        ? `${cameraEnabled ? "🎥 " : ""}${audioEnabled ? "🔊 " : ""}`
+        : "";
     document.title = `${marks}${branding}`;
-  }, [mode, audioEnabled, branding]);
+  }, [mode, audioEnabled, cameraEnabled, branding]);
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
@@ -162,6 +171,11 @@ export default function RemoteDesktop({
           audioStream={audioStream}
           videoStreams={videoStreams}
           onAudioChange={setAudio}
+          canCamera={canCamera}
+          cameraEnabled={cameraEnabled}
+          cameraError={cameraError}
+          cameraStreaming={cameraStreaming}
+          onCameraChange={setCamera}
           macKeyOverridesEnabled={macKeyOverridesEnabled}
           macKeyOverridesActive={macKeyOverridesActive}
           isMacHost={isMacHost}

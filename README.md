@@ -209,6 +209,17 @@ connection itself, and a server that does not — wayvnc, TigerVNC, x11vnc — g
 the desktop and no sound. wlshare speaks it, capturing the default sink's
 monitor from PipeWire. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
+One RDP redirection sends this browser's own media the other way and is
+**experimental**, for lack of tests: `camera = true` offers the remote a virtual
+webcam over MS-RDPECAM. It is off by default, enabled per session from the
+floating menu and never remembered, and refused on VNC. Its socket rules, its
+control messages and the channel's wire format are tested like everything else;
+no test carries a frame to a host, because the camera channel is created only by
+a Windows host that redirects cameras — a workstation, or a Windows Server
+carrying the Remote Desktop Session Host role. It is verified by hand there, where
+remote audio (`audio = true`) and the rest of the RDP feature set are exercised on
+every test run. Expect to re-check it by hand after a change.
+
 High Performance mode is the one part of remotex built entirely without a
 specification: Apple documents none of the protocol revision,
 its record layer, its control messages or its virtual display handling, so all of

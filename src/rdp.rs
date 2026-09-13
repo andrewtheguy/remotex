@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
+use crate::camera::CameraBridge;
 use crate::config::{RenderPlan, TargetConfig};
 use crate::copies;
 use crate::encode::TileSink;
@@ -39,6 +40,7 @@ use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay,
     MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED,
 };
+use crate::rdp_camera;
 use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
     self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
@@ -142,10 +144,16 @@ fn connect_budget() -> Duration {
 /// host to redirect its sound and hands every buffer to the bridge from its own
 /// thread — see [`Sound`] — so the pictures' event queue below never carries a sample.
 ///
+/// `camera` is `Some` exactly for a target with `camera = true`: the RDP client then
+/// takes the host's camera enumeration channel, and the bridge's control becomes the
+/// session's camera feed — see [`rdp_camera`].
+///
 /// The event channel from the RDP client is bounded, and a slow consumer makes the
 /// rectangles coarser rather than the queue longer: while it is full the client
 /// folds overlapping paint and collapses past a cap before anything is queued, and
 /// every other event waits for room — see `EVENT_QUEUE` in the client.
+// Eight handoffs matching the engine spawner's surface; see `session::spawn_engine`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
     plan: RenderPlan,
@@ -153,10 +161,11 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
+    camera: Option<Arc<CameraBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("rdp", frame_tx, plan, feedback);
-    session(config, display, input_rx, audio, &sink).await;
+    session(config, display, input_rx, audio, camera, &sink).await;
     sink.finish().await;
 }
 
@@ -189,9 +198,17 @@ async fn session(
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
+    camera: Option<Arc<CameraBridge>>,
     sink: &TileSink,
 ) {
-    let (session, mut events) = Session::start(connect_config(&config, display, audio));
+    let (session, mut events) =
+        Session::start(connect_config(&config, display, audio, camera.as_ref()));
+    // The feed exists from here, so the camera socket's traffic has somewhere to go
+    // before the desktop does: a plug made while the host is still connecting waits in
+    // the session's queue for the enumeration channel.
+    if let (Some(bridge), Some(feed)) = (&camera, session.camera()) {
+        rdp_camera::attach(bridge, feed.clone());
+    }
 
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
         return;
@@ -305,7 +322,12 @@ async fn await_desktop(
 }
 
 /// Everything the RDP client needs to open this target's session.
-fn connect_config(config: &TargetConfig, display: Option<HostDisplay>, audio: Option<Arc<AudioBridge>>) -> Connect {
+fn connect_config(
+    config: &TargetConfig,
+    display: Option<HostDisplay>,
+    audio: Option<Arc<AudioBridge>>,
+    camera: Option<&Arc<CameraBridge>>,
+) -> Connect {
     // The opening size, in points at 1x: the pinned config size, else the full
     // resolution of the client's own screen — the same rule every engine
     // resolves. The density this session ends up at remains the client's to
@@ -329,6 +351,7 @@ fn connect_config(config: &TargetConfig, display: Option<HostDisplay>, audio: Op
         egfx: config.egfx(),
         clipboard: config.clipboard,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
+        camera: camera.map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
     }
 }
 
@@ -1537,6 +1560,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
         // Both halves of the clipboard pair are answered by the active loop, on the
         // clipboard channel, before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
+        // The camera socket's opening message, which acts on the slot's camera bridge;
+        // the camera reaches this engine through its feed, never through input.
+        ClientMsg::CameraFormat { .. } => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
         // them: it empties that socket's tile cache and injects its own `Refresh`.

@@ -52,19 +52,47 @@
 //! only under [`AUDIO_ENV`], set when a sound is playing on the remote; otherwise the
 //! counts are printed and a quiet host is not a failure.
 //!
+//! ## The camera
+//!
+//! The session offers a camera and plugs one as soon as it connects, the way the
+//! gateway does when a browser enables its camera. What a host does with it is the
+//! host's: a Windows workstation opens the camera enumeration channel, agrees a
+//! version and opens the device's channel once it is told about the device, and a
+//! Windows Server without the Remote Desktop Session Host role opens nothing. So the
+//! negotiation and the device channel are asserted only under [`CAMERA_ENV`], set
+//! against a host that offers cameras; otherwise what happened is printed. Nothing
+//! on the host opens the camera there, so no stream starts — run with
+//! `RUST_LOG=remotex=debug` to read the host's device queries and this end's answers.
+//!
 //! ```sh
-//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> REMOTEX_UAT_AUDIO=1 \
+//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> REMOTEX_UAT_AUDIO=1 REMOTEX_UAT_CAMERA=1 \
 //!   cargo test --test rdp_client_probe -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! The stream is the third test, [`stream_camera`], and it needs a stream to play and a
+//! host with the Windows Camera app: it opens the app through the Run dialog, plays the
+//! file named by [`CAMERA_STREAM_ENV`] into the camera the app opens, and closes the app
+//! again. What it asserts is the host's part of the Video Capture sequence — it starts
+//! the stream in the one format offered, takes the samples it asks for without stopping,
+//! and stops when the app closes. Whether the picture in the app is the test pattern is
+//! for eyes: take a screenshot of the remote while the samples play.
+//!
+//! ```sh
+//! ffmpeg -f lavfi -i testsrc=size=640x480:rate=30 -t 20 -c:v libx264 -profile:v baseline \
+//!   -pix_fmt yuv420p -g 30 -bf 0 -x264-params aud=1:repeat-headers=1 \
+//!   -bsf:v h264_mp4toannexb -f h264 tmp/camera_probe_640x480.h264
+//! REMOTEX_UAT_TARGET=<rdp target> REMOTEX_UAT_CAMERA_STREAM=tmp/camera_probe_640x480.h264 \
+//!   cargo test --test rdp_client_probe a_real_host_streams_the_camera -- --ignored --nocapture
 //! ```
 
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::proto::rdpsnd;
-use remotex::rdp_client::{AudioSink, Connect, Event, Input, Session};
+use remotex::rdp_client::proto::{rdpecam, rdpsnd};
+use remotex::rdp_client::{AudioSink, Camera, CameraSink, Connect, Event, Fed, Input, Session};
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use tokio::sync::mpsc::Receiver;
 
@@ -79,6 +107,28 @@ const EGFX_ENV: &str = "REMOTEX_UAT_EGFX";
 /// A Windows host sends its format list only once something plays, so the
 /// negotiation is asserted only when this says it can be, and printed otherwise.
 const AUDIO_ENV: &str = "REMOTEX_UAT_AUDIO";
+
+/// Whether the target's host offers camera redirection — set it to `1` against a Windows
+/// workstation, or a Server with the Remote Desktop Session Host role. The host's
+/// negotiation and its opening of the device channel are asserted only when this says
+/// it will, and printed otherwise.
+const CAMERA_ENV: &str = "REMOTEX_UAT_CAMERA";
+
+/// The camera the probe plugs: what a browser's webcam typically announces.
+const PROBE_CAMERA: rdpecam::Format =
+    rdpecam::Format { width: 640, height: 480, fps_numerator: 30, fps_denominator: 1 };
+
+/// An Annex B H.264 file for [`stream_camera`] to play, in [`PROBE_CAMERA`]'s geometry
+/// and rate, written with an access unit delimiter before every picture and the
+/// parameter sets before every keyframe — the module docs have the ffmpeg line.
+const CAMERA_STREAM_ENV: &str = "REMOTEX_UAT_CAMERA_STREAM";
+
+/// What the Run dialog is given to open the Windows Camera app.
+const CAMERA_APP: &str = "microsoft.windows.camera:";
+
+/// How long the samples play, and how far apart.
+const CAMERA_FEED: Duration = Duration::from_secs(10);
+const CAMERA_FRAME: Duration = Duration::from_micros(33_333);
 
 /// The opening size, and the one each case asks to move to. Both even, both well
 /// inside what any host accepts.
@@ -104,6 +154,9 @@ const KEY_R: u8 = 0x13;
 const KEY_A: u8 = 0x1E;
 const KEY_C: u8 = 0x2E;
 const KEY_V: u8 = 0x2F;
+const ENTER: u8 = 0x1C;
+const LALT: u8 = 0x38;
+const F4: u8 = 0x3E;
 
 /// Whether this run offers the graphics pipeline — see [`EGFX_ENV`].
 fn egfx() -> bool {
@@ -145,13 +198,55 @@ impl AudioSink for Listen {
     }
 }
 
-fn connect() -> (Session, Receiver<Event>, Arc<Ear>) {
+/// Whether this run was told the host offers cameras — see [`CAMERA_ENV`].
+fn camera_offered() -> bool {
+    matches!(std::env::var(CAMERA_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"))
+}
+
+/// What the host decided about the session's camera: counted, like the sound.
+#[derive(Default, Debug)]
+struct Eye {
+    /// The version the host agreed, or 0 if it never did.
+    version: AtomicU8,
+    attached: AtomicBool,
+    starts: AtomicU64,
+    stops: AtomicU64,
+    keyframes: AtomicU64,
+}
+
+struct Watch(Arc<Eye>);
+
+impl CameraSink for Watch {
+    fn negotiated(&self, version: u8) {
+        self.0.version.store(version, Ordering::Relaxed);
+    }
+
+    fn attached(&self) {
+        self.0.attached.store(true, Ordering::Relaxed);
+    }
+
+    fn started(&self, format: rdpecam::Format) {
+        assert_eq!(format, PROBE_CAMERA, "the host started the camera in a format it was never offered");
+        self.0.starts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn stopped(&self) {
+        self.0.stops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn keyframe_needed(&self) {
+        self.0.keyframes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn connect() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
     let target = common::uat_target(&name);
     println!("rdp_client_probe: {name} ({}:{}), egfx {}", target.host, target.port, egfx());
     let ear = Arc::new(Ear::default());
+    let eye = Arc::new(Eye::default());
     let (session, events) = Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
@@ -164,8 +259,9 @@ fn connect() -> (Session, Receiver<Event>, Arc<Ear>) {
         egfx: egfx(),
         clipboard: true,
         audio: Some(Box::new(Listen(Arc::clone(&ear)))),
+        camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
     });
-    (session, events, ear)
+    (session, events, ear, eye)
 }
 
 /// What a stretch of the session did.
@@ -188,6 +284,8 @@ struct Tally {
     remote_text: Vec<String>,
     refusals: u64,
     oversized: Vec<u64>,
+    /// The text a paste on the remote is answered with, when not [`COPIED`].
+    offer: Option<&'static str>,
 }
 
 /// Read events until `until` says stop or `deadline` passes. Panics on an ended
@@ -235,7 +333,7 @@ async fn pump(
             Event::ClipboardWanted { format } => {
                 tally.pastes.push(format);
                 let data = (format == CF_UNICODETEXT)
-                    .then(|| rdp_clipboard::encode_unicode(COPIED));
+                    .then(|| rdp_clipboard::encode_unicode(tally.offer.unwrap_or(COPIED)));
                 session.input().send_clipboard(data);
             }
             Event::Connected { .. } => panic!("a second Connected"),
@@ -309,7 +407,7 @@ async fn resize_to(
 
 async fn case() {
     common::init_logging();
-    let (session, mut events, ear) = connect();
+    let (session, mut events, ear, eye) = connect();
 
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
@@ -319,6 +417,10 @@ async fn case() {
         panic!("the session did not connect: {first:?}");
     };
     println!("  connected at {width}x{height}");
+    // Plugged as a browser's enable plugs it: once, early, before the host has opened
+    // anything for it to be announced on.
+    let camera = session.camera().expect("the session was given a camera");
+    camera.plug(PROBE_CAMERA);
 
     // A desktop worth of drawing, and Display Control, before anything is resized.
     // Under the pipeline the drawing shows as frames; on the bitmap path, as paint.
@@ -415,6 +517,28 @@ async fn case() {
         println!("  (no sound negotiated: a quiet host sends no format list; set {AUDIO_ENV}=1 with a sound playing to assert it)");
     }
 
+    // The camera had the whole session to be negotiated and opened. Unplugging it is the
+    // Device Removed Notification, and the session must survive the host's answer.
+    println!("  camera: {eye:?}");
+    if camera_offered() {
+        assert_eq!(
+            eye.version.load(Ordering::Relaxed),
+            rdpecam::VERSION,
+            "the host never agreed MS-RDPECAM version {}, though {CAMERA_ENV} says it offers \
+             cameras",
+            rdpecam::VERSION
+        );
+        assert!(
+            eye.attached.load(Ordering::Relaxed),
+            "the host never opened the announced camera's device channel"
+        );
+    } else if eye.version.load(Ordering::Relaxed) == 0 {
+        println!("  (no camera negotiated: set {CAMERA_ENV}=1 against a host that offers cameras to assert it)");
+    }
+    camera.unplug();
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
+
     drop(session);
     // The drop disconnected and joined the thread, so its last word is here.
     let mut ended = None;
@@ -461,7 +585,7 @@ fn chord(input: &Input, modifiers: &[(u8, bool)], key: u8, extended: bool) {
 ///   reads, and the bytes that come back are the bytes that went out.
 async fn round_trip() {
     common::init_logging();
-    let (session, mut events, _ear) = connect();
+    let (session, mut events, _ear, _eye) = connect();
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
         .expect("no first event within 60s")
@@ -539,6 +663,146 @@ async fn round_trip() {
     assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
 }
 
+/// The access units of an Annex B stream written with access unit delimiters, each with
+/// whether it holds an IDR picture.
+fn access_units(stream: &[u8]) -> Vec<(Vec<u8>, bool)> {
+    let starts: Vec<usize> = (0..stream.len().saturating_sub(4))
+        .filter(|&at| stream[at..at + 4] == [0, 0, 0, 1] && stream[at + 4] & 0x1F == 9)
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &at)| {
+            let unit = &stream[at..starts.get(n + 1).copied().unwrap_or(stream.len())];
+            let idr = unit.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1F == 5);
+            (unit.to_vec(), idr)
+        })
+        .collect()
+}
+
+/// The camera, streaming: the Video Capture sequence a real application on the host
+/// starts, fed real H.264.
+///
+/// The Windows Camera app is the application every Windows desktop has, and the Run
+/// dialog opens it by its protocol name — pasted, because a keystroke per character is
+/// a keyboard layout's business. The app opens the only camera there is, which is this
+/// one; the host starts the stream, and the samples play at the stream's rate for
+/// [`CAMERA_FEED`], with events drained between them as the gateway drains them. Alt+F4
+/// closes the app, which is the host's cue to stop.
+///
+/// Measured against a Windows Enterprise host, the app tears its first stream down a few
+/// seconds in — Deactivate, and every device channel closed — then opens the device again
+/// and starts a second stream that runs until the app closes. So what is asserted is that
+/// a stream was running when the samples ran out, not that none stopped before.
+async fn stream_camera() {
+    common::init_logging();
+    let path = std::env::var(CAMERA_STREAM_ENV).unwrap_or_else(|_| {
+        panic!("set {CAMERA_STREAM_ENV} to an Annex B H.264 file at 640x480, 30 frames a second")
+    });
+    let units = access_units(&std::fs::read(&path).expect("reading the camera stream"));
+    assert!(units.first().is_some_and(|(_, idr)| *idr), "the stream does not open on a keyframe");
+    println!("  {} access units from {path}", units.len());
+
+    let (session, mut events, _ear, eye) = connect();
+    let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
+        .await
+        .expect("no first event within 60s")
+        .expect("the event channel closed");
+    assert!(matches!(first, Event::Connected { .. }), "the session did not connect: {first:?}");
+    let camera = session.camera().expect("the session was given a camera");
+    camera.plug(PROBE_CAMERA);
+
+    let mut tally = Tally::default();
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(20), |t| {
+        t.clipboard_ready && t.paints > 0 && eye.attached.load(Ordering::Relaxed)
+    })
+    .await;
+    assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
+    assert!(eye.attached.load(Ordering::Relaxed), "the host never opened the camera's device channel");
+    // A desktop a moment old is still being rebuilt — a reclaimed session resets its
+    // graphics here — and a keystroke that lands before it settles opens nothing.
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(3), |_| false)
+        .await;
+
+    // 1. Open the Camera app.
+    let input = session.input();
+    tally.offer = Some(CAMERA_APP);
+    input.advertise_clipboard(vec![CF_UNICODETEXT]);
+    chord(input, &[(LWIN, true)], KEY_R, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
+    chord(input, &[(LCTRL, false)], KEY_A, false);
+    chord(input, &[(LCTRL, false)], KEY_V, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(4), |t| {
+        !t.pastes.is_empty()
+    })
+    .await;
+    // Not asserted: the Run dialog remembers what it last ran, and a paste it did not ask
+    // this end for still opens the app. Whether the host starts a stream is the check.
+    println!("  the Run dialog asked this end for {:?}", tally.pastes);
+    chord(input, &[], ENTER, false);
+    let started = pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(30), |_| {
+        eye.starts.load(Ordering::Relaxed) > 0
+    })
+    .await;
+
+    // 2. Play the stream into it.
+    let mut fed = [0u64; 4]; // queued, dropped, skipped, ended
+    if started {
+        let feeding = Instant::now();
+        let mut next = feeding;
+        for (unit, idr) in units.iter().cycle() {
+            if feeding.elapsed() >= CAMERA_FEED {
+                break;
+            }
+            fed[match camera.sample(unit, *idr) {
+                Fed::Queued => 0,
+                Fed::Dropped => 1,
+                Fed::Skipped => 2,
+                Fed::Ended => 3,
+            }] += 1;
+            next += CAMERA_FRAME;
+            pump(&session, &mut events, &mut tally, next, |_| false).await;
+        }
+    }
+    let stops_while_playing = eye.stops.load(Ordering::Relaxed);
+    let playing = eye.starts.load(Ordering::Relaxed) > stops_while_playing;
+    // What the app shows of the samples is for eyes, as a desktop's picture is.
+    dump(&session, "camera-playing");
+
+    // 3. Close the app, whatever happened above, and give the host its moment to stop.
+    chord(input, &[(LALT, false)], F4, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(10), |_| {
+        eye.stops.load(Ordering::Relaxed) > stops_while_playing
+    })
+    .await;
+    println!(
+        "  camera stream: {eye:?}; samples queued {}, dropped {}, skipped {}, after the end {}",
+        fed[0], fed[1], fed[2], fed[3]
+    );
+    camera.unplug();
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false)
+        .await;
+
+    assert!(started, "the host never started the camera; the Camera app may not have opened");
+    assert!(fed[0] > 0, "no sample reached the session");
+    assert_eq!(fed[3], 0, "the session ended while the samples played");
+    assert!(playing, "no stream was running when the samples ran out");
+    assert!(
+        eye.stops.load(Ordering::Relaxed) > stops_while_playing,
+        "closing the Camera app did not stop the stream"
+    );
+
+    drop(session);
+    let mut ended = None;
+    while let Ok(event) = events.try_recv() {
+        if let Event::Ended(result) = event {
+            ended = Some(result);
+        }
+    }
+    assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
+}
+
 #[tokio::test]
 #[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
 async fn a_real_host_paints_and_resizes() {
@@ -549,4 +813,10 @@ async fn a_real_host_paints_and_resizes() {
 #[ignore = "drives a real RDP host named in tmp/test_uat.toml, and its Run dialog"]
 async fn a_real_host_round_trips_the_clipboard() {
     round_trip().await;
+}
+
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml, its Camera app, and a stream in REMOTEX_UAT_CAMERA_STREAM"]
+async fn a_real_host_streams_the_camera() {
+    stream_camera().await;
 }

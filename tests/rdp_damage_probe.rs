@@ -73,6 +73,9 @@ fn connect() -> (Session, Receiver<Event>) {
         egfx: target.egfx(),
         clipboard: target.clipboard,
         audio: target.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
+        // A camera draws nothing, and one the browser never plugs costs the host a
+        // channel and nothing else.
+        camera: None,
     });
     (session, events)
 }
