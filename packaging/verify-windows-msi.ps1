@@ -3,6 +3,7 @@
 # smoke test the release workflow's Windows row and ci/windows/ci.ps1 run; it needs an
 # elevated PowerShell 7 (msiexec /qn installs per machine), on a machine whose Program Files
 # is theirs to install into.
+#Requires -Version 7
 param([string] $Msi = 'dist\remotex-windows-x86_64.msi')
 $ErrorActionPreference = 'Stop'
 $Msi = (Resolve-Path $Msi).Path

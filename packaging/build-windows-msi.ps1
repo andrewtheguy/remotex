@@ -18,6 +18,7 @@
 # prebuilt static archives from their `-prebuilt` crates. SKIP_FRONTEND_BUILD=1 reuses an
 # existing frontend\dist, as the tarball script does. packaging/verify-windows-msi.ps1 then
 # installs the result, runs it and removes it.
+#Requires -Version 7
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 

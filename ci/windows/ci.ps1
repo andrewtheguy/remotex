@@ -4,6 +4,7 @@
 # and the workflow disagree, the workflow is right and this is stale.
 #
 # PowerShell 7. Installs nothing; the machine is provisioned by ci/windows/provision.ps1.
+#Requires -Version 7
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
