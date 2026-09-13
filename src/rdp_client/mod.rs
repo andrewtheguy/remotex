@@ -48,6 +48,16 @@
 //! and bytes and decides nothing about either — which format is text, and what its
 //! bytes mean, is [`crate::rdp_clipboard`]'s.
 //!
+//! # The camera
+//!
+//! MS-RDPECAM, for a session that asked for it with [`Connect::camera`]: a camera on
+//! this end, which the host installs as a device of its own. The caller plugs it and
+//! hands it samples through [`Session::camera`] — H.264 already encoded, which this
+//! module passes through without looking inside — and the host's decisions about it,
+//! starting the stream and stopping it, reach a [`CameraSink`] on the session thread.
+//! [`proto::rdpecam`] is the channel; the samples are metered out one per request the
+//! host makes, as the specification requires.
+//!
 //! # What this does not do
 //!
 //! - **No touch.** MS-RDPEI is never asked for.
@@ -64,6 +74,7 @@
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
 //! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
 
+mod camera;
 mod connect;
 mod error;
 mod framebuffer;
@@ -73,6 +84,7 @@ mod pointer;
 pub mod proto;
 mod session;
 
+pub use camera::{Camera, CameraFeed, CameraSink, Fed};
 pub use error::Error;
 pub use framebuffer::{Frame, Framebuffer, Rect};
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};

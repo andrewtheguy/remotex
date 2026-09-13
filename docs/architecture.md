@@ -12,6 +12,7 @@ browser SPA over loopback or the network
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input, binary image batches
    │  /ws/audio: the audio format, then binary audio frames
+   │  /ws/camera: the camera format and H.264 samples up, start/stop down
    ▼
 axum server ── single session slot ── protocol engine
                                          ├─ RDP through the built-in client
@@ -25,6 +26,9 @@ with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the
 `ard-high-performance` RFB 003.889 path. Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
+The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
+passed through to an RDP host over MS-RDPECAM. The redirection is experimental —
+see [Camera frames](#camera-frames).
 
 ## Constraints
 
@@ -969,6 +973,82 @@ against — see [`wlshare-audio.md`](wlshare-audio.md) — and the extension is
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
+
+### Camera frames
+
+**Experimental, for lack of tests.** The camera is the one path this gateway
+ships without automated coverage of the redirection itself. Its socket rules and
+message encodings are unit tested like everything else here — the claim and
+engine binding, the eviction, the byte-for-byte control frames — and so is the
+MS-RDPECAM wire the RDP client speaks, against the specification's own examples.
+`tests/rdp_client_probe.rs` checks against a real host that the camera is
+negotiated and its device opened, and its `a_real_host_streams_the_camera` opens
+the host's Camera app and carries H.264 frames from a file to it. Like every real-host
+probe it is ignored by default, and it checks that the host started the stream
+and took samples, not the pixels the host displays. The dummy RDP server the
+container tests drive offers no camera at all. The displayed picture is verified
+by hand against a Windows host, and a change here needs a hand check.
+
+The browser's camera goes the other way, on a third socket, and only to an RDP
+target that opted in with `camera = true` (refused on VNC at parse time: the
+channel is MS-RDPECAM and RFB has no equivalent). **Opening
+`/ws/camera?session=<token>` is the enable** — explicit, per session, and never a
+remembered preference, unlike audio's "sound by default". Its refusals add one
+code to the family: 401 before the upgrade, 4000 for a stale token, 4001 on
+eviction, and **4002** when the running target carries no camera (or no engine is
+running at all). Where the audio socket is bound to the claim alone and survives a
+target switch, the camera socket is bound to the claim *and the engine*: every
+engine end and every claim change closes it, so the next session always starts
+with the camera off. Closing it — either side — unplugs the virtual device from
+the remote.
+
+The socket's first message is `cameraFormat`, naming the H.264 the browser's
+`VideoEncoder` is configured for (geometry and a rational frame rate); its arrival
+is what announces the device to the host. Binary frames follow, one encoded access
+unit each:
+
+```text
+u8 kind = 0x04 | u8 flags (bit 0: keyframe) | the Annex B access unit
+```
+
+Downstream the gateway relays the host's decisions as `cameraStart` (with the
+confirmed format), `cameraStop`, and `cameraKeyframe`; the browser encodes only
+between start and stop, restarting at an IDR, and honors a keyframe request on the
+next frame. Streaming begins when an application on the host opens the camera,
+which is the host's move alone — an enabled camera on an idle desktop sends
+nothing.
+
+The host also decides whether redirection exists at all, before any client
+message: the enumeration channel is created by the server, and a **Windows Server
+without the Remote Desktop Session Host role never creates it**. Microsoft's own
+client gets no camera against such a host either, so an enabled camera there is an
+announcement nobody asks about: the socket stays open and `cameraStart` never
+comes. Installing the role on the host is what turns the channel on:
+
+```powershell
+Install-WindowsFeature RDS-RD-Server -IncludeAllSubFeature -Restart
+```
+
+Windows 11 creates the channel and installs the redirected device as a real
+camera, enumerable by every capture application, for exactly as long as the camera
+socket holds it plugged.
+
+The gateway never transcodes — the PCM-passthrough bargain in the other
+direction. The browser encodes Annex B Constrained Baseline H.264
+(`frontend/src/cameraSender.ts`) from a capture asked for at 640 pixels wide and at
+most 15 frames a second — a host without a GPU was measured taking samples below 30,
+and a faster camera only fills the queue until it drops to a keyframe — the host's
+own camera stack decodes it, and the
+gateway advertises exactly one media type: the announced geometry. There is no
+codec key beside `camera`, and a browser that cannot encode H.264 reports that by
+name instead of falling back.
+
+The channel is the RDP client's own: `src/rdp_client/proto/rdpecam.rs` speaks
+MS-RDPECAM on the session thread, and `src/rdp_camera.rs` adapts it to the
+gateway's `CameraBridge` (`src/camera.rs`), which is all the session layer sees.
+How the client negotiates the version, announces the device, answers the host's
+queries and meters samples against the host's requests is in
+[The RDP client](rdp-client.md#camera-ms-rdpecam).
 
 ### Display geometry
 

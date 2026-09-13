@@ -7,6 +7,7 @@
 pub mod aac_eld;
 pub mod audio;
 pub mod auth;
+pub mod camera;
 pub mod classify;
 pub mod cli;
 pub mod config;
@@ -25,6 +26,7 @@ pub mod pcm48;
 pub mod pcm_stream;
 pub mod protocol;
 pub mod rdp;
+pub mod rdp_camera;
 pub mod rdp_client;
 pub mod rdp_clipboard;
 pub mod regions;

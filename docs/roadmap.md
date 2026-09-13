@@ -11,7 +11,7 @@ is the only place they can be read in context.
 ### What the RDP client does not carry yet
 
 The client carries the desktop, the pointer, keyboard, mouse, resize, the
-clipboard and sound. Touch was carried by the engine before it, from FreeRDP's
+clipboard, sound and the browser's camera. Touch was carried by the engine before it, from FreeRDP's
 `rdpei` plugin, and is not carried *here*: `proto` is the gateway's own now, so it
 is a channel to write rather than a dependency to configure, and it is refused
 where it would otherwise build a control with nothing behind it, by having no key

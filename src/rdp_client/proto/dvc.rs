@@ -247,9 +247,9 @@ pub fn close(channel: u32) -> Vec<u8> {
     w.finish()
 }
 
-/// A payload for one channel. Refused rather than split if it does not fit one PDU:
-/// what this client sends on a dynamic channel is a monitor layout, sixty-four
-/// bytes, and the sound conversation's replies, each shorter than that.
+/// A payload for one channel, in one PDU. Refused rather than split if it does not fit
+/// one: a monitor layout and the sound conversation's replies always do, and a message
+/// that may not — a camera sample — goes through [`pieces`].
 pub fn data(channel: u32, payload: &[u8]) -> Result<Vec<u8>, TooLong> {
     if payload.len() > MAX_DATA {
         return Err(TooLong(payload.len()));
@@ -260,6 +260,46 @@ pub fn data(channel: u32, payload: &[u8]) -> Result<Vec<u8>, TooLong> {
     write_field(&mut w, width, channel);
     w.bytes(payload);
     Ok(w.finish())
+}
+
+/// The most one dynamic channel PDU may be, header and all ([MS-RDPEDYC] 2.2.3).
+const MAX_PDU: usize = 1600;
+
+/// A message of any length for one channel, as the PDUs that carry it.
+///
+/// One Data PDU when it fits in [`MAX_DATA`] bytes; otherwise a Data First announcing
+/// the whole length and carrying as much as fits beside its header, then as many Data
+/// PDUs as the rest takes — no PDU longer than 1,600 bytes, as [MS-RDPEDYC] 1.3.3.2.1
+/// and 2.2.3.1 lay the sequence out. The host reassembles them the way [`Incoming`] does
+/// here. Refused only for a message longer than the Data First's length field can say.
+pub fn pieces(channel: u32, payload: &[u8]) -> Result<Vec<Vec<u8>>, TooLong> {
+    if payload.len() <= MAX_DATA {
+        return Ok(vec![data(channel, payload)?]);
+    }
+    let total = u32::try_from(payload.len()).map_err(|_| TooLong(payload.len()))?;
+    let (id, len) = (field_width(channel), field_width(total));
+    // A message a few bytes past MAX_DATA fits whole beside a Data First's longer header,
+    // which then carries all of it and no Data PDU follows (2.2.3.1).
+    let room = MAX_PDU - 1 - width_bytes(id) - width_bytes(len);
+    let (first, mut rest) = payload.split_at(room.min(payload.len()));
+    let mut w = Writer::with_capacity(MAX_PDU);
+    w.u8(header(DATA_FIRST, len, id));
+    write_field(&mut w, id, channel);
+    write_field(&mut w, len, total);
+    w.bytes(first);
+    let block = MAX_PDU - 1 - width_bytes(id);
+    let mut pdus = Vec::with_capacity(1 + rest.len().div_ceil(block));
+    pdus.push(w.finish());
+    while !rest.is_empty() {
+        let (piece, after) = rest.split_at(block.min(rest.len()));
+        let mut w = Writer::with_capacity(MAX_PDU);
+        w.u8(header(DATA, BYTE, id));
+        write_field(&mut w, id, channel);
+        w.bytes(piece);
+        pdus.push(w.finish());
+        rest = after;
+    }
+    Ok(pdus)
 }
 
 /// The first byte: the command, and the width of the two fields that may follow it.
@@ -273,6 +313,15 @@ fn field_width(value: u32) -> u8 {
         0..=0xFF => BYTE,
         0x100..=0xFFFF => SHORT,
         _ => LONG,
+    }
+}
+
+/// The bytes a field of `width` takes.
+fn width_bytes(width: u8) -> usize {
+    match width {
+        BYTE => 1,
+        SHORT => 2,
+        _ => 4,
     }
 }
 
@@ -523,6 +572,37 @@ mod tests {
         // for, and which a server therefore never has cause to send.
         let err = incoming.push(&server(0x08, BYTE, BYTE, &[0x00])).unwrap_err();
         assert!(matches!(err, Malformed::Refused { field: "a command", value: 8, .. }));
+    }
+
+    /// A message that fits goes as the one Data PDU [`data`] writes. One that does not goes
+    /// as a Data First and Data PDUs, none past 1,600 bytes, which a receiver reassembles
+    /// into the message that went out — for channel numbers and lengths of every width.
+    #[test]
+    fn a_long_message_goes_as_a_data_first_and_the_data_pdus_after_it() {
+        assert_eq!(pieces(3, &[7; MAX_DATA]).unwrap(), vec![data(3, &[7; MAX_DATA]).unwrap()]);
+
+        let message: Vec<u8> = (0..4000u32).map(|n| n as u8).collect();
+        let pdus = pieces(3, &message).unwrap();
+        assert_eq!(&pdus[0][..4], &[0x24, 0x03, 0xA0, 0x0F], "Data First, a two-byte length of 4000");
+        assert_eq!(pdus.iter().map(Vec::len).collect::<Vec<_>>(), vec![1600, 1600, 808]);
+        assert_eq!(pdus[1][..2], [0x30, 0x03], "Data");
+
+        for (channel, length) in [(3, 1591), (0x0102, 70_000), (0x0001_0002, 3200)] {
+            let message: Vec<u8> = (0..length).map(|n: u32| (n % 251) as u8).collect();
+            let pdus = pieces(channel, &message).unwrap();
+            assert!(pdus.iter().all(|pdu| pdu.len() <= MAX_PDU));
+            assert_eq!(pdus[0][0] >> 4, DATA_FIRST);
+            let mut incoming = Incoming::new();
+            let (last, head) = pdus.split_last().unwrap();
+            for pdu in head {
+                assert_eq!(incoming.push(pdu).unwrap(), None);
+            }
+            assert_eq!(
+                incoming.push(last).unwrap(),
+                Some(Message::Data { channel, data: &message }),
+                "channel {channel:#x}, {length} bytes"
+            );
+        }
     }
 
     #[test]

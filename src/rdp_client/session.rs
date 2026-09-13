@@ -15,6 +15,7 @@ use super::connect::{self, Connected, Joined};
 use super::error::Error;
 use super::framebuffer::{Framebuffer, Rect, affordable, stage};
 use super::gfx::{self, Graphics};
+use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
 use super::proto::capabilities::DemandActive;
@@ -24,7 +25,7 @@ use super::proto::frame::Frames;
 use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
-use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpsnd, tls};
+use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
 
 // ------------------------------------------------------------------ configuration
@@ -72,6 +73,14 @@ pub struct Connect {
     /// names no channel and tells the host in the logon that there is nothing here
     /// to play sound, so it leaves the sound where it is.
     pub audio: Option<Box<dyn AudioSink>>,
+    /// A camera to offer the host, for a target that asked for one (MS-RDPECAM).
+    ///
+    /// Asked for, the client takes the camera enumeration channel a Windows host opens
+    /// and agrees a version on it; the device exists from the moment the caller plugs it
+    /// through [`Session::camera`] until it is unplugged, and the host's decisions about
+    /// it go to its sink from the session's own thread. `None` refuses the channel by
+    /// name, so the host is offered no camera from this end.
+    pub camera: Option<Camera>,
 }
 
 /// Where a session's redirected sound goes.
@@ -213,6 +222,8 @@ pub struct Session {
     /// Closed by the thread as it finishes, which is what lets `drop` wait for it
     /// with a deadline — a `JoinHandle` has none.
     finished: std::sync::mpsc::Receiver<()>,
+    /// The camera feed, for a session configured with [`Connect::camera`].
+    camera: Option<CameraFeed>,
 }
 
 impl Session {
@@ -230,6 +241,13 @@ impl Session {
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let input = Input::new(commands_tx);
         let framebuffer = Arc::new(Framebuffer::new());
+        let (camera, camera_queues) = match config.camera {
+            Some(_) => {
+                let (feed, queues) = CameraFeed::new();
+                (Some(feed), Some(queues))
+            }
+            None => (None, None),
+        };
 
         let spawned = std::thread::Builder::new().name("rdp".into()).spawn({
             let framebuffer = Arc::clone(&framebuffer);
@@ -253,7 +271,7 @@ impl Session {
                 // event, and the caller would wait on the receiver forever. Converted
                 // into the disconnection it really is.
                 let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    runtime.block_on(thread_main(config, commands, &framebuffer, &events, stop))
+                    runtime.block_on(thread_main(config, commands, camera_queues, &framebuffer, &events, stop))
                 }));
                 let result = outcome
                     .unwrap_or_else(|_| Err(Error::new("the RDP session thread panicked")));
@@ -286,7 +304,7 @@ impl Session {
                 None
             }
         };
-        (Self { input, framebuffer, thread, finished }, receiver)
+        (Self { input, framebuffer, thread, finished, camera }, receiver)
     }
 
     /// Keyboard, mouse, refresh and resize.
@@ -297,6 +315,12 @@ impl Session {
     /// The framebuffer, kept up to date by the session thread.
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.framebuffer
+    }
+
+    /// The camera feed, for a session configured with [`Connect::camera`]: plug the
+    /// device, hand it samples, unplug it.
+    pub fn camera(&self) -> Option<&CameraFeed> {
+        self.camera.as_ref()
     }
 }
 
@@ -340,11 +364,12 @@ fn install_crypto_provider() {
 async fn thread_main(
     config: Connect,
     mut commands: mpsc::UnboundedReceiver<Command>,
+    camera: Option<CameraQueues>,
     framebuffer: &Framebuffer,
     events: &mpsc::Sender<Event>,
     stop: watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    run(config, &mut commands, framebuffer, events, stop).await.map_err(Error::from)
+    run(config, &mut commands, camera, framebuffer, events, stop).await.map_err(Error::from)
 }
 
 /// The same, in the errors the protocol modules raise. They become the session's one
@@ -352,6 +377,7 @@ async fn thread_main(
 async fn run(
     config: Connect,
     commands: &mut mpsc::UnboundedReceiver<Command>,
+    camera: Option<CameraQueues>,
     framebuffer: &Framebuffer,
     events: &mpsc::Sender<Event>,
     stop: watch::Receiver<bool>,
@@ -374,7 +400,17 @@ async fn run(
     let _ = events.send(Event::Connected { width, height }).await;
     let mut config = config;
     let audio = config.audio.take();
-    Active::new(connected, &config, audio, framebuffer, events, stop).run(commands).await
+    let capture = config.camera.take();
+    Active::new(connected, &config, audio, capture, framebuffer, events, stop).run(commands, camera).await
+}
+
+/// The next thing a camera feed wants, for a session that has one; a session that does
+/// not waits here for ever, which in a `select!` is never.
+async fn next_camera(camera: &mut Option<CameraQueues>) -> Option<CameraInput> {
+    match camera {
+        Some(queues) => queues.next().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Resolves once the caller has asked this session to stop, or dropped every
@@ -474,6 +510,8 @@ struct Active<'a> {
     audio: Option<Joined>,
     /// The sound conversation and where its buffers go, for a session that asked.
     sound: Option<Sound>,
+    /// The camera and where the host's decisions about it go, for a session that asked.
+    capture: Option<Capture>,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
     devices: Option<Joined>,
@@ -596,11 +634,58 @@ impl Sound {
     }
 }
 
+/// The camera, and where the host's decisions about it go.
+struct Capture {
+    proto: rdpecam::Rdpecam,
+    sink: Box<dyn CameraSink>,
+}
+
+impl Capture {
+    /// What a turn meant goes to the sink at once, and what it put on the wire comes back
+    /// as the dynamic channel PDUs that carry it — a sample is far longer than one.
+    fn settle(&self, turn: rdpecam::Turn) -> Result<Vec<Vec<u8>>> {
+        for output in turn.outputs {
+            match output {
+                rdpecam::Output::Negotiated { version } => {
+                    info!("rdp: the host offers camera redirection, MS-RDPECAM version {version}");
+                    self.sink.negotiated(version);
+                }
+                rdpecam::Output::VersionRefused { version } => warn!(
+                    "rdp: the host answered camera redirection with version {version}, which this \
+                     client does not speak, so it is offered no camera"
+                ),
+                rdpecam::Output::Attached => {
+                    info!("rdp: the host opened the camera's device channel");
+                    self.sink.attached();
+                }
+                rdpecam::Output::Started(format) => {
+                    info!(
+                        "rdp: the host started the camera at {}x{}, {}/{} frames a second",
+                        format.width, format.height, format.fps_numerator, format.fps_denominator
+                    );
+                    self.sink.started(format);
+                }
+                rdpecam::Output::Stopped => {
+                    info!("rdp: the host stopped the camera");
+                    self.sink.stopped();
+                }
+                rdpecam::Output::KeyframeNeeded => self.sink.keyframe_needed(),
+            }
+        }
+        let mut pdus = Vec::new();
+        for (channel, message) in turn.replies {
+            pdus.extend(dvc::pieces(channel, &message)?);
+        }
+        Ok(pdus)
+    }
+}
+
 impl<'a> Active<'a> {
     fn new(
         connected: Connected,
         config: &Connect,
         sink: Option<Box<dyn AudioSink>>,
+        camera: Option<Camera>,
         framebuffer: &'a Framebuffer,
         events: &'a mpsc::Sender<Event>,
         stop: watch::Receiver<bool>,
@@ -621,6 +706,7 @@ impl<'a> Active<'a> {
             clipboard,
             audio,
             sound: sink.map(|sink| Sound { proto: rdpsnd::Rdpsnd::new(), sink }),
+            capture: camera.map(|camera| Capture { proto: rdpecam::Rdpecam::new(&camera.name), sink: camera.sink }),
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
@@ -652,7 +738,11 @@ impl<'a> Active<'a> {
         }
     }
 
-    async fn run(mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> Result<()> {
+    async fn run(
+        mut self,
+        commands: &mut mpsc::UnboundedReceiver<Command>,
+        mut camera: Option<CameraQueues>,
+    ) -> Result<()> {
         // Updates that arrived while the share was being finalized were read past
         // there — the server may start painting once it has the Font List, which is
         // before this client has the Font Map that ends the sequence — so the desktop
@@ -683,6 +773,12 @@ impl<'a> Active<'a> {
                         Err(_) => self.damage.clear(),
                     }
                 }
+                // The caller's camera: a device plugged or unplugged, or a sample.
+                input = next_camera(&mut camera) => match input {
+                    Some(input) => self.on_camera(input).await?,
+                    // Every feed is gone, so nothing more will come.
+                    None => camera = None,
+                },
                 command = commands.recv() => {
                     let stop = match command {
                         Some(command) => self.on_commands(command, commands).await?,
@@ -825,7 +921,7 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8], arrived: Instant) -> Result<()> {
         let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, sound, framebuffer, .. } = self;
+            let Self { chunks, incoming, dynamics, graphics, sound, capture, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -883,6 +979,33 @@ impl<'a> Active<'a> {
                     }
                     (vec![dvc::close(channel)], Vec::new())
                 }
+                // The camera's two channels, for a session that carries one: the host
+                // opens them by name, and everything on them is the camera's to answer.
+                dvc::Message::Create { channel, name }
+                    if capture.as_ref().is_some_and(|capture| capture.proto.wants(name)) =>
+                {
+                    let capture = capture.as_mut().expect("the guard found a camera");
+                    let turn = capture.proto.opened(name, channel);
+                    let mut replies = vec![dvc::create_response(channel, dvc::ACCEPTED)];
+                    replies.extend(capture.settle(turn)?);
+                    (replies, Vec::new())
+                }
+                dvc::Message::Data { channel, data }
+                    if capture.as_ref().is_some_and(|capture| capture.proto.owns(channel)) =>
+                {
+                    let capture = capture.as_mut().expect("the guard found a camera");
+                    let turn = capture.proto.push(channel, data);
+                    (capture.settle(turn)?, Vec::new())
+                }
+                dvc::Message::Close { channel }
+                    if capture.as_ref().is_some_and(|capture| capture.proto.owns(channel)) =>
+                {
+                    let capture = capture.as_mut().expect("the guard found a camera");
+                    let turn = capture.proto.closed(channel);
+                    let mut replies = capture.settle(turn)?;
+                    replies.push(dvc::close(channel));
+                    (replies, Vec::new())
+                }
                 message => (answer(message, dynamics)?, Vec::new()),
             }
         };
@@ -929,6 +1052,29 @@ impl<'a> Active<'a> {
             self.resize_ready = true;
             self.send(Event::ResizeReady { max_area: caps.area }).await;
             self.send_layout().await?;
+        }
+        Ok(())
+    }
+
+    /// One thing the caller's camera feed wants done: the device plugged or unplugged, or
+    /// a sample to send or keep until the host asks for one.
+    async fn on_camera(&mut self, input: CameraInput) -> Result<()> {
+        let Some(capture) = &mut self.capture else {
+            return Ok(());
+        };
+        let turn = match input {
+            CameraInput::Command(CameraCommand::Plug(format)) => capture.proto.plug(format),
+            CameraInput::Command(CameraCommand::Unplug) => capture.proto.unplug(),
+            CameraInput::Sample(sample) => capture.proto.sample(sample.data, sample.keyframe),
+        };
+        let pdus = capture.settle(turn)?;
+        // The camera's channels are opened over this one, so a session without it has
+        // opened none and has nothing to send.
+        let Some(dynamic) = self.dynamic else {
+            return Ok(());
+        };
+        for pdu in pdus {
+            self.write_channel(dynamic, &pdu).await?;
         }
         Ok(())
     }
@@ -1470,8 +1616,9 @@ fn answer_clipboard(pdu: &[u8]) -> Result<(Option<Vec<u8>>, Option<Event>)> {
 /// Display Control for [`Connect::resize`], and the Graphics channel for
 /// [`Connect::egfx`], whose acceptance is followed at once by this client's
 /// capabilities, because a server waits for those before it draws anything. Every
-/// other name a Windows host offers — a printer, a smart card, a camera — is refused
-/// by name, which is what a client with nothing behind them does.
+/// other name a Windows host offers — a printer, a smart card — is refused by name,
+/// which is what a client with nothing behind them does; so are the camera's, except on
+/// a session that carries a camera, whose channels are answered before they reach here.
 ///
 /// The Graphics channel's own data does not come here: it is the desktop, and the
 /// session hands it to the compositor instead.

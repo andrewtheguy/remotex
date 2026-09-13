@@ -4070,10 +4070,13 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
         // them: it empties that socket's tile cache and injects its own `Refresh`.
+        // `CameraFormat` is the camera socket's opening message, never forwarded as
+        // input, and a VNC target carries no camera anyway.
         ClientMsg::Connect { .. }
         | ClientMsg::Disconnect
         | ClientMsg::CacheReset
-        | ClientMsg::PaintAck { .. } => Vec::new(),
+        | ClientMsg::PaintAck { .. }
+        | ClientMsg::CameraFormat { .. } => Vec::new(),
         // Intercepted by the input loop, which is where the requested screen is
         // checked — see the `SelectDisplay` branch there. The Apple extension
         // supplies the selectable list on either transport, and wlshare's outputs
