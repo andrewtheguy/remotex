@@ -126,9 +126,10 @@ pub fn connect_initial(conference: &[u8]) -> Result<Vec<u8>, TooLong> {
 
 /// The GCC Conference Create Response inside an MCS Connect-Response.
 ///
-/// Everything from the start of `userData` to the end of the TPDU, whatever length
-/// the field declares: [MS-RDPBCGR] 3.2.5.3.4 says the client MUST ignore that
-/// length, and the conference inside measures itself.
+/// Everything from the start of `userData` to the end of the Connect-Response,
+/// whatever length the field declares: [MS-RDPBCGR] 3.2.5.3.4 says the client MUST
+/// ignore that length, and the conference inside measures itself. The
+/// Connect-Response's own length is not that one, and still bounds it.
 pub fn connect_response(frame: &[u8]) -> Result<&[u8], Malformed> {
     const WHAT: &str = "an MCS Connect-Response";
     let payload = x224::data_payload(frame)?;
@@ -145,8 +146,10 @@ pub fn connect_response(frame: &[u8]) -> Result<&[u8], Malformed> {
     if tag != der::OCTET_STRING {
         return Err(fields.refuse("an ASN.1 tag", tag));
     }
-    let start = payload.len() - r.rest().len() - fields.rest().len();
-    Ok(&payload[start..])
+    if !r.is_empty() {
+        return Err(r.refuse("bytes past its own length, numbering", r.rest().len() as u64));
+    }
+    Ok(fields.rest())
 }
 
 /// An Erect Domain Request. The server does not answer it.
@@ -454,7 +457,8 @@ mod tests {
     }
 
     /// The `userData` length is not read: the conference is everything from the field's
-    /// contents to the end of the TPDU, whatever the field says its length is.
+    /// contents to the end of the Connect-Response, whatever the field says its length
+    /// is. The Connect-Response's own length is read, and bytes past it are refused.
     #[test]
     fn a_connect_response_user_data_length_is_ignored() {
         let mut body = Writer::new();
@@ -469,7 +473,13 @@ mod tests {
         let mut w = Writer::new();
         der::write_application_tag(&mut w, CONNECT_RESPONSE, body.len());
         w.bytes(&body);
-        assert_eq!(connect_response(&server(&w.finish())).unwrap(), &[1, 2, 3]);
+        let response = w.finish();
+        assert_eq!(connect_response(&server(&response)).unwrap(), &[1, 2, 3]);
+
+        let mut trailing = response;
+        trailing.extend_from_slice(&[9, 9]);
+        let err = connect_response(&server(&trailing)).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "bytes past its own length, numbering", value: 2, .. }), "{err}");
     }
 
     /// The answer a server that has decided to end the connection sends instead of

@@ -335,7 +335,8 @@ host redirects no sound to a client that did not name it — measured here as a
 session numbered an `rdpsnd` channel the host never spoke on, and recorded in
 FreeRDP as "rdpsnd requires rdpdr to be registered" — so the client walks the
 channel's opening handshake, announce, name, capabilities and an empty device
-list, and there is nothing after it: no I/O request could arrive.
+list, sent again when the host says the user is logged on, and there is nothing
+after it: no I/O request could arrive.
 
 A current Windows host carries the conversation on a dynamic channel,
 `AUDIO_PLAYBACK_DVC`, rather than the static one, and the client accepts it when
@@ -346,8 +347,9 @@ for high quality; the host sends a training probe, echoed back; then Wave2
 buffers, each confirmed by block number and each handed to the engine's
 `AudioSink` — from there to the same `AudioBridge` every other engine feeds, on the
 client's thread, never through the event queue. Each confirm goes out once its
-buffer is with the sink, its timestamp the host's plus the milliseconds that took,
-as MS-RDPEA 3.2.5.2.1.6 has it. Close keeps the format: a Windows host sends its
+buffer is with the sink, its timestamp the host's plus the milliseconds since the
+PDU came off the network — held through a rebuilt share included — as MS-RDPEA
+3.2.5.2.1.6 has it. Close keeps the format: a Windows host sends its
 format list once per channel and a Close after every stream.
 
 The measured part: a Windows host negotiates nothing until something plays. A

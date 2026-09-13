@@ -7,10 +7,12 @@
 //! channel the host never speaks on. So this is the channel's opening handshake and
 //! nothing after it. The server announces itself; the client confirms, gives its
 //! name, answers the capability exchange with the general set alone, and announces a
-//! device list with nothing in it — [MS-RDPEFS] 3.1.3 has the list follow the
-//! server's client ID confirm whether or not there are devices, and FreeRDP, which
-//! skips an empty one, is laxer than the specification there. With no devices no I/O
-//! request will ever arrive.
+//! device list with nothing in it. The list follows the server's client ID confirm,
+//! as [MS-RDPEFS] 3.1.3 orders, and again the User Logged On message this client's
+//! `RDPDR_USER_LOGGEDON_PDU` asks for, which 3.2.5.1.5 says MUST be answered with the
+//! devices suited to the logged-on user; 3.2.5.1.9 lets the list go any number of
+//! times. FreeRDP, which skips an empty one, is laxer than the specification there.
+//! With no devices no I/O request will ever arrive.
 //!
 //! [MS-RDPEFS] 2.2.2, ported against FreeRDP's `channels/rdpdr/client`.
 //!
@@ -115,11 +117,12 @@ impl Rdpdr {
                 let minor = r.u16_le()?;
                 self.client_id = r.u32_le()?;
                 self.version = Some((major, minor));
-                // The list follows the confirm even with nothing in it, and ends the
-                // handshake.
+                // The list follows the confirm even with nothing in it.
                 Ok(vec![device_list_announce()])
             }
-            USER_LOGGEDON => Ok(Vec::new()),
+            // The user is logged on, which is when the devices suited to them are
+            // owed: none, again.
+            USER_LOGGEDON => Ok(vec![device_list_announce()]),
             other => {
                 debug!("rdp: ignoring a device redirection PDU of type {other:#06x}");
                 Ok(Vec::new())
@@ -217,8 +220,8 @@ mod tests {
     }
 
     /// The capability request is answered with the general set alone, its I/O codes
-    /// the intersection with the server's; a client id confirm is answered with a
-    /// device list of nothing, which ends the handshake.
+    /// the intersection with the server's; a client id confirm and the logged-on
+    /// notice after it are each answered with a device list of nothing.
     #[test]
     fn capabilities_are_answered_with_the_general_set_alone() {
         let mut rdpdr = Rdpdr::new();
@@ -245,16 +248,17 @@ mod tests {
         let confirm = rdpdr.push(&server(CLIENTID_CONFIRM, &[1, 0, 0x0D, 0, 9, 0, 0, 0])).unwrap();
         assert_eq!(confirm, vec![vec![0x72, 0x44, 0x41, 0x44, 0, 0, 0, 0]], "a list of no devices");
         assert_eq!(rdpdr.client_id, 9);
+        let logged_on = rdpdr.push(&server(USER_LOGGEDON, &[])).unwrap();
+        assert_eq!(logged_on, confirm, "the same list of no devices");
     }
 
-    /// Another component, an unknown packet, and a logged-on notice each earn nothing;
-    /// a PDU cut short is an error.
+    /// Another component and an unknown packet each earn nothing; a PDU cut short is
+    /// an error.
     #[test]
     fn what_is_not_the_handshake_is_left_alone() {
         let mut rdpdr = Rdpdr::new();
         assert!(rdpdr.push(&[0x52, 0x50, 0x01, 0x00, 1, 2]).unwrap().is_empty(), "the printer component");
         assert!(rdpdr.push(&server(0x4952, &[0; 8])).unwrap().is_empty(), "an I/O request nobody asked for");
-        assert!(rdpdr.push(&server(USER_LOGGEDON, &[])).unwrap().is_empty());
         assert!(rdpdr.push(&server(SERVER_ANNOUNCE, &[1, 0])).is_err());
     }
 }

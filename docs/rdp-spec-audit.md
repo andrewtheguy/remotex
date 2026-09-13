@@ -144,7 +144,8 @@ not mentioned. Each line was checked field by field against the spec text.
   4.1.5 through 4.1.11; join order and channel-id checks; Disconnect Provider
   Ultimatum's straddled reason, and the confirms' four-bit result straddling the
   CHOICE byte as 4.1.7 annotates it; the Connect-Response `userData` length ignored
-  as 3.2.5.3.4 requires; PER lengths written in X.691's fourteen bits.
+  as 3.2.5.3.4 requires, within the Connect-Response's own length, past which bytes
+  are refused; PER lengths written in X.691's fourteen bits.
 - **GCC blocks:** `TS_UD_CS_CORE` at 234 bytes with every dependent-presence rule,
   `TS_UD_CS_SEC` naming the four methods of example 4.1.3, `TS_UD_CS_NET`, no
   extended blocks; the T.124 result read as its three-bit index; `TS_UD_SC_CORE`'s
@@ -206,12 +207,14 @@ not mentioned. Each line was checked field by field against the spec text.
   Request with `CodePage 0` and the terminator counted, Core Capability Response
   with the general set's fields and `SpecialTypeDeviceCap` for minor 0x0C and up,
   and an empty Client Device List Announce after Client ID Confirm (MS-RDPEFS
-  3.1.3).
+  3.1.3) and again after User Logged On, which `RDPDR_USER_LOGGEDON_PDU` asks for
+  (3.2.5.1.5, 3.2.5.1.9).
 - **Audio:** prolog, client formats as a subset of the server's, `wVersion 8`,
   Quality Mode only when both sides reach 6, Training Confirm echo, WaveInfo and
   Wave reassembly with the four carried bytes, Wave2, `wFormatNo` indexing the
   client's list, confirms on the receiving transport with `wTimeStamp` advanced by
-  the milliseconds from arrival to sending (3.2.5.2.1.6), `WAVEFORMATEX` layout.
+  the milliseconds from network arrival to sending, time held through a
+  reactivation included (3.2.5.2.1.6), `WAVEFORMATEX` layout.
 - **Graphics pipeline:** every server-to-client PDU's field order, ResetGraphics
   with 20-byte monitor definitions and the pad read past, CapsAdvertise with
   distinct versions and valid flags, FrameAcknowledge after compositing with a
