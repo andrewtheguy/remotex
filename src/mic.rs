@@ -203,6 +203,16 @@ impl Decoder {
     fn push(&mut self, packet: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
         let frames = self.opus.decode_float(packet, &mut self.decoded, false).context("decode opus")?;
         self.pending.extend_from_slice(&self.decoded[..frames]);
+        let groups = self.whole_groups();
+        if groups.is_err() {
+            // A group that failed and those behind it are not carried into the next packet.
+            self.pending.clear();
+        }
+        groups
+    }
+
+    /// Take every whole group out of `pending`, as PCM bytes.
+    fn whole_groups(&mut self) -> anyhow::Result<Vec<Vec<u8>>> {
         let mut groups = Vec::new();
         let mut taken = 0;
         while self.pending.len() - taken >= GROUP {

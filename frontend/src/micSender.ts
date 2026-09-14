@@ -39,6 +39,9 @@ export const MIC_FRAME_MICROSECONDS = 60_000;
 // bitrate — only a link that has stopped reaches it.
 const MAX_BUFFERED_BYTES = 16 * 1024;
 
+// Captured buffers allowed waiting in the encoder before new ones are dropped.
+const MAX_ENCODE_QUEUE = 4;
+
 // The encoder configuration for audio captured at `sampleRate`: always mono,
 // in Opus's voice mode.
 export function opusConfig(sampleRate: number): AudioEncoderConfig {
@@ -153,6 +156,7 @@ export async function startMicSender(
     output: (chunk) => {
       if (
         stopped ||
+        !streaming ||
         socket.readyState !== WebSocket.OPEN ||
         socket.bufferedAmount > MAX_BUFFERED_BYTES
       ) {
@@ -202,6 +206,11 @@ export async function startMicSender(
     }
     if (msg.type === "micOpen" || msg.type === "micClose") {
       streaming = msg.type === "micOpen";
+      // Packets still in the encoder belong to the recording that ended.
+      if (!streaming && encoder.state === "configured") {
+        encoder.reset();
+        configuredRate = 0;
+      }
       callbacks.onStreaming(streaming);
     }
   };
@@ -221,6 +230,10 @@ export async function startMicSender(
       }
       encoder.configure(opusConfig(data.sampleRate));
       configuredRate = data.sampleRate;
+    }
+    // An encoder falling behind the microphone drops audio rather than lagging it.
+    if (encoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
+      return;
     }
     const mono = monoOf(data);
     encoder.encode(mono);
