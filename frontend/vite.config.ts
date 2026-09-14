@@ -28,10 +28,10 @@ const backendUrl = /^\d+$/.test(backend)
 // Dev server proxies the API and the WebSocket to the Rust backend, so
 // `bun run dev` on :5173 talks to a locally running gateway.
 //
-// One build, and one consumer shape: `bun run build` runs once in CI and the
-// single `frontend/dist` it makes is what everything ships — the tarball's
-// `share/remotex/web` and the container image. Both serve it over HTTP from an
-// origin root, which is the only thing the output below has to suit.
+// One build, and one consumer: `bun run build` runs once and the single
+// `frontend/dist` it makes is compiled into the gateway binary (src/assets.rs),
+// which serves it over HTTP from an origin root — the only thing the output below
+// has to suit.
 export default defineConfig({
   // Relative asset URLs, and safe here rather than by luck: there is no
   // client-side router, so the document is only ever at `/` or at a one-segment

@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
@@ -11,8 +10,6 @@ use axum::{
 };
 use log::warn;
 use serde::{Deserialize, Serialize};
-use tower::service_fn;
-use tower_http::services::ServeDir;
 
 #[cfg(feature = "embedded-gateway")]
 use crate::auth::GatewayAuth;
@@ -200,12 +197,12 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   paths return 404 rather than the SPA, so API clients get an honest error.
 /// - `/ws` — the remote-desktop control and picture WebSocket.
 /// - `/ws/audio` — the dedicated remote-audio WebSocket.
-/// - fallback — the built SPA, served from `config.static_dir` on disk. Real
-///   files are served by [`ServeDir`]; any unknown path returns `index.html`
-///   with a 200 so client-side routes resolve (matching an SPA's expectations).
-///   The static shell stays public — it renders the login screen and holds no
+/// - fallback — the built SPA, compiled into the binary ([`crate::assets`]). A
+///   real file is served as itself; any unknown path returns `index.html` with a
+///   200 so client-side routes resolve (matching an SPA's expectations). The
+///   static shell stays public — it renders the login screen and holds no
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
-///   serves the same SPA from its launcher-provided web root.
+///   is the same binary and serves the same SPA.
 pub fn router(config: AppConfig) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions)
@@ -220,27 +217,6 @@ pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
 ) -> Router {
-    // Use `.fallback` (returns the fallback response as-is) rather than
-    // `.not_found_service` (which forces a 404 status), so SPA routes get 200.
-    let spa = {
-        let static_dir = config.static_dir.clone();
-        let index_path = static_dir.join("index.html");
-        let spa_index = service_fn(move |_req| {
-            let index_path = index_path.clone();
-            async move {
-                let response = match tokio::fs::read(&index_path).await {
-                    Ok(bytes) => {
-                        ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes)
-                            .into_response()
-                    }
-                    Err(_) => StatusCode::NOT_FOUND.into_response(),
-                };
-                Ok::<_, Infallible>(response)
-            }
-        });
-        ServeDir::new(&static_dir).fallback(spa_index)
-    };
-
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
     // its client was given a token before it made its first request — so the
@@ -310,7 +286,9 @@ pub(crate) fn router_with_sessions(
         );
 
     routed
-        .fallback_service(spa)
+        // `.fallback` returns the SPA's response as-is, where `.not_found_service`
+        // would force a 404 onto the index a client-side route is answered with.
+        .fallback(crate::assets::serve)
         // Added last and therefore **outermost**: it sees every request before
         // routing, because what it acts on is the `Host` a browser arrived under
         // rather than which handler would answer. Inert unless
@@ -863,10 +841,9 @@ mod tests {
         assert_eq!(&body[..], PNG);
     }
 
-    /// A router whose only interesting property is the dev hostname, over a
-    /// static dir that does not exist — every assertion below is about the
-    /// redirect, and a request that is *not* redirected only has to be shown not
-    /// to be one.
+    /// A router whose only interesting property is the dev hostname — every
+    /// assertion below is about the redirect, and a request that is *not*
+    /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
         router(router_config(dev_hostname))
     }
@@ -876,7 +853,6 @@ mod tests {
     fn router_config(dev_hostname: Option<&str>) -> AppConfig {
         AppConfig {
             listen: crate::config::ListenAddr::Tcp("127.0.0.1:52675".to_owned()),
-            static_dir: "frontend/dist".into(),
             // Never dialed: no test here starts a session.
             targets: vec![crate::config::TargetConfig {
                 name: "unreachable".to_owned(),
@@ -1251,7 +1227,6 @@ mod tests {
 
         let config = AppConfig {
             listen: crate::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
-            static_dir: "frontend/dist".into(),
             targets: vec![target],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(

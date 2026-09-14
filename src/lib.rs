@@ -5,6 +5,7 @@
 
 #[cfg(feature = "apple-hp-audio")]
 pub mod aac_eld;
+pub mod assets;
 pub mod audio;
 pub mod auth;
 pub mod camera;

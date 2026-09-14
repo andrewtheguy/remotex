@@ -13,14 +13,6 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 #[tokio::test]
 async fn instances_start_stop_and_share_the_master_port() {
     let root = common::ScratchDir::new("tui-instances");
-    // The SPA lives outside the instances root, because every directory under that
-    // root is an instance: a `web/` beside them is a valid instance name, so
-    // `Supervisor::rescan` would adopt it — bootstrapping a `remotex.toml` into the
-    // web root and listing the page itself in the TUI.
-    let spa = common::ScratchDir::new("tui-web");
-    let web = spa.path().join("web");
-    std::fs::create_dir_all(&web).unwrap();
-    std::fs::write(web.join("index.html"), "<!doctype html><title>spa</title>").unwrap();
 
     for name in ["one", "two"] {
         let dir = root.path().join(name);
@@ -32,13 +24,10 @@ async fn instances_start_stop_and_share_the_master_port() {
         .unwrap();
     }
 
-    let mut supervisor = Supervisor::open(
-        root.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_remotex").into(),
-        web,
-    )
-    .await
-    .unwrap();
+    let mut supervisor =
+        Supervisor::open(root.path().to_path_buf(), env!("CARGO_BIN_EXE_remotex").into())
+            .await
+            .unwrap();
     let router = SharedPort::bind(free_port(), supervisor.routes()).await.unwrap();
     supervisor.start("one").await.unwrap();
     supervisor.start("two").await.unwrap();

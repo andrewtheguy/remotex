@@ -75,7 +75,6 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 pub struct TuiOptions {
     pub port: u16,
     pub instances_dir: PathBuf,
-    pub web_root: PathBuf,
 }
 
 /// The platform's private application-data directory for local instances.
@@ -97,14 +96,8 @@ pub fn default_instances_dir() -> anyhow::Result<PathBuf> {
 
 /// Run the terminal UI and its shared-port router until `q` or a shutdown signal.
 pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        options.web_root.join("index.html").is_file(),
-        "the web root {} has no index.html; build the frontend or pass --web-root",
-        options.web_root.display()
-    );
     let binary = std::env::current_exe().context("cannot locate the remotex executable")?;
-    let mut supervisor =
-        Supervisor::open(options.instances_dir.clone(), binary, options.web_root.clone()).await?;
+    let mut supervisor = Supervisor::open(options.instances_dir.clone(), binary).await?;
     let router = SharedPort::bind(options.port, supervisor.routes()).await?;
 
     let mut terminal = TerminalSession::enter()?;
@@ -787,19 +780,16 @@ struct RunningGateway {
 pub struct Supervisor {
     root: PathBuf,
     binary: PathBuf,
-    web_root: PathBuf,
     instances: Vec<ManagedInstance>,
     routes: RouteTable,
 }
 
 impl Supervisor {
-    pub async fn open(root: PathBuf, binary: PathBuf, web_root: PathBuf) -> anyhow::Result<Self> {
+    pub async fn open(root: PathBuf, binary: PathBuf) -> anyhow::Result<Self> {
         create_private_dir(&root)?;
-        separate_trees(&root, &web_root)?;
         let mut manager = Self {
             root,
             binary,
-            web_root,
             instances: Vec::new(),
             routes: RouteTable::default(),
         };
@@ -907,7 +897,7 @@ impl Supervisor {
         self.instances[index].state = InstanceState::Starting;
         self.publish().await;
 
-        match spawn_gateway(&self.binary, &self.web_root, &dir).await {
+        match spawn_gateway(&self.binary, &dir).await {
             Ok(gateway) => {
                 self.instances[index].state = InstanceState::Running(gateway);
                 self.publish().await;
@@ -1082,7 +1072,7 @@ impl std::fmt::Display for ExitKind {
     }
 }
 
-async fn spawn_gateway(binary: &Path, web_root: &Path, dir: &Path) -> anyhow::Result<RunningGateway> {
+async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGateway> {
     let log_path = dir.join("gateway.log");
     let mut log = std::fs::OpenOptions::new()
         .create(true)
@@ -1095,8 +1085,6 @@ async fn spawn_gateway(binary: &Path, web_root: &Path, dir: &Path) -> anyhow::Re
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir)
-        .arg("--web-root")
-        .arg(web_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
@@ -1138,40 +1126,6 @@ fn valid_instance_name(name: &str) -> anyhow::Result<()> {
         "use lowercase ASCII letters, digits, and hyphens only"
     );
     anyhow::ensure!(!name.starts_with('-') && !name.ends_with('-'), "the name may not start or end with '-'");
-    Ok(())
-}
-
-/// Refuse an instances root and a web root that contain one another.
-///
-/// Neither nesting is a layout anyone means. A web root under the instances root
-/// is adopted as an instance — every immediate subdirectory is one — so `rescan`
-/// bootstraps a `remotex.toml` into the SPA and lists the page itself in the TUI.
-/// The other way round is worse than untidy: the workers serve their web root as
-/// a directory tree, so an instances root inside it publishes every instance's
-/// config, and those hold the targets' passwords.
-fn separate_trees(root: &Path, web_root: &Path) -> anyhow::Result<()> {
-    // Canonical, because `..` and symlinks decide containment here and a textual
-    // prefix test would miss both.
-    let root = root
-        .canonicalize()
-        .with_context(|| format!("cannot resolve {}", root.display()))?;
-    let web_root = web_root
-        .canonicalize()
-        .with_context(|| format!("cannot resolve {}", web_root.display()))?;
-    anyhow::ensure!(
-        !web_root.starts_with(&root),
-        "the web root {} is inside the instances directory {}, where every subdirectory \
-         is an instance; pass --web-root or --instances-dir a path outside the other",
-        web_root.display(),
-        root.display()
-    );
-    anyhow::ensure!(
-        !root.starts_with(&web_root),
-        "the instances directory {} is inside the web root {}, which is served as files; \
-         it holds the targets' passwords and must not be published",
-        root.display(),
-        web_root.display()
-    );
     Ok(())
 }
 
@@ -1520,38 +1474,6 @@ fn landing_page(port: u16, instances: &BTreeMap<String, PublishedInstance>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The SPA and the instances are two trees, and either one swallowing the
-    /// other is a mistake the supervisor should not start into.
-    #[test]
-    fn the_web_root_and_the_instances_root_may_not_contain_one_another() {
-        let base = tempfile::tempdir().unwrap();
-        let instances = base.path().join("instances");
-        let web = base.path().join("web");
-        for dir in [&instances, &web, &instances.join("one")] {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        separate_trees(&instances, &web).expect("siblings are the ordinary layout");
-
-        // A name that merely shares a prefix is a sibling, not a child.
-        let neighbour = base.path().join("instances-web");
-        std::fs::create_dir(&neighbour).unwrap();
-        separate_trees(&instances, &neighbour).unwrap();
-
-        let inside = instances.join("web");
-        std::fs::create_dir(&inside).unwrap();
-        let error = format!("{:#}", separate_trees(&instances, &inside).unwrap_err());
-        assert!(error.contains("every subdirectory"), "{error}");
-
-        // The dangerous direction: the configs would be served as files.
-        let published = web.join("instances");
-        std::fs::create_dir(&published).unwrap();
-        let error = format!("{:#}", separate_trees(&published, &web).unwrap_err());
-        assert!(error.contains("passwords"), "{error}");
-
-        // The same directory is both nestings at once, and neither is a layout.
-        assert!(separate_trees(&web, &web).is_err());
-    }
 
     /// The tick is not a reason to touch the terminal. A repaint that changes
     /// nothing still erases the display, and a selection made over this screen

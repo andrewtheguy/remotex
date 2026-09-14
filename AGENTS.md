@@ -12,9 +12,10 @@ documentation.
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
   `cargo test`.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
-- Before browser QA of a frontend change, run `bun run build` in `frontend/`
-  and say so. `remotex serve` reads the gitignored `frontend/dist` from disk.
-  For source-based iteration, use `REMOTEX_DEV_BACKEND=<port> bun run dev`.
+- Before browser QA of a frontend change, rebuild the gateway and say so:
+  `frontend/dist` is compiled into the binary, so a running `remotex serve` never
+  sees a newer bundle. For source-based iteration, use
+  `REMOTEX_DEV_BACKEND=<port> bun run dev`.
 - After Playwright changes, run `bun run typecheck` in `tests/playwright/`.
 - Put temporary files and test configuration under `tmp/`. Always run local
   Python through `uv` (GitHub Actions excluded).
@@ -30,8 +31,10 @@ documentation.
 - There is one client: the browser SPA, including when installed as a Chrome or
   Edge app. Do not add a native wrapper or a second implementation of a page
   feature.
-- There is one frontend build and one `frontend/dist`, served from the gateway's
-  origin root. Every URL the page uses goes through `frontend/src/gateway.ts`.
+- There is one frontend build and one `frontend/dist`, compiled into the gateway
+  binary (`src/assets.rs`) and served from its origin root. Do not add a web root,
+  a `static_dir`, or any run-time path the SPA is read from. Every URL the page
+  uses goes through `frontend/src/gateway.ts`.
 - The page requires a secure context plus `VideoDecoder` and `AudioDecoder` and
   refuses startup in `frontend/src/preflight.ts` when they are absent. Do not add
   fallback browser paths.

@@ -94,7 +94,8 @@ sudo installer -pkg remotex-macos-arm64.pkg -target /
 ```
 
 The macOS package is unsigned and not notarized, so fetch it with `curl` as
-shown rather than through a browser. It installs the gateway CLI and web client.
+shown rather than through a browser. It installs the gateway CLI, with the web
+client compiled into it.
 
 Windows x86-64, from PowerShell 7 (`pwsh`) run as administrator:
 
@@ -265,8 +266,8 @@ docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
 ## Development
 
 Install the frontend dependencies once, then use Cargo for local development.
-`cargo run` rebuilds the frontend when its sources change and serves the generated
-bundle with the gateway.
+`cargo run` rebuilds the frontend when its sources change and compiles the
+generated bundle into the gateway binary.
 
 ```sh
 bun install --cwd frontend
@@ -280,14 +281,14 @@ Open <http://localhost:52380>. Use `RUST_LOG=info` or `RUST_LOG=debug` for backe
 logs. Use `cargo build` when you only need to compile without starting the
 gateway.
 
-The gateway serves `frontend/dist` from disk, and `build.rs` declares only the
-frontend *sources* as Cargo inputs, so Cargo cannot notice that the bundle itself
-is missing. Build it explicitly whenever `frontend/dist` may be absent or stale
-without a source change — after deleting it, after `CI=true` builds, which skip
-the frontend step entirely, or when a prebuilt `target/` came from elsewhere:
+The built frontend is embedded in the binary at compile time (`src/assets.rs`),
+so `target/release/remotex` runs on its own with no `frontend/dist` beside it.
+`build.rs` runs `bun run build` before the crate compiles and fails the build if
+`frontend/dist/index.html` is still missing afterwards. With `CI=true` the bun
+step is skipped and the bundle has to be there already:
 
 ```sh
-bun run --cwd frontend build && cargo run -- serve -c remotex.toml
+bun run --cwd frontend build && CI=true cargo build --release
 ```
 
 The main directories are:
@@ -378,6 +379,6 @@ bash packaging/build-tarball.sh
 bash packaging/build-native-packages.sh
 ```
 
-Local Cargo builds automatically rebuild the frontend when its sources change.
-The native package builder consumes the tarball so every artifact contains the
-same gateway binary and built frontend.
+Local Cargo builds automatically rebuild the frontend when its sources change,
+and the binary carries it. The native package builder consumes the tarball so
+every artifact contains the same gateway binary.

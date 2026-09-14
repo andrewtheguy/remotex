@@ -33,6 +33,7 @@ ARG VERSION
 RUN test -n "${VERSION}" || { echo "the VERSION build-arg is required" >&2; exit 1; }
 
 COPY bin/remotex /opt/remotex/versions/${VERSION}/bin/remotex
+# The example config only: the web client is compiled into the binary.
 COPY share /opt/remotex/versions/${VERSION}/share
 
 # `current` is the stable path the entrypoint uses; canonicalizing it is how the

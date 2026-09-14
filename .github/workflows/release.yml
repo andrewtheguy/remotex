@@ -72,8 +72,10 @@ jobs:
             --generate-notes \
             ${{ steps.version.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
-  # The frontend bundle is platform-agnostic — build it once here and reuse it
-  # for every target artifact, rather than rebuilding on each matrix runner.
+  # The frontend bundle is platform-agnostic — build it once here and hand it to
+  # every matrix runner, rather than rebuilding on each. `cargo build` compiles it
+  # into the binary (src/assets.rs), and with CI=true build.rs does not run bun, so
+  # the download below is what puts frontend/dist in place first.
   frontend:
     needs: prepare
     runs-on: ubuntu-latest
@@ -214,7 +216,7 @@ jobs:
 
   # Container images, built only once the release is published so a pushed image
   # tag always corresponds to a real release. Nothing is compiled here: each
-  # arch's image takes the release layout and frontend from its tarball, then
+  # arch's image takes the release layout from its tarball, then
   # replaces the native binary with the feature-minimal container binary built
   # on the same pinned runner from the same commit. In particular, the image can
   # never expose the managed-instance gateway surface.
@@ -311,9 +313,6 @@ jobs:
               exit 1
               ;;
           esac
-          # The frontend has to be where the server looks for it by default.
-          docker run --rm --entrypoint sh "${GHCR_IMAGE}:${IMAGE_TAG}" \
-            -c 'test -f /opt/remotex/current/share/remotex/web/index.html'
 
       - name: Push image
         run: docker push "${GHCR_IMAGE}:${IMAGE_TAG}"

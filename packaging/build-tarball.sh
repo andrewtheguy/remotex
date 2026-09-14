@@ -8,7 +8,6 @@
 #   ├── VERSION
 #   ├── bin/remotex                # release binary
 #   ├── share/doc/remotex/remotex.example.toml # config template
-#   ├── share/remotex/web/                  # built frontend (index.html + assets)
 #   ├── install.sh
 #   └── uninstall.sh
 #
@@ -48,9 +47,12 @@ stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
 
-# The frontend bundle is platform-agnostic, so CI builds it once and reuses it
-# across every target. Set SKIP_FRONTEND_BUILD=1 to use an existing frontend/dist
-# instead of rebuilding (requires `bun run build` to have run first).
+# The frontend is compiled into the binary (src/assets.rs), so `cargo build` below
+# needs frontend/dist first. The bundle is platform-agnostic, so CI builds it once
+# and hands every target the same one: set SKIP_FRONTEND_BUILD=1 to use an
+# existing frontend/dist instead of rebuilding (requires `bun run build` to have
+# run first). A local build makes its own through build.rs either way; the step
+# here is for CI, where CI=true skips that.
 if [ "${SKIP_FRONTEND_BUILD:-0}" = 1 ]; then
   [ -d frontend/dist ] || { echo "SKIP_FRONTEND_BUILD=1 but frontend/dist is missing" >&2; exit 1; }
   echo ">> using prebuilt frontend/dist"
@@ -69,10 +71,9 @@ echo ">> building release binary"
 cargo build --release
 
 echo ">> assembling ${pkg}"
-mkdir -p "$root/bin" "$root/share/doc/remotex" "$root/share/remotex"
+mkdir -p "$root/bin" "$root/share/doc/remotex"
 cp target/release/remotex "$root/bin/remotex"
 cp remotex.example.toml "$root/share/doc/remotex/remotex.example.toml"
-cp -R frontend/dist "$root/share/remotex/web"
 cp packaging/install.sh packaging/uninstall.sh "$root/"
 chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"

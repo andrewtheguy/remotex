@@ -60,7 +60,7 @@ if ($next.Argument -ne 'InstallDirDlg') { throw "the welcome page's Next leads t
 Write-Host "   the wizard has its $($dialogs.Count) pages, finish page included, and skips the licence page"
 Write-Host ">> installing $Msi"
 Invoke-Msiexec @('/i', $Msi) 'install'
-foreach ($file in 'bin\remotex.exe', 'VERSION', 'share\doc\remotex\remotex.example.toml', 'share\remotex\web\index.html') {
+foreach ($file in 'bin\remotex.exe', 'VERSION', 'share\doc\remotex\remotex.example.toml') {
     if (-not (Test-Path (Join-Path $root $file))) { throw "the installed tree lacks $file" }
 }
 $version = (Get-Content (Join-Path $root 'VERSION') -Raw).Trim()

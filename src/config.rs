@@ -1249,8 +1249,6 @@ pub struct ServerSection {
     /// overriding one half from the command line and taking the other from the
     /// file is how a gateway ends up on an address nobody wrote down.
     pub listen: Option<String>,
-    /// Directory holding the built frontend; overrides [`default_static_dir`].
-    pub static_dir: Option<PathBuf>,
     /// Web-login credential: `username:bcrypt_hash`, generated with
     /// `remotex gen-passwd <username>`. Required — without a login everything
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
@@ -1339,8 +1337,7 @@ pub struct Logo {
 #[derive(Clone, Debug)]
 pub enum LogoSource {
     /// A file, read per request. As written in the config; a relative path
-    /// resolves against the process's working directory, the same as
-    /// `[server].static_dir`.
+    /// resolves against the process's working directory.
     File(PathBuf),
     /// The image itself, decoded once from the config's `data:` URL.
     ///
@@ -1499,13 +1496,6 @@ pub struct AppConfig {
     /// A served gateway uses the configured TCP or Unix address. A managed local
     /// worker uses the private Unix socket supplied by its control plane.
     pub listen: ListenAddr,
-    /// Directory holding the built frontend (index.html + assets), served from
-    /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
-    /// one is given it by its launcher (`--web-root`).
-    ///
-    /// Every gateway has one, because every client is the same SPA and loads it
-    /// from the gateway's own HTTP origin.
-    pub static_dir: PathBuf,
     /// Every target profile this process serves; the post-login picker selects
     /// one. Non-empty for [`Audience::Served`]; possibly empty for an embedded
     /// gateway, whose client shows "no targets are configured" instead.
@@ -1549,18 +1539,15 @@ impl ConfigFile {
         if audience == Audience::Embedded {
             // Refused rather than ignored, and named as a whole block rather than
             // key by key: every one of them is a decision the launcher has already
-            // made for this gateway — a private Unix socket under the instance, a
-            // web root it hands over on the command line
-            // (`serve-embedded --web-root`), and a token instead of a login. A key
-            // that is quietly overridden is worse than
-            // one that is refused: it reads as configuration and behaves as
+            // made for this gateway — a private Unix socket under the instance and
+            // a token instead of a login. A key that is quietly overridden is worse
+            // than one that is refused: it reads as configuration and behaves as
             // decoration.
             anyhow::ensure!(
                 config.server.is_none(),
                 "an embedded instance config may not have a [server] block: \
-                 the launcher decides where its gateway listens, where the client it \
-                 serves comes from, and how it authenticates. Only [branding] and \
-                 [[targets]] belong here"
+                 the launcher decides where its gateway listens and how it \
+                 authenticates. Only [branding] and [[targets]] belong here"
             );
         } else {
             anyhow::ensure!(
@@ -2071,10 +2058,9 @@ impl ConfigFile {
     }
 
     /// Resolve the runtime configuration of a managed local instance: its private
-    /// Unix socket, the SPA from the launcher's web root, and a freshly minted
-    /// token.
+    /// Unix socket and a freshly minted token.
     ///
-    /// Every one of those is an argument here rather than a default that
+    /// Both are arguments here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
     /// the way in. `[branding]` is the one thing such a config *may* say about the
     /// gateway itself: it names the instance, and multiple local instances are
@@ -2083,14 +2069,12 @@ impl ConfigFile {
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
-        web_root: PathBuf,
         socket_path: PathBuf,
     ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
             // Only the native control plane reaches this listener. It owns the TCP
             // origin a browser addresses and proxies both HTTP and WebSockets here.
             listen: ListenAddr::Unix(socket_path),
-            static_dir: web_root,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_ref())?,
@@ -2156,7 +2140,6 @@ impl ConfigFile {
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
         Ok(AppConfig {
             listen,
-            static_dir: server.static_dir.unwrap_or_else(default_static_dir),
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
@@ -2332,7 +2315,6 @@ pub fn installed_config_path() -> Option<PathBuf> {
 /// Paths belonging to one recognized installation.
 struct InstalledLayout {
     config: PathBuf,
-    static_dir: PathBuf,
 }
 
 /// Resolve the package-manager layout or the quick installer's relocatable
@@ -2346,13 +2328,12 @@ fn installed_layout() -> Option<InstalledLayout> {
 fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     let bin_dir = exe.parent()?;
 
-    // Native Linux packages own the executable and web bundle at their FHS
-    // paths. Configuration is administrator-created under /etc, not under
-    // /usr: package removal must not delete a file containing credentials.
+    // Native Linux packages own the executable at its FHS path. Configuration is
+    // administrator-created under /etc, not under /usr: package removal must not
+    // delete a file containing credentials.
     if bin_dir == Path::new("/usr/bin") {
         return Some(InstalledLayout {
             config: "/etc/remotex/remotex.toml".into(),
-            static_dir: "/usr/share/remotex/web".into(),
         });
     }
 
@@ -2361,23 +2342,19 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     if bin_dir == Path::new("/usr/local/bin") {
         return Some(InstalledLayout {
             config: "/usr/local/etc/remotex/remotex.toml".into(),
-            static_dir: "/usr/local/share/remotex/web".into(),
         });
     }
 
-    // The Windows package installs the same tree under %ProgramFiles%\remotex, and
-    // the tree is relocatable: <root>\bin\remotex.exe beside <root>\share\remotex\web.
-    // Its configuration lives outside that tree, under %ProgramData%, for the
-    // same reason as /etc above — replacing the unpacked release must not touch a
-    // file holding credentials.
+    // The Windows package installs the same tree under %ProgramFiles%\remotex:
+    // <root>\bin\remotex.exe, and the tree is relocatable. Its configuration lives
+    // outside that tree, under %ProgramData%, for the same reason as /etc above —
+    // replacing the unpacked release must not touch a file holding credentials.
     #[cfg(windows)]
     if bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin"))
-        && let Some(root) = bin_dir.parent()
         && let Some(program_data) = std::env::var_os("ProgramData")
     {
         return Some(InstalledLayout {
             config: PathBuf::from(program_data).join("remotex").join("remotex.toml"),
-            static_dir: root.join("share").join("remotex").join("web"),
         });
     }
 
@@ -2391,46 +2368,7 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     }
     Some(InstalledLayout {
         config: versions_dir.parent()?.join("etc/remotex.toml"),
-        static_dir: version_root.join("share/remotex/web"),
     })
-}
-
-/// Say so, before binding, when the web root is not one.
-///
-/// The SPA handler still answers per request, so this changes nothing about what
-/// happens — it changes whether anyone can tell *why*. A gateway with no page to
-/// serve is a browser window showing a 404, which does not say which of the two
-/// ends is wrong.
-///
-/// `hint` is the half that differs: a served gateway is told where to look in its
-/// config, and an embedded one is told the launcher supplied this path — the config
-/// it reads has no key for it and `[server]` is refused there.
-pub fn warn_if_no_web_root(static_dir: &Path, hint: &str) {
-    if !static_dir.is_dir() {
-        log::warn!(
-            "static dir {} not found — the web UI will 404 ({hint})",
-            static_dir.display()
-        );
-    } else if !static_dir.join("index.html").is_file() {
-        log::warn!(
-            "no index.html in static dir {} — the web UI will 404 ({hint})",
-            static_dir.display()
-        );
-    }
-}
-
-/// Default location of the built frontend.
-///
-/// Prefers the web bundle belonging to a recognized installation; falls back
-/// to `frontend/dist` relative to the working directory for `cargo run` in a
-/// checkout. Override with `static_dir` in the `[server]` block.
-pub fn default_static_dir() -> PathBuf {
-    if let Some(layout) = installed_layout()
-        && layout.static_dir.is_dir()
-    {
-        return layout.static_dir;
-    }
-    PathBuf::from("frontend/dist")
 }
 
 #[cfg(test)]
@@ -2441,11 +2379,9 @@ mod tests {
     fn installed_paths_follow_each_install_layout() {
         let linux = installed_layout_for_exe(Path::new("/usr/bin/remotex")).unwrap();
         assert_eq!(linux.config, Path::new("/etc/remotex/remotex.toml"));
-        assert_eq!(linux.static_dir, Path::new("/usr/share/remotex/web"));
 
         let mac = installed_layout_for_exe(Path::new("/usr/local/bin/remotex")).unwrap();
         assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
-        assert_eq!(mac.static_dir, Path::new("/usr/local/share/remotex/web"));
 
         // The quick installer's tree is a Unix one; on Windows any `bin` directory is
         // the package's tree, which is the arm below.
@@ -2456,10 +2392,6 @@ mod tests {
             ))
             .unwrap();
             assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
-            assert_eq!(
-                quick.static_dir,
-                Path::new("/srv/remotex/versions/0.0.144/share/remotex/web")
-            );
         }
 
         #[cfg(windows)]
@@ -2470,10 +2402,6 @@ mod tests {
             .unwrap();
             let program_data = PathBuf::from(std::env::var_os("ProgramData").unwrap());
             assert_eq!(installed.config, program_data.join("remotex").join("remotex.toml"));
-            assert_eq!(
-                installed.static_dir,
-                Path::new(r"C:\Program Files\remotex\share\remotex\web")
-            );
         }
 
         assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
@@ -2899,7 +2827,6 @@ mod tests {
             r#"
             [server]
             listen = "0.0.0.0:8080"
-            static_dir = "/srv/web"
             {}
 
             [[targets]]
@@ -2923,7 +2850,6 @@ mod tests {
         .unwrap();
         let config = config.resolve().unwrap();
         assert_eq!(config.listen.to_string(), "0.0.0.0:8080");
-        assert_eq!(config.static_dir, PathBuf::from("/srv/web"));
         // Every profile is carried over, in file order, for the picker.
         assert_eq!(config.targets.len(), 2);
         let win = &config.targets[0];

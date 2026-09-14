@@ -55,15 +55,10 @@ pub enum Commands {
         /// Directory whose immediate subdirectories are remotex instances
         #[arg(long)]
         instances_dir: Option<PathBuf>,
-
-        /// Built SPA to serve (default: the installed or checkout frontend/dist)
-        #[arg(long)]
-        web_root: Option<PathBuf>,
     },
 
-    /// Start one managed worker on <instance-dir>/gateway.sock, serving the SPA
-    /// from a caller-provided web root and printing its socket and launch token
-    /// on stdout for the TUI that started it.
+    /// Start one managed worker on <instance-dir>/gateway.sock, printing its
+    /// socket and launch token on stdout for the TUI that started it.
     ///
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
@@ -74,10 +69,6 @@ pub enum Commands {
         /// The managed instance directory. Nothing outside it is read.
         #[arg(long)]
         instance_dir: PathBuf,
-        /// Where the built SPA lives. Passed rather than derived: its installation
-        /// layout is not this process's to guess.
-        #[arg(long)]
-        web_root: PathBuf,
     },
 
     /// Check a config file and say what is wrong with it, without starting
@@ -157,50 +148,30 @@ mod tests {
         assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
     }
 
-    /// The managed worker takes the two paths only its supervisor knows — the
-    /// instance it owns and the SPA it selected — and nothing else: the socket
-    /// path and secret are the gateway's to decide.
+    /// The managed worker takes the one path only its supervisor knows — the
+    /// instance it owns — and nothing else: the socket path and secret are the
+    /// gateway's to decide, and the SPA is in the binary.
     #[cfg(all(feature = "embedded-gateway", unix))]
     #[test]
-    fn serve_embedded_takes_the_two_paths_the_launcher_knows() {
-        let cli = Cli::try_parse_from([
-            "remotex",
-            "serve-embedded",
-            "--instance-dir",
-            "/i",
-            "--web-root",
-            "/w",
-        ])
-        .unwrap();
-        let Commands::ServeEmbedded {
-            instance_dir,
-            web_root,
-        } = cli.command
-        else {
+    fn serve_embedded_takes_the_one_path_the_launcher_knows() {
+        let cli = Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i"])
+            .unwrap();
+        let Commands::ServeEmbedded { instance_dir } = cli.command else {
             panic!("expected the serve-embedded subcommand");
         };
         assert_eq!(instance_dir, std::path::Path::new("/i"));
-        assert_eq!(web_root, std::path::Path::new("/w"));
 
-        for missing in [
-            vec!["remotex", "serve-embedded"],
-            vec!["remotex", "serve-embedded", "--instance-dir", "/i"],
-            vec!["remotex", "serve-embedded", "--web-root", "/w"],
-        ] {
-            assert!(
-                Cli::try_parse_from(&missing).is_err(),
-                "neither path has a default: the launcher names both {missing:?}"
-            );
-        }
-        for rejected in ["--port", "--gateway", "--token"] {
+        assert!(
+            Cli::try_parse_from(["remotex", "serve-embedded"]).is_err(),
+            "the instance directory has no default: the launcher names it"
+        );
+        for rejected in ["--port", "--gateway", "--token", "--web-root"] {
             assert!(
                 Cli::try_parse_from([
                     "remotex",
                     "serve-embedded",
                     "--instance-dir",
                     "/i",
-                    "--web-root",
-                    "/w",
                     rejected,
                     "x"
                 ])
@@ -229,7 +200,7 @@ mod tests {
 
     #[cfg(feature = "embedded-gateway")]
     #[test]
-    fn tui_takes_its_port_instances_dir_and_web_root() {
+    fn tui_takes_its_port_and_instances_dir() {
         let cli = Cli::try_parse_from([
             "remotex",
             "tui",
@@ -237,21 +208,21 @@ mod tests {
             "52380",
             "--instances-dir",
             "/instances",
-            "--web-root",
-            "/web",
         ])
         .unwrap();
         let Commands::Tui {
             port,
             instances_dir,
-            web_root,
         } = cli.command
         else {
             panic!("expected the tui subcommand");
         };
         assert_eq!(port, 52380);
         assert_eq!(instances_dir.as_deref(), Some(std::path::Path::new("/instances")));
-        assert_eq!(web_root.as_deref(), Some(std::path::Path::new("/web")));
+        assert!(
+            Cli::try_parse_from(["remotex", "tui", "--web-root", "/web"]).is_err(),
+            "the SPA is in the binary; there is no web root to name"
+        );
     }
 
     #[cfg(feature = "embedded-gateway")]

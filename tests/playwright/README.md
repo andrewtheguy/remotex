@@ -125,8 +125,9 @@ REMOTEX_PLAYWRIGHT_VIDEO_TARGET='video' \
 bun run test:video
 ```
 
-That gateway serves the built SPA from `frontend/dist`, so run `bun run build` in
-`frontend/` first; a stale bundle is exactly what these specs cannot see.
+That gateway serves the SPA compiled into its binary, so rebuild the gateway
+after a frontend change and restart it; a stale bundle is exactly what these
+specs cannot see.
 
 The grid spec wants two targets on one such config: one with `render_grid_debug =
 true` and one without, so the overlay is checked for being absent as well as for

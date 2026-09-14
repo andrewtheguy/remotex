@@ -3,21 +3,21 @@
 # The same tree the tarball carries (packaging/build-tarball.sh), installed by Windows
 # Installer under %ProgramFiles%\remotex with bin on the machine PATH — and nothing else,
 # like the .deb, .rpm and .pkg: no service, no config. The gateway finds its config at
-# %ProgramData%\remotex\remotex.toml and the web client at ..\share\remotex\web beside the
-# exe (`installed_layout_for_exe` in src/config.rs):
+# %ProgramData%\remotex\remotex.toml (`installed_layout_for_exe` in src/config.rs); the web
+# client is compiled into the exe:
 #
 #   C:\Program Files\remotex\
 #   ├── VERSION
 #   ├── bin\remotex.exe
-#   ├── share\doc\remotex\remotex.example.toml
-#   └── share\remotex\web\
+#   └── share\doc\remotex\remotex.example.toml
 #
 # Runs on Windows under PowerShell 7 with cargo, the MSVC toolchain and WiX 5 on PATH
 # (`dotnet tool install --global wix --version 5.0.2`; the UI extension the wizard pages
 # come from is fetched below); the three C libraries arrive as
-# prebuilt static archives from their `-prebuilt` crates. SKIP_FRONTEND_BUILD=1 reuses an
-# existing frontend\dist, as the tarball script does. packaging/verify-windows-msi.ps1 then
-# installs the result, runs it and removes it.
+# prebuilt static archives from their `-prebuilt` crates. `cargo build` compiles frontend\dist
+# into the exe, so it has to exist first: SKIP_FRONTEND_BUILD=1 reuses an existing one, as the
+# tarball script does. packaging/verify-windows-msi.ps1 then installs the result, runs it and
+# removes it.
 #Requires -Version 7
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -77,10 +77,9 @@ $stage = Join-Path ([System.IO.Path]::GetTempPath()) "remotex-msi-$PID"
 try {
     Write-Host ">> assembling remotex-$version"
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-    New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex", "$stage\share\remotex" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex" | Out-Null
     Copy-Item $exe "$stage\bin\remotex.exe"
     Copy-Item 'remotex.example.toml' "$stage\share\doc\remotex\remotex.example.toml"
-    Copy-Item -Recurse 'frontend\dist' "$stage\share\remotex\web"
     # Bare LF and no BOM, like the tarball's VERSION.
     [System.IO.File]::WriteAllText("$stage\VERSION", "$version`n")
 
