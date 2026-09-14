@@ -78,6 +78,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         auth: common::test_auth(),
         branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
+        usage: None,
         targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,
@@ -120,7 +121,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = server::router(config);
+    let app = server::router(config, Default::default());
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

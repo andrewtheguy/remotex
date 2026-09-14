@@ -76,6 +76,7 @@ use crate::{
     protocol::{self, ClientMsg, ServerMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
+    usage::{Socket, UsageMeters},
     wire::Wire,
 };
 
@@ -450,6 +451,57 @@ where
     Ok(())
 }
 
+/// The bytes a data frame occupies on the wire, for [`crate::usage`]: its payload and
+/// its header, whose length field grows past 125 and 65535 bytes and whose four-byte
+/// mask only frames from the browser carry (RFC 6455 §5.2).
+///
+/// Data frames only. The heartbeat's pings and pongs and the closing handshake are
+/// the socket keeping itself alive, and counting them would give every timeframe a
+/// connection spends idle a record.
+fn data_frame_len(msg: &Message, masked: bool) -> Option<u64> {
+    let payload = match msg {
+        Message::Text(text) => text.len(),
+        Message::Binary(bytes) => bytes.len(),
+        Message::Ping(_) | Message::Pong(_) | Message::Close(_) => return None,
+    };
+    let length_field = match payload {
+        0..=125 => 0,
+        126..=65535 => 2,
+        _ => 8,
+    };
+    let mask = if masked { 4 } else { 0 };
+    Some((2 + length_field + mask + payload) as u64)
+}
+
+/// Split an attached socket into halves that count every data frame into `usage`, under
+/// the target `sessions` has selected when the frame moves.
+fn metered(
+    socket: WebSocket,
+    sessions: Arc<SessionManager>,
+    usage: Arc<UsageMeters>,
+    kind: Socket,
+) -> (
+    impl futures_util::Sink<Message, Error = axum::Error> + Send + Unpin,
+    impl futures_util::Stream<Item = Result<Message, axum::Error>> + Send + Unpin,
+) {
+    let (ws_tx, ws_rx) = socket.split();
+    let (outbound_sessions, outbound_usage) = (Arc::clone(&sessions), Arc::clone(&usage));
+    let ws_tx = ws_tx.with(move |msg: Message| {
+        if let Some(bytes) = data_frame_len(&msg, false) {
+            outbound_usage.counter(outbound_sessions.selected_target(), kind).sent(bytes);
+        }
+        std::future::ready(Ok::<_, axum::Error>(msg))
+    });
+    let ws_rx = ws_rx.inspect(move |frame| {
+        if let Ok(msg) = frame
+            && let Some(bytes) = data_frame_len(msg, true)
+        {
+            usage.counter(sessions.selected_target(), kind).received(bytes);
+        }
+    });
+    (ws_tx, ws_rx)
+}
+
 /// The query string every media socket takes: the claim token and nothing else.
 #[derive(Deserialize)]
 pub struct WsParams {
@@ -493,7 +545,15 @@ pub async fn handler(
         _ => None,
     };
     ws.on_upgrade(move |socket| {
-        session(socket, state.sessions, params.session, display, params.chroma, HEARTBEAT_TIMINGS)
+        session(
+            socket,
+            state.sessions,
+            params.session,
+            display,
+            params.chroma,
+            HEARTBEAT_TIMINGS,
+            Arc::clone(&state.usage.meters),
+        )
     })
 }
 
@@ -502,7 +562,9 @@ pub async fn audio_handler(
     Query(params): Query<WsParams>,
     State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| audio(socket, state.sessions, params.session, HEARTBEAT_TIMINGS))
+    ws.on_upgrade(move |socket| {
+        audio(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
+    })
 }
 
 /// The audio socket: one task, because there is nothing inbound to do.
@@ -515,6 +577,7 @@ async fn audio(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = token.and_then(|t| sessions.attach_audio(&t).ok());
     let Some(attachment) = attachment else {
@@ -530,7 +593,7 @@ async fn audio(
 
     info!("ws: an audio socket attached");
 
-    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Audio);
     let (audio_id, mut packets, mut evicted) =
         (attachment.id, attachment.packets, attachment.evicted);
     // The same encoder the session socket uses, so the two cannot disagree about a
@@ -628,7 +691,9 @@ pub async fn camera_handler(
     Query(params): Query<WsParams>,
     State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS))
+    ws.on_upgrade(move |socket| {
+        camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
+    })
 }
 
 /// The camera socket: the enable, the frames, and the remote's decisions.
@@ -644,6 +709,7 @@ async fn camera(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_camera(&token),
@@ -666,7 +732,7 @@ async fn camera(
 
     info!("ws: a camera socket attached");
 
-    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Camera);
     let (camera_id, mut signals, mut evicted) =
         (attachment.id, attachment.signals, attachment.evicted);
     let mut heartbeat = interval(heartbeat_timings.interval);
@@ -791,7 +857,9 @@ pub async fn mic_handler(
     Query(params): Query<WsParams>,
     State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS))
+    ws.on_upgrade(move |socket| {
+        mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
+    })
 }
 
 /// The microphone socket: the enable, the browser's Opus, and the remote's decisions.
@@ -804,6 +872,7 @@ async fn mic(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_mic(&token),
@@ -826,7 +895,7 @@ async fn mic(
 
     info!("ws: a microphone socket attached");
 
-    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Mic);
     let (mic_id, mut signals, mut evicted) = (attachment.id, attachment.signals, attachment.evicted);
     let mut heartbeat = interval(heartbeat_timings.interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -904,6 +973,7 @@ async fn session(
     display: Option<protocol::HostDisplay>,
     chroma: Chroma,
     heartbeat_timings: HeartbeatTimings,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = match token {
         Some(t) => sessions.attach(&t, display, chroma).await.ok(),
@@ -922,7 +992,7 @@ async fn session(
 
     info!("ws: client attached to the session slot");
 
-    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Session);
     let (attach_id, mut events) = (attachment.id, attachment.events);
 
     // How many times the client has said it lost its tile cache. The inbound half
@@ -1532,14 +1602,17 @@ mod tests {
             },
         ));
         let token = sessions.claim(false, None).unwrap();
+        let usage = Arc::new(UsageMeters::new(vec!["fake".to_owned()]));
+        let served_usage = Arc::clone(&usage);
         let app = Router::new().route(
             "/ws",
             any(move |ws: WebSocketUpgrade| {
                 let sessions = Arc::clone(&sessions);
                 let token = token.clone();
+                let usage = Arc::clone(&served_usage);
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, HEARTBEAT_TIMINGS)
+                        session(socket, sessions, Some(token), None, Chroma::Full, HEARTBEAT_TIMINGS, usage)
                     })
                 }
             }),
@@ -1572,6 +1645,35 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
+        // The connect status is written once the target is selected, so reading up to it
+        // is reading past the moment its bytes started counting under that target.
+        loop {
+            if let ClientFrame::Text(text) = client.next().await.unwrap().unwrap()
+                && text.as_str().contains(r#""type":"connected""#)
+            {
+                break;
+            }
+        }
+
+        // Counted as the wire carries them, computed here from RFC 6455 rather than by
+        // the function under test: a browser's short text frame is a two-byte header, a
+        // four-byte mask and its payload.
+        let records = usage.close_timeframe(0, 1);
+        let received: u64 = records.iter().map(|record| record.received_bytes).sum();
+        let texts = [
+            r#"{"type":"connect","target":"fake"}"#,
+            r#"{"type":"paintAck","sequence":1,"queuedMs":7,"drawMs":11}"#,
+            r#"{"type":"refresh"}"#,
+        ];
+        assert_eq!(received, texts.iter().map(|text| 6 + text.len() as u64).sum::<u64>());
+        assert!(
+            records.iter().any(|record| record.target.is_none() && record.sent_bytes > 0),
+            "the picker went out before any target was selected: {records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record.target.as_deref() == Some("fake") && record.sent_bytes > 0),
+            "the connect status went out under the target it selected: {records:?}"
+        );
 
         drop(client);
         server.abort();
@@ -1600,7 +1702,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, timings)
+                        session(socket, sessions, Some(token), None, Chroma::Full, timings, Arc::default())
                     })
                 }
             }),
@@ -1695,7 +1797,7 @@ mod tests {
                 let sessions = Arc::clone(&served);
                 let token = token.clone();
                 async move {
-                    ws.on_upgrade(move |socket| audio(socket, sessions, Some(token), timings))
+                    ws.on_upgrade(move |socket| audio(socket, sessions, Some(token), timings, Arc::default()))
                 }
             }),
         );

@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
             info!("remotex {}", env!("CARGO_PKG_VERSION"));
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
-            let config = file.resolve_with(listen.as_deref())?;
+            let config = file.resolve_with(listen.as_deref(), &remotex::config::state_dir(&path))?;
             serve(config).await?;
         }
         #[cfg(all(feature = "embedded-gateway", unix))]
@@ -141,7 +141,15 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
 }
 
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
-    let app = server::router(config.clone());
+    if let Some(recording) = &config.usage {
+        info!("recording websocket data usage to {}", recording.database.display());
+    }
+    let usage = remotex::usage::start(
+        config.usage.as_ref(),
+        config.targets.iter().map(|target| target.name.clone()).collect(),
+    )
+        .context("cannot record websocket data usage ([usage].database)")?;
+    let app = server::router(config.clone(), usage);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

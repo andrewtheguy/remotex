@@ -8,7 +8,7 @@
 # global-only: --config <path> if given, else the installed global config
 # (/etc/remotex/remotex.toml from a Linux package,
 # /usr/local/etc/remotex/remotex.toml from the macOS package, or
-# <prefix>/etc/remotex.toml from the quick installer). There are no per-user or
+# /opt/remotex/etc/remotex.toml in the container). There are no per-user or
 # working-directory files. The listen address below is the one setting that can
 # also come from outside this file (--listen, or REMOTEX_LISTEN); everything
 # else, credentials included, is configured here. Keep this file readable only
@@ -45,6 +45,32 @@
 #iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ
 #DwAEhQGAhKmMIQAAAABJRU5ErkJggg==
 #"""
+
+# Data usage of the browser's WebSockets (/ws, /ws/audio, /ws/camera, /ws/mic),
+# kept in an SQLite database and shown by the page's "Data usage" view, which
+# reads it when opened. Only the hop between the browser and this gateway is
+# counted: the bytes of every text and binary frame, WebSocket headers included,
+# written to the browser (sent) and read from it (received).
+#
+# Bytes are grouped by the target the session had selected when they moved, and
+# by "no target" while the browser sits on the picker. Every interval_secs one
+# record is added per target and socket that moved data in that timeframe — an
+# idle socket adds none — in one transaction. Each target's socket keeps its
+# newest max_records records. Best effort: the timeframe being counted when the
+# gateway stops is lost. Without a [usage] table, nothing is recorded.
+#
+# The database is usage.sqlite3 in the gateway's state directory unless database
+# names another file; a relative path is taken from that directory too. The state
+# directory is /var/lib/remotex for the Linux packages, /usr/local/var/remotex for
+# the macOS package, %ProgramData%\remotex on Windows, /opt/remotex/var in the
+# container, and the instance directory under `remotex tui`. A config named with --config keeps it in the config's own
+# directory. The directory must be writable: SQLite keeps its -wal and -shm files
+# beside the database.
+#
+#[usage]
+#database = "usage.sqlite3"
+#interval_secs = 60
+#max_records = 1440
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,

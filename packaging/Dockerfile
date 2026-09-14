@@ -27,8 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # The version is part of the on-disk layout, not decoration: remotex derives its
 # config path from its own location — <prefix>/versions/<version>/bin/remotex
-# resolves to <prefix>/etc/remotex.toml (see src/config.rs). Mirroring the real
-# install layout is what makes bare `serve` find /opt/remotex/etc/remotex.toml.
+# resolves to <prefix>/etc/remotex.toml and keeps state in <prefix>/var (see
+# src/config.rs). That layout is what makes bare `serve` find
+# /opt/remotex/etc/remotex.toml.
 ARG VERSION
 RUN test -n "${VERSION}" || { echo "the VERSION build-arg is required" >&2; exit 1; }
 
@@ -37,7 +38,7 @@ COPY bin/remotex /opt/remotex/versions/${VERSION}/bin/remotex
 COPY share /opt/remotex/versions/${VERSION}/share
 
 # `current` is the stable path the entrypoint uses; canonicalizing it is how the
-# binary finds the versioned root, exactly as with the tarball installer.
+# binary finds the versioned root.
 RUN ln -s "versions/${VERSION}" /opt/remotex/current && mkdir -p /opt/remotex/etc
 
 # A normal native release binary has the embedded gateway feature enabled. Fail

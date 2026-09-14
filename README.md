@@ -130,9 +130,8 @@ start the server in the foreground:
 remotex serve
 ```
 
-See [`docs/install.md`](docs/install.md) for package upgrades, removal, macOS
-config setup, and the quick-install fallback for Linux distributions that
-support neither `.deb` nor `.rpm`.
+See [`docs/install.md`](docs/install.md) for package upgrades, removal, and macOS
+config setup.
 
 ## Local instances
 
@@ -254,8 +253,9 @@ docker run -d --name remotex -p 52380:52380 \
 ```
 
 Set `[server].listen = "0.0.0.0:52380"` in the mounted config, or pass the same
-address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. Images are published for
-Linux amd64 and arm64 with `latest` and `v<version>` tags.
+address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[usage]` set, mount a volume
+at `/opt/remotex/var` too, or the records go with the container. Images are
+published for Linux amd64 and arm64 with `latest` and `v<version>` tags.
 
 Generate the required web-login credential with:
 
@@ -305,8 +305,8 @@ The main directories are:
 
 remotex reads one TOML file. Native packages default to
 `/etc/remotex/remotex.toml` on Linux and
-`/usr/local/etc/remotex/remotex.toml` on macOS. The quick-installer fallback
-uses `<prefix>/etc/remotex.toml`; a checkout should pass `--config`.
+`/usr/local/etc/remotex/remotex.toml` on macOS, and the container to
+`/opt/remotex/etc/remotex.toml`; a checkout should pass `--config`.
 
 ```toml
 [server]

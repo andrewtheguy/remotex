@@ -87,11 +87,12 @@ The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
 The config contains the web-login hash and target credentials. Create it as the
 account that will run `remotex serve`, mode `0600`. The package ships only the
 public [`remotex.example.toml`](../remotex.example.toml) from which to create it.
+The same account owns the state directory, where a `[usage]` database is kept.
 
 On Linux:
 
 ```sh
-sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex /var/lib/remotex
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
   /usr/share/doc/remotex/remotex.example.toml /etc/remotex/remotex.toml
 remotex gen-passwd admin
@@ -101,7 +102,7 @@ ${EDITOR:-vi} /etc/remotex/remotex.toml
 On macOS:
 
 ```sh
-sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /usr/local/etc/remotex
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /usr/local/etc/remotex /usr/local/var/remotex
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
   /usr/local/share/doc/remotex/remotex.example.toml \
   /usr/local/etc/remotex/remotex.toml
@@ -110,12 +111,13 @@ ${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml
 ```
 
 On Windows, from PowerShell 7 (`pwsh`) opened after the install, where only the account
-that runs the gateway may read the file:
+that runs the gateway may read the directory — the config and the usage database
+with its SQLite files inherit that:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:ProgramData\remotex" | Out-Null
+icacls "$env:ProgramData\remotex" /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F"
 Copy-Item "$env:ProgramFiles\remotex\share\doc\remotex\remotex.example.toml" "$env:ProgramData\remotex\remotex.toml"
-icacls "$env:ProgramData\remotex\remotex.toml" /inheritance:r /grant:r "${env:USERNAME}:F"
 remotex gen-passwd admin
 notepad "$env:ProgramData\remotex\remotex.toml"
 ```
@@ -186,33 +188,6 @@ On Windows, remove remotex from **Apps & features**.
 None of these touch the live config. Remove `/etc/remotex` on Linux,
 `/usr/local/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
 separately only when the credentials and configuration should be deleted too.
-
-## Unsupported-package fallback
-
-The quick installer is only for a Linux distribution that can run the release
-binary but supports neither `.deb` nor `.rpm`. It downloads the release tarball,
-verifies its SHA-256 digest, and installs under `/opt/remotex`:
-
-```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
-```
-
-`PREFIX` and `BINDIR` change its install locations:
-
-```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
-  PREFIX="$HOME/.local/opt/remotex" BINDIR="$HOME/.local/bin" bash
-```
-
-Pass a release tag as its first argument to install a specific version:
-
-```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
-  bash -s -- v0.0.144
-```
-
-The quick installer keeps its own versioned layout and rollback mechanism. It
-is not part of the native package upgrade or removal flow.
 
 ## Build release packages
 

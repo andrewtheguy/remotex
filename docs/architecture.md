@@ -1602,6 +1602,32 @@ then read per request, which is what lets an operator swap the image without a
 restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
 
+`[usage]` is top-level for the same reason and records the data usage of the
+browser's four WebSockets in an SQLite database, one row per target, socket and
+timeframe, so targets can be compared. The database is `usage.sqlite3` in the
+gateway's state directory unless `database` names another, and a relative
+`database` is taken from there as well: the installation's state directory beside
+its config and web paths when `serve` reads the installed config, the config
+file's own directory when `--config` names one, and the instance directory under
+`remotex tui`. Each socket counts the frames it writes and
+reads — text and binary frames with their headers, never the heartbeat's pings and
+pongs, so an idle connection records nothing — into the counters of the target
+the session has selected at that moment, which the session manager publishes in
+an atomic beside its state so a frame never takes the session lock; bytes moved
+on the picker count under no target. Every `interval_secs` the counters are
+taken, each target's socket that moved data gains a row, and the rows past
+`max_records` per target and socket are deleted oldest first,
+all in one transaction, so a crash leaves the timeframe written or not at all. It
+is best effort by design: the open timeframe dies with the process, and a failed
+write is retried with the next one. A file that is not this gateway's usage
+database — not SQLite, SQLite without its application id, or another schema
+version — is refused at startup before anything is written to it. The page reads
+the rows on demand: `GET /api/usage?within=<seconds>` behind the login, counted
+back from the gateway's clock the rows were stamped with rather than the browser's, which
+the picker's "Data usage" view calls when it opens and when asked to refresh, and
+`/api/config` says whether there is a database to offer. What an
+engine exchanges with its remote is a different link and is not counted.
+
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
 flow and protocol engines. Containerized dummy servers cover RDP and VNC.

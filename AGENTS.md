@@ -110,6 +110,14 @@ documentation.
   `/ws/camera` socket, is explicit per session, and is bound to both claim and
   engine. See [Camera frames](docs/architecture.md#camera-frames) and
   [The browser's camera over VNC with wlshare](docs/wlshare-camera.md).
+- Browser microphone redirection is MS-RDPEAI on RDP and wlshare's microphone
+  extension on generic VNC. The browser sends low-bitrate mono Opus, which the
+  gateway decodes to the 16-bit PCM the host records in. It uses its own `/ws/mic`
+  socket, follows the camera socket's rules — explicit per session, refused with
+  `4002` when the target carries no microphone, closed with the engine — and is
+  never put on the session socket. See
+  [Camera frames](docs/architecture.md#camera-frames) and
+  [The browser's microphone over VNC with wlshare](docs/wlshare-microphone.md).
 - Do not use Windows Server for ordinary camera QA; without the Remote Desktop
   Session Host role it does not offer the enumeration channel. Camera redirection
   is not required in the normal QA flow.

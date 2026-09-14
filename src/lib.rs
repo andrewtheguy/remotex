@@ -37,6 +37,7 @@ pub mod server;
 pub mod session;
 pub mod tape;
 pub mod tiles;
+pub mod usage;
 pub mod video;
 pub mod vnc;
 pub mod vnc_apple;

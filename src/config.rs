@@ -7,6 +7,7 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -18,6 +19,7 @@ use crate::audio::PcmFormat;
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::{HostDisplay, JpegSampling};
+use crate::usage::UsageConfig;
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
@@ -1483,8 +1485,37 @@ pub struct ConfigFile {
     /// that refusal is the whole of the migration.
     #[serde(default)]
     pub branding: Option<BrandingSection>,
+    /// The `[usage]` table: where the browser sockets' data usage is recorded. Absent
+    /// records nothing. Top-level for [`Self::branding`]'s reason — an embedded config
+    /// may set it too.
+    #[serde(default)]
+    pub usage: Option<UsageSection>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// The `[usage]` table as written. See [`crate::usage`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageSection {
+    /// The SQLite database the records are kept in. Absent is `usage.sqlite3` in the
+    /// gateway's state directory, and a relative path is taken from that directory too.
+    pub database: Option<PathBuf>,
+    /// Seconds in one timeframe, which is also how often it is written.
+    #[serde(default = "default_usage_interval_secs")]
+    pub interval_secs: u64,
+    /// Records kept per target and socket; the oldest go first.
+    #[serde(default = "default_usage_max_records")]
+    pub max_records: usize,
+}
+
+fn default_usage_interval_secs() -> u64 {
+    60
+}
+
+/// A day of one-minute timeframes, for a socket busy all day.
+fn default_usage_max_records() -> usize {
+    1440
 }
 
 /// Resolved runtime configuration: the web server plus every target profile it
@@ -1512,6 +1543,8 @@ pub struct AppConfig {
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
     pub dev_hostname: Option<String>,
+    /// `[usage]`, resolved. `None` records nothing.
+    pub usage: Option<UsageConfig>,
 }
 
 impl ConfigFile {
@@ -1562,6 +1595,20 @@ impl ConfigFile {
                 !config.targets.is_empty(),
                 "config has no [[targets]] — at least one target profile is required"
             );
+        }
+        if let Some(usage) = &config.usage {
+            anyhow::ensure!(
+                usage.database.as_ref().is_none_or(|database| !database.as_os_str().is_empty()),
+                "[usage].database is empty — name the SQLite file, or leave the key out for \
+                 usage.sqlite3 in the gateway's state directory"
+            );
+            anyhow::ensure!(usage.interval_secs >= 1, "[usage].interval_secs must be at least 1");
+            anyhow::ensure!(
+                std::time::Instant::now().checked_add(Duration::from_secs(usage.interval_secs)).is_some(),
+                "[usage].interval_secs {} is too long to schedule",
+                usage.interval_secs
+            );
+            anyhow::ensure!(usage.max_records >= 1, "[usage].max_records must be at least 1");
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -2065,11 +2112,14 @@ impl ConfigFile {
     /// the way in. `[branding]` is the one thing such a config *may* say about the
     /// gateway itself: it names the instance, and multiple local instances are
     /// easier to tell apart if they can be called different things.
+    ///
+    /// `state_dir` is the instance directory, where `[usage]` keeps its database.
     #[cfg(all(feature = "embedded-gateway", unix))]
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
         socket_path: PathBuf,
+        state_dir: &Path,
     ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
             // Only the native control plane reaches this listener. It owns the TCP
@@ -2079,6 +2129,18 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: None,
+            usage: Self::resolve_usage(self.usage, state_dir),
+        })
+    }
+
+    /// The `[usage]` table resolved, its database placed in `state_dir`. Its values were
+    /// checked by [`Self::parse_with`].
+    fn resolve_usage(section: Option<UsageSection>, state_dir: &Path) -> Option<UsageConfig> {
+        section.map(|section| UsageConfig {
+            // `join` keeps an absolute path as written.
+            database: state_dir.join(section.database.as_deref().unwrap_or(Path::new(USAGE_DATABASE))),
+            interval: Duration::from_secs(section.interval_secs),
+            max_records: section.max_records,
         })
     }
 
@@ -2110,8 +2172,11 @@ impl ConfigFile {
 
     /// Resolve the runtime configuration with the file's own listen address.
     /// See [`Self::resolve_with`] for the overriding form.
+    ///
+    /// For checking a config that may not be in any file: the state directory is the
+    /// working directory, and nothing is opened in it.
     pub fn resolve(self) -> anyhow::Result<AppConfig> {
-        self.resolve_with(None)
+        self.resolve_with(None, Path::new(""))
     }
 
     /// Resolve the runtime configuration: validate the web-login credential and
@@ -2120,7 +2185,9 @@ impl ConfigFile {
     /// `listen` is `--listen`/`REMOTEX_LISTEN` when either was given, and it wins
     /// over `[server].listen`. That is the whole precedence: one address, from the
     /// command line if it is there and from the file otherwise.
-    pub fn resolve_with(self, listen: Option<&str>) -> anyhow::Result<AppConfig> {
+    ///
+    /// `state_dir` is where `[usage]` keeps its database; see [`state_dir`].
+    pub fn resolve_with(self, listen: Option<&str>, state_dir: &Path) -> anyhow::Result<AppConfig> {
         let server = self.server.unwrap_or_default();
         let listen = match (listen, server.listen.as_deref()) {
             (Some(value), _) => parse_listen(value).context("invalid --listen address")?,
@@ -2152,6 +2219,7 @@ impl ConfigFile {
                 .map(dev_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
+            usage: Self::resolve_usage(self.usage, state_dir),
         })
     }
 }
@@ -2315,10 +2383,26 @@ pub fn installed_config_path() -> Option<PathBuf> {
 /// Paths belonging to one recognized installation.
 struct InstalledLayout {
     config: PathBuf,
+    /// Where the gateway writes what it keeps between runs, outside the replaced files.
+    state_dir: PathBuf,
 }
 
-/// Resolve the package-manager layout or the quick installer's relocatable
-/// layout from the executable that is actually running.
+/// The `[usage]` database's file name when the config names none.
+const USAGE_DATABASE: &str = "usage.sqlite3";
+
+/// The state directory of a gateway serving the config at `config`: the installation's
+/// when that is the installed config, and otherwise the config file's own directory.
+pub fn state_dir(config: &Path) -> PathBuf {
+    if let Some(layout) = installed_layout()
+        && layout.config == config
+    {
+        return layout.state_dir;
+    }
+    config.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+}
+
+/// Resolve the package-manager layout or the container image's versioned layout
+/// from the executable that is actually running.
 fn installed_layout() -> Option<InstalledLayout> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
@@ -2334,6 +2418,7 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     if bin_dir == Path::new("/usr/bin") {
         return Some(InstalledLayout {
             config: "/etc/remotex/remotex.toml".into(),
+            state_dir: "/var/lib/remotex".into(),
         });
     }
 
@@ -2342,6 +2427,7 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     if bin_dir == Path::new("/usr/local/bin") {
         return Some(InstalledLayout {
             config: "/usr/local/etc/remotex/remotex.toml".into(),
+            state_dir: "/usr/local/var/remotex".into(),
         });
     }
 
@@ -2353,21 +2439,25 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     if bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin"))
         && let Some(program_data) = std::env::var_os("ProgramData")
     {
+        let program_data = PathBuf::from(program_data).join("remotex");
         return Some(InstalledLayout {
-            config: PathBuf::from(program_data).join("remotex").join("remotex.toml"),
+            config: program_data.join("remotex.toml"),
+            state_dir: program_data,
         });
     }
 
-    // The fallback quick installer is relocatable. Its launcher resolves to
-    // <prefix>/versions/<version>/bin/remotex, while configuration deliberately
-    // lives outside the version being replaced.
+    // The container image (packaging/Dockerfile) puts the binary at
+    // <prefix>/versions/<version>/bin/remotex, while configuration and state live
+    // outside the version, under /opt/remotex/etc and /opt/remotex/var.
     let version_root = bin_dir.parent()?;
     let versions_dir = version_root.parent()?;
     if versions_dir.file_name()? != "versions" {
         return None;
     }
+    let prefix = versions_dir.parent()?;
     Some(InstalledLayout {
-        config: versions_dir.parent()?.join("etc/remotex.toml"),
+        config: prefix.join("etc/remotex.toml"),
+        state_dir: prefix.join("var"),
     })
 }
 
@@ -2379,11 +2469,13 @@ mod tests {
     fn installed_paths_follow_each_install_layout() {
         let linux = installed_layout_for_exe(Path::new("/usr/bin/remotex")).unwrap();
         assert_eq!(linux.config, Path::new("/etc/remotex/remotex.toml"));
+        assert_eq!(linux.state_dir, Path::new("/var/lib/remotex"));
 
         let mac = installed_layout_for_exe(Path::new("/usr/local/bin/remotex")).unwrap();
         assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
+        assert_eq!(mac.state_dir, Path::new("/usr/local/var/remotex"));
 
-        // The quick installer's tree is a Unix one; on Windows any `bin` directory is
+        // The container's tree is a Unix one; on Windows any `bin` directory is
         // the package's tree, which is the arm below.
         #[cfg(unix)]
         {
@@ -2392,6 +2484,7 @@ mod tests {
             ))
             .unwrap();
             assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
+            assert_eq!(quick.state_dir, Path::new("/srv/remotex/var"));
         }
 
         #[cfg(windows)]
@@ -2402,9 +2495,16 @@ mod tests {
             .unwrap();
             let program_data = PathBuf::from(std::env::var_os("ProgramData").unwrap());
             assert_eq!(installed.config, program_data.join("remotex").join("remotex.toml"));
+            assert_eq!(installed.state_dir, program_data.join("remotex"));
         }
 
         assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
+    }
+
+    #[test]
+    fn a_config_outside_an_installation_keeps_state_in_its_own_directory() {
+        assert_eq!(state_dir(Path::new("/home/me/remotex/uat.toml")), Path::new("/home/me/remotex"));
+        assert_eq!(state_dir(Path::new("uat.toml")), Path::new(""), "the working directory");
     }
 
     /// The moving encode a plan resolves, for the tests that are about that and not
@@ -2605,26 +2705,26 @@ mod tests {
     fn the_command_line_listen_address_wins_and_is_checked() {
         let file = ConfigFile::parse(&with_server(r#"listen = "127.0.0.1:1""#)).unwrap();
         assert_eq!(
-            file.clone().resolve_with(Some("0.0.0.0:8080")).unwrap().listen.to_string(),
+            file.clone().resolve_with(Some("0.0.0.0:8080"), Path::new("")).unwrap().listen.to_string(),
             "0.0.0.0:8080"
         );
         // Absent, the file still decides.
         assert_eq!(
-            file.clone().resolve_with(None).unwrap().listen.to_string(),
+            file.clone().resolve_with(None, Path::new("")).unwrap().listen.to_string(),
             "127.0.0.1:1"
         );
         // And a config with no address at all falls back to the default.
         assert_eq!(
             ConfigFile::parse(&minimal())
                 .unwrap()
-                .resolve_with(None)
+                .resolve_with(None, Path::new(""))
                 .unwrap()
                 .listen
                 .to_string(),
             DEFAULT_LISTEN
         );
 
-        let err = file.resolve_with(Some("0.0.0.0")).unwrap_err();
+        let err = file.resolve_with(Some("0.0.0.0"), Path::new("")).unwrap_err();
         assert!(
             format!("{err:#}").contains("--listen"),
             "a bad override must name where it came from: {err:#}"
@@ -2739,6 +2839,53 @@ mod tests {
         let toml = format!("branding = \"remotex\"\n{}", minimal());
         let err = ConfigFile::parse(&toml).expect_err("a string is not a [branding] table");
         assert!(format!("{err:#}").contains("branding"), "{err:#}");
+    }
+
+    /// No table records nothing; a table names its database and may leave the rest to the
+    /// defaults.
+    #[test]
+    fn usage_is_recorded_in_the_state_directory_unless_a_database_is_named() {
+        let state = Path::new("/var/lib/remotex");
+        let usage = |table: &str| {
+            let toml = format!("{table}\n{}", minimal());
+            ConfigFile::parse(&toml).unwrap().resolve_with(None, state).unwrap().usage
+        };
+        assert_eq!(usage(""), None, "no [usage] records nothing");
+        assert_eq!(
+            usage("[usage]"),
+            Some(UsageConfig {
+                database: PathBuf::from("/var/lib/remotex/usage.sqlite3"),
+                interval: Duration::from_secs(60),
+                max_records: 1440,
+            })
+        );
+        assert_eq!(
+            usage("[usage]\ndatabase = \"/srv/usage/remotex.sqlite3\"").unwrap().database,
+            Path::new("/srv/usage/remotex.sqlite3")
+        );
+        assert_eq!(
+            usage("[usage]\ndatabase = \"usage/uat.sqlite3\"").unwrap().database,
+            Path::new("/var/lib/remotex/usage/uat.sqlite3"),
+            "a relative database is taken from the state directory"
+        );
+
+        let usage = usage("[usage]\ninterval_secs = 300\nmax_records = 12").unwrap();
+        assert_eq!((usage.interval, usage.max_records), (Duration::from_secs(300), 12));
+    }
+
+    #[test]
+    fn a_usage_table_that_records_nothing_is_refused() {
+        for (bad, says) in [
+            ("database = \"\"", "[usage].database"),
+            ("database = \"u.sqlite3\"\ninterval_secs = 0", "[usage].interval_secs"),
+            ("interval_secs = 18446744073709551615", "too long to schedule"),
+            ("database = \"u.sqlite3\"\nmax_records = 0", "[usage].max_records"),
+            ("database = \"u.sqlite3\"\nmax_count = 3", "max_count"),
+        ] {
+            let toml = format!("[usage]\n{bad}\n{}", minimal());
+            let err = ConfigFile::parse(&toml).expect_err(bad);
+            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
     }
 
     /// The logo's content type is decided at resolution, so a file no browser
