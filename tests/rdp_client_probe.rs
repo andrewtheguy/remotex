@@ -933,6 +933,8 @@ async fn stream_camera() {
         eye.stops.load(Ordering::Relaxed) > stops_while_playing
     })
     .await;
+    // Whether the app is gone, or something of it is still up, is for eyes too.
+    dump(&session, "camera-closed");
     println!(
         "  camera stream: {eye:?}; samples queued {}, dropped {}, skipped {}, after the end {}",
         fed[0], fed[1], fed[2], fed[3]
