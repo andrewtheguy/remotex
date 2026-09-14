@@ -50,9 +50,6 @@
           <Directory Id="ShareDocDir" Name="doc">
             <Directory Id="DocDir" Name="remotex" />
           </Directory>
-          <Directory Id="ShareRemotexDir" Name="remotex">
-            <Directory Id="WebDir" Name="web" />
-          </Directory>
         </Directory>
       </Directory>
     </StandardDirectory>
@@ -69,8 +66,7 @@
       <Component Directory="INSTALLFOLDER">
         <File Source="$(var.Stage)\VERSION" />
       </Component>
-      <!-- The web client, every file of it: bun's output names carry content hashes. -->
-      <Files Directory="WebDir" Include="$(var.Stage)\share\remotex\web\**" />
+      <!-- No web directory: the web client is compiled into remotex.exe. -->
     </ComponentGroup>
 
     <Feature Id="Main">

@@ -71,9 +71,6 @@
 # A browser cannot use this form. The client addresses its gateway by URL — one
 # HTTP origin and two WebSockets — so whatever terminates the proxy is what it
 # talks to.
-# Directory of the built frontend. Defaults to share/remotex/web in the active
-# version (or frontend/dist in a checkout). Only set to override.
-#static_dir = ""
 # Web login (required): username:bcrypt_hash guarding the whole surface.
 # Generate with:  remotex gen-passwd <username>
 site_passwd = ""

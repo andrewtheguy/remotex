@@ -31,8 +31,8 @@ foreach ($dir in 'LIBVPX_PREBUILT_DIR', 'LIBOPUS_PREBUILT_DIR') {
     if ($v) { Write-Host "   $dir=$v" }
 }
 
-# The frontend first, on its own: build.rs runs `bun run build` too, but only from an installed
-# node_modules, and the workspace arrives without one.
+# Build the platform-independent frontend once, then have each Cargo invocation stage that
+# bundle in its own OUT_DIR. The workspace arrives without node_modules.
 Invoke-Step 'frontend' {
     Push-Location frontend
     try {
@@ -40,10 +40,10 @@ Invoke-Step 'frontend' {
         if ($LASTEXITCODE -eq 0) { & bun run build }
     } finally { Pop-Location }
 }
+$env:REMOTEX_PREBUILT_FRONTEND = 'frontend\dist'
 Invoke-Step 'clippy' { & cargo clippy --all-targets -- -D warnings }
 Invoke-Step 'cargo test' { & cargo test }
 Invoke-Step 'release installer' {
-    $env:SKIP_FRONTEND_BUILD = '1'
     & pwsh -NoProfile -File packaging\build-windows-msi.ps1
 }
 Invoke-Step 'the installer installs' {

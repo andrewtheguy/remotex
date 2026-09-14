@@ -72,8 +72,10 @@ jobs:
             --generate-notes \
             ${{ steps.version.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
-  # The frontend bundle is platform-agnostic — build it once here and reuse it
-  # for every target artifact, rather than rebuilding on each matrix runner.
+  # The frontend bundle is platform-agnostic — build it once here and hand it to
+  # every matrix runner, rather than rebuilding on each. Each runner tells
+  # build.rs to stage the downloaded frontend/dist in Cargo's private OUT_DIR,
+  # from which src/assets.rs compiles it into the binary.
   frontend:
     needs: prepare
     runs-on: ubuntu-latest
@@ -94,6 +96,8 @@ jobs:
 
   build:
     needs: [prepare, frontend]
+    env:
+      REMOTEX_PREBUILT_FRONTEND: frontend/dist
     strategy:
       fail-fast: false
       matrix:
@@ -141,7 +145,7 @@ jobs:
       - name: Build release artifacts (${{ matrix.target-note }})
         if: runner.os != 'Windows'
         run: |
-          SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
+          bash packaging/build-tarball.sh
           bash packaging/build-native-packages.sh
 
       - name: Install WiX
@@ -152,8 +156,6 @@ jobs:
       - name: Build the release installer (${{ matrix.target-note }})
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          SKIP_FRONTEND_BUILD: "1"
         run: pwsh -NoProfile -File packaging/build-windows-msi.ps1
 
       - name: Install, run and remove the installer (${{ matrix.target-note }})
@@ -214,7 +216,7 @@ jobs:
 
   # Container images, built only once the release is published so a pushed image
   # tag always corresponds to a real release. Nothing is compiled here: each
-  # arch's image takes the release layout and frontend from its tarball, then
+  # arch's image takes the release layout from its tarball, then
   # replaces the native binary with the feature-minimal container binary built
   # on the same pinned runner from the same commit. In particular, the image can
   # never expose the managed-instance gateway surface.
@@ -311,9 +313,6 @@ jobs:
               exit 1
               ;;
           esac
-          # The frontend has to be where the server looks for it by default.
-          docker run --rm --entrypoint sh "${GHCR_IMAGE}:${IMAGE_TAG}" \
-            -c 'test -f /opt/remotex/current/share/remotex/web/index.html'
 
       - name: Push image
         run: docker push "${GHCR_IMAGE}:${IMAGE_TAG}"

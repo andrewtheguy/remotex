@@ -1,12 +1,10 @@
 //! A managed local gateway: one browser instance, one Unix socket, one token.
 //!
-//! `remotex serve-embedded --instance-dir <dir> --web-root <dir>` is not a
-//! deployment. It is started by an instance manager, serves that browser instance
-//! alone, and dies with its parent. Everything that makes a `serve` gateway
-//! configurable is therefore decided here instead: the socket is
-//! `<instance-dir>/gateway.sock`, the SPA comes from a caller-provided web root,
-//! and there is no login to offer — see
-//! [`crate::config::Audience::Embedded`].
+//! `remotex serve-embedded --instance-dir <dir>` is not a deployment. It is
+//! started by an instance manager, serves that browser instance alone, and dies
+//! with its parent. Everything that makes a `serve` gateway configurable is
+//! therefore decided here instead: the socket is `<instance-dir>/gateway.sock`
+//! and there is no login to offer — see [`crate::config::Audience::Embedded`].
 //!
 //! The SPA it serves is the same browser client as `remotex serve`. The token below
 //! stands in for the login: the master listener seeds it with an `HttpOnly` response
@@ -133,19 +131,11 @@ impl Instance {
 /// The order is the contract: bind, *then* announce. A socket announced before it is
 /// bound is a promise this process might not keep, and the parent would race a
 /// connection against a listener that does not exist yet.
-pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()> {
+pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
     let socket_path = instance.socket_path();
-    let config = file.resolve_embedded(token.clone(), web_root, socket_path.clone())?;
-
-    // Before the bind so a missing page is reported before the handshake. This path
-    // is supplied by the launcher rather than the config, so name that half in the
-    // error.
-    crate::config::warn_if_no_web_root(
-        &config.static_dir,
-        "the launcher-provided --web-root is incomplete",
-    );
+    let config = file.resolve_embedded(token.clone(), socket_path.clone())?;
 
     let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {
         anyhow::bail!("the embedded gateway must listen on its private Unix socket");
@@ -169,7 +159,6 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
 
     info!("embedded gateway listening on unix:{}", socket_path.display());
     info!("config: {}", instance.config_path().display());
-    info!("web root: {}", config.static_dir.display());
     info!("{} target(s) available in the picker:", config.targets.len());
     for target in &config.targets {
         info!(
@@ -312,13 +301,9 @@ pub async fn parent_closed() {
 pub fn check(text: &str) -> anyhow::Result<()> {
     let file = ConfigFile::parse_with(text, Audience::Embedded)?;
     // Parsing alone would accept a file the gateway then refuses to start on, so
-    // the check goes all the way through resolution. The web root is the
-    // launcher's to name and is not in the file, so any path is sufficient here.
-    file.resolve_embedded(
-        EmbeddedToken::generate(),
-        PathBuf::new(),
-        PathBuf::from("gateway.sock"),
-    )
+    // the check goes all the way through resolution. The socket is the launcher's
+    // to place and is not in the file, so any path is sufficient here.
+    file.resolve_embedded(EmbeddedToken::generate(), PathBuf::from("gateway.sock"))
         .map(|_| ())
 }
 
@@ -386,15 +371,10 @@ mod tests {
         )
         .unwrap();
         let resolved = file
-            .resolve_embedded(
-                EmbeddedToken::generate(),
-                PathBuf::from("/w"),
-                PathBuf::from("/i/gateway.sock"),
-            )
+            .resolve_embedded(EmbeddedToken::generate(), PathBuf::from("/i/gateway.sock"))
             .unwrap();
         assert_eq!(resolved.branding.text, "work laptop");
         assert_eq!(resolved.branding.logo.unwrap().mime, "image/png");
-        assert_eq!(resolved.static_dir, PathBuf::from("/w"), "the launcher's web root");
 
         // There is exactly one place to write it, so the block it used to live in
         // refuses it — `deny_unknown_fields` and nothing else, which is the whole of

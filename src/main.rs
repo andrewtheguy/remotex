@@ -36,18 +36,13 @@ async fn main() -> anyhow::Result<()> {
             serve(config).await?;
         }
         #[cfg(all(feature = "embedded-gateway", unix))]
-        Commands::Tui {
-            port,
-            instances_dir,
-            web_root,
-        } => {
+        Commands::Tui { port, instances_dir } => {
             anyhow::ensure!(port != 0, "--port must be between 1 and 65535");
             remotex::embedded::run_tui(remotex::embedded::TuiOptions {
                 port,
                 instances_dir: instances_dir
                     .map(Ok)
                     .unwrap_or_else(remotex::embedded::default_instances_dir)?,
-                web_root: web_root.unwrap_or_else(remotex::config::default_static_dir),
             })
             .await?;
         }
@@ -60,11 +55,8 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
         #[cfg(all(feature = "embedded-gateway", unix))]
-        Commands::ServeEmbedded {
-            instance_dir,
-            web_root,
-        } => {
-            serve_embedded(&remotex::embedded::Instance::new(instance_dir), web_root).await?;
+        Commands::ServeEmbedded { instance_dir } => {
+            serve_embedded(&remotex::embedded::Instance::new(instance_dir)).await?;
         }
         Commands::CheckConfig {
             config,
@@ -129,10 +121,7 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
 #[cfg(all(feature = "embedded-gateway", unix))]
-async fn serve_embedded(
-    instance: &remotex::embedded::Instance,
-    web_root: std::path::PathBuf,
-) -> anyhow::Result<()> {
+async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
     tokio::select! {
         // In order, and the order is the point. `serve` reads and checks the config
         // before its first `await`, so it is ready with a refusal on the very first
@@ -142,7 +131,7 @@ async fn serve_embedded(
         // that wins decides whether a refused config is reported at all: `[server]`
         // in the file, and one run in five exits 0 with nothing on stderr.
         biased;
-        result = remotex::embedded::serve(instance, web_root) => result?,
+        result = remotex::embedded::serve(instance) => result?,
         _ = remotex::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }
@@ -152,13 +141,6 @@ async fn serve_embedded(
 }
 
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
-    // Surface a misconfigured static path before we start listening. The SPA
-    // handler still 404s per-request; this just makes the cause obvious.
-    remotex::config::warn_if_no_web_root(
-        &config.static_dir,
-        "set static_dir under [server]",
-    );
-
     let app = server::router(config.clone());
 
     // One server per listener over the same router — `Router` is `Clone`, and the

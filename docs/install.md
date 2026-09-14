@@ -4,9 +4,9 @@
 
 Install a native package from the
 [latest release](https://github.com/andrewtheguy/remotex/releases/latest). The
-package manager owns the gateway executable, frontend bundle, and config
-example. It does not own the live config, so an upgrade or removal never
-replaces or deletes credentials.
+package manager owns the gateway executable and the config example; the web
+client is compiled into the executable. It does not own the live config, so an
+upgrade or removal never replaces or deletes credentials.
 
 ### Debian and Ubuntu (`.deb`)
 
@@ -22,7 +22,6 @@ Use the `arm64` filename on an arm64 host. The package installs:
 
 ```text
 /usr/bin/remotex
-/usr/share/remotex/web/
 /usr/share/doc/remotex/remotex.example.toml
 ```
 
@@ -53,13 +52,12 @@ It installs:
 
 ```text
 /usr/local/bin/remotex
-/usr/local/share/remotex/web/
 /usr/local/share/doc/remotex/remotex.example.toml
 ```
 
 The package is unsigned and not notarized. A browser download is quarantined,
 so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
-contains the gateway CLI and web client.
+contains the gateway CLI, with the web client inside it.
 
 ### Windows (`.msi`)
 
@@ -77,7 +75,6 @@ on the machine `PATH`, so `remotex` works in a shell opened after the install:
 
 ```text
 C:\Program Files\remotex\bin\remotex.exe
-C:\Program Files\remotex\share\remotex\web\
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 ```
 
@@ -180,7 +177,7 @@ steps against the current layout:
 
 ```sh
 sudo rm -f /usr/local/bin/remotex
-sudo rm -rf /usr/local/share/remotex /usr/local/share/doc/remotex
+sudo rm -rf /usr/local/share/doc/remotex
 sudo pkgutil --forget com.andrewtheguy.remotex.gateway
 ```
 

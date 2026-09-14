@@ -1,10 +1,15 @@
 # Packaging
 
 Native packages are the release install contract. Linux ships both `.deb` and
-`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout and
-frontend input for container builds and the payload used by the
-unsupported-platform quick installer. Containers replace its native binary with
-a build that excludes the `embedded-gateway` default feature.
+`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout input
+for container builds and the payload used by the unsupported-platform quick
+installer. Containers replace its native binary with a build that excludes the
+`embedded-gateway` default feature.
+
+Every artifact carries one gateway binary with the web client compiled into it
+(`src/assets.rs` embeds the bundle from Cargo's private output directory at build
+time). No package installs a web directory, and there is nothing to point the
+gateway at.
 
 ## Native layouts
 
@@ -12,7 +17,6 @@ Linux package managers own the conventional FHS paths directly:
 
 ```text
 /usr/bin/remotex
-/usr/share/remotex/web/
 /usr/share/doc/remotex/remotex.example.toml
 ```
 
@@ -20,7 +24,6 @@ The macOS package owns the corresponding local prefix:
 
 ```text
 /usr/local/bin/remotex
-/usr/local/share/remotex/web/
 /usr/local/share/doc/remotex/remotex.example.toml
 ```
 
@@ -29,7 +32,6 @@ directory and puts its `bin` on the machine `PATH`:
 
 ```text
 C:\Program Files\remotex\bin\remotex.exe
-C:\Program Files\remotex\share\remotex\web\
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 ```
 
@@ -142,8 +144,8 @@ builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
 arm64, and the MSI for Windows x86-64. The release is published only after the packages and common artifacts
 succeed.
 
-Container images take their layout and frontend from the Linux tarballs, then
-replace `bin/remotex` with the separately built container gateway. The build
+Container images take their layout from the Linux tarballs, then replace
+`bin/remotex` with the separately built container gateway. The build
 script, release smoke test, and Dockerfile all reject a binary that exposes
 `tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
 build plumbing and fallback payloads even though native packages are what users

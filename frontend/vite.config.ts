@@ -28,10 +28,12 @@ const backendUrl = /^\d+$/.test(backend)
 // Dev server proxies the API and the WebSocket to the Rust backend, so
 // `bun run dev` on :5173 talks to a locally running gateway.
 //
-// One build, and one consumer shape: `bun run build` runs once in CI and the
-// single `frontend/dist` it makes is what everything ships — the tarball's
-// `share/remotex/web` and the container image. Both serve it over HTTP from an
-// origin root, which is the only thing the output below has to suit.
+// A standalone `bun run build` writes frontend/dist. Cargo instead sets this to
+// its private OUT_DIR, because generated files are outputs rather than inputs to
+// build.rs. Either way the one bundle is compiled into the gateway binary
+// (src/assets.rs), which serves it over HTTP from an origin root.
+const outDir = process.env.REMOTEX_FRONTEND_OUT_DIR ?? "dist";
+
 export default defineConfig({
   // Relative asset URLs, and safe here rather than by luck: there is no
   // client-side router, so the document is only ever at `/` or at a one-segment
@@ -40,6 +42,12 @@ export default defineConfig({
   base: "./",
   define: {
     __APP_VERSION__: JSON.stringify(version),
+  },
+  build: {
+    outDir,
+    // Vite does not empty an output outside the project root by default. Cargo's
+    // directory must not retain obsolete content-hashed assets between builds.
+    emptyOutDir: true,
   },
   plugins: [react()],
   server: {

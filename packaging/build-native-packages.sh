@@ -12,8 +12,10 @@
 # Native packages use package-manager-owned paths directly. There is no
 # versioned tree, active-version symlink, rollback copy, or package wrapper:
 #
-#   Linux: /usr/bin/remotex, /usr/share/remotex/web
-#   macOS: /usr/local/bin/remotex, /usr/local/share/remotex/web
+#   Linux: /usr/bin/remotex
+#   macOS: /usr/local/bin/remotex
+#
+# The web client is inside that one binary; the packages carry no web directory.
 #
 # The live config is not package-owned. It contains credentials, so the operator
 # creates it from the packaged example with the ownership of the account that
@@ -68,7 +70,6 @@ tar -xzf "$tarball" -C "$stage/release" --strip-components=1
 release="$stage/release"
 
 [ -x "$release/bin/remotex" ] || { echo "release tarball has no executable gateway" >&2; exit 1; }
-[ -f "$release/share/remotex/web/index.html" ] || { echo "release tarball has no frontend index" >&2; exit 1; }
 [ "$(cat "$release/VERSION")" = "$version" ] || { echo "release tarball VERSION does not match Cargo.toml" >&2; exit 1; }
 
 reported="$("$release/bin/remotex" --version)"
@@ -80,10 +81,9 @@ reported="$("$release/bin/remotex" --version)"
 if [ "$os" = macos ]; then
   command -v pkgbuild >/dev/null 2>&1 || { echo "pkgbuild is required" >&2; exit 1; }
   payload="$stage/payload"
-  mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex" "$payload/usr/local/share/remotex"
+  mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex"
   cp "$release/bin/remotex" "$payload/usr/local/bin/remotex"
   cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/local/share/doc/remotex/remotex.example.toml"
-  cp -R "$release/share/remotex/web" "$payload/usr/local/share/remotex/web"
   output="dist/remotex-macos-${asset_arch}.pkg"
   pkgbuild \
     --root "$payload" \
@@ -94,7 +94,6 @@ if [ "$os" = macos ]; then
 
   pkgutil --payload-files "$output" > "$stage/pkg-contents"
   grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
-  grep -qx './usr/local/share/remotex/web/index.html' "$stage/pkg-contents"
   grep -qx './usr/local/share/doc/remotex/remotex.example.toml' "$stage/pkg-contents"
   echo ">> wrote $output"
   exit 0
@@ -104,10 +103,9 @@ command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required" >&2; exit 1
 command -v rpmbuild >/dev/null 2>&1 || { echo "rpmbuild is required" >&2; exit 1; }
 
 payload="$stage/payload"
-mkdir -p "$payload/usr/bin" "$payload/usr/share/doc/remotex" "$payload/usr/share/remotex"
+mkdir -p "$payload/usr/bin" "$payload/usr/share/doc/remotex"
 cp "$release/bin/remotex" "$payload/usr/bin/remotex"
 cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/share/doc/remotex/remotex.example.toml"
-cp -R "$release/share/remotex/web" "$payload/usr/share/remotex/web"
 
 # '-' separates the Debian revision, so a SemVer prerelease has to become '~',
 # which sorts before everything: '0.0.1-rc.1-1' would otherwise sort *after* the
@@ -138,7 +136,6 @@ dpkg-deb --build --root-owner-group "$deb_root" "$deb_output"
 [ "$(dpkg-deb --field "$deb_output" Package)" = remotex ]
 dpkg-deb --contents "$deb_output" > "$stage/deb-contents"
 grep -q '\./usr/bin/remotex$' "$stage/deb-contents"
-grep -q '\./usr/share/remotex/web/index.html$' "$stage/deb-contents"
 grep -q '\./usr/share/doc/remotex/remotex.example.toml$' "$stage/deb-contents"
 echo ">> wrote $deb_output"
 
@@ -175,7 +172,6 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo
   echo '%files'
   echo '/usr/bin/remotex'
-  echo '/usr/share/remotex'
   echo '/usr/share/doc/remotex/remotex.example.toml'
 } > "$spec"
 
@@ -190,6 +186,5 @@ rpm_output="dist/remotex-linux-${asset_arch}.rpm"
 cp "$rpm_built" "$rpm_output"
 rpm -qpl "$rpm_output" > "$stage/rpm-contents"
 grep -qx '/usr/bin/remotex' "$stage/rpm-contents"
-grep -qx '/usr/share/remotex/web/index.html' "$stage/rpm-contents"
 grep -qx '/usr/share/doc/remotex/remotex.example.toml' "$stage/rpm-contents"
 echo ">> wrote $rpm_output"

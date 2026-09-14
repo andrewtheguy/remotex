@@ -8,7 +8,6 @@
 #   ├── VERSION
 #   ├── bin/remotex                # release binary
 #   ├── share/doc/remotex/remotex.example.toml # config template
-#   ├── share/remotex/web/                  # built frontend (index.html + assets)
 #   ├── install.sh
 #   └── uninstall.sh
 #
@@ -48,18 +47,10 @@ stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
 
-# The frontend bundle is platform-agnostic, so CI builds it once and reuses it
-# across every target. Set SKIP_FRONTEND_BUILD=1 to use an existing frontend/dist
-# instead of rebuilding (requires `bun run build` to have run first).
-if [ "${SKIP_FRONTEND_BUILD:-0}" = 1 ]; then
-  [ -d frontend/dist ] || { echo "SKIP_FRONTEND_BUILD=1 but frontend/dist is missing" >&2; exit 1; }
-  echo ">> using prebuilt frontend/dist"
-else
-  echo ">> building frontend"
-  ( cd frontend && bun run build )
-fi
-
 echo ">> building release binary"
+# build.rs creates the frontend in Cargo's OUT_DIR. Release CI sets
+# REMOTEX_PREBUILT_FRONTEND=frontend/dist so each target stages the one
+# platform-independent bundle built by the frontend job instead of running Bun.
 # No env coaxing here for either prebuilt C library. Remote audio links
 # `opus-prebuilt` and VP9 links `libvpx-prebuilt` — each pulls a prebuilt static
 # archive rather than compiling vendored C, so neither needs cmake, pkg-config, a
@@ -69,10 +60,9 @@ echo ">> building release binary"
 cargo build --release
 
 echo ">> assembling ${pkg}"
-mkdir -p "$root/bin" "$root/share/doc/remotex" "$root/share/remotex"
+mkdir -p "$root/bin" "$root/share/doc/remotex"
 cp target/release/remotex "$root/bin/remotex"
 cp remotex.example.toml "$root/share/doc/remotex/remotex.example.toml"
-cp -R frontend/dist "$root/share/remotex/web"
 cp packaging/install.sh packaging/uninstall.sh "$root/"
 chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"

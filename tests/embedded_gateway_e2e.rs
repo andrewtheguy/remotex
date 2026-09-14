@@ -1,6 +1,6 @@
 //! End-to-end tests of a managed embedded gateway: the handshake it prints,
 //! the token it takes in a cookie, the login it refuses, the SPA it serves out of
-//! the provided web root, and the way it dies with whatever started it.
+//! its own binary, and the way it dies with whatever started it.
 //!
 //! The real binary, spawned as a child the way a manager spawns it — because every
 //! one of those is a property of the *process*, not of a router built in-process.
@@ -41,13 +41,10 @@ impl Embedded {
     fn start(config: &str) -> Self {
         let dir = common::ScratchDir::new("embedded");
         dir.write("remotex.toml", config);
-        let web = web_root(&dir);
         let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
             .arg("serve-embedded")
             .arg("--instance-dir")
             .arg(dir.path())
-            .arg("--web-root")
-            .arg(&web)
             // stdin is the liveness pipe: closing our end is how the parent tells this
             // process to stop, so it must be a pipe and not this test's terminal.
             .stdin(Stdio::piped())
@@ -151,16 +148,6 @@ async fn unix_http_request(path: &std::path::Path, request: &str) -> (u16, Strin
         .expect("response has a status code");
     let (head, body) = text.split_once("\r\n\r\n").expect("response has a body");
     (status, head.to_owned(), body.to_owned())
-}
-
-/// A stand-in for the built frontend directory: an `index.html` and one asset
-/// beside it, which is the whole shape the gateway cares about.
-fn web_root(dir: &common::ScratchDir) -> std::path::PathBuf {
-    let web = dir.path().join("web");
-    std::fs::create_dir_all(web.join("assets")).unwrap();
-    std::fs::write(web.join("index.html"), "<!doctype html><title>spa</title>").unwrap();
-    std::fs::write(web.join("assets").join("index-abc123.js"), "export {}\n").unwrap();
-    web
 }
 
 /// One VNC target pointing at the discard port. Never dialed.
@@ -303,25 +290,33 @@ async fn the_socket_upgrade_takes_the_cookie() {
     assert_eq!(response.status(), 101);
 }
 
-/// This gateway serves the same SPA as `remotex serve`: real files as
-/// themselves, unknown paths as the index, and — the part worth pinning — the
-/// document itself without any credential, because the browser has to be able to
-/// load the page before its own scripts can present the cookie to anything.
+/// This gateway serves the same SPA as `remotex serve`, out of the same binary:
+/// real files as themselves, unknown paths as the index, and — the part worth
+/// pinning — the document itself without any credential, because the browser has
+/// to be able to load the page before its own scripts can present the cookie to
+/// anything.
 #[tokio::test]
 async fn the_spa_is_served_and_unknown_api_paths_are_not() {
     let embedded = Embedded::start(one_target());
 
     let (status, body) = embedded.get("/", None).await;
     assert_eq!(status, 200, "the document is public");
-    assert!(body.contains("<title>spa</title>"), "{body}");
+    assert!(body.contains("<div id=\"root\">"), "{body}");
 
-    let (status, body) = embedded.get_authorized("/assets/index-abc123.js").await;
-    assert_eq!((status, body.as_str()), (200, "export {}\n"));
+    // The document names its script by content hash; that file is in the binary too.
+    let script = body
+        .split("src=\"./")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the document references its script");
+    let (status, body) = embedded.get_authorized(&format!("/{script}")).await;
+    assert_eq!(status, 200, "{script}");
+    assert!(!body.contains("<div id=\"root\">"), "a script, not the index: {script}");
 
     // A client-side route is the index with a 200, not a 404.
     let (status, body) = embedded.get_authorized("/login").await;
     assert_eq!(status, 200);
-    assert!(body.contains("<title>spa</title>"), "{body}");
+    assert!(body.contains("<div id=\"root\">"), "{body}");
 
     // But an unknown API path is still an honest 404 rather than an SPA shell.
     let (status, body) = embedded.get_authorized("/api/nope").await;
@@ -373,13 +368,10 @@ fn a_server_block_refuses_the_start() {
         &format!("[server]\nlisten = \"0.0.0.0:1234\"\n{}", one_target()),
     );
 
-    let web = web_root(&dir);
     let output = Command::new(env!("CARGO_BIN_EXE_remotex"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir.path())
-        .arg("--web-root")
-        .arg(&web)
         .stdin(Stdio::null())
         .output()
         .unwrap();
