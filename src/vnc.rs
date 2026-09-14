@@ -2580,7 +2580,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     // [`send_microphone_decided`] gives.
                     ServerMicrophone::Start(format) => {
                         let mut device = link.device.lock().unwrap();
-                        if device.start() {
+                        // The bridge sizes its resampler from the rate, so a format it
+                        // cannot produce is refused before anything opens.
+                        if let Err(e) = format.producible() {
+                            warn!("vnc: the desktop records the microphone in a format the gateway cannot produce: {e:#}");
+                        } else if device.start() {
                             info!(
                                 "vnc: an application on the desktop is recording the microphone ({} ch, {} Hz)",
                                 format.channels, format.sample_rate

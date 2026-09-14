@@ -34,6 +34,25 @@ pub struct MicFormat {
     pub sample_rate: u32,
 }
 
+/// The fastest rate a host may record in. Real ones stop at 48 kHz; the bound keeps a
+/// malformed format from sizing the resampler's buffers.
+const MAX_RATE: u32 = 192_000;
+
+impl MicFormat {
+    /// Whether the bridge can produce this format: mono or stereo, at a rate no faster
+    /// than [`MAX_RATE`] that is a whole number of frames in 20 ms.
+    pub fn producible(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(matches!(self.channels, 1 | 2), "{} channels", self.channels);
+        anyhow::ensure!(
+            (1..=MAX_RATE).contains(&self.sample_rate)
+                && (GROUP as u64 * u64::from(self.sample_rate)).is_multiple_of(u64::from(DECODE_RATE)),
+            "{} Hz is not a rate of at most {MAX_RATE} Hz with a whole number of frames in 20 ms",
+            self.sample_rate
+        );
+        Ok(())
+    }
+}
+
 /// A decision of the remote's, on its way to the mic socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MicSignal {
@@ -232,14 +251,8 @@ struct Decoder {
 
 impl Decoder {
     fn new(format: MicFormat) -> anyhow::Result<Self> {
-        anyhow::ensure!(matches!(format.channels, 1 | 2), "{} channels", format.channels);
-        let out = GROUP as u64 * u64::from(format.sample_rate);
-        anyhow::ensure!(
-            out.is_multiple_of(u64::from(DECODE_RATE)),
-            "{} Hz is not a whole number of frames in 20 ms",
-            format.sample_rate
-        );
-        let group_out = (out / u64::from(DECODE_RATE)) as usize;
+        format.producible()?;
+        let group_out = GROUP * format.sample_rate as usize / DECODE_RATE as usize;
         let resampler = (format.sample_rate != DECODE_RATE)
             .then(|| {
                 Fft::<f32>::new(DECODE_RATE as usize, format.sample_rate as usize, GROUP, 1, FixedSync::Input)
@@ -497,5 +510,9 @@ mod tests {
     fn a_format_the_engine_would_never_open_is_refused() {
         assert!(Decoder::new(MicFormat { channels: 1, sample_rate: 11_025 }).is_err());
         assert!(Decoder::new(MicFormat { channels: 3, sample_rate: 16_000 }).is_err());
+        // Divides 20 ms evenly, but would size the resampler in gigabytes.
+        assert!(Decoder::new(MicFormat { channels: 1, sample_rate: 4_294_967_250 }).is_err());
+        assert!(Decoder::new(MicFormat { channels: 1, sample_rate: 0 }).is_err());
+        assert!(MicFormat { channels: 2, sample_rate: 192_000 }.producible().is_ok());
     }
 }
