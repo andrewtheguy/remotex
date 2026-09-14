@@ -268,6 +268,11 @@ impl Session {
         };
         let feeds = Feeds { camera: camera_queues, microphone: mic_queue };
 
+        // The session's last word has its place kept from the start. Waiting for room
+        // at the end would wait on a caller that may be doing nothing but dropping the
+        // session — which waits on this thread in turn — so a queue left full when the
+        // caller stopped reading would lose the one event that says how it ended.
+        let last_word = events.clone().try_reserve_owned().expect("a new queue has room");
         let spawned = std::thread::Builder::new().name("rdp".into()).spawn({
             let framebuffer = Arc::clone(&framebuffer);
             let events = events.clone();
@@ -279,8 +284,7 @@ impl Session {
                 let runtime = match runtime {
                     Ok(runtime) => runtime,
                     Err(e) => {
-                        // Nothing has been sent yet, so there is room for this.
-                        let _ = events.try_send(Event::Ended(Err(Error::new(format!(
+                        last_word.send(Event::Ended(Err(Error::new(format!(
                             "could not start the RDP session runtime: {e}"
                         )))));
                         return;
@@ -294,29 +298,14 @@ impl Session {
                 }));
                 let result = outcome
                     .unwrap_or_else(|_| Err(Error::new("the RDP session thread panicked")));
-                // The last word waits for room like any other event, but not past the
-                // point where a caller dropping this session has given up on the
-                // thread: staying longer would hold a thread nobody is waiting for
-                // against a queue nobody is draining.
-                runtime.block_on(async {
-                    if tokio::time::timeout(JOIN_BUDGET, events.send(Event::Ended(result)))
-                        .await
-                        .is_err()
-                    {
-                        warn!(
-                            "rdp: the caller took no event for {}s, so the session's last one \
-                             is dropped",
-                            JOIN_BUDGET.as_secs()
-                        );
-                    }
-                });
+                last_word.send(Event::Ended(result));
             }
         });
         let thread = match spawned {
             Ok(thread) => Some(thread),
             Err(e) => {
-                // The closure never ran, so nothing else will end this session. The
-                // queue is empty, so this cannot be refused for room.
+                // The closure never ran, so nothing else will end this session. Dropping
+                // it gave back the kept place, and nothing else is queued.
                 let _ = events.try_send(Event::Ended(Err(Error::new(format!(
                     "could not start the RDP session thread: {e}"
                 )))));
