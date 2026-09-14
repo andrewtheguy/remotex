@@ -46,6 +46,23 @@
 #DwAEhQGAhKmMIQAAAABJRU5ErkJggg==
 #"""
 
+# Data usage of the browser's WebSockets (/ws, /ws/audio, /ws/camera, /ws/mic),
+# kept in an SQLite database and shown by the page's "Data usage" view, which
+# reads it when opened. Only the hop between the browser and this gateway is
+# counted: the bytes of every text and binary frame, WebSocket headers included,
+# written to the browser (sent) and read from it (received).
+#
+# Every interval_secs one record is added per socket that moved data in that
+# timeframe — an idle socket adds none — in one transaction. Each socket keeps its
+# newest max_records records. The database's directory must be writable: SQLite
+# keeps its -wal and -shm files beside it. Best effort: the timeframe being
+# counted when the gateway stops is lost. Absent, nothing is recorded.
+#
+#[usage]
+#database = "/var/lib/remotex/usage.sqlite3"
+#interval_secs = 60
+#max_records = 1440
+
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
 # because it is one decision — a host without a port is half an answer.

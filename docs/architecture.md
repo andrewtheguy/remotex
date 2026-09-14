@@ -1602,6 +1602,23 @@ then read per request, which is what lets an operator swap the image without a
 restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
 
+`[usage]` is top-level for the same reason and records the data usage of the
+browser's four WebSockets in an SQLite database, one row per socket per
+timeframe. Each socket counts the frames it writes and reads — text and binary
+frames with their headers, never the heartbeat's pings and pongs, so an idle
+connection records nothing — into counters shared by every connection to that
+socket. Every `interval_secs` the counters are taken, each socket that moved data
+gains a row, and the rows past `max_records` per socket are deleted oldest first,
+all in one transaction, so a crash leaves the timeframe written or not at all. It
+is best effort by design: the open timeframe dies with the process, and a failed
+write is retried with the next one. A file that is not this gateway's usage
+database — not SQLite, SQLite without its application id, or another schema
+version — is refused at startup before anything is written to it. The page reads
+the rows on demand: `GET /api/usage?since=<unix seconds>` behind the login, which
+the picker's "Data usage" view calls when it opens and when asked to refresh, and
+`/api/config` says whether there is a database to offer. What an
+engine exchanges with its remote is a different link and is not counted.
+
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
 flow and protocol engines. Containerized dummy servers cover RDP and VNC.

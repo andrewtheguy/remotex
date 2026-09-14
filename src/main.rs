@@ -141,7 +141,12 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
 }
 
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
-    let app = server::router(config.clone());
+    if let Some(recording) = &config.usage {
+        info!("recording websocket data usage to {}", recording.database.display());
+    }
+    let usage = remotex::usage::start(config.usage.as_ref())
+        .context("cannot record websocket data usage ([usage].database)")?;
+    let app = server::router(config.clone(), usage);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,6 +18,7 @@ use crate::{
     config::AppConfig,
     error::{ApiResult, AppError},
     session::SessionManager,
+    usage::{self, Usage},
     ws,
 };
 
@@ -32,6 +33,8 @@ pub struct AppState {
     /// gateway's client carries the launch token the control plane seeded in that
     /// same cookie and there is no session to look up, so this stays empty there.
     pub auth: Arc<AuthSessions>,
+    /// Every browser socket's byte counters, and the database `[usage]` records them in.
+    pub usage: Usage,
 }
 
 /// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
@@ -203,9 +206,12 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   static shell stays public — it renders the login screen and holds no
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
 ///   is the same binary and serves the same SPA.
-pub fn router(config: AppConfig) -> Router {
+///
+/// `usage` is where the browser sockets count their bytes and, when `[usage]` is set,
+/// the database [`crate::usage::start`] records them in and `/api/usage` reads.
+pub fn router(config: AppConfig, usage: Usage) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
-    router_with_sessions(config, sessions)
+    router_with_sessions(config, sessions, usage)
 }
 
 /// [`router`] over a caller-supplied session slot.
@@ -216,6 +222,7 @@ pub fn router(config: AppConfig) -> Router {
 pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
+    usage: Usage,
 ) -> Router {
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
@@ -246,6 +253,7 @@ pub(crate) fn router_with_sessions(
         config,
         sessions,
         auth: Arc::new(AuthSessions::default()),
+        usage,
     };
     let require_auth = middleware::from_fn_with_state(state.clone(), require_auth);
 
@@ -263,6 +271,7 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
+                .route("/usage", get(usage_handler))
                 .route_layer(require_auth.clone()),
         )
         .fallback(|| async { AppError::NotFound });
@@ -529,6 +538,9 @@ struct ConfigResponse {
     /// the client already knows its gateway's origin, and a URL here would be a
     /// second spelling of it.
     logo: bool,
+    /// Whether `GET /api/usage` has a database to read, so the page offers the view only
+    /// where there is something in it.
+    usage: bool,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
@@ -537,6 +549,7 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         branding: state.config.branding.text.clone(),
         logo: state.config.branding.logo.is_some(),
+        usage: state.usage.store.is_some(),
     })
 }
 
@@ -624,6 +637,35 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
         })
         .collect();
     Json(targets)
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    /// Unix seconds: only timeframes that ended after it. Absent reads everything kept.
+    #[serde(default)]
+    since: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageResponse {
+    interval_secs: u64,
+    max_records: usize,
+    records: Vec<usage::Record>,
+}
+
+/// The recorded data usage of the browser sockets, read when the page asks for it.
+/// 404 on a gateway with no `[usage]`: there is no database to read.
+async fn usage_handler(
+    State(state): State<AppState>,
+    Query(query): Query<UsageQuery>,
+) -> ApiResult<Json<UsageResponse>> {
+    let store = state.usage.store.clone().ok_or(AppError::NotFound)?;
+    let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
+    let records = tokio::task::spawn_blocking(move || store.records(query.since))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(UsageResponse { interval_secs, max_records, records }))
 }
 
 #[derive(Deserialize, Default)]
@@ -823,7 +865,7 @@ mod tests {
             source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
         });
 
-        let response = router(config)
+        let response = router(config, Usage::default())
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/logo")
@@ -845,7 +887,7 @@ mod tests {
     /// assertion below is about the redirect, and a request that is *not*
     /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        router(router_config(dev_hostname))
+        router(router_config(dev_hostname), Usage::default())
     }
 
     /// The config both test routers are built from, so the only thing that ever
@@ -900,6 +942,7 @@ mod tests {
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
+            usage: None,
         }
     }
 
@@ -1239,11 +1282,12 @@ mod tests {
                 logo: None,
             },
             dev_hostname: None,
+            usage: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router_with_sessions(config, sessions);
+        let app = router_with_sessions(config, sessions, Usage::default());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1309,8 +1353,77 @@ mod tests {
         let json = serde_json::to_string(&ConfigResponse {
             branding: "remotex".to_owned(),
             logo: false,
+            usage: false,
         })
         .unwrap();
-        assert_eq!(json, r#"{"branding":"remotex","logo":false}"#);
+        assert_eq!(json, r#"{"branding":"remotex","logo":false,"usage":false}"#);
+    }
+
+    /// `/api/usage` is behind the login, reads the database from a time, and is a 404
+    /// on a gateway that records nothing.
+    #[tokio::test]
+    async fn usage_is_read_behind_the_login() {
+        use tower::ServiceExt as _;
+
+        let get = |uri: &str, cookie: Option<&str>| {
+            let mut request = axum::http::Request::builder().uri(uri);
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            request.body(axum::body::Body::empty()).unwrap()
+        };
+        let log_in = |app: Router| async move {
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/auth/login")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(r#"{"username":"admin","password":"hunter2"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let set_cookie = response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap();
+            set_cookie.split(';').next().unwrap().to_owned()
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = usage::UsageStore::open(&usage::UsageConfig {
+            database: dir.path().join("usage.sqlite3"),
+            interval: std::time::Duration::from_secs(60),
+            max_records: 10,
+        })
+        .unwrap();
+        let record = |start, sent_bytes| usage::Record {
+            socket: usage::Socket::Session,
+            start,
+            end: start + 60,
+            sent_bytes,
+            received_bytes: 7,
+        };
+        store.write(&[record(0, 100), record(60, 200)]).unwrap();
+        let app = router(
+            router_config(None),
+            Usage { meters: Arc::default(), store: Some(Arc::new(store)) },
+        );
+
+        let response = app.clone().oneshot(get("/api/usage", None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let cookie = log_in(app.clone()).await;
+        let response = app.clone().oneshot(get("/api/usage?since=60", Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"intervalSecs":60,"maxRecords":10,"records":[{"socket":"session","start":60,"end":120,"sentBytes":200,"receivedBytes":7}]}"#
+        );
+
+        let app = router(router_config(None), Usage::default());
+        let cookie = log_in(app.clone()).await;
+        let response = app.oneshot(get("/api/usage", Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

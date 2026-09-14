@@ -540,6 +540,92 @@ body {
   cursor: default;
 }
 
+/* The "Data usage" view takes the picker's place, wider for its tables. */
+.picker-panel.usage-panel {
+  width: min(640px, 100%);
+  gap: 0.25rem;
+}
+
+.usage-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.usage-controls select {
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+}
+
+.usage-controls .picker-logout {
+  margin-top: 0;
+}
+
+.usage-read-at {
+  margin: 0 0 0.5rem;
+  color: #6e7681;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.usage-heading {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #8b949e;
+}
+
+.usage-scroll {
+  max-height: 50vh;
+  overflow: auto;
+  margin-bottom: 0.75rem;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  color: #c9d1d9;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 0.35rem 0.6rem;
+  text-align: right;
+  border-bottom: 1px solid #21262d;
+  white-space: nowrap;
+}
+
+.usage-table th:first-child,
+.usage-table td:first-child {
+  text-align: left;
+}
+
+.usage-table thead th {
+  position: sticky;
+  top: 0;
+  color: #8b949e;
+  font-weight: 600;
+  background: #0d1117;
+}
+
+.usage-table .usage-total th,
+.usage-table .usage-total td {
+  font-weight: 600;
+  color: #e6edf3;
+}
+
 /* Phase 9: the floating chrome. A draggable FAB pinned in viewport space
    (position: fixed, moved via left/top) that toggles the toolbar drawer.
    touch-action: none so a drag never scrolls the page under it. */

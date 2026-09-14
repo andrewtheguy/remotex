@@ -7,6 +7,7 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -18,6 +19,7 @@ use crate::audio::PcmFormat;
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::{HostDisplay, JpegSampling};
+use crate::usage::UsageConfig;
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
@@ -1483,8 +1485,36 @@ pub struct ConfigFile {
     /// that refusal is the whole of the migration.
     #[serde(default)]
     pub branding: Option<BrandingSection>,
+    /// The `[usage]` table: where the browser sockets' data usage is recorded. Absent
+    /// records nothing. Top-level for [`Self::branding`]'s reason — an embedded config
+    /// may set it too.
+    #[serde(default)]
+    pub usage: Option<UsageSection>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// The `[usage]` table as written. See [`crate::usage`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageSection {
+    /// The SQLite database the records are kept in. Required: the table exists to name it.
+    pub database: PathBuf,
+    /// Seconds in one timeframe, which is also how often it is written.
+    #[serde(default = "default_usage_interval_secs")]
+    pub interval_secs: u64,
+    /// Records kept per socket; the oldest go first.
+    #[serde(default = "default_usage_max_records")]
+    pub max_records: usize,
+}
+
+fn default_usage_interval_secs() -> u64 {
+    60
+}
+
+/// A day of one-minute timeframes, for a socket busy all day.
+fn default_usage_max_records() -> usize {
+    1440
 }
 
 /// Resolved runtime configuration: the web server plus every target profile it
@@ -1512,6 +1542,8 @@ pub struct AppConfig {
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
     pub dev_hostname: Option<String>,
+    /// `[usage]`, resolved. `None` records nothing.
+    pub usage: Option<UsageConfig>,
 }
 
 impl ConfigFile {
@@ -1562,6 +1594,14 @@ impl ConfigFile {
                 !config.targets.is_empty(),
                 "config has no [[targets]] — at least one target profile is required"
             );
+        }
+        if let Some(usage) = &config.usage {
+            anyhow::ensure!(
+                !usage.database.as_os_str().is_empty(),
+                "[usage].database is empty — name the SQLite file the records are kept in"
+            );
+            anyhow::ensure!(usage.interval_secs >= 1, "[usage].interval_secs must be at least 1");
+            anyhow::ensure!(usage.max_records >= 1, "[usage].max_records must be at least 1");
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -2079,6 +2119,16 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: None,
+            usage: Self::resolve_usage(self.usage),
+        })
+    }
+
+    /// The `[usage]` table resolved. Its values were checked by [`Self::parse_with`].
+    fn resolve_usage(section: Option<UsageSection>) -> Option<UsageConfig> {
+        section.map(|section| UsageConfig {
+            database: section.database,
+            interval: Duration::from_secs(section.interval_secs),
+            max_records: section.max_records,
         })
     }
 
@@ -2152,6 +2202,7 @@ impl ConfigFile {
                 .map(dev_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
+            usage: Self::resolve_usage(self.usage),
         })
     }
 }
@@ -2739,6 +2790,45 @@ mod tests {
         let toml = format!("branding = \"remotex\"\n{}", minimal());
         let err = ConfigFile::parse(&toml).expect_err("a string is not a [branding] table");
         assert!(format!("{err:#}").contains("branding"), "{err:#}");
+    }
+
+    /// No table records nothing; a table names its database and may leave the rest to the
+    /// defaults.
+    #[test]
+    fn usage_is_recorded_only_when_a_database_is_named() {
+        assert_eq!(ConfigFile::parse(&minimal()).unwrap().resolve().unwrap().usage, None);
+
+        let toml = format!("[usage]\ndatabase = \"/var/lib/remotex/usage.sqlite3\"\n{}", minimal());
+        assert_eq!(
+            ConfigFile::parse(&toml).unwrap().resolve().unwrap().usage,
+            Some(UsageConfig {
+                database: PathBuf::from("/var/lib/remotex/usage.sqlite3"),
+                interval: Duration::from_secs(60),
+                max_records: 1440,
+            })
+        );
+
+        let toml = format!(
+            "[usage]\ndatabase = \"u.sqlite3\"\ninterval_secs = 300\nmax_records = 12\n{}",
+            minimal()
+        );
+        let usage = ConfigFile::parse(&toml).unwrap().resolve().unwrap().usage.unwrap();
+        assert_eq!((usage.interval, usage.max_records), (Duration::from_secs(300), 12));
+    }
+
+    #[test]
+    fn a_usage_table_that_records_nothing_is_refused() {
+        for (bad, says) in [
+            ("interval_secs = 60", "database"),
+            ("database = \"\"", "[usage].database"),
+            ("database = \"u.sqlite3\"\ninterval_secs = 0", "[usage].interval_secs"),
+            ("database = \"u.sqlite3\"\nmax_records = 0", "[usage].max_records"),
+            ("database = \"u.sqlite3\"\nmax_count = 3", "max_count"),
+        ] {
+            let toml = format!("[usage]\n{bad}\n{}", minimal());
+            let err = ConfigFile::parse(&toml).expect_err(bad);
+            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
     }
 
     /// The logo's content type is decided at resolution, so a file no browser
