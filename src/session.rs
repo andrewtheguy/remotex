@@ -1509,7 +1509,7 @@ fn spawn_engine(
             ))
             }
             Protocol::Vnc => {
-                rt.block_on(vnc::run(target, plan, display, input_rx, frame_tx, audio, feedback))
+                rt.block_on(vnc::run(target, plan, display, input_rx, frame_tx, audio, uplinks.camera, feedback))
             }
         }
     });

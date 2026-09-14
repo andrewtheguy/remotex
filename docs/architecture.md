@@ -27,7 +27,8 @@ Apple Remote Desktop authentication, or with the
 `ard-high-performance` RFB 003.889 path. Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
-passed through to an RDP host over MS-RDPECAM. The redirection is experimental —
+passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
+extension on a generic VNC target. The redirection is experimental —
 see [Camera frames](#camera-frames).
 
 ## Constraints
@@ -989,9 +990,9 @@ and took samples, not the pixels the host displays. The dummy RDP server the
 container tests drive offers no camera at all. The displayed picture is verified
 by hand against a Windows host, and a change here needs a hand check.
 
-The browser's camera goes the other way, on a third socket, and only to an RDP
-target that opted in with `camera = true` (refused on VNC at parse time: the
-channel is MS-RDPECAM and RFB has no equivalent). **Opening
+The browser's camera goes the other way, on a third socket, to an RDP target or a
+generic VNC target that opted in with `camera = true` (refused on both Apple
+subtypes at parse time: Screen Sharing has nowhere to put a camera). **Opening
 `/ws/camera?session=<token>` is the enable** — explicit, per session, and never a
 remembered preference, unlike audio's "sound by default". Its refusals add one
 code to the family: 401 before the upgrade, 4000 for a stale token, 4001 on
@@ -1049,6 +1050,16 @@ gateway's `CameraBridge` (`src/camera.rs`), which is all the session layer sees.
 How the client negotiates the version, announces the device, answers the host's
 queries and meters samples against the host's requests is in
 [The RDP client](rdp-client.md#camera-ms-rdpecam).
+
+On a generic VNC target the camera goes to wlshare instead, over its private
+camera extension, and wlshare makes it a PipeWire camera on the wlroots desktop.
+`src/vnc_camera.rs` asks for the extension beside the density and outputs
+requests, holds the browser's plug until wlshare says it takes a camera, and
+relays wlshare's start, stop and keyframe as the same bridge signals, so the
+socket and the browser behave as they do against RDP. A server that never answers
+is sent nothing and the enabled camera is never started, as on a Windows Server
+without the RDSH role. See
+[The browser's camera over VNC with wlshare](wlshare-camera.md).
 
 ### Display geometry
 

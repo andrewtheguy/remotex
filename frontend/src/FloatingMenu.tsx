@@ -821,8 +821,9 @@ export default function FloatingMenu({
   videoStreams: readonly string[];
   onAudioChange: (enabled: boolean) => void;
   // The camera, under Audio's hide-don't-disable rule: `camera = true` is
-  // RDP-only, so on every other target there is nothing that could be switched
-  // on. `cameraEnabled` is per session and never remembered — see
+  // RDP's and generic VNC's (wlshare's camera extension) alone, so on every other
+  // target there is nothing that could be switched on. `cameraEnabled` is per
+  // session and never remembered — see
   // useRemoteDesktop — and `cameraStreaming` is whether the remote is
   // consuming, which is the half the camera light cannot say.
   canCamera: boolean;

@@ -777,12 +777,14 @@ pub struct TargetConfig {
     /// of accepted and left inert.
     #[serde(default)]
     pub audio_codec: Option<AudioCodec>,
-    /// Offer the remote a redirected camera (MS-RDPECAM). Rejected for VNC:
-    /// RFB has no equivalent channel, and unlike [`Self::audio`] there is no
-    /// extension carrying one either.
+    /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a generic
+    /// VNC target the wlshare camera extension ([`crate::vnc_camera`]), which is
+    /// asked for the way [`Self::audio`]'s extension is — a server that never
+    /// announces it leaves the camera unplugged. Rejected on both Apple
+    /// subtypes: Screen Sharing speaks no such extension.
     ///
     /// **Experimental**, for lack of tests. The socket's session rules and its
-    /// message encodings are unit tested, and so is the channel's wire; the
+    /// message encodings are unit tested, and so are both wires; the RDP
     /// redirection itself is exercised only against a real Windows host, because
     /// only a host that creates the `RDCamera_Device_Enumerator` channel — a
     /// workstation, or a Windows Server carrying the Remote Desktop Session Host
@@ -1671,14 +1673,17 @@ impl ConfigFile {
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about the
             // *engine* and the *build* and not about any of them.
-            // The camera is RDP's alone: MS-RDPECAM is an RDP channel and RFB has
-            // nothing to redirect a client's camera onto.
+            // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
+            // generic VNC target, asked for the way the QEMU Audio extension is: a
+            // server that never announces it leaves the camera unplugged. Apple's
+            // Screen Sharing speaks no such extension, in either subtype.
             anyhow::ensure!(
-                !target.camera || target.protocol == Protocol::Rdp,
-                "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
-                 is an RDP channel and RFB has no equivalent. Remove the key.",
+                !target.camera || target.protocol == Protocol::Rdp || target.subtype.is_none(),
+                "target {:?} sets camera on an {} target, and Apple's Screen Sharing has nowhere \
+                 to put one: the camera rides MS-RDPECAM on rdp and wlshare's camera extension on \
+                 a generic vnc target. Remove the key.",
                 target.name,
-                target.protocol.name()
+                target.subtype.map_or("apple", Subtype::name)
             );
             anyhow::ensure!(
                 !target.microphone || target.protocol == Protocol::Rdp,
@@ -4739,28 +4744,38 @@ mod tests {
         assert_eq!(config.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
     }
 
-    /// MS-RDPECAM is an RDP channel with no RFB counterpart and no extension
-    /// carrying one, so the key is refused on VNC at parse time and opt-in
-    /// (default off) on RDP.
+    /// The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
+    /// generic VNC target, so the key is accepted on both — opt-in (default off) on
+    /// each — and refused on both Apple subtypes, whose Screen Sharing speaks no
+    /// such extension.
     #[test]
-    fn camera_belongs_to_rdp_and_is_refused_on_vnc() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
+    fn camera_rides_rdp_and_generic_vnc_and_is_refused_on_a_mac() {
+        for subtype in ["ard", "ard-high-performance"] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
 
-            [[targets]]
-            name = "nope"
-            protocol = "vnc"
-            host = "10.0.0.5"
-            camera = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("camera"), "{rendered}");
-        assert!(rendered.contains("rdp"), "the protocol that does carry it is named: {rendered}");
+                [[targets]]
+                name = "mac"
+                protocol = "vnc"
+                subtype = "{subtype}"
+                host = "10.0.0.5"
+                username = "andrew"
+                password = "h"
+                camera = true
+                "#,
+                site_passwd_line()
+            ))
+            .and_then(|file| file.resolve())
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains(&format!("camera on an {subtype} target")), "{rendered}");
+            assert!(
+                rendered.contains("wlshare's camera extension"),
+                "the path a vnc target does have is named: {rendered}"
+            );
+        }
 
         let config = ConfigFile::parse(&format!(
             r#"
@@ -4776,6 +4791,12 @@ mod tests {
             camera = true
 
             [[targets]]
+            name = "desk"
+            protocol = "vnc"
+            host = "10.0.0.7"
+            camera = true
+
+            [[targets]]
             name = "quiet"
             protocol = "rdp"
             username = "u"
@@ -4788,7 +4809,8 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].camera);
-        assert!(!config.targets[1].camera, "the camera is opt-in");
+        assert!(config.targets[1].camera, "a generic vnc target asks wlshare for it");
+        assert!(!config.targets[2].camera, "the camera is opt-in");
     }
 
     /// MS-RDPEAI is an RDP channel, so the key is refused on VNC; on RDP it stands on its
