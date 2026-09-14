@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchUsage,
   formatBytes,
@@ -159,33 +159,37 @@ export default function UsagePanel({
   const [readAt, setReadAt] = useState<number | null>(null);
   const [targetFilter, setTargetFilter] = useState("all");
 
-  const load = useCallback(
-    async (isCancelled: () => boolean) => {
-      setLoading(true);
-      const now = Date.now() / 1000;
-      const result = await fetchUsage(usageSince(range, now));
-      if (isCancelled()) {
-        return;
-      }
-      setLoading(false);
-      if (result.kind === "unauthorized") {
-        onUnauthorized();
-      } else if (result.kind === "error") {
-        setError(result.message);
-      } else {
-        setError(null);
-        setReport(result.report);
-        setReadAt(now);
-      }
-    },
-    [range, onUnauthorized],
-  );
+  // Only the newest read may commit: a range change or a Refresh while one is still
+  // out makes the earlier answer stale, and an unmounted panel takes none.
+  const generation = useRef(0);
+
+  const load = useCallback(async () => {
+    const request = ++generation.current;
+    setLoading(true);
+    const now = Date.now() / 1000;
+    const result = await fetchUsage(usageSince(range, now));
+    if (request !== generation.current) {
+      return;
+    }
+    setLoading(false);
+    if (result.kind === "unauthorized") {
+      onUnauthorized();
+    } else if (result.kind === "error") {
+      // A failed read leaves nothing of the previous range on screen.
+      setReport(null);
+      setReadAt(null);
+      setError(result.message);
+    } else {
+      setError(null);
+      setReport(result.report);
+      setReadAt(now);
+    }
+  }, [range, onUnauthorized]);
 
   useEffect(() => {
-    let cancelled = false;
-    void load(() => cancelled);
+    void load();
     return () => {
-      cancelled = true;
+      generation.current++;
     };
   }, [load]);
 
@@ -239,7 +243,7 @@ export default function UsagePanel({
         <button
           type="button"
           className="picker-logout"
-          onClick={() => void load(() => false)}
+          onClick={() => void load()}
           disabled={loading}
         >
           {loading ? "Loading…" : "Refresh"}

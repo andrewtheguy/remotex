@@ -384,11 +384,14 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
     let usage = Usage { meters: Arc::clone(&meters), store: Some(Arc::clone(&store)) };
     // Kept while writes fail, up to what the database would keep of them anyway.
     let pending_cap = store.max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
+    let first_tick = tokio::time::Instant::now()
+        .checked_add(store.interval)
+        .with_context(|| format!("[usage].interval_secs {} is too long to schedule", store.interval.as_secs()))?;
 
     tokio::spawn(async move {
         let mut pending: Vec<Record> = Vec::new();
         let mut start = unix_now();
-        let mut ticks = interval_at(tokio::time::Instant::now() + store.interval, store.interval);
+        let mut ticks = interval_at(first_tick, store.interval);
         // A slow write delays the next timeframe instead of bunching several up: the
         // counters keep counting meanwhile, so nothing is lost, only longer.
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
