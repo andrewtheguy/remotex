@@ -217,7 +217,12 @@ export default function UsagePanel({
         <select
           aria-label="Time range"
           value={range}
-          onChange={(e) => setRange(e.target.value as UsageRange)}
+          onChange={(e) => {
+            // The previous range's rows are not this range's, even while it loads.
+            setReport(null);
+            setReadAt(null);
+            setRange(e.target.value as UsageRange);
+          }}
         >
           {USAGE_RANGES.map((r) => (
             <option key={r.id} value={r.id}>

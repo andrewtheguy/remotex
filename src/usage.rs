@@ -203,7 +203,13 @@ impl UsageStore {
         }
         // Only a file this call creates gets a schema. SQLite shows an existing empty file,
         // or another program's empty database, just like a new one, and neither is ours.
-        let created = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        // A new file is private to the gateway's user; SQLite gives the `-wal` and `-shm`
+        // files it creates beside it the database's own permissions.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let created = match options.open(path) {
             Ok(_) => true,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
             Err(e) => return Err(e).with_context(|| format!("cannot create {}", path.display())),
@@ -520,6 +526,22 @@ mod tests {
         let store = UsageStore::open(&config(path, 1)).unwrap();
         assert_eq!(sent(&store, Some("mac"), Socket::Audio), [5]);
         assert_eq!(store.records(0).unwrap().len(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_database_and_its_sidecars_are_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.sqlite3");
+        let store = UsageStore::open(&config(path.clone(), 10)).unwrap();
+        store.write(&[record(Some("mac"), Socket::Session, 0, 1, 1)]).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let file = PathBuf::from(format!("{}{suffix}", path.display()));
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", file.display());
+        }
     }
 
     #[test]
