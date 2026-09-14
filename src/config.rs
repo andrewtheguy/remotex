@@ -1603,6 +1603,11 @@ impl ConfigFile {
                  usage.sqlite3 in the gateway's state directory"
             );
             anyhow::ensure!(usage.interval_secs >= 1, "[usage].interval_secs must be at least 1");
+            anyhow::ensure!(
+                std::time::Instant::now().checked_add(Duration::from_secs(usage.interval_secs)).is_some(),
+                "[usage].interval_secs {} is too long to schedule",
+                usage.interval_secs
+            );
             anyhow::ensure!(usage.max_records >= 1, "[usage].max_records must be at least 1");
         }
         for target in &config.targets {
@@ -2396,8 +2401,8 @@ pub fn state_dir(config: &Path) -> PathBuf {
     config.parent().map_or_else(PathBuf::new, Path::to_path_buf)
 }
 
-/// Resolve the package-manager layout or the quick installer's relocatable
-/// layout from the executable that is actually running.
+/// Resolve the package-manager layout or the container image's versioned layout
+/// from the executable that is actually running.
 fn installed_layout() -> Option<InstalledLayout> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
@@ -2441,9 +2446,9 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
         });
     }
 
-    // The fallback quick installer is relocatable. Its launcher resolves to
-    // <prefix>/versions/<version>/bin/remotex, while configuration deliberately
-    // lives outside the version being replaced.
+    // The container image (packaging/Dockerfile) puts the binary at
+    // <prefix>/versions/<version>/bin/remotex, while configuration and state live
+    // outside the version, under /opt/remotex/etc and /opt/remotex/var.
     let version_root = bin_dir.parent()?;
     let versions_dir = version_root.parent()?;
     if versions_dir.file_name()? != "versions" {
@@ -2470,7 +2475,7 @@ mod tests {
         assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
         assert_eq!(mac.state_dir, Path::new("/usr/local/var/remotex"));
 
-        // The quick installer's tree is a Unix one; on Windows any `bin` directory is
+        // The container's tree is a Unix one; on Windows any `bin` directory is
         // the package's tree, which is the arm below.
         #[cfg(unix)]
         {
@@ -2873,6 +2878,7 @@ mod tests {
         for (bad, says) in [
             ("database = \"\"", "[usage].database"),
             ("database = \"u.sqlite3\"\ninterval_secs = 0", "[usage].interval_secs"),
+            ("interval_secs = 18446744073709551615", "too long to schedule"),
             ("database = \"u.sqlite3\"\nmax_records = 0", "[usage].max_records"),
             ("database = \"u.sqlite3\"\nmax_count = 3", "max_count"),
         ] {

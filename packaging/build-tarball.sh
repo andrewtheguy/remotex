@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # Build a distro-agnostic release tarball for the current OS/arch.
 #
-# Produces dist/remotex-<version>-<os>-<arch>.tar.gz containing a relocatable
-# tree that install.sh lays down under <prefix>/versions/<version>:
+# Produces dist/remotex-<version>-<os>-<arch>.tar.gz, the payload the native
+# packages and the container image are built from:
 #
 #   remotex-<version>/
 #   ├── VERSION
 #   ├── bin/remotex                # release binary
-#   ├── share/doc/remotex/remotex.example.toml # config template
-#   ├── install.sh
-#   └── uninstall.sh
+#   └── share/doc/remotex/remotex.example.toml # config template
 #
 # Run on each target platform you want to ship (macOS builds the mac tarball,
 # Linux builds the linux tarball) — this does not cross-compile.
@@ -63,8 +61,7 @@ echo ">> assembling ${pkg}"
 mkdir -p "$root/bin" "$root/share/doc/remotex"
 cp target/release/remotex "$root/bin/remotex"
 cp remotex.example.toml "$root/share/doc/remotex/remotex.example.toml"
-cp packaging/install.sh packaging/uninstall.sh "$root/"
-chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/remotex"
+chmod +x "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"
 
 mkdir -p dist

@@ -2,9 +2,8 @@
 
 Native packages are the release install contract. Linux ships both `.deb` and
 `.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout input
-for container builds and the payload used by the unsupported-platform quick
-installer. Containers replace its native binary with a build that excludes the
-`embedded-gateway` default feature.
+for native package and container builds. Containers replace its native binary
+with a build that excludes the `embedded-gateway` default feature.
 
 Every artifact carries one gateway binary with the web client compiled into it
 (`src/assets.rs` embeds the bundle from Cargo's private output directory at build
@@ -49,9 +48,8 @@ What the gateway keeps between runs — today only the `[usage]` database — is
 outside the manifests for the same reason, in a state directory the gateway
 creates when it first needs it: `/var/lib/remotex` on Linux,
 `/usr/local/var/remotex` on macOS and `%ProgramData%\remotex` on Windows. The
-account that runs the gateway must be able to create or write it. The quick
-installer and the container use `<prefix>/var`, which in the container is
-`/opt/remotex/var` and wants a volume for the records to outlive it.
+account that runs the gateway must be able to create or write it. The container
+uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 
 ## Scripts
 
@@ -63,13 +61,7 @@ installer and the container use `<prefix>/var`, which in the container is
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with all default features disabled |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
-| `install.sh` | install the tarball fallback under a relocatable prefix |
-| `uninstall.sh` | remove that fallback installation or one fallback version |
 | `Dockerfile` | build an image from an extracted release tarball |
-
-The repository-root `install.sh` downloads and verifies a release before
-calling the tarball's `packaging/install.sh`. That path is retained only for a
-Linux distribution that supports neither native package format.
 
 ## Local build
 
@@ -97,9 +89,8 @@ dist/remotex-macos-arm64.pkg
 dist/remotex-windows-x86_64.msi
 ```
 
-Arm Linux runners use `arm64` in the asset names. The tarballs retain their
-existing versioned filenames because the quick installer selects and verifies
-them by release version.
+Arm Linux runners use `arm64` in the asset names. The tarballs keep versioned
+filenames, which the container build selects by release version.
 
 ## x86-64 CPU compatibility
 

@@ -31,7 +31,6 @@ esac
 
 if ! info="$(pkgutil --pkg-info "$pkgid" 2>/dev/null)"; then
   echo "error: no receipt for $pkgid — the package is not installed" >&2
-  echo "       a tarball install is removed by packaging/uninstall.sh instead" >&2
   exit 1
 fi
 

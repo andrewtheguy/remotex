@@ -201,12 +201,30 @@ impl UsageStore {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
         }
-        let mut connection =
-            Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .context("cannot set the busy timeout")?;
-        Self::adopt(&mut connection, path)?;
+        // Only a file this call creates gets a schema. SQLite shows an existing empty file,
+        // or another program's empty database, just like a new one, and neither is ours.
+        let created = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e).with_context(|| format!("cannot create {}", path.display())),
+        };
+        let adopted = Connection::open(path)
+            .with_context(|| format!("cannot open {}", path.display()))
+            .and_then(|mut connection| {
+                connection.busy_timeout(Duration::from_secs(5)).context("cannot set the busy timeout")?;
+                Self::adopt(&mut connection, path, created)?;
+                Ok(connection)
+            });
+        let connection = match adopted {
+            Ok(connection) => connection,
+            Err(e) => {
+                // A file left empty would be refused by every later start.
+                if created {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(e);
+            }
+        };
         // Only once the file is known to be ours: switching the journal writes to it.
         let journal: String = connection
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
@@ -226,8 +244,9 @@ impl UsageStore {
         Ok(store)
     }
 
-    /// Check the database is this module's, creating the schema in an empty one.
-    fn adopt(connection: &mut Connection, path: &Path) -> anyhow::Result<()> {
+    /// Check the database is this module's, creating the schema when `created` says the
+    /// file is the one [`Self::open`] just made.
+    fn adopt(connection: &mut Connection, path: &Path, created: bool) -> anyhow::Result<()> {
         let not_ours = || format!("{} is not a remotex usage database", path.display());
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -237,7 +256,7 @@ impl UsageStore {
             .with_context(not_ours)?;
         let application_id: i64 =
             transaction.query_row("PRAGMA application_id", [], |row| row.get(0)).with_context(not_ours)?;
-        if objects == 0 && application_id == 0 {
+        if created && objects == 0 && application_id == 0 {
             transaction
                 .execute_batch(SCHEMA)
                 .and_then(|()| transaction.pragma_update(None, "application_id", APPLICATION_ID))
@@ -380,13 +399,14 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
     let Some(config) = config else {
         return Ok(Usage { meters, store: None });
     };
+    // Before the database is touched. The config check refuses such an interval too.
+    let first_tick = tokio::time::Instant::now()
+        .checked_add(config.interval)
+        .with_context(|| format!("[usage].interval_secs {} is too long to schedule", config.interval.as_secs()))?;
     let store = Arc::new(UsageStore::open(config)?);
     let usage = Usage { meters: Arc::clone(&meters), store: Some(Arc::clone(&store)) };
     // Kept while writes fail, up to what the database would keep of them anyway.
     let pending_cap = store.max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
-    let first_tick = tokio::time::Instant::now()
-        .checked_add(store.interval)
-        .with_context(|| format!("[usage].interval_secs {} is too long to schedule", store.interval.as_secs()))?;
 
     tokio::spawn(async move {
         let mut pending: Vec<Record> = Vec::new();
@@ -511,6 +531,12 @@ mod tests {
         let error = UsageStore::open(&config(text.clone(), 1)).expect_err("not SQLite");
         assert!(format!("{error:#}").contains("is not a remotex usage database"), "{error:#}");
         assert_eq!(std::fs::read(&text).unwrap(), b"not a database, but somebody's");
+
+        let empty = dir.path().join("empty.sqlite3");
+        std::fs::write(&empty, b"").unwrap();
+        let error = UsageStore::open(&config(empty.clone(), 1)).expect_err("an existing empty file");
+        assert!(format!("{error:#}").contains("is not a remotex usage database"), "{error:#}");
+        assert_eq!(std::fs::read(&empty).unwrap(), b"");
 
         let other = dir.path().join("other.sqlite3");
         Connection::open(&other).unwrap().execute_batch("CREATE TABLE usage (x INTEGER)").unwrap();

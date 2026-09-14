@@ -187,33 +187,6 @@ None of these touch the live config. Remove `/etc/remotex` on Linux,
 `/usr/local/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
 separately only when the credentials and configuration should be deleted too.
 
-## Unsupported-package fallback
-
-The quick installer is only for a Linux distribution that can run the release
-binary but supports neither `.deb` nor `.rpm`. It downloads the release tarball,
-verifies its SHA-256 digest, and installs under `/opt/remotex`:
-
-```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
-```
-
-`PREFIX` and `BINDIR` change its install locations:
-
-```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
-  PREFIX="$HOME/.local/opt/remotex" BINDIR="$HOME/.local/bin" bash
-```
-
-Pass a release tag as its first argument to install a specific version:
-
-```sh
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
-  bash -s -- v0.0.144
-```
-
-The quick installer keeps its own versioned layout and rollback mechanism. It
-is not part of the native package upgrade or removal flow.
-
 ## Build release packages
 
 Build the tarball input, then the native package for the current host:
