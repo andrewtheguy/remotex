@@ -12,9 +12,9 @@
 // everywhere, complete from the first frame, and costs the encoders nothing.
 //
 // The canvas keeps the framebuffer's own bitmap size, so nothing here is redrawn
-// when the CSS box changes: a pinch zoom or a density difference scales the
-// finished lines the same way it scales the desktop under them, and the lines
-// stay on the boundaries they mark.
+// when the CSS box changes: a pinch zoom, or a move to a screen of another
+// density, scales the finished lines the same way it scales the desktop under
+// them, and the lines stay on the boundaries they mark.
 
 import type { CanvasSize } from "./desktopCanvas.ts";
 
@@ -67,9 +67,9 @@ export function tileGridLines(
 /**
  * Paint the lattice on `canvas`, sized to the framebuffer `size` describes.
  *
- * `scale` is the remote's pixel density, so a 2x desktop — presented at half its
- * bitmap size in CSS pixels — gets lines twice as thick and dashes twice as long,
- * and both come out the same size on screen as they do on a 1x one.
+ * `scale` is the remote's pixel density, so a 2x desktop gets lines twice as
+ * thick and dashes twice as long: one remote point of line on either, drawn in
+ * that desktop's own pixels.
  */
 export function drawTileGrid(
   canvas: HTMLCanvasElement,

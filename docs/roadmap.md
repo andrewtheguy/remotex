@@ -22,6 +22,18 @@ browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchRead
 and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
 designing for it.
 
+A fractional `DesktopScaleFactor` is the other gap. The browser draws one
+framebuffer pixel per device pixel, so the window's pixels are `points × the
+screen's ratio`; RDP is asked for them at `protocol::render_density`, 1x or 2x
+decided at the 1.5 midpoint, because that quantization was chosen once for every
+engine when a Mac answered a 1.25x request with a small 2x display. A 1.25x or
+1.5x Windows client therefore gets a 2x desktop with more pixels than its window
+has, drawn larger than the window and scrolling. MS-RDPBCGR's monitor layout takes
+any `DesktopScaleFactor` from 100 to 500 and Windows renders 125, 150 and 175; the
+change is asking for the exact ratio on RDP alone, with the pixel count to match,
+and leaving High Performance at its measured 1x or 2x. Until then a fractional
+screen is best served at 100% or 200% UI scaling.
+
 The clipboard and sound were the other two of these and are done. MS-RDPECLIP is
 `rdp_client/proto/cliprdr.rs`, the channel plumbing the static channels needed is
 in `connect.rs` and `proto/channel.rs`, and the engine's half — advertise on

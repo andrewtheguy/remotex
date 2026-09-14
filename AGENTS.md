@@ -54,18 +54,24 @@ documentation.
   client-side selection. An engine with nothing to choose between sends no list and
   the panel stays hidden. See
   [Switching outputs over VNC with wlshare](docs/wlshare-outputs.md).
-- Pointer clients present the remote desktop at 100%; oversized desktops scroll.
-  Do not add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile,
-  gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
-- `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
-  pixel density, not a fit factor. `resize = true` means the window continuously
-  drives the remote size; do not add a client resize toggle or remembered resize
-  preference. Density is the wire's word alone: RDP negotiates it, Apple
-  reports it, wlshare reports it over a private extension every generic VNC
-  session asks for and only it answers, and generic VNC that does not answer is
-  presented at 1x. Do not add a
-  client-side density control, and never label a framebuffer with a density the
-  server has not confirmed. Read
+- Pointer clients draw the framebuffer at one device pixel per remote pixel: the
+  canvas bitmap is the framebuffer, its CSS box is that bitmap divided by
+  `devicePixelRatio`, and nothing is resampled; oversized desktops scroll. Do
+  not add fit-to-window, zoom-to-fit, viewport-derived scaling, or a layout that
+  divides by the remote's density. Mobile, gated by `CAN_PINCH_ZOOM`, is the
+  sole fit-to-width/pinch-zoom exception.
+- `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is the
+  remote's pixel density, a label for the Help card and the tile lattice, never
+  a layout or fit factor. `resize = true` means the window continuously drives
+  the remote size, and the gateway asks for the window's device pixels: RDP and
+  Apple High Performance render the points at the browser's density quantized
+  to 1x or 2x, generic VNC asks for points × the browser's exact ratio. Do not
+  add a client resize toggle or remembered resize preference. The label is the
+  wire's word alone: RDP negotiates it, Apple reports it, wlshare reports it over
+  a private extension every generic VNC session asks for and only it answers,
+  and generic VNC that does not answer is labelled 1x. Do not add a client-side
+  density control, and never label a framebuffer with a density the server has
+  not confirmed. Read
   [Display geometry](docs/architecture.md#display-geometry),
   [HiDPI over generic VNC](docs/generic-vnc-hidpi.md) and
   [Pixel density over VNC with wlshare](docs/wlshare-density.md) before

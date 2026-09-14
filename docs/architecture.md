@@ -1068,21 +1068,29 @@ selection, viewport size, refresh, cache reset, and session control. Pointer
 motion is coalesced while the socket has queued bytes; any non-motion input
 flushes the latest held position first.
 
-Pointer clients present every remote pixel at 100%, scrolling when the desktop
-is larger than the window. The sole presentation-scale exception is a mobile
+Pointer clients draw every remote pixel on one device pixel, scrolling when the
+desktop is larger than the window: the canvas bitmap is the framebuffer and its
+CSS box is that bitmap divided by the browser's `devicePixelRatio`, so nothing
+is resampled on the way to the screen (`frontend/src/desktopCanvas.ts`). A 1x
+framebuffer on a 2x screen is therefore half the CSS size it would be on a 1x
+screen, and sharp on both. The sole presentation-scale exception is a mobile
 client marked `HostDisplay::fit`, gated by `CAN_PINCH_ZOOM`, which starts
 fit-to-width and layers pinch zoom over it. Lack of remote resize support never
 permits a pointer client to scale the canvas to fit.
 
 `ClientMsg::Viewport` is the window's CSS size in points, including immediately
 after a connect when no remote scale has been announced. `ServerMsg::Resize`
-reports framebuffer pixels and the remote density; the browser presents it at
-`w / scale` by `h / scale` CSS pixels. The scale is never a fit factor.
+reports framebuffer pixels and the remote's density; the browser lays the
+framebuffer out at its own density and reads the scale as a label — the Help
+card shows it beside the browser's, and the tile lattice is cut at it. The
+scale is never a layout or fit factor.
 
 A target's `resize` means the window drives the remote's size, continuously and
 on every engine alike: an engine that has it applies every `viewport` it is
-sent — in points, the window's CSS pixels, rendered at the engine's own density —
-an engine without it drops them all, and the client sends them exactly
+sent — in points, the window's CSS pixels, turned into the window's device
+pixels at the browser's density as the engine can: RDP and High Performance at
+the 1x or 2x they render at, generic VNC at the exact ratio — an engine without
+it drops them all, and the client sends them exactly
 when `connected` said `resize` — on every window change, with no toggle, no
 manual button and no remembered preference beside it. Standard `ard` rejects
 `resize` at config parse because it shares physical displays.
@@ -1132,23 +1140,30 @@ side by 2400-pixel short side ceiling at the negotiated density. RDP opening and
 layout sizes and generic VNC `SetDesktopSize` requests all pass through
 `video::fit_ceiling`; High Performance separately keeps its native 3840×2160
 backing ceiling. This changes what the remote is asked to render, not how the
-browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
-the remainder bare. Tile targets are not capped. A pinned streaming size already
+browser lays it out: a 5K window receives at most a 3840×2400-pixel desktop,
+drawn pixel for pixel, with the remainder bare. Tile targets are not capped. A pinned streaming size already
 over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still reach the encoder's refusal because the gateway
 cannot ask it for a smaller desktop.
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only with
-`resize`: RDP quantizes it to 1x or 2x at a midpoint, a High Performance virtual
-display re-renders the same points at it; the resulting density travels back as
-the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
-Other engines ignore the message. Generic VNC, whose wire carries no density, is
-presented at 1x and takes no density from the client; see
-[HiDPI over generic VNC](generic-vnc-hidpi.md). wlshare is the one generic
+`resize`, because the browser lays the framebuffer out at its own density and
+the same window on a denser screen holds more pixels: RDP quantizes the density
+to 1x or 2x at a midpoint and asks for the points at it, a High Performance
+virtual display re-renders the same points at it, and generic VNC asks for the
+window again at points × the exact ratio. RDP and Apple report the density they
+granted as the `scale` on `resize`; generic VNC's wire carries none, so its
+framebuffer is labelled 1x and no density label is taken from the client; see
+[HiDPI over generic VNC](generic-vnc-hidpi.md). The quantization has a visible
+cost on a fractional screen: a 1.25x or 1.5x Windows client is rendered at 2x, so
+its desktop holds more pixels than the window has and is drawn larger than the
+window, scrolling, until RDP is asked for a fractional `DesktopScaleFactor`; see
+[the roadmap](roadmap.md#what-the-rdp-client-does-not-carry-yet). wlshare is the one generic
 server that reports a scale, over a private extension every generic session asks
-for and discovers by the answer: the label follows its reports and the client's
-density is declared to it, never applied by the gateway itself; see
+for and discovers by the answer: the label follows its reports, and the client's
+density is declared to it so the output draws its desktop at the browser's
+density — the pixels asked for are the window's whatever it answers; see
 [Pixel density over VNC with wlshare](wlshare-density.md).
 
 A client shows the display picker exactly when the target sends it a

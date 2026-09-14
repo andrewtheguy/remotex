@@ -165,10 +165,11 @@ export interface DisplayInfo {
 // server sends so the browser knows which post-login state it is in.
 export type ControlMsg =
   // `w`/`h` are framebuffer pixels; `scale` is how many of them the remote draws
-  // per point of its *own* desktop (1 for VNC, RDP and a 1x Mac, 2 for a Retina
-  // one). The canvas bitmap remains `w` by `h`, while its CSS box is
-  // `w / scale` by `h / scale`, preserving every source pixel without changing
-  // the remote desktop's logical size. `tileGrid` is the gateway's tile lattice
+  // per point of its *own* desktop (1 for plain VNC, RDP and a 1x Mac, 2 for a
+  // Retina one). The canvas bitmap is `w` by `h` and its CSS box is that bitmap
+  // divided by this browser's devicePixelRatio — one device pixel per remote
+  // pixel. `scale` is a label for the Help card and the tile lattice; it never
+  // sizes the canvas. `tileGrid` is the gateway's tile lattice
   // for this framebuffer, in its pixels: 64 points, so 64 at 1x and 128 at 2x.
   // It rides every resize because it follows the density, and it travels
   // rather than living here as a constant: an overlay that draws a different

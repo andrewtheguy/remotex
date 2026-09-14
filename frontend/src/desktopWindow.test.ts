@@ -7,14 +7,14 @@ import {
   sizeWindowToDesktop,
 } from "./desktopWindow.ts";
 
-test("a Retina framebuffer requests its logical desktop size", () => {
+test("a 2x host requests half the framebuffer's pixels as CSS pixels", () => {
   assert.deepEqual(desktopViewportSize({ w: 3840, h: 2160 }, 2), {
     w: 1920,
     h: 1080,
   });
 });
 
-test("a fractional remote point is rounded outward rather than clipped", () => {
+test("a fractional CSS pixel is rounded outward rather than clipped", () => {
   assert.deepEqual(desktopViewportSize({ w: 1366, h: 768 }, 1.25), {
     w: 1093,
     h: 615,
@@ -36,7 +36,7 @@ test("the requested outer size preserves the live browser frame", () => {
   });
 });
 
-test("sizing a window requests the remote logical viewport plus its frame", () => {
+test("sizing a window requests the framebuffer's device pixels plus its frame", () => {
   let requested: { w: number; h: number } | null = null;
   const target: ResizableWindow = {
     innerWidth: 800,

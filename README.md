@@ -40,8 +40,9 @@ wrapper or a second client lifecycle.
 
 An installed desktop browser app has **Window → Size to _width_×_height_**. It
 uses [`window.resizeTo()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/resizeTo)
-to make the app's content area exactly the remote desktop's logical size; it
-resizes the local window and never scales or resizes the remote desktop. This is
+to make the app's content area exactly the framebuffer at one device pixel per
+remote pixel; it resizes the local window and never scales or resizes the remote
+desktop. This is
 supported in installed Chrome and Edge desktop app windows and is best-effort in
 other browsers. Ordinary tabs cannot resize their containing browser window, and
 mobile browsers ignore the request.
@@ -191,16 +192,20 @@ turns the Mac's Dynamic resolution setting back on. Standard `ard` still refuses
 resize, and the one/two-virtual-display control is not implemented.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
-A plain VNC server has no way to say its pixels are HiDPI — standard RFB carries
-sizes in pixels and nothing else — so those targets are shown at 1x, one CSS
-pixel per framebuffer pixel, and the window's points go to the server as pixels.
-See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
-on a sway output at scale 2 and why a second client's resize can come back
-prohibited. The one exception is a server that answers the density request the
-gateway puts in every generic `SetEncodings`, which today is wlshare: it reports
-its output's scale, the gateway labels the framebuffer with it and asks for the
-window in points × scale, and the browser's density is declared back to the
-server. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
+The browser draws every framebuffer pixel on one device pixel, whatever the
+server: the canvas is the framebuffer, laid out at the browser's own density, and
+nothing is resampled. With `resize = true` the window is asked for in its device
+pixels — a 1728×883-point window on a Retina screen asks a plain VNC server for
+3456×1766 pixels. A plain VNC server has no way to say what its pixels are drawn
+at — standard RFB carries sizes in pixels and nothing else — so those targets
+are labelled 1x on the Help card, and how large the desktop's UI comes out is
+the server's scale against the browser's. See
+[`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means on
+a sway output and why a second client's resize can come back prohibited. A
+server that answers the density request the gateway puts in every generic
+`SetEncodings`, which today is wlshare, reports its output's scale, which labels
+the framebuffer, and is told the browser's density so the output draws at it.
+See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
 `audio = true` works on a plain VNC target too, through the QEMU Audio
 extension `rfbproto` registers: the gateway lists its pseudo-encoding, a server

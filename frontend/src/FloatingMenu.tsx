@@ -377,7 +377,8 @@ function FullscreenSection({ onSettled }: { onSettled: () => void }) {
 }
 
 // Resize the browser frame, not the desktop: the resulting content viewport is
-// exactly the remote's logical size, leaving applyCanvasCss at its invariant 100%.
+// exactly the framebuffer at one device pixel per remote pixel, leaving
+// applyCanvasCss at its invariant 1:1.
 // App windows only — a tab's browser frame is not the page's to resize — and not on
 // touch clients, whose window cannot be resized and whose presentation is the one
 // deliberate fit-to-width exception.
@@ -392,7 +393,9 @@ function WindowSection({
   if (!inAppWindow || CAN_PINCH_ZOOM) {
     return null;
   }
-  const viewport = size ? desktopViewportSize(size, size.scale) : null;
+  const viewport = size
+    ? desktopViewportSize(size, window.devicePixelRatio)
+    : null;
   return (
     <div className="toolbar-section">
       <span className="toolbar-label">Window</span>
@@ -417,7 +420,7 @@ function WindowSection({
 // It exists because a density that did not take is otherwise invisible. Both
 // engines that match a client's density report the result only as a `resize`, and
 // a request the remote quietly dropped produces no message at all: the desktop
-// simply looks soft, or half the size it was asked for, with nothing saying which
+// is simply half or twice the size it was asked for, with nothing saying which
 // end disagreed. Two densities that ought to agree and don't is the whole
 // diagnostic, which is why this reports both and not just the resolution.
 //
@@ -1086,8 +1089,9 @@ export default function FloatingMenu({
     setOpen(false);
   }, [togglePanel]);
 
-  // A button gesture in Chrome's app window requests the remote's point-size
-  // viewport plus whatever frame Chrome and this OS currently put around it.
+  // A button gesture in Chrome's app window requests the framebuffer's
+  // device-pixel viewport plus whatever frame Chrome and this OS currently put
+  // around it.
   // Close the drawer first so a smaller requested window does not leave its menu
   // covering the desktop it was just sized to show.
   const onSizeWindow = useCallback(() => {
@@ -1095,7 +1099,7 @@ export default function FloatingMenu({
       return;
     }
     setOpen(false);
-    sizeWindowToDesktop(size, size.scale);
+    sizeWindowToDesktop(size, window.devicePixelRatio);
   }, [size]);
 
   // Entering the mode has to hand the keyboard over along with the screen. The button

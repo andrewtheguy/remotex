@@ -411,16 +411,14 @@ impl Layout {
     /// single number is true. The combined view is a mosaic of screens at
     /// different densities — the measured Mac puts a 1x 1280x800 beside a 2x
     /// 1600x900, giving a 4480x1800 framebuffer of 2880x900 points — and no one
-    /// scale describes it. There it reports [`UNSCALED`], which shows the
-    /// framebuffer at its pixel size: too large on the Retina half, but nothing
-    /// is misrepresented, and picking a screen is what makes it exact.
+    /// scale describes it. There it reports [`UNSCALED`]: a label that claims
+    /// nothing, and picking a screen is what makes it exact.
     ///
     /// A combined view of *one* screen is that screen, so its density holds for
     /// the whole framebuffer. This is not a corner: a High Performance layout
     /// always reports the combined sentinel over its single virtual display, so
     /// the sentinel path is the one a granted Retina mode comes back on — reading
-    /// it as 1x told the client to show 3456x1804 backing pixels at full size,
-    /// and poisoned the point arithmetic every later resize starts from.
+    /// it as 1x poisoned the point arithmetic every later resize starts from.
     ///
     /// [`UNSCALED`]: crate::protocol::UNSCALED
     pub fn scale(&self) -> f32 {

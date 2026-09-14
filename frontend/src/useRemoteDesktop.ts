@@ -202,9 +202,10 @@ const pointerRectCache = createRectCache((clear) =>
 );
 
 // The canvas bitmap remains the full remote framebuffer; only its CSS box is
-// sized here, in the remote's own points. This is the same high-density canvas
-// split used by ordinary DPR-aware renderers, except the guest has already drawn
-// the high-density pixels, so the 2D context needs no scale transform.
+// sized here, at one device pixel per framebuffer pixel. This is the same
+// high-density canvas split used by ordinary DPR-aware renderers, except the
+// remote has already drawn the pixels, so the 2D context needs no scale
+// transform and nothing is resampled on the way to the screen.
 //
 // `grid` is the `render_grid_debug` overlay (tileGrid.ts), which is not a second
 // thing to lay out but the same one: it holds the framebuffer's bitmap like the
@@ -259,7 +260,7 @@ function applyCanvasCss(
     box(w, h, `translate3d(${view.pan.x}px, ${view.pan.y}px, 0)`);
     return;
   }
-  let { w, h } = desktopCanvasGeometry(size, size.scale).layout;
+  let { w, h } = desktopCanvasGeometry(size, window.devicePixelRatio).layout;
   // When the remote matched the viewport (dynamic resize), snap to it
   // exactly so fractional-dpr rounding can't spawn phantom scrollbars. The
   // ≤1px scale this introduces is imperceptible.
@@ -1050,9 +1051,9 @@ export function useRemoteDesktop(
       }
     };
     // The screen this window is on, deduped the same way. Mid-session only its
-    // density is acted on — an RDP target that allows resize matches it, and
-    // re-sending an unchanged value would be a full RDP reactivation for
-    // nothing. The full resolution rides along so the message stays the shape
+    // density is acted on — a target that allows resize renders at it, or asks
+    // for the window in its pixels — and re-sending an unchanged value would be
+    // a full RDP reactivation for nothing. The full resolution rides along so the message stays the shape
     // `connect` carries, where the size is what the session opens at.
     let lastHostDisplay: string | null = null;
     // Which display the remote is sharing, as its last `displays` reported it.
@@ -1350,7 +1351,10 @@ export function useRemoteDesktop(
       // canvas is replaced and filled black.
       const seq = ++resizeSeq;
       pendingResizes.set(seq, { size: s, grid: msg.tileGrid });
-      painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq);
+      painter.resize(
+        desktopCanvasGeometry(s, window.devicePixelRatio).bitmap,
+        seq,
+      );
     };
 
     // The remote's display list, and the one follow-up a change of display needs:
@@ -1688,9 +1692,10 @@ export function useRemoteDesktop(
     };
     window.addEventListener("resize", onViewportChange);
 
-    // A devicePixelRatio change affects what a resizable remote is asked to
-    // render, not the canvas's layout: the bitmap and CSS box describe the
-    // guest's pixels and points, while the browser rasterizes them for the host.
+    // A devicePixelRatio change moves the canvas's CSS box — the bitmap stays
+    // the framebuffer, and the box is that bitmap at one device pixel per
+    // remote pixel on the screen the window is now on — and changes what a
+    // resizable remote is asked to render.
     // There is no devicePixelRatio event, so this is the standard
     // trick: a media query pinned to the current ratio, which stops matching the
     // moment the ratio changes, re-armed each time from the new value.
@@ -1703,6 +1708,14 @@ export function useRemoteDesktop(
       dprQuery.addEventListener("change", onDprChange);
     };
     function onDprChange() {
+      applyCanvasCss(
+        canvasRef.current,
+        gridRef.current,
+        sizeRef.current,
+        viewRef.current,
+        bottomInsetRef.current,
+      );
+      syncCursor();
       sendHostDisplay();
       watchDpr();
     }

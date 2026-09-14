@@ -10,17 +10,18 @@ export interface ResizableWindow {
 }
 
 /**
- * The whole-CSS-pixel viewport that presents every remote point without scaling.
+ * The whole-CSS-pixel viewport that shows every framebuffer pixel on one device
+ * pixel, at this host's density.
  *
- * A framebuffer can divide into fractional points at an unusual density. A native
- * window only accepts integer dimensions, so round outward: one spare fraction is
- * preferable to clipping the last fraction of a remote point.
+ * A framebuffer can divide into fractional CSS pixels at an unusual density. A
+ * native window only accepts integer dimensions, so round outward: one spare
+ * fraction is preferable to clipping the last remote pixel.
  */
 export function desktopViewportSize(
   framebuffer: CanvasSize,
-  guestDensity: number,
+  hostDensity: number,
 ): CanvasSize {
-  const { layout } = desktopCanvasGeometry(framebuffer, guestDensity);
+  const { layout } = desktopCanvasGeometry(framebuffer, hostDensity);
   return {
     w: Math.ceil(layout.w),
     h: Math.ceil(layout.h),
@@ -44,14 +45,14 @@ export function outerSizeForViewport(
   };
 }
 
-/** Request a window whose content viewport is the remote desktop's logical size. */
+/** Request a window whose content viewport is the framebuffer at one device pixel per remote pixel. */
 export function sizeWindowToDesktop(
   framebuffer: CanvasSize,
-  guestDensity: number,
+  hostDensity: number,
   target: ResizableWindow = window,
 ): void {
   const outer = outerSizeForViewport(
-    desktopViewportSize(framebuffer, guestDensity),
+    desktopViewportSize(framebuffer, hostDensity),
     target,
   );
   target.resizeTo(outer.w, outer.h);

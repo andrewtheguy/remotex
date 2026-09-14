@@ -886,9 +886,9 @@ async fn active_loop(
     //
     // Believing a write instead was a bug with two faces. The desktop stayed 1x
     // while this end declared 2x, so every later resize went out with a density the
-    // server had thrown away, and — the one a person actually notices — a reattach
-    // announced `scale` 2.0 for a 1x framebuffer, which a client presents at half
-    // size. Nothing acknowledges a layout on this protocol, so the absence of a
+    // server had thrown away, and a reattach announced `scale` 2.0 for a 1x
+    // framebuffer, a label the Help card and tile lattice then had wrong.
+    // Nothing acknowledges a layout on this protocol, so the absence of a
     // resize is the only evidence there is, and it has to be the evidence used.
     let mut applied = Density::One;
     // Whether the remote has offered DisplayControl. Until it has, a layout has

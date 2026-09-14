@@ -35,13 +35,15 @@ pub const SCALE_ONE: u16 = 100;
 /// sharper desktop.
 const SCALE_MAX: u16 = 2 * SCALE_ONE;
 
-/// A wire `scale` as the ratio clients divide the framebuffer by.
+/// A client screen's `scale` as the ratio of device pixels per CSS point it
+/// names: what a generic VNC window's points are multiplied by to ask for the
+/// pixels that fill it.
 ///
 /// Below `SCALE_ONE` — a zero from a source that could not read the display's
-/// mode, or a fraction that would blow the desktop up rather than shrink it —
-/// reads as 1×, the answer that leaves the framebuffer alone. Above
-/// `SCALE_MAX` reads as 2×: those screens are real, and the sharpest desktop
-/// that exists is the right answer for them.
+/// mode, or a fraction that would ask for fewer pixels than points — reads as
+/// 1×, the answer that leaves the points alone. Above `SCALE_MAX` reads as 2×:
+/// those screens are real, and the densest desktop worth asking for is the
+/// right answer for them.
 pub fn scale_ratio(scale: u16) -> f32 {
     if scale < SCALE_ONE {
         1.0
@@ -268,16 +270,19 @@ pub enum ClientMsg {
     /// screen, 200 for a Retina one. Sent on connect and again whenever the
     /// window lands on a different screen; clients send it unconditionally
     /// rather than asking what the engine is, so being ignored is not a client
-    /// error. Its density is a ratio the client *has*; what a remote is asked
-    /// to render at is [`render_density`] of it.
+    /// error. Its density is a ratio the client *has*, and the one it lays the
+    /// framebuffer out at — one device pixel per framebuffer pixel. What a
+    /// remote is asked to *render* at is [`render_density`] of it; what a
+    /// generic VNC window is asked for is its points at [`scale_ratio`] of it.
     ///
     /// Mid-session it is a *density* report, and only targets with `resize`
     /// act on it — a density is a resize. RDP asks the host for twice the
     /// pixels at 200% UI scaling, quantized at a midpoint; a High Performance
-    /// Apple virtual display re-renders the same points at the new density.
-    /// Both report what they got back through [`ServerMsg::Resize`]. The
-    /// size fields matter at session-open, where [`ClientMsg::Connect`]
-    /// carries the same shape.
+    /// Apple virtual display re-renders the same points at the new density;
+    /// generic VNC asks for the window again in the pixels the new density
+    /// makes of it. All report what they got back through
+    /// [`ServerMsg::Resize`]. The size fields matter at session-open, where
+    /// [`ClientMsg::Connect`] carries the same shape.
     HostDisplay(HostDisplay),
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
@@ -1135,11 +1140,13 @@ pub enum ServerMsg {
     /// Mac, an RDP host rendering at 100%), 2.0 for a Retina Mac or an RDP host
     /// that accepted a 200% request.
     ///
-    /// The two travel together because a client cannot present either without
-    /// the other: it shows the desktop at `w / scale` points and lets the host
-    /// resample that to its own display, which is what keeps a remote the same
-    /// physical size on a 1x screen and a Retina one. A size that arrived without
-    /// its density would be presented at the wrong size until the next message.
+    /// The client lays the framebuffer out at one device pixel per pixel, at
+    /// its own screen's density, and never divides by `scale`: the number is a
+    /// label, read off the Help card beside the browser's own density so a
+    /// desktop the remote drew at the wrong one can be told from a browser
+    /// showing it wrong, and the pitch of the tile lattice below. The two
+    /// travel together because the lattice is cut at the density the pixels
+    /// were drawn at.
     ///
     /// On the wire the announcement also carries the tile lattice for this
     /// framebuffer, [`TileGrid::at`] its `scale`, for the client's
