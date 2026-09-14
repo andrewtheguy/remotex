@@ -23,6 +23,8 @@ use rust_embed::{EmbeddedFile, RustEmbed};
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
+// build.rs leaves this marker so a deleted `dist` is rebuilt; it is not a page asset.
+#[exclude = ".embedded"]
 struct Frontend;
 
 const INDEX: &str = "index.html";
@@ -138,7 +140,14 @@ mod tests {
     /// to load as the document, and a directory or a traversal is not a file either.
     #[tokio::test]
     async fn every_other_path_is_the_document() {
-        for path in ["/login", "/assets/", "/assets/../index.html", "/no/such/thing"] {
+        for path in [
+            "/login",
+            "/assets/",
+            "/assets/../index.html",
+            "/no/such/thing",
+            // build.rs leaves this marker in dist; it is excluded from the embed.
+            "/.embedded",
+        ] {
             let response = get(path, None).await;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             assert_eq!(
