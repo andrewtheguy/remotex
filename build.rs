@@ -13,10 +13,9 @@ fn main() {
         "frontend/tsconfig.app.json",
         "frontend/tsconfig.node.json",
         "frontend/vite.config.ts",
-        // The bundle itself, so a deleted `frontend/dist` reruns this script and is
-        // rebuilt rather than failing the check below. The build this script runs
-        // finishes before Cargo stamps its output, so it does not rerun itself.
-        "frontend/dist",
+        // Not `frontend/dist`: Cargo stamps "last build" before this script runs,
+        // so a directory the script rewrites always looks newer and every build
+        // would run Vite again.
     ] {
         println!("cargo:rerun-if-changed={path}");
     }

@@ -172,7 +172,6 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo
   echo '%files'
   echo '/usr/bin/remotex'
-  echo '/usr/share/remotex'
   echo '/usr/share/doc/remotex/remotex.example.toml'
 } > "$spec"
 
