@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
@@ -30,6 +31,7 @@ import type {
   RemoteClipboard,
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
+import UsagePanel, { useUsageAvailable } from "./UsagePanel.tsx";
 import {
   CAN_PINCH_ZOOM,
   densityLabel,
@@ -204,6 +206,78 @@ function ImmersiveHelpRows() {
         </dd>
       </div>
     </>
+  );
+}
+
+// The backdrop and card every modal shares. Escape dismisses it, matching the
+// backdrop tap and the card's own Close; the listener lives only while it is mounted.
+function ModalOverlay({
+  className,
+  onDismiss,
+  children,
+}: {
+  className: string;
+  onDismiss: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onDismiss();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onDismiss]);
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: tap-outside dismiss; the Close button covers keyboard users
+    // biome-ignore lint/a11y/noStaticElementInteractions: overlay backdrop
+    <div className="help-overlay" onClick={onDismiss}>
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner card only stops the backdrop's dismiss */}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: inner card */}
+      <div className={className} onClick={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// The Info card's way into "Data usage", offered only on a gateway with `[usage]`.
+function DataUsageButton({ onOpen }: { onOpen: () => void }) {
+  if (!useUsageAvailable()) {
+    return null;
+  }
+  return (
+    <button type="button" className="toolbar-btn" onClick={onOpen}>
+      Data usage
+    </button>
+  );
+}
+
+// The Info card switched to "Data usage". Back returns to Info; the backdrop and
+// Escape close both.
+function UsageModal({
+  open,
+  onBack,
+  onDismiss,
+  onUnauthorized,
+}: {
+  open: boolean;
+  onBack: () => void;
+  onDismiss: () => void;
+  onUnauthorized: () => void;
+}) {
+  if (!open) {
+    return null;
+  }
+  return (
+    <ModalOverlay className="help-card usage-card" onDismiss={onDismiss}>
+      <UsagePanel
+        closeLabel="Back to info"
+        onClose={onBack}
+        onUnauthorized={onUnauthorized}
+      />
+    </ModalOverlay>
   );
 }
 
@@ -724,6 +798,7 @@ function TouchscreenSection({
 
 export default function FloatingMenu({
   onLogout,
+  onUnauthorized,
   onSwitchTarget,
   sendKeyCombo,
   onKeyboardInset,
@@ -767,6 +842,8 @@ export default function FloatingMenu({
   onFocusDesktop,
 }: {
   onLogout: () => void;
+  // The usage read came back 401: the login expired. See UsagePanel.
+  onUnauthorized: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
@@ -866,7 +943,9 @@ export default function FloatingMenu({
   onFocusDesktop: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
+  // The one modal card, and which face it shows: Info, or the "Data usage" view its
+  // button switches it to.
+  const [modal, setModal] = useState<"info" | "usage" | null>(null);
   const { panel, setPanel, closePanel, togglePanel } = usePanel();
   // True between pressing Clipboard and the remote's text arriving. The panel
   // stays closed for that moment so it never opens on stale text that visibly
@@ -959,20 +1038,8 @@ export default function FloatingMenu({
     [position, clamp, defaultPosition],
   );
 
-  // Escape dismisses the gesture-help overlay, matching the backdrop tap and
-  // the Close button. Listener lives only while the overlay is open.
-  useEffect(() => {
-    if (!helpOpen) {
-      return;
-    }
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setHelpOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [helpOpen]);
+  const closeModal = useCallback(() => setModal(null), []);
+  const closeUsage = useCallback(() => setModal("info"), []);
 
   // Capture the non-persisted chrome shortcut before remote input forwarding.
   const [hidden, setHidden] = useState(false);
@@ -1278,7 +1345,7 @@ export default function FloatingMenu({
             <button
               type="button"
               className="toolbar-btn"
-              onClick={() => setHelpOpen(true)}
+              onClick={() => setModal("info")}
               title="This session's size, density, render dial and decoders, and the touch gestures"
             >
               Info
@@ -1312,80 +1379,80 @@ export default function FloatingMenu({
         </div>
       )}
 
-      {helpOpen && (
-        // biome-ignore lint/a11y/useKeyWithClickEvents: tap-outside dismiss; the Close button covers keyboard users
-        // biome-ignore lint/a11y/noStaticElementInteractions: overlay backdrop
-        <div className="help-overlay" onClick={() => setHelpOpen(false)}>
-          {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner card only stops the backdrop's dismiss */}
-          {/* biome-ignore lint/a11y/noStaticElementInteractions: inner card */}
-          <div className="help-card" onClick={(e) => e.stopPropagation()}>
-            <h2>Info</h2>
-            <ScreenHelp
-              size={size}
-              hostScale={hostScale}
-              connection={connection}
-              renderPlan={renderPlan}
-              audio={{
-                available: canAudio,
-                enabled: audioEnabled,
-                error: audioError,
-                stream: audioStream,
-              }}
-              videoStreams={videoStreams}
-            />
-            <h3>Shortcuts</h3>
-            <dl className="help-list">
-              <div className="help-item">
-                <dt>Hide or show this menu</dt>
-                {/* Worth documenting precisely because of what it does: once the
-                    ☰ button is hidden there is nothing left on screen to read the
-                    way back off, so a shortcut nobody wrote down is a menu that
-                    looks gone for good. */}
-                <dd>{hideChromeShortcut(isMacHost)}</dd>
+      <UsageModal
+        open={modal === "usage"}
+        onBack={closeUsage}
+        onDismiss={closeModal}
+        onUnauthorized={onUnauthorized}
+      />
+
+      {modal === "info" && (
+        <ModalOverlay className="help-card" onDismiss={closeModal}>
+          <h2>Info</h2>
+          <ScreenHelp
+            size={size}
+            hostScale={hostScale}
+            connection={connection}
+            renderPlan={renderPlan}
+            audio={{
+              available: canAudio,
+              enabled: audioEnabled,
+              error: audioError,
+              stream: audioStream,
+            }}
+            videoStreams={videoStreams}
+          />
+          <h3>Shortcuts</h3>
+          <dl className="help-list">
+            <div className="help-item">
+              <dt>Hide or show this menu</dt>
+              {/* Worth documenting precisely because of what it does: once the
+                  ☰ button is hidden there is nothing left on screen to read the
+                  way back off, so a shortcut nobody wrote down is a menu that
+                  looks gone for good. */}
+              <dd>{hideChromeShortcut(isMacHost)}</dd>
+            </div>
+            <ImmersiveHelpRows />
+            <AppWindowHelpRow />
+          </dl>
+          {isMacHost && (
+            <>
+              <h3>Mac key override</h3>
+              <dl className="help-list">
+                {MAC_KEY_HELP.map((row) => (
+                  <div key={row.situation} className="help-item">
+                    <dt>{row.situation}</dt>
+                    <dd>{row.effect}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
+          <h3>Touch gestures</h3>
+          {touchActive ? (
+            <p className="help-note">
+              Touchscreen is on: fingers reach the remote as touch contacts, and
+              its own gestures apply — tap, drag, press-and-hold, pinch,
+              two-finger scroll, edge swipes. Turn it off for the trackpad
+              gestures below.
+            </p>
+          ) : null}
+          <dl className="help-list">
+            {GESTURE_HELP.map((row) => (
+              <div key={row.gesture} className="help-item">
+                <dt>{row.gesture}</dt>
+                <dd>{row.action}</dd>
               </div>
-              <ImmersiveHelpRows />
-              <AppWindowHelpRow />
-            </dl>
-            {isMacHost && (
-              <>
-                <h3>Mac key override</h3>
-                <dl className="help-list">
-                  {MAC_KEY_HELP.map((row) => (
-                    <div key={row.situation} className="help-item">
-                      <dt>{row.situation}</dt>
-                      <dd>{row.effect}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </>
-            )}
-            <h3>Touch gestures</h3>
-            {touchActive ? (
-              <p className="help-note">
-                Touchscreen is on: fingers reach the remote as touch contacts,
-                and its own gestures apply — tap, drag, press-and-hold, pinch,
-                two-finger scroll, edge swipes. Turn it off for the trackpad
-                gestures below.
-              </p>
-            ) : null}
-            <dl className="help-list">
-              {GESTURE_HELP.map((row) => (
-                <div key={row.gesture} className="help-item">
-                  <dt>{row.gesture}</dt>
-                  <dd>{row.action}</dd>
-                </div>
-              ))}
-            </dl>
-            <button
-              type="button"
-              className="toolbar-btn"
-              onClick={() => setHelpOpen(false)}
-            >
+            ))}
+          </dl>
+          <div className="help-actions">
+            <DataUsageButton onOpen={() => setModal("usage")} />
+            <button type="button" className="toolbar-btn" onClick={closeModal}>
               Close
             </button>
-            <div className="app-version">v{__APP_VERSION__}</div>
           </div>
-        </div>
+          <div className="app-version">v{__APP_VERSION__}</div>
+        </ModalOverlay>
       )}
 
       <DockedPanel

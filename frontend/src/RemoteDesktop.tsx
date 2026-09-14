@@ -157,6 +157,7 @@ export default function RemoteDesktop({
       {mode === "desktop" && (
         <FloatingMenu
           onLogout={onLogout}
+          onUnauthorized={onUnauthorized}
           onSwitchTarget={switchTarget}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}

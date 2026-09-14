@@ -772,6 +772,26 @@ body {
   overflow-y: auto;
 }
 
+/* The Info card switched to "Data usage": wider for its tables. */
+.help-card.usage-card {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 92vw);
+  gap: 0.25rem;
+}
+
+.help-card.usage-card h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .help-card h2 {
   margin: 0 0 14px;
   font-size: 1.05rem;

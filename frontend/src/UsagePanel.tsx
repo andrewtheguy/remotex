@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { gatewayConfig } from "./gatewayConfig.ts";
 import {
   fetchUsage,
   formatBytes,
@@ -15,12 +16,30 @@ import {
   usageWithin,
 } from "./usage.ts";
 
-// The "Data usage" view, opened from the target picker. It reads the recorded rows
-// when it opens, when the range changes and when Refresh is pressed — never on a
-// timer. See usage.ts.
+// The "Data usage" view, opened from the target picker and from the session's Info
+// card, which it replaces while open; `closeLabel` names where its button returns to.
+// It reads the recorded rows when it opens, when the range changes and when Refresh
+// is pressed — never on a timer. See usage.ts.
 //
 // Usage is compared by target first: one table sums each target over all its sockets,
 // and the target filter narrows the socket table and the timeframes to one of them.
+
+/// Whether to offer the view at all: only a gateway with `[usage]` records any.
+export function useUsageAvailable(): boolean {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    gatewayConfig().then(({ usage }) => {
+      if (!cancelled) {
+        setAvailable(usage);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return available;
+}
 
 /// Timeframes listed below the totals, newest first. The totals cover every row.
 const LISTED_TIMEFRAMES = 200;
@@ -146,9 +165,11 @@ function TimeframesTable({ records }: { records: readonly UsageRecord[] }) {
 }
 
 export default function UsagePanel({
+  closeLabel,
   onClose,
   onUnauthorized,
 }: {
+  closeLabel: string;
   onClose: () => void;
   onUnauthorized: () => void;
 }) {
@@ -269,7 +290,7 @@ export default function UsagePanel({
         </>
       )}
       <button type="button" className="picker-logout" onClick={onClose}>
-        Back to targets
+        {closeLabel}
       </button>
     </>
   );
