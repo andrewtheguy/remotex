@@ -44,13 +44,14 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The built frontend, compiled into the binary (src/assets.rs): `frontend/dist` is
-# read at build time and the gateway is one file, with no web root beside it to
-# find, configure or get wrong. `debug-embed` so a debug build is the same one
-# file — the crate would otherwise read the folder from disk at run time in
-# debug, which is a second serving path. `mime-guess` names each file's content
-# type from its extension.
-rust-embed = { version = "8", features = ["debug-embed", "include-exclude", "mime-guess"] }
+# The built frontend, compiled into the binary (src/assets.rs): build.rs puts the
+# bundle in Cargo's OUT_DIR and the gateway is one file, with no web root beside
+# it to find, configure or get wrong. `debug-embed` so a debug build is the same
+# one file — the crate would otherwise read the folder from disk at run time in
+# debug, which is a second serving path. `interpolate-folder-path` lets the derive
+# read Cargo's private output. `mime-guess` names each file's content type from
+# its extension.
+rust-embed = { version = "8", features = ["debug-embed", "interpolate-folder-path", "mime-guess"] }
 # `ServiceExt::oneshot` in the router tests, which drive the router without a
 # socket.
 tower = { version = "0.5", features = ["util"] }
@@ -227,6 +228,9 @@ sspi = { version = "0.21", default-features = false }
 rsa = { version = "0.10.0-rc.18", default-features = false }
 eax = "0.6"
 sha2 = "0.11"
+
+[build-dependencies]
+anyhow = "1"
 
 # The global allocator on every Unix build (src/main.rs): glibc's per-thread arenas
 # kept freed session memory, and the gateway grew with every session. Windows' heap

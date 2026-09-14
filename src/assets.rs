@@ -1,10 +1,10 @@
 //! The browser client, compiled into the gateway.
 //!
-//! `frontend/dist` is read when this crate is built and every file in it becomes
+//! `build.rs` writes the bundle to Cargo's `OUT_DIR` and every file in it becomes
 //! bytes in the binary, so `remotex` is one file wherever it runs: no web root to
 //! install beside it, no `[server]` key to point at one, and no launcher argument
-//! for a managed worker. `build.rs` refuses to build without the bundle, which is
-//! where "the web UI will 404" used to be a warning at start-up.
+//! for a managed worker. The build refuses to continue without the bundle, which
+//! is where "the web UI will 404" used to be a warning at start-up.
 //!
 //! Vite names every asset by its content hash and only `index.html` keeps a stable
 //! name, so each embedded file's hash is also its `ETag`: a browser that already
@@ -22,17 +22,15 @@ use axum::{
 use rust_embed::{EmbeddedFile, RustEmbed};
 
 #[derive(RustEmbed)]
-#[folder = "frontend/dist"]
-// build.rs leaves this marker so a deleted `dist` is rebuilt; it is not a page asset.
-#[exclude = ".embedded"]
+#[folder = "$OUT_DIR/frontend-dist"]
 struct Frontend;
 
 const INDEX: &str = "index.html";
 
 /// The document. Its presence is `build.rs`'s promise: the build fails without
-/// `frontend/dist/index.html`, so there is no gateway in which this is `None`.
+/// `index.html`, so there is no gateway in which this is `None`.
 fn index() -> EmbeddedFile {
-    Frontend::get(INDEX).expect("build.rs verified frontend/dist/index.html exists")
+    Frontend::get(INDEX).expect("build.rs verified the frontend index exists")
 }
 
 /// Serve the SPA: a real file as itself, and any other path as `index.html` with a
@@ -145,8 +143,6 @@ mod tests {
             "/assets/",
             "/assets/../index.html",
             "/no/such/thing",
-            // build.rs leaves this marker in dist; it is excluded from the embed.
-            "/.embedded",
         ] {
             let response = get(path, None).await;
             assert_eq!(response.status(), StatusCode::OK, "{path}");

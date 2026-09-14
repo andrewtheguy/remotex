@@ -47,21 +47,10 @@ stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
 
-# The frontend is compiled into the binary (src/assets.rs), so `cargo build` below
-# needs frontend/dist first. The bundle is platform-agnostic, so CI builds it once
-# and hands every target the same one: set SKIP_FRONTEND_BUILD=1 to use an
-# existing frontend/dist instead of rebuilding (requires `bun run build` to have
-# run first). A local build makes its own through build.rs either way; the step
-# here is for CI, where CI=true skips that.
-if [ "${SKIP_FRONTEND_BUILD:-0}" = 1 ]; then
-  [ -d frontend/dist ] || { echo "SKIP_FRONTEND_BUILD=1 but frontend/dist is missing" >&2; exit 1; }
-  echo ">> using prebuilt frontend/dist"
-else
-  echo ">> building frontend"
-  ( cd frontend && bun run build )
-fi
-
 echo ">> building release binary"
+# build.rs creates the frontend in Cargo's OUT_DIR. Release CI sets
+# REMOTEX_PREBUILT_FRONTEND=frontend/dist so each target stages the one
+# platform-independent bundle built by the frontend job instead of running Bun.
 # No env coaxing here for either prebuilt C library. Remote audio links
 # `opus-prebuilt` and VP9 links `libvpx-prebuilt` — each pulls a prebuilt static
 # archive rather than compiling vendored C, so neither needs cmake, pkg-config, a

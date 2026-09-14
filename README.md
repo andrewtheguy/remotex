@@ -283,12 +283,13 @@ gateway.
 
 The built frontend is embedded in the binary at compile time (`src/assets.rs`),
 so `target/release/remotex` runs on its own with no `frontend/dist` beside it.
-`build.rs` runs `bun run build` before the crate compiles and fails the build if
-`frontend/dist/index.html` is still missing afterwards. With `CI=true` the bun
-step is skipped and the bundle has to be there already:
+`build.rs` runs `bun run build` into Cargo's private output directory before the
+crate compiles and fails the build if `index.html` is missing afterwards. A
+release builder can name a platform-independent bundle that it built earlier:
 
 ```sh
-bun run --cwd frontend build && CI=true cargo build --release
+bun run --cwd frontend build
+REMOTEX_PREBUILT_FRONTEND=frontend/dist cargo build --release
 ```
 
 The main directories are:

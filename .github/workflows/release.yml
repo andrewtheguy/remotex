@@ -73,9 +73,9 @@ jobs:
             ${{ steps.version.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
   # The frontend bundle is platform-agnostic — build it once here and hand it to
-  # every matrix runner, rather than rebuilding on each. `cargo build` compiles it
-  # into the binary (src/assets.rs), and with CI=true build.rs does not run bun, so
-  # the download below is what puts frontend/dist in place first.
+  # every matrix runner, rather than rebuilding on each. Each runner tells
+  # build.rs to stage the downloaded frontend/dist in Cargo's private OUT_DIR,
+  # from which src/assets.rs compiles it into the binary.
   frontend:
     needs: prepare
     runs-on: ubuntu-latest
@@ -96,6 +96,8 @@ jobs:
 
   build:
     needs: [prepare, frontend]
+    env:
+      REMOTEX_PREBUILT_FRONTEND: frontend/dist
     strategy:
       fail-fast: false
       matrix:
@@ -143,7 +145,7 @@ jobs:
       - name: Build release artifacts (${{ matrix.target-note }})
         if: runner.os != 'Windows'
         run: |
-          SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
+          bash packaging/build-tarball.sh
           bash packaging/build-native-packages.sh
 
       - name: Install WiX
@@ -154,8 +156,6 @@ jobs:
       - name: Build the release installer (${{ matrix.target-note }})
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          SKIP_FRONTEND_BUILD: "1"
         run: pwsh -NoProfile -File packaging/build-windows-msi.ps1
 
       - name: Install, run and remove the installer (${{ matrix.target-note }})

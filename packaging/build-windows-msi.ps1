@@ -14,10 +14,10 @@
 # Runs on Windows under PowerShell 7 with cargo, the MSVC toolchain and WiX 5 on PATH
 # (`dotnet tool install --global wix --version 5.0.2`; the UI extension the wizard pages
 # come from is fetched below); the three C libraries arrive as
-# prebuilt static archives from their `-prebuilt` crates. `cargo build` compiles frontend\dist
-# into the exe, so it has to exist first: SKIP_FRONTEND_BUILD=1 reuses an existing one, as the
-# tarball script does. packaging/verify-windows-msi.ps1 then installs the result, runs it and
-# removes it.
+# prebuilt static archives from their `-prebuilt` crates. `cargo build` compiles the frontend
+# from Cargo's OUT_DIR into the exe; release CI points REMOTEX_PREBUILT_FRONTEND at its shared
+# platform-independent bundle. packaging/verify-windows-msi.ps1 then installs the result, runs
+# it and removes it.
 #Requires -Version 7
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -48,18 +48,6 @@ if ($parts[0] -gt 255 -or $parts[1] -gt 255 -or $parts[2] -gt 65535) {
     throw "$msiVersion does not fit an MSI ProductVersion (255.255.65535)"
 }
 if ($msiVersion -ne $version) { Write-Host ">> MSI ProductVersion $msiVersion for $version" }
-
-if ($env:SKIP_FRONTEND_BUILD -eq '1') {
-    if (-not (Test-Path 'frontend\dist\index.html')) { throw 'SKIP_FRONTEND_BUILD=1 but frontend\dist is missing' }
-    Write-Host '>> using prebuilt frontend\dist'
-} else {
-    Write-Host '>> building frontend'
-    Push-Location frontend
-    try {
-        & bun run build
-        if ($LASTEXITCODE -ne 0) { throw "bun run build failed (exit $LASTEXITCODE)" }
-    } finally { Pop-Location }
-}
 
 Write-Host '>> building release binary'
 & cargo build --release

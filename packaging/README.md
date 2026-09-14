@@ -7,8 +7,9 @@ installer. Containers replace its native binary with a build that excludes the
 `embedded-gateway` default feature.
 
 Every artifact carries one gateway binary with the web client compiled into it
-(`src/assets.rs` embeds `frontend/dist` at build time). No package installs a web
-directory, and there is nothing to point the gateway at.
+(`src/assets.rs` embeds the bundle from Cargo's private output directory at build
+time). No package installs a web directory, and there is nothing to point the
+gateway at.
 
 ## Native layouts
 
