@@ -209,21 +209,58 @@ function ImmersiveHelpRows() {
   );
 }
 
-// The backdrop and card every modal shares. Escape dismisses it, matching the
+const FOCUSABLE =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+// Tab and Shift+Tab wrap around the card's own controls instead of leaving it for
+// the page behind the backdrop.
+function keepTabWithin(card: HTMLElement | null, e: KeyboardEvent) {
+  if (!card) {
+    return;
+  }
+  const focusable = card.querySelectorAll<HTMLElement>(FOCUSABLE);
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (!first || !last) {
+    e.preventDefault();
+    card.focus();
+  } else if (e.shiftKey && (active === first || !card.contains(active))) {
+    e.preventDefault();
+    last.focus();
+  } else if (
+    !e.shiftKey &&
+    (active === last || active === card || !card.contains(active))
+  ) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+// The backdrop and card every modal shares. The card is a modal dialog: focus moves
+// into it when it opens and Tab stays inside it. Escape dismisses it, matching the
 // backdrop tap and the card's own Close; the listener lives only while it is mounted.
 function ModalOverlay({
+  label,
   className,
   onDismiss,
   children,
 }: {
+  label: string;
   className: string;
   onDismiss: () => void;
   children: ReactNode;
 }) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    cardRef.current?.focus();
+  }, []);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         onDismiss();
+      } else if (e.key === "Tab") {
+        keepTabWithin(cardRef.current, e);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -234,8 +271,15 @@ function ModalOverlay({
     // biome-ignore lint/a11y/noStaticElementInteractions: overlay backdrop
     <div className="help-overlay" onClick={onDismiss}>
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner card only stops the backdrop's dismiss */}
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: inner card */}
-      <div className={className} onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={cardRef}
+        className={className}
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
         {children}
       </div>
     </div>
@@ -271,7 +315,11 @@ function UsageModal({
     return null;
   }
   return (
-    <ModalOverlay className="help-card usage-card" onDismiss={onDismiss}>
+    <ModalOverlay
+      label="Data usage"
+      className="help-card usage-card"
+      onDismiss={onDismiss}
+    >
       <UsagePanel
         closeLabel="Back to info"
         onClose={onBack}
@@ -1038,7 +1086,12 @@ export default function FloatingMenu({
     [position, clamp, defaultPosition],
   );
 
-  const closeModal = useCallback(() => setModal(null), []);
+  // The toolbar control that opened the modal, which takes focus back when it closes.
+  const modalOpenerRef = useRef<HTMLElement | null>(null);
+  const closeModal = useCallback(() => {
+    setModal(null);
+    modalOpenerRef.current?.focus();
+  }, []);
   const closeUsage = useCallback(() => setModal("info"), []);
 
   // Capture the non-persisted chrome shortcut before remote input forwarding.
@@ -1345,7 +1398,10 @@ export default function FloatingMenu({
             <button
               type="button"
               className="toolbar-btn"
-              onClick={() => setModal("info")}
+              onClick={(e) => {
+                modalOpenerRef.current = e.currentTarget;
+                setModal("info");
+              }}
               title="This session's size, density, render dial and decoders, and the touch gestures"
             >
               Info
@@ -1387,7 +1443,7 @@ export default function FloatingMenu({
       />
 
       {modal === "info" && (
-        <ModalOverlay className="help-card" onDismiss={closeModal}>
+        <ModalOverlay label="Info" className="help-card" onDismiss={closeModal}>
           <h2>Info</h2>
           <ScreenHelp
             size={size}

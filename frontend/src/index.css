@@ -772,6 +772,12 @@ body {
   overflow-y: auto;
 }
 
+/* The card takes focus when it opens so Tab starts inside it; its controls show
+   focus, the card itself does not. */
+.help-card:focus {
+  outline: none;
+}
+
 /* The Info card switched to "Data usage": wider for its tables. */
 .help-card.usage-card {
   display: flex;
