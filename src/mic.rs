@@ -70,11 +70,21 @@ pub trait MicControl: Send + Sync {
 /// device during the RDP handshake, seconds before any mic socket connects, so the last
 /// open is latched under the same lock as the sender and replayed to a socket that
 /// subscribes while it stands; a close clears it.
+///
+/// It keeps, too, whether a mic socket is attached. The browser can enable its microphone
+/// while the engine is still connecting, before any control is registered, so the plug is
+/// remembered and told to the control as it registers.
 #[derive(Default)]
 pub struct MicBridge {
-    control: Mutex<Option<Arc<dyn MicControl>>>,
+    upstream: Mutex<Upstream>,
     downstream: Mutex<Downstream>,
     decoder: Mutex<Option<Decoder>>,
+}
+
+#[derive(Default)]
+struct Upstream {
+    control: Option<Arc<dyn MicControl>>,
+    plugged: bool,
 }
 
 #[derive(Default)]
@@ -94,9 +104,14 @@ impl MicBridge {
         Self::default()
     }
 
-    /// The engine registers its control as it starts.
+    /// The engine registers its control as it starts, and hears of a mic socket that
+    /// attached before it did.
     pub fn set_control(&self, control: Arc<dyn MicControl>) {
-        *self.control.lock().expect("mic control lock") = Some(control);
+        let mut upstream = self.upstream.lock().expect("mic control lock");
+        if upstream.plugged {
+            control.plug();
+        }
+        upstream.control = Some(control);
     }
 
     /// The socket subscribes for the host's decisions, replacing any earlier subscriber,
@@ -140,7 +155,7 @@ impl MicBridge {
         let Some(format) = self.downstream.lock().expect("mic signal lock").open else {
             return;
         };
-        let Some(control) = self.control.lock().expect("mic control lock").clone() else {
+        let Some(control) = self.control() else {
             return;
         };
         let mut decoder = self.decoder.lock().expect("mic decoder lock");
@@ -166,10 +181,13 @@ impl MicBridge {
         }
     }
 
-    /// A mic socket attached: the engine is told the browser's microphone is there.
+    /// A mic socket attached: the engine is told the browser's microphone is there, now or
+    /// as it registers. Told under the lock, so a plug and an unplug reach the engine in
+    /// the order they were made.
     pub fn plug(&self) {
-        let control = self.control.lock().expect("mic control lock").clone();
-        if let Some(control) = control {
+        let mut upstream = self.upstream.lock().expect("mic control lock");
+        upstream.plugged = true;
+        if let Some(control) = upstream.control.as_ref() {
             control.plug();
         }
     }
@@ -178,8 +196,9 @@ impl MicBridge {
     /// engine drops what it has not sent and lets the microphone go.
     pub fn unplug(&self) {
         *self.decoder.lock().expect("mic decoder lock") = None;
-        let control = self.control.lock().expect("mic control lock").clone();
-        if let Some(control) = control {
+        let mut upstream = self.upstream.lock().expect("mic control lock");
+        upstream.plugged = false;
+        if let Some(control) = upstream.control.as_ref() {
             control.unplug();
         }
     }
@@ -188,10 +207,13 @@ impl MicBridge {
     /// has not sent yet of this one is dropped.
     pub fn reset(&self) {
         *self.decoder.lock().expect("mic decoder lock") = None;
-        let control = self.control.lock().expect("mic control lock").clone();
-        if let Some(control) = control {
+        if let Some(control) = self.control() {
             control.reset();
         }
+    }
+
+    fn control(&self) -> Option<Arc<dyn MicControl>> {
+        self.upstream.lock().expect("mic control lock").control.clone()
     }
 }
 
@@ -299,10 +321,13 @@ mod tests {
     struct Recorder {
         buffers: Mutex<Vec<Vec<u8>>>,
         resets: Mutex<usize>,
+        plugs: Mutex<usize>,
     }
 
     impl MicControl for Recorder {
-        fn plug(&self) {}
+        fn plug(&self) {
+            *self.plugs.lock().unwrap() += 1;
+        }
 
         fn unplug(&self) {
             *self.resets.lock().unwrap() += 1;
@@ -348,6 +373,24 @@ mod tests {
         assert_eq!(groups, 60);
         let exact = 60 * 640;
         assert!(bytes <= exact && bytes + 640 >= exact, "{bytes} bytes for {exact}");
+    }
+
+    /// A browser that enables its microphone while the engine is still connecting has
+    /// plugged it by the time the engine registers; one that let it go again has not.
+    #[test]
+    fn a_plug_made_before_the_engine_registers_reaches_it() {
+        let bridge = MicBridge::new();
+        bridge.plug();
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        assert_eq!(*recorder.plugs.lock().unwrap(), 1);
+
+        let bridge = MicBridge::new();
+        bridge.plug();
+        bridge.unplug();
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        assert_eq!(*recorder.plugs.lock().unwrap(), 0);
     }
 
     #[test]
