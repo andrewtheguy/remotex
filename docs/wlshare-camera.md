@@ -98,8 +98,18 @@ enabled camera on a desktop nobody is filming costs nothing past the plug.
 
 Both halves' wire formats are unit tested against independent decoders — this
 side's in `src/vnc_camera.rs`, wlshare's in `crates/wlshare-rfb/src/camera.rs` —
-and so are the device's hold-until-answered rule and the queue's drop to a
-keyframe. wlshare's decoder is tested against a libx264 stream.
+and so are the device's hold-until-answered rule, the queue's drop to a keyframe,
+and the bridge keeping a plug made before the engine registers. wlshare's decoder
+is tested against a libx264 stream.
+
+The container test in `tests/wlshare_e2e.rs` follows the whole path but the page:
+wlshare on a headless sway with PipeWire and WirePlumber, and the gateway, driven by
+a client that opens the camera socket as the session starts, plugs 320x240 at 15/1,
+and sends a libx264 Constrained Baseline fixture in real time. GStreamer's
+`pipewiresrc` is the application: it asserts that wlshare lends the desktop a node,
+that opening it sends `cameraStart` with the plugged format and leaving it sends
+`cameraStop`, that the application negotiates raw pictures of that size, and that
+closing the socket removes the node.
 
 Measured 2026-09-14 against wlshare on a sway session with PipeWire 1.4.2, without
 the gateway: a probe client speaking the wire above plugged 640x480 at 15/1 and

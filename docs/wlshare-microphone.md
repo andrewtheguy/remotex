@@ -90,7 +90,15 @@ decisions leave in the order they were made:
 
 Both halves' wire formats are unit tested against independent decoders — this
 side's in `src/vnc_mic.rs`, wlshare's in `crates/wlshare-rfb/src/microphone.rs` —
-and so are the device's rules and the queues.
+and so are the device's rules, the queues, and the bridge keeping a plug made
+before the engine registers.
+
+The container test in `tests/wlshare_e2e.rs` follows the whole path but the page:
+wlshare on a headless sway with PipeWire and WirePlumber, and the gateway, driven by
+a client that opens the mic socket as the session starts and sends 60 ms Opus
+packets of a 440 Hz tone. It asserts that wlshare lends the desktop a node, that
+`pw-record` linking to it sends `micOpen` and leaving it sends `micClose`, that what
+was recorded is loudest at 440 Hz, and that closing the socket removes the node.
 
 Measured 2026-09-14 against wlshare on a labwc session with PipeWire 1.4.2,
 without the gateway: a probe client speaking the wire above plugged a microphone
