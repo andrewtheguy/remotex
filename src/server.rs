@@ -1397,6 +1397,7 @@ mod tests {
         })
         .unwrap();
         let record = |start, sent_bytes| usage::Record {
+            target: Some("mac".to_owned()),
             socket: usage::Socket::Session,
             start,
             end: start + 60,
@@ -1418,7 +1419,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
-            r#"{"intervalSecs":60,"maxRecords":10,"records":[{"socket":"session","start":60,"end":120,"sentBytes":200,"receivedBytes":7}]}"#
+            r#"{"intervalSecs":60,"maxRecords":10,"records":[{"target":"mac","socket":"session","start":60,"end":120,"sentBytes":200,"receivedBytes":7}]}"#
         );
 
         let app = router(router_config(None), Usage::default());

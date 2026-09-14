@@ -52,8 +52,10 @@
 # counted: the bytes of every text and binary frame, WebSocket headers included,
 # written to the browser (sent) and read from it (received).
 #
-# Every interval_secs one record is added per socket that moved data in that
-# timeframe — an idle socket adds none — in one transaction. Each socket keeps its
+# Bytes are grouped by the target the session had selected when they moved, and
+# by "no target" while the browser sits on the picker. Every interval_secs one
+# record is added per target and socket that moved data in that timeframe — an
+# idle socket adds none — in one transaction. Each target's socket keeps its
 # newest max_records records. The database's directory must be writable: SQLite
 # keeps its -wal and -shm files beside it. Best effort: the timeframe being
 # counted when the gateway stops is lost. Absent, nothing is recorded.

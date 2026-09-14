@@ -1503,7 +1503,7 @@ pub struct UsageSection {
     /// Seconds in one timeframe, which is also how often it is written.
     #[serde(default = "default_usage_interval_secs")]
     pub interval_secs: u64,
-    /// Records kept per socket; the oldest go first.
+    /// Records kept per target and socket; the oldest go first.
     #[serde(default = "default_usage_max_records")]
     pub max_records: usize,
 }

@@ -1603,12 +1603,15 @@ restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
 
 `[usage]` is top-level for the same reason and records the data usage of the
-browser's four WebSockets in an SQLite database, one row per socket per
-timeframe. Each socket counts the frames it writes and reads — text and binary
-frames with their headers, never the heartbeat's pings and pongs, so an idle
-connection records nothing — into counters shared by every connection to that
-socket. Every `interval_secs` the counters are taken, each socket that moved data
-gains a row, and the rows past `max_records` per socket are deleted oldest first,
+browser's four WebSockets in an SQLite database, one row per target, socket and
+timeframe, so targets can be compared. Each socket counts the frames it writes and
+reads — text and binary frames with their headers, never the heartbeat's pings and
+pongs, so an idle connection records nothing — into the counters of the target
+the session has selected at that moment, which the session manager publishes in
+an atomic beside its state so a frame never takes the session lock; bytes moved
+on the picker count under no target. Every `interval_secs` the counters are
+taken, each target's socket that moved data gains a row, and the rows past
+`max_records` per target and socket are deleted oldest first,
 all in one transaction, so a crash leaves the timeframe written or not at all. It
 is best effort by design: the open timeframe dies with the process, and a failed
 write is retried with the next one. A file that is not this gateway's usage

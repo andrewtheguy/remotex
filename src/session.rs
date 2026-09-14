@@ -343,6 +343,10 @@ struct State {
     /// beside it, since every non-takeover engine end clears it
     /// ([`SessionManager::attach`] leans on that).
     selected: Option<TargetConfig>,
+    /// `selected`'s position in [`SessionManager::targets`] plus one, zero for none: what
+    /// the WebSocket usage meters read on every data frame without taking this lock.
+    /// Changed only beside `selected`, by [`State::select`] and [`State::clear_selection`].
+    selected_index: Arc<std::sync::atomic::AtomicUsize>,
     /// The running engine, if any. Remains available after detach until the
     /// reattach grace expires, a heartbeat expires, or an explicit disconnect.
     engine: Option<EngineSlot>,
@@ -470,6 +474,18 @@ impl State {
     }
 }
 
+impl State {
+    fn select(&mut self, target: TargetConfig, index: Option<usize>) {
+        self.selected = Some(target);
+        self.selected_index.store(index.map_or(0, |i| i + 1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_index.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The single session slot: owns the engine lifecycle and routes its frames
 /// to whichever browser currently holds the attachment.
 pub struct SessionManager {
@@ -483,6 +499,8 @@ pub struct SessionManager {
     /// to keep reading it, and [`LinkFeedback::reset`] on every attachment change is
     /// what keeps its *contents* from outliving the browser they measured.
     feedback: Arc<LinkFeedback>,
+    /// The state's [`State::selected_index`], shared so it is read without the lock.
+    selected_index: Arc<std::sync::atomic::AtomicUsize>,
     // std Mutex: every critical section is short and never held across an await.
     state: Mutex<State>,
 }
@@ -492,13 +510,21 @@ impl SessionManager {
         Self::with_spawner(targets, Box::new(spawn_engine))
     }
 
+    /// The selected target's position in the `[[targets]]` list, `None` on the picker.
+    /// Lock-free, because the usage meters ask on every data frame ([`crate::usage`]).
+    pub fn selected_target(&self) -> Option<usize> {
+        self.selected_index.load(std::sync::atomic::Ordering::Relaxed).checked_sub(1)
+    }
+
     /// Test seam: run the manager against a scripted engine.
     fn with_spawner(targets: Vec<TargetConfig>, spawn_engine: EngineSpawner) -> Self {
+        let state = State::default();
         Self {
             targets,
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
-            state: Mutex::new(State::default()),
+            selected_index: Arc::clone(&state.selected_index),
+            state: Mutex::new(state),
         }
     }
 
@@ -1125,7 +1151,7 @@ impl SessionManager {
             if st.take_engine() {
                 info!("session: ending the running engine; the next session starts from scratch");
             }
-            st.selected = None;
+            st.clear_selection();
             target
         };
         self.await_engine_exit().await;
@@ -1253,7 +1279,8 @@ impl SessionManager {
             render,
             grid_debug: target.render_grid_debug,
         };
-        st.selected = Some(target);
+        let index = self.targets.iter().position(|t| t.name == target.name);
+        st.select(target, index);
         status
     }
 
@@ -1269,7 +1296,7 @@ impl SessionManager {
         // the engine (both engines exit their loop when input_rx closes); its
         // pump then finds a newer/absent generation and does nothing.
         let had_engine = st.take_engine();
-        st.selected = None;
+        st.clear_selection();
         if had_engine {
             info!("session: disconnected; returning to the picker");
         }
@@ -1339,7 +1366,7 @@ impl SessionManager {
             // left here.
             st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
             let had_engine = st.take_engine();
-            st.selected = None;
+            st.clear_selection();
             if had_engine {
                 info!("session: logged out; engine stopped");
             }
@@ -1368,7 +1395,7 @@ impl SessionManager {
         st.client = None;
         st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
         let had_engine = st.take_engine();
-        st.selected = None;
+        st.clear_selection();
         if had_engine {
             info!("session: browser heartbeat expired; engine stopped");
         }
@@ -1397,7 +1424,7 @@ impl SessionManager {
                 };
                 if st.client.is_none() && st.attachment_epoch == attachment_epoch && current {
                     st.take_engine();
-                    st.selected = None;
+                    st.clear_selection();
                     true
                 } else {
                     false
@@ -1456,7 +1483,7 @@ impl SessionManager {
                 return;
             }
             st.take_engine();
-            st.selected = None;
+            st.clear_selection();
             st.client.as_ref().map(|c| c.event_tx.clone())
         };
         if let Some(event_tx) = event_tx {

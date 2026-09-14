@@ -139,7 +139,10 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
 
     // Before the handshake too, so a usage database the gateway cannot use is a refused
     // start the launcher reports rather than a gateway that silently records nothing.
-    let usage = crate::usage::start(config.usage.as_ref())
+    let usage = crate::usage::start(
+        config.usage.as_ref(),
+        config.targets.iter().map(|target| target.name.clone()).collect(),
+    )
         .context("cannot record websocket data usage ([usage].database)")?;
 
     let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {

@@ -2,11 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import {
   fetchUsage,
   formatBytes,
+  type TargetUsage,
+  targetLabel,
   USAGE_RANGES,
   USAGE_SOCKET_LABEL,
   USAGE_SOCKETS,
   type UsageRange,
+  type UsageRecord,
   type UsageReport,
+  usageByTarget,
   usageSince,
   usageTotals,
 } from "./usage.ts";
@@ -14,12 +18,131 @@ import {
 // The "Data usage" view, opened from the target picker. It reads the recorded rows
 // when it opens, when the range changes and when Refresh is pressed — never on a
 // timer. See usage.ts.
+//
+// Usage is compared by target first: one table sums each target over all its sockets,
+// and the target filter narrows the socket table and the timeframes to one of them.
 
 /// Timeframes listed below the totals, newest first. The totals cover every row.
 const LISTED_TIMEFRAMES = 200;
 
+/// The filter select's value for a target: `null` (the picker) cannot be an option
+/// value, and a prefix keeps a target named "all" apart from the "all" choice.
+function targetKey(target: string | null): string {
+  return target === null ? "picker" : `target:${target}`;
+}
+
 function timeLabel(unixSecs: number): string {
   return new Date(unixSecs * 1000).toLocaleString();
+}
+
+function ByTargetTable({ byTarget }: { byTarget: readonly TargetUsage[] }) {
+  return (
+    <>
+      <h2 className="usage-heading">By target</h2>
+      <table className="usage-table" aria-label="By target">
+        <thead>
+          <tr>
+            <th scope="col">Target</th>
+            <th scope="col">Sent</th>
+            <th scope="col">Received</th>
+            <th scope="col">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {byTarget.map((usage) => (
+            <tr key={targetKey(usage.target)}>
+              <th scope="row">{targetLabel(usage.target)}</th>
+              <td>{formatBytes(usage.sent)}</td>
+              <td>{formatBytes(usage.received)}</td>
+              <td>{formatBytes(usage.sent + usage.received)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function BySocketTable({
+  records,
+  label,
+}: {
+  records: readonly UsageRecord[];
+  label: string;
+}) {
+  const totals = usageTotals(records);
+  return (
+    <>
+      <h2 className="usage-heading">By socket, {label}</h2>
+      <table className="usage-table" aria-label="By socket">
+        <thead>
+          <tr>
+            <th scope="col">Socket</th>
+            <th scope="col">Sent</th>
+            <th scope="col">Received</th>
+          </tr>
+        </thead>
+        <tbody>
+          {USAGE_SOCKETS.map((socket) => (
+            <tr key={socket}>
+              <th scope="row">{USAGE_SOCKET_LABEL[socket]}</th>
+              <td>{formatBytes(totals[socket].sent)}</td>
+              <td>{formatBytes(totals[socket].received)}</td>
+            </tr>
+          ))}
+          <tr className="usage-total">
+            <th scope="row">Total</th>
+            <td>{formatBytes(totals.all.sent)}</td>
+            <td>{formatBytes(totals.all.received)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function TimeframesTable({ records }: { records: readonly UsageRecord[] }) {
+  const listed = records.slice(-LISTED_TIMEFRAMES).reverse();
+  return (
+    <>
+      <h2 className="usage-heading">
+        Timeframes
+        {records.length > listed.length
+          ? ` (newest ${listed.length} of ${records.length})`
+          : ""}
+      </h2>
+      <div className="usage-scroll">
+        <table className="usage-table" aria-label="Timeframes">
+          <thead>
+            <tr>
+              <th scope="col">Ended</th>
+              <th scope="col">Target</th>
+              <th scope="col">Socket</th>
+              <th scope="col">Sent</th>
+              <th scope="col">Received</th>
+            </tr>
+          </thead>
+          <tbody>
+            {listed.map((record) => (
+              <tr
+                key={`${targetKey(record.target)}-${record.socket}-${record.start}-${record.end}`}
+              >
+                <td
+                  title={`${timeLabel(record.start)} – ${timeLabel(record.end)}`}
+                >
+                  {timeLabel(record.end)}
+                </td>
+                <td>{targetLabel(record.target)}</td>
+                <td>{USAGE_SOCKET_LABEL[record.socket]}</td>
+                <td>{formatBytes(record.sentBytes)}</td>
+                <td>{formatBytes(record.receivedBytes)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
 }
 
 export default function UsagePanel({
@@ -34,6 +157,7 @@ export default function UsagePanel({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [readAt, setReadAt] = useState<number | null>(null);
+  const [targetFilter, setTargetFilter] = useState("all");
 
   const load = useCallback(
     async (isCancelled: () => boolean) => {
@@ -65,18 +189,25 @@ export default function UsagePanel({
     };
   }, [load]);
 
-  const totals = report ? usageTotals(report.records) : null;
-  const listed = report
-    ? report.records.slice(-LISTED_TIMEFRAMES).reverse()
-    : [];
+  const records = report?.records ?? [];
+  const byTarget = usageByTarget(records);
+  // A target the new range has no rows for falls back to every target rather than
+  // leaving the filter on an option the list no longer has.
+  const selected = byTarget.find(
+    (usage) => targetKey(usage.target) === targetFilter,
+  );
+  const filtered = selected
+    ? records.filter((record) => record.target === selected.target)
+    : records;
+  const filterLabel = selected ? targetLabel(selected.target) : "all targets";
 
   return (
     <>
       <h1>Data usage</h1>
       <p className="picker-hint">
-        Bytes between this browser and the gateway, per WebSocket.
+        Bytes between this browser and the gateway, per target and WebSocket.
         {report &&
-          ` Recorded every ${report.intervalSecs} s; each socket keeps its newest ${report.maxRecords} timeframes.`}
+          ` Recorded every ${report.intervalSecs} s; each target's socket keeps its newest ${report.maxRecords} timeframes.`}
       </p>
       <div className="usage-controls">
         <select
@@ -87,6 +218,21 @@ export default function UsagePanel({
           {USAGE_RANGES.map((r) => (
             <option key={r.id} value={r.id}>
               {r.label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Target"
+          value={selected ? targetFilter : "all"}
+          onChange={(e) => setTargetFilter(e.target.value)}
+        >
+          <option value="all">All targets</option>
+          {byTarget.map((usage) => (
+            <option
+              key={targetKey(usage.target)}
+              value={targetKey(usage.target)}
+            >
+              {targetLabel(usage.target)}
             </option>
           ))}
         </select>
@@ -103,68 +249,14 @@ export default function UsagePanel({
       {readAt !== null && (
         <p className="usage-read-at">Read at {timeLabel(readAt)}</p>
       )}
-      {totals && (
-        <table className="usage-table" aria-label="Totals">
-          <thead>
-            <tr>
-              <th scope="col">Socket</th>
-              <th scope="col">Sent</th>
-              <th scope="col">Received</th>
-            </tr>
-          </thead>
-          <tbody>
-            {USAGE_SOCKETS.map((socket) => (
-              <tr key={socket}>
-                <th scope="row">{USAGE_SOCKET_LABEL[socket]}</th>
-                <td>{formatBytes(totals[socket].sent)}</td>
-                <td>{formatBytes(totals[socket].received)}</td>
-              </tr>
-            ))}
-            <tr className="usage-total">
-              <th scope="row">Total</th>
-              <td>{formatBytes(totals.all.sent)}</td>
-              <td>{formatBytes(totals.all.received)}</td>
-            </tr>
-          </tbody>
-        </table>
-      )}
-      {report && report.records.length === 0 && (
+      {report && records.length === 0 && (
         <p className="picker-hint">No data moved in this range.</p>
       )}
-      {listed.length > 0 && (
+      {byTarget.length > 0 && <ByTargetTable byTarget={byTarget} />}
+      {filtered.length > 0 && (
         <>
-          <h2 className="usage-heading">
-            Timeframes
-            {report && report.records.length > listed.length
-              ? ` (newest ${listed.length} of ${report.records.length})`
-              : ""}
-          </h2>
-          <div className="usage-scroll">
-            <table className="usage-table" aria-label="Timeframes">
-              <thead>
-                <tr>
-                  <th scope="col">Ended</th>
-                  <th scope="col">Socket</th>
-                  <th scope="col">Sent</th>
-                  <th scope="col">Received</th>
-                </tr>
-              </thead>
-              <tbody>
-                {listed.map((record) => (
-                  <tr key={`${record.socket}-${record.start}-${record.end}`}>
-                    <td
-                      title={`${timeLabel(record.start)} – ${timeLabel(record.end)}`}
-                    >
-                      {timeLabel(record.end)}
-                    </td>
-                    <td>{USAGE_SOCKET_LABEL[record.socket]}</td>
-                    <td>{formatBytes(record.sentBytes)}</td>
-                    <td>{formatBytes(record.receivedBytes)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <BySocketTable records={filtered} label={filterLabel} />
+          <TimeframesTable records={filtered} />
         </>
       )}
       <button type="button" className="picker-logout" onClick={onClose}>

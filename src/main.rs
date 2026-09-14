@@ -144,7 +144,10 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     if let Some(recording) = &config.usage {
         info!("recording websocket data usage to {}", recording.database.display());
     }
-    let usage = remotex::usage::start(config.usage.as_ref())
+    let usage = remotex::usage::start(
+        config.usage.as_ref(),
+        config.targets.iter().map(|target| target.name.clone()).collect(),
+    )
         .context("cannot record websocket data usage ([usage].database)")?;
     let app = server::router(config.clone(), usage);
 

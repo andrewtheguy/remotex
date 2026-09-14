@@ -76,7 +76,7 @@ use crate::{
     protocol::{self, ClientMsg, ServerMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
-    usage::{Counter, Socket},
+    usage::{Socket, UsageMeters},
     wire::Wire,
 };
 
@@ -473,19 +473,22 @@ fn data_frame_len(msg: &Message, masked: bool) -> Option<u64> {
     Some((2 + length_field + mask + payload) as u64)
 }
 
-/// Split an attached socket into halves that count every data frame into `usage`.
+/// Split an attached socket into halves that count every data frame into `usage`, under
+/// the target `sessions` has selected when the frame moves.
 fn metered(
     socket: WebSocket,
-    usage: Arc<Counter>,
+    sessions: Arc<SessionManager>,
+    usage: Arc<UsageMeters>,
+    kind: Socket,
 ) -> (
     impl futures_util::Sink<Message, Error = axum::Error> + Send + Unpin,
     impl futures_util::Stream<Item = Result<Message, axum::Error>> + Send + Unpin,
 ) {
     let (ws_tx, ws_rx) = socket.split();
-    let outbound = Arc::clone(&usage);
+    let (outbound_sessions, outbound_usage) = (Arc::clone(&sessions), Arc::clone(&usage));
     let ws_tx = ws_tx.with(move |msg: Message| {
         if let Some(bytes) = data_frame_len(&msg, false) {
-            outbound.sent(bytes);
+            outbound_usage.counter(outbound_sessions.selected_target(), kind).sent(bytes);
         }
         std::future::ready(Ok::<_, axum::Error>(msg))
     });
@@ -493,7 +496,7 @@ fn metered(
         if let Ok(msg) = frame
             && let Some(bytes) = data_frame_len(msg, true)
         {
-            usage.received(bytes);
+            usage.counter(sessions.selected_target(), kind).received(bytes);
         }
     });
     (ws_tx, ws_rx)
@@ -549,7 +552,7 @@ pub async fn handler(
             display,
             params.chroma,
             HEARTBEAT_TIMINGS,
-            state.usage.meters.counter(Socket::Session),
+            Arc::clone(&state.usage.meters),
         )
     })
 }
@@ -560,7 +563,7 @@ pub async fn audio_handler(
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        audio(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, state.usage.meters.counter(Socket::Audio))
+        audio(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
     })
 }
 
@@ -574,7 +577,7 @@ async fn audio(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<Counter>,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = token.and_then(|t| sessions.attach_audio(&t).ok());
     let Some(attachment) = attachment else {
@@ -590,7 +593,7 @@ async fn audio(
 
     info!("ws: an audio socket attached");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, usage);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Audio);
     let (audio_id, mut packets, mut evicted) =
         (attachment.id, attachment.packets, attachment.evicted);
     // The same encoder the session socket uses, so the two cannot disagree about a
@@ -689,7 +692,7 @@ pub async fn camera_handler(
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, state.usage.meters.counter(Socket::Camera))
+        camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
     })
 }
 
@@ -706,7 +709,7 @@ async fn camera(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<Counter>,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_camera(&token),
@@ -729,7 +732,7 @@ async fn camera(
 
     info!("ws: a camera socket attached");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, usage);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Camera);
     let (camera_id, mut signals, mut evicted) =
         (attachment.id, attachment.signals, attachment.evicted);
     let mut heartbeat = interval(heartbeat_timings.interval);
@@ -855,7 +858,7 @@ pub async fn mic_handler(
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, state.usage.meters.counter(Socket::Mic))
+        mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
     })
 }
 
@@ -869,7 +872,7 @@ async fn mic(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<Counter>,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_mic(&token),
@@ -892,7 +895,7 @@ async fn mic(
 
     info!("ws: a microphone socket attached");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, usage);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Mic);
     let (mic_id, mut signals, mut evicted) = (attachment.id, attachment.signals, attachment.evicted);
     let mut heartbeat = interval(heartbeat_timings.interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -970,7 +973,7 @@ async fn session(
     display: Option<protocol::HostDisplay>,
     chroma: Chroma,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<Counter>,
+    usage: Arc<UsageMeters>,
 ) {
     let attachment = match token {
         Some(t) => sessions.attach(&t, display, chroma).await.ok(),
@@ -989,7 +992,7 @@ async fn session(
 
     info!("ws: client attached to the session slot");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, usage);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Session);
     let (attach_id, mut events) = (attachment.id, attachment.events);
 
     // How many times the client has said it lost its tile cache. The inbound half
@@ -1599,7 +1602,7 @@ mod tests {
             },
         ));
         let token = sessions.claim(false, None).unwrap();
-        let usage = Arc::new(Counter::default());
+        let usage = Arc::new(UsageMeters::new(vec!["fake".to_owned()]));
         let served_usage = Arc::clone(&usage);
         let app = Router::new().route(
             "/ws",
@@ -1642,18 +1645,35 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
+        // The connect status is written once the target is selected, so reading up to it
+        // is reading past the moment its bytes started counting under that target.
+        loop {
+            if let ClientFrame::Text(text) = client.next().await.unwrap().unwrap()
+                && text.as_str().contains(r#""type":"connected""#)
+            {
+                break;
+            }
+        }
 
         // Counted as the wire carries them, computed here from RFC 6455 rather than by
         // the function under test: a browser's short text frame is a two-byte header, a
         // four-byte mask and its payload.
-        let (sent, received) = usage.take();
+        let records = usage.close_timeframe(0, 1);
+        let received: u64 = records.iter().map(|record| record.received_bytes).sum();
         let texts = [
             r#"{"type":"connect","target":"fake"}"#,
             r#"{"type":"paintAck","sequence":1,"queuedMs":7,"drawMs":11}"#,
             r#"{"type":"refresh"}"#,
         ];
         assert_eq!(received, texts.iter().map(|text| 6 + text.len() as u64).sum::<u64>());
-        assert!(sent > 0, "the picker and the connect status went to the browser");
+        assert!(
+            records.iter().any(|record| record.target.is_none() && record.sent_bytes > 0),
+            "the picker went out before any target was selected: {records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record.target.as_deref() == Some("fake") && record.sent_bytes > 0),
+            "the connect status went out under the target it selected: {records:?}"
+        );
 
         drop(client);
         server.abort();

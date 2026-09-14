@@ -1,14 +1,17 @@
-//! Data usage of the browser's WebSockets, per socket and per timeframe, kept in SQLite.
+//! Data usage of the browser's WebSockets, per target, socket and timeframe, kept in SQLite.
 //!
 //! Only the hop between the browser and this gateway is measured: `/ws`, `/ws/audio`,
 //! `/ws/camera` and `/ws/mic` each add the bytes of the data frames they write and read to
-//! their own [`Counter`] (see `crate::ws`). What an engine exchanges with its remote is a
-//! different link and is not counted here.
+//! the [`Counter`] of the target the session has selected at that moment (see `crate::ws`
+//! and [`crate::session::SessionManager::selected_target`]), or of no target while the
+//! browser is on the picker. What an engine exchanges with its remote is a different link
+//! and is not counted here.
 //!
-//! Every `[usage].interval_secs` the counters are taken and each socket that moved data
-//! in that timeframe gets one row; a socket that moved nothing gets none, so idle hours
-//! cost no rows. Each socket keeps its newest `[usage].max_records` rows and the oldest go
-//! first. The browser reads them on demand through `GET /api/usage` ([`UsageStore::records`]).
+//! Every `[usage].interval_secs` the counters are taken and each target's socket that
+//! moved data in that timeframe gets one row; one that moved nothing gets none, so idle
+//! hours cost no rows. Each target's socket keeps its newest `[usage].max_records` rows
+//! and the oldest go first. The browser reads them on demand through `GET /api/usage`
+//! ([`UsageStore::records`]).
 //!
 //! Best effort, on purpose: the timeframe still being counted when the process stops is
 //! lost, and a write that fails is retried with the next timeframe's. What reaches the
@@ -32,7 +35,7 @@ pub struct UsageConfig {
     pub database: PathBuf,
     /// The length of one timeframe, and how often it is written.
     pub interval: Duration,
-    /// Records kept per socket.
+    /// Records kept per target and socket.
     pub max_records: usize,
 }
 
@@ -64,7 +67,7 @@ impl Socket {
     }
 }
 
-/// Bytes one socket has moved since its counters were last taken.
+/// Bytes one socket has moved for one target since its counters were last taken.
 #[derive(Debug, Default)]
 pub struct Counter {
     sent: AtomicU64,
@@ -84,49 +87,64 @@ impl Counter {
 
     /// Take both counts, leaving zero. A byte added between the two swaps lands in the
     /// next timeframe rather than nowhere.
-    pub(crate) fn take(&self) -> (u64, u64) {
+    fn take(&self) -> (u64, u64) {
         (self.sent.swap(0, Ordering::Relaxed), self.received.swap(0, Ordering::Relaxed))
     }
 }
 
-/// Every socket's [`Counter`]. One per gateway, shared by every connection to a socket,
-/// so a reattach keeps counting into the same place.
-#[derive(Debug, Default)]
+/// Every target's [`Counter`] for every socket, and one more set for the picker. One per
+/// gateway, shared by every connection, so a reattach keeps counting into the same place.
+#[derive(Debug)]
 pub struct UsageMeters {
-    session: Arc<Counter>,
-    audio: Arc<Counter>,
-    camera: Arc<Counter>,
-    mic: Arc<Counter>,
+    /// The `[[targets]]` names, in the order [`crate::session::SessionManager`] indexes.
+    targets: Vec<String>,
+    /// One set per entry of `targets`, then the picker's.
+    counters: Vec<[Counter; 4]>,
+}
+
+impl Default for UsageMeters {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 impl UsageMeters {
-    pub fn counter(&self, socket: Socket) -> Arc<Counter> {
-        Arc::clone(match socket {
-            Socket::Session => &self.session,
-            Socket::Audio => &self.audio,
-            Socket::Camera => &self.camera,
-            Socket::Mic => &self.mic,
-        })
+    pub fn new(targets: Vec<String>) -> Self {
+        let counters = (0..=targets.len()).map(|_| Default::default()).collect();
+        Self { targets, counters }
+    }
+
+    /// The counter for `socket` under the target at `target` in the `[[targets]]` list, or
+    /// under no target for `None` — and for an index the list does not have.
+    pub fn counter(&self, target: Option<usize>, socket: Socket) -> &Counter {
+        let slot = target.filter(|&index| index < self.targets.len()).unwrap_or(self.targets.len());
+        &self.counters[slot][socket as usize]
     }
 
     /// End the timeframe `start..end`: take every counter and return a record for each
-    /// socket that moved data.
-    fn close_timeframe(&self, start: u64, end: u64) -> Vec<Record> {
-        Socket::ALL
-            .into_iter()
-            .filter_map(|socket| {
-                let (sent_bytes, received_bytes) = self.counter(socket).take();
-                (sent_bytes != 0 || received_bytes != 0)
-                    .then_some(Record { socket, start, end, sent_bytes, received_bytes })
-            })
-            .collect()
+    /// target's socket that moved data.
+    pub(crate) fn close_timeframe(&self, start: u64, end: u64) -> Vec<Record> {
+        let mut records = Vec::new();
+        for (slot, counters) in self.counters.iter().enumerate() {
+            for socket in Socket::ALL {
+                let (sent_bytes, received_bytes) = counters[socket as usize].take();
+                if sent_bytes == 0 && received_bytes == 0 {
+                    continue;
+                }
+                let target = self.targets.get(slot).cloned();
+                records.push(Record { target, socket, start, end, sent_bytes, received_bytes });
+            }
+        }
+        records
     }
 }
 
-/// What one socket moved in one timeframe. Times are Unix seconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// What one socket moved for one target in one timeframe. Times are Unix seconds; a
+/// `None` target is the picker.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
+    pub target: Option<String>,
     pub socket: Socket,
     pub start: u64,
     pub end: u64,
@@ -145,17 +163,18 @@ pub struct Usage {
 /// Marks a database as this module's, in the header field SQLite keeps for it.
 const APPLICATION_ID: i64 = 0x524d_5855; // "RMXU"
 /// The one schema there is. A database written by any other is refused, not migrated.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = "
     CREATE TABLE usage (
         id INTEGER PRIMARY KEY,
+        target TEXT,
         socket TEXT NOT NULL CHECK (socket IN ('session', 'audio', 'camera', 'mic')),
         started_at INTEGER NOT NULL,
         ended_at INTEGER NOT NULL,
         sent_bytes INTEGER NOT NULL CHECK (sent_bytes >= 0),
         received_bytes INTEGER NOT NULL CHECK (received_bytes >= 0)
     ) STRICT;
-    CREATE INDEX usage_by_socket ON usage (socket, id);
+    CREATE INDEX usage_by_series ON usage (target, socket, id);
     CREATE INDEX usage_by_end ON usage (ended_at);
 ";
 
@@ -232,7 +251,8 @@ impl UsageStore {
             transaction.query_row("PRAGMA user_version", [], |row| row.get(0)).with_context(not_ours)?;
         anyhow::ensure!(
             version == SCHEMA_VERSION,
-            "{} holds usage schema {version}, and this gateway reads only {SCHEMA_VERSION}",
+            "{} holds usage schema {version}, and this gateway reads only {SCHEMA_VERSION} — \
+             move the file away to start a new one",
             path.display()
         );
         let check: String = transaction
@@ -247,20 +267,22 @@ impl UsageStore {
         self.connection.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Add `records` and trim every socket to `max_records`, all or nothing.
+    /// Add `records` and trim what they were added to back to `max_records`, all or
+    /// nothing. No records trims every target's every socket.
     pub(crate) fn write(&self, records: &[Record]) -> anyhow::Result<()> {
         let mut connection = self.lock();
         let transaction = connection.transaction().context("cannot begin a usage write")?;
         {
             let mut insert = transaction
                 .prepare_cached(
-                    "INSERT INTO usage (socket, started_at, ended_at, sent_bytes, received_bytes)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO usage (target, socket, started_at, ended_at, sent_bytes, received_bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )
                 .context("cannot prepare the usage insert")?;
             for record in records {
                 insert
                     .execute(params![
+                        record.target,
                         record.socket.name(),
                         sql_int(record.start)?,
                         sql_int(record.end)?,
@@ -269,16 +291,31 @@ impl UsageStore {
                     ])
                     .context("cannot insert a usage record")?;
             }
+
+            let mut series: Vec<(Option<String>, String)> = if records.is_empty() {
+                let mut select = transaction
+                    .prepare_cached("SELECT DISTINCT target, socket FROM usage")
+                    .context("cannot prepare the usage series query")?;
+                select
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .and_then(Iterator::collect)
+                    .context("cannot list the usage series")?
+            } else {
+                records.iter().map(|record| (record.target.clone(), record.socket.name().to_owned())).collect()
+            };
+            series.sort();
+            series.dedup();
             let mut trim = transaction
                 .prepare_cached(
-                    "DELETE FROM usage WHERE socket = ?1 AND id <= (
-                         SELECT id FROM usage WHERE socket = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
+                    "DELETE FROM usage WHERE target IS ?1 AND socket = ?2 AND id <= (
+                         SELECT id FROM usage WHERE target IS ?1 AND socket = ?2
+                         ORDER BY id DESC LIMIT 1 OFFSET ?3
                      )",
                 )
                 .context("cannot prepare the usage trim")?;
             let keep = i64::try_from(self.max_records).unwrap_or(i64::MAX);
-            for socket in Socket::ALL {
-                trim.execute(params![socket.name(), keep]).context("cannot trim usage records")?;
+            for (target, socket) in series {
+                trim.execute(params![target, socket, keep]).context("cannot trim usage records")?;
             }
         }
         transaction.commit().context("cannot commit a usage write")
@@ -289,27 +326,29 @@ impl UsageStore {
         let connection = self.lock();
         let mut select = connection
             .prepare_cached(
-                "SELECT socket, started_at, ended_at, sent_bytes, received_bytes
+                "SELECT target, socket, started_at, ended_at, sent_bytes, received_bytes
                  FROM usage WHERE ended_at > ?1 ORDER BY id",
             )
             .context("cannot prepare the usage query")?;
         let rows = select
             .query_map([sql_int(since)?], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .context("cannot query usage records")?;
         rows.map(|row| {
-            let (socket, start, end, sent, received) = row.context("cannot read a usage record")?;
+            let (target, socket, start, end, sent, received) = row.context("cannot read a usage record")?;
             let socket = Socket::from_name(&socket)
                 .with_context(|| format!("a usage record names no socket: {socket:?}"))?;
             let unsigned = |value: i64| u64::try_from(value).context("a usage record is negative");
             Ok(Record {
+                target,
                 socket,
                 start: unsigned(start)?,
                 end: unsigned(end)?,
@@ -330,21 +369,21 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Open the database `config` names and start recording into it; with no `[usage]`,
-/// counters nobody records.
+/// Meters for `targets` (the `[[targets]]` names, in order), and with `config` the
+/// database they are recorded in; with no `[usage]`, counters nobody records.
 ///
 /// The database is opened and checked before this returns, so a path the gateway cannot
 /// use fails the start instead of every write after it. After that nothing fails: a write
 /// that does not succeed is logged and its records ride along with the next timeframe's.
-pub fn start(config: Option<&UsageConfig>) -> anyhow::Result<Usage> {
+pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Result<Usage> {
+    let meters = Arc::new(UsageMeters::new(targets));
     let Some(config) = config else {
-        return Ok(Usage::default());
+        return Ok(Usage { meters, store: None });
     };
     let store = Arc::new(UsageStore::open(config)?);
-    let usage = Usage { meters: Arc::default(), store: Some(Arc::clone(&store)) };
-    let meters = Arc::clone(&usage.meters);
+    let usage = Usage { meters: Arc::clone(&meters), store: Some(Arc::clone(&store)) };
     // Kept while writes fail, up to what the database would keep of them anyway.
-    let pending_cap = store.max_records.saturating_mul(Socket::ALL.len());
+    let pending_cap = store.max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
 
     tokio::spawn(async move {
         let mut pending: Vec<Record> = Vec::new();
@@ -383,28 +422,32 @@ pub fn start(config: Option<&UsageConfig>) -> anyhow::Result<Usage> {
 mod tests {
     use super::*;
 
-    fn counted(meters: &UsageMeters, socket: Socket, sent: u64, received: u64) {
-        let counter = meters.counter(socket);
-        counter.sent(sent);
-        counter.received(received);
-    }
-
     fn config(database: PathBuf, max_records: usize) -> UsageConfig {
         UsageConfig { database, interval: Duration::from_secs(60), max_records }
     }
 
+    fn record(target: Option<&str>, socket: Socket, start: u64, sent_bytes: u64, received_bytes: u64) -> Record {
+        Record { target: target.map(str::to_owned), socket, start, end: start + 60, sent_bytes, received_bytes }
+    }
+
     #[test]
-    fn a_timeframe_records_only_the_sockets_that_moved_data() {
-        let meters = UsageMeters::default();
-        counted(&meters, Socket::Session, 1500, 40);
-        counted(&meters, Socket::Mic, 0, 900);
+    fn a_timeframe_records_each_target_and_socket_that_moved_data() {
+        let meters = UsageMeters::new(vec!["mac".to_owned(), "win".to_owned()]);
+        meters.counter(Some(1), Socket::Session).sent(1500);
+        meters.counter(Some(1), Socket::Session).received(40);
+        meters.counter(Some(0), Socket::Session).sent(3);
+        meters.counter(None, Socket::Mic).received(900);
+        meters.counter(Some(7), Socket::Audio).sent(5);
 
         assert_eq!(
             meters.close_timeframe(100, 160),
             [
-                Record { socket: Socket::Session, start: 100, end: 160, sent_bytes: 1500, received_bytes: 40 },
-                Record { socket: Socket::Mic, start: 100, end: 160, sent_bytes: 0, received_bytes: 900 },
-            ]
+                record(Some("mac"), Socket::Session, 100, 3, 0),
+                record(Some("win"), Socket::Session, 100, 1500, 40),
+                record(None, Socket::Audio, 100, 5, 0),
+                record(None, Socket::Mic, 100, 0, 900),
+            ],
+            "an index past the target list counts as no target"
         );
         // The counters were taken, so an idle timeframe after it records nothing.
         assert_eq!(meters.close_timeframe(160, 220), []);
@@ -414,44 +457,46 @@ mod tests {
     fn records_are_kept_across_a_reopen_and_read_from_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path().join("nested/usage.sqlite3"), 10);
-        let first = Record { socket: Socket::Session, start: 0, end: 60, sent_bytes: 2048, received_bytes: 12 };
-        let second = Record { socket: Socket::Audio, start: 60, end: 120, sent_bytes: 9000, received_bytes: 0 };
-        UsageStore::open(&config).unwrap().write(&[first, second]).unwrap();
+        let first = record(Some("mac"), Socket::Session, 0, 2048, 12);
+        let second = record(None, Socket::Audio, 60, 9000, 0);
+        UsageStore::open(&config).unwrap().write(&[first.clone(), second.clone()]).unwrap();
 
         let store = UsageStore::open(&config).unwrap();
-        assert_eq!(store.records(0).unwrap(), [first, second]);
+        assert_eq!(store.records(0).unwrap(), [first, second.clone()]);
         assert_eq!(store.records(60).unwrap(), [second], "a timeframe that ended by `since` is left out");
     }
 
     #[test]
-    fn each_socket_keeps_its_newest_records_up_to_the_cap() {
+    fn each_target_and_socket_keeps_its_newest_records_up_to_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("usage.sqlite3");
         let store = UsageStore::open(&config(path.clone(), 3)).unwrap();
         for timeframe in 0..5 {
-            let record = Record {
-                socket: Socket::Audio,
-                start: timeframe,
-                end: timeframe + 1,
-                sent_bytes: timeframe + 1,
-                received_bytes: 0,
-            };
-            store.write(&[record]).unwrap();
+            store.write(&[record(Some("mac"), Socket::Audio, timeframe, timeframe + 1, 0)]).unwrap();
         }
-        store
-            .write(&[Record { socket: Socket::Camera, start: 5, end: 6, sent_bytes: 0, received_bytes: 7 }])
-            .unwrap();
+        store.write(&[record(Some("win"), Socket::Audio, 5, 70, 0)]).unwrap();
+        store.write(&[record(None, Socket::Audio, 6, 80, 0)]).unwrap();
+        store.write(&[record(Some("mac"), Socket::Camera, 7, 0, 7)]).unwrap();
 
-        let sent = |store: &UsageStore, socket| -> Vec<u64> {
-            store.records(0).unwrap().iter().filter(|r| r.socket == socket).map(|r| r.sent_bytes).collect()
+        let sent = |store: &UsageStore, target: Option<&str>, socket| -> Vec<u64> {
+            store
+                .records(0)
+                .unwrap()
+                .iter()
+                .filter(|r| r.target.as_deref() == target && r.socket == socket)
+                .map(|r| r.sent_bytes)
+                .collect()
         };
-        assert_eq!(sent(&store, Socket::Audio), [3, 4, 5], "the oldest go first");
-        assert_eq!(sent(&store, Socket::Camera).len(), 1, "one socket's cap is not another's");
+        assert_eq!(sent(&store, Some("mac"), Socket::Audio), [3, 4, 5], "the oldest go first");
+        assert_eq!(sent(&store, Some("win"), Socket::Audio), [70], "one target's cap is not another's");
+        assert_eq!(sent(&store, None, Socket::Audio), [80], "nor the picker's");
+        assert_eq!(sent(&store, Some("mac"), Socket::Camera).len(), 1, "nor another socket's");
         drop(store);
 
         // A cap lowered between runs applies to what the database already holds.
         let store = UsageStore::open(&config(path, 1)).unwrap();
-        assert_eq!(sent(&store, Socket::Audio), [5]);
+        assert_eq!(sent(&store, Some("mac"), Socket::Audio), [5]);
+        assert_eq!(store.records(0).unwrap().len(), 4);
     }
 
     #[test]
@@ -470,5 +515,14 @@ mod tests {
         let error = UsageStore::open(&config(other.clone(), 1)).expect_err("another program's SQLite");
         assert!(format!("{error:#}").contains("is not a remotex usage database"), "{error:#}");
         assert_eq!(std::fs::read(&other).unwrap(), before);
+
+        let older = dir.path().join("older.sqlite3");
+        let connection = Connection::open(&older).unwrap();
+        connection.execute_batch("CREATE TABLE usage (x INTEGER)").unwrap();
+        connection.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+        let error = UsageStore::open(&config(older, 1)).expect_err("another schema version");
+        assert!(format!("{error:#}").contains("holds usage schema 1"), "{error:#}");
     }
 }

@@ -23,8 +23,12 @@ export const USAGE_SOCKET_LABEL: Record<UsageSocket, string> = {
   mic: "Microphone",
 };
 
-/** What one socket moved in one timeframe. Times are Unix seconds. */
+/**
+ * What one socket moved for one target in one timeframe. Times are Unix seconds; a
+ * `null` target is the picker, where the browser sat with no target selected.
+ */
 export interface UsageRecord {
+  target: string | null;
   socket: UsageSocket;
   start: number;
   end: number;
@@ -126,4 +130,33 @@ export function usageTotals(
     }
   }
   return totals;
+}
+
+export function targetLabel(target: string | null): string {
+  return target ?? "No target (picker)";
+}
+
+export interface TargetUsage {
+  target: string | null;
+  sent: number;
+  received: number;
+}
+
+/** Every target's sums over all its sockets, busiest first. */
+export function usageByTarget(records: readonly UsageRecord[]): TargetUsage[] {
+  const byTarget = new Map<string | null, TargetUsage>();
+  for (const record of records) {
+    let usage = byTarget.get(record.target);
+    if (!usage) {
+      usage = { target: record.target, sent: 0, received: 0 };
+      byTarget.set(record.target, usage);
+    }
+    usage.sent += record.sentBytes;
+    usage.received += record.receivedBytes;
+  }
+  return [...byTarget.values()].sort(
+    (a, b) =>
+      b.sent + b.received - (a.sent + a.received) ||
+      targetLabel(a.target).localeCompare(targetLabel(b.target)),
+  );
 }
