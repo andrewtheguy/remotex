@@ -588,9 +588,16 @@ impl DesktopState {
     /// answering that one declares instead, finding [`Self::declared`] cleared.
     fn output_switched(&mut self) -> Option<[u8; 8]> {
         self.declared = None;
-        (self.density == Density::Reported && !self.following)
+        let msg = (self.density == Density::Reported && !self.following)
             .then(|| self.declare_density(self.host_density))
-            .flatten()
+            .flatten();
+        // Outstanding even at the scale already reported: wlshare answers every
+        // declaration, and that answer is what asks for the window on the new
+        // output, whose size is its own and not the window's.
+        if msg.is_some() {
+            self.following = true;
+        }
+        msg
     }
 }
 
@@ -5599,6 +5606,53 @@ mod tests {
         let d = desktop.lock().unwrap();
         assert!(d.following);
         assert_eq!(d.declared, Some(2.0));
+    }
+
+    /// A switch to an output already at the browser's density still waits for
+    /// the declaration's answer, and that answer asks for the window on the new
+    /// output: its size is the output's own, not the window's. Measured against
+    /// wlshare on a headless sway, where nothing else would ever ask.
+    #[tokio::test]
+    async fn a_switch_at_the_same_density_asks_for_the_window_on_the_answer() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let screen = Screen { id: 1, flags: 0 };
+        let desktop = shared_desktop((1600, 1200), Some(screen), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Reported;
+            d.wire_scale = Some(2.0);
+            d.scale = 2.0;
+            d.host_density = 2.0;
+            d.declared = Some(2.0);
+            d.viewport = Some((800, 600));
+        }
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        let outputs = [
+            Listed { id: 3, name: "HEADLESS-1", size: (1600, 1200), scale: 2.0, headless: true },
+            Listed { id: 7, name: "HEADLESS-2", size: (1280, 800), scale: 2.0, headless: true },
+        ];
+        read_output_list(&mut output_list_body(3, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+
+        read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density(2.0));
+        assert!(desktop.lock().unwrap().following, "the declaration is out whatever its scale");
+
+        // The new output's own size arrives, then the answer at the same 2x.
+        desktop.lock().unwrap().size = (1280, 800);
+        let body = output_scale_body((1280, 800), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1280, 800)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            written(&wire),
+            [client_density(2.0).to_vec(), set_desktop_size((1600, 1200), screen).to_vec()].concat()
+        );
+        assert!(!desktop.lock().unwrap().following);
     }
 
     /// A count no compositor sends ends the session: the entries are
