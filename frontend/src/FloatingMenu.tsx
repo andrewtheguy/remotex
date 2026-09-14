@@ -1280,7 +1280,7 @@ export default function FloatingMenu({
               onClick={() => setHelpOpen(true)}
               title="This session's size, density, render dial and decoders, and the touch gestures"
             >
-              Help
+              Info
             </button>
             <button
               type="button"
@@ -1318,7 +1318,7 @@ export default function FloatingMenu({
           {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner card only stops the backdrop's dismiss */}
           {/* biome-ignore lint/a11y/noStaticElementInteractions: inner card */}
           <div className="help-card" onClick={(e) => e.stopPropagation()}>
-            <h2>Help</h2>
+            <h2>Info</h2>
             <ScreenHelp
               size={size}
               hostScale={hostScale}
