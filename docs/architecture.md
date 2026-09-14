@@ -1061,6 +1061,13 @@ is sent nothing and the enabled camera is never started, as on a Windows Server
 without the RDSH role. See
 [The browser's camera over VNC with wlshare](wlshare-camera.md).
 
+The browser's microphone follows the same path on a generic VNC target:
+`src/vnc_mic.rs` asks for wlshare's microphone extension, plugs the microphone
+when the mic socket attaches and unplugs it when the socket closes, relays
+wlshare's start and stop as the bridge's open and close, and sends the bridge's
+decoded PCM between them. See
+[The browser's microphone over VNC with wlshare](wlshare-microphone.md).
+
 ### Display geometry
 
 Client JSON messages cover pointer, wheel, keyboard, clipboard, display

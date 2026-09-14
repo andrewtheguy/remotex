@@ -74,11 +74,20 @@ pub trait CameraControl: Send + Sync {
 /// through to the engine's control, which does its own credit metering — so
 /// what the bridge holds is just the two registrations: the engine's control
 /// and the socket's signal sender, either of which can come and go while the
-/// other stays.
+/// other stays — and the format the socket plugged. The page plugs the moment its
+/// socket opens, which can be while the engine is still connecting and before it
+/// has registered, so the plug is remembered and told to the control as it
+/// registers.
 #[derive(Default)]
 pub struct CameraBridge {
-    control: Mutex<Option<Arc<dyn CameraControl>>>,
+    upstream: Mutex<Upstream>,
     signals: Mutex<Option<mpsc::UnboundedSender<CameraSignal>>>,
+}
+
+#[derive(Default)]
+struct Upstream {
+    control: Option<Arc<dyn CameraControl>>,
+    plugged: Option<CameraFormat>,
 }
 
 impl std::fmt::Debug for CameraBridge {
@@ -94,9 +103,14 @@ impl CameraBridge {
 
     /// The engine registers its control as it starts. There is exactly one
     /// engine per bridge, so a second registration is a replaced engine —
-    /// which cannot happen today, and would be harmless if it did.
+    /// which cannot happen today, and would be harmless if it did. A camera
+    /// plugged before the engine registered is plugged into it now.
     pub fn set_control(&self, control: Arc<dyn CameraControl>) {
-        *self.control.lock().expect("camera control lock") = Some(control);
+        let mut upstream = self.upstream.lock().expect("camera control lock");
+        if let Some(format) = upstream.plugged {
+            control.plug(format);
+        }
+        upstream.control = Some(control);
     }
 
     /// The socket subscribes for the remote's decisions, replacing any earlier
@@ -120,16 +134,21 @@ impl CameraBridge {
         }
     }
 
-    /// Plug the device, if an engine is listening.
+    /// Plug the device, now or as the engine registers. Told under the lock, so a
+    /// plug and an unplug reach the engine in the order they were made.
     pub fn plug(&self, format: CameraFormat) {
-        if let Some(control) = self.control() {
+        let mut upstream = self.upstream.lock().expect("camera control lock");
+        upstream.plugged = Some(format);
+        if let Some(control) = upstream.control.as_ref() {
             control.plug(format);
         }
     }
 
-    /// Unplug the device, if an engine is listening.
+    /// Unplug the device, if an engine is listening, and forget the plug.
     pub fn unplug(&self) {
-        if let Some(control) = self.control() {
+        let mut upstream = self.upstream.lock().expect("camera control lock");
+        upstream.plugged = None;
+        if let Some(control) = upstream.control.as_ref() {
             control.unplug();
         }
     }
@@ -143,7 +162,7 @@ impl CameraBridge {
     }
 
     fn control(&self) -> Option<Arc<dyn CameraControl>> {
-        self.control.lock().expect("camera control lock").clone()
+        self.upstream.lock().expect("camera control lock").control.clone()
     }
 }
 
@@ -183,6 +202,25 @@ mod tests {
         bridge.plug(FORMAT);
         bridge.unplug();
         assert!(!bridge.sample(&[1, 2, 3], true));
+    }
+
+    /// A page that plugs its camera while the engine is still connecting has
+    /// plugged it by the time the engine registers; one that unplugged it again
+    /// has not.
+    #[test]
+    fn a_plug_made_before_the_engine_registers_reaches_it() {
+        let bridge = CameraBridge::new();
+        bridge.plug(FORMAT);
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        assert_eq!(recorder.plugs.load(Ordering::Relaxed), 1);
+
+        let bridge = CameraBridge::new();
+        bridge.plug(FORMAT);
+        bridge.unplug();
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        assert_eq!(recorder.plugs.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -285,13 +285,17 @@ password = "change-me"
 # one is simply never asked for a frame.
 #camera = false
 
-# Microphone redirection (RDP only): offer the remote this browser's microphone
-# over MS-RDPEAI. EXPERIMENTAL, like `camera`. Capability only: the recording
+# Microphone redirection: offer the remote this browser's microphone over
+# MS-RDPEAI on "rdp" — or, on a generic "vnc" target, over wlshare's microphone
+# extension, which makes it a PipeWire audio source on the wlroots desktop; any
+# other VNC server says nothing and the microphone is never plugged (see
+# docs/wlshare-microphone.md). EXPERIMENTAL, like `camera`. Capability only: the recording
 # device is fed when a client turns the microphone on from the floating menu —
 # per session, never remembered. The browser sends mono speech Opus at a fixed
 # low bitrate and the gateway decodes it to the PCM the host records in, so there
 # is no codec or quality key beside this one. The host starts recording only
-# once an application on it does. A "vnc" target refuses the key.
+# once an application on it does. An "ard" or "ard-high-performance" target
+# refuses the key.
 #microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is

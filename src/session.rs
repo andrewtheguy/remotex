@@ -450,13 +450,14 @@ impl State {
         }
     }
 
-    /// End the microphone socket. The host keeps its recording device, which simply
-    /// hears nothing more; the next socket starts a fresh stream.
+    /// End the microphone socket, unplugging the microphone when an engine still runs: an
+    /// RDP host keeps its recording device, which simply hears nothing more, and wlshare
+    /// takes its lent one back. The next socket starts a fresh stream.
     fn evict_mic(&mut self) {
         if self.mic.take().is_some() {
             info!("session: closing the microphone socket");
             if let Some(bridge) = self.engine.as_ref().and_then(|e| e.microphone.as_ref()) {
-                bridge.reset();
+                bridge.unplug();
             }
         }
     }
@@ -903,6 +904,7 @@ impl SessionManager {
         };
         st.evict_mic();
         let signals = bridge.subscribe();
+        bridge.plug();
         let (close_tx, evicted) = oneshot::channel();
         st.next_mic_id += 1;
         let id = st.next_mic_id;
@@ -1509,7 +1511,9 @@ fn spawn_engine(
             ))
             }
             Protocol::Vnc => {
-                rt.block_on(vnc::run(target, plan, display, input_rx, frame_tx, audio, uplinks.camera, feedback))
+                rt.block_on(vnc::run(
+                    target, plan, display, input_rx, frame_tx, audio, uplinks.camera, uplinks.microphone, feedback,
+                ))
             }
         }
     });
@@ -3248,6 +3252,10 @@ mod tests {
     }
 
     impl crate::mic::MicControl for MicRecorder {
+        fn plug(&self) {}
+
+        fn unplug(&self) {}
+
         fn sample(&self, _pcm: Vec<u8>) -> bool {
             self.buffers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true

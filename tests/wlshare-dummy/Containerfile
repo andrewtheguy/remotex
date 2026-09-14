@@ -41,6 +41,7 @@ RUN apt-get update \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         sway libwayland-client0 libxkbcommon0 libpam0g libpipewire-0.3-0t64 libavcodec61 \
+        pipewire wireplumber pipewire-bin gstreamer1.0-pipewire gstreamer1.0-tools \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m desk
 COPY --from=build /usr/local/bin/wlshare /usr/local/bin/wlshare
@@ -57,13 +58,23 @@ RUN printf '%s\n' \
     'resize = true' \
     'audio = false' \
     > /etc/wlshare-e2e.toml
-# Start sway, add the second output once its IPC answers, then run wlshare in the
-# foreground. The wait is bounded, so a sway that cannot start names itself
-# instead of leaving the test to time out on something else.
+# Start PipeWire and WirePlumber for the microphone node, then sway, add the second
+# output once its IPC answers, and run wlshare in the foreground. Neither audio
+# daemon has a D-Bus here, and neither needs one. The waits are bounded, so a daemon
+# that cannot start names itself instead of leaving the test to time out on
+# something else.
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'export XDG_RUNTIME_DIR=/tmp/xdg WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1' \
     'mkdir -p -m 700 "$XDG_RUNTIME_DIR"' \
+    'pipewire &' \
+    'waited=0' \
+    'until [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do' \
+    '  waited=$((waited + 1))' \
+    '  [ "$waited" -lt 100 ] || { echo "dummy-wlshare: pipewire was not ready after 10s" >&2; exit 1; }' \
+    '  sleep 0.1' \
+    'done' \
+    'wireplumber &' \
     'sway -c /etc/sway-e2e.conf &' \
     'sway=$!' \
     'waited=0' \

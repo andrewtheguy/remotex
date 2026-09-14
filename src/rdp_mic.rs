@@ -45,6 +45,15 @@ impl MicrophoneSink for Signals {
 struct Control(MicrophoneFeed);
 
 impl MicControl for Control {
+    // The host's recording device is the channel's, there for the whole session.
+    fn plug(&self) {}
+
+    // The device stays and simply hears nothing more; the next socket starts a fresh
+    // stream.
+    fn unplug(&self) {
+        self.0.flush();
+    }
+
     fn sample(&self, pcm: Vec<u8>) -> bool {
         self.0.sample(pcm)
     }

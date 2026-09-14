@@ -506,6 +506,40 @@ pub async fn connect_audio_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws
     ws
 }
 
+/// Open the camera WebSocket with a claim token and the login cookie, as
+/// [`connect_audio_ws`] opens the audio one. Its first message must be the
+/// `cameraFormat` that plugs the camera.
+#[allow(dead_code)]
+pub async fn connect_camera_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let mut request = format!("ws://{addr}/ws/camera?session={token}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Cookie", cookie.parse().unwrap());
+    let (ws, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws
+}
+
+/// Open the microphone WebSocket with a claim token and the login cookie, as
+/// [`connect_audio_ws`] opens the audio one. Opening it is the browser enabling its
+/// microphone.
+#[allow(dead_code)]
+pub async fn connect_mic_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let mut request = format!("ws://{addr}/ws/mic?session={token}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Cookie", cookie.parse().unwrap());
+    let (ws, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws
+}
+
 /// Pick a target from the picker over an attached WebSocket, starting its
 /// engine. A fresh attach lands on the picker (no engine); the browser sends
 /// this `connect` to begin a session. Reattach/takeover to a running engine

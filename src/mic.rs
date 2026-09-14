@@ -8,8 +8,8 @@
 //! browser cannot know, and which say when it is worth encoding at all.
 //!
 //! Nothing here names an engine. The engine side registers a [`MicControl`] and publishes
-//! [`MicSignal`]s; RDP's adapter is [`crate::rdp_mic`], and it is the only implementor,
-//! because MS-RDPEAI is the one microphone channel any of the gateway's protocols has.
+//! [`MicSignal`]s; RDP's adapter is [`crate::rdp_mic`], over MS-RDPEAI, and a generic VNC
+//! target's is [`crate::vnc_mic`], over wlshare's microphone extension.
 
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +34,25 @@ pub struct MicFormat {
     pub sample_rate: u32,
 }
 
+/// The fastest rate a host may record in. Real ones stop at 48 kHz; the bound keeps a
+/// malformed format from sizing the resampler's buffers.
+const MAX_RATE: u32 = 192_000;
+
+impl MicFormat {
+    /// Whether the bridge can produce this format: mono or stereo, at a rate no faster
+    /// than [`MAX_RATE`] that is a whole number of frames in 20 ms.
+    pub fn producible(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(matches!(self.channels, 1 | 2), "{} channels", self.channels);
+        anyhow::ensure!(
+            (1..=MAX_RATE).contains(&self.sample_rate)
+                && (GROUP as u64 * u64::from(self.sample_rate)).is_multiple_of(u64::from(DECODE_RATE)),
+            "{} Hz is not a rate of at most {MAX_RATE} Hz with a whole number of frames in 20 ms",
+            self.sample_rate
+        );
+        Ok(())
+    }
+}
+
 /// A decision of the remote's, on its way to the mic socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MicSignal {
@@ -48,6 +67,13 @@ pub enum MicSignal {
 /// May be called from any thread and must not block: it runs once per decoded group on
 /// the socket task.
 pub trait MicControl: Send + Sync {
+    /// The browser enabled its microphone: a mic socket attached. An engine whose remote
+    /// has a recording device for the whole session has nothing to do; one that lends
+    /// the remote a device makes it now.
+    fn plug(&self);
+    /// The browser's microphone is gone: its socket closed. What the engine holds of it
+    /// is dropped, and a lent device is taken back.
+    fn unplug(&self);
     /// Interleaved 16-bit little-endian PCM in the format last opened. Returns whether it
     /// was taken.
     fn sample(&self, pcm: Vec<u8>) -> bool;
@@ -63,11 +89,21 @@ pub trait MicControl: Send + Sync {
 /// device during the RDP handshake, seconds before any mic socket connects, so the last
 /// open is latched under the same lock as the sender and replayed to a socket that
 /// subscribes while it stands; a close clears it.
+///
+/// It keeps, too, whether a mic socket is attached. The browser can enable its microphone
+/// while the engine is still connecting, before any control is registered, so the plug is
+/// remembered and told to the control as it registers.
 #[derive(Default)]
 pub struct MicBridge {
-    control: Mutex<Option<Arc<dyn MicControl>>>,
+    upstream: Mutex<Upstream>,
     downstream: Mutex<Downstream>,
     decoder: Mutex<Option<Decoder>>,
+}
+
+#[derive(Default)]
+struct Upstream {
+    control: Option<Arc<dyn MicControl>>,
+    plugged: bool,
 }
 
 #[derive(Default)]
@@ -87,9 +123,14 @@ impl MicBridge {
         Self::default()
     }
 
-    /// The engine registers its control as it starts.
+    /// The engine registers its control as it starts, and hears of a mic socket that
+    /// attached before it did.
     pub fn set_control(&self, control: Arc<dyn MicControl>) {
-        *self.control.lock().expect("mic control lock") = Some(control);
+        let mut upstream = self.upstream.lock().expect("mic control lock");
+        if upstream.plugged {
+            control.plug();
+        }
+        upstream.control = Some(control);
     }
 
     /// The socket subscribes for the host's decisions, replacing any earlier subscriber,
@@ -133,7 +174,7 @@ impl MicBridge {
         let Some(format) = self.downstream.lock().expect("mic signal lock").open else {
             return;
         };
-        let Some(control) = self.control.lock().expect("mic control lock").clone() else {
+        let Some(control) = self.control() else {
             return;
         };
         let mut decoder = self.decoder.lock().expect("mic decoder lock");
@@ -159,14 +200,39 @@ impl MicBridge {
         }
     }
 
-    /// The stream ended — its socket went away, or the host stopped recording: the next
-    /// one starts fresh, and what the engine has not sent yet of this one is dropped.
+    /// A mic socket attached: the engine is told the browser's microphone is there, now or
+    /// as it registers. Told under the lock, so a plug and an unplug reach the engine in
+    /// the order they were made.
+    pub fn plug(&self) {
+        let mut upstream = self.upstream.lock().expect("mic control lock");
+        upstream.plugged = true;
+        if let Some(control) = upstream.control.as_ref() {
+            control.plug();
+        }
+    }
+
+    /// The mic socket went away: the next stream starts from a fresh decoder, and the
+    /// engine drops what it has not sent and lets the microphone go.
+    pub fn unplug(&self) {
+        *self.decoder.lock().expect("mic decoder lock") = None;
+        let mut upstream = self.upstream.lock().expect("mic control lock");
+        upstream.plugged = false;
+        if let Some(control) = upstream.control.as_ref() {
+            control.unplug();
+        }
+    }
+
+    /// The host stopped recording: the next stream starts fresh, and what the engine
+    /// has not sent yet of this one is dropped.
     pub fn reset(&self) {
         *self.decoder.lock().expect("mic decoder lock") = None;
-        let control = self.control.lock().expect("mic control lock").clone();
-        if let Some(control) = control {
+        if let Some(control) = self.control() {
             control.reset();
         }
+    }
+
+    fn control(&self) -> Option<Arc<dyn MicControl>> {
+        self.upstream.lock().expect("mic control lock").control.clone()
     }
 }
 
@@ -185,14 +251,8 @@ struct Decoder {
 
 impl Decoder {
     fn new(format: MicFormat) -> anyhow::Result<Self> {
-        anyhow::ensure!(matches!(format.channels, 1 | 2), "{} channels", format.channels);
-        let out = GROUP as u64 * u64::from(format.sample_rate);
-        anyhow::ensure!(
-            out.is_multiple_of(u64::from(DECODE_RATE)),
-            "{} Hz is not a whole number of frames in 20 ms",
-            format.sample_rate
-        );
-        let group_out = (out / u64::from(DECODE_RATE)) as usize;
+        format.producible()?;
+        let group_out = GROUP * format.sample_rate as usize / DECODE_RATE as usize;
         let resampler = (format.sample_rate != DECODE_RATE)
             .then(|| {
                 Fft::<f32>::new(DECODE_RATE as usize, format.sample_rate as usize, GROUP, 1, FixedSync::Input)
@@ -274,9 +334,18 @@ mod tests {
     struct Recorder {
         buffers: Mutex<Vec<Vec<u8>>>,
         resets: Mutex<usize>,
+        plugs: Mutex<usize>,
     }
 
     impl MicControl for Recorder {
+        fn plug(&self) {
+            *self.plugs.lock().unwrap() += 1;
+        }
+
+        fn unplug(&self) {
+            *self.resets.lock().unwrap() += 1;
+        }
+
         fn sample(&self, pcm: Vec<u8>) -> bool {
             self.buffers.lock().unwrap().push(pcm);
             true
@@ -317,6 +386,24 @@ mod tests {
         assert_eq!(groups, 60);
         let exact = 60 * 640;
         assert!(bytes <= exact && bytes + 640 >= exact, "{bytes} bytes for {exact}");
+    }
+
+    /// A browser that enables its microphone while the engine is still connecting has
+    /// plugged it by the time the engine registers; one that let it go again has not.
+    #[test]
+    fn a_plug_made_before_the_engine_registers_reaches_it() {
+        let bridge = MicBridge::new();
+        bridge.plug();
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        assert_eq!(*recorder.plugs.lock().unwrap(), 1);
+
+        let bridge = MicBridge::new();
+        bridge.plug();
+        bridge.unplug();
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        assert_eq!(*recorder.plugs.lock().unwrap(), 0);
     }
 
     #[test]
@@ -423,5 +510,9 @@ mod tests {
     fn a_format_the_engine_would_never_open_is_refused() {
         assert!(Decoder::new(MicFormat { channels: 1, sample_rate: 11_025 }).is_err());
         assert!(Decoder::new(MicFormat { channels: 3, sample_rate: 16_000 }).is_err());
+        // Divides 20 ms evenly, but would size the resampler in gigabytes.
+        assert!(Decoder::new(MicFormat { channels: 1, sample_rate: 4_294_967_250 }).is_err());
+        assert!(Decoder::new(MicFormat { channels: 1, sample_rate: 0 }).is_err());
+        assert!(MicFormat { channels: 2, sample_rate: 192_000 }.producible().is_ok());
     }
 }
