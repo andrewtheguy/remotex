@@ -24,7 +24,7 @@
 //! MS-RDPECAM path uses ([`crate::camera`]); this is the VNC engine's adapter to
 //! them. See docs/wlshare-camera.md.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use log::{info, warn};
@@ -107,9 +107,16 @@ pub fn parse_server(header: [u8; SERVER_HEADER_LEN], body: &[u8]) -> anyhow::Res
 }
 
 /// The plug: `0xE2`, operation 0, two bytes of padding, `u16` width and height,
-/// `u32` frame-rate numerator and denominator. `None` for a geometry past the
-/// `u16` the extension carries, which no camera a browser opens has.
+/// `u32` frame-rate numerator and denominator.
+///
+/// `None` for a format the extension cannot describe: a geometry past its `u16`,
+/// or — as the RDP path's `Format::is_describable` refuses too — a picture with
+/// no area or a rate with either half zero, which wlshare takes as a client that
+/// does not speak the extension and ends the whole session over.
 fn plug(format: CameraFormat) -> Option<[u8; 16]> {
+    if format.width == 0 || format.height == 0 || format.fps_numerator == 0 || format.fps_denominator == 0 {
+        return None;
+    }
     let width = u16::try_from(format.width).ok()?;
     let height = u16::try_from(format.height).ok()?;
     let mut msg = [0u8; 16];
@@ -163,7 +170,11 @@ impl Device {
     /// The browser plugged its camera, or plugged it again in another format.
     pub fn plug(&mut self, format: CameraFormat) -> Option<Vec<u8>> {
         let Some(msg) = plug(format) else {
-            warn!("vnc: a {}x{} camera does not fit the wlshare camera extension; not plugged", format.width, format.height);
+            warn!(
+                "vnc: a {}x{} camera at {}/{} frames a second is not one the wlshare camera \
+                 extension can describe; not plugged",
+                format.width, format.height, format.fps_numerator, format.fps_denominator
+            );
             return None;
         };
         self.plugged = Some(format);
@@ -179,9 +190,10 @@ impl Device {
         (self.announced && was.is_some()).then(|| unplug().to_vec())
     }
 
-    /// One access unit, sent only on a plugged camera the server knows about.
+    /// One access unit, sent only on a plugged camera the server knows about. Its
+    /// length was held to what wlshare accepts before it was queued.
     pub fn sample(&self, unit: &[u8], keyframe: bool) -> Option<Vec<u8>> {
-        (self.announced && self.plugged.is_some() && unit.len() <= MAX_SAMPLE).then(|| sample(unit, keyframe))
+        (self.announced && self.plugged.is_some()).then(|| sample(unit, keyframe))
     }
 }
 
@@ -201,23 +213,45 @@ pub enum Input {
     Sample { unit: Vec<u8>, keyframe: bool },
 }
 
+/// An [`Input`] as it waits, stamped with the plug it belongs to: every plug and
+/// unplug starts a new generation, and every sample carries the one current when
+/// the browser sent it.
+type Stamped = (u64, Input);
+
 /// The engine loop's end of the camera socket's traffic. Two queues, for the
 /// reason [`crate::rdp_client::CameraFeed`] has two: a plug or an unplug must
 /// never be lost, and a late sample is worthless.
 pub struct Queues {
-    commands: mpsc::UnboundedReceiver<Input>,
-    samples: mpsc::Receiver<Input>,
+    commands: mpsc::UnboundedReceiver<Stamped>,
+    samples: mpsc::Receiver<Stamped>,
+    /// The generation of the last command taken.
+    generation: u64,
 }
 
 impl Queues {
     /// The next thing the socket wants sent, or `None` once the control is gone.
+    ///
+    /// Commands go ahead of the samples queued behind them, so a replug can be
+    /// taken while the old camera's samples still wait; those are of an older
+    /// generation than the command last taken, and are dropped here rather than
+    /// sent as the new camera's — a picture of the wrong size, or a frame from the
+    /// middle of another stream.
     pub async fn next(&mut self) -> Option<Input> {
-        tokio::select! {
-            // Biased so a plug or an unplug goes before samples queued behind it.
-            biased;
-            Some(command) = self.commands.recv() => Some(command),
-            Some(sample) = self.samples.recv() => Some(sample),
-            else => None,
+        loop {
+            tokio::select! {
+                // Biased so a plug or an unplug goes before samples queued behind it.
+                biased;
+                Some((generation, command)) = self.commands.recv() => {
+                    self.generation = generation;
+                    return Some(command);
+                }
+                Some((generation, sample)) = self.samples.recv() => {
+                    if generation == self.generation {
+                        return Some(sample);
+                    }
+                }
+                else => return None,
+            }
         }
     }
 }
@@ -232,51 +266,76 @@ pub fn attach(bridge: &Arc<CameraBridge>) -> (Link, Queues) {
     bridge.set_control(Arc::new(Control {
         commands: commands_tx,
         samples: samples_tx,
+        generation: AtomicU64::new(0),
         gap: AtomicBool::new(false),
         bridge: Arc::downgrade(bridge),
     }));
-    (Link { bridge: Arc::clone(bridge), device: std::sync::Mutex::new(Device::default()) }, Queues { commands, samples })
+    (
+        Link { bridge: Arc::clone(bridge), device: std::sync::Mutex::new(Device::default()) },
+        Queues { commands, samples, generation: 0 },
+    )
 }
 
 struct Control {
-    commands: mpsc::UnboundedSender<Input>,
-    samples: mpsc::Sender<Input>,
+    commands: mpsc::UnboundedSender<Stamped>,
+    samples: mpsc::Sender<Stamped>,
+    /// The current plug's generation, which the samples sent after it carry.
+    generation: AtomicU64,
     /// Whether samples are being dropped until a keyframe.
     gap: AtomicBool,
     bridge: Weak<CameraBridge>,
 }
 
+impl Control {
+    /// Start a new generation and queue the command that begins it. A gap in the
+    /// old stream says nothing about the new one, which opens on a keyframe.
+    fn command(&self, input: Input) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.gap.store(false, Ordering::Relaxed);
+        // A closed queue is an engine that has ended, and the device went with it.
+        let _ = self.commands.send((generation, input));
+    }
+
+    /// Drop a sample, opening a gap that only a keyframe closes, and ask the
+    /// browser for that keyframe once per gap — or again, when a keyframe itself
+    /// is what was dropped. Returns `false`, the refusal the bridge reports.
+    fn open_gap(&self, keyframe: bool) -> bool {
+        if (keyframe || !self.gap.swap(true, Ordering::Relaxed))
+            && let Some(bridge) = self.bridge.upgrade()
+        {
+            bridge.signal(CameraSignal::Keyframe);
+        }
+        self.gap.store(true, Ordering::Relaxed);
+        false
+    }
+}
+
 impl CameraControl for Control {
     fn plug(&self, format: CameraFormat) {
-        // A closed queue is an engine that has ended, and the device went with it.
-        let _ = self.commands.send(Input::Plug(format));
+        self.command(Input::Plug(format));
     }
 
     fn unplug(&self) {
-        let _ = self.commands.send(Input::Unplug);
+        self.command(Input::Unplug);
     }
 
-    /// A full queue drops the sample and every later one but a keyframe, and asks
-    /// the browser for that keyframe once per gap — or again, when the keyframe
-    /// itself found no room.
+    /// A sample wlshare would refuse, or one that finds the queue full, is dropped
+    /// with every later one but a keyframe.
     fn sample(&self, data: &[u8], keyframe: bool) -> bool {
         if !keyframe && self.gap.load(Ordering::Relaxed) {
             return false;
         }
-        match self.samples.try_send(Input::Sample { unit: data.to_vec(), keyframe }) {
+        if data.len() > MAX_SAMPLE {
+            warn!("vnc: dropped a {}-byte camera sample, over the {MAX_SAMPLE} bytes wlshare accepts", data.len());
+            return self.open_gap(keyframe);
+        }
+        let generation = self.generation.load(Ordering::Relaxed);
+        match self.samples.try_send((generation, Input::Sample { unit: data.to_vec(), keyframe })) {
             Ok(()) => {
                 self.gap.store(false, Ordering::Relaxed);
                 true
             }
-            Err(TrySendError::Full(_)) => {
-                if (keyframe || !self.gap.swap(true, Ordering::Relaxed))
-                    && let Some(bridge) = self.bridge.upgrade()
-                {
-                    bridge.signal(CameraSignal::Keyframe);
-                }
-                self.gap.store(true, Ordering::Relaxed);
-                false
-            }
+            Err(TrySendError::Full(_)) => self.open_gap(keyframe),
             Err(TrySendError::Closed(_)) => false,
         }
     }
@@ -288,6 +347,7 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     const VGA: CameraFormat = CameraFormat { width: 640, height: 480, fps_numerator: 30_000, fps_denominator: 1_001 };
+    const QVGA: CameraFormat = CameraFormat { width: 320, height: 240, fps_numerator: 15, fps_denominator: 1 };
 
     /// A client message as docs/wlshare-camera.md lays it out, read back without
     /// the builders.
@@ -337,6 +397,25 @@ mod tests {
         assert_eq!(plug(CameraFormat { width: 70_000, ..VGA }), None, "no geometry past a u16");
     }
 
+    /// A format with no area or no rate would end the session at wlshare, so it is
+    /// never put on the wire, and a camera already plugged stays as it was.
+    #[test]
+    fn a_format_the_extension_cannot_describe_is_not_plugged() {
+        for format in [
+            CameraFormat { width: 0, ..VGA },
+            CameraFormat { height: 0, ..VGA },
+            CameraFormat { fps_numerator: 0, ..VGA },
+            CameraFormat { fps_denominator: 0, ..VGA },
+        ] {
+            assert_eq!(plug(format), None, "{format:?}");
+        }
+        let mut device = Device::default();
+        assert_eq!(device.announce(), None);
+        assert_eq!(decode(&device.plug(VGA).unwrap()), Sent::Plug(VGA));
+        assert_eq!(device.plug(CameraFormat { fps_denominator: 0, ..QVGA }), None);
+        assert_eq!(decode(&device.sample(&[1], true).unwrap()), Sent::Sample { keyframe: true, unit: vec![1] });
+    }
+
     #[test]
     fn server_messages_parse_and_an_unknown_one_is_fatal() {
         assert_eq!(body_len([0, 0, 0]).unwrap(), 0);
@@ -374,24 +453,20 @@ mod tests {
         assert_eq!(device.unplug(), None);
         assert_eq!(device.plug(VGA), None);
         assert_eq!(device.sample(&[1], true), None);
-
-        let mut device = Device::default();
-        assert_eq!(device.announce(), None, "nothing plugged, nothing to send");
-        assert_eq!(decode(&device.plug(VGA).unwrap()), Sent::Plug(VGA));
-        assert_eq!(device.sample(&vec![0; MAX_SAMPLE + 1], true), None, "a unit wlshare would refuse is dropped here");
     }
 
-    /// The socket's traffic reaches the queues, commands first; a full sample queue
-    /// drops to a keyframe and asks the browser for one once per gap.
+    /// The socket's traffic reaches the queues; a full sample queue, or a unit
+    /// wlshare would refuse, drops to a keyframe and asks the browser for one once
+    /// per gap.
     #[tokio::test]
-    async fn a_full_queue_drops_to_a_keyframe_and_asks_for_one_once() {
+    async fn a_dropped_sample_drops_to_a_keyframe_and_asks_for_one_once() {
         let bridge = Arc::new(CameraBridge::new());
         let mut signals = bridge.subscribe();
         let (_link, mut queues) = attach(&bridge);
 
-        assert!(bridge.sample(&[1], true));
         bridge.plug(VGA);
-        assert_eq!(queues.next().await, Some(Input::Plug(VGA)), "a plug goes before samples queued ahead of it");
+        assert!(bridge.sample(&[1], true));
+        assert_eq!(queues.next().await, Some(Input::Plug(VGA)));
         assert_eq!(queues.next().await, Some(Input::Sample { unit: vec![1], keyframe: true }));
 
         for _ in 0..SAMPLE_QUEUE {
@@ -404,11 +479,48 @@ mod tests {
         assert!(!bridge.sample(&[5], true));
         assert_eq!(signals.try_recv(), Ok(CameraSignal::Keyframe), "a keyframe lost to the queue is owed again");
 
-        while let Ok(sample) = queues.samples.try_recv() {
+        while let Ok((_, sample)) = queues.samples.try_recv() {
             assert_eq!(sample, Input::Sample { unit: vec![2], keyframe: false });
         }
         assert!(!bridge.sample(&[6], false), "room is not a keyframe");
         assert!(bridge.sample(&[7], true));
         assert!(bridge.sample(&[8], false), "the gap closed");
+
+        // An oversized unit opens the same gap, even when it is the keyframe a
+        // stream starts on: without the request the stream would never start.
+        assert!(!bridge.sample(&vec![0; MAX_SAMPLE + 1], true));
+        assert_eq!(signals.try_recv(), Ok(CameraSignal::Keyframe));
+        assert!(!bridge.sample(&[9], false), "the deltas after it are dropped too");
+        assert_eq!(signals.try_recv(), Err(TryRecvError::Empty));
+        assert!(bridge.sample(&[10], true));
+    }
+
+    /// A replug taken while the old camera's samples still wait leaves them behind:
+    /// commands go first, and a sample of an older generation is never sent as the
+    /// new camera's.
+    #[tokio::test]
+    async fn a_replug_leaves_the_old_cameras_samples_behind() {
+        let bridge = Arc::new(CameraBridge::new());
+        let (_link, mut queues) = attach(&bridge);
+
+        bridge.plug(VGA);
+        assert!(bridge.sample(&[1], true));
+        bridge.unplug();
+        bridge.plug(QVGA);
+        assert!(bridge.sample(&[2], true));
+
+        assert_eq!(queues.next().await, Some(Input::Plug(VGA)));
+        assert_eq!(queues.next().await, Some(Input::Unplug));
+        assert_eq!(queues.next().await, Some(Input::Plug(QVGA)));
+        assert_eq!(queues.next().await, Some(Input::Sample { unit: vec![2], keyframe: true }));
+
+        // And a sample from before any plug belongs to no camera at all.
+        let bridge = Arc::new(CameraBridge::new());
+        let (_link, mut queues) = attach(&bridge);
+        assert!(bridge.sample(&[3], true));
+        bridge.plug(VGA);
+        assert!(bridge.sample(&[4], true));
+        assert_eq!(queues.next().await, Some(Input::Plug(VGA)));
+        assert_eq!(queues.next().await, Some(Input::Sample { unit: vec![4], keyframe: true }));
     }
 }

@@ -65,8 +65,14 @@ stream at an offset nothing recovers from.
 `src/vnc_camera.rs` is the VNC engine's adapter to the camera socket's
 `CameraBridge` — the same socket, bridge and browser encoder MS-RDPECAM uses, so
 the browser cannot tell the two apart. The bridge's control feeds two queues, as
-the RDP client's does: plug and unplug without limit, samples sixteen deep, a full
-queue dropping to the next keyframe and asking the browser for it once per gap.
+the RDP client's does: plug and unplug without limit, samples sixteen deep. A
+sample that finds the queue full, or is past the 4 MiB wlshare accepts, is dropped
+with every later one until a keyframe, and the browser is asked for it once per gap
+— the dropped unit may have been the keyframe a stream starts on. Commands go
+ahead of the samples queued behind them, so every plug and unplug starts a new
+generation and a sample carries the one current when it was sent: the old camera's
+samples still waiting when a replug is taken are dropped, never sent as the new
+camera's.
 The engine's loop writes what they carry; the read loop turns wlshare's start,
 stop and keyframe into the bridge's signals, which reach the browser as
 `cameraStart`, `cameraStop` and `cameraKeyframe`.
@@ -78,9 +84,11 @@ so two decisions leave in the order they were made:
   answer. A server that never answers is sent nothing at all — no plug, no
   samples — whatever the browser does, so a target with `camera = true` pointed
   at wayvnc or TigerVNC loses nothing but the camera.
+- A plug with no area or no rate is never sent, as the RDP path refuses it too:
+  wlshare takes one as a client that does not speak the extension and ends the
+  session over it.
 - An unplug goes out only for a camera that was plugged on the wire.
-- A sample goes out only on a plugged camera the server knows about, and one past
-  the 4 MiB wlshare accepts is dropped here instead of ending the session there.
+- A sample goes out only on a plugged camera the server knows about.
 
 The browser encodes between `cameraStart` and `cameraStop` alone, and wlshare
 sends start only while an application on the desktop has the camera open, so an
