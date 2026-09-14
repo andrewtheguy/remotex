@@ -8,8 +8,8 @@
 //! browser cannot know, and which say when it is worth encoding at all.
 //!
 //! Nothing here names an engine. The engine side registers a [`MicControl`] and publishes
-//! [`MicSignal`]s; RDP's adapter is [`crate::rdp_mic`], and it is the only implementor,
-//! because MS-RDPEAI is the one microphone channel any of the gateway's protocols has.
+//! [`MicSignal`]s; RDP's adapter is [`crate::rdp_mic`], over MS-RDPEAI, and a generic VNC
+//! target's is [`crate::vnc_mic`], over wlshare's microphone extension.
 
 use std::sync::{Arc, Mutex};
 
@@ -48,6 +48,13 @@ pub enum MicSignal {
 /// May be called from any thread and must not block: it runs once per decoded group on
 /// the socket task.
 pub trait MicControl: Send + Sync {
+    /// The browser enabled its microphone: a mic socket attached. An engine whose remote
+    /// has a recording device for the whole session has nothing to do; one that lends
+    /// the remote a device makes it now.
+    fn plug(&self);
+    /// The browser's microphone is gone: its socket closed. What the engine holds of it
+    /// is dropped, and a lent device is taken back.
+    fn unplug(&self);
     /// Interleaved 16-bit little-endian PCM in the format last opened. Returns whether it
     /// was taken.
     fn sample(&self, pcm: Vec<u8>) -> bool;
@@ -159,8 +166,26 @@ impl MicBridge {
         }
     }
 
-    /// The stream ended — its socket went away, or the host stopped recording: the next
-    /// one starts fresh, and what the engine has not sent yet of this one is dropped.
+    /// A mic socket attached: the engine is told the browser's microphone is there.
+    pub fn plug(&self) {
+        let control = self.control.lock().expect("mic control lock").clone();
+        if let Some(control) = control {
+            control.plug();
+        }
+    }
+
+    /// The mic socket went away: the next stream starts from a fresh decoder, and the
+    /// engine drops what it has not sent and lets the microphone go.
+    pub fn unplug(&self) {
+        *self.decoder.lock().expect("mic decoder lock") = None;
+        let control = self.control.lock().expect("mic control lock").clone();
+        if let Some(control) = control {
+            control.unplug();
+        }
+    }
+
+    /// The host stopped recording: the next stream starts fresh, and what the engine
+    /// has not sent yet of this one is dropped.
     pub fn reset(&self) {
         *self.decoder.lock().expect("mic decoder lock") = None;
         let control = self.control.lock().expect("mic control lock").clone();
@@ -277,6 +302,12 @@ mod tests {
     }
 
     impl MicControl for Recorder {
+        fn plug(&self) {}
+
+        fn unplug(&self) {
+            *self.resets.lock().unwrap() += 1;
+        }
+
         fn sample(&self, pcm: Vec<u8>) -> bool {
             self.buffers.lock().unwrap().push(pcm);
             true

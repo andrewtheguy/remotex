@@ -831,8 +831,9 @@ export default function FloatingMenu({
   cameraError: string | null;
   cameraStreaming: boolean;
   onCameraChange: (enabled: boolean) => void;
-  // The microphone, under the camera's rules: `microphone = true` is RDP-only,
-  // enabled per session, and `micStreaming` is whether the remote records.
+  // The microphone, under the camera's rules: `microphone = true` is RDP's and
+  // generic VNC's (wlshare's microphone extension) alone, enabled per session, and
+  // `micStreaming` is whether the remote records.
   canMic: boolean;
   micEnabled: boolean;
   micError: string | null;

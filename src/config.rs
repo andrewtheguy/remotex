@@ -798,8 +798,11 @@ pub struct TargetConfig {
     /// through, so there is no codec key beside this one.
     #[serde(default)]
     pub camera: bool,
-    /// Offer the remote this browser's microphone (MS-RDPEAI). RDP only: RFB has no
-    /// equivalent channel.
+    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a generic VNC
+    /// target the wlshare microphone extension ([`crate::vnc_mic`]), asked for the way
+    /// [`Self::camera`]'s is — a server that never announces it leaves the microphone
+    /// unplugged. Rejected on both Apple subtypes: Screen Sharing speaks no such
+    /// extension.
     ///
     /// Capability only, like [`Self::camera`]: the recording device is fed when a client
     /// enables its microphone — explicitly, per session — by opening `/ws/mic`. The
@@ -1685,12 +1688,15 @@ impl ConfigFile {
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
             );
+            // The microphone likewise: MS-RDPEAI on RDP, wlshare's microphone extension on
+            // a generic VNC target, and nothing on a Mac.
             anyhow::ensure!(
-                !target.microphone || target.protocol == Protocol::Rdp,
-                "target {:?} sets microphone on a {} target, and only rdp carries it: MS-RDPEAI \
-                 is an RDP channel and RFB has no equivalent. Remove the key.",
+                !target.microphone || target.protocol == Protocol::Rdp || target.subtype.is_none(),
+                "target {:?} sets microphone on an {} target, and Apple's Screen Sharing has \
+                 nowhere to put one: the microphone rides MS-RDPEAI on rdp and wlshare's \
+                 microphone extension on a generic vnc target. Remove the key.",
                 target.name,
-                target.protocol.name()
+                target.subtype.map_or("apple", Subtype::name)
             );
             if target.audio && target.protocol == Protocol::Vnc {
                 anyhow::ensure!(
@@ -4813,17 +4819,26 @@ mod tests {
         assert!(!config.targets[2].camera, "the camera is opt-in");
     }
 
-    /// MS-RDPEAI is an RDP channel, so the key is refused on VNC; on RDP it stands on its
-    /// own, since a Windows host opens audio input with or without redirected sound.
+    /// The microphone rides MS-RDPEAI on RDP and wlshare's microphone extension on a
+    /// generic VNC target, and is refused on both Apple subtypes. On either it stands on
+    /// its own: a remote records with or without redirected sound.
     #[test]
-    fn microphone_belongs_to_rdp() {
+    fn microphone_rides_rdp_and_generic_vnc_and_is_refused_on_a_mac() {
         let parse = |target: &str| {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
         };
-        let vnc = parse("name = \"nope\"\nprotocol = \"vnc\"\nhost = \"10.0.0.5\"\naudio = true\nmicrophone = true")
+        for subtype in ["ard", "ard-high-performance"] {
+            let mac = parse(&format!(
+                "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\nmicrophone = true"
+            ))
             .unwrap_err();
-        assert!(format!("{vnc:#}").contains("only rdp carries it"), "{vnc:#}");
+            let rendered = format!("{mac:#}");
+            assert!(rendered.contains(&format!("microphone on an {subtype} target")), "{rendered}");
+            assert!(rendered.contains("wlshare's microphone extension"), "{rendered}");
+        }
+        let vnc = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nmicrophone = true").unwrap();
+        assert!(vnc.targets[0].microphone, "a generic vnc target asks wlshare for it");
         let config = parse(
             "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nmicrophone = true",
         )

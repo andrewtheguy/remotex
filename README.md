@@ -214,14 +214,16 @@ Two redirections send this browser's own media the other way and are
 webcam over MS-RDPECAM — or, on a generic `vnc` target, over wlshare's camera
 extension, which makes it a PipeWire camera on the wlroots desktop (see
 [`docs/wlshare-camera.md`](docs/wlshare-camera.md)) — and `microphone = true`
-offers an RDP host a microphone over MS-RDPEAI. They serve a different purpose from the rest of the session. The
+offers an RDP host a microphone over MS-RDPEAI, or a generic `vnc` target one over
+wlshare's microphone extension, which makes it a PipeWire audio source on the
+wlroots desktop (see [`docs/wlshare-microphone.md`](docs/wlshare-microphone.md)). They serve a different purpose from the rest of the session. The
 screen and the remote's sound aim to match sitting at the desktop and spend the
 bandwidth that takes on a fast link; the camera and the microphone are for
 someone who needs one for a while — a call, a recording — and are sent as
 cheaply as that allows on any link. The microphone goes as mono speech Opus at
 16 kbit/s, which the gateway decodes to the PCM the host records in. Both are off
-by default and enabled per session from the floating menu, never remembered; the
-microphone is refused on VNC, and the camera on Apple's Screen Sharing. A Windows host starts the microphone only once something on it
+by default and enabled per session from the floating menu, never remembered, and
+both are refused on Apple's Screen Sharing. A Windows host starts the microphone only once something on it
 records. Their socket rules,
 control messages and channel wire formats are tested like everything else, and
 `a_real_host_records_the_microphone` feeds a host's recording device.
