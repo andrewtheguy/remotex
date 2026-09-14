@@ -3252,6 +3252,8 @@ mod tests {
             self.buffers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true
         }
+
+        fn reset(&self) {}
     }
 
     /// One 60 ms packet of speech-shaped Opus, as the browser sends.

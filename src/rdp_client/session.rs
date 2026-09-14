@@ -25,7 +25,7 @@ use super::proto::frame::Frames;
 use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
-use super::microphone::{MicrophoneFeed, MicrophoneSink};
+use super::microphone::{MicrophoneFeed, MicrophoneInput, MicrophoneQueue, MicrophoneSink};
 use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
 
@@ -400,7 +400,7 @@ async fn thread_main(
 /// asked for it.
 struct Feeds {
     camera: Option<CameraQueues>,
-    microphone: Option<mpsc::Receiver<Vec<u8>>>,
+    microphone: Option<MicrophoneQueue>,
 }
 
 /// The same, in the errors the protocol modules raise. They become the session's one
@@ -445,10 +445,11 @@ async fn next_camera(camera: &mut Option<CameraQueues>) -> Option<CameraInput> {
     }
 }
 
-/// The next buffer of microphone PCM, the same way.
-async fn next_microphone(microphone: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+/// The next thing a microphone feed wants, the same way. The session holds a feed for as
+/// long as it runs, so the queue never ends under it.
+async fn next_microphone(microphone: &mut Option<MicrophoneQueue>) -> MicrophoneInput {
     match microphone {
-        Some(queue) => queue.recv().await,
+        Some(queue) => queue.next().await,
         None => std::future::pending().await,
     }
 }
@@ -872,11 +873,9 @@ impl<'a> Active<'a> {
                     // Every feed is gone, so nothing more will come.
                     None => camera = None,
                 },
-                // The caller's microphone: PCM for the host, if it is recording.
-                pcm = next_microphone(&mut microphone) => match pcm {
-                    Some(pcm) => self.on_microphone(&pcm).await?,
-                    None => microphone = None,
-                },
+                // The caller's microphone: PCM for the host, if it is recording, or a
+                // flush of what is not sent yet.
+                input = next_microphone(&mut microphone) => self.on_microphone(input).await?,
                 command = commands.recv() => {
                     let stop = match command {
                         Some(command) => self.on_commands(command, commands).await?,
@@ -1202,15 +1201,22 @@ impl<'a> Active<'a> {
     }
 
     /// One buffer of the caller's microphone: sent as whole packets while the host
-    /// records, and dropped otherwise.
-    async fn on_microphone(&mut self, pcm: &[u8]) -> Result<()> {
+    /// records, and dropped otherwise. A flush drops the partial packet instead.
+    async fn on_microphone(&mut self, input: MicrophoneInput) -> Result<()> {
         let (Some(recorder), Some(dynamic)) = (&mut self.recorder, self.dynamic) else {
             return Ok(());
+        };
+        let pcm = match input {
+            MicrophoneInput::Pcm(pcm) => pcm,
+            MicrophoneInput::Flush => {
+                recorder.proto.discard_pending();
+                return Ok(());
+            }
         };
         let Some(channel) = recorder.proto.channel() else {
             return Ok(());
         };
-        let turn = recorder.proto.sample(pcm);
+        let turn = recorder.proto.sample(&pcm);
         let pdus = recorder.settle(channel, turn)?;
         for pdu in pdus {
             self.write_channel(dynamic, &pdu).await?;

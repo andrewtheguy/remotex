@@ -48,6 +48,10 @@ impl MicControl for Control {
     fn sample(&self, pcm: Vec<u8>) -> bool {
         self.0.sample(pcm)
     }
+
+    fn reset(&self) {
+        self.0.flush();
+    }
 }
 
 #[cfg(test)]

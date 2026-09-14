@@ -51,6 +51,8 @@ pub trait MicControl: Send + Sync {
     /// Interleaved 16-bit little-endian PCM in the format last opened. Returns whether it
     /// was taken.
     fn sample(&self, pcm: Vec<u8>) -> bool;
+    /// Drop PCM taken but not yet sent: what follows, if anything, is another stream.
+    fn reset(&self);
 }
 
 /// The seam itself: one per engine that carries a microphone, created by
@@ -105,15 +107,22 @@ impl MicBridge {
 
     /// Publish one of the host's decisions. Called on an engine thread, and never blocks.
     pub fn signal(&self, signal: MicSignal) {
-        let mut downstream = self.downstream.lock().expect("mic signal lock");
-        downstream.open = match signal {
-            MicSignal::Open(format) => Some(format),
-            MicSignal::Close => None,
-        };
-        if let Some(tx) = downstream.sender.as_ref()
-            && tx.send(signal).is_err()
         {
-            debug!("mic: a signal arrived with no socket to hear it: {signal:?}");
+            let mut downstream = self.downstream.lock().expect("mic signal lock");
+            downstream.open = match signal {
+                MicSignal::Open(format) => Some(format),
+                MicSignal::Close => None,
+            };
+            if let Some(tx) = downstream.sender.as_ref()
+                && tx.send(signal).is_err()
+            {
+                debug!("mic: a signal arrived with no socket to hear it: {signal:?}");
+            }
+        }
+        // The next recording starts from a fresh encoder in the browser, so it gets a fresh
+        // decoder here, and none of this one's audio.
+        if signal == MicSignal::Close {
+            self.reset();
         }
     }
 
@@ -150,9 +159,14 @@ impl MicBridge {
         }
     }
 
-    /// The socket that fed the decoder went away: the next one starts a fresh stream.
+    /// The stream ended — its socket went away, or the host stopped recording: the next
+    /// one starts fresh, and what the engine has not sent yet of this one is dropped.
     pub fn reset(&self) {
         *self.decoder.lock().expect("mic decoder lock") = None;
+        let control = self.control.lock().expect("mic control lock").clone();
+        if let Some(control) = control {
+            control.reset();
+        }
     }
 }
 
@@ -259,12 +273,17 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         buffers: Mutex<Vec<Vec<u8>>>,
+        resets: Mutex<usize>,
     }
 
     impl MicControl for Recorder {
         fn sample(&self, pcm: Vec<u8>) -> bool {
             self.buffers.lock().unwrap().push(pcm);
             true
+        }
+
+        fn reset(&self) {
+            *self.resets.lock().unwrap() += 1;
         }
     }
 
@@ -350,6 +369,32 @@ mod tests {
         bridge.packet(&[0xFF, 0xFF, 0xFF]);
         bridge.packet(&browser_packets(1)[0]);
         assert_eq!(recorder.buffers.lock().unwrap().len(), 3);
+    }
+
+    /// A close drops the engine's unsent audio, and a reopen in the same format decodes
+    /// from a fresh decoder: the first packet of the new recording comes out exactly as it
+    /// does from a bridge that never heard the old one.
+    #[test]
+    fn a_close_ends_the_stream() {
+        let packets = browser_packets(3);
+        let fresh = MicBridge::new();
+        let expected = Arc::new(Recorder::default());
+        fresh.set_control(expected.clone());
+        fresh.signal(MicSignal::Open(MONO_16K));
+        fresh.packet(&packets[2]);
+
+        let bridge = MicBridge::new();
+        let recorder = Arc::new(Recorder::default());
+        bridge.set_control(recorder.clone());
+        bridge.signal(MicSignal::Open(MONO_16K));
+        bridge.packet(&packets[0]);
+        bridge.packet(&packets[1]);
+        bridge.signal(MicSignal::Close);
+        assert_eq!(*recorder.resets.lock().unwrap(), 1);
+        recorder.buffers.lock().unwrap().clear();
+        bridge.signal(MicSignal::Open(MONO_16K));
+        bridge.packet(&packets[2]);
+        assert_eq!(*recorder.buffers.lock().unwrap(), *expected.buffers.lock().unwrap());
     }
 
     #[tokio::test]

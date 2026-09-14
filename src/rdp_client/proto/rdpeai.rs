@@ -159,15 +159,28 @@ pub struct Turn {
     pub outputs: Vec<Output>,
 }
 
+/// Where the conversation on the channel stands: the states of 3.1.5's diagram that wait
+/// on the host, since every reply goes out in the same turn as the PDU it answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Phase {
+    /// The channel is open and the host's Version comes first.
+    #[default]
+    Version,
+    /// Versions agreed; the host's Sound Formats are next.
+    Formats,
+    /// Formats exchanged, with the one offered — `None` for an empty list. An Open is next,
+    /// and an unsuccessful one comes back here.
+    Exchanged(Option<Format>),
+    /// Opened: the host records `format` in packets of `frames`.
+    Recording { format: Format, frames: usize },
+}
+
 /// The client's side of audio input redirection, on its one channel.
 #[derive(Debug, Default)]
 pub struct Rdpeai {
     /// The channel, while the host holds it open.
     channel: Option<u32>,
-    /// The format offered, once the host has listed its own.
-    format: Option<Format>,
-    /// Frames each Data PDU holds, while the host is recording.
-    frames_per_packet: Option<usize>,
+    phase: Phase,
     /// PCM gathered towards the next packet.
     pending: Vec<u8>,
 }
@@ -211,7 +224,12 @@ impl Rdpeai {
 
     /// Whether the host is recording, so PCM is wanted.
     pub fn recording(&self) -> bool {
-        self.frames_per_packet.is_some()
+        matches!(self.phase, Phase::Recording { .. })
+    }
+
+    /// Drop a partial packet: the audio after it does not continue it.
+    pub fn discard_pending(&mut self) {
+        self.pending.clear();
     }
 
     /// One whole message from the host. A malformed or out-of-sequence one is ignored
@@ -228,7 +246,7 @@ impl Rdpeai {
     /// taken while the host is not recording.
     pub fn sample(&mut self, pcm: &[u8]) -> Turn {
         let mut turn = Turn::default();
-        let (Some(frames), Some(format)) = (self.frames_per_packet, self.format) else {
+        let Phase::Recording { format, frames } = self.phase else {
             return turn;
         };
         let packet = frames * usize::from(format.block_align());
@@ -248,13 +266,26 @@ impl Rdpeai {
 
     fn on_message(&mut self, message: &[u8], turn: &mut Turn) -> Result<(), Malformed> {
         let mut r = Reader::new(WHAT, message);
-        match r.u8()? {
+        let kind = r.u8()?;
+        let in_sequence = match kind {
+            MSG_SNDIN_VERSION => self.phase == Phase::Version,
+            MSG_SNDIN_FORMATS => self.phase == Phase::Formats,
+            MSG_SNDIN_OPEN => matches!(self.phase, Phase::Exchanged(_)),
+            MSG_SNDIN_FORMATCHANGE => self.recording(),
+            kind => return Err(r.refuse("a message id", kind)),
+        };
+        if !in_sequence {
+            debug!("rdp: ignoring audio input message {kind:#04x} out of sequence in {:?}", self.phase);
+            return Ok(());
+        }
+        match kind {
             MSG_SNDIN_VERSION => {
                 let version = r.u32_le()?;
                 if version == 0 {
                     return Err(r.refuse("a version", version));
                 }
                 let agreed = version.min(VERSION);
+                self.phase = Phase::Formats;
                 turn.replies.push(version_pdu(agreed));
                 turn.outputs.push(Output::Negotiated { version: agreed });
             }
@@ -266,9 +297,7 @@ impl Rdpeai {
                     offered.extend(Format::read(&mut r)?);
                 }
                 let chosen = choose(&offered);
-                self.format = chosen;
-                self.frames_per_packet = None;
-                self.pending.clear();
+                self.phase = Phase::Exchanged(chosen);
                 turn.replies.push(vec![MSG_SNDIN_DATA_INCOMING]);
                 turn.replies.push(formats_pdu(chosen));
                 turn.outputs.push(match chosen {
@@ -280,8 +309,9 @@ impl Rdpeai {
                 let frames = r.u32_le()?;
                 let initial = r.u32_le()?;
                 // The format to capture in follows; this end captures in the one it
-                // offered, which is what the data must be encoded in either way.
-                let Some(format) = self.format.filter(|_| initial == 0) else {
+                // offered, which is what the data must be encoded in either way. An
+                // unsuccessful reply leaves the formats exchanged.
+                let (Phase::Exchanged(Some(format)), 0) = (self.phase, initial) else {
                     turn.replies.push(open_reply_pdu(E_INVALIDARG));
                     return Err(r.refuse("an initial format", initial));
                 };
@@ -289,24 +319,21 @@ impl Rdpeai {
                     turn.replies.push(open_reply_pdu(E_INVALIDARG));
                     return Err(r.refuse("frames per packet", frames));
                 }
-                let was_recording = self.recording();
-                self.frames_per_packet = Some(frames as usize);
+                self.phase = Phase::Recording { format, frames: frames as usize };
                 self.pending.clear();
                 turn.replies.push(format_change_pdu(initial));
                 turn.replies.push(open_reply_pdu(S_OK));
-                if !was_recording {
-                    turn.outputs.push(Output::Opened(format));
-                }
+                turn.outputs.push(Output::Opened(format));
             }
             MSG_SNDIN_FORMATCHANGE => {
                 let index = r.u32_le()?;
-                if self.format.is_none() || index != 0 {
+                if index != 0 {
                     return Err(r.refuse("a new format", index));
                 }
                 self.pending.clear();
                 turn.replies.push(format_change_pdu(index));
             }
-            kind => return Err(r.refuse("a message id", kind)),
+            _ => unreachable!("every other id was refused above"),
         }
         Ok(())
     }
@@ -378,6 +405,14 @@ mod tests {
         message
     }
 
+    /// A channel opened and a version agreed, which is how every host starts.
+    fn negotiated() -> Rdpeai {
+        let mut mic = Rdpeai::new();
+        mic.opened(3);
+        mic.push(&[MSG_SNDIN_VERSION, 2, 0, 0, 0]);
+        mic
+    }
+
     /// A channel negotiated through to recording 16 kHz mono in packets of `frames`.
     fn recording(frames: u32) -> Rdpeai {
         let mut mic = Rdpeai::new();
@@ -398,6 +433,7 @@ mod tests {
         let turn = mic.push(&[0x01, 0x01, 0x00, 0x00, 0x00]);
         assert_eq!(turn.replies, vec![vec![0x01, 0x01, 0x00, 0x00, 0x00]]);
         assert_eq!(turn.outputs, vec![Output::Negotiated { version: 1 }]);
+        mic.opened(4);
         assert_eq!(mic.push(&[0x01, 0x07, 0, 0, 0]).replies, vec![vec![0x01, 0x02, 0, 0, 0]]);
     }
 
@@ -415,8 +451,7 @@ mod tests {
             // ADPCM, with its extra bytes, stepped over.
             [&[0x02, 0x00, 0x01, 0x00, 0x44, 0xAC, 0, 0, 0x47, 0xAD, 0, 0, 0x00, 0x08, 0x04, 0x00, 0x02, 0x00][..], &[0xF4, 0x07]].concat(),
         ]);
-        let mut mic = Rdpeai::new();
-        mic.opened(3);
+        let mut mic = negotiated();
         let turn = mic.push(&host);
         let chosen = Format { channels: 1, sample_rate: 22_050 };
         assert_eq!(turn.outputs, vec![Output::Offered(chosen)]);
@@ -445,8 +480,7 @@ mod tests {
     /// opens.
     #[test]
     fn no_producible_format_is_an_empty_list() {
-        let mut mic = Rdpeai::new();
-        mic.opened(3);
+        let mut mic = negotiated();
         let turn = mic.push(&formats_from_host(&[pcm_format(1, 11_025)]));
         assert_eq!(turn.outputs, vec![Output::NoFormat { offered: 1 }]);
         assert_eq!(turn.replies[1], vec![0x02, 0, 0, 0, 0, 0x09, 0, 0, 0]);
@@ -459,22 +493,39 @@ mod tests {
     /// and then an `S_OK` Open Reply (4.1.8), in that order.
     #[test]
     fn an_open_is_confirmed_then_answered() {
-        let mut mic = Rdpeai::new();
-        mic.opened(3);
+        let mut mic = negotiated();
         mic.push(&formats_from_host(&[pcm_format(1, 16_000)]));
         let turn = mic.push(&open(320, 0));
         assert_eq!(turn.replies, vec![vec![0x07, 0, 0, 0, 0], vec![0x04, 0x00, 0x00, 0x00, 0x00]]);
         assert_eq!(turn.outputs, vec![Output::Opened(MONO_16K)]);
     }
 
-    /// An Open before any format list names nothing, and is refused.
+    /// Out of sequence is ignored (3.1.5): an Open before the formats are exchanged, formats
+    /// or a version while recording, a Format Change before any Open, and a second Open.
     #[test]
-    fn an_open_out_of_sequence_is_refused() {
-        let mut mic = Rdpeai::new();
-        mic.opened(3);
-        let turn = mic.push(&open(320, 0));
-        assert_eq!(turn.replies, vec![open_reply_pdu(E_INVALIDARG)]);
-        assert!(turn.outputs.is_empty());
+    fn messages_out_of_sequence_are_ignored() {
+        let mut mic = negotiated();
+        assert_eq!(mic.push(&open(320, 0)), Turn::default());
+        mic.push(&formats_from_host(&[pcm_format(1, 16_000)]));
+        assert_eq!(mic.push(&[0x07, 0, 0, 0, 0]), Turn::default());
+
+        let mut mic = recording(4);
+        assert_eq!(mic.push(&formats_from_host(&[pcm_format(1, 48_000)])), Turn::default());
+        assert_eq!(mic.push(&[MSG_SNDIN_VERSION, 2, 0, 0, 0]), Turn::default());
+        assert_eq!(mic.push(&open(8, 0)), Turn::default());
+        assert!(mic.recording());
+        let turn = mic.sample(&[0; 8]);
+        assert_eq!(turn.replies, vec![vec![0x05], [&[0x06][..], &[0; 8]].concat()], "still 16 kHz mono in fours");
+    }
+
+    /// An unsuccessful Open leaves the formats exchanged, so the host may open again.
+    #[test]
+    fn an_open_can_follow_a_refused_one() {
+        let mut mic = negotiated();
+        mic.push(&formats_from_host(&[pcm_format(1, 16_000)]));
+        assert_eq!(mic.push(&open(0, 0)).replies, vec![open_reply_pdu(E_INVALIDARG)]);
+        assert_eq!(mic.push(&open(320, 1)).replies, vec![open_reply_pdu(E_INVALIDARG)]);
+        assert_eq!(mic.push(&open(320, 0)).outputs, vec![Output::Opened(MONO_16K)]);
     }
 
     /// PCM is cut into packets of exactly FramesPerPacket frames, each an Incoming Data PDU
@@ -491,8 +542,7 @@ mod tests {
 
     #[test]
     fn nothing_is_sent_before_the_host_records() {
-        let mut mic = Rdpeai::new();
-        mic.opened(3);
+        let mut mic = negotiated();
         mic.push(&formats_from_host(&[pcm_format(1, 16_000)]));
         assert!(mic.sample(&[0; 640]).replies.is_empty());
     }

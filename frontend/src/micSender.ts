@@ -256,17 +256,22 @@ export async function startMicSender(
   };
 
   // The capture pump. Audio flows whenever the microphone does; it costs
-  // anything only while the remote is recording.
+  // anything only while the remote is recording. It ends quietly when stop()
+  // cancelled it, and otherwise the capture itself ended — the device removed,
+  // the permission revoked — which stops the sender. stop() is a no-op once
+  // stopped.
   void (async () => {
     for (;;) {
       let result: ReadableStreamReadResult<AudioData>;
       try {
         result = await reader.read();
-      } catch {
-        break; // cancelled by stop()
+      } catch (e) {
+        stop(e instanceof Error ? e.message : "the microphone capture failed");
+        break;
       }
       if (result.done || stopped) {
         result.value?.close();
+        stop("the microphone stopped");
         break;
       }
       take(result.value);
