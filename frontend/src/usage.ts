@@ -56,10 +56,12 @@ export const USAGE_RANGES: readonly {
   { id: "all", label: "Everything kept", seconds: null },
 ];
 
-/** The `since` a range asks the gateway for, from `nowSecs` (Unix seconds). */
-export function usageSince(range: UsageRange, nowSecs: number): number {
-  const seconds = USAGE_RANGES.find((r) => r.id === range)?.seconds ?? null;
-  return seconds === null ? 0 : Math.max(0, Math.floor(nowSecs) - seconds);
+/**
+ * The seconds a range reads back, or `null` for everything kept. The gateway counts
+ * them back from its own clock, which the records were stamped with.
+ */
+export function usageWithin(range: UsageRange): number | null {
+  return USAGE_RANGES.find((r) => r.id === range)?.seconds ?? null;
 }
 
 export type UsageResult =
@@ -67,9 +69,11 @@ export type UsageResult =
   | { kind: "unauthorized" }
   | { kind: "error"; message: string };
 
-export async function fetchUsage(since: number): Promise<UsageResult> {
+export async function fetchUsage(within: number | null): Promise<UsageResult> {
   try {
-    const res = await gatewayFetch(`/api/usage?since=${since}`);
+    const res = await gatewayFetch(
+      within === null ? "/api/usage" : `/api/usage?within=${within}`,
+    );
     if (res.status === 401) {
       return { kind: "unauthorized" };
     }

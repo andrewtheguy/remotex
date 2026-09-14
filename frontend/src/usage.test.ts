@@ -6,8 +6,8 @@ import {
   targetLabel,
   type UsageRecord,
   usageByTarget,
-  usageSince,
   usageTotals,
+  usageWithin,
 } from "./usage.ts";
 
 const record = (
@@ -34,11 +34,11 @@ test("bytes are shown in binary units, with a decimal only when small", () => {
   assert.equal(formatBytes(3 * 1024 ** 3), "3.0 GB");
 });
 
-test("a range reads back from now, and everything kept reads from zero", () => {
-  assert.equal(usageSince("hour", 10_000.7), 6400);
-  assert.equal(usageSince("day", 100_000), 13_600);
-  assert.equal(usageSince("week", 1000), 0, "never before the epoch");
-  assert.equal(usageSince("all", 100_000), 0);
+test("a range asks for its length, and everything kept for no bound", () => {
+  assert.equal(usageWithin("hour"), 3600);
+  assert.equal(usageWithin("day"), 86_400);
+  assert.equal(usageWithin("week"), 604_800);
+  assert.equal(usageWithin("all"), null);
 });
 
 test("totals are summed per socket and over every socket", () => {

@@ -1622,7 +1622,8 @@ is best effort by design: the open timeframe dies with the process, and a failed
 write is retried with the next one. A file that is not this gateway's usage
 database — not SQLite, SQLite without its application id, or another schema
 version — is refused at startup before anything is written to it. The page reads
-the rows on demand: `GET /api/usage?since=<unix seconds>` behind the login, which
+the rows on demand: `GET /api/usage?within=<seconds>` behind the login, counted
+back from the gateway's clock the rows were stamped with rather than the browser's, which
 the picker's "Data usage" view calls when it opens and when asked to refresh, and
 `/api/config` says whether there is a database to offer. What an
 engine exchanges with its remote is a different link and is not counted.

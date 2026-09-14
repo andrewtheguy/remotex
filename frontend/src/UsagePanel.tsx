@@ -11,8 +11,8 @@ import {
   type UsageRecord,
   type UsageReport,
   usageByTarget,
-  usageSince,
   usageTotals,
+  usageWithin,
 } from "./usage.ts";
 
 // The "Data usage" view, opened from the target picker. It reads the recorded rows
@@ -167,7 +167,7 @@ export default function UsagePanel({
     const request = ++generation.current;
     setLoading(true);
     const now = Date.now() / 1000;
-    const result = await fetchUsage(usageSince(range, now));
+    const result = await fetchUsage(usageWithin(range));
     if (request !== generation.current) {
       return;
     }

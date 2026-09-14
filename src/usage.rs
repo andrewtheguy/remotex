@@ -390,7 +390,7 @@ fn sql_int(value: u64) -> anyhow::Result<i64> {
     i64::try_from(value).with_context(|| format!("{value} does not fit an SQLite integer"))
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
 }
 

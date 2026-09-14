@@ -641,9 +641,9 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
 
 #[derive(Deserialize)]
 struct UsageQuery {
-    /// Unix seconds: only timeframes that ended after it. Absent reads everything kept.
-    #[serde(default)]
-    since: u64,
+    /// Seconds back from the gateway's own clock: only timeframes that ended within them.
+    /// Absent reads everything kept. Relative, so a browser's clock never moves the range.
+    within: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -662,7 +662,8 @@ async fn usage_handler(
 ) -> ApiResult<Json<UsageResponse>> {
     let store = state.usage.store.clone().ok_or(AppError::NotFound)?;
     let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
-    let records = tokio::task::spawn_blocking(move || store.records(query.since))
+    let since = query.within.map_or(0, |within| usage::unix_now().saturating_sub(within));
+    let records = tokio::task::spawn_blocking(move || store.records(since))
         .await
         .map_err(anyhow::Error::from)??;
     Ok(Json(UsageResponse { interval_secs, max_records, records }))
@@ -1359,7 +1360,7 @@ mod tests {
         assert_eq!(json, r#"{"branding":"remotex","logo":false,"usage":false}"#);
     }
 
-    /// `/api/usage` is behind the login, reads the database from a time, and is a 404
+    /// `/api/usage` is behind the login, reads back from the gateway's clock, and is a 404
     /// on a gateway that records nothing.
     #[tokio::test]
     async fn usage_is_read_behind_the_login() {
@@ -1404,7 +1405,8 @@ mod tests {
             sent_bytes,
             received_bytes: 7,
         };
-        store.write(&[record(0, 100), record(60, 200)]).unwrap();
+        let now = usage::unix_now();
+        store.write(&[record(now - 600, 100), record(now - 100, 200)]).unwrap();
         let app = router(
             router_config(None),
             Usage { meters: Arc::default(), store: Some(Arc::new(store)) },
@@ -1414,12 +1416,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let cookie = log_in(app.clone()).await;
-        let response = app.clone().oneshot(get("/api/usage?since=60", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/usage?within=300", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
-            r#"{"intervalSecs":60,"maxRecords":10,"records":[{"target":"mac","socket":"session","start":60,"end":120,"sentBytes":200,"receivedBytes":7}]}"#
+            format!(
+                r#"{{"intervalSecs":60,"maxRecords":10,"records":[{{"target":"mac","socket":"session","start":{},"end":{},"sentBytes":200,"receivedBytes":7}}]}}"#,
+                now - 100,
+                now - 40
+            )
         );
 
         let app = router(router_config(None), Usage::default());
