@@ -796,6 +796,15 @@ pub struct TargetConfig {
     /// through, so there is no codec key beside this one.
     #[serde(default)]
     pub camera: bool,
+    /// Offer the remote this browser's microphone (MS-RDPEAI). RDP only: RFB has no
+    /// equivalent channel.
+    ///
+    /// Capability only, like [`Self::camera`]: the recording device is fed when a client
+    /// enables its microphone — explicitly, per session — by opening `/ws/mic`. The
+    /// browser sends speech-grade Opus and the gateway decodes it to the PCM the host
+    /// records in, so there is no codec or quality key beside this one.
+    #[serde(default)]
+    pub microphone: bool,
     /// Opus bitrate in kbit/s (6–510); `None` reads as
     /// [`DEFAULT_AUDIO_BITRATE_KBPS`]. Opus only — passthrough PCM has no
     /// encoder to give a rate to, so the key is refused beside
@@ -1667,6 +1676,13 @@ impl ConfigFile {
             anyhow::ensure!(
                 !target.camera || target.protocol == Protocol::Rdp,
                 "target {:?} sets camera on a {} target, and only rdp carries it: MS-RDPECAM \
+                 is an RDP channel and RFB has no equivalent. Remove the key.",
+                target.name,
+                target.protocol.name()
+            );
+            anyhow::ensure!(
+                !target.microphone || target.protocol == Protocol::Rdp,
+                "target {:?} sets microphone on a {} target, and only rdp carries it: MS-RDPEAI \
                  is an RDP channel and RFB has no equivalent. Remove the key.",
                 target.name,
                 target.protocol.name()
@@ -4773,6 +4789,25 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].camera);
         assert!(!config.targets[1].camera, "the camera is opt-in");
+    }
+
+    /// MS-RDPEAI is an RDP channel, so the key is refused on VNC; on RDP it stands on its
+    /// own, since a Windows host opens audio input with or without redirected sound.
+    #[test]
+    fn microphone_belongs_to_rdp() {
+        let parse = |target: &str| {
+            ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
+                .and_then(|file| file.resolve())
+        };
+        let vnc = parse("name = \"nope\"\nprotocol = \"vnc\"\nhost = \"10.0.0.5\"\naudio = true\nmicrophone = true")
+            .unwrap_err();
+        assert!(format!("{vnc:#}").contains("only rdp carries it"), "{vnc:#}");
+        let config = parse(
+            "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nmicrophone = true",
+        )
+        .unwrap();
+        assert!(config.targets[0].microphone);
+        assert!(!config.targets[0].audio, "the microphone does not need the remote's sound");
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key

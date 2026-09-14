@@ -58,6 +58,14 @@
 //! [`proto::rdpecam`] is the channel; the samples are metered out one per request the
 //! host makes, as the specification requires.
 //!
+//! # The microphone
+//!
+//! MS-RDPEAI, for a session that asked for it with [`Connect::microphone`]: a microphone
+//! on this end, recorded from by applications on the host. The caller hands PCM to
+//! [`Session::microphone`], and the host's decisions — it started recording, in this
+//! format, or stopped — reach a [`MicrophoneSink`] on the session thread.
+//! [`proto::rdpeai`] is the channel, which cuts the PCM into the packets the host asked for.
+//!
 //! # What this does not do
 //!
 //! - **No touch.** MS-RDPEI is never asked for.
@@ -80,11 +88,13 @@ mod error;
 mod framebuffer;
 mod gfx;
 mod input;
+mod microphone;
 mod pointer;
 pub mod proto;
 mod session;
 
 pub use camera::{Camera, CameraFeed, CameraSink, Fed};
+pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use framebuffer::{Frame, Framebuffer, Rect};
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};

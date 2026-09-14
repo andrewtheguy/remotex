@@ -1,0 +1,85 @@
+# wlshare built from its checkout, on a headless sway, for the wlshare e2e test
+# (tests/wlshare_e2e.rs). The build context is the wlshare repository, not this
+# directory — the test passes it — so a change there is what gets tested.
+#
+# wlshare is the one generic VNC server that answers the gateway's private
+# density and outputs extensions, so this is the image that exercises them.
+# Headless sway gives it two HEADLESS-* outputs — the only kind wlshare ever
+# resizes or rescales — with no GPU and no input devices. Nothing draws on
+# them, which is the point: a desktop that never changes is where a capture
+# waiting on damage shows itself. sway and wlroots 0.19 come from wlshare's APT
+# repository, because trixie's own wlroots 0.18 paints the cursor into a
+# headless capture.
+#
+# The session is unauthenticated: the published port is on loopback, and the
+# RSA-AES login is the gateway's own unit tests' business.
+FROM debian:trixie-slim AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl pkg-config \
+        libwayland-dev libxkbcommon-dev libpam0g-dev \
+        libpipewire-0.3-dev libspa-0.2-dev libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+WORKDIR /build
+COPY . /build
+# The registry and target directory are cache mounts, so a source change
+# rebuilds incrementally instead of from nothing.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p wlshare && cp target/release/wlshare /usr/local/bin/wlshare
+
+FROM debian:trixie-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL -o /etc/apt/keyrings/wlshare.gpg https://andrewtheguy.github.io/wlshare/wlshare.gpg \
+    && printf '%s\n' 'Types: deb' 'URIs: https://andrewtheguy.github.io/wlshare' 'Suites: trixie' \
+        'Components: main' 'Signed-By: /etc/apt/keyrings/wlshare.gpg' \
+        > /etc/apt/sources.list.d/wlshare.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        sway libwayland-client0 libxkbcommon0 libpam0g libpipewire-0.3-0t64 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m desk
+COPY --from=build /usr/local/bin/wlshare /usr/local/bin/wlshare
+# HEADLESS-1 is shared first at 1024x768 and scale 1; HEADLESS-2 is the second
+# output a switch lands on, a different size at scale 2.
+RUN printf '%s\n' \
+    'xwayland disable' \
+    'output HEADLESS-1 mode --custom 1024x768 scale 1' \
+    'output HEADLESS-2 mode --custom 1280x800 scale 2' \
+    > /etc/sway-e2e.conf \
+    && printf '%s\n' \
+    'listen = "0.0.0.0:5900"' \
+    'output = "HEADLESS-1"' \
+    'resize = true' \
+    'audio = false' \
+    > /etc/wlshare-e2e.toml
+# Start sway, add the second output once its IPC answers, then run wlshare in the
+# foreground. The wait is bounded, so a sway that cannot start names itself
+# instead of leaving the test to time out on something else.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'export XDG_RUNTIME_DIR=/tmp/xdg WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1' \
+    'mkdir -p -m 700 "$XDG_RUNTIME_DIR"' \
+    'sway -c /etc/sway-e2e.conf &' \
+    'sway=$!' \
+    'waited=0' \
+    'until [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock 2>/dev/null) swaymsg -t get_version >/dev/null 2>&1; do' \
+    '  kill -0 "$sway" 2>/dev/null || { echo "dummy-wlshare: sway exited" >&2; exit 1; }' \
+    '  waited=$((waited + 1))' \
+    '  [ "$waited" -lt 300 ] || { echo "dummy-wlshare: sway was not ready after 30s" >&2; exit 1; }' \
+    '  sleep 0.1' \
+    'done' \
+    'export SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock)' \
+    'swaymsg create_output >/dev/null' \
+    'exec env WAYLAND_DISPLAY=wayland-1 wlshare --config /etc/wlshare-e2e.toml' \
+    > /usr/local/bin/dummy-wlshare && chmod +x /usr/local/bin/dummy-wlshare
+USER desk
+# wlshare as PID 1 has no SIGTERM handler the kernel will deliver, so a stop
+# would wait out its timeout; the test only ever discards the container.
+STOPSIGNAL SIGKILL
+EXPOSE 5900
+CMD ["/usr/local/bin/dummy-wlshare"]

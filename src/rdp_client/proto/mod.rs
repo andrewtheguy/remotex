@@ -96,6 +96,7 @@ pub mod planar;
 pub mod pointer;
 pub mod progressive;
 pub mod rdpdr;
+pub mod rdpeai;
 pub mod rdpecam;
 pub mod rdpsnd;
 pub mod share;

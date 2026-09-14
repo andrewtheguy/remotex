@@ -76,6 +76,7 @@ fn connect() -> (Session, Receiver<Event>) {
         // A camera draws nothing, and one the browser never plugs costs the host a
         // channel and nothing else.
         camera: None,
+        microphone: None,
     });
     (session, events)
 }

@@ -591,6 +591,51 @@ function CameraSection({
   );
 }
 
+// The microphone toggle: the camera's twin, and the same rules — a target
+// without `microphone = true` omits the row, the click is the `getUserMedia`
+// gesture, nothing is remembered, and the label says "experimental" for the
+// same lack of coverage.
+function MicSection({
+  available,
+  enabled,
+  error,
+  streaming,
+  onChange,
+}: {
+  available: boolean;
+  enabled: boolean;
+  error: string | null;
+  // Whether an application on the remote is recording right now.
+  streaming: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  if (!available) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Microphone (experimental)</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => onChange(!enabled)}
+        aria-pressed={enabled}
+        title="Offer this browser's microphone to the remote"
+      >
+        {enabled ? "Disable microphone" : "Enable microphone"}
+      </button>
+      {enabled && !error && (
+        <p className="audio-note">
+          {streaming
+            ? "The remote is recording the microphone"
+            : "Waiting for the remote to record"}
+        </p>
+      )}
+      {error && <p className="audio-note">{error}</p>}
+    </div>
+  );
+}
+
 // macOS-only Command-to-Control preference. It remains visible but inactive for
 // a Mac guest, where Command already has native meaning.
 function MacKeyboardSection({
@@ -704,6 +749,11 @@ export default function FloatingMenu({
   cameraError,
   cameraStreaming,
   onCameraChange,
+  canMic,
+  micEnabled,
+  micError,
+  micStreaming,
+  onMicChange,
   macKeyOverridesEnabled,
   macKeyOverridesActive,
   isMacHost,
@@ -780,6 +830,13 @@ export default function FloatingMenu({
   cameraError: string | null;
   cameraStreaming: boolean;
   onCameraChange: (enabled: boolean) => void;
+  // The microphone, under the camera's rules: `microphone = true` is RDP-only,
+  // enabled per session, and `micStreaming` is whether the remote records.
+  canMic: boolean;
+  micEnabled: boolean;
+  micError: string | null;
+  micStreaming: boolean;
+  onMicChange: (enabled: boolean) => void;
   // The Command-to-Control preference and whether it is doing anything. The two
   // differ when the guest is itself a Mac, which is why the section reports the
   // reason rather than just showing the switch off. The whole section is absent
@@ -1191,6 +1248,14 @@ export default function FloatingMenu({
             error={cameraError}
             streaming={cameraStreaming}
             onChange={onCameraChange}
+          />
+
+          <MicSection
+            available={canMic}
+            enabled={micEnabled}
+            error={micError}
+            streaming={micStreaming}
+            onChange={onMicChange}
           />
 
           <MacKeyboardSection

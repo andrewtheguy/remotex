@@ -592,6 +592,26 @@ pub struct Container {
     name: String,
 }
 
+impl Container {
+    /// Run a command inside the container and return its stdout, failing the
+    /// test if it fails — for asking the server what it did rather than only
+    /// what it told the gateway.
+    #[allow(dead_code)]
+    pub fn exec(&self, args: &[&str]) -> String {
+        let out = Command::new(self.runtime)
+            .args(["exec", &self.name])
+            .args(args)
+            .output()
+            .expect("run container exec");
+        assert!(
+            out.status.success(),
+            "{args:?} failed in the container:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("container exec output is UTF-8")
+    }
+}
+
 impl Drop for Container {
     fn drop(&mut self) {
         let _ = Command::new(self.runtime)
@@ -628,6 +648,20 @@ pub fn start_dummy_server(
     internal_port: u16,
 ) -> (Container, u16) {
     let context_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(context);
+    start_server_image(runtime, image, &context_dir, &context_dir, internal_port)
+}
+
+/// [`start_dummy_server`] with the `Containerfile` in `containerfile_dir` and a
+/// build context of its own — for a server built from another checkout, whose
+/// sources are the context and whose `.dockerignore` then applies.
+#[allow(dead_code)]
+pub fn start_server_image(
+    runtime: &'static str,
+    image: &str,
+    containerfile_dir: &Path,
+    context_dir: &Path,
+    internal_port: u16,
+) -> (Container, u16) {
     // With a remote engine the build context is sent over the connection, so a
     // local path still works.
     //
@@ -636,8 +670,8 @@ pub fn start_dummy_server(
     // the explicit flag.
     let build = Command::new(runtime)
         .args(["build", "-t", image, "-f"])
-        .arg(context_dir.join("Containerfile"))
-        .arg(&context_dir)
+        .arg(containerfile_dir.join("Containerfile"))
+        .arg(context_dir)
         .output()
         .expect("run container build");
     assert!(

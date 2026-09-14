@@ -205,6 +205,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             domain: target.domain.as_deref(),
             address: client_address,
             audio: false,
+            microphone: false,
             keyboard_layout: KEYBOARD_LAYOUT,
         }
         .encode()

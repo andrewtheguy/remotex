@@ -91,8 +91,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::proto::{rdpecam, rdpsnd};
-use remotex::rdp_client::{AudioSink, Camera, CameraSink, Connect, Event, Fed, Input, Session};
+use remotex::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
+use remotex::rdp_client::{AudioSink, Camera, CameraSink, Connect, Event, Fed, Input, MicrophoneSink, Session};
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use tokio::sync::mpsc::Receiver;
 
@@ -114,6 +114,16 @@ const AUDIO_ENV: &str = "REMOTEX_UAT_AUDIO";
 /// it will, and printed otherwise.
 const CAMERA_ENV: &str = "REMOTEX_UAT_CAMERA";
 
+/// Whether the target's host offers microphone redirection — set it to `1` against a
+/// Windows host that allows it. A policy can turn audio input off, so the negotiation
+/// is asserted only when this says it will be, and printed otherwise.
+const MICROPHONE_ENV: &str = "REMOTEX_UAT_MICROPHONE";
+
+/// Whether the probe asks for sound at all: anything but `0` or `false` does. Off, it
+/// shows that the host opens audio input without it — measured against a Windows
+/// Enterprise host, it does.
+const SOUND_ENV: &str = "REMOTEX_UAT_SOUND";
+
 /// The camera the probe plugs: what a browser's webcam typically announces.
 const PROBE_CAMERA: rdpecam::Format =
     rdpecam::Format { width: 640, height: 480, fps_numerator: 30, fps_denominator: 1 };
@@ -122,6 +132,10 @@ const PROBE_CAMERA: rdpecam::Format =
 /// and rate, written with an access unit delimiter before every picture and the
 /// parameter sets before every keyframe — the module docs have the ffmpeg line.
 const CAMERA_STREAM_ENV: &str = "REMOTEX_UAT_CAMERA_STREAM";
+
+/// What the Run dialog is given to open something that records: the Recording tab of
+/// Sound, whose level meters open every capture device it lists.
+const RECORDING_TAB: &str = "control mmsys.cpl,,1";
 
 /// What the Run dialog is given to open the Windows Camera app.
 const CAMERA_APP: &str = "microsoft.windows.camera:";
@@ -239,7 +253,50 @@ impl CameraSink for Watch {
     }
 }
 
+/// Whether this run was told the host offers a microphone — see [`MICROPHONE_ENV`].
+fn microphone_offered() -> bool {
+    matches!(std::env::var(MICROPHONE_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"))
+}
+
+/// Whether this run asks for sound — see [`SOUND_ENV`].
+fn sound() -> bool {
+    !matches!(std::env::var(SOUND_ENV).as_deref(), Ok("0") | Ok("false"))
+}
+
+/// What the host decided about the session's microphone: counted, like the sound.
+#[derive(Default, Debug)]
+struct Voice {
+    /// The version the host agreed, or 0 if it never did.
+    version: AtomicU64,
+    /// The rate and channels of the last open, as `rate * 10 + channels`, or 0.
+    opened: AtomicU64,
+    opens: AtomicU64,
+    closes: AtomicU64,
+}
+
+struct Speak(Arc<Voice>);
+
+impl MicrophoneSink for Speak {
+    fn negotiated(&self, version: u32) {
+        self.0.version.store(u64::from(version), Ordering::Relaxed);
+    }
+
+    fn opened(&self, format: rdpeai::Format) {
+        self.0.opened.store(u64::from(format.sample_rate) * 10 + u64::from(format.channels), Ordering::Relaxed);
+        self.0.opens.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn closed(&self) {
+        self.0.closes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn connect() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>) {
+    let (session, events, ear, eye, _voice) = connect_with_voice();
+    (session, events, ear, eye)
+}
+
+fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Voice>) {
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
@@ -247,6 +304,7 @@ fn connect() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>) {
     println!("rdp_client_probe: {name} ({}:{}), egfx {}", target.host, target.port, egfx());
     let ear = Arc::new(Ear::default());
     let eye = Arc::new(Eye::default());
+    let voice = Arc::new(Voice::default());
     let (session, events) = Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
@@ -258,10 +316,109 @@ fn connect() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>) {
         resize: true,
         egfx: egfx(),
         clipboard: true,
-        audio: Some(Box::new(Listen(Arc::clone(&ear)))),
+        audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
         camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
+        microphone: Some(Box::new(Speak(Arc::clone(&voice)))),
     });
-    (session, events, ear, eye)
+    (session, events, ear, eye, voice)
+}
+
+/// The microphone, recorded: the Audio Input sequence up to the host's Open, and PCM fed
+/// in the packets it asked for.
+///
+/// A Windows host starts audio input only when something on it records (MS-RDPEAI
+/// 3.1.4.1), the way it negotiates sound only when something plays. So the probe opens
+/// the Recording tab of Sound through the Run dialog — its level meters open the
+/// capture devices — waits for the host's open, feeds a few seconds of a tone in the
+/// format it chose, and closes the dialog. What is asserted under [`MICROPHONE_ENV`] is
+/// the negotiation; the rest is printed, and the session surviving all of it is the claim.
+async fn record_microphone() {
+    common::init_logging();
+    let (session, mut events, _ear, _eye, voice) = connect_with_voice();
+    let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
+        .await
+        .expect("no first event within 60s")
+        .expect("the event channel closed");
+    assert!(matches!(first, Event::Connected { .. }), "the session did not connect: {first:?}");
+    let microphone = session.microphone().expect("the session was given a microphone");
+
+    let mut tally = Tally::default();
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(15), |t| {
+        t.paints > 0 && t.clipboard_ready
+    })
+    .await;
+    assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(3), |_| false).await;
+    println!("  sound {}, microphone after connect: {voice:?}", sound());
+
+    // Something records: the Recording tab, opened as the Camera app is.
+    let input = session.input();
+    tally.offer = Some(RECORDING_TAB);
+    input.advertise_clipboard(vec![CF_UNICODETEXT]);
+    chord(input, &[(LWIN, true)], KEY_R, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(2), |_| false).await;
+    chord(input, &[(LCTRL, false)], KEY_A, false);
+    chord(input, &[(LCTRL, false)], KEY_V, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(4), |t| {
+        !t.pastes.is_empty()
+    })
+    .await;
+    chord(input, &[], ENTER, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(20), |_| {
+        voice.opens.load(Ordering::Relaxed) > 0
+    })
+    .await;
+    println!("  microphone with the Recording tab open: {voice:?}");
+
+    let opened = voice.opened.load(Ordering::Relaxed);
+    let mut fed = [0u64; 2]; // taken, refused
+    if opened > 0 {
+        let (rate, channels) = ((opened / 10) as usize, (opened % 10) as usize);
+        let group = rate / 50; // 20 ms
+        let mut phase = 0usize;
+        let feeding = Instant::now();
+        let mut next = feeding;
+        while feeding.elapsed() < Duration::from_secs(4) {
+            let mut pcm = Vec::with_capacity(group * channels * 2);
+            for _ in 0..group {
+                let value = ((phase as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 8000.0) as i16;
+                phase += 1;
+                for _ in 0..channels {
+                    pcm.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            fed[usize::from(!microphone.sample(pcm))] += 1;
+            next += Duration::from_millis(20);
+            pump(&session, &mut events, &mut tally, next, |_| false).await;
+            // Mid-tone, the Recording tab's level meter for the redirected device is
+            // what eyes can check the samples arrived by.
+            if fed[0] == 150 {
+                dump(&session, "microphone-recording");
+            }
+        }
+    }
+    // Close the Sound dialog, whatever happened above.
+    chord(input, &[(LALT, false)], F4, false);
+    pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(3), |_| false).await;
+    println!("  microphone: {voice:?}; buffers taken {}, refused {}", fed[0], fed[1]);
+    if microphone_offered() {
+        assert_eq!(
+            voice.version.load(Ordering::Relaxed),
+            u64::from(rdpeai::VERSION),
+            "the host never agreed MS-RDPEAI version {}, though {MICROPHONE_ENV} says it offers \
+             microphones",
+            rdpeai::VERSION
+        );
+    }
+
+    drop(session);
+    let mut ended = None;
+    while let Ok(event) = events.try_recv() {
+        if let Event::Ended(result) = event {
+            ended = Some(result);
+        }
+    }
+    assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end: {ended:?}");
 }
 
 /// What a stretch of the session did.
@@ -819,4 +976,10 @@ async fn a_real_host_round_trips_the_clipboard() {
 #[ignore = "drives a real RDP host named in tmp/test_uat.toml, its Camera app, and a stream in REMOTEX_UAT_CAMERA_STREAM"]
 async fn a_real_host_streams_the_camera() {
     stream_camera().await;
+}
+
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
+async fn a_real_host_records_the_microphone() {
+    record_microphone().await;
 }
