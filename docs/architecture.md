@@ -1604,7 +1604,12 @@ with the state around it.
 
 `[usage]` is top-level for the same reason and records the data usage of the
 browser's four WebSockets in an SQLite database, one row per target, socket and
-timeframe, so targets can be compared. Each socket counts the frames it writes and
+timeframe, so targets can be compared. The database is `usage.sqlite3` in the
+gateway's state directory unless `database` names another, and a relative
+`database` is taken from there as well: the installation's state directory beside
+its config and web paths when `serve` reads the installed config, the config
+file's own directory when `--config` names one, and the instance directory under
+`remotex tui`. Each socket counts the frames it writes and
 reads — text and binary frames with their headers, never the heartbeat's pings and
 pongs, so an idle connection records nothing — into the counters of the target
 the session has selected at that moment, which the session manager publishes in

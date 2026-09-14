@@ -56,12 +56,20 @@
 # by "no target" while the browser sits on the picker. Every interval_secs one
 # record is added per target and socket that moved data in that timeframe — an
 # idle socket adds none — in one transaction. Each target's socket keeps its
-# newest max_records records. The database's directory must be writable: SQLite
-# keeps its -wal and -shm files beside it. Best effort: the timeframe being
-# counted when the gateway stops is lost. Absent, nothing is recorded.
+# newest max_records records. Best effort: the timeframe being counted when the
+# gateway stops is lost. Without a [usage] table, nothing is recorded.
+#
+# The database is usage.sqlite3 in the gateway's state directory unless database
+# names another file; a relative path is taken from that directory too. The state
+# directory is /var/lib/remotex for the Linux packages, /usr/local/var/remotex for
+# the macOS package, %ProgramData%\remotex on Windows, <prefix>/var for the quick
+# installer and the container (/opt/remotex/var), and the instance directory under
+# `remotex tui`. A config named with --config keeps it in the config's own
+# directory. The directory must be writable: SQLite keeps its -wal and -shm files
+# beside the database.
 #
 #[usage]
-#database = "/var/lib/remotex/usage.sqlite3"
+#database = "usage.sqlite3"
 #interval_secs = 60
 #max_records = 1440
 

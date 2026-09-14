@@ -135,7 +135,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
     let socket_path = instance.socket_path();
-    let config = file.resolve_embedded(token.clone(), socket_path.clone())?;
+    let config = file.resolve_embedded(token.clone(), socket_path.clone(), &instance.dir)?;
 
     // Before the handshake too, so a usage database the gateway cannot use is a refused
     // start the launcher reports rather than a gateway that silently records nothing.
@@ -310,8 +310,13 @@ pub fn check(text: &str) -> anyhow::Result<()> {
     let file = ConfigFile::parse_with(text, Audience::Embedded)?;
     // Parsing alone would accept a file the gateway then refuses to start on, so
     // the check goes all the way through resolution. The socket is the launcher's
-    // to place and is not in the file, so any path is sufficient here.
-    file.resolve_embedded(EmbeddedToken::generate(), PathBuf::from("gateway.sock"))
+    // to place and is not in the file, so any path is sufficient here, and so is
+    // any instance directory: nothing is opened in it.
+    file.resolve_embedded(
+        EmbeddedToken::generate(),
+        PathBuf::from("gateway.sock"),
+        std::path::Path::new(""),
+    )
         .map(|_| ())
 }
 
@@ -379,7 +384,11 @@ mod tests {
         )
         .unwrap();
         let resolved = file
-            .resolve_embedded(EmbeddedToken::generate(), PathBuf::from("/i/gateway.sock"))
+            .resolve_embedded(
+                EmbeddedToken::generate(),
+                PathBuf::from("/i/gateway.sock"),
+                std::path::Path::new("/i"),
+            )
             .unwrap();
         assert_eq!(resolved.branding.text, "work laptop");
         assert_eq!(resolved.branding.logo.unwrap().mime, "image/png");
