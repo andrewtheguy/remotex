@@ -50,6 +50,8 @@ use crate::vnc_apple_audio::{self, MediaStream};
 use crate::vnc_qemu_audio::{self, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
+use crate::camera::CameraSignal;
+use crate::vnc_camera::{self, ServerCamera};
 use crate::vnc_clipboard;
 use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
 use crate::vnc_rsa_aes::{self, FrameReader, Sealer, Strength};
@@ -622,6 +624,37 @@ async fn send_decided<M: AsRef<[u8]>>(
     }
 }
 
+/// [`send_decided`] for the camera: the uplink first, then the device, so a plug
+/// decided from newer state never trails an unplug decided from older — the
+/// server's announcement, read on the read loop, can race the browser's plug.
+async fn send_camera_decided(
+    uplink: &SharedUplink,
+    link: &vnc_camera::Link,
+    decide: impl FnOnce(&mut vnc_camera::Device) -> Option<Vec<u8>>,
+) -> anyhow::Result<()> {
+    let mut up = uplink.lock().await;
+    let msg = decide(&mut link.device.lock().unwrap());
+    match msg {
+        Some(msg) => up.send(&msg).await,
+        None => Ok(()),
+    }
+}
+
+/// The camera socket's next command for the loop to send; never, on a session
+/// without a camera.
+async fn camera_input(queues: &mut Option<vnc_camera::Queues>) -> vnc_camera::Input {
+    let next = match queues {
+        Some(queues) => queues.next().await,
+        None => None,
+    };
+    match next {
+        Some(input) => input,
+        // The bridge keeps the control, and with it the senders, for as long as
+        // the engine runs, so the queues only end with the engine.
+        None => std::future::pending().await,
+    }
+}
+
 type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
 
 /// The remote's screens and which one is being shared: a Mac's, from its display
@@ -816,6 +849,9 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 /// A thin wrapper so the shutdown cannot be missed — see [`crate::rdp::run`], which has
 /// the same shape for the same reason: the engine thread's runtime dies with this
 /// function, and the sink forwards from a task of its own.
+// One argument per thing the session hands an engine, as `rdp::run` takes them; a
+// parameter struct would exist only to be destructured here.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
     plan: RenderPlan,
@@ -823,10 +859,11 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<crate::audio::AudioBridge>>,
+    camera: Option<Arc<crate::camera::CameraBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = TileSink::new("vnc", frame_tx, plan, feedback);
-    session(config, display, input_rx, audio, &sink).await;
+    session(config, display, input_rx, audio, camera, &sink).await;
     sink.finish().await;
 }
 
@@ -835,6 +872,7 @@ async fn session(
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<crate::audio::AudioBridge>>,
+    camera: Option<Arc<crate::camera::CameraBridge>>,
     sink: &TileSink,
 ) {
     // The budget covers the RFB handshake, which can stall on a host that accepts
@@ -905,6 +943,7 @@ async fn session(
             high_performance,
             media,
             qemu_audio,
+            camera,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
         },
@@ -975,6 +1014,11 @@ struct Flags {
     /// announces the extension then sends ([`vnc_qemu_audio`]). `None` on every
     /// Apple target and wherever `audio` was not asked for.
     qemu_audio: Option<Arc<crate::audio::AudioBridge>>,
+    /// The browser's camera, on a generic target that carries one: the bridge the
+    /// camera socket drives, lent to a server that announces the wlshare camera
+    /// extension ([`vnc_camera`]). `None` on every Apple target, which the config
+    /// file refuses `camera` on, and wherever the key is absent.
+    camera: Option<Arc<crate::camera::CameraBridge>>,
     /// The density the virtual display opened at, from the session-open's
     /// screen. Seeding [`DesktopState::host_density`] with it keeps the
     /// client's first `hostDisplay` — an echo of the same screen — from
@@ -1250,6 +1294,7 @@ async fn rfb38_preface(
             apple,
             config.clipboard,
             config.audio,
+            config.camera,
         )))
         .await?;
     if apple && config.clipboard {
@@ -1267,7 +1312,7 @@ async fn rfb38_preface(
     })
 }
 
-fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool) -> Vec<i32> {
+fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
         // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
@@ -1338,6 +1383,13 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool) -> Vec<i32> {
         // does not says nothing and the session runs in silence. See
         // [`crate::vnc_qemu_audio`].
         encodings.push(vnc_qemu_audio::ENCODING);
+    }
+    if camera {
+        // The wlshare camera extension, on a target that carries a camera, asked
+        // the way audio is: wlshare answers that it takes one, and any other
+        // server says nothing and the browser's camera is never plugged. See
+        // [`crate::vnc_camera`].
+        encodings.push(vnc_camera::ENCODING);
     }
     if !apple {
         // The density request, asked of every generic server and last so it
@@ -1513,6 +1565,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         high_performance,
         media,
         qemu_audio,
+        camera,
         host_density,
         poll,
     } = flags;
@@ -1547,6 +1600,15 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         shadow
     }));
     let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+    // The camera socket's traffic comes to this loop through the queues, and the
+    // server's decisions go to the bridge from the read loop: both share the link.
+    let (camera, mut camera_queues) = match camera {
+        Some(bridge) => {
+            let (link, queues) = vnc_camera::attach(&bridge);
+            (Some(Arc::new(link)), Some(queues))
+        }
+        None => (None, None),
+    };
     let shared = Shared {
         uplink: Arc::clone(&uplink),
         desktop: Arc::clone(&desktop),
@@ -1555,6 +1617,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         shadow: Arc::clone(&shadow),
         display: Arc::clone(&display),
         audio: qemu_audio,
+        camera: camera.clone(),
     };
 
     // Kick off the update cycle with one full (non-incremental) request. On the
@@ -1589,6 +1652,21 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         tokio::select! {
             res = &mut read_task => {
                 return res.map_err(|e| anyhow::anyhow!("read task failed: {e}"))?;
+            }
+            // The camera socket's plug, unplug and samples, written in the order the
+            // browser sent them; what reaches the wire is the device's decision.
+            input = camera_input(&mut camera_queues) => {
+                if let Some(link) = &camera {
+                    let sent = send_camera_decided(&uplink, link, |device| match input {
+                        vnc_camera::Input::Plug(format) => device.plug(format),
+                        vnc_camera::Input::Unplug => device.unplug(),
+                        vnc_camera::Input::Sample { unit, keyframe } => device.sample(&unit, keyframe),
+                    })
+                    .await;
+                    if let Err(e) = sent {
+                        break Err(e);
+                    }
+                }
             }
             input = input_rx.recv() => {
                 let Some(input) = input else {
@@ -1953,6 +2031,9 @@ struct Shared {
     /// see [`Flags::qemu_audio`]. `None` is a session with no sound to carry,
     /// and the extension is then neither advertised nor read.
     audio: Option<Arc<crate::audio::AudioBridge>>,
+    /// The browser's camera — see [`Flags::camera`]. `None` is a session with no
+    /// camera to lend, and the extension is then neither advertised nor read.
+    camera: Option<Arc<vnc_camera::Link>>,
 }
 
 /// Read server messages forever, forwarding framebuffer updates as tiles.
@@ -1967,7 +2048,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     sink: TileSink,
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
-    let Shared { uplink, desktop, clipboard, display, audio, .. } = &shared;
+    let Shared { uplink, desktop, clipboard, display, audio, camera, .. } = &shared;
     // Where the QEMU Audio extension stands here. `Off` on a session with no
     // bridge to feed, which is also a session that never listed the encoding, so
     // neither the announcement nor a sample can arrive.
@@ -2366,6 +2447,35 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             bridge.wave(samples);
                         }
                     }
+                }
+            }
+            // The wlshare camera extension's one message type: the server takes a
+            // camera, or an application on the desktop opened or closed it, or a
+            // keyframe is owed ([`vnc_camera`]). Only a session that carries a
+            // camera listed the encoding, so only it reads the type; on every other
+            // session 0xE2 is as unknown as it was.
+            vnc_camera::MSG_CAMERA if let Some(link) = camera => {
+                let mut header = [0u8; vnc_camera::SERVER_HEADER_LEN];
+                reader.read_exact(&mut header).await?;
+                let mut body = [0u8; vnc_camera::START_FORMAT_LEN];
+                let body = &mut body[..vnc_camera::body_len(header)?];
+                reader.read_exact(body).await?;
+                match vnc_camera::parse_server(header, body)? {
+                    ServerCamera::Available => {
+                        send_camera_decided(uplink, link, vnc_camera::Device::announce).await?;
+                    }
+                    ServerCamera::Start(format) => {
+                        info!(
+                            "vnc: an application on the desktop opened the camera ({}x{})",
+                            format.width, format.height
+                        );
+                        link.bridge.signal(CameraSignal::Start(format));
+                    }
+                    ServerCamera::Stop => {
+                        info!("vnc: the camera is no longer open on the desktop");
+                        link.bridge.signal(CameraSignal::Stop);
+                    }
+                    ServerCamera::Keyframe => link.bridge.signal(CameraSignal::Keyframe),
                 }
             }
             MSG_END_OF_CONTINUOUS_UPDATES => {
@@ -5049,7 +5159,7 @@ mod tests {
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
         assert_eq!(
-            rfb38_encoding_list(false, false, false),
+            rfb38_encoding_list(false, false, false, false),
             vec![
                 ENCODING_COPY_RECT,
                 ENCODING_ZRLE,
@@ -5078,10 +5188,12 @@ mod tests {
         // one as a rectangle at all — the clipboard's arrives as a
         // ServerCutText, the density report and the output list as their own
         // messages, not here.
-        let pixel_encodings = rfb38_encoding_list(false, true, true)
+        let pixel_encodings = rfb38_encoding_list(false, true, true, true)
             .into_iter()
             .filter(|encoding| {
-                *encoding >= 0 && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS].contains(encoding)
+                *encoding >= 0
+                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING]
+                        .contains(encoding)
             });
         for encoding in pixel_encodings {
             let mut wire = vec![0u8, 0];
@@ -5134,7 +5246,7 @@ mod tests {
     /// see [`both_apple_subtypes_start_out_wanting_zlib`].
     #[test]
     fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
-        let encodings = rfb38_encoding_list(true, true, true);
+        let encodings = rfb38_encoding_list(true, true, true, false);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
         assert!(!encodings.contains(&ENCODING_ZLIB));
@@ -5371,9 +5483,9 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
         for clipboard in [false, true] {
-            let generic = rfb38_encoding_list(false, clipboard, false);
+            let generic = rfb38_encoding_list(false, clipboard, false, false);
             assert_eq!(&generic[generic.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            let apple = rfb38_encoding_list(true, clipboard, false);
+            let apple = rfb38_encoding_list(true, clipboard, false, false);
             assert!(!apple.contains(&ENCODING_WLSHARE_DENSITY));
             assert!(!apple.contains(&ENCODING_WLSHARE_OUTPUTS));
         }
@@ -5752,7 +5864,7 @@ mod tests {
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_qemu_audio::ENCODING, -259);
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(false, clipboard, true);
+            let asked = rfb38_encoding_list(false, clipboard, true, false);
             assert!(asked.contains(&vnc_qemu_audio::ENCODING));
             assert_eq!(
                 &asked[asked.len() - 2..],
@@ -5760,15 +5872,28 @@ mod tests {
                 "the wlshare requests stay last, so audio never weighs on encoding preference"
             );
             assert!(
-                !rfb38_encoding_list(false, clipboard, false)
+                !rfb38_encoding_list(false, clipboard, false, false)
                     .contains(&vnc_qemu_audio::ENCODING),
                 "a target without audio does not ask"
             );
             assert!(
-                !rfb38_encoding_list(true, clipboard, true)
+                !rfb38_encoding_list(true, clipboard, true, false)
                     .contains(&vnc_qemu_audio::ENCODING),
                 "no Mac is asked"
             );
+        }
+    }
+
+    /// The camera extension is asked of a generic server exactly where the target
+    /// carries a camera, and — like every wlshare request — without weighing on
+    /// encoding preference: the density and outputs requests stay last.
+    #[test]
+    fn the_camera_extension_is_asked_only_where_a_camera_is_carried() {
+        for clipboard in [false, true] {
+            let asked = rfb38_encoding_list(false, clipboard, true, true);
+            assert!(asked.contains(&vnc_camera::ENCODING));
+            assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+            assert!(!rfb38_encoding_list(false, clipboard, true, false).contains(&vnc_camera::ENCODING));
         }
     }
 
@@ -6220,6 +6345,7 @@ mod tests {
             shadow,
             display: Arc::new(std::sync::Mutex::new(DisplayState::default())),
             audio: None,
+            camera: None,
         }
     }
 

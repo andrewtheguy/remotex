@@ -260,8 +260,12 @@ password = "change-me"
 # ceiling.
 #audio_bitrate_min = 32
 
-# Camera redirection (RDP only): offer the remote a virtual webcam whose frames
-# are this browser's, over MS-RDPECAM. EXPERIMENTAL, for lack of tests — the
+# Camera redirection: offer the remote a virtual webcam whose frames are this
+# browser's, over MS-RDPECAM on "rdp" — or, on a generic "vnc" target, over
+# wlshare's camera extension, which makes it a PipeWire camera on the wlroots
+# desktop; any other VNC server says nothing and the camera is never plugged (see
+# docs/wlshare-camera.md). The rest of this note is about RDP.
+# EXPERIMENTAL, for lack of tests — the
 # socket's rules, its messages and the channel's wire are checked. Only a Windows
 # host that creates the camera enumeration channel has anywhere to redirect to: a
 # workstation, or a Windows Server carrying the Remote Desktop Session Host role.
@@ -274,8 +278,9 @@ password = "change-me"
 # floating menu — explicitly, per session, never remembered — and is unplugged
 # when that client closes it, the session changes hands, or the engine ends. The
 # browser encodes H.264 and the gateway passes it through untranscoded, so there
-# is no codec key beside this one. RFB has no equivalent channel, so a "vnc"
-# target refuses the key rather than ignoring it. A Windows Server without the
+# is no codec key beside this one. Apple's Screen Sharing has nowhere to put a
+# camera, so an "ard" or "ard-high-performance" target refuses the key rather than
+# ignoring it. A Windows Server without the
 # RDSH role never creates the enumeration channel, so an enabled camera against
 # one is simply never asked for a frame.
 #camera = false
