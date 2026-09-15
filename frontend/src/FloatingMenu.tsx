@@ -25,6 +25,7 @@ import {
   audioLabel,
   videoLabel,
 } from "./mediaLabel.ts";
+import { keepTabWithin } from "./modalFocus.ts";
 import type {
   ClipboardSnapshot,
   DisplayInfo,
@@ -209,34 +210,6 @@ function ImmersiveHelpRows() {
   );
 }
 
-const FOCUSABLE =
-  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
-
-// Tab and Shift+Tab wrap around the card's own controls instead of leaving it for
-// the page behind the backdrop.
-function keepTabWithin(card: HTMLElement | null, e: KeyboardEvent) {
-  if (!card) {
-    return;
-  }
-  const focusable = card.querySelectorAll<HTMLElement>(FOCUSABLE);
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  const active = document.activeElement;
-  if (!first || !last) {
-    e.preventDefault();
-    card.focus();
-  } else if (e.shiftKey && (active === first || !card.contains(active))) {
-    e.preventDefault();
-    last.focus();
-  } else if (
-    !e.shiftKey &&
-    (active === last || active === card || !card.contains(active))
-  ) {
-    e.preventDefault();
-    first.focus();
-  }
-}
-
 // The backdrop and card every modal shares. The card is a modal dialog: focus moves
 // into it when it opens and Tab stays inside it. Escape dismisses it, matching the
 // backdrop tap and the card's own Close; the listener lives only while it is mounted.
@@ -260,7 +233,7 @@ function ModalOverlay({
       if (e.key === "Escape") {
         onDismiss();
       } else if (e.key === "Tab") {
-        keepTabWithin(cardRef.current, e);
+        keepTabWithin(cardRef.current, document.activeElement, e);
       }
     };
     window.addEventListener("keydown", onKeyDown);
