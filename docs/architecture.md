@@ -1628,11 +1628,14 @@ this gateway's usage database — not SQLite, SQLite without its application id,
 another schema version — is refused at startup before anything is written to it.
 The page reads two things. `GET /api/usage/live` is the last sample, per target
 and socket, which the "Data usage" view polls once a second while it is open and
-shows the way a network meter does; `GET /api/usage?within=<seconds>` is the
+not paused, keeps for the last five minutes, and shows the way a network meter
+does: the rate now over a graph of the last minute or five, one per direction on
+its own scale, narrowed to a target or a socket by its filters, with a gap for a
+second not read; `GET /api/usage?within=<seconds>` is the
 recorded rows, counted back from the gateway's clock the rows were stamped with
 rather than the browser's, with the gateway's clock at the read and the open
 timeframe as it stands, which the view reads when it opens and when asked to
-refresh. Both are behind the login, and `/api/config` says whether there is a
+refresh and sums per target and per socket. Both are behind the login, and `/api/config` says whether there is a
 database to offer. The gateway stores bytes, peaks and times; the page divides
 for an average — a row's bytes over the seconds its timeframe spans, and for a
 target or socket over a range, its bytes over the seconds of the timeframes it

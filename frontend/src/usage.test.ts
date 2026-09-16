@@ -2,11 +2,21 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  agoLabel,
+  appendLive,
   customUsageRange,
   formatRate,
+  GRAPH_WINDOWS,
+  graphWindowLabel,
+  LIVE_HISTORY_SECS,
+  type LiveRate,
+  liveSeries,
+  liveTargets,
   liveTotals,
+  rateScale,
   targetLabel,
   USAGE_PRESETS,
+  type UsageLive,
   type UsageRecord,
   usageByTarget,
   usageRangeKey,
@@ -66,6 +76,95 @@ test("the rate right now is summed over what moved", () => {
     { sent: 1200, received: 10 },
   );
   assert.deepEqual(liveTotals([]), { sent: 0, received: 0 });
+});
+
+const rate = (
+  target: string | null,
+  socket: LiveRate["socket"],
+  sentPerSec: number,
+  receivedPerSec: number,
+): LiveRate => ({ target, socket, sentPerSec, receivedPerSec });
+
+const sample = (at: number, ...rates: LiveRate[]): UsageLive => ({ at, rates });
+
+test("the history keeps one sample per second, newest last, as long as the longest window", () => {
+  assert.equal(LIVE_HISTORY_SECS, Math.max(...GRAPH_WINDOWS));
+  let history = appendLive([], sample(100));
+  history = appendLive(history, sample(101));
+  assert.deepEqual(
+    history.map((s) => s.at),
+    [100, 101],
+  );
+  const again = appendLive(history, sample(101));
+  assert.equal(again, history, "the poll came round before the next sample");
+  assert.equal(appendLive(history, sample(99)), history, "an earlier second");
+  for (let at = 102; at < 100 + LIVE_HISTORY_SECS + 5; at++) {
+    history = appendLive(history, sample(at));
+  }
+  assert.equal(history.length, LIVE_HISTORY_SECS);
+  assert.equal(history[0].at, 105, "the oldest fall off");
+});
+
+test("a series is the window's seconds up to the newest sample, summed over what is kept, with gaps for seconds not read", () => {
+  const history = [
+    sample(10, rate("mac", "session", 1000, 10)),
+    sample(11, rate("mac", "session", 2000, 20), rate("win", "audio", 300, 0)),
+    // 12 was not read.
+    sample(13, rate("win", "session", 50, 5)),
+  ];
+  const all = liveSeries(history, 5, () => true);
+  assert.deepEqual(all.sent, {
+    points: [null, 1000, 2300, null, 50],
+    peak: 2300,
+  });
+  assert.deepEqual(all.received, { points: [null, 10, 20, null, 5], peak: 20 });
+  const mac = liveSeries(history, 3, (r) => r.target === "mac");
+  assert.deepEqual(mac.sent, { points: [2000, null, 0], peak: 2000 });
+  assert.deepEqual(mac.received, { points: [20, null, 0], peak: 20 });
+  const audio = liveSeries(history, 2, (r) => r.socket === "audio");
+  assert.deepEqual(audio.sent, { points: [null, 0], peak: 0 });
+  assert.deepEqual(liveSeries([], 3, () => true).sent, {
+    points: [null, null, null],
+    peak: 0,
+  });
+});
+
+test("a scale tops out at a round number of bits per second above the peak", () => {
+  assert.equal(formatRate(rateScale(0)), "1.0 kbps");
+  assert.equal(
+    formatRate(rateScale(100)),
+    "1.0 kbps",
+    "800 bps is under the floor",
+  );
+  assert.equal(formatRate(rateScale(125)), "2.0 kbps", "1 kbps needs headroom");
+  assert.equal(formatRate(rateScale(100_000)), "1.0 Mbps");
+  assert.equal(formatRate(rateScale(110_000)), "1.0 Mbps", "968 kbps fits");
+  assert.equal(formatRate(rateScale(120_000)), "2.0 Mbps");
+  assert.equal(formatRate(rateScale(280_000)), "2.5 Mbps");
+  assert.equal(formatRate(rateScale(500_000)), "5.0 Mbps");
+  assert.equal(formatRate(rateScale(1_000_000)), "10 Mbps");
+  for (const peak of [0, 125, 999, 123_456, 9.9e6]) {
+    assert.ok(rateScale(peak) >= peak * 1.1, `${peak} has a tenth of headroom`);
+  }
+});
+
+test("the graph's targets are those any sample saw, by label", () => {
+  assert.deepEqual(
+    liveTargets([
+      sample(1, rate("win", "session", 1, 1)),
+      sample(2, rate(null, "session", 1, 1), rate("mac", "audio", 1, 0)),
+      sample(3, rate("win", "audio", 1, 1)),
+    ]),
+    ["mac", null, "win"],
+  );
+  assert.deepEqual(liveTargets([]), []);
+});
+
+test("a window is named by its length", () => {
+  assert.equal(graphWindowLabel(60), "last 60 seconds");
+  assert.equal(graphWindowLabel(300), "last 5 minutes");
+  assert.equal(agoLabel(60), "60 s ago");
+  assert.equal(agoLabel(300), "5 min ago");
 });
 
 test("a range asks for its length, and everything kept for no bound", () => {

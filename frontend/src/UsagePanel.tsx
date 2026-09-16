@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { gatewayConfig } from "./gatewayConfig.ts";
 import {
+  agoLabel,
+  appendLive,
   customUsageRange,
   DEFAULT_USAGE_RANGE,
   fetchUsage,
   fetchUsageLive,
   formatRate,
+  GRAPH_WINDOWS,
+  graphWindowLabel,
+  type LiveRate,
+  liveSeries,
+  liveTargets,
   liveTotals,
+  type RateSeries,
+  rateScale,
   type TargetUsage,
   targetLabel,
   USAGE_PRESETS,
@@ -17,6 +26,7 @@ import {
   type UsageRange,
   type UsageRecord,
   type UsageReport,
+  type UsageSocket,
   type UsageTotals,
   type UsageUnit,
   usageByTarget,
@@ -26,22 +36,30 @@ import {
   usageTotals,
   usageWithin,
 } from "./usage.ts";
+import {
+  type ChartInk,
+  drawChart,
+  pointedSecond,
+  tipLeft,
+} from "./usageChart.ts";
 
 // The "Data usage" view, opened from the target picker and from the session's Info
 // card, which it replaces while open; `closeLabel` names where its button returns to.
 // See usage.ts.
 //
 // Two reads. The rate right now — what the gateway's last one-second sample found
-// moving — is polled every second while the view is open and shown at the top, the
-// way a network meter reads. The recorded rows are read when the view opens, when the
-// range changes and when Refresh is pressed, never on a timer.
+// moving — is polled every second while the view is open, kept for the last five
+// minutes, and drawn the way a network meter does: the number now over a graph of
+// the window behind it, one per direction since sent and received differ by orders
+// of magnitude and would flatten each other on one scale. Pause stops the polling,
+// and so the graph, until Resume. The recorded rows are read when the view opens,
+// when the range changes and when Refresh is pressed, never on a timer.
 //
 // Usage is compared by target first: one table sums each target over all its sockets,
-// and the target filter narrows the rate right now, the socket table and the
-// timeframes to one of them. The rate is the metric: every table shows, for each
-// direction, the average over the seconds spanned and the busiest second, in bits per
-// second. The bytes behind them stay in the model and the API. The timeframe still
-// being counted is read with the written ones and told apart in the list.
+// and the target filter narrows the meter and the socket table to one of them; the
+// socket filter narrows the meter alone. The rate is the metric: the tables show, for
+// each direction, the average over the seconds spanned and the busiest second, in
+// bits per second. The bytes behind them stay in the model and the API.
 
 /// Whether to offer the view at all: only a gateway with `[usage]` records any.
 export function useUsageAvailable(): boolean {
@@ -60,11 +78,23 @@ export function useUsageAvailable(): boolean {
   return available;
 }
 
-/// Timeframes listed below the totals, newest first. The totals cover every row.
-const LISTED_TIMEFRAMES = 200;
-
 /// How often the rate right now is read: the gateway samples once a second.
 const LIVE_PERIOD_MS = 1000;
+
+/// The meter's ink, in the page's dark palette; the two hues were checked apart for
+/// every kind of color vision against the surface, and the swatches in index.css
+/// match them.
+const SURFACE = { grid: "#21262d", label: "#6e7681", surface: "#161b22" };
+const SENT_INK: ChartInk = {
+  line: "#4493f8",
+  fill: "rgba(68, 147, 248, 0.18)",
+  ...SURFACE,
+};
+const RECEIVED_INK: ChartInk = {
+  line: "#bf7f12",
+  fill: "rgba(191, 127, 18, 0.2)",
+  ...SURFACE,
+};
 
 /// The filter select's value for a target: `null` (the picker) cannot be an option
 /// value, and a prefix keeps a target named "all" apart from the "all" choice.
@@ -76,24 +106,183 @@ function timeLabel(unixSecs: number): string {
   return new Date(unixSecs * 1000).toLocaleString();
 }
 
-/// The rate right now, over `rates` (already narrowed to the target filter), or what
-/// stands in for it while there is none to show.
-function LiveRate({
+/// One direction's rate right now, large, and its busiest second in the window.
+function RateTile({
+  name,
+  direction,
+  now,
+  peak,
+  windowSecs,
+}: {
+  name: string;
+  direction: "sent" | "received";
+  now: number | null;
+  peak: number;
+  windowSecs: number;
+}) {
+  const [value, unit] = now === null ? ["—", ""] : formatRate(now).split(" ");
+  return (
+    <div className="usage-tile">
+      <span className="usage-tile-label">
+        <span className={`usage-swatch usage-${direction}`} />
+        {name}
+      </span>
+      <span className="usage-tile-value">
+        {value}
+        {unit && <small>{unit}</small>}
+      </span>
+      <span className="usage-tile-sub">
+        peak {formatRate(peak)}, {graphWindowLabel(windowSecs)}
+      </span>
+    </div>
+  );
+}
+
+/// The seconds of one direction on a canvas that fills its box (see usageChart.ts),
+/// redrawn as the seconds, the scale or the box change. Pointing at a second names
+/// it.
+function RateChart({
+  name,
+  series,
+  windowSecs,
+  ink,
+  small,
+}: {
+  name: string;
+  series: RateSeries;
+  windowSecs: number;
+  ink: ChartInk;
+  small?: boolean;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [pointed, setPointed] = useState<number | null>(null);
+  const top = rateScale(series.peak);
+  const { points } = series;
+
+  useEffect(() => {
+    const element = box.current;
+    const surface = canvas.current;
+    if (element === null || surface === null) {
+      return;
+    }
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      const ctx = surface.getContext("2d");
+      if (width === 0 || height === 0 || ctx === null) {
+        return;
+      }
+      if (
+        surface.width !== Math.round(width * dpr) ||
+        surface.height !== Math.round(height * dpr)
+      ) {
+        surface.width = Math.round(width * dpr);
+        surface.height = Math.round(height * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawChart(ctx, { width, height, points, top }, ink);
+    };
+    draw();
+    const observer = new ResizeObserver(draw);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [points, top, ink]);
+
+  const width = box.current?.clientWidth ?? 0;
+  const ago = pointed === null ? 0 : points.length - 1 - pointed;
+  const pointedValue = pointed === null ? null : points[pointed];
+
+  return (
+    <>
+      <div className="usage-chart-head">
+        <strong>{name}</strong>
+        <span>scale: 0 – {formatRate(top)}</span>
+      </div>
+      <div
+        ref={box}
+        className={small ? "usage-chart usage-chart-small" : "usage-chart"}
+        role="img"
+        aria-label={`${name}, ${graphWindowLabel(windowSecs)}, peak ${formatRate(series.peak)}`}
+        onPointerMove={(e) => {
+          const left = e.currentTarget.getBoundingClientRect().left;
+          setPointed(
+            pointedSecond(
+              e.clientX - left,
+              points.length,
+              e.currentTarget.clientWidth,
+            ),
+          );
+        }}
+        onPointerLeave={() => setPointed(null)}
+      >
+        <canvas ref={canvas} />
+        {pointed !== null && (
+          <div
+            className="usage-tip"
+            style={{ left: `${tipLeft(pointed, points.length, width)}px` }}
+          >
+            {ago === 0 ? "now" : `${ago} s ago`} ·{" "}
+            {pointedValue === null ? "not read" : formatRate(pointedValue)}
+          </div>
+        )}
+      </div>
+      <div className="usage-axis">
+        <span>{agoLabel(windowSecs)}</span>
+        <span>now</span>
+      </div>
+    </>
+  );
+}
+
+/// The meter: each direction's rate now and its graph over the window, summed over
+/// the rates `keep` admits.
+function Meter({
   live,
-  rates,
+  history,
+  windowSecs,
+  keep,
 }: {
   live: UsageLive | null;
-  rates: readonly UsageLive["rates"][number][];
+  history: readonly UsageLive[];
+  windowSecs: number;
+  keep: (rate: LiveRate) => boolean;
 }) {
-  if (live === null) {
-    return <p className="usage-now">Now: —</p>;
-  }
-  const totals = liveTotals(rates);
+  const series = liveSeries(history, windowSecs, keep);
+  const now = live === null ? null : liveTotals(live.rates.filter(keep));
   return (
-    <p className="usage-now">
-      Now: <strong>{formatRate(totals.sent)}</strong> sent,{" "}
-      <strong>{formatRate(totals.received)}</strong> received
-    </p>
+    <section className="usage-meter" aria-label="Rate right now">
+      <div className="usage-tiles">
+        <RateTile
+          name="Sent"
+          direction="sent"
+          now={now === null ? null : now.sent}
+          peak={series.sent.peak}
+          windowSecs={windowSecs}
+        />
+        <RateTile
+          name="Received"
+          direction="received"
+          now={now === null ? null : now.received}
+          peak={series.received.peak}
+          windowSecs={windowSecs}
+        />
+      </div>
+      <RateChart
+        name="Sent"
+        series={series.sent}
+        windowSecs={windowSecs}
+        ink={SENT_INK}
+      />
+      <RateChart
+        name="Received"
+        series={series.received}
+        windowSecs={windowSecs}
+        ink={RECEIVED_INK}
+        small
+      />
+    </section>
   );
 }
 
@@ -215,61 +404,6 @@ function BySocketTable({
   );
 }
 
-function TimeframesTable({
-  records,
-  open,
-}: {
-  records: readonly UsageRecord[];
-  /// Which of `records` belong to the timeframe still being counted.
-  open: ReadonlySet<UsageRecord>;
-}) {
-  const listed = records.slice(-LISTED_TIMEFRAMES).reverse();
-  return (
-    <>
-      <h2 className="usage-heading">
-        Timeframes
-        {records.length > listed.length
-          ? ` (newest ${listed.length} of ${records.length})`
-          : ""}
-      </h2>
-      <div className="usage-scroll">
-        <table className="usage-table" aria-label="Timeframes">
-          <DirectionHeaders leading={["Ended", "Target", "Socket"]} />
-          <tbody>
-            {listed.map((record) => {
-              const seconds = record.end - record.start;
-              return (
-                <tr
-                  key={`${targetKey(record.target)}-${record.socket}-${record.start}-${record.end}`}
-                  className={open.has(record) ? "usage-open" : undefined}
-                >
-                  <td
-                    title={`${timeLabel(record.start)} – ${timeLabel(record.end)}`}
-                  >
-                    {open.has(record) ? "In progress" : timeLabel(record.end)}
-                  </td>
-                  <td>{targetLabel(record.target)}</td>
-                  <td>{USAGE_SOCKET_LABEL[record.socket]}</td>
-                  <DirectionCells
-                    bytes={record.sentBytes}
-                    seconds={seconds}
-                    peak={record.peakSentPerSec}
-                  />
-                  <DirectionCells
-                    bytes={record.receivedBytes}
-                    seconds={seconds}
-                    peak={record.peakReceivedPerSec}
-                  />
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </>
-  );
-}
-
 /// The range select and, on "Custom", the amount and unit it is typed as. A custom
 /// range applies on Apply (or Enter), not per keystroke, so half a number is never
 /// read.
@@ -372,9 +506,13 @@ export default function UsagePanel({
   const [range, setRange] = useState<UsageRange>(DEFAULT_USAGE_RANGE);
   const [report, setReport] = useState<UsageReport | null>(null);
   const [live, setLive] = useState<UsageLive | null>(null);
+  const [history, setHistory] = useState<readonly UsageLive[]>([]);
+  const [paused, setPaused] = useState(false);
+  const [windowSecs, setWindowSecs] = useState(GRAPH_WINDOWS[0]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [targetFilter, setTargetFilter] = useState("all");
+  const [socketFilter, setSocketFilter] = useState<UsageSocket | "all">("all");
 
   // Only the newest read may commit: a range change or a Refresh while one is still
   // out makes the earlier answer stale, and an unmounted panel takes none.
@@ -407,9 +545,13 @@ export default function UsagePanel({
     };
   }, [load]);
 
-  // The rate right now, once a second while the view is open. A read that fails
-  // shows nothing rather than a stale number; the next second tries again.
+  // The rate right now, once a second while the view is open and not paused. A read
+  // that fails shows nothing rather than a stale number, and leaves a gap in the
+  // graph; the next second tries again.
   useEffect(() => {
+    if (paused) {
+      return;
+    }
     let cancelled = false;
     const read = async () => {
       const result = await fetchUsageLive();
@@ -418,8 +560,11 @@ export default function UsagePanel({
       }
       if (result.kind === "unauthorized") {
         onUnauthorized();
+      } else if (result.kind === "ok") {
+        setLive(result.live);
+        setHistory((kept) => appendLive(kept, result.live));
       } else {
-        setLive(result.kind === "ok" ? result.live : null);
+        setLive(null);
       }
     };
     void read();
@@ -428,7 +573,7 @@ export default function UsagePanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [onUnauthorized]);
+  }, [paused, onUnauthorized]);
 
   const changeRange = useCallback((next: UsageRange) => {
     // The previous range's rows are not this range's, even while it loads.
@@ -436,51 +581,100 @@ export default function UsagePanel({
     setRange(next);
   }, []);
 
-  // The open timeframe counts with the written ones, and is told apart in the list.
-  const open = new Set(report?.open);
+  // The open timeframe counts with the written ones.
   const records = report ? [...report.records, ...report.open] : [];
   const byTarget = usageByTarget(records);
-  // A target the new range has no rows for falls back to every target rather than
-  // leaving the filter on an option the list no longer has.
-  const selected = byTarget.find(
-    (usage) => targetKey(usage.target) === targetFilter,
-  );
-  const filtered = selected
-    ? records.filter((record) => record.target === selected.target)
-    : records;
-  const liveRates = live?.rates ?? [];
-  const filteredLive = selected
-    ? liveRates.filter((rate) => rate.target === selected.target)
-    : liveRates;
-  const filterLabel = selected ? targetLabel(selected.target) : "all targets";
+  // The targets to choose from: the range's, busiest first, then any the graph has
+  // seen moving that the range has no rows for yet. A filter on a target neither
+  // knows falls back to every target rather than sitting on an option the select no
+  // longer has.
+  const targets = new Map<string, string | null>();
+  for (const usage of byTarget) {
+    targets.set(targetKey(usage.target), usage.target);
+  }
+  for (const target of liveTargets(history)) {
+    if (!targets.has(targetKey(target))) {
+      targets.set(targetKey(target), target);
+    }
+  }
+  const selected = targets.has(targetFilter) ? targetFilter : "all";
+  const filtered =
+    selected === "all"
+      ? records
+      : records.filter((record) => targetKey(record.target) === selected);
+  const keep = (rate: LiveRate) =>
+    (selected === "all" || targetKey(rate.target) === selected) &&
+    (socketFilter === "all" || rate.socket === socketFilter);
+  const filterLabel =
+    selected === "all"
+      ? "all targets"
+      : targetLabel(targets.get(selected) as string | null);
 
   return (
     <>
       <h1>Data usage</h1>
       <p className="picker-hint">
         The rate between this browser and the gateway, per target and WebSocket,
-        in bits per second.
-        {report &&
-          ` Recorded every ${report.intervalSecs} s; each target's socket keeps its newest ${report.maxRecords} timeframes.`}
+        in bits per second, sampled by the gateway once a second.
       </p>
-      <LiveRate live={live} rates={filteredLive} />
       <div className="usage-controls">
-        <RangeControls range={range} onChange={changeRange} />
         <select
           aria-label="Target"
-          value={selected ? targetFilter : "all"}
+          value={selected}
           onChange={(e) => setTargetFilter(e.target.value)}
         >
           <option value="all">All targets</option>
-          {byTarget.map((usage) => (
-            <option
-              key={targetKey(usage.target)}
-              value={targetKey(usage.target)}
-            >
-              {targetLabel(usage.target)}
+          {[...targets].map(([key, target]) => (
+            <option key={key} value={key}>
+              {targetLabel(target)}
             </option>
           ))}
         </select>
+        <select
+          aria-label="Socket"
+          value={socketFilter}
+          onChange={(e) =>
+            setSocketFilter(e.target.value as UsageSocket | "all")
+          }
+        >
+          <option value="all">All sockets</option>
+          {USAGE_SOCKETS.map((socket) => (
+            <option key={socket} value={socket}>
+              {USAGE_SOCKET_LABEL[socket]}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Graph window"
+          value={windowSecs}
+          onChange={(e) => setWindowSecs(Number(e.target.value))}
+        >
+          {GRAPH_WINDOWS.map((secs) => {
+            const label = graphWindowLabel(secs);
+            return (
+              <option key={secs} value={secs}>
+                {label[0].toUpperCase() + label.slice(1)}
+              </option>
+            );
+          })}
+        </select>
+        <button
+          type="button"
+          className="picker-logout"
+          aria-pressed={paused}
+          onClick={() => setPaused((p) => !p)}
+        >
+          {paused ? "Resume" : "Pause"}
+        </button>
+      </div>
+      <Meter
+        live={live}
+        history={history}
+        windowSecs={windowSecs}
+        keep={keep}
+      />
+      <div className="usage-controls">
+        <RangeControls range={range} onChange={changeRange} />
         <button
           type="button"
           className="picker-logout"
@@ -493,7 +687,9 @@ export default function UsagePanel({
       {error && <p className="picker-error">{error}</p>}
       {report && (
         <p className="usage-read-at">
-          {usageRangeLabel(range)}, read at {timeLabel(report.now)}
+          {usageRangeLabel(range)}, read at {timeLabel(report.now)}. Recorded
+          every {report.intervalSecs} s; each target's socket keeps its newest{" "}
+          {report.maxRecords} timeframes.
         </p>
       )}
       {report && records.length === 0 && (
@@ -501,10 +697,7 @@ export default function UsagePanel({
       )}
       {byTarget.length > 0 && <ByTargetTable byTarget={byTarget} />}
       {filtered.length > 0 && (
-        <>
-          <BySocketTable records={filtered} label={filterLabel} />
-          <TimeframesTable records={filtered} open={open} />
-        </>
+        <BySocketTable records={filtered} label={filterLabel} />
       )}
       <button type="button" className="picker-logout" onClick={onClose}>
         {closeLabel}

@@ -2,12 +2,12 @@
 // "Data usage" view asks for it.
 //
 // The gateway samples its counters once a second: the last sample is the rate right
-// now, read from `GET /api/usage/live` each second while the view is open, and each
-// written timeframe carries its busiest second. The recorded rows are read only on
-// demand, with the timeframe still being counted. The shapes mirror `crate::usage` and
-// the handlers' responses in src/server.rs. Rates are shown in bits per second, the
-// way a network meter does, and an average is derived here: a row's bytes over the
-// seconds of its timeframe.
+// now, read from `GET /api/usage/live` each second while the view is open and kept
+// here as the seconds the graph draws, and each written timeframe carries its busiest
+// second. The recorded rows are read only on demand, with the timeframe still being
+// counted. The shapes mirror `crate::usage` and the handlers' responses in
+// src/server.rs. Rates are shown in bits per second, the way a network meter does, and
+// an average is derived here: a row's bytes over the seconds of its timeframe.
 
 import { gatewayFetch } from "./gateway.ts";
 
@@ -43,17 +43,20 @@ export interface UsageRecord {
   peakReceivedPerSec: number;
 }
 
+/** What one target's socket moved in one sampled second, in bytes per second. */
+export interface LiveRate {
+  target: string | null;
+  socket: UsageSocket;
+  sentPerSec: number;
+  receivedPerSec: number;
+}
+
 /** The rate right now: what the gateway's last one-second sample found moving. */
 export interface UsageLive {
   /** When the sample was taken, in the gateway's Unix seconds. */
   at: number;
-  /** Bytes per second, for each target's socket that moved; the rest moved nothing. */
-  rates: {
-    target: string | null;
-    socket: UsageSocket;
-    sentPerSec: number;
-    receivedPerSec: number;
-  }[];
+  /** Each target's socket that moved; the rest moved nothing. */
+  rates: LiveRate[];
 }
 
 export interface UsageReport {
@@ -214,7 +217,7 @@ export function formatRate(bytesPerSecond: number): string {
 }
 
 /** The rate right now summed over `rates`, in bytes per second. */
-export function liveTotals(rates: readonly UsageLive["rates"][number][]): {
+export function liveTotals(rates: readonly LiveRate[]): {
   sent: number;
   received: number;
 } {
@@ -225,6 +228,117 @@ export function liveTotals(rates: readonly UsageLive["rates"][number][]): {
     received += rate.receivedPerSec;
   }
   return { sent, received };
+}
+
+/** The spans the graph draws, in seconds: the last minute and the last five. */
+export const GRAPH_WINDOWS: readonly number[] = [60, 300];
+
+/** How many seconds of samples the view keeps: enough for the longest window. */
+export const LIVE_HISTORY_SECS = 300;
+
+export function graphWindowLabel(windowSecs: number): string {
+  return windowSecs % 60 === 0 && windowSecs > 60
+    ? `last ${windowSecs / 60} minutes`
+    : `last ${windowSecs} seconds`;
+}
+
+/** How long ago the graph's left edge is, for its axis. */
+export function agoLabel(windowSecs: number): string {
+  return windowSecs % 60 === 0 && windowSecs > 60
+    ? `${windowSecs / 60} min ago`
+    : `${windowSecs} s ago`;
+}
+
+/**
+ * `history` with `live` as its newest sample: oldest first, one per second, and no
+ * longer than the view keeps. A second already kept — the poll came round before the
+ * gateway's next sample — leaves the history as it was, and so does a sample from an
+ * earlier second.
+ */
+export function appendLive(
+  history: readonly UsageLive[],
+  live: UsageLive,
+): readonly UsageLive[] {
+  const last = history.at(-1);
+  if (last !== undefined && live.at <= last.at) {
+    return history;
+  }
+  const next = [...history, live];
+  return next.length > LIVE_HISTORY_SECS
+    ? next.slice(-LIVE_HISTORY_SECS)
+    : next;
+}
+
+/**
+ * One direction over a window: a rate per second, oldest first, `null` for a second
+ * no sample was read in, and the busiest second among them in bytes per second.
+ */
+export interface RateSeries {
+  points: (number | null)[];
+  peak: number;
+}
+
+/**
+ * Each direction over the last `windowSecs` seconds up to the newest sample, summed
+ * over the rates `keep` admits — a target, a socket, or all of them. A second nothing
+ * kept moved in is zero; a second with no sample at all is a gap. No history draws a
+ * window of gaps.
+ */
+export function liveSeries(
+  history: readonly UsageLive[],
+  windowSecs: number,
+  keep: (rate: LiveRate) => boolean,
+): { sent: RateSeries; received: RateSeries } {
+  const sent: (number | null)[] = new Array(windowSecs).fill(null);
+  const received: (number | null)[] = new Array(windowSecs).fill(null);
+  const last = history.at(-1);
+  if (last !== undefined) {
+    const first = last.at - windowSecs + 1;
+    for (const sample of history) {
+      const i = sample.at - first;
+      if (i >= 0) {
+        const totals = liveTotals(sample.rates.filter(keep));
+        sent[i] = totals.sent;
+        received[i] = totals.received;
+      }
+    }
+  }
+  const peak = (points: (number | null)[]) =>
+    points.reduce<number>((max, p) => (p === null ? max : Math.max(max, p)), 0);
+  return {
+    sent: { points: sent, peak: peak(sent) },
+    received: { points: received, peak: peak(received) },
+  };
+}
+
+/**
+ * The top of a graph's scale for a busiest second in bytes per second: a round number
+ * of bits per second — 1, 2, 2.5 or 5 of a power of ten — at least a tenth above the
+ * peak, and never below one kilobit per second, so nothing moved is not a scale of
+ * nothing.
+ */
+export function rateScale(peakBytesPerSec: number): number {
+  const bits = Math.max(1000, peakBytesPerSec * 8 * 1.1);
+  const power = 10 ** Math.floor(Math.log10(bits));
+  for (const step of [1, 2, 2.5, 5, 10]) {
+    if (step * power >= bits) {
+      return (step * power) / 8;
+    }
+  }
+  return (10 * power) / 8;
+}
+
+/** Every target some kept sample saw moving, by label. */
+export function liveTargets(history: readonly UsageLive[]): (string | null)[] {
+  const targets = new Map<string, string | null>();
+  for (const sample of history) {
+    for (const rate of sample.rates) {
+      targets.set(targetLabel(rate.target), rate.target);
+    }
+  }
+  return [...targets]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, target]) => target);
 }
 
 /** `bytes` over `seconds` as a rate, or `null` for no time at all. */

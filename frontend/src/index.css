@@ -540,7 +540,7 @@ body {
   cursor: default;
 }
 
-/* The "Data usage" view takes the picker's place, wider for its tables. */
+/* The "Data usage" view takes the picker's place, wider for its graph and tables. */
 .picker-panel.usage-panel {
   width: min(760px, 100%);
   gap: 0.25rem;
@@ -596,17 +596,137 @@ body {
   text-align: center;
 }
 
-/* The rate right now, read once a second while the view is open. */
-.usage-now {
-  margin: 0 0 0.25rem;
-  color: #8b949e;
-  font-size: 1rem;
-  text-align: center;
+/* The meter: each direction's rate now, then its graph over the window. */
+.usage-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 0.75rem;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
 }
 
-.usage-now strong {
+.usage-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.usage-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.usage-tile-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* The ink of each direction's line, as its legend. Same hex as UsagePanel.tsx. */
+.usage-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.usage-swatch.usage-sent {
+  background: #4493f8;
+}
+
+.usage-swatch.usage-received {
+  background: #bf7f12;
+}
+
+.usage-tile-value {
   color: #e6edf3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.7rem;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.usage-tile-value small {
+  margin-left: 4px;
+  color: #8b949e;
+  font-size: 0.95rem;
+}
+
+.usage-tile-sub {
+  color: #6e7681;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  color: #8b949e;
+  font-size: 0.78rem;
+}
+
+.usage-chart-head strong {
+  color: #e6edf3;
+  font-weight: 500;
+}
+
+.usage-chart {
+  position: relative;
+  height: 180px;
+  max-width: 100%;
+  touch-action: pan-y;
+}
+
+.usage-chart.usage-chart-small {
+  height: 100px;
+}
+
+.usage-chart canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.usage-tip {
+  position: absolute;
+  top: 8px;
+  padding: 4px 8px;
+  color: #e6edf3;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.usage-axis {
+  display: flex;
+  justify-content: space-between;
+  color: #6e7681;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 480px) {
+  .usage-tile-value {
+    font-size: 1.35rem;
+  }
 }
 
 /* The direction a pair of columns belongs to, over its own header row. */
@@ -619,24 +739,11 @@ body {
   top: 1.85rem;
 }
 
-.usage-table .usage-open td {
-  color: #e6edf3;
-  font-style: italic;
-}
-
 .usage-heading {
   margin: 1rem 0 0.4rem;
   font-size: 0.9rem;
   font-weight: 600;
   color: #8b949e;
-}
-
-.usage-scroll {
-  max-height: 50vh;
-  overflow: auto;
-  margin-bottom: 0.75rem;
-  border: 1px solid #21262d;
-  border-radius: 6px;
 }
 
 .usage-table {
