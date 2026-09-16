@@ -16,13 +16,17 @@
 //! nothing gets none, so idle hours cost no rows. Each target's socket keeps its newest
 //! `[usage].max_records` rows and the oldest go first. The browser reads them on demand
 //! through `GET /api/usage` ([`UsageStore::records`]), together with the open timeframe
-//! as it stands ([`UsageMeters::open_timeframe`]). The gateway stores bytes, peaks and
-//! times; the page divides for averages.
+//! as it stands and the closed ones not yet written ([`UsageMeters::snapshot`]). The
+//! gateway stores bytes, peaks and times; the page divides for averages.
 //!
-//! Best effort, on purpose: the timeframe still being counted when the process stops is
-//! lost, and a write that fails is retried with the next timeframe's. What reaches the
-//! database is never torn — a timeframe's rows and the trim after them are one transaction.
+//! The sampler and the writer are separate tasks: a closed timeframe's rows wait in the
+//! meters until the writer has committed them, so a slow or failing write never holds
+//! up a sample, and a read meanwhile sees the rows from memory. Best effort, on purpose:
+//! the timeframe still being counted when the process stops is lost, and a write that
+//! fails is retried with the next timeframe's. What reaches the database is never torn —
+//! a timeframe's rows and the trim after them are one transaction.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -32,6 +36,7 @@ use anyhow::Context as _;
 use log::warn;
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Serialize;
+use tokio::sync::Notify;
 use tokio::time::{MissedTickBehavior, interval_at};
 
 /// The resolved `[usage]` table.
@@ -46,7 +51,7 @@ pub struct UsageConfig {
 }
 
 /// One of the browser's WebSockets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Socket {
     Session,
@@ -139,7 +144,8 @@ fn per_second(bytes: u64, secs: u64) -> u64 {
     (bytes + secs / 2) / secs
 }
 
-/// The open timeframe: what the samples so far have added up to, and when.
+/// The open timeframe: what the samples so far have added up to, and when; and the
+/// closed timeframes' records the writer has not committed yet.
 #[derive(Debug)]
 struct Open {
     /// When the timeframe began, in Unix seconds: the last close, or the start.
@@ -148,6 +154,10 @@ struct Open {
     sampled_at: u64,
     /// One set per entry of `UsageMeters::targets`, then the picker's.
     tallies: Vec<[Tally; 4]>,
+    /// Closed, not yet written, oldest first, each under the number it was closed as.
+    unwritten: VecDeque<(u64, Record)>,
+    /// The number the next closed record takes.
+    next_closed: u64,
 }
 
 /// Every target's [`Counter`] for every socket, and one more set for the picker, with
@@ -155,7 +165,8 @@ struct Open {
 /// connection, so a reattach keeps counting into the same place.
 ///
 /// The counters are atomics the sockets add to without a lock; only the sampler, once a
-/// second, and a read of the open timeframe or the live rate take the lock on `open`.
+/// second, the writer, and a read of the open timeframe or the live rate take the lock
+/// on `open`.
 #[derive(Debug)]
 pub struct UsageMeters {
     /// The `[[targets]]` names, in the order [`crate::session::SessionManager`] indexes.
@@ -163,6 +174,9 @@ pub struct UsageMeters {
     /// One set per entry of `targets`, then the picker's.
     counters: Vec<[Counter; 4]>,
     open: Mutex<Open>,
+    /// How many closed records wait for the writer at most: while writes keep failing,
+    /// the oldest go first, as they would from the database.
+    unwritten_cap: usize,
 }
 
 impl Default for UsageMeters {
@@ -180,8 +194,22 @@ impl UsageMeters {
     pub(crate) fn open_at(targets: Vec<String>, start: u64) -> Self {
         let slots = targets.len() + 1;
         let counters = (0..slots).map(|_| Default::default()).collect();
-        let open = Open { since: start, sampled_at: start, tallies: vec![[Tally::default(); 4]; slots] };
-        Self { targets, counters, open: Mutex::new(open) }
+        let open = Open {
+            since: start,
+            sampled_at: start,
+            tallies: vec![[Tally::default(); 4]; slots],
+            unwritten: VecDeque::new(),
+            next_closed: 0,
+        };
+        Self { targets, counters, open: Mutex::new(open), unwritten_cap: usize::MAX }
+    }
+
+    /// Meters recorded into a database keeping `max_records` per target and socket:
+    /// what waits for the writer is capped at what the database would keep of it.
+    fn recorded(targets: Vec<String>, max_records: usize) -> Self {
+        let mut meters = Self::new(targets);
+        meters.unwritten_cap = max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
+        meters
     }
 
     /// The counter for `socket` under the target at `target` in the `[[targets]]` list, or
@@ -215,8 +243,9 @@ impl UsageMeters {
     }
 
     /// End the open timeframe at `end` (Unix seconds), with a last sample, and begin the
-    /// next one there: a record for each target's socket that moved data in it. The rate
-    /// right now carries over; the sums and peaks start again.
+    /// next one there: a record for each target's socket that moved data in it, queued
+    /// for the writer and returned. The rate right now carries over; the sums and peaks
+    /// start again.
     pub(crate) fn close_timeframe(&self, end: u64) -> Vec<Record> {
         let mut open = self.lock_open();
         Self::sample_into(&self.counters, &mut open, end);
@@ -225,13 +254,44 @@ impl UsageMeters {
             *tally = Tally { now_sent: tally.now_sent, now_received: tally.now_received, ..Default::default() };
         }
         open.since = end;
+        for record in &records {
+            let number = open.next_closed;
+            open.next_closed += 1;
+            open.unwritten.push_back((number, record.clone()));
+        }
+        while open.unwritten.len() > self.unwritten_cap {
+            open.unwritten.pop_front();
+        }
         records
+    }
+
+    /// The closed records waiting for the writer, oldest first, and the number of the
+    /// newest, to pass to [`Self::written`] once they are in the database.
+    pub(crate) fn unwritten(&self) -> (u64, Vec<Record>) {
+        let open = self.lock_open();
+        let through = open.unwritten.back().map_or(0, |(number, _)| *number);
+        (through, open.unwritten.iter().map(|(_, record)| record.clone()).collect())
+    }
+
+    /// The records closed as `through` and before are in the database.
+    pub(crate) fn written(&self, through: u64) {
+        let mut open = self.lock_open();
+        while open.unwritten.front().is_some_and(|(number, _)| *number <= through) {
+            open.unwritten.pop_front();
+        }
     }
 
     /// The open timeframe as it stands at `now` (Unix seconds), left counting: a record
     /// for each target's socket that has moved data since the last close, including
     /// what has moved since the last sample.
     pub fn open_timeframe(&self, now: u64) -> Vec<Record> {
+        self.snapshot(now).open
+    }
+
+    /// The open timeframe as it stands at `now` (see [`Self::open_timeframe`]) and the
+    /// closed records not yet written, taken together under one lock: a close cannot
+    /// fall between them.
+    pub fn snapshot(&self, now: u64) -> Snapshot {
         let open = self.lock_open();
         let tallies = open
             .tallies
@@ -245,8 +305,17 @@ impl UsageMeters {
                 })
             })
             .collect();
-        let peeked = Open { since: open.since, sampled_at: open.sampled_at, tallies };
-        self.records(&peeked, now)
+        let peeked = Open {
+            since: open.since,
+            sampled_at: open.sampled_at,
+            tallies,
+            unwritten: VecDeque::new(),
+            next_closed: 0,
+        };
+        Snapshot {
+            open: self.records(&peeked, now),
+            unwritten: open.unwritten.iter().map(|(_, record)| record.clone()).collect(),
+        }
     }
 
     /// A record per tally of `open` that moved, for the timeframe `open.since..end`. A
@@ -295,6 +364,40 @@ impl UsageMeters {
             }
         }
         Live { at: open.sampled_at, rates }
+    }
+}
+
+/// The meters at one moment: the open timeframe as it stands, and the closed records
+/// the writer has not committed. Read before the database, so a timeframe closed
+/// between the two is in the snapshot, and one written between the two is in both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub open: Vec<Record>,
+    pub unwritten: Vec<Record>,
+}
+
+/// What a read of the usage answers: the timeframes closed by then, oldest first, and
+/// the one still being counted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reading {
+    pub records: Vec<Record>,
+    pub open: Vec<Record>,
+}
+
+impl Snapshot {
+    /// This snapshot beside `written`, the database's records read after it and back
+    /// to `since`: an unwritten record the database has meanwhile is counted from the
+    /// database, one it lacks is counted from here if its timeframe ended after `since`,
+    /// and an open record the database has a row for — the timeframe closed and was
+    /// written in between — yields to that row, as the whole of it.
+    pub fn with_written(self, written: Vec<Record>, since: u64) -> Reading {
+        let keys: HashSet<(Option<&str>, Socket, u64)> =
+            written.iter().map(|record| (record.target.as_deref(), record.socket, record.start)).collect();
+        let unwritten = |record: &Record| !keys.contains(&(record.target.as_deref(), record.socket, record.start));
+        let mut records = written.clone();
+        records.extend(self.unwritten.into_iter().filter(|record| record.end > since && unwritten(record)));
+        let open = self.open.into_iter().filter(unwritten).collect();
+        Reading { records, open }
     }
 }
 
@@ -591,11 +694,15 @@ pub(crate) fn unix_now() -> u64 {
 ///
 /// The database is opened and checked before this returns, so a path the gateway cannot
 /// use fails the start instead of every write after it. After that nothing fails: a write
-/// that does not succeed is logged and its records ride along with the next timeframe's.
+/// that does not succeed is logged and its records wait for the next attempt.
+///
+/// Two tasks: the sampler takes the counters every second and closes the timeframe
+/// every `interval_secs`, never waiting on the database; the writer wakes at each close
+/// and commits whatever is waiting, so a write that takes seconds, or SQLite's busy
+/// wait, delays no sample and flattens no peak.
 pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Result<Usage> {
-    let meters = Arc::new(UsageMeters::new(targets));
     let Some(config) = config else {
-        return Ok(Usage { meters, store: None });
+        return Ok(Usage { meters: Arc::new(UsageMeters::new(targets)), store: None });
     };
     // Before the database is touched. The config check refuses such an interval too.
     let started = tokio::time::Instant::now();
@@ -603,42 +710,45 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
         .checked_add(config.interval)
         .with_context(|| format!("[usage].interval_secs {} is too long to schedule", config.interval.as_secs()))?;
     let store = Arc::new(UsageStore::open(config)?);
+    let meters = Arc::new(UsageMeters::recorded(targets, store.max_records));
     let usage = Usage { meters: Arc::clone(&meters), store: Some(Arc::clone(&store)) };
-    // Kept while writes fail, up to what the database would keep of them anyway.
-    let pending_cap = store.max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
+    let closed = Arc::new(Notify::new());
 
+    let sampler = Arc::clone(&meters);
+    let wake = Arc::clone(&closed);
+    let interval = store.interval;
     tokio::spawn(async move {
-        let mut pending: Vec<Record> = Vec::new();
         let mut next_close = first_close;
         let mut ticks = interval_at(started + SAMPLE_PERIOD, SAMPLE_PERIOD);
-        // A slow write delays the next sample instead of bunching several up: the
-        // counters keep counting meanwhile, so nothing is lost, and the sample after
-        // it is spread over the seconds it actually spans.
+        // A late tick is taken once, not bunched: the counters keep counting meanwhile,
+        // and the sample after it is spread over the seconds it actually spans.
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             let tick = ticks.tick().await;
             if tick < next_close {
-                meters.sample(unix_now());
+                sampler.sample(unix_now());
                 continue;
             }
-            pending.extend(meters.close_timeframe(unix_now()));
+            sampler.close_timeframe(unix_now());
             while next_close <= tick {
-                next_close += store.interval;
+                next_close += interval;
             }
-            if pending.is_empty() {
+            wake.notify_one();
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            // A close during a write leaves a permit, so the next round begins at once.
+            closed.notified().await;
+            let (through, batch) = meters.unwritten();
+            if batch.is_empty() {
                 continue;
             }
-            let excess = pending.len().saturating_sub(pending_cap);
-            pending.drain(..excess);
-
-            let batch = std::mem::take(&mut pending);
             let writer = Arc::clone(&store);
-            match tokio::task::spawn_blocking(move || writer.write(&batch).map_err(|e| (e, batch))).await {
-                Ok(Ok(())) => {}
-                Ok(Err((e, batch))) => {
-                    warn!("usage: {e:#}");
-                    pending = batch;
-                }
+            match tokio::task::spawn_blocking(move || writer.write(&batch)).await {
+                Ok(Ok(())) => meters.written(through),
+                Ok(Err(e)) => warn!("usage: {e:#}"),
                 Err(e) => warn!("usage: the write task failed: {e}"),
             }
         }
@@ -737,6 +847,53 @@ mod tests {
             meters.open_timeframe(50),
             [Record { end: 220, peak_sent_per_sec: 0, ..record(Some("mac"), Socket::Audio, 220, 8, 0) }]
         );
+    }
+
+    #[test]
+    fn closed_records_wait_for_the_writer_and_are_read_meanwhile() {
+        let meters = UsageMeters::recorded(vec!["mac".to_owned()], 1);
+        assert_eq!(meters.unwritten_cap, 8, "one record per target and socket, and the picker's");
+        let start = meters.lock_open().since;
+        meters.counter(Some(0), Socket::Session).sent(10);
+        let first = meters.close_timeframe(start + 60);
+        meters.counter(None, Socket::Audio).sent(20);
+        let second = meters.close_timeframe(start + 120);
+        let (through, waiting) = meters.unwritten();
+        assert_eq!(waiting, [first.clone(), second.clone()].concat());
+        assert_eq!(through, 1);
+
+        // The read sees them with the open timeframe, and a database that has one of
+        // them by then counts it once, from the database.
+        meters.counter(Some(0), Socket::Mic).received(5);
+        let snapshot = meters.snapshot(start + 130);
+        assert_eq!(snapshot.unwritten, waiting);
+        assert_eq!(snapshot.open.len(), 1);
+        let open = snapshot.open.clone();
+        let reading = snapshot.clone().with_written(first.clone(), 0);
+        assert_eq!(reading, Reading { records: [first.clone(), second.clone()].concat(), open: open.clone() });
+        let reading = snapshot.clone().with_written(vec![], start + 60);
+        assert_eq!(reading.records, second, "a record that ended by `since` is left out, as the database leaves it");
+        // The open timeframe closed and was written between the snapshot and the
+        // database read: the database's row is the whole of it, and the rows still
+        // waiting are read from the snapshot after it.
+        let written = Record { end: start + 180, received_bytes: 9, ..open[0].clone() };
+        let reading = snapshot.with_written(vec![written.clone()], 0);
+        assert_eq!(reading, Reading { records: [vec![written], first.clone(), second.clone()].concat(), open: vec![] });
+
+        // Written through the first: the second still waits.
+        meters.written(0);
+        assert_eq!(meters.unwritten(), (1, second.clone()));
+        meters.written(1);
+        assert_eq!(meters.unwritten(), (0, vec![]), "nothing waits, so no number");
+
+        // While writes fail, the oldest go first once the cap is reached.
+        for timeframe in 0..10u64 {
+            meters.counter(None, Socket::Session).sent(1);
+            meters.close_timeframe(start + 200 + timeframe);
+        }
+        let (through, waiting) = meters.unwritten();
+        assert_eq!(through, 12, "two records closed first: the microphone bytes left over, and the session");
+        assert_eq!(waiting.iter().map(|record| record.end).collect::<Vec<_>>(), (start + 202..start + 210).collect::<Vec<_>>());
     }
 
     #[test]

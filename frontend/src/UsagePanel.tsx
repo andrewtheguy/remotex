@@ -3,6 +3,7 @@ import { gatewayConfig } from "./gatewayConfig.ts";
 import {
   agoLabel,
   appendLive,
+  clockNow,
   customUsageRange,
   DEFAULT_USAGE_RANGE,
   fetchUsage,
@@ -51,9 +52,12 @@ import {
 // moving — is polled every second while the view is open, kept for the last five
 // minutes, and drawn the way a network meter does: the number now over a graph of
 // the window behind it, one per direction since sent and received differ by orders
-// of magnitude and would flatten each other on one scale. Pause stops the polling,
-// and so the graph, until Resume. The recorded rows are read when the view opens,
-// when the range changes and when Refresh is pressed, never on a timer.
+// of magnitude and would flatten each other on one scale. One poll is out at a time,
+// so a slow answer is never overtaken by a later one; the graph's right edge is the
+// gateway's clock as the page reckons it, so a poll that fails or is skipped leaves a
+// gap rather than the last sample standing at "now". Pause stops the polling, and so
+// the graph, until Resume. The recorded rows are read when the view opens, when the
+// range changes and when Refresh is pressed, never on a timer.
 //
 // Usage is compared by target first: one table sums each target over all its sockets,
 // and the target filter narrows the meter and the socket table to one of them; the
@@ -236,35 +240,37 @@ function RateChart({
   );
 }
 
-/// The meter: each direction's rate now and its graph over the window, summed over
-/// the rates `keep` admits.
+/// The meter: each direction's rate now and its graph over the window up to `now`,
+/// summed over the rates `keep` admits.
 function Meter({
   live,
   history,
+  now,
   windowSecs,
   keep,
 }: {
   live: UsageLive | null;
   history: readonly UsageLive[];
+  now: number | null;
   windowSecs: number;
   keep: (rate: LiveRate) => boolean;
 }) {
-  const series = liveSeries(history, windowSecs, keep);
-  const now = live === null ? null : liveTotals(live.rates.filter(keep));
+  const series = liveSeries(history, windowSecs, keep, now);
+  const rates = live === null ? null : liveTotals(live.rates.filter(keep));
   return (
     <section className="usage-meter" aria-label="Rate right now">
       <div className="usage-tiles">
         <RateTile
           name="Sent"
           direction="sent"
-          now={now === null ? null : now.sent}
+          now={rates === null ? null : rates.sent}
           peak={series.sent.peak}
           windowSecs={windowSecs}
         />
         <RateTile
           name="Received"
           direction="received"
-          now={now === null ? null : now.received}
+          now={rates === null ? null : rates.received}
           peak={series.received.peak}
           windowSecs={windowSecs}
         />
@@ -507,6 +513,9 @@ export default function UsagePanel({
   const [report, setReport] = useState<UsageReport | null>(null);
   const [live, setLive] = useState<UsageLive | null>(null);
   const [history, setHistory] = useState<readonly UsageLive[]>([]);
+  // The gateway's second the graph ends at, moved on by every poll's outcome.
+  const [now, setNow] = useState<number | null>(null);
+  const anchor = useRef<{ at: number; wall: number } | null>(null);
   const [paused, setPaused] = useState(false);
   const [windowSecs, setWindowSecs] = useState(GRAPH_WINDOWS[0]);
   const [error, setError] = useState<string | null>(null);
@@ -545,25 +554,36 @@ export default function UsagePanel({
     };
   }, [load]);
 
-  // The rate right now, once a second while the view is open and not paused. A read
-  // that fails shows nothing rather than a stale number, and leaves a gap in the
-  // graph; the next second tries again.
+  // The rate right now, once a second while the view is open and not paused, one
+  // read out at a time: a tick while one is still out is skipped, so an answer never
+  // lands after a later one. A read that fails shows nothing rather than a stale
+  // number, and the clock moves on without a sample, which the graph draws as a gap;
+  // the next second tries again.
   useEffect(() => {
     if (paused) {
       return;
     }
     let cancelled = false;
+    let reading = false;
     const read = async () => {
+      if (reading) {
+        return;
+      }
+      reading = true;
       const result = await fetchUsageLive();
+      reading = false;
       if (cancelled) {
         return;
       }
       if (result.kind === "unauthorized") {
         onUnauthorized();
       } else if (result.kind === "ok") {
+        anchor.current = { at: result.live.at, wall: Date.now() };
+        setNow(result.live.at);
         setLive(result.live);
         setHistory((kept) => appendLive(kept, result.live));
       } else {
+        setNow(clockNow(anchor.current, Date.now()));
         setLive(null);
       }
     };
@@ -670,6 +690,7 @@ export default function UsagePanel({
       <Meter
         live={live}
         history={history}
+        now={now}
         windowSecs={windowSecs}
         keep={keep}
       />

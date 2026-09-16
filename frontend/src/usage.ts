@@ -279,24 +279,25 @@ export interface RateSeries {
 }
 
 /**
- * Each direction over the last `windowSecs` seconds up to the newest sample, summed
- * over the rates `keep` admits — a target, a socket, or all of them. A second nothing
- * kept moved in is zero; a second with no sample at all is a gap. No history draws a
- * window of gaps.
+ * Each direction over the last `windowSecs` seconds up to `now` — the gateway's second
+ * the graph's right edge stands at, which a read that fails still moves on, so the
+ * newest sample slides left and gaps take its place — summed over the rates `keep`
+ * admits: a target, a socket, or all of them. A second nothing kept moved in is zero; a
+ * second with no sample is a gap, and so is the whole window before the first read.
  */
 export function liveSeries(
   history: readonly UsageLive[],
   windowSecs: number,
   keep: (rate: LiveRate) => boolean,
+  now: number | null,
 ): { sent: RateSeries; received: RateSeries } {
   const sent: (number | null)[] = new Array(windowSecs).fill(null);
   const received: (number | null)[] = new Array(windowSecs).fill(null);
-  const last = history.at(-1);
-  if (last !== undefined) {
-    const first = last.at - windowSecs + 1;
+  if (now !== null) {
+    const first = now - windowSecs + 1;
     for (const sample of history) {
       const i = sample.at - first;
-      if (i >= 0) {
+      if (i >= 0 && i < windowSecs) {
         const totals = liveTotals(sample.rates.filter(keep));
         sent[i] = totals.sent;
         received[i] = totals.received;
@@ -326,6 +327,20 @@ export function rateScale(peakBytesPerSec: number): number {
     }
   }
   return (10 * power) / 8;
+}
+
+/**
+ * The gateway's second right now, as far as the page can tell: the last sample's second
+ * plus the whole seconds since it was read, `anchor.wall` being this browser's clock at
+ * the read. Between samples, and while reads fail, the graph moves on by this.
+ */
+export function clockNow(
+  anchor: { at: number; wall: number } | null,
+  wall: number,
+): number | null {
+  return anchor === null
+    ? null
+    : anchor.at + Math.max(0, Math.round((wall - anchor.wall) / 1000));
 }
 
 /** Every target some kept sample saw moving, by label. */

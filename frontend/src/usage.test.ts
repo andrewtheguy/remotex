@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   agoLabel,
   appendLive,
+  clockNow,
   customUsageRange,
   formatRate,
   GRAPH_WINDOWS,
@@ -105,28 +106,49 @@ test("the history keeps one sample per second, newest last, as long as the longe
   assert.equal(history[0].at, 105, "the oldest fall off");
 });
 
-test("a series is the window's seconds up to the newest sample, summed over what is kept, with gaps for seconds not read", () => {
+test("a series is the window's seconds up to now, summed over what is kept, with gaps for seconds not read", () => {
   const history = [
     sample(10, rate("mac", "session", 1000, 10)),
     sample(11, rate("mac", "session", 2000, 20), rate("win", "audio", 300, 0)),
     // 12 was not read.
     sample(13, rate("win", "session", 50, 5)),
   ];
-  const all = liveSeries(history, 5, () => true);
+  const all = liveSeries(history, 5, () => true, 13);
   assert.deepEqual(all.sent, {
     points: [null, 1000, 2300, null, 50],
     peak: 2300,
   });
   assert.deepEqual(all.received, { points: [null, 10, 20, null, 5], peak: 20 });
-  const mac = liveSeries(history, 3, (r) => r.target === "mac");
+  const mac = liveSeries(history, 3, (r) => r.target === "mac", 13);
   assert.deepEqual(mac.sent, { points: [2000, null, 0], peak: 2000 });
   assert.deepEqual(mac.received, { points: [20, null, 0], peak: 20 });
-  const audio = liveSeries(history, 2, (r) => r.socket === "audio");
+  const audio = liveSeries(history, 2, (r) => r.socket === "audio", 13);
   assert.deepEqual(audio.sent, { points: [null, 0], peak: 0 });
-  assert.deepEqual(liveSeries([], 3, () => true).sent, {
+  // Reads have failed since the newest sample: it slides left and gaps follow it.
+  const stale = liveSeries(history, 4, () => true, 15);
+  assert.deepEqual(stale.sent, { points: [null, 50, null, null], peak: 50 });
+  // Nothing read yet, or a window that ends before the samples: gaps throughout.
+  assert.deepEqual(liveSeries(history, 3, () => true, null).sent, {
     points: [null, null, null],
     peak: 0,
   });
+  assert.deepEqual(liveSeries(history, 2, () => true, 9).sent, {
+    points: [null, null],
+    peak: 0,
+  });
+});
+
+test("the clock is the last sample's second plus the whole seconds since it was read", () => {
+  assert.equal(clockNow(null, 5000), null);
+  assert.equal(clockNow({ at: 100, wall: 5000 }, 5000), 100);
+  assert.equal(clockNow({ at: 100, wall: 5000 }, 5400), 100);
+  assert.equal(clockNow({ at: 100, wall: 5000 }, 5600), 101);
+  assert.equal(clockNow({ at: 100, wall: 5000 }, 8100), 103);
+  assert.equal(
+    clockNow({ at: 100, wall: 5000 }, 4000),
+    100,
+    "never behind the sample",
+  );
 });
 
 test("a scale tops out at a round number of bits per second above the peak", () => {

@@ -668,14 +668,15 @@ async fn usage_handler(
 ) -> ApiResult<Json<UsageResponse>> {
     let store = state.usage.store.clone().ok_or(AppError::NotFound)?;
     let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
-    let since = query.within.map_or(0, |within| usage::unix_now().saturating_sub(within));
-    let records = tokio::task::spawn_blocking(move || store.records(since))
+    let now = usage::unix_now();
+    let since = query.within.map_or(0, |within| now.saturating_sub(within));
+    // The meters before the database: a timeframe closed between the two is in the
+    // snapshot, and one written between the two is counted once, from the database.
+    let snapshot = state.usage.meters.snapshot(now);
+    let written = tokio::task::spawn_blocking(move || store.records(since))
         .await
         .map_err(anyhow::Error::from)??;
-    // Read after the database: a timeframe closed between the two is then missing from
-    // this read rather than counted twice, in the written rows and the open one.
-    let now = usage::unix_now();
-    let open = state.usage.meters.open_timeframe(now);
+    let usage::Reading { records, open } = snapshot.with_written(written, since);
     Ok(Json(UsageResponse { now, interval_secs, max_records, records, open }))
 }
 
@@ -1429,11 +1430,15 @@ mod tests {
         };
         let now = usage::unix_now();
         store.write(&[record(now - 600, 100), record(now - 100, 200)]).unwrap();
-        // The timeframe still being counted: one sample of the picker's, and bytes since.
+        // A timeframe closed but not written yet, then the one still being counted:
+        // one sample of the picker's, and bytes since.
         let meters = Arc::new(usage::UsageMeters::open_at(vec!["mac".to_owned()], now - 20));
         meters.counter(None, usage::Socket::Session).sent(30);
         meters.sample(now - 19);
+        meters.close_timeframe(now - 10);
         meters.counter(None, usage::Socket::Session).received(4);
+        meters.sample(now - 9);
+        meters.counter(None, usage::Socket::Session).received(2);
         let app = router(router_config(None), Usage { meters, store: Some(Arc::new(store)) });
 
         let response = app.clone().oneshot(get("/api/usage", None)).await.unwrap();
@@ -1456,10 +1461,11 @@ mod tests {
                 "intervalSecs": 60,
                 "maxRecords": 10,
                 "records": [
-                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7}
+                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7},
+                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0}
                 ],
                 "open": [
-                    {"target": null, "socket": "session", "start": now - 20, "end": null, "sentBytes": 30, "receivedBytes": 4, "peakSentPerSec": 30, "peakReceivedPerSec": 0}
+                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4}
                 ],
             })
         );
@@ -1471,7 +1477,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
-            format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":30,"receivedPerSec":0}}]}}"#, now - 19)
+            format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":0,"receivedPerSec":4}}]}}"#, now - 9)
         );
 
         let app = router(router_config(None), Usage::default());
