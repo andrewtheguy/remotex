@@ -1,4 +1,5 @@
-//! Data usage of the browser's WebSockets, per target, socket and timeframe, kept in SQLite.
+//! Data usage of the browser's WebSockets, per target, socket and timeframe, kept in SQLite,
+//! and the rate they move at right now.
 //!
 //! Only the hop between the browser and this gateway is measured: `/ws`, `/ws/audio`,
 //! `/ws/camera` and `/ws/mic` each add the bytes of the data frames they write and read to
@@ -7,11 +8,16 @@
 //! browser is on the picker. What an engine exchanges with its remote is a different link
 //! and is not counted here.
 //!
-//! Every `[usage].interval_secs` the counters are taken and each target's socket that
-//! moved data in that timeframe gets one row; one that moved nothing gets none, so idle
-//! hours cost no rows. Each target's socket keeps its newest `[usage].max_records` rows
-//! and the oldest go first. The browser reads them on demand through `GET /api/usage`
-//! ([`UsageStore::records`]).
+//! Once a second the counters are taken ([`UsageMeters::sample`]): what moved in that
+//! second is the rate right now, which the browser reads through `GET /api/usage/live`
+//! ([`UsageMeters::live`]), and it is added to the open timeframe, which also keeps its
+//! busiest second per direction. Every `[usage].interval_secs` the open timeframe is
+//! closed and each target's socket that moved data in it gets one row; one that moved
+//! nothing gets none, so idle hours cost no rows. Each target's socket keeps its newest
+//! `[usage].max_records` rows and the oldest go first. The browser reads them on demand
+//! through `GET /api/usage` ([`UsageStore::records`]), together with the open timeframe
+//! as it stands ([`UsageMeters::open_timeframe`]). The gateway stores bytes, peaks and
+//! times; the page divides for averages.
 //!
 //! Best effort, on purpose: the timeframe still being counted when the process stops is
 //! lost, and a write that fails is retried with the next timeframe's. What reaches the
@@ -90,16 +96,73 @@ impl Counter {
     fn take(&self) -> (u64, u64) {
         (self.sent.swap(0, Ordering::Relaxed), self.received.swap(0, Ordering::Relaxed))
     }
+
+    /// Both counts so far, left counting.
+    fn peek(&self) -> (u64, u64) {
+        (self.sent.load(Ordering::Relaxed), self.received.load(Ordering::Relaxed))
+    }
 }
 
-/// Every target's [`Counter`] for every socket, and one more set for the picker. One per
-/// gateway, shared by every connection, so a reattach keeps counting into the same place.
+/// What one socket has moved for one target in the open timeframe, up to the last
+/// sample, and in that sample.
+#[derive(Clone, Copy, Debug, Default)]
+struct Tally {
+    sent: u64,
+    received: u64,
+    /// The busiest second so far, in bytes per second.
+    peak_sent: u64,
+    peak_received: u64,
+    /// The last sample, in bytes per second: the rate right now.
+    now_sent: u64,
+    now_received: u64,
+}
+
+impl Tally {
+    /// Add a sample of `sent` and `received` bytes moved over `secs`.
+    fn add(&mut self, sent: u64, received: u64, secs: u64) {
+        self.sent += sent;
+        self.received += received;
+        self.now_sent = per_second(sent, secs);
+        self.now_received = per_second(received, secs);
+        self.peak_sent = self.peak_sent.max(self.now_sent);
+        self.peak_received = self.peak_received.max(self.now_received);
+    }
+
+    fn moved(&self) -> bool {
+        self.sent != 0 || self.received != 0
+    }
+}
+
+/// `bytes` over `secs`, rounded; a sample never spans less than a second.
+fn per_second(bytes: u64, secs: u64) -> u64 {
+    let secs = secs.max(1);
+    (bytes + secs / 2) / secs
+}
+
+/// The open timeframe: what the samples so far have added up to, and when.
+#[derive(Debug)]
+struct Open {
+    /// When the timeframe began, in Unix seconds: the last close, or the start.
+    since: u64,
+    /// When the counters were last sampled, in Unix seconds.
+    sampled_at: u64,
+    /// One set per entry of `UsageMeters::targets`, then the picker's.
+    tallies: Vec<[Tally; 4]>,
+}
+
+/// Every target's [`Counter`] for every socket, and one more set for the picker, with
+/// the open timeframe their samples add up to. One per gateway, shared by every
+/// connection, so a reattach keeps counting into the same place.
+///
+/// The counters are atomics the sockets add to without a lock; only the sampler, once a
+/// second, and a read of the open timeframe or the live rate take the lock on `open`.
 #[derive(Debug)]
 pub struct UsageMeters {
     /// The `[[targets]]` names, in the order [`crate::session::SessionManager`] indexes.
     targets: Vec<String>,
     /// One set per entry of `targets`, then the picker's.
     counters: Vec<[Counter; 4]>,
+    open: Mutex<Open>,
 }
 
 impl Default for UsageMeters {
@@ -110,8 +173,15 @@ impl Default for UsageMeters {
 
 impl UsageMeters {
     pub fn new(targets: Vec<String>) -> Self {
-        let counters = (0..=targets.len()).map(|_| Default::default()).collect();
-        Self { targets, counters }
+        Self::open_at(targets, unix_now())
+    }
+
+    /// Meters whose first timeframe began at `start` (Unix seconds).
+    pub(crate) fn open_at(targets: Vec<String>, start: u64) -> Self {
+        let slots = targets.len() + 1;
+        let counters = (0..slots).map(|_| Default::default()).collect();
+        let open = Open { since: start, sampled_at: start, tallies: vec![[Tally::default(); 4]; slots] };
+        Self { targets, counters, open: Mutex::new(open) }
     }
 
     /// The counter for `socket` under the target at `target` in the `[[targets]]` list, or
@@ -121,26 +191,115 @@ impl UsageMeters {
         &self.counters[slot][socket as usize]
     }
 
-    /// End the timeframe `start..end`: take every counter and return a record for each
-    /// target's socket that moved data.
-    pub(crate) fn close_timeframe(&self, start: u64, end: u64) -> Vec<Record> {
-        let mut records = Vec::new();
-        for (slot, counters) in self.counters.iter().enumerate() {
+    fn lock_open(&self) -> std::sync::MutexGuard<'_, Open> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Take every counter into the open timeframe as one sample ending at `now` (Unix
+    /// seconds): what moved since the last sample, over the seconds since it, is the
+    /// rate right now and a candidate for the timeframe's busiest second.
+    pub(crate) fn sample(&self, now: u64) {
+        let mut open = self.lock_open();
+        Self::sample_into(&self.counters, &mut open, now);
+    }
+
+    fn sample_into(counters: &[[Counter; 4]], open: &mut Open, now: u64) {
+        let secs = now.saturating_sub(open.sampled_at);
+        for (slot, counters) in counters.iter().enumerate() {
             for socket in Socket::ALL {
-                let (sent_bytes, received_bytes) = counters[socket as usize].take();
-                if sent_bytes == 0 && received_bytes == 0 {
+                let (sent, received) = counters[socket as usize].take();
+                open.tallies[slot][socket as usize].add(sent, received, secs);
+            }
+        }
+        open.sampled_at = now.max(open.sampled_at);
+    }
+
+    /// End the open timeframe at `end` (Unix seconds), with a last sample, and begin the
+    /// next one there: a record for each target's socket that moved data in it. The rate
+    /// right now carries over; the sums and peaks start again.
+    pub(crate) fn close_timeframe(&self, end: u64) -> Vec<Record> {
+        let mut open = self.lock_open();
+        Self::sample_into(&self.counters, &mut open, end);
+        let records = self.records(&open, end);
+        for tally in open.tallies.iter_mut().flatten() {
+            *tally = Tally { now_sent: tally.now_sent, now_received: tally.now_received, ..Default::default() };
+        }
+        open.since = end;
+        records
+    }
+
+    /// The open timeframe as it stands at `now` (Unix seconds), left counting: a record
+    /// for each target's socket that has moved data since the last close, including
+    /// what has moved since the last sample.
+    pub fn open_timeframe(&self, now: u64) -> Vec<Record> {
+        let open = self.lock_open();
+        let tallies = open
+            .tallies
+            .iter()
+            .zip(&self.counters)
+            .map(|(tallies, counters)| {
+                std::array::from_fn(|socket| {
+                    let (sent, received) = counters[socket].peek();
+                    let tally = tallies[socket];
+                    Tally { sent: tally.sent + sent, received: tally.received + received, ..tally }
+                })
+            })
+            .collect();
+        let peeked = Open { since: open.since, sampled_at: open.sampled_at, tallies };
+        self.records(&peeked, now)
+    }
+
+    /// A record per tally of `open` that moved, for the timeframe `open.since..end`. A
+    /// clock set back cannot make a timeframe end before it began.
+    fn records(&self, open: &Open, end: u64) -> Vec<Record> {
+        let start = open.since;
+        let end = end.max(start);
+        let mut records = Vec::new();
+        for (slot, tallies) in open.tallies.iter().enumerate() {
+            for socket in Socket::ALL {
+                let tally = tallies[socket as usize];
+                if !tally.moved() {
                     continue;
                 }
-                let target = self.targets.get(slot).cloned();
-                records.push(Record { target, socket, start, end, sent_bytes, received_bytes });
+                records.push(Record {
+                    target: self.targets.get(slot).cloned(),
+                    socket,
+                    start,
+                    end,
+                    sent_bytes: tally.sent,
+                    received_bytes: tally.received,
+                    peak_sent_per_sec: tally.peak_sent,
+                    peak_received_per_sec: tally.peak_received,
+                });
             }
         }
         records
     }
+
+    /// The rate right now: what the last sample found moving, per target and socket.
+    pub fn live(&self) -> Live {
+        let open = self.lock_open();
+        let mut rates = Vec::new();
+        for (slot, tallies) in open.tallies.iter().enumerate() {
+            for socket in Socket::ALL {
+                let tally = tallies[socket as usize];
+                if tally.now_sent == 0 && tally.now_received == 0 {
+                    continue;
+                }
+                rates.push(LiveRate {
+                    target: self.targets.get(slot).cloned(),
+                    socket,
+                    sent_per_sec: tally.now_sent,
+                    received_per_sec: tally.now_received,
+                });
+            }
+        }
+        Live { at: open.sampled_at, rates }
+    }
 }
 
-/// What one socket moved for one target in one timeframe. Times are Unix seconds; a
-/// `None` target is the picker.
+/// What one socket moved for one target in one timeframe, and its busiest second in
+/// bytes per second. Times are Unix seconds; a `None` target is the picker.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
@@ -150,6 +309,26 @@ pub struct Record {
     pub end: u64,
     pub sent_bytes: u64,
     pub received_bytes: u64,
+    pub peak_sent_per_sec: u64,
+    pub peak_received_per_sec: u64,
+}
+
+/// The rate right now, as of the sample at `at` (Unix seconds): every target's socket
+/// that moved in it, in bytes per second.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Live {
+    pub at: u64,
+    pub rates: Vec<LiveRate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveRate {
+    pub target: Option<String>,
+    pub socket: Socket,
+    pub sent_per_sec: u64,
+    pub received_per_sec: u64,
 }
 
 /// A gateway's usage: the counters the sockets add to, and the database they are
@@ -163,7 +342,7 @@ pub struct Usage {
 /// Marks a database as this module's, in the header field SQLite keeps for it.
 const APPLICATION_ID: i64 = 0x524d_5855; // "RMXU"
 /// The one schema there is. A database written by any other is refused, not migrated.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const SCHEMA: &str = "
     CREATE TABLE usage (
         id INTEGER PRIMARY KEY,
@@ -172,7 +351,9 @@ const SCHEMA: &str = "
         started_at INTEGER NOT NULL,
         ended_at INTEGER NOT NULL,
         sent_bytes INTEGER NOT NULL CHECK (sent_bytes >= 0),
-        received_bytes INTEGER NOT NULL CHECK (received_bytes >= 0)
+        received_bytes INTEGER NOT NULL CHECK (received_bytes >= 0),
+        peak_sent_per_sec INTEGER NOT NULL CHECK (peak_sent_per_sec >= 0),
+        peak_received_per_sec INTEGER NOT NULL CHECK (peak_received_per_sec >= 0)
     ) STRICT;
     CREATE INDEX usage_by_series ON usage (target, socket, id);
     CREATE INDEX usage_by_end ON usage (ended_at);
@@ -300,8 +481,9 @@ impl UsageStore {
         {
             let mut insert = transaction
                 .prepare_cached(
-                    "INSERT INTO usage (target, socket, started_at, ended_at, sent_bytes, received_bytes)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO usage (target, socket, started_at, ended_at, sent_bytes, received_bytes,
+                                        peak_sent_per_sec, peak_received_per_sec)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 )
                 .context("cannot prepare the usage insert")?;
             for record in records {
@@ -313,6 +495,8 @@ impl UsageStore {
                         sql_int(record.end)?,
                         sql_int(record.sent_bytes)?,
                         sql_int(record.received_bytes)?,
+                        sql_int(record.peak_sent_per_sec)?,
+                        sql_int(record.peak_received_per_sec)?,
                     ])
                     .context("cannot insert a usage record")?;
             }
@@ -351,7 +535,8 @@ impl UsageStore {
         let connection = self.lock();
         let mut select = connection
             .prepare_cached(
-                "SELECT target, socket, started_at, ended_at, sent_bytes, received_bytes
+                "SELECT target, socket, started_at, ended_at, sent_bytes, received_bytes,
+                        peak_sent_per_sec, peak_received_per_sec
                  FROM usage WHERE ended_at > ?1 ORDER BY id",
             )
             .context("cannot prepare the usage query")?;
@@ -360,18 +545,23 @@ impl UsageStore {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
+                    [
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ],
                 ))
             })
             .context("cannot query usage records")?;
         rows.map(|row| {
-            let (target, socket, start, end, sent, received) = row.context("cannot read a usage record")?;
+            let (target, socket, numbers) = row.context("cannot read a usage record")?;
             let socket = Socket::from_name(&socket)
                 .with_context(|| format!("a usage record names no socket: {socket:?}"))?;
             let unsigned = |value: i64| u64::try_from(value).context("a usage record is negative");
+            let [start, end, sent, received, peak_sent, peak_received] = numbers;
             Ok(Record {
                 target,
                 socket,
@@ -379,6 +569,8 @@ impl UsageStore {
                 end: unsigned(end)?,
                 sent_bytes: unsigned(sent)?,
                 received_bytes: unsigned(received)?,
+                peak_sent_per_sec: unsigned(peak_sent)?,
+                peak_received_per_sec: unsigned(peak_received)?,
             })
         })
         .collect()
@@ -395,7 +587,7 @@ pub(crate) fn unix_now() -> u64 {
 }
 
 /// Meters for `targets` (the `[[targets]]` names, in order), and with `config` the
-/// database they are recorded in; with no `[usage]`, counters nobody records.
+/// database they are recorded in; with no `[usage]`, counters nobody samples or records.
 ///
 /// The database is opened and checked before this returns, so a path the gateway cannot
 /// use fails the start instead of every write after it. After that nothing fails: a write
@@ -406,7 +598,8 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
         return Ok(Usage { meters, store: None });
     };
     // Before the database is touched. The config check refuses such an interval too.
-    let first_tick = tokio::time::Instant::now()
+    let started = tokio::time::Instant::now();
+    let first_close = started
         .checked_add(config.interval)
         .with_context(|| format!("[usage].interval_secs {} is too long to schedule", config.interval.as_secs()))?;
     let store = Arc::new(UsageStore::open(config)?);
@@ -416,16 +609,22 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
 
     tokio::spawn(async move {
         let mut pending: Vec<Record> = Vec::new();
-        let mut start = unix_now();
-        let mut ticks = interval_at(first_tick, store.interval);
-        // A slow write delays the next timeframe instead of bunching several up: the
-        // counters keep counting meanwhile, so nothing is lost, only longer.
+        let mut next_close = first_close;
+        let mut ticks = interval_at(started + SAMPLE_PERIOD, SAMPLE_PERIOD);
+        // A slow write delays the next sample instead of bunching several up: the
+        // counters keep counting meanwhile, so nothing is lost, and the sample after
+        // it is spread over the seconds it actually spans.
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            ticks.tick().await;
-            let end = unix_now();
-            pending.extend(meters.close_timeframe(start, end));
-            start = end;
+            let tick = ticks.tick().await;
+            if tick < next_close {
+                meters.sample(unix_now());
+                continue;
+            }
+            pending.extend(meters.close_timeframe(unix_now()));
+            while next_close <= tick {
+                next_close += store.interval;
+            }
             if pending.is_empty() {
                 continue;
             }
@@ -447,6 +646,9 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
     Ok(usage)
 }
 
+/// How often the counters are sampled: the second the rate right now is measured over.
+const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,31 +657,100 @@ mod tests {
         UsageConfig { database, interval: Duration::from_secs(60), max_records }
     }
 
+    /// A one-minute record whose bytes all moved in one second: its peaks are its bytes.
     fn record(target: Option<&str>, socket: Socket, start: u64, sent_bytes: u64, received_bytes: u64) -> Record {
-        Record { target: target.map(str::to_owned), socket, start, end: start + 60, sent_bytes, received_bytes }
+        Record {
+            target: target.map(str::to_owned),
+            socket,
+            start,
+            end: start + 60,
+            sent_bytes,
+            received_bytes,
+            peak_sent_per_sec: sent_bytes,
+            peak_received_per_sec: received_bytes,
+        }
+    }
+
+    fn live(target: Option<&str>, socket: Socket, sent_per_sec: u64, received_per_sec: u64) -> LiveRate {
+        LiveRate { target: target.map(str::to_owned), socket, sent_per_sec, received_per_sec }
     }
 
     #[test]
     fn a_timeframe_records_each_target_and_socket_that_moved_data() {
-        let meters = UsageMeters::new(vec!["mac".to_owned(), "win".to_owned()]);
+        let meters = UsageMeters::open_at(vec!["mac".to_owned(), "win".to_owned()], 100);
         meters.counter(Some(1), Socket::Session).sent(1500);
         meters.counter(Some(1), Socket::Session).received(40);
         meters.counter(Some(0), Socket::Session).sent(3);
         meters.counter(None, Socket::Mic).received(900);
         meters.counter(Some(7), Socket::Audio).sent(5);
-
+        // One second in: the first sample is what moved in it, and the rate right now.
+        meters.sample(101);
         assert_eq!(
-            meters.close_timeframe(100, 160),
-            [
-                record(Some("mac"), Socket::Session, 100, 3, 0),
-                record(Some("win"), Socket::Session, 100, 1500, 40),
-                record(None, Socket::Audio, 100, 5, 0),
-                record(None, Socket::Mic, 100, 0, 900),
-            ],
+            meters.live(),
+            Live {
+                at: 101,
+                rates: vec![
+                    live(Some("mac"), Socket::Session, 3, 0),
+                    live(Some("win"), Socket::Session, 1500, 40),
+                    live(None, Socket::Audio, 5, 0),
+                    live(None, Socket::Mic, 0, 900),
+                ]
+            },
             "an index past the target list counts as no target"
         );
+
+        // A quieter second lowers the rate right now but not the timeframe's peak, and
+        // what has moved since the last sample shows in the open timeframe.
+        meters.counter(Some(1), Socket::Session).sent(600);
+        meters.sample(102);
+        assert_eq!(meters.live().rates, [live(Some("win"), Socket::Session, 600, 0)], "only what moved in that second");
+        meters.counter(Some(1), Socket::Session).sent(7);
+        let expected = [
+            record(Some("mac"), Socket::Session, 100, 3, 0),
+            Record {
+                sent_bytes: 2107,
+                peak_sent_per_sec: 1500,
+                ..record(Some("win"), Socket::Session, 100, 2107, 40)
+            },
+            record(None, Socket::Audio, 100, 5, 0),
+            record(None, Socket::Mic, 100, 0, 900),
+        ];
+        assert_eq!(meters.open_timeframe(160), expected);
+        // A close samples what is left over the seconds since the last sample: 7 bytes
+        // over 58 seconds round to nothing, so the peak stands. The rate right now is the
+        // last sample's, which found only those 7 bytes moving.
+        assert_eq!(meters.close_timeframe(160), expected);
+        assert_eq!(meters.live(), Live { at: 160, rates: vec![] });
+
         // The counters were taken, so an idle timeframe after it records nothing.
-        assert_eq!(meters.close_timeframe(160, 220), []);
+        assert_eq!(meters.open_timeframe(200), []);
+        assert_eq!(meters.close_timeframe(220), []);
+
+        // The next timeframe begins where the last one closed, and its peaks start over.
+        meters.counter(Some(0), Socket::Audio).sent(8);
+        assert_eq!(
+            meters.open_timeframe(230),
+            [Record { end: 230, peak_sent_per_sec: 0, ..record(Some("mac"), Socket::Audio, 220, 8, 0) }]
+        );
+        // A clock set back cannot end a timeframe before it began.
+        assert_eq!(
+            meters.open_timeframe(50),
+            [Record { end: 220, peak_sent_per_sec: 0, ..record(Some("mac"), Socket::Audio, 220, 8, 0) }]
+        );
+    }
+
+    #[test]
+    fn a_sample_spans_the_seconds_since_the_last_one() {
+        let meters = UsageMeters::open_at(vec![], 100);
+        meters.counter(None, Socket::Session).sent(1000);
+        meters.sample(105);
+        assert_eq!(meters.live(), Live { at: 105, rates: vec![live(None, Socket::Session, 200, 0)] });
+        // Two samples in one second read as one second, never a division by nothing.
+        meters.counter(None, Socket::Session).received(30);
+        meters.sample(105);
+        assert_eq!(meters.live().rates, [live(None, Socket::Session, 0, 30)]);
+        assert_eq!(per_second(7, 58), 0);
+        assert_eq!(per_second(29, 58), 1, "rounded, not truncated");
     }
 
     #[test]

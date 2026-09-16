@@ -1658,7 +1658,7 @@ mod tests {
         // Counted as the wire carries them, computed here from RFC 6455 rather than by
         // the function under test: a browser's short text frame is a two-byte header, a
         // four-byte mask and its payload.
-        let records = usage.close_timeframe(0, 1);
+        let records = usage.close_timeframe(crate::usage::unix_now());
         let received: u64 = records.iter().map(|record| record.received_bytes).sum();
         let texts = [
             r#"{"type":"connect","target":"fake"}"#,

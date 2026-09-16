@@ -542,7 +542,7 @@ body {
 
 /* The "Data usage" view takes the picker's place, wider for its tables. */
 .picker-panel.usage-panel {
-  width: min(640px, 100%);
+  width: min(760px, 100%);
   gap: 0.25rem;
 }
 
@@ -569,11 +569,59 @@ body {
   margin-top: 0;
 }
 
+/* A custom range: "Last [amount] [unit] Apply", inline with the selects. */
+.usage-custom {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #8b949e;
+}
+
+.usage-custom input {
+  width: 4.5rem;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+}
+
 .usage-read-at {
   margin: 0 0 0.5rem;
   color: #6e7681;
   font-size: 0.75rem;
   text-align: center;
+}
+
+/* The rate right now, read once a second while the view is open. */
+.usage-now {
+  margin: 0 0 0.25rem;
+  color: #8b949e;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.usage-now strong {
+  color: #e6edf3;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The direction a pair of columns belongs to, over its own header row. */
+.usage-table th.usage-group {
+  text-align: center;
+  border-bottom: none;
+}
+
+.usage-table thead tr + tr th {
+  top: 1.85rem;
+}
+
+.usage-table .usage-open td {
+  color: #e6edf3;
+  font-style: italic;
 }
 
 .usage-heading {
@@ -782,7 +830,7 @@ body {
 .help-card.usage-card {
   display: flex;
   flex-direction: column;
-  width: min(640px, 92vw);
+  width: min(760px, 92vw);
   gap: 0.25rem;
 }
 

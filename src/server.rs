@@ -272,6 +272,7 @@ pub(crate) fn router_with_sessions(
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
                 .route("/usage", get(usage_handler))
+                .route("/usage/live", get(usage_live_handler))
                 .route_layer(require_auth.clone()),
         )
         .fallback(|| async { AppError::NotFound });
@@ -649,9 +650,14 @@ struct UsageQuery {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageResponse {
+    /// The gateway's clock at the read, in Unix seconds, which `open` ends at.
+    now: u64,
     interval_secs: u64,
     max_records: usize,
+    /// The written timeframes, oldest first.
     records: Vec<usage::Record>,
+    /// The timeframe still being counted, as it stands at `now`.
+    open: Vec<usage::Record>,
 }
 
 /// The recorded data usage of the browser sockets, read when the page asks for it.
@@ -666,7 +672,21 @@ async fn usage_handler(
     let records = tokio::task::spawn_blocking(move || store.records(since))
         .await
         .map_err(anyhow::Error::from)??;
-    Ok(Json(UsageResponse { interval_secs, max_records, records }))
+    // Read after the database: a timeframe closed between the two is then missing from
+    // this read rather than counted twice, in the written rows and the open one.
+    let now = usage::unix_now();
+    let open = state.usage.meters.open_timeframe(now);
+    Ok(Json(UsageResponse { now, interval_secs, max_records, records, open }))
+}
+
+/// The rate right now: what the last one-second sample found moving on each target's
+/// socket. Polled by the "Data usage" view while it is open. 404 on a gateway with no
+/// `[usage]`: nothing samples the counters there.
+async fn usage_live_handler(State(state): State<AppState>) -> ApiResult<Json<usage::Live>> {
+    if state.usage.store.is_none() {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(state.usage.meters.live()))
 }
 
 #[derive(Deserialize, Default)]
@@ -1404,13 +1424,17 @@ mod tests {
             end: start + 60,
             sent_bytes,
             received_bytes: 7,
+            peak_sent_per_sec: sent_bytes / 2,
+            peak_received_per_sec: 7,
         };
         let now = usage::unix_now();
         store.write(&[record(now - 600, 100), record(now - 100, 200)]).unwrap();
-        let app = router(
-            router_config(None),
-            Usage { meters: Arc::default(), store: Some(Arc::new(store)) },
-        );
+        // The timeframe still being counted: one sample of the picker's, and bytes since.
+        let meters = Arc::new(usage::UsageMeters::open_at(vec!["mac".to_owned()], now - 20));
+        meters.counter(None, usage::Socket::Session).sent(30);
+        meters.sample(now - 19);
+        meters.counter(None, usage::Socket::Session).received(4);
+        let app = router(router_config(None), Usage { meters, store: Some(Arc::new(store)) });
 
         let response = app.clone().oneshot(get("/api/usage", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1419,18 +1443,42 @@ mod tests {
         let response = app.clone().oneshot(get("/api/usage?within=300", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The read's own clock is the open timeframe's end; the second it lands in is
+        // not this test's to know.
+        let read_at = json["now"].as_u64().unwrap();
+        assert!((now..now + 60).contains(&read_at), "now = {read_at}");
+        assert_eq!(json["open"][0]["end"].take(), read_at);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "now": read_at,
+                "intervalSecs": 60,
+                "maxRecords": 10,
+                "records": [
+                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7}
+                ],
+                "open": [
+                    {"target": null, "socket": "session", "start": now - 20, "end": null, "sentBytes": 30, "receivedBytes": 4, "peakSentPerSec": 30, "peakReceivedPerSec": 0}
+                ],
+            })
+        );
+
+        let response = app.clone().oneshot(get("/api/usage/live", None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app.clone().oneshot(get("/api/usage/live", Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
-            format!(
-                r#"{{"intervalSecs":60,"maxRecords":10,"records":[{{"target":"mac","socket":"session","start":{},"end":{},"sentBytes":200,"receivedBytes":7}}]}}"#,
-                now - 100,
-                now - 40
-            )
+            format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":30,"receivedPerSec":0}}]}}"#, now - 19)
         );
 
         let app = router(router_config(None), Usage::default());
         let cookie = log_in(app.clone()).await;
-        let response = app.oneshot(get("/api/usage", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/usage", Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app.oneshot(get("/api/usage/live", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
