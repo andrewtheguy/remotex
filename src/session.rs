@@ -344,7 +344,7 @@ struct State {
     /// ([`SessionManager::attach`] leans on that).
     selected: Option<TargetConfig>,
     /// `selected`'s position in [`SessionManager::targets`] plus one, zero for none: what
-    /// the WebSocket usage meters read on every data frame without taking this lock.
+    /// the WebSocket throughput meters read on every data frame without taking this lock.
     /// Changed only beside `selected`, by [`State::select`] and [`State::clear_selection`].
     selected_index: Arc<std::sync::atomic::AtomicUsize>,
     /// The running engine, if any. Remains available after detach until the
@@ -511,7 +511,7 @@ impl SessionManager {
     }
 
     /// The selected target's position in the `[[targets]]` list, `None` on the picker.
-    /// Lock-free, because the usage meters ask on every data frame ([`crate::usage`]).
+    /// Lock-free, because the throughput meters ask on every data frame ([`crate::throughput`]).
     pub fn selected_target(&self) -> Option<usize> {
         self.selected_index.load(std::sync::atomic::Ordering::Relaxed).checked_sub(1)
     }

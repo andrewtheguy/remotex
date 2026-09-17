@@ -10,14 +10,14 @@ export interface GatewayConfig {
   branding: string;
   /** Whether the gateway serves an icon at `/api/logo`. */
   logo: boolean;
-  /** Whether the gateway records data usage `GET /api/usage` can read. */
-  usage: boolean;
+  /** Whether the gateway records throughput `GET /api/throughput` can read. */
+  throughput: boolean;
 }
 
 const FALLBACK: GatewayConfig = {
   branding: "remotex",
   logo: false,
-  usage: false,
+  throughput: false,
 };
 
 let pending: Promise<GatewayConfig> | null = null;
@@ -35,7 +35,7 @@ export function gatewayConfig(): Promise<GatewayConfig> {
     .then((config) => ({
       branding: config.branding || FALLBACK.branding,
       logo: config.logo === true,
-      usage: config.usage === true,
+      throughput: config.throughput === true,
     }))
     .catch(() => FALLBACK);
   return pending;

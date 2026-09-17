@@ -3,10 +3,10 @@ import { gatewayConfig } from "./gatewayConfig.ts";
 import {
   appendLive,
   clockNow,
-  customUsageRange,
-  DEFAULT_USAGE_RANGE,
-  fetchUsage,
-  fetchUsageLive,
+  customThroughputRange,
+  DEFAULT_THROUGHPUT_RANGE,
+  fetchThroughput,
+  fetchThroughputLive,
   formatRate,
   liveSeries,
   liveTotals,
@@ -14,34 +14,34 @@ import {
   rateScale,
   recordedSeries,
   spanLabel,
+  THROUGHPUT_PRESETS,
+  THROUGHPUT_SOCKET_LABEL,
+  THROUGHPUT_SOCKETS,
+  THROUGHPUT_UNITS,
+  type ThroughputLive,
+  type ThroughputRange,
+  type ThroughputReport,
+  type ThroughputSeries,
+  type ThroughputSocket,
+  type ThroughputSource,
+  type ThroughputUnit,
   targetLabel,
-  USAGE_PRESETS,
-  USAGE_SOCKET_LABEL,
-  USAGE_SOCKETS,
-  USAGE_UNITS,
-  type UsageLive,
-  type UsageRange,
-  type UsageReport,
-  type UsageSeries,
-  type UsageSocket,
-  type UsageSource,
-  type UsageUnit,
-  usageRangeIsLive,
-  usageRangeKey,
-  usageRangeLabel,
-  usageTargets,
-  usageWithin,
-} from "./usage.ts";
+  throughputRangeIsLive,
+  throughputRangeKey,
+  throughputRangeLabel,
+  throughputTargets,
+  throughputWithin,
+} from "./throughput.ts";
 import {
   type ChartInk,
   drawChart,
   pointedIndex,
   tipLeft,
-} from "./usageChart.ts";
+} from "./throughputChart.ts";
 
-// The "Data usage" view, opened from the target picker and from the session's Info
+// The "Throughput" view, opened from the target picker and from the session's Info
 // card, which it replaces while open; `closeLabel` names where its button returns to.
-// See usage.ts.
+// See throughput.ts.
 //
 // A network meter over one range: each direction's rate right now, large, over a graph
 // of the range behind it, one per direction since sent and received differ by orders
@@ -60,14 +60,14 @@ import {
 // The target and socket filters narrow the tiles and the graphs alike. Every rate is
 // in bits per second; the bytes behind them stay in the model and the API.
 
-/// Whether to offer the view at all: only a gateway with `[usage]` records any.
-export function useUsageAvailable(): boolean {
+/// Whether to offer the view at all: only a gateway with `[meter]` records any.
+export function useThroughputAvailable(): boolean {
   const [available, setAvailable] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    gatewayConfig().then(({ usage }) => {
+    gatewayConfig().then(({ throughput }) => {
       if (!cancelled) {
-        setAvailable(usage);
+        setAvailable(throughput);
       }
     });
     return () => {
@@ -132,16 +132,16 @@ function RateTile({
 }) {
   const [value, unit] = now === null ? ["—", ""] : formatRate(now).split(" ");
   return (
-    <div className="usage-tile">
-      <span className="usage-tile-label">
-        <span className={`usage-swatch usage-${direction}`} />
+    <div className="throughput-tile">
+      <span className="throughput-tile-label">
+        <span className={`throughput-swatch throughput-${direction}`} />
         {name}
       </span>
-      <span className="usage-tile-value">
+      <span className="throughput-tile-value">
         {value}
         {unit && <small>{unit}</small>}
       </span>
-      <span className="usage-tile-sub">
+      <span className="throughput-tile-sub">
         peak {formatRate(busiest)}, {rangeLabel}
       </span>
     </div>
@@ -164,7 +164,7 @@ function pointName(
     : pointLabel(end - Math.min(ago + stepSecs, spanSecs), spanSecs > 86_400);
 }
 
-/// The points of one direction on a canvas that fills its box (see usageChart.ts),
+/// The points of one direction on a canvas that fills its box (see throughputChart.ts),
 /// redrawn as the points, the scale or the box change. Pointing at one names it.
 function RateChart({
   name,
@@ -238,7 +238,7 @@ function RateChart({
 
   return (
     <>
-      <div className="usage-chart-head">
+      <div className="throughput-chart-head">
         <strong>{name}</strong>
         <span>
           {!sampled && end !== null && `${spanLabel(stepSecs)} averages · `}
@@ -247,7 +247,9 @@ function RateChart({
       </div>
       <div
         ref={box}
-        className={small ? "usage-chart usage-chart-small" : "usage-chart"}
+        className={
+          small ? "throughput-chart throughput-chart-small" : "throughput-chart"
+        }
         role="img"
         aria-label={`${name}, ${rangeLabel}, peak ${formatRate(series.busiest)}`}
         onPointerMove={(e) => {
@@ -265,7 +267,7 @@ function RateChart({
         <canvas ref={canvas} />
         {pointed !== null && (
           <div
-            className="usage-tip"
+            className="throughput-tip"
             style={{
               left: `${tipLeft(pointed, points.length, width, sampled ? 60 : 100)}px`,
             }}
@@ -275,7 +277,7 @@ function RateChart({
           </div>
         )}
       </div>
-      <div className="usage-axis">
+      <div className="throughput-axis">
         <span>{spanSecs > 0 && `${spanLabel(spanSecs)} ago`}</span>
         <span>now</span>
       </div>
@@ -290,12 +292,12 @@ function Meter({
   rangeLabel,
 }: {
   rates: { sent: number; received: number } | null;
-  series: UsageSeries;
+  series: ThroughputSeries;
   rangeLabel: string;
 }) {
   return (
-    <section className="usage-meter" aria-label="Rate right now">
-      <div className="usage-tiles">
+    <section className="throughput-meter" aria-label="Rate right now">
+      <div className="throughput-tiles">
         <RateTile
           name="Sent"
           direction="sent"
@@ -341,46 +343,52 @@ function RangeControls({
   range,
   onChange,
 }: {
-  range: UsageRange;
-  onChange: (range: UsageRange) => void;
+  range: ThroughputRange;
+  onChange: (range: ThroughputRange) => void;
 }) {
   const [custom, setCustom] = useState(
-    () => !USAGE_PRESETS.some((p) => usageRangeKey(p) === usageRangeKey(range)),
+    () =>
+      !THROUGHPUT_PRESETS.some(
+        (p) => throughputRangeKey(p) === throughputRangeKey(range),
+      ),
   );
-  const seed = range === "all" ? DEFAULT_USAGE_RANGE : range;
+  const seed = range === "all" ? DEFAULT_THROUGHPUT_RANGE : range;
   const [amount, setAmount] = useState(String(seed.amount));
-  const [unit, setUnit] = useState<UsageUnit>(seed.unit);
-  const typed = customUsageRange(amount, unit);
+  const [unit, setUnit] = useState<ThroughputUnit>(seed.unit);
+  const typed = customThroughputRange(amount, unit);
 
   return (
     <>
       <select
         aria-label="Time range"
-        value={custom ? "custom" : usageRangeKey(range)}
+        value={custom ? "custom" : throughputRangeKey(range)}
         onChange={(e) => {
           if (e.target.value === "custom") {
             setCustom(true);
             return;
           }
           setCustom(false);
-          const preset = USAGE_PRESETS.find(
-            (p) => usageRangeKey(p) === e.target.value,
+          const preset = THROUGHPUT_PRESETS.find(
+            (p) => throughputRangeKey(p) === e.target.value,
           );
           if (preset !== undefined) {
             onChange(preset);
           }
         }}
       >
-        {USAGE_PRESETS.map((preset) => (
-          <option key={usageRangeKey(preset)} value={usageRangeKey(preset)}>
-            {usageRangeLabel(preset)}
+        {THROUGHPUT_PRESETS.map((preset) => (
+          <option
+            key={throughputRangeKey(preset)}
+            value={throughputRangeKey(preset)}
+          >
+            {throughputRangeLabel(preset)}
           </option>
         ))}
         <option value="custom">Custom…</option>
       </select>
       {custom && (
         <form
-          className="usage-custom"
+          className="throughput-custom"
           onSubmit={(e) => {
             e.preventDefault();
             if (typed !== null) {
@@ -401,9 +409,9 @@ function RangeControls({
           <select
             aria-label="Unit"
             value={unit}
-            onChange={(e) => setUnit(e.target.value as UsageUnit)}
+            onChange={(e) => setUnit(e.target.value as ThroughputUnit)}
           >
-            {USAGE_UNITS.map((u) => (
+            {THROUGHPUT_UNITS.map((u) => (
               <option key={u} value={u}>
                 {u}
               </option>
@@ -413,7 +421,8 @@ function RangeControls({
             type="submit"
             className="picker-logout"
             disabled={
-              typed === null || usageRangeKey(typed) === usageRangeKey(range)
+              typed === null ||
+              throughputRangeKey(typed) === throughputRangeKey(range)
             }
           >
             Apply
@@ -424,7 +433,7 @@ function RangeControls({
   );
 }
 
-export default function UsagePanel({
+export default function ThroughputPanel({
   closeLabel,
   onClose,
   onUnauthorized,
@@ -433,19 +442,21 @@ export default function UsagePanel({
   onClose: () => void;
   onUnauthorized: () => void;
 }) {
-  const [range, setRange] = useState<UsageRange>(DEFAULT_USAGE_RANGE);
-  const [report, setReport] = useState<UsageReport | null>(null);
-  const [live, setLive] = useState<UsageLive | null>(null);
-  const [history, setHistory] = useState<readonly UsageLive[]>([]);
+  const [range, setRange] = useState<ThroughputRange>(DEFAULT_THROUGHPUT_RANGE);
+  const [report, setReport] = useState<ThroughputReport | null>(null);
+  const [live, setLive] = useState<ThroughputLive | null>(null);
+  const [history, setHistory] = useState<readonly ThroughputLive[]>([]);
   // The gateway's second a sampled graph ends at, moved on by every poll's outcome.
   const [now, setNow] = useState<number | null>(null);
   const anchor = useRef<{ at: number; wall: number } | null>(null);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [targetFilter, setTargetFilter] = useState("all");
-  const [socketFilter, setSocketFilter] = useState<UsageSocket | "all">("all");
+  const [socketFilter, setSocketFilter] = useState<ThroughputSocket | "all">(
+    "all",
+  );
 
-  const sampled = usageRangeIsLive(range);
+  const sampled = throughputRangeIsLive(range);
   // The range whose rows are on screen, so that pausing reads nothing more.
   const shown = useRef<string | null>(null);
 
@@ -456,14 +467,14 @@ export default function UsagePanel({
     if (sampled) {
       return;
     }
-    const key = usageRangeKey(range);
+    const key = throughputRangeKey(range);
     if (paused && shown.current === key) {
       return;
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
-      const result = await fetchUsage(usageWithin(range));
+      const result = await fetchThroughput(throughputWithin(range));
       if (cancelled) {
         return;
       }
@@ -509,7 +520,7 @@ export default function UsagePanel({
         return;
       }
       reading = true;
-      const result = await fetchUsageLive();
+      const result = await fetchThroughputLive();
       reading = false;
       if (cancelled) {
         return;
@@ -534,7 +545,7 @@ export default function UsagePanel({
     };
   }, [paused, onUnauthorized]);
 
-  const changeRange = useCallback((next: UsageRange) => {
+  const changeRange = useCallback((next: ThroughputRange) => {
     // The previous range's rows are not this range's, even while it loads.
     shown.current = null;
     setReport(null);
@@ -546,19 +557,19 @@ export default function UsagePanel({
   // A filter on a target neither knows falls back to every target rather than sitting
   // on an option the select no longer has.
   const targets = new Map<string, string | null>();
-  for (const target of usageTargets(
+  for (const target of throughputTargets(
     history,
     report ? [...report.records, ...report.open] : [],
   )) {
     targets.set(targetKey(target), target);
   }
   const selected = targets.has(targetFilter) ? targetFilter : "all";
-  const keep = (source: UsageSource) =>
+  const keep = (source: ThroughputSource) =>
     (selected === "all" || targetKey(source.target) === selected) &&
     (socketFilter === "all" || source.socket === socketFilter);
 
-  const within = usageWithin(range);
-  let series: UsageSeries;
+  const within = throughputWithin(range);
+  let series: ThroughputSeries;
   if (sampled && within !== null) {
     series = liveSeries(history, within, keep, now);
   } else if (report !== null) {
@@ -574,17 +585,17 @@ export default function UsagePanel({
       end: null,
     };
   }
-  const label = usageRangeLabel(range);
+  const label = throughputRangeLabel(range);
   const rangeLabel = label[0].toLowerCase() + label.slice(1);
 
   return (
     <>
-      <h1>Data usage</h1>
+      <h1>Throughput</h1>
       <p className="picker-hint">
         The rate between this browser and the gateway, per target and WebSocket,
         in bits per second, sampled by the gateway once a second.
       </p>
-      <div className="usage-controls">
+      <div className="throughput-controls">
         <select
           aria-label="Target"
           value={selected}
@@ -601,13 +612,13 @@ export default function UsagePanel({
           aria-label="Socket"
           value={socketFilter}
           onChange={(e) =>
-            setSocketFilter(e.target.value as UsageSocket | "all")
+            setSocketFilter(e.target.value as ThroughputSocket | "all")
           }
         >
           <option value="all">All sockets</option>
-          {USAGE_SOCKETS.map((socket) => (
+          {THROUGHPUT_SOCKETS.map((socket) => (
             <option key={socket} value={socket}>
-              {USAGE_SOCKET_LABEL[socket]}
+              {THROUGHPUT_SOCKET_LABEL[socket]}
             </option>
           ))}
         </select>

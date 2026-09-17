@@ -1,9 +1,9 @@
-// Drawing one direction of the data usage meter: the points of a range on a
+// Drawing one direction of the throughput meter: the points of a range on a
 // canvas, an area under a line, a dot on the newest second, four grid lines with
 // their rate at the right edge, and a gap where a point was not read. The rendering
-// is the panel's (UsagePanel.tsx); this is the geometry and the strokes.
+// is the panel's (ThroughputPanel.tsx); this is the geometry and the strokes.
 
-import { formatRate } from "./usage.ts";
+import { formatRate } from "./throughput.ts";
 
 /// Room at the right edge for the scale's labels, in CSS pixels.
 export const SCALE_WIDTH = 68;

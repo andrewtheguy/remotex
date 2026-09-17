@@ -32,7 +32,7 @@ import type {
   RemoteClipboard,
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
-import UsagePanel, { useUsageAvailable } from "./UsagePanel.tsx";
+import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
   CAN_PINCH_ZOOM,
   densityLabel,
@@ -259,21 +259,21 @@ function ModalOverlay({
   );
 }
 
-// The Info card's way into "Data usage", offered only on a gateway with `[usage]`.
-function DataUsageButton({ onOpen }: { onOpen: () => void }) {
-  if (!useUsageAvailable()) {
+// The Info card's way into "Throughput", offered only on a gateway with `[meter]`.
+function ThroughputButton({ onOpen }: { onOpen: () => void }) {
+  if (!useThroughputAvailable()) {
     return null;
   }
   return (
     <button type="button" className="toolbar-btn" onClick={onOpen}>
-      Data usage
+      Throughput
     </button>
   );
 }
 
-// The Info card switched to "Data usage". Back returns to Info; the backdrop and
+// The Info card switched to "Throughput". Back returns to Info; the backdrop and
 // Escape close both.
-function UsageModal({
+function ThroughputModal({
   open,
   onBack,
   onDismiss,
@@ -289,11 +289,11 @@ function UsageModal({
   }
   return (
     <ModalOverlay
-      label="Data usage"
-      className="help-card usage-card"
+      label="Throughput"
+      className="help-card throughput-card"
       onDismiss={onDismiss}
     >
-      <UsagePanel
+      <ThroughputPanel
         closeLabel="Back to info"
         onClose={onBack}
         onUnauthorized={onUnauthorized}
@@ -863,7 +863,7 @@ export default function FloatingMenu({
   onFocusDesktop,
 }: {
   onLogout: () => void;
-  // The usage read came back 401: the login expired. See UsagePanel.
+  // The throughput read came back 401: the login expired. See ThroughputPanel.
   onUnauthorized: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
@@ -964,9 +964,9 @@ export default function FloatingMenu({
   onFocusDesktop: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  // The one modal card, and which face it shows: Info, or the "Data usage" view its
+  // The one modal card, and which face it shows: Info, or the "Throughput" view its
   // button switches it to.
-  const [modal, setModal] = useState<"info" | "usage" | null>(null);
+  const [modal, setModal] = useState<"info" | "throughput" | null>(null);
   const { panel, setPanel, closePanel, togglePanel } = usePanel();
   // True between pressing Clipboard and the remote's text arriving. The panel
   // stays closed for that moment so it never opens on stale text that visibly
@@ -1065,7 +1065,7 @@ export default function FloatingMenu({
     setModal(null);
     modalOpenerRef.current?.focus();
   }, []);
-  const closeUsage = useCallback(() => setModal("info"), []);
+  const closeThroughput = useCallback(() => setModal("info"), []);
 
   // Capture the non-persisted chrome shortcut before remote input forwarding.
   const [hidden, setHidden] = useState(false);
@@ -1408,9 +1408,9 @@ export default function FloatingMenu({
         </div>
       )}
 
-      <UsageModal
-        open={modal === "usage"}
-        onBack={closeUsage}
+      <ThroughputModal
+        open={modal === "throughput"}
+        onBack={closeThroughput}
         onDismiss={closeModal}
         onUnauthorized={onUnauthorized}
       />
@@ -1475,7 +1475,7 @@ export default function FloatingMenu({
             ))}
           </dl>
           <div className="help-actions">
-            <DataUsageButton onOpen={() => setModal("usage")} />
+            <ThroughputButton onOpen={() => setModal("throughput")} />
             <button type="button" className="toolbar-btn" onClick={closeModal}>
               Close
             </button>

@@ -540,13 +540,13 @@ body {
   cursor: default;
 }
 
-/* The "Data usage" view takes the picker's place, wider for its graphs. */
-.picker-panel.usage-panel {
+/* The "Throughput" view takes the picker's place, wider for its graphs. */
+.picker-panel.throughput-panel {
   width: min(760px, 100%);
   gap: 0.25rem;
 }
 
-.usage-controls {
+.throughput-controls {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
@@ -555,7 +555,7 @@ body {
   margin: 0.5rem 0;
 }
 
-.usage-controls select {
+.throughput-controls select {
   padding: 0.35rem 0.5rem;
   font: inherit;
   font-size: 0.85rem;
@@ -565,12 +565,12 @@ body {
   border-radius: 6px;
 }
 
-.usage-controls .picker-logout {
+.throughput-controls .picker-logout {
   margin-top: 0;
 }
 
 /* A custom range: "Last [amount] [unit] Apply", inline with the selects. */
-.usage-custom {
+.throughput-custom {
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -578,7 +578,7 @@ body {
   color: #8b949e;
 }
 
-.usage-custom input {
+.throughput-custom input {
   width: 4.5rem;
   padding: 0.35rem 0.5rem;
   font: inherit;
@@ -590,7 +590,7 @@ body {
 }
 
 /* The meter: each direction's rate now, then its graph over the window. */
-.usage-meter {
+.throughput-meter {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
@@ -600,20 +600,20 @@ body {
   border-radius: 10px;
 }
 
-.usage-tiles {
+.throughput-tiles {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
 }
 
-.usage-tile {
+.throughput-tile {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
 
-.usage-tile-label {
+.throughput-tile-label {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -623,23 +623,23 @@ body {
   text-transform: uppercase;
 }
 
-/* The ink of each direction's line, as its legend. Same hex as UsagePanel.tsx. */
-.usage-swatch {
+/* The ink of each direction's line, as its legend. Same hex as ThroughputPanel.tsx. */
+.throughput-swatch {
   flex: none;
   width: 10px;
   height: 10px;
   border-radius: 2px;
 }
 
-.usage-swatch.usage-sent {
+.throughput-swatch.throughput-sent {
   background: #4493f8;
 }
 
-.usage-swatch.usage-received {
+.throughput-swatch.throughput-received {
   background: #bf7f12;
 }
 
-.usage-tile-value {
+.throughput-tile-value {
   color: #e6edf3;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 1.7rem;
@@ -648,19 +648,19 @@ body {
   line-height: 1.1;
 }
 
-.usage-tile-value small {
+.throughput-tile-value small {
   margin-left: 4px;
   color: #8b949e;
   font-size: 0.95rem;
 }
 
-.usage-tile-sub {
+.throughput-tile-sub {
   color: #6e7681;
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 
-.usage-chart-head {
+.throughput-chart-head {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
@@ -669,23 +669,23 @@ body {
   font-size: 0.78rem;
 }
 
-.usage-chart-head strong {
+.throughput-chart-head strong {
   color: #e6edf3;
   font-weight: 500;
 }
 
-.usage-chart {
+.throughput-chart {
   position: relative;
   height: 180px;
   max-width: 100%;
   touch-action: pan-y;
 }
 
-.usage-chart.usage-chart-small {
+.throughput-chart.throughput-chart-small {
   height: 100px;
 }
 
-.usage-chart canvas {
+.throughput-chart canvas {
   position: absolute;
   inset: 0;
   display: block;
@@ -693,7 +693,7 @@ body {
   height: 100%;
 }
 
-.usage-tip {
+.throughput-tip {
   position: absolute;
   top: 8px;
   padding: 4px 8px;
@@ -708,7 +708,7 @@ body {
   pointer-events: none;
 }
 
-.usage-axis {
+.throughput-axis {
   display: flex;
   justify-content: space-between;
   color: #6e7681;
@@ -717,7 +717,7 @@ body {
 }
 
 @media (max-width: 480px) {
-  .usage-tile-value {
+  .throughput-tile-value {
     font-size: 1.35rem;
   }
 }
@@ -874,15 +874,15 @@ body {
   outline: none;
 }
 
-/* The Info card switched to "Data usage": wider for its graphs. */
-.help-card.usage-card {
+/* The Info card switched to "Throughput": wider for its graphs. */
+.help-card.throughput-card {
   display: flex;
   flex-direction: column;
   width: min(760px, 92vw);
   gap: 0.25rem;
 }
 
-.help-card.usage-card h1 {
+.help-card.throughput-card h1 {
   margin: 0 0 0.5rem;
   font-size: 1.05rem;
   font-weight: 600;

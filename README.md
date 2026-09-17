@@ -253,7 +253,7 @@ docker run -d --name remotex -p 52380:52380 \
 ```
 
 Set `[server].listen = "0.0.0.0:52380"` in the mounted config, or pass the same
-address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[usage]` set, mount a volume
+address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[meter]` set, mount a volume
 at `/opt/remotex/var` too, or the records go with the container. Images are
 published for Linux amd64 and arm64 with `latest` and `v<version>` tags.
 

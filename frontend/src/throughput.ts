@@ -1,26 +1,26 @@
-// The browser sockets' data usage, as the "Data usage" view graphs it over a range.
+// The browser sockets' throughput, as the "Throughput" view graphs it over a range.
 //
 // The gateway samples its counters once a second: the last sample is the rate right
-// now, read from `GET /api/usage/live` each second while the view is open and kept
+// now, read from `GET /api/throughput/live` each second while the view is open and kept
 // here as the seconds a short range draws. A range longer than the seconds kept is
-// drawn from the recorded rows instead, read from `GET /api/usage` with the timeframe
+// drawn from the recorded rows instead, read from `GET /api/throughput` with the timeframe
 // still being counted; each row carries its busiest second. The shapes mirror
-// `crate::usage` and the handlers' responses in src/server.rs. Rates are shown in bits
+// `crate::throughput` and the handlers' responses in src/server.rs. Rates are shown in bits
 // per second, the way a network meter does, and an average is derived here: bytes over
 // the seconds they moved in.
 
 import { gatewayFetch } from "./gateway.ts";
 
-export type UsageSocket = "session" | "audio" | "camera" | "mic";
+export type ThroughputSocket = "session" | "audio" | "camera" | "mic";
 
-export const USAGE_SOCKETS: readonly UsageSocket[] = [
+export const THROUGHPUT_SOCKETS: readonly ThroughputSocket[] = [
   "session",
   "audio",
   "camera",
   "mic",
 ];
 
-export const USAGE_SOCKET_LABEL: Record<UsageSocket, string> = {
+export const THROUGHPUT_SOCKET_LABEL: Record<ThroughputSocket, string> = {
   session: "Session",
   audio: "Audio",
   camera: "Camera",
@@ -32,9 +32,9 @@ export const USAGE_SOCKET_LABEL: Record<UsageSocket, string> = {
  * bytes per second. Times are Unix seconds; a `null` target is the picker, where the
  * browser sat with no target selected.
  */
-export interface UsageRecord {
+export interface ThroughputRecord {
   target: string | null;
-  socket: UsageSocket;
+  socket: ThroughputSocket;
   start: number;
   end: number;
   sentBytes: number;
@@ -44,46 +44,46 @@ export interface UsageRecord {
 }
 
 /** Whose bytes a row or a rate counts: what the view's filters choose by. */
-export interface UsageSource {
+export interface ThroughputSource {
   target: string | null;
-  socket: UsageSocket;
+  socket: ThroughputSocket;
 }
 
 /** What one target's socket moved in one sampled second, in bytes per second. */
-export interface LiveRate extends UsageSource {
+export interface LiveRate extends ThroughputSource {
   sentPerSec: number;
   receivedPerSec: number;
 }
 
 /** The rate right now: what the gateway's last one-second sample found moving. */
-export interface UsageLive {
+export interface ThroughputLive {
   /** When the sample was taken, in the gateway's Unix seconds. */
   at: number;
   /** Each target's socket that moved; the rest moved nothing. */
   rates: LiveRate[];
 }
 
-export interface UsageReport {
+export interface ThroughputReport {
   /** The gateway's clock at the read, in Unix seconds, which `open` ends at. */
   now: number;
   intervalSecs: number;
   maxRecords: number;
   /** The written timeframes, oldest first. */
-  records: UsageRecord[];
+  records: ThroughputRecord[];
   /** The timeframe still being counted, as it stood at `now`. */
-  open: UsageRecord[];
+  open: ThroughputRecord[];
 }
 
-export type UsageUnit = "seconds" | "minutes" | "hours" | "days";
+export type ThroughputUnit = "seconds" | "minutes" | "hours" | "days";
 
-export const USAGE_UNITS: readonly UsageUnit[] = [
+export const THROUGHPUT_UNITS: readonly ThroughputUnit[] = [
   "seconds",
   "minutes",
   "hours",
   "days",
 ];
 
-const UNIT_SECONDS: Record<UsageUnit, number> = {
+const UNIT_SECONDS: Record<ThroughputUnit, number> = {
   seconds: 1,
   minutes: 60,
   hours: 3600,
@@ -91,16 +91,16 @@ const UNIT_SECONDS: Record<UsageUnit, number> = {
 };
 
 /** The last `amount` of `unit`. */
-export interface UsageSpan {
+export interface ThroughputSpan {
   amount: number;
-  unit: UsageUnit;
+  unit: ThroughputUnit;
 }
 
 /** How far back the graph reaches: a span back from now, or everything kept. */
-export type UsageRange = UsageSpan | "all";
+export type ThroughputRange = ThroughputSpan | "all";
 
 /** The ranges the select offers before "Custom"; any other range is custom. */
-export const USAGE_PRESETS: readonly UsageRange[] = [
+export const THROUGHPUT_PRESETS: readonly ThroughputRange[] = [
   { amount: 60, unit: "seconds" },
   { amount: 5, unit: "minutes" },
   { amount: 15, unit: "minutes" },
@@ -117,14 +117,17 @@ export const USAGE_PRESETS: readonly UsageRange[] = [
   "all",
 ];
 
-export const DEFAULT_USAGE_RANGE: UsageSpan = { amount: 60, unit: "seconds" };
+export const DEFAULT_THROUGHPUT_RANGE: ThroughputSpan = {
+  amount: 60,
+  unit: "seconds",
+};
 
 /** The select's value for a range: the same range spells the same key. */
-export function usageRangeKey(range: UsageRange): string {
+export function throughputRangeKey(range: ThroughputRange): string {
   return range === "all" ? "all" : `${range.amount}:${range.unit}`;
 }
 
-export function usageRangeLabel(range: UsageRange): string {
+export function throughputRangeLabel(range: ThroughputRange): string {
   if (range === "all") {
     return "Everything kept";
   }
@@ -136,10 +139,10 @@ export function usageRangeLabel(range: UsageRange): string {
  * A custom range from the amount typed and the unit chosen, or `null` when the amount
  * is not a whole number of at least one.
  */
-export function customUsageRange(
+export function customThroughputRange(
   amount: string,
-  unit: UsageUnit,
-): UsageRange | null {
+  unit: ThroughputUnit,
+): ThroughputRange | null {
   if (!/^\d+$/.test(amount.trim())) {
     return null;
   }
@@ -153,19 +156,21 @@ export function customUsageRange(
  * The seconds a range reads back, or `null` for everything kept. The gateway counts
  * them back from its own clock, which the records were stamped with.
  */
-export function usageWithin(range: UsageRange): number | null {
+export function throughputWithin(range: ThroughputRange): number | null {
   return range === "all" ? null : range.amount * UNIT_SECONDS[range.unit];
 }
 
-export type UsageResult =
-  | { kind: "ok"; report: UsageReport }
+export type ThroughputResult =
+  | { kind: "ok"; report: ThroughputReport }
   | { kind: "unauthorized" }
   | { kind: "error"; message: string };
 
-export async function fetchUsage(within: number | null): Promise<UsageResult> {
+export async function fetchThroughput(
+  within: number | null,
+): Promise<ThroughputResult> {
   try {
     const res = await gatewayFetch(
-      within === null ? "/api/usage" : `/api/usage?within=${within}`,
+      within === null ? "/api/throughput" : `/api/throughput?within=${within}`,
     );
     if (res.status === 401) {
       return { kind: "unauthorized" };
@@ -173,36 +178,36 @@ export async function fetchUsage(within: number | null): Promise<UsageResult> {
     if (res.status === 404) {
       return {
         kind: "error",
-        message: "This gateway is not recording data usage",
+        message: "This gateway is not recording throughput",
       };
     }
     if (!res.ok) {
       return {
         kind: "error",
-        message: `Could not load usage (HTTP ${res.status})`,
+        message: `Could not load throughput (HTTP ${res.status})`,
       };
     }
-    return { kind: "ok", report: (await res.json()) as UsageReport };
+    return { kind: "ok", report: (await res.json()) as ThroughputReport };
   } catch {
-    return { kind: "error", message: "Could not load usage" };
+    return { kind: "error", message: "Could not load throughput" };
   }
 }
 
-export type UsageLiveResult =
-  | { kind: "ok"; live: UsageLive }
+export type ThroughputLiveResult =
+  | { kind: "ok"; live: ThroughputLive }
   | { kind: "unauthorized" }
   | { kind: "error" };
 
-export async function fetchUsageLive(): Promise<UsageLiveResult> {
+export async function fetchThroughputLive(): Promise<ThroughputLiveResult> {
   try {
-    const res = await gatewayFetch("/api/usage/live");
+    const res = await gatewayFetch("/api/throughput/live");
     if (res.status === 401) {
       return { kind: "unauthorized" };
     }
     if (!res.ok) {
       return { kind: "error" };
     }
-    return { kind: "ok", live: (await res.json()) as UsageLive };
+    return { kind: "ok", live: (await res.json()) as ThroughputLive };
   } catch {
     return { kind: "error" };
   }
@@ -248,8 +253,8 @@ export function liveTotals(rates: readonly LiveRate[]): {
 export const LIVE_HISTORY_SECS = 300;
 
 /** Whether a range is drawn from the sampled seconds rather than the recorded rows. */
-export function usageRangeIsLive(range: UsageRange): boolean {
-  const within = usageWithin(range);
+export function throughputRangeIsLive(range: ThroughputRange): boolean {
+  const within = throughputWithin(range);
   return within !== null && within <= LIVE_HISTORY_SECS;
 }
 
@@ -274,9 +279,9 @@ export function spanLabel(secs: number): string {
  * earlier second.
  */
 export function appendLive(
-  history: readonly UsageLive[],
-  live: UsageLive,
-): readonly UsageLive[] {
+  history: readonly ThroughputLive[],
+  live: ThroughputLive,
+): readonly ThroughputLive[] {
   const last = history.at(-1);
   if (last !== undefined && live.at <= last.at) {
     return history;
@@ -301,7 +306,7 @@ export interface RateSeries {
 }
 
 /** Both directions over one range, and how it is laid out in time. */
-export interface UsageSeries {
+export interface ThroughputSeries {
   sent: RateSeries;
   received: RateSeries;
   /** The seconds one point spans. */
@@ -327,11 +332,11 @@ function highest(points: readonly (number | null)[]): number {
  * second with no sample is a gap, and so is the whole window before the first read.
  */
 export function liveSeries(
-  history: readonly UsageLive[],
+  history: readonly ThroughputLive[],
   windowSecs: number,
-  keep: (source: UsageSource) => boolean,
+  keep: (source: ThroughputSource) => boolean,
   now: number | null,
-): UsageSeries {
+): ThroughputSeries {
   const sent: (number | null)[] = new Array(windowSecs).fill(null);
   const received: (number | null)[] = new Array(windowSecs).fill(null);
   if (now !== null) {
@@ -373,10 +378,10 @@ export const MAX_GRAPH_POINTS = 600;
  * row's: one socket's, never two sockets' seconds added together.
  */
 export function recordedSeries(
-  report: UsageReport,
+  report: ThroughputReport,
   within: number | null,
-  keep: (source: UsageSource) => boolean,
-): UsageSeries {
+  keep: (source: ThroughputSource) => boolean,
+): ThroughputSeries {
   const rows = [...report.records, ...report.open];
   const interval = Math.max(1, report.intervalSecs);
   const span =
@@ -468,9 +473,9 @@ export function clockNow(
 }
 
 /** Every target some kept sample or some row saw moving, by label. */
-export function usageTargets(
-  history: readonly UsageLive[],
-  rows: readonly UsageRecord[],
+export function throughputTargets(
+  history: readonly ThroughputLive[],
+  rows: readonly ThroughputRecord[],
 ): (string | null)[] {
   const targets = new Map<string, string | null>();
   for (const sample of history) {

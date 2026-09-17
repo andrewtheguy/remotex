@@ -18,7 +18,7 @@ use crate::{
     config::AppConfig,
     error::{ApiResult, AppError},
     session::SessionManager,
-    usage::{self, Usage},
+    throughput::{self, Throughput},
     ws,
 };
 
@@ -33,8 +33,8 @@ pub struct AppState {
     /// gateway's client carries the launch token the control plane seeded in that
     /// same cookie and there is no session to look up, so this stays empty there.
     pub auth: Arc<AuthSessions>,
-    /// Every browser socket's byte counters, and the database `[usage]` records them in.
-    pub usage: Usage,
+    /// Every browser socket's byte counters, and the database `[meter]` records them in.
+    pub throughput: Throughput,
 }
 
 /// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
@@ -207,11 +207,11 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
 ///   is the same binary and serves the same SPA.
 ///
-/// `usage` is where the browser sockets count their bytes and, when `[usage]` is set,
-/// the database [`crate::usage::start`] records them in and `/api/usage` reads.
-pub fn router(config: AppConfig, usage: Usage) -> Router {
+/// `throughput` is where the browser sockets count their bytes and, when `[meter]` is set,
+/// the database [`crate::throughput::start`] records them in and `/api/throughput` reads.
+pub fn router(config: AppConfig, throughput: Throughput) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
-    router_with_sessions(config, sessions, usage)
+    router_with_sessions(config, sessions, throughput)
 }
 
 /// [`router`] over a caller-supplied session slot.
@@ -222,7 +222,7 @@ pub fn router(config: AppConfig, usage: Usage) -> Router {
 pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
-    usage: Usage,
+    throughput: Throughput,
 ) -> Router {
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
@@ -253,7 +253,7 @@ pub(crate) fn router_with_sessions(
         config,
         sessions,
         auth: Arc::new(AuthSessions::default()),
-        usage,
+        throughput,
     };
     let require_auth = middleware::from_fn_with_state(state.clone(), require_auth);
 
@@ -271,8 +271,8 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
-                .route("/usage", get(usage_handler))
-                .route("/usage/live", get(usage_live_handler))
+                .route("/throughput", get(throughput_handler))
+                .route("/throughput/live", get(throughput_live_handler))
                 .route_layer(require_auth.clone()),
         )
         .fallback(|| async { AppError::NotFound });
@@ -539,9 +539,9 @@ struct ConfigResponse {
     /// the client already knows its gateway's origin, and a URL here would be a
     /// second spelling of it.
     logo: bool,
-    /// Whether `GET /api/usage` has a database to read, so the page offers the view only
+    /// Whether `GET /api/throughput` has a database to read, so the page offers the view only
     /// where there is something in it.
-    usage: bool,
+    throughput: bool,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
@@ -550,7 +550,7 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         branding: state.config.branding.text.clone(),
         logo: state.config.branding.logo.is_some(),
-        usage: state.usage.store.is_some(),
+        throughput: state.throughput.store.is_some(),
     })
 }
 
@@ -641,7 +641,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
 }
 
 #[derive(Deserialize)]
-struct UsageQuery {
+struct ThroughputQuery {
     /// Seconds back from the gateway's own clock: only timeframes that ended within them.
     /// Absent reads everything kept. Relative, so a browser's clock never moves the range.
     within: Option<u64>,
@@ -649,45 +649,47 @@ struct UsageQuery {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsageResponse {
+struct ThroughputResponse {
     /// The gateway's clock at the read, in Unix seconds, which `open` ends at.
     now: u64,
     interval_secs: u64,
     max_records: usize,
     /// The written timeframes, oldest first.
-    records: Vec<usage::Record>,
+    records: Vec<throughput::Record>,
     /// The timeframe still being counted, as it stands at `now`.
-    open: Vec<usage::Record>,
+    open: Vec<throughput::Record>,
 }
 
-/// The recorded data usage of the browser sockets, read when the page asks for it.
-/// 404 on a gateway with no `[usage]`: there is no database to read.
-async fn usage_handler(
+/// The recorded throughput of the browser sockets, read when the page asks for it.
+/// 404 on a gateway with no `[meter]`: there is no database to read.
+async fn throughput_handler(
     State(state): State<AppState>,
-    Query(query): Query<UsageQuery>,
-) -> ApiResult<Json<UsageResponse>> {
-    let store = state.usage.store.clone().ok_or(AppError::NotFound)?;
+    Query(query): Query<ThroughputQuery>,
+) -> ApiResult<Json<ThroughputResponse>> {
+    let store = state.throughput.store.clone().ok_or(AppError::NotFound)?;
     let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
-    let now = usage::unix_now();
+    let now = throughput::unix_now();
     let since = query.within.map_or(0, |within| now.saturating_sub(within));
     // The meters before the database: a timeframe closed between the two is in the
     // snapshot, and one written between the two is counted once, from the database.
-    let snapshot = state.usage.meters.snapshot(now);
+    let snapshot = state.throughput.meters.snapshot(now);
     let written = tokio::task::spawn_blocking(move || store.records(since))
         .await
         .map_err(anyhow::Error::from)??;
-    let usage::Reading { records, open } = snapshot.with_written(written, since);
-    Ok(Json(UsageResponse { now, interval_secs, max_records, records, open }))
+    let throughput::Reading { records, open } = snapshot.with_written(written, since);
+    Ok(Json(ThroughputResponse { now, interval_secs, max_records, records, open }))
 }
 
 /// The rate right now: what the last one-second sample found moving on each target's
-/// socket. Polled by the "Data usage" view while it is open. 404 on a gateway with no
-/// `[usage]`: nothing samples the counters there.
-async fn usage_live_handler(State(state): State<AppState>) -> ApiResult<Json<usage::Live>> {
-    if state.usage.store.is_none() {
+/// socket. Polled by the "Throughput" view while it is open. 404 on a gateway with no
+/// `[meter]`: nothing samples the counters there.
+async fn throughput_live_handler(
+    State(state): State<AppState>,
+) -> ApiResult<Json<throughput::Live>> {
+    if state.throughput.store.is_none() {
         return Err(AppError::NotFound);
     }
-    Ok(Json(state.usage.meters.live()))
+    Ok(Json(state.throughput.meters.live()))
 }
 
 #[derive(Deserialize, Default)]
@@ -887,7 +889,7 @@ mod tests {
             source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
         });
 
-        let response = router(config, Usage::default())
+        let response = router(config, Throughput::default())
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/logo")
@@ -909,7 +911,7 @@ mod tests {
     /// assertion below is about the redirect, and a request that is *not*
     /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        router(router_config(dev_hostname), Usage::default())
+        router(router_config(dev_hostname), Throughput::default())
     }
 
     /// The config both test routers are built from, so the only thing that ever
@@ -964,7 +966,7 @@ mod tests {
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
-            usage: None,
+            meter: None,
         }
     }
 
@@ -1304,12 +1306,12 @@ mod tests {
                 logo: None,
             },
             dev_hostname: None,
-            usage: None,
+            meter: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router_with_sessions(config, sessions, Usage::default());
+        let app = router_with_sessions(config, sessions, Throughput::default());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1375,16 +1377,16 @@ mod tests {
         let json = serde_json::to_string(&ConfigResponse {
             branding: "remotex".to_owned(),
             logo: false,
-            usage: false,
+            throughput: false,
         })
         .unwrap();
-        assert_eq!(json, r#"{"branding":"remotex","logo":false,"usage":false}"#);
+        assert_eq!(json, r#"{"branding":"remotex","logo":false,"throughput":false}"#);
     }
 
-    /// `/api/usage` is behind the login, reads back from the gateway's clock, and is a 404
+    /// `/api/throughput` is behind the login, reads back from the gateway's clock, and is a 404
     /// on a gateway that records nothing.
     #[tokio::test]
-    async fn usage_is_read_behind_the_login() {
+    async fn throughput_is_read_behind_the_login() {
         use tower::ServiceExt as _;
 
         let get = |uri: &str, cookie: Option<&str>| {
@@ -1412,15 +1414,15 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let store = usage::UsageStore::open(&usage::UsageConfig {
-            database: dir.path().join("usage.sqlite3"),
+        let store = throughput::ThroughputStore::open(&throughput::MeterConfig {
+            database: dir.path().join("meter.sqlite3"),
             interval: std::time::Duration::from_secs(60),
             max_records: 10,
         })
         .unwrap();
-        let record = |start, sent_bytes| usage::Record {
+        let record = |start, sent_bytes| throughput::Record {
             target: Some("mac".to_owned()),
-            socket: usage::Socket::Session,
+            socket: throughput::Socket::Session,
             start,
             end: start + 60,
             sent_bytes,
@@ -1428,24 +1430,24 @@ mod tests {
             peak_sent_per_sec: sent_bytes / 2,
             peak_received_per_sec: 7,
         };
-        let now = usage::unix_now();
+        let now = throughput::unix_now();
         store.write(&[record(now - 600, 100), record(now - 100, 200)]).unwrap();
         // A timeframe closed but not written yet, then the one still being counted:
         // one sample of the picker's, and bytes since.
-        let meters = Arc::new(usage::UsageMeters::open_at(vec!["mac".to_owned()], now - 20));
-        meters.counter(None, usage::Socket::Session).sent(30);
+        let meters = Arc::new(throughput::ThroughputMeters::open_at(vec!["mac".to_owned()], now - 20));
+        meters.counter(None, throughput::Socket::Session).sent(30);
         meters.sample(now - 19);
         meters.close_timeframe(now - 10);
-        meters.counter(None, usage::Socket::Session).received(4);
+        meters.counter(None, throughput::Socket::Session).received(4);
         meters.sample(now - 9);
-        meters.counter(None, usage::Socket::Session).received(2);
-        let app = router(router_config(None), Usage { meters, store: Some(Arc::new(store)) });
+        meters.counter(None, throughput::Socket::Session).received(2);
+        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) });
 
-        let response = app.clone().oneshot(get("/api/usage", None)).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let cookie = log_in(app.clone()).await;
-        let response = app.clone().oneshot(get("/api/usage?within=300", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput?within=300", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         let mut json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1470,9 +1472,9 @@ mod tests {
             })
         );
 
-        let response = app.clone().oneshot(get("/api/usage/live", None)).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput/live", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let response = app.clone().oneshot(get("/api/usage/live", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput/live", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
@@ -1480,11 +1482,11 @@ mod tests {
             format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":0,"receivedPerSec":4}}]}}"#, now - 9)
         );
 
-        let app = router(router_config(None), Usage::default());
+        let app = router(router_config(None), Throughput::default());
         let cookie = log_in(app.clone()).await;
-        let response = app.clone().oneshot(get("/api/usage", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let response = app.oneshot(get("/api/usage/live", Some(&cookie))).await.unwrap();
+        let response = app.oneshot(get("/api/throughput/live", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

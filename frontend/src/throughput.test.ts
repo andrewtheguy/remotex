@@ -4,7 +4,7 @@ import { test } from "node:test";
 import {
   appendLive,
   clockNow,
-  customUsageRange,
+  customThroughputRange,
   formatRate,
   LIVE_HISTORY_SECS,
   type LiveRate,
@@ -14,27 +14,27 @@ import {
   rateScale,
   recordedSeries,
   spanLabel,
+  THROUGHPUT_PRESETS,
+  type ThroughputLive,
+  type ThroughputRecord,
+  type ThroughputReport,
   targetLabel,
-  USAGE_PRESETS,
-  type UsageLive,
-  type UsageRecord,
-  type UsageReport,
-  usageRangeIsLive,
-  usageRangeKey,
-  usageRangeLabel,
-  usageTargets,
-  usageWithin,
-} from "./usage.ts";
+  throughputRangeIsLive,
+  throughputRangeKey,
+  throughputRangeLabel,
+  throughputTargets,
+  throughputWithin,
+} from "./throughput.ts";
 
 /// A record whose bytes all moved in one second, so its peaks are its bytes.
 const record = (
   target: string | null,
-  socket: UsageRecord["socket"],
+  socket: ThroughputRecord["socket"],
   sentBytes: number,
   receivedBytes: number,
   start = 0,
   end = start + 60,
-): UsageRecord => ({
+): ThroughputRecord => ({
   target,
   socket,
   start,
@@ -79,7 +79,10 @@ const rate = (
   receivedPerSec: number,
 ): LiveRate => ({ target, socket, sentPerSec, receivedPerSec });
 
-const sample = (at: number, ...rates: LiveRate[]): UsageLive => ({ at, rates });
+const sample = (at: number, ...rates: LiveRate[]): ThroughputLive => ({
+  at,
+  rates,
+});
 
 test("the history keeps one sample per second, newest last, as long as the longest sampled range", () => {
   let history = appendLive([], sample(100));
@@ -170,9 +173,15 @@ test("a scale tops out at a round number of bits per second above the peak", () 
 
 const report = (
   now: number,
-  records: UsageRecord[],
-  open: UsageRecord[] = [],
-): UsageReport => ({ now, intervalSecs: 60, maxRecords: 1440, records, open });
+  records: ThroughputRecord[],
+  open: ThroughputRecord[] = [],
+): ThroughputReport => ({
+  now,
+  intervalSecs: 60,
+  maxRecords: 1440,
+  records,
+  open,
+});
 
 test("a recorded range is a point per timeframe, the average over it, zero where nothing moved", () => {
   const read = report(
@@ -248,7 +257,7 @@ test("everything kept reaches back to the oldest row, whatever the filters keep"
 
 test("the targets are those any sample or row saw, by label", () => {
   assert.deepEqual(
-    usageTargets(
+    throughputTargets(
       [
         sample(1, rate("win", "session", 1, 1)),
         sample(2, rate(null, "session", 1, 1), rate("mac", "audio", 1, 0)),
@@ -257,7 +266,7 @@ test("the targets are those any sample or row saw, by label", () => {
     ),
     ["linux", "mac", null, "win"],
   );
-  assert.deepEqual(usageTargets([], []), []);
+  assert.deepEqual(throughputTargets([], []), []);
   assert.equal(targetLabel(null), "No target (picker)");
   assert.equal(targetLabel("mac"), "mac");
 });
@@ -271,24 +280,27 @@ test("a length of time is named in its largest unit", () => {
 });
 
 test("a range no longer than the seconds kept is drawn from them", () => {
-  assert.ok(usageRangeIsLive({ amount: 60, unit: "seconds" }));
-  assert.ok(usageRangeIsLive({ amount: 5, unit: "minutes" }));
-  assert.equal(usageWithin({ amount: 5, unit: "minutes" }), LIVE_HISTORY_SECS);
-  assert.ok(!usageRangeIsLive({ amount: 15, unit: "minutes" }));
-  assert.ok(!usageRangeIsLive("all"));
+  assert.ok(throughputRangeIsLive({ amount: 60, unit: "seconds" }));
+  assert.ok(throughputRangeIsLive({ amount: 5, unit: "minutes" }));
+  assert.equal(
+    throughputWithin({ amount: 5, unit: "minutes" }),
+    LIVE_HISTORY_SECS,
+  );
+  assert.ok(!throughputRangeIsLive({ amount: 15, unit: "minutes" }));
+  assert.ok(!throughputRangeIsLive("all"));
 });
 
 test("a range asks for its length, and everything kept for no bound", () => {
-  assert.equal(usageWithin({ amount: 60, unit: "seconds" }), 60);
-  assert.equal(usageWithin({ amount: 15, unit: "minutes" }), 900);
-  assert.equal(usageWithin({ amount: 1, unit: "hours" }), 3600);
-  assert.equal(usageWithin({ amount: 24, unit: "hours" }), 86_400);
-  assert.equal(usageWithin({ amount: 7, unit: "days" }), 604_800);
-  assert.equal(usageWithin("all"), null);
+  assert.equal(throughputWithin({ amount: 60, unit: "seconds" }), 60);
+  assert.equal(throughputWithin({ amount: 15, unit: "minutes" }), 900);
+  assert.equal(throughputWithin({ amount: 1, unit: "hours" }), 3600);
+  assert.equal(throughputWithin({ amount: 24, unit: "hours" }), 86_400);
+  assert.equal(throughputWithin({ amount: 7, unit: "days" }), 604_800);
+  assert.equal(throughputWithin("all"), null);
 });
 
 test("the presets step up without a jump, each spelled by one key", () => {
-  const seconds = USAGE_PRESETS.map(usageWithin);
+  const seconds = THROUGHPUT_PRESETS.map(throughputWithin);
   assert.equal(seconds.at(-1), null, "everything kept comes last");
   const bounded = seconds.slice(0, -1) as number[];
   for (let i = 1; i < bounded.length; i++) {
@@ -296,31 +308,34 @@ test("the presets step up without a jump, each spelled by one key", () => {
     assert.ok(bounded[i] <= bounded[i - 1] * 5, `no jump past 5x at ${i}`);
   }
   assert.equal(
-    new Set(USAGE_PRESETS.map(usageRangeKey)).size,
-    USAGE_PRESETS.length,
+    new Set(THROUGHPUT_PRESETS.map(throughputRangeKey)).size,
+    THROUGHPUT_PRESETS.length,
   );
-  assert.equal(usageRangeKey({ amount: 24, unit: "hours" }), "24:hours");
-  assert.equal(usageRangeKey("all"), "all");
-  assert.equal(usageRangeLabel({ amount: 1, unit: "hours" }), "Last 1 hour");
+  assert.equal(throughputRangeKey({ amount: 24, unit: "hours" }), "24:hours");
+  assert.equal(throughputRangeKey("all"), "all");
   assert.equal(
-    usageRangeLabel({ amount: 30, unit: "minutes" }),
+    throughputRangeLabel({ amount: 1, unit: "hours" }),
+    "Last 1 hour",
+  );
+  assert.equal(
+    throughputRangeLabel({ amount: 30, unit: "minutes" }),
     "Last 30 minutes",
   );
-  assert.equal(usageRangeLabel("all"), "Everything kept");
+  assert.equal(throughputRangeLabel("all"), "Everything kept");
 });
 
 test("a custom range takes a whole number of at least one", () => {
-  assert.deepEqual(customUsageRange("90", "minutes"), {
+  assert.deepEqual(customThroughputRange("90", "minutes"), {
     amount: 90,
     unit: "minutes",
   });
-  assert.deepEqual(customUsageRange(" 2 ", "days"), {
+  assert.deepEqual(customThroughputRange(" 2 ", "days"), {
     amount: 2,
     unit: "days",
   });
-  assert.equal(customUsageRange("0", "hours"), null);
-  assert.equal(customUsageRange("", "hours"), null);
-  assert.equal(customUsageRange("1.5", "hours"), null);
-  assert.equal(customUsageRange("-3", "hours"), null);
-  assert.equal(customUsageRange("abc", "hours"), null);
+  assert.equal(customThroughputRange("0", "hours"), null);
+  assert.equal(customThroughputRange("", "hours"), null);
+  assert.equal(customThroughputRange("1.5", "hours"), null);
+  assert.equal(customThroughputRange("-3", "hours"), null);
+  assert.equal(customThroughputRange("abc", "hours"), null);
 });

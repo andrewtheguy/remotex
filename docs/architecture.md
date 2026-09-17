@@ -1602,10 +1602,10 @@ then read per request, which is what lets an operator swap the image without a
 restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
 
-`[usage]` is top-level for the same reason and records the data usage of the
+`[meter]` is top-level for the same reason and records the throughput of the
 browser's four WebSockets in an SQLite database, one row per target, socket and
 timeframe, so targets can be compared, and measures the rate they move at. The
-database is `usage.sqlite3` in the
+database is `meter.sqlite3` in the
 gateway's state directory unless `database` names another, and a relative
 `database` is taken from there as well: the installation's state directory beside
 its config and web paths when `serve` reads the installed config, the config
@@ -1625,15 +1625,15 @@ a slow write or SQLite's busy wait never delays a sample; the writer adds them
 and deletes the rows past `max_records` per target and socket oldest first, all
 in one transaction, so a crash leaves the timeframe written or not at all. It is
 best effort by design: the open timeframe dies with the process, and a failed
-write is retried at the next close. A file that is not this gateway's usage
+write is retried at the next close. A file that is not this gateway's throughput
 database — not SQLite, SQLite without its application id, or another schema
 version — is refused at startup before anything is written to it. The page reads
-two things and draws one graph from them. `GET /api/usage/live` is the last
-sample, per target and socket, which the "Data usage" view polls once a second
+two things and draws one graph from them. `GET /api/throughput/live` is the last
+sample, per target and socket, which the "Throughput" view polls once a second
 while it is open and not paused, one poll out at a time, keeps for the last five
 minutes, and shows the way a network meter does: the rate now over a graph of the
 chosen range, one per direction on its own scale, narrowed to a target or a socket
-by its filters. `GET /api/usage?within=<seconds>` is the recorded rows, counted
+by its filters. `GET /api/throughput?within=<seconds>` is the recorded rows, counted
 back from the gateway's clock the rows were stamped with rather than the
 browser's, with the gateway's clock at the read and the open timeframe as it
 stands. The range is one select — the last 60 seconds up to the last 30 days,
