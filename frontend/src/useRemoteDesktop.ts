@@ -2079,6 +2079,12 @@ export function useRemoteDesktop(
           return; // no permission, or the user declined
         }
         if (
+          // Asked again on the far side of the await, which is where the menu can
+          // have opened: the read sits on a permission prompt for as long as the
+          // user takes to answer it, and what it then resolves with may be what was
+          // copied off a panel. Sending it would also stamp `lastToRemoteRef` with
+          // it, which is the mirror's echo guard.
+          viewOnlyRef.current ||
           text === "" ||
           overClipboardLimit(text) ||
           // Came from the remote a moment ago; sending it back is a loop.
