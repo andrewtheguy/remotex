@@ -201,6 +201,20 @@ test("a recorded range is a point per timeframe, the average over it, zero where
     () => true,
   );
   assert.deepEqual(clipped.sent.points, [50, 0]);
+  // A range that is no whole number of steps begins at its cutoff all the same: the
+  // oldest step averages over the seconds after it, and a row before it is left out.
+  const ragged = recordedSeries(
+    report(600, [
+      record("mac", "session", 70_000, 0, 180, 240),
+      record("mac", "session", 9000, 0, 240, 300),
+      record("mac", "session", 6000, 0, 300, 360),
+    ]),
+    330,
+    () => true,
+  );
+  assert.equal(ragged.spanSecs, 330);
+  assert.deepEqual(ragged.sent.points, [150, 100, 0, 0, 0, 0]);
+  assert.equal(ragged.sent.busiest, 9000);
 });
 
 test("a recorded range past the most points shares them between timeframes", () => {

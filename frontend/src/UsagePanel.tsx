@@ -161,7 +161,7 @@ function pointName(
   }
   return end === null
     ? ""
-    : pointLabel(end - ago - stepSecs, spanSecs > 86_400);
+    : pointLabel(end - Math.min(ago + stepSecs, spanSecs), spanSecs > 86_400);
 }
 
 /// The points of one direction on a canvas that fills its box (see usageChart.ts),
@@ -170,6 +170,7 @@ function RateChart({
   name,
   series,
   stepSecs,
+  spanSecs,
   end,
   rangeLabel,
   ink,
@@ -178,6 +179,7 @@ function RateChart({
   name: string;
   series: RateSeries;
   stepSecs: number;
+  spanSecs: number;
   end: number | null;
   rangeLabel: string;
   ink: ChartInk;
@@ -185,11 +187,12 @@ function RateChart({
 }) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
-  const [pointed, setPointed] = useState<number | null>(null);
+  const [hovered, setPointed] = useState<number | null>(null);
   const top = rateScale(series.peak);
   const { points } = series;
+  // A series of another length may replace this one under a resting pointer.
+  const pointed = hovered !== null && hovered < points.length ? hovered : null;
   const sampled = stepSecs === 1;
-  const spanSecs = points.length * stepSecs;
 
   useEffect(() => {
     const element = box.current;
@@ -312,6 +315,7 @@ function Meter({
         name="Sent"
         series={series.sent}
         stepSecs={series.stepSecs}
+        spanSecs={series.spanSecs}
         end={series.end}
         rangeLabel={rangeLabel}
         ink={SENT_INK}
@@ -320,6 +324,7 @@ function Meter({
         name="Received"
         series={series.received}
         stepSecs={series.stepSecs}
+        spanSecs={series.spanSecs}
         end={series.end}
         rangeLabel={rangeLabel}
         ink={RECEIVED_INK}
@@ -565,6 +570,7 @@ export default function UsagePanel({
       sent: unread,
       received: unread,
       stepSecs: (within ?? 0) / 2,
+      spanSecs: within ?? 0,
       end: null,
     };
   }

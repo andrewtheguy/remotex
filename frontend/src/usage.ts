@@ -306,6 +306,8 @@ export interface UsageSeries {
   received: RateSeries;
   /** The seconds one point spans. */
   stepSecs: number;
+  /** The seconds the range reaches back from `end`. */
+  spanSecs: number;
   /** The gateway's second the last point ends at, or `null` before any read. */
   end: number | null;
 }
@@ -351,6 +353,7 @@ export function liveSeries(
     sent: series(sent),
     received: series(received),
     stepSecs: 1,
+    spanSecs: windowSecs,
     end: now,
   };
 }
@@ -363,8 +366,10 @@ export const MAX_GRAPH_POINTS = 600;
  * its oldest row — up to the gateway's clock at the read, from the rows `keep` admits
  * with the open timeframe among them. A point is the average over its step: one
  * timeframe, or as many as it takes to stay within `MAX_GRAPH_POINTS`, a row's bytes
- * shared between the steps it overlaps. A timeframe nothing moved in has no row, so a
- * step with none is zero and a recorded range has no gaps. The busiest second is one
+ * shared between the steps it overlaps. The range begins at its cutoff exactly: the
+ * part of a row before it is left out, and the oldest step, which the cutoff may fall
+ * inside, averages over the seconds it has after it. A timeframe nothing moved in has
+ * no row, so a step with none is zero and a recorded range has no gaps. The busiest second is one
  * row's: one socket's, never two sockets' seconds added together.
  */
 export function recordedSeries(
@@ -384,12 +389,13 @@ export function recordedSeries(
   const stepSecs = interval * Math.ceil(timeframes / MAX_GRAPH_POINTS);
   const count = Math.max(2, Math.ceil(span / stepSecs));
   const first = report.now - count * stepSecs;
+  const cutoff = report.now - span;
   const sent = new Array<number>(count).fill(0);
   const received = new Array<number>(count).fill(0);
   let busiestSent = 0;
   let busiestReceived = 0;
   for (const row of rows) {
-    if (!keep(row) || row.end <= first) {
+    if (!keep(row) || row.end <= cutoff) {
       continue;
     }
     busiestSent = Math.max(busiestSent, row.peakSentPerSec);
@@ -408,12 +414,13 @@ export function recordedSeries(
     );
     for (let i = from; i <= to; i++) {
       const stepStart = first + i * stepSecs;
+      const stepFrom = Math.max(stepStart, cutoff);
+      const stepEnd = stepStart + stepSecs;
       const overlap =
-        Math.min(row.end, stepStart + stepSecs) -
-        Math.max(row.start, stepStart);
-      const share = length > 0 ? overlap / length : 1;
-      sent[i] += (row.sentBytes * share) / stepSecs;
-      received[i] += (row.receivedBytes * share) / stepSecs;
+        Math.min(row.end, stepEnd) - Math.max(row.start, stepFrom);
+      const share = length > 0 ? Math.max(0, overlap) / length : 1;
+      sent[i] += (row.sentBytes * share) / (stepEnd - stepFrom);
+      received[i] += (row.receivedBytes * share) / (stepEnd - stepFrom);
     }
   }
   const series = (points: number[], busiest: number): RateSeries => {
@@ -424,6 +431,7 @@ export function recordedSeries(
     sent: series(sent, busiestSent),
     received: series(received, busiestReceived),
     stepSecs,
+    spanSecs: span,
     end: report.now,
   };
 }
