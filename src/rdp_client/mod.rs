@@ -34,10 +34,9 @@
 //! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
 //! draws through surfaces on a dynamic channel — [`gfx`](self::gfx) composes them
 //! into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
-//! layout with a graphics reset. Without it, the server sends plain bitmap updates
-//! on the share and answers a monitor layout with a Deactivation-Reactivation
-//! Sequence — it tears the desktop down and builds it again at the new size. Either
-//! way a resize surfaces here as one [`Event::Resize`].
+//! layout with a graphics reset, which surfaces here as one [`Event::Resize`].
+//! Without it, the server sends plain bitmap updates on the share and the desktop
+//! keeps its opening size: Display Control is the pipeline's alone.
 //!
 //! # The clipboard
 //!

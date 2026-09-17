@@ -124,7 +124,7 @@ impl Input {
     /// is dropped, like every other input on a session that cannot carry it.
     ///
     /// **Nothing happens synchronously.** The server answers by resizing the
-    /// desktop — a Deactivation-Reactivation Sequence — which arrives as
+    /// desktop — a graphics reset — which arrives as
     /// [`Event::Resize`](super::Event::Resize) with the size it actually chose. A
     /// server that declines sends nothing at all, so the framebuffer's size is what
     /// `Event::Resize` says, never what was requested here.

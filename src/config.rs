@@ -728,7 +728,8 @@ pub struct TargetConfig {
     /// resize: the Display Control channel this negotiates is the only way to tell
     /// a live session to render at 200%, so a Retina client gets twice the pixels
     /// and a UI drawn twice as large. Off, an RDP target ignores the client's
-    /// density entirely.
+    /// density entirely. An RDP resize is the graphics pipeline's, so the key is
+    /// refused beside `egfx = false`.
     ///
     /// On `ard-high-performance` the setup descriptor always enables the Mac's
     /// dynamic geometry; this flag decides only whether the window keeps
@@ -736,14 +737,13 @@ pub struct TargetConfig {
     /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
-    /// RDP's graphics pipeline (MS-RDPEGFX), on by default and decoupled from
-    /// [`Self::resize`]. On, a Windows host draws the desktop through the
-    /// pipeline's surfaces and marks every frame, and a resize is a graphics reset
-    /// — no reactivation and no reconnect. Off, the host draws with bitmap updates
-    /// and a resize is a Deactivation-Reactivation Sequence, after which it
-    /// re-renders the desktop from scratch; that is the escape hatch for a host
-    /// whose pipeline this client's decoders cannot yet paint, and the path every
-    /// non-Windows server takes regardless.
+    /// RDP's graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host
+    /// draws the desktop through the pipeline's surfaces and marks every frame,
+    /// and a resize is a graphics reset. Off, the host draws with bitmap updates
+    /// and the desktop keeps its opening size — [`Self::resize`] is refused
+    /// beside it; that is the escape hatch for a host whose pipeline this
+    /// client's decoders cannot yet paint, and the path every non-Windows server
+    /// takes regardless.
     ///
     /// `Option` rather than a bare default so that setting it on a VNC target,
     /// which has no graphics pipeline to switch, is refused at parse time
@@ -1683,6 +1683,17 @@ impl ConfigFile {
                  to switch. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            // An RDP resize is a graphics reset, which only the pipeline has: the
+            // bitmap path keeps its opening size, so the pair is refused rather than
+            // left to a channel whose layouts would go nowhere. MS-RDPEDISP's other
+            // answer, a Deactivation-Reactivation Sequence, is left out on purpose: see
+            // "Bitmap updates" in docs/rdp-client.md.
+            anyhow::ensure!(
+                !(target.protocol == Protocol::Rdp && target.resize && !target.egfx()),
+                "target {:?} sets resize with egfx = false, and an rdp desktop is resized \
+                 through the graphics pipeline alone. Remove one of the two keys.",
+                target.name
             );
             // Audio is carried by three paths and refused elsewhere rather than
             // ignored: MS-RDPEA on RDP, the QEMU Audio extension on a generic VNC
@@ -4974,6 +4985,33 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(!config.targets[0].egfx(), "the bitmap path is one key away");
+    }
+
+    /// An RDP resize is a graphics reset, so the bitmap path has none to offer and
+    /// the pair is refused by name rather than left inert.
+    #[test]
+    fn resize_is_refused_on_rdp_without_the_graphics_pipeline() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            username = "u"
+            password = "p"
+            host = "10.0.0.5"
+            resize = true
+            egfx = false
+            "#,
+            site_passwd_line()
+        ))
+        .and_then(ConfigFile::resolve)
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("resize"), "{rendered}");
+        assert!(rendered.contains("egfx = false"), "{rendered}");
     }
 
     /// Standard mode has no audio to offer — Apple's media stream is High

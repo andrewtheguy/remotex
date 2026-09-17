@@ -173,8 +173,10 @@ not mentioned. Each line was checked field by field against the spec text.
 - **Finalization and share layer:** Synchronize addressed to the Demand Active's
   `pduSource` (3.2.5.3.14), Control Cooperate then Request Control, Font List;
   server Synchronize, Cooperate, Granted, Font Map; share control and data headers
-  including `uncompressedLength`; compressed bodies refused; Deactivate All to
-  reactivation with no input in the window; Set Error Info fatal; Refresh Rect and
+  including `uncompressedLength`; compressed bodies refused; a mid-session Deactivate All
+  fatal, since nothing this client asks for rebuilds the share — the
+  Deactivation-Reactivation Sequence (1.3.1.3) is deliberately not implemented, see
+  [Bitmap updates](rdp-client.md#bitmap-updates); Set Error Info fatal; Refresh Rect and
   Suppress Output sent only when advertised.
 - **Fast-path input and output:** header, both length forms, event header packing,
   scancode flags, every mouse flag with the 9-bit rotation clamped, extended
@@ -213,8 +215,7 @@ not mentioned. Each line was checked field by field against the spec text.
   Quality Mode only when both sides reach 6, Training Confirm echo, WaveInfo and
   Wave reassembly with the four carried bytes, Wave2, `wFormatNo` indexing the
   client's list, confirms on the receiving transport with `wTimeStamp` advanced by
-  the milliseconds from network arrival to sending, time held through a
-  reactivation included (3.2.5.2.1.6), `WAVEFORMATEX` layout.
+  the milliseconds from arrival to sending (3.2.5.2.1.6), `WAVEFORMATEX` layout.
 - **Graphics pipeline:** every server-to-client PDU's field order, ResetGraphics
   with 20-byte monitor definitions and the pad read past, CapsAdvertise with
   distinct versions and valid flags, FrameAcknowledge after compositing with a

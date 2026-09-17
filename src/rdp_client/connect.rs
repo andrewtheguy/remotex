@@ -10,8 +10,6 @@
 //! reader wants — what is sent, and what has to come back — would be the one thing not
 //! written down anywhere.
 
-use std::time::Instant;
-
 use anyhow::{Context as _, Result, bail};
 use log::{debug, info};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, WriteHalf};
@@ -85,9 +83,8 @@ pub(super) struct Connected {
     /// What the server said when it opened the share.
     pub demand: DemandActive,
     /// PDUs that arrived on a static virtual channel while the share was being
-    /// finalized, in the order they came and each with when it arrived — see
-    /// [`activate`].
-    pub deferred: Vec<(u16, Vec<u8>, Instant)>,
+    /// finalized, in the order they came — see [`activate`].
+    pub deferred: Vec<(u16, Vec<u8>)>,
 }
 
 impl Connected {
@@ -233,7 +230,6 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     license::accept(payload)?;
 
     // 9. The capability exchange, and 10. the four PDUs that make the share live.
-    //     Both happen again, unchanged, every time the server rebuilds the desktop.
     let payload = receive(&mut frames, &mut frame, io_channel).await?;
     let Pdu::DemandActive { source, body } = share::decode(payload)? else {
         bail!("the host did not demand a share once licensing was done");
@@ -252,10 +248,6 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 /// The capability exchange and the handshake after it: everything between a Demand
 /// Active and a live share.
 ///
-/// Run once while connecting, and again every time the server tears the desktop down
-/// and builds it back — the Deactivation-Reactivation Sequence repeats this whole
-/// exchange, which is why it is one function rather than part of the sequence above.
-///
 /// Fast-path updates that arrive part-way through are read past: the server may start
 /// painting a desktop before it has finished agreeing on one, and what is dropped
 /// here is asked for again by whoever called this.
@@ -264,8 +256,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 /// again: a server opens the clipboard as soon as the channel is up, which is before
 /// this exchange ends, and a Monitor Ready read past here would be a session whose
 /// clipboard never started. So those are handed back rather than dropped, for the
-/// caller to act on once it can, each with when it arrived: a sound buffer's confirm
-/// counts the time it was held.
+/// caller to act on once it can.
 pub(super) async fn activate(
     frames: &mut Frames<ReadHalf<tls::Stream>>,
     writer: &mut WriteHalf<tls::Stream>,
@@ -273,7 +264,7 @@ pub(super) async fn activate(
     user: u16,
     io_channel: u16,
     demand: &DemandActive,
-) -> Result<Vec<(u16, Vec<u8>, Instant)>> {
+) -> Result<Vec<(u16, Vec<u8>)>> {
     let confirm = ConfirmActive {
         share_id: demand.share_id,
         width: demand.width,
@@ -300,7 +291,7 @@ pub(super) async fn activate(
         let payload = match mcs::send_data_indication(frame)? {
             mcs::Indication::Data(data) if data.channel == io_channel => data.payload,
             mcs::Indication::Data(data) => {
-                deferred.push((data.channel, data.payload.to_vec(), Instant::now()));
+                deferred.push((data.channel, data.payload.to_vec()));
                 continue;
             }
             mcs::Indication::Disconnect(reason) => {

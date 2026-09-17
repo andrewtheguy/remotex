@@ -640,7 +640,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
             if target.egfx() {
                 "egfx pipeline; a resize is a graphics reset"
             } else {
-                "bitmap updates; a resize reactivates the session"
+                "bitmap updates at the opening size"
             },
         ));
     }
