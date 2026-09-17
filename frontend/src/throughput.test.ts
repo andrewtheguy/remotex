@@ -38,7 +38,9 @@ const back = (within: number | null) => ({ within, end: null });
 const within = (range: Parameters<typeof throughputBounds>[0]) =>
   throughputBounds(range).within;
 
-/// A record whose bytes all moved in one second, so its peaks are its bytes.
+/// A record whose bytes all moved in one second, so its peaks are its bytes. It names
+/// none of its seconds unless `seconds` says which moved, as a read too long for them
+/// answers.
 const record = (
   target: string | null,
   socket: ThroughputRecord["socket"],
@@ -46,6 +48,7 @@ const record = (
   receivedBytes: number,
   start = 0,
   end = start + 60,
+  seconds: [number, number, number][] = [],
 ): ThroughputRecord => ({
   target,
   socket,
@@ -55,6 +58,7 @@ const record = (
   receivedBytes,
   peakSentPerSec: sentBytes,
   peakReceivedPerSec: receivedBytes,
+  seconds,
 });
 
 test("a rate in bytes per second is shown in decimal bits per second", () => {
@@ -238,6 +242,63 @@ test("a recorded range is a point per timeframe, the average over it, zero where
   assert.equal(ragged.spanSecs, 330);
   assert.deepEqual(ragged.sent.points, [150, 100, 0, 0, 0, 0]);
   assert.equal(ragged.sent.busiest, 9000);
+});
+
+test("the seconds a row names are drawn a point each, the quiet ones as zero", () => {
+  // Two timeframes, each moving in two of its seconds; the range is the newest 120.
+  const read = report(240, [
+    record("mac", "session", 6000, 60, 120, 180, [
+      [0, 3000, 30],
+      [59, 3000, 30],
+    ]),
+    record("mac", "session", 600, 0, 180, 240, [[10, 600, 0]]),
+  ]);
+  const second = recordedSeries(read, back(120), () => true);
+  assert.equal(second.stepSecs, 1, "a range of 120 seconds is 120 points");
+  assert.equal(second.sent.points.length, 120);
+  assert.equal(second.sent.points[0], 3000, "the second it began in");
+  assert.equal(
+    second.sent.points[1],
+    0,
+    "a second it named is a second nothing moved",
+  );
+  assert.equal(second.sent.points[59], 3000);
+  assert.equal(second.sent.points[70], 600);
+  assert.deepEqual(second.received.points.slice(0, 2), [30, 0]);
+  assert.equal(
+    second.sent.busiest,
+    6000,
+    "the row's own busiest second stands",
+  );
+
+  // Past the points a graph holds, a step averages the seconds in it, the quiet
+  // seconds among them.
+  const stepped = recordedSeries(
+    report(240, [
+      record("mac", "session", 6000, 0, 180, 240, [
+        [0, 4000, 0],
+        [1, 2000, 0],
+      ]),
+    ]),
+    back(MAX_GRAPH_POINTS * 2),
+    () => true,
+  );
+  assert.equal(stepped.stepSecs, 2);
+  assert.equal(
+    stepped.sent.points.at(-30),
+    3000,
+    "4000 and 2000 over two seconds",
+  );
+  assert.equal(stepped.sent.points.at(-29), 0);
+
+  // A read that carries no seconds is the timeframe's average, as before.
+  const averaged = recordedSeries(
+    report(240, [record("mac", "session", 6000, 60, 180, 240)]),
+    back(120),
+    () => true,
+  );
+  assert.equal(averaged.stepSecs, 60);
+  assert.deepEqual(averaged.sent.points, [0, 100]);
 });
 
 test("a recorded range past the most points shares them between timeframes", () => {

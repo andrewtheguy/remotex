@@ -674,6 +674,8 @@ impl ThroughputQuery {
 struct ThroughputResponse {
     /// The gateway's clock at the read, in Unix seconds, which `open` ends at.
     now: u64,
+    /// The seconds one row's timeframe groups, which a range too long for the sampled
+    /// seconds is drawn a point per.
     interval_secs: u64,
     max_records: usize,
     /// The written timeframes, oldest first.
@@ -689,17 +691,33 @@ async fn throughput_handler(
     Query(query): Query<ThroughputQuery>,
 ) -> ApiResult<Json<ThroughputResponse>> {
     let store = state.throughput.store.clone().ok_or(AppError::NotFound)?;
-    let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
+    let max_records = store.max_records;
     let now = throughput::unix_now();
     let window = query.window(now).map_err(AppError::BadRequest)?;
+    // Short enough to draw a point a second: the range is answered with the seconds that
+    // moved, and a longer one with the timeframes alone.
+    let span = window.until.unwrap_or(now).saturating_sub(window.since);
+    let seconds = span <= throughput::TRACE_SPAN_SECS;
     // The meters before the database: a timeframe closed between the two is in the
     // snapshot, and one written between the two is counted once, from the database.
     let snapshot = state.throughput.meters.snapshot(now);
-    let written = tokio::task::spawn_blocking(move || store.records(window))
+    let written = tokio::task::spawn_blocking(move || store.records(window, seconds))
         .await
         .map_err(anyhow::Error::from)??;
-    let throughput::Reading { records, open } = snapshot.with_written(written, window);
-    Ok(Json(ThroughputResponse { now, interval_secs, max_records, records, open }))
+    let throughput::Reading { mut records, mut open } = snapshot.with_written(written, window);
+    if !seconds {
+        // The rows from memory carry theirs whatever the range: drop them with the rest.
+        for record in records.iter_mut().chain(&mut open) {
+            record.seconds.clear();
+        }
+    }
+    Ok(Json(ThroughputResponse {
+        now,
+        interval_secs: throughput::TIMEFRAME.as_secs(),
+        max_records,
+        records,
+        open,
+    }))
 }
 
 /// The rate right now: what the last one-second sample found moving on each target's
@@ -1438,7 +1456,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = throughput::ThroughputStore::open(&throughput::MeterConfig {
             database: dir.path().join("meter.sqlite3"),
-            interval: std::time::Duration::from_secs(60),
             max_records: 10,
         })
         .unwrap();
@@ -1451,6 +1468,11 @@ mod tests {
             received_bytes: 7,
             peak_sent_per_sec: sent_bytes / 2,
             peak_received_per_sec: 7,
+            // Two seconds of it moved: the rest of the minute was quiet.
+            seconds: vec![
+                throughput::Second(0, sent_bytes / 2, 3),
+                throughput::Second(30, sent_bytes / 2, 4),
+            ],
         };
         let now = throughput::unix_now();
         store.write(&[record(now - 600, 100), record(now - 100, 200)]).unwrap();
@@ -1485,14 +1507,24 @@ mod tests {
                 "intervalSecs": 60,
                 "maxRecords": 10,
                 "records": [
-                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7},
-                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0}
+                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7, "seconds": [[0, 100, 3], [30, 100, 4]]},
+                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0, "seconds": [[1, 30, 0]]}
                 ],
                 "open": [
-                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4}
+                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4, "seconds": [[1, 0, 4]]}
                 ],
             })
         );
+
+        // A range too long to draw a point a second is answered without the seconds, from
+        // the database and from the meters alike.
+        let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        for record in json["records"].as_array().unwrap().iter().chain(json["open"].as_array().unwrap()) {
+            assert_eq!(record["seconds"], serde_json::json!([]), "{record}");
+        }
 
         // A range named outright: the timeframes inside it alone, and not the one still
         // being counted, which began after that range ended.
@@ -1501,7 +1533,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["records"], serde_json::json!([{"target": "mac", "socket": "session", "start": now - 600, "end": now - 540, "sentBytes": 100, "receivedBytes": 7, "peakSentPerSec": 50, "peakReceivedPerSec": 7}]));
+        assert_eq!(json["records"], serde_json::json!([{"target": "mac", "socket": "session", "start": now - 600, "end": now - 540, "sentBytes": 100, "receivedBytes": 7, "peakSentPerSec": 50, "peakReceivedPerSec": 7, "seconds": [[0, 50, 3], [30, 50, 4]]}]));
         assert_eq!(json["open"], serde_json::json!([]));
 
         // Two ranges in one query, or one that ends where it begins, is no query at all.

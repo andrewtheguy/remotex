@@ -22,6 +22,7 @@ import {
   type RateSeries,
   rateScale,
   recordedSeries,
+  reportHasSeconds,
   spanLabel,
   THROUGHPUT_PRESETS,
   THROUGHPUT_SOCKET_LABEL,
@@ -90,9 +91,10 @@ export function useThroughputAvailable(): boolean {
 /// How often the rate right now is read: the gateway samples once a second.
 const LIVE_PERIOD_MS = 1000;
 
-/// The soonest the recorded rows are read again, whatever the timeframe's length, and
-/// how soon a failed read is retried.
-const RECORDED_PERIOD_MIN_SECS = 10;
+/// How soon the recorded rows are read again when the read carried the seconds that
+/// moved — the graph then draws a point a second, and a stale one shows — and how soon a
+/// failed read is retried.
+const RECORDED_PERIOD_SECS = 10;
 
 /// The meter's ink, in the page's dark palette; the two hues were checked apart for
 /// every kind of color vision against the surface, and the swatches in index.css
@@ -108,6 +110,15 @@ const RECEIVED_INK: ChartInk = {
   fill: "rgba(191, 127, 18, 0.2)",
   ...SURFACE,
 };
+
+/// How long until the recorded rows are read again: a range drawn a point per timeframe
+/// has nothing new to say until the next one closes, while one drawn a point per second
+/// moves on with every read.
+function readAgainSecs(report: ThroughputReport): number {
+  return reportHasSeconds(report)
+    ? RECORDED_PERIOD_SECS
+    : Math.max(RECORDED_PERIOD_SECS, report.intervalSecs);
+}
 
 /// The filter select's value for a target: `null` (the picker) cannot be an option
 /// value, and a prefix keeps a target named "all" apart from the "all" choice.
@@ -148,14 +159,15 @@ function RateTile({
 }
 
 /// What the tooltip calls a point that ends `ago` seconds before the graph does: how
-/// long ago a sampled second was, when a recorded step began.
+/// long ago a second was on a range that ends now, and otherwise when the step began.
 function pointName(
   ago: number,
   stepSecs: number,
   end: number | null,
   spanSecs: number,
+  relative: boolean,
 ): string {
-  if (stepSecs === 1) {
+  if (stepSecs === 1 && relative) {
     return ago === 0 ? "now" : `${ago} s ago`;
   }
   return end === null
@@ -173,6 +185,7 @@ function RateChart({
   end,
   rangeLabel,
   axis,
+  relative,
   ink,
   small,
 }: {
@@ -184,6 +197,8 @@ function RateChart({
   rangeLabel: string;
   /// What each end of the plot stands at: how long ago, or the time itself.
   axis: readonly [string, string];
+  /// Whether the range ends at the read, so a point can be named by how long ago it was.
+  relative: boolean;
   ink: ChartInk;
   small?: boolean;
 }) {
@@ -194,7 +209,7 @@ function RateChart({
   const top = rateScale(busiest);
   // A series of another length may replace this one under a resting pointer.
   const pointed = hovered !== null && hovered < points.length ? hovered : null;
-  const sampled = stepSecs === 1;
+  const sampled = stepSecs === 1 && relative;
 
   useEffect(() => {
     const element = box.current;
@@ -236,6 +251,7 @@ function RateChart({
           stepSecs,
           end,
           spanSecs,
+          relative,
         );
 
   return (
@@ -243,7 +259,7 @@ function RateChart({
       <div className="throughput-chart-head">
         <strong>{name}</strong>
         <span>
-          {!sampled && end !== null && `${spanLabel(stepSecs)} averages · `}
+          {stepSecs > 1 && end !== null && `${spanLabel(stepSecs)} averages · `}
           scale: 0 – {formatRate(top)}
         </span>
       </div>
@@ -293,11 +309,13 @@ function Meter({
   series,
   rangeLabel,
   axis,
+  relative,
 }: {
   rates: { sent: number; received: number } | null;
   series: ThroughputSeries;
   rangeLabel: string;
   axis: readonly [string, string];
+  relative: boolean;
 }) {
   return (
     <section className="throughput-meter" aria-label="Rate right now">
@@ -325,6 +343,7 @@ function Meter({
         end={series.end}
         rangeLabel={rangeLabel}
         axis={axis}
+        relative={relative}
         ink={SENT_INK}
       />
       <RateChart
@@ -335,6 +354,7 @@ function Meter({
         end={series.end}
         rangeLabel={rangeLabel}
         axis={axis}
+        relative={relative}
         ink={RECEIVED_INK}
         small
       />
@@ -509,6 +529,7 @@ function meterView(
   series: ThroughputSeries;
   rangeLabel: string;
   axis: readonly [string, string];
+  relative: boolean;
 } {
   const { within, end } = throughputBounds(range);
   const unread: RateSeries = { points: [null, null], busiest: 0 };
@@ -529,6 +550,7 @@ function meterView(
   const label = throughputRangeLabel(range);
   return {
     series,
+    relative: !isThroughputWindow(range),
     // A window names itself; the rest read on after "peak 5.0 Mbps, ".
     rangeLabel: isThroughputWindow(range)
       ? label
@@ -585,7 +607,7 @@ export default function ThroughputPanel({
       if (cancelled) {
         return;
       }
-      let again = RECORDED_PERIOD_MIN_SECS;
+      let again = RECORDED_PERIOD_SECS;
       if (result.kind === "unauthorized") {
         onUnauthorized();
         return;
@@ -598,7 +620,7 @@ export default function ThroughputPanel({
         shown.current = key;
         setError(null);
         setReport(result.report);
-        again = Math.max(again, result.report.intervalSecs);
+        again = readAgainSecs(result.report);
       }
       if (!paused) {
         timer = setTimeout(() => void read(), again * 1000);
@@ -727,6 +749,7 @@ export default function ThroughputPanel({
         series={view.series}
         rangeLabel={view.rangeLabel}
         axis={view.axis}
+        relative={view.relative}
       />
       <button type="button" className="picker-logout" onClick={onClose}>
         {closeLabel}

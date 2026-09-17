@@ -53,11 +53,16 @@
 # written to the browser (sent) and read from it (received).
 #
 # Bytes are grouped by the target the session had selected when they moved, and
-# by "no target" while the browser sits on the picker. Every interval_secs one
-# record is added per target and socket that moved data in that timeframe — an
-# idle socket adds none — in one transaction. Each target's socket keeps its
-# newest max_records records. Best effort: the timeframe being counted when the
-# gateway stops is lost. Without a [meter] table, nothing is recorded.
+# by "no target" while the browser sits on the picker. The meter reads the
+# counters once a second, and every minute one record is added per target and
+# socket that moved data in that minute — an idle socket adds none — in one
+# transaction, carrying the minute's bytes, its busiest second and each second of
+# it that moved. A second that moved nothing is not stored. The second is the
+# meter's resolution and the minute is only how often it reaches the disk;
+# neither is configurable. Each target's socket keeps its newest max_records
+# records, so the default is a week of minutes for a socket busy all week. Best
+# effort: the minute being counted when the gateway stops is lost. Without a
+# [meter] table, nothing is recorded.
 #
 # The database is meter.sqlite3 in the gateway's state directory unless database
 # names another file; a relative path is taken from that directory too. The state
@@ -69,8 +74,7 @@
 #
 #[meter]
 #database = "meter.sqlite3"
-#interval_secs = 60
-#max_records = 1440
+#max_records = 10080
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,

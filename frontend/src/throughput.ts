@@ -41,6 +41,14 @@ export interface ThroughputRecord {
   receivedBytes: number;
   peakSentPerSec: number;
   peakReceivedPerSec: number;
+  /**
+   * Every second of the timeframe that moved something, oldest first, as
+   * `[at, sentPerSec, receivedPerSec]` — `at` being seconds from `start`, the rates in
+   * bytes per second. A second that moved nothing is simply missing. Empty where the
+   * range asked for is too long for the gateway to send them, and then a point is the
+   * timeframe's average instead.
+   */
+  seconds: [number, number, number][];
 }
 
 /** Whose bytes a row or a rate counts: what the view's filters choose by. */
@@ -464,20 +472,130 @@ export function liveSeries(
   };
 }
 
+/**
+ * Whether a report carries the seconds that moved. The gateway answers a short enough
+ * range with them and a longer one without, so this is how the page knows which it has
+ * without keeping the gateway's threshold of its own.
+ */
+export function reportHasSeconds(report: ThroughputReport): boolean {
+  return [...report.records, ...report.open].some(
+    (row) => row.seconds.length > 0,
+  );
+}
+
 /** The most points a recorded range is drawn with; past it, timeframes share one. */
 export const MAX_GRAPH_POINTS = 600;
 
 /**
  * Each direction of a report over `bounds` — the seconds the range covers, ending where
  * it ends or at the gateway's clock at the read — from the rows `keep` admits with the
- * open timeframe among them. A point is the average over its step: one
- * timeframe, or as many as it takes to stay within `MAX_GRAPH_POINTS`, a row's bytes
- * shared between the steps it overlaps. The range begins at its cutoff exactly: the
- * part of a row before it is left out, and the oldest step, which the cutoff may fall
- * inside, averages over the seconds it has after it. A timeframe nothing moved in has
- * no row, so a step with none is zero and a recorded range has no gaps. The busiest second is one
- * row's: one socket's, never two sockets' seconds added together.
+ * open timeframe among them.
+ *
+ * A point is the average over its step. Where the rows carry the seconds that moved, a
+ * step is a second, or as many seconds as it takes to stay within `MAX_GRAPH_POINTS`,
+ * and the rates of the seconds inside it are averaged over its whole length, the ones
+ * that moved nothing counted as the zeroes they are. Where they do not — a range too
+ * long for the gateway to send them — a step is a timeframe, or as many as it takes,
+ * and a row's bytes are shared between the steps it overlaps. The range begins at its
+ * cutoff exactly: the part of a row before it is left out, and the oldest step, which
+ * the cutoff may fall inside, averages over the seconds it has after it. A timeframe
+ * nothing moved in has no row, so a step with none is zero and a recorded range has no
+ * gaps. The busiest second is one row's: one socket's, never two sockets' seconds added
+ * together.
  */
+/** The steps a recorded range is drawn as, in the gateway's own seconds. */
+interface Grid {
+  /** The second the oldest step begins at; the range may begin inside it. */
+  first: number;
+  /** The second the range begins at. */
+  cutoff: number;
+  /** The second the range ends at. */
+  end: number;
+  stepSecs: number;
+  count: number;
+}
+
+/// The seconds `grid`'s step at `index` has: its own, less what the range's ends leave
+/// out of the oldest and the newest.
+function stepSecondsAt(index: number, grid: Grid): number {
+  const start = grid.first + index * grid.stepSecs;
+  return Math.max(
+    1,
+    Math.min(start + grid.stepSecs, grid.end) - Math.max(start, grid.cutoff),
+  );
+}
+
+/// One row's named seconds, each added to the step it falls in as the rate it is.
+function addSeconds(
+  row: ThroughputRecord,
+  grid: Grid,
+  sent: number[],
+  received: number[],
+) {
+  for (const [at, sentPerSec, receivedPerSec] of row.seconds) {
+    const when = row.start + at;
+    if (when < grid.cutoff || when >= grid.end) {
+      continue;
+    }
+    const i = Math.min(
+      grid.count - 1,
+      Math.floor((when - grid.first) / grid.stepSecs),
+    );
+    sent[i] += sentPerSec;
+    received[i] += receivedPerSec;
+  }
+}
+
+/// One row's bytes shared between the steps its timeframe overlaps, each as an average
+/// over the seconds that step spans.
+function addTimeframe(
+  row: ThroughputRecord,
+  grid: Grid,
+  sent: number[],
+  received: number[],
+) {
+  const { first, cutoff, stepSecs, count } = grid;
+  const length = row.end - row.start;
+  // A timeframe that has only just opened spans no time yet: its bytes are its step's.
+  const last = count - 1;
+  const from = Math.min(
+    last,
+    Math.max(0, Math.floor((row.start - first) / stepSecs)),
+  );
+  const to = Math.min(
+    last,
+    Math.max(from, Math.floor((row.end - 1 - first) / stepSecs)),
+  );
+  for (let i = from; i <= to; i++) {
+    const stepStart = first + i * stepSecs;
+    const stepFrom = Math.max(stepStart, cutoff);
+    const stepEnd = stepStart + stepSecs;
+    const overlap = Math.min(row.end, stepEnd) - Math.max(row.start, stepFrom);
+    const share = length > 0 ? Math.max(0, overlap) / length : 1;
+    sent[i] += (row.sentBytes * share) / (stepEnd - stepFrom);
+    received[i] += (row.receivedBytes * share) / (stepEnd - stepFrom);
+  }
+}
+
+/**
+ * The seconds a range covers at a read that ends at `end`: as asked, less any part of it
+ * the read has not reached, and, for everything kept, back to the oldest row there is.
+ */
+function spanOf(
+  bounds: ThroughputBounds,
+  end: number,
+  interval: number,
+  rows: readonly ThroughputRecord[],
+): number {
+  if (bounds.within === null) {
+    const oldest = rows.reduce((min, row) => Math.min(min, row.start), end);
+    return Math.max(interval, end - oldest);
+  }
+  return bounds.end === null
+    ? bounds.within
+    : Math.max(1, end - (bounds.end - bounds.within));
+}
+
 export function recordedSeries(
   report: ThroughputReport,
   bounds: ThroughputBounds,
@@ -488,53 +606,41 @@ export function recordedSeries(
   // Never past the read: nothing is recorded after it, so a range that reaches into the
   // future is drawn up to it and no further.
   const end = Math.min(bounds.end ?? report.now, report.now);
-  let span: number;
-  if (bounds.within === null) {
-    span = Math.max(
-      interval,
-      end - rows.reduce((min, r) => Math.min(min, r.start), end),
-    );
-  } else if (bounds.end === null) {
-    span = bounds.within;
-  } else {
-    span = Math.max(1, end - (bounds.end - bounds.within));
-  }
-  const timeframes = Math.ceil(span / interval);
-  const stepSecs = interval * Math.ceil(timeframes / MAX_GRAPH_POINTS);
-  const count = Math.max(2, Math.ceil(span / stepSecs));
-  const first = end - count * stepSecs;
+  const span = spanOf(bounds, end, interval, rows);
   const cutoff = end - span;
+  const kept = rows.filter((row) => keep(row) && row.end > cutoff);
+  const detailed = kept.some((row) => row.seconds.length > 0);
+  const stepSecs = detailed
+    ? Math.max(1, Math.ceil(span / MAX_GRAPH_POINTS))
+    : interval * Math.ceil(Math.ceil(span / interval) / MAX_GRAPH_POINTS);
+  const count = Math.max(2, Math.ceil(span / stepSecs));
+  const grid: Grid = {
+    first: end - count * stepSecs,
+    cutoff,
+    end,
+    stepSecs,
+    count,
+  };
   const sent = new Array<number>(count).fill(0);
   const received = new Array<number>(count).fill(0);
   let busiestSent = 0;
   let busiestReceived = 0;
-  for (const row of rows) {
-    if (!keep(row) || row.end <= cutoff) {
-      continue;
-    }
+  for (const row of kept) {
     busiestSent = Math.max(busiestSent, row.peakSentPerSec);
     busiestReceived = Math.max(busiestReceived, row.peakReceivedPerSec);
-    const length = row.end - row.start;
-    // A timeframe that has only just opened spans no time yet: its bytes are its
-    // step's.
-    const last = count - 1;
-    const from = Math.min(
-      last,
-      Math.max(0, Math.floor((row.start - first) / stepSecs)),
-    );
-    const to = Math.min(
-      last,
-      Math.max(from, Math.floor((row.end - 1 - first) / stepSecs)),
-    );
-    for (let i = from; i <= to; i++) {
-      const stepStart = first + i * stepSecs;
-      const stepFrom = Math.max(stepStart, cutoff);
-      const stepEnd = stepStart + stepSecs;
-      const overlap =
-        Math.min(row.end, stepEnd) - Math.max(row.start, stepFrom);
-      const share = length > 0 ? Math.max(0, overlap) / length : 1;
-      sent[i] += (row.sentBytes * share) / (stepEnd - stepFrom);
-      received[i] += (row.receivedBytes * share) / (stepEnd - stepFrom);
+    if (detailed) {
+      addSeconds(row, grid, sent, received);
+    } else {
+      addTimeframe(row, grid, sent, received);
+    }
+  }
+  if (detailed) {
+    // What a step holds is the seconds that moved in it; its rate is those over every
+    // second it spans, the quiet ones counted as the zeroes they are.
+    for (let i = 0; i < count; i++) {
+      const secs = stepSecondsAt(i, grid);
+      sent[i] /= secs;
+      received[i] /= secs;
     }
   }
   const series = (points: number[], busiest: number): RateSeries => ({

@@ -7,7 +7,6 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -1501,21 +1500,15 @@ pub struct MeterSection {
     /// The SQLite database the records are kept in. Absent is `meter.sqlite3` in the
     /// gateway's state directory, and a relative path is taken from that directory too.
     pub database: Option<PathBuf>,
-    /// Seconds in one timeframe, which is also how often it is written.
-    #[serde(default = "default_meter_interval_secs")]
-    pub interval_secs: u64,
-    /// Records kept per target and socket; the oldest go first.
+    /// Records kept per target and socket; the oldest go first. One record is one
+    /// timeframe, whose length is the gateway's to decide, not this file's.
     #[serde(default = "default_meter_max_records")]
     pub max_records: usize,
 }
 
-fn default_meter_interval_secs() -> u64 {
-    60
-}
-
-/// A day of one-minute timeframes, for a socket busy all day.
+/// A week of one-minute timeframes, for a socket busy all week.
 fn default_meter_max_records() -> usize {
-    1440
+    10_080
 }
 
 /// Resolved runtime configuration: the web server plus every target profile it
@@ -1601,12 +1594,6 @@ impl ConfigFile {
                 meter.database.as_ref().is_none_or(|database| !database.as_os_str().is_empty()),
                 "[meter].database is empty — name the SQLite file, or leave the key out for \
                  meter.sqlite3 in the gateway's state directory"
-            );
-            anyhow::ensure!(meter.interval_secs >= 1, "[meter].interval_secs must be at least 1");
-            anyhow::ensure!(
-                std::time::Instant::now().checked_add(Duration::from_secs(meter.interval_secs)).is_some(),
-                "[meter].interval_secs {} is too long to schedule",
-                meter.interval_secs
             );
             anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
         }
@@ -2139,7 +2126,6 @@ impl ConfigFile {
         section.map(|section| MeterConfig {
             // `join` keeps an absolute path as written.
             database: state_dir.join(section.database.as_deref().unwrap_or(Path::new(METER_DATABASE))),
-            interval: Duration::from_secs(section.interval_secs),
             max_records: section.max_records,
         })
     }
@@ -2855,8 +2841,7 @@ mod tests {
             meter("[meter]"),
             Some(MeterConfig {
                 database: PathBuf::from("/var/lib/remotex/meter.sqlite3"),
-                interval: Duration::from_secs(60),
-                max_records: 1440,
+                max_records: 10_080,
             })
         );
         assert_eq!(
@@ -2869,16 +2854,18 @@ mod tests {
             "a relative database is taken from the state directory"
         );
 
-        let meter = meter("[meter]\ninterval_secs = 300\nmax_records = 12").unwrap();
-        assert_eq!((meter.interval, meter.max_records), (Duration::from_secs(300), 12));
+        assert_eq!(meter("[meter]\nmax_records = 12").unwrap().max_records, 12);
+        assert!(
+            ConfigFile::parse(&format!("[meter]\ninterval_secs = 60\n{}", minimal())).is_err(),
+            "the meter's second is not the file's to set"
+        );
     }
 
     #[test]
     fn a_meter_table_that_records_nothing_is_refused() {
         for (bad, says) in [
             ("database = \"\"", "[meter].database"),
-            ("database = \"u.sqlite3\"\ninterval_secs = 0", "[meter].interval_secs"),
-            ("interval_secs = 18446744073709551615", "too long to schedule"),
+            ("database = \"u.sqlite3\"\ninterval_secs = 60", "interval_secs"),
             ("database = \"u.sqlite3\"\nmax_records = 0", "[meter].max_records"),
             ("database = \"u.sqlite3\"\nmax_count = 3", "max_count"),
         ] {

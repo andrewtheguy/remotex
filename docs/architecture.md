@@ -1618,12 +1618,20 @@ an atomic beside its state so a frame never takes the session lock; bytes moved
 on the picker count under no target. Once a second the counters are taken as a
 sample: what moved in that second, over the seconds since the last sample, is the
 rate right now, and it is added to the open timeframe, which also keeps the
-busiest second per direction it has seen. Every `interval_secs` the open
-timeframe is closed and each target's socket that moved data gains a row holding
-its bytes and its peaks. The rows wait in memory for a separate writer task, so
+busiest second per direction it has seen and the second itself where it moved
+anything. Every minute the open timeframe is closed and each target's socket that
+moved data gains a row holding its bytes, its peaks and its seconds. The second is
+the meter's resolution and the minute is only how often it reaches the disk;
+neither is a configuration key. The seconds travel as one blob of unsigned LEB128
+triples — offset into the timeframe, sent rate, received rate — and a second that
+moved nothing is not among them, so a socket busy through a whole minute costs
+some four hundred bytes and one that moved in three of its seconds costs a dozen.
+A trickle that rounds to nothing a second is in the row's bytes but is no second
+of the graph's. The rows wait in memory for a separate writer task, so
 a slow write or SQLite's busy wait never delays a sample; the writer adds them
 and deletes the rows past `max_records` per target and socket oldest first, all
-in one transaction, so a crash leaves the timeframe written or not at all. It is
+in one transaction, so a crash leaves the timeframe written or not at all. The
+default keeps a week of minutes per target and socket. It is
 best effort by design: the open timeframe dies with the process, and a failed
 write is retried at the next close. A file that is not this gateway's throughput
 database — not SQLite, SQLite without its application id, or another schema
@@ -1654,11 +1662,17 @@ minutes of samples kept is drawn from them second by second, with a gap for a
 second not read, its right edge following the gateway's clock rather than the last
 sample so a failing poll leaves gaps. A longer one, and every range between two
 times however short — the seconds kept are the view's own, not any clock's — is
-drawn from the recorded rows,
-read when the range is chosen and again as each timeframe closes: a point is the
-average over one timeframe, or over as many as keep the graph within 600 points, a
-row's bytes shared between the points it overlaps and a timeframe with no row
-drawn as zero, while the peak beside the rate now, which the graph's scale and its
+drawn from the recorded rows. A read whose range is an hour or less is answered
+with the seconds that moved in it and drawn a point per second, or per as many
+seconds as keep the graph within 600 points, each the average over its own
+length with the quiet seconds counted as the zeroes they are; a read that is
+answered without them is drawn
+a point per timeframe instead: the average over one, or over as many as keep the
+graph within 600 points, a row's bytes shared between the points it overlaps and a
+timeframe with no row drawn as zero. The rows are read when the range is chosen and
+again every ten seconds while they carry the seconds, or as each timeframe closes
+while they do not, since a graph of timeframe averages has nothing new to say until
+one of them ends. The peak beside the rate now, which the graph's scale and its
 dashed line both sit at, is the busiest second any one row in the range carries.
 A range between two times is drawn between them, and stops at the read where it
 reaches past it, since nothing is recorded ahead of the clock; its axis stands at
@@ -1668,8 +1682,8 @@ one lock before it queries the database, then counts a row the database has
 meanwhile once, from the database, so a timeframe closed during the read is never
 missing from it nor counted twice. Both are behind the login, and `/api/config` says whether there is a
 database to offer. The gateway stores bytes, peaks and times; the page divides
-for an average and shows every rate in decimal bits per second, as a network
-meter does. What an
+for an average where it is given no seconds, and shows every rate in decimal bits
+per second, as a network meter does. What an
 engine exchanges with its remote is a different link and is not counted.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
