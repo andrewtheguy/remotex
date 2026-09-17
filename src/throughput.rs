@@ -1,4 +1,4 @@
-//! Data usage of the browser's WebSockets, per target, socket and timeframe, kept in SQLite,
+//! Throughput of the browser's WebSockets, per target, socket and timeframe, kept in SQLite,
 //! and the rate they move at right now.
 //!
 //! Only the hop between the browser and this gateway is measured: `/ws`, `/ws/audio`,
@@ -8,16 +8,19 @@
 //! browser is on the picker. What an engine exchanges with its remote is a different link
 //! and is not counted here.
 //!
-//! Once a second the counters are taken ([`UsageMeters::sample`]): what moved in that
-//! second is the rate right now, which the browser reads through `GET /api/usage/live`
-//! ([`UsageMeters::live`]), and it is added to the open timeframe, which also keeps its
-//! busiest second per direction. Every `[usage].interval_secs` the open timeframe is
-//! closed and each target's socket that moved data in it gets one row; one that moved
-//! nothing gets none, so idle hours cost no rows. Each target's socket keeps its newest
-//! `[usage].max_records` rows and the oldest go first. The browser reads them on demand
-//! through `GET /api/usage` ([`UsageStore::records`]), together with the open timeframe
-//! as it stands and the closed ones not yet written ([`UsageMeters::snapshot`]). The
-//! gateway stores bytes, peaks and times; the page divides for averages.
+//! Once a second the counters are taken ([`ThroughputMeters::sample`]): what moved in that
+//! second is the rate right now, which the browser reads through `GET /api/throughput/live`
+//! ([`ThroughputMeters::live`]), and it is added to the open timeframe, which also keeps its
+//! busiest second per direction, and the second itself where it moved anything. Every
+//! [`TIMEFRAME`] the open timeframe is closed and each target's socket that moved data in
+//! it gets one row, carrying its bytes, its peaks and its seconds; one that moved nothing
+//! gets none, so idle hours cost no rows. The timeframe is only how often the seconds
+//! reach the database — the meter's own resolution is one second and is not configurable. Each target's socket keeps its newest
+//! `[meter].max_records` rows and the oldest go first. The browser reads them on demand
+//! through `GET /api/throughput` ([`ThroughputStore::records`]), together with the open timeframe
+//! as it stands and the closed ones not yet written ([`ThroughputMeters::snapshot`]). The
+//! gateway stores bytes, peaks, times and the seconds that moved; the page divides for
+//! averages where it is given no seconds.
 //!
 //! The sampler and the writer are separate tasks: a closed timeframe's rows wait in the
 //! meters until the writer has committed them, so a slow or failing write never holds
@@ -39,13 +42,11 @@ use serde::Serialize;
 use tokio::sync::Notify;
 use tokio::time::{MissedTickBehavior, interval_at};
 
-/// The resolved `[usage]` table.
+/// The resolved `[meter]` table.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UsageConfig {
+pub struct MeterConfig {
     /// The SQLite database the records live in. Its directory is created when missing.
     pub database: PathBuf,
-    /// The length of one timeframe, and how often it is written.
-    pub interval: Duration,
     /// Records kept per target and socket.
     pub max_records: usize,
 }
@@ -108,9 +109,19 @@ impl Counter {
     }
 }
 
+/// A sampled second that moved something, as the page reads it:
+/// `[at, sentPerSec, receivedPerSec]`, `at` naming the second by the whole second it
+/// begins, counted from the timeframe's start — so a minute holds 0 through 59 and
+/// never a sixtieth, which is the next timeframe's first.
+/// A second that moved nothing is not one of these: it is simply missing, and reads as
+/// zero, which is what keeps a timeframe of a busy socket around three hundred bytes
+/// and one of a quiet socket a handful.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Second(pub u32, pub u64, pub u64);
+
 /// What one socket has moved for one target in the open timeframe, up to the last
-/// sample, and in that sample.
-#[derive(Clone, Copy, Debug, Default)]
+/// sample, in that sample, and in each second of it that moved.
+#[derive(Clone, Debug, Default)]
 struct Tally {
     sent: u64,
     received: u64,
@@ -120,23 +131,45 @@ struct Tally {
     /// The last sample, in bytes per second: the rate right now.
     now_sent: u64,
     now_received: u64,
+    /// Every second of the timeframe that moved, oldest first.
+    seconds: Vec<Second>,
 }
 
 impl Tally {
-    /// Add a sample of `sent` and `received` bytes moved over `secs`.
-    fn add(&mut self, sent: u64, received: u64, secs: u64) {
+    /// Add a sample of `sent` and `received` bytes moved over `secs`, taken `at` seconds
+    /// into the timeframe. The sample covers the `secs` seconds behind it, and each of
+    /// them is written at the rate they averaged: a late sample spreads over the seconds
+    /// it waited instead of standing as one busy second among zeroes the graph would
+    /// draw the bytes away in.
+    fn add(&mut self, sent: u64, received: u64, secs: u64, at: u32) {
         self.sent += sent;
         self.received += received;
         self.now_sent = per_second(sent, secs);
         self.now_received = per_second(received, secs);
         self.peak_sent = self.peak_sent.max(self.now_sent);
         self.peak_received = self.peak_received.max(self.now_received);
+        // A trickle that rounds to nothing a second is no second of the graph's: it is
+        // in the timeframe's bytes, and a zero here would only cost a row space.
+        if self.now_sent == 0 && self.now_received == 0 {
+            return;
+        }
+        // The seconds this sample covers, each named by the second it begins: the one
+        // ending at `at` is `at - 1`, and the sample before this one took the rest.
+        let spanned = u32::try_from(secs.max(1)).unwrap_or(u32::MAX);
+        for index in at.saturating_sub(spanned)..=at.saturating_sub(1) {
+            self.seconds.push(Second(index, self.now_sent, self.now_received));
+        }
     }
 
     fn moved(&self) -> bool {
         self.sent != 0 || self.received != 0
     }
 }
+
+/// How many closed records wait for the writer at most, however many the database keeps.
+/// While writes keep failing the oldest go first, as they would from the database; a week
+/// of records with all their seconds is memory held against a backlog nobody reads.
+const UNWRITTEN_MAX: usize = 4096;
 
 /// `bytes` over `secs`, rounded; a sample never spans less than a second.
 fn per_second(bytes: u64, secs: u64) -> u64 {
@@ -152,7 +185,7 @@ struct Open {
     since: u64,
     /// When the counters were last sampled, in Unix seconds.
     sampled_at: u64,
-    /// One set per entry of `UsageMeters::targets`, then the picker's.
+    /// One set per entry of `ThroughputMeters::targets`, then the picker's.
     tallies: Vec<[Tally; 4]>,
     /// Closed, not yet written, oldest first, each under the number it was closed as.
     unwritten: VecDeque<(u64, Record)>,
@@ -168,7 +201,7 @@ struct Open {
 /// second, the writer, and a read of the open timeframe or the live rate take the lock
 /// on `open`.
 #[derive(Debug)]
-pub struct UsageMeters {
+pub struct ThroughputMeters {
     /// The `[[targets]]` names, in the order [`crate::session::SessionManager`] indexes.
     targets: Vec<String>,
     /// One set per entry of `targets`, then the picker's.
@@ -179,13 +212,13 @@ pub struct UsageMeters {
     unwritten_cap: usize,
 }
 
-impl Default for UsageMeters {
+impl Default for ThroughputMeters {
     fn default() -> Self {
         Self::new(Vec::new())
     }
 }
 
-impl UsageMeters {
+impl ThroughputMeters {
     pub fn new(targets: Vec<String>) -> Self {
         Self::open_at(targets, unix_now())
     }
@@ -197,7 +230,7 @@ impl UsageMeters {
         let open = Open {
             since: start,
             sampled_at: start,
-            tallies: vec![[Tally::default(); 4]; slots],
+            tallies: vec![std::array::from_fn(|_| Tally::default()); slots],
             unwritten: VecDeque::new(),
             next_closed: 0,
         };
@@ -205,10 +238,12 @@ impl UsageMeters {
     }
 
     /// Meters recorded into a database keeping `max_records` per target and socket:
-    /// what waits for the writer is capped at what the database would keep of it.
+    /// what waits for the writer is capped at what the database would keep of it, and at
+    /// [`UNWRITTEN_MAX`] whichever is smaller.
     fn recorded(targets: Vec<String>, max_records: usize) -> Self {
         let mut meters = Self::new(targets);
-        meters.unwritten_cap = max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
+        let kept = max_records.saturating_mul(meters.counters.len() * Socket::ALL.len());
+        meters.unwritten_cap = kept.min(UNWRITTEN_MAX);
         meters
     }
 
@@ -233,10 +268,11 @@ impl UsageMeters {
 
     fn sample_into(counters: &[[Counter; 4]], open: &mut Open, now: u64) {
         let secs = now.saturating_sub(open.sampled_at);
+        let at = u32::try_from(now.saturating_sub(open.since)).unwrap_or(u32::MAX);
         for (slot, counters) in counters.iter().enumerate() {
             for socket in Socket::ALL {
                 let (sent, received) = counters[socket as usize].take();
-                open.tallies[slot][socket as usize].add(sent, received, secs);
+                open.tallies[slot][socket as usize].add(sent, received, secs, at);
             }
         }
         open.sampled_at = now.max(open.sampled_at);
@@ -253,6 +289,7 @@ impl UsageMeters {
         for tally in open.tallies.iter_mut().flatten() {
             *tally = Tally { now_sent: tally.now_sent, now_received: tally.now_received, ..Default::default() };
         }
+
         open.since = end;
         for record in &records {
             let number = open.next_closed;
@@ -300,8 +337,12 @@ impl UsageMeters {
             .map(|(tallies, counters)| {
                 std::array::from_fn(|socket| {
                     let (sent, received) = counters[socket].peek();
-                    let tally = tallies[socket];
-                    Tally { sent: tally.sent + sent, received: tally.received + received, ..tally }
+                    let tally = &tallies[socket];
+                    Tally {
+                        sent: tally.sent + sent,
+                        received: tally.received + received,
+                        ..tally.clone()
+                    }
                 })
             })
             .collect();
@@ -326,7 +367,7 @@ impl UsageMeters {
         let mut records = Vec::new();
         for (slot, tallies) in open.tallies.iter().enumerate() {
             for socket in Socket::ALL {
-                let tally = tallies[socket as usize];
+                let tally = &tallies[socket as usize];
                 if !tally.moved() {
                     continue;
                 }
@@ -339,6 +380,7 @@ impl UsageMeters {
                     received_bytes: tally.received,
                     peak_sent_per_sec: tally.peak_sent,
                     peak_received_per_sec: tally.peak_received,
+                    seconds: tally.seconds.clone(),
                 });
             }
         }
@@ -351,7 +393,7 @@ impl UsageMeters {
         let mut rates = Vec::new();
         for (slot, tallies) in open.tallies.iter().enumerate() {
             for socket in Socket::ALL {
-                let tally = tallies[socket as usize];
+                let tally = &tallies[socket as usize];
                 if tally.now_sent == 0 && tally.now_received == 0 {
                     continue;
                 }
@@ -376,7 +418,7 @@ pub struct Snapshot {
     pub unwritten: Vec<Record>,
 }
 
-/// What a read of the usage answers: the timeframes closed by then, oldest first, and
+/// What a read of the throughput answers: the timeframes closed by then, oldest first, and
 /// the one still being counted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reading {
@@ -384,19 +426,41 @@ pub struct Reading {
     pub open: Vec<Record>,
 }
 
+/// The seconds a read of the records covers: every timeframe that ended after `since`
+/// and, when the read names an end, began before `until`. Unix seconds on the gateway's
+/// own clock, which stamped the records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub since: u64,
+    pub until: Option<u64>,
+}
+
+impl Window {
+    /// Everything kept that ended after `since`, up to now.
+    pub fn since(since: u64) -> Self {
+        Self { since, until: None }
+    }
+
+    /// Whether a timeframe falls in this window: any part of it does.
+    fn covers(&self, record: &Record) -> bool {
+        record.end > self.since && self.until.is_none_or(|until| record.start < until)
+    }
+}
+
 impl Snapshot {
-    /// This snapshot beside `written`, the database's records read after it and back
-    /// to `since`: an unwritten record the database has meanwhile is counted from the
-    /// database, one it lacks is counted from here if its timeframe ended after `since`,
-    /// and an open record the database has a row for — the timeframe closed and was
-    /// written in between — yields to that row, as the whole of it.
-    pub fn with_written(self, written: Vec<Record>, since: u64) -> Reading {
+    /// This snapshot beside `written`, the database's records read after it over the
+    /// same `window`: an unwritten record the database has meanwhile is counted from the
+    /// database, one it lacks is counted from here if the window covers it, and an open
+    /// record the database has a row for — the timeframe closed and was written in
+    /// between — yields to that row, as the whole of it.
+    pub fn with_written(self, written: Vec<Record>, window: Window) -> Reading {
         let keys: HashSet<(Option<&str>, Socket, u64)> =
             written.iter().map(|record| (record.target.as_deref(), record.socket, record.start)).collect();
         let unwritten = |record: &Record| !keys.contains(&(record.target.as_deref(), record.socket, record.start));
+        let kept = |record: &Record| window.covers(record) && unwritten(record);
         let mut records = written.clone();
-        records.extend(self.unwritten.into_iter().filter(|record| record.end > since && unwritten(record)));
-        let open = self.open.into_iter().filter(unwritten).collect();
+        records.extend(self.unwritten.into_iter().filter(kept));
+        let open = self.open.into_iter().filter(kept).collect();
         Reading { records, open }
     }
 }
@@ -414,6 +478,10 @@ pub struct Record {
     pub received_bytes: u64,
     pub peak_sent_per_sec: u64,
     pub peak_received_per_sec: u64,
+    /// Every second of the timeframe that moved something, oldest first; empty in a read
+    /// whose range is too long for them (see [`TRACE_SPAN_SECS`]), where a point on the
+    /// graph is the timeframe's average instead.
+    pub seconds: Vec<Second>,
 }
 
 /// The rate right now, as of the sample at `at` (Unix seconds): every target's socket
@@ -434,20 +502,20 @@ pub struct LiveRate {
     pub received_per_sec: u64,
 }
 
-/// A gateway's usage: the counters the sockets add to, and the database they are
-/// recorded in when `[usage]` is set.
+/// A gateway's throughput: the counters the sockets add to, and the database they are
+/// recorded in when `[meter]` is set.
 #[derive(Clone, Debug, Default)]
-pub struct Usage {
-    pub meters: Arc<UsageMeters>,
-    pub store: Option<Arc<UsageStore>>,
+pub struct Throughput {
+    pub meters: Arc<ThroughputMeters>,
+    pub store: Option<Arc<ThroughputStore>>,
 }
 
 /// Marks a database as this module's, in the header field SQLite keeps for it.
 const APPLICATION_ID: i64 = 0x524d_5855; // "RMXU"
 /// The one schema there is. A database written by any other is refused, not migrated.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 const SCHEMA: &str = "
-    CREATE TABLE usage (
+    CREATE TABLE throughput (
         id INTEGER PRIMARY KEY,
         target TEXT,
         socket TEXT NOT NULL CHECK (socket IN ('session', 'audio', 'camera', 'mic')),
@@ -456,30 +524,90 @@ const SCHEMA: &str = "
         sent_bytes INTEGER NOT NULL CHECK (sent_bytes >= 0),
         received_bytes INTEGER NOT NULL CHECK (received_bytes >= 0),
         peak_sent_per_sec INTEGER NOT NULL CHECK (peak_sent_per_sec >= 0),
-        peak_received_per_sec INTEGER NOT NULL CHECK (peak_received_per_sec >= 0)
+        peak_received_per_sec INTEGER NOT NULL CHECK (peak_received_per_sec >= 0),
+        seconds BLOB NOT NULL
     ) STRICT;
-    CREATE INDEX usage_by_series ON usage (target, socket, id);
-    CREATE INDEX usage_by_end ON usage (ended_at);
+    CREATE INDEX throughput_by_series ON throughput (target, socket, id);
+    CREATE INDEX throughput_by_end ON throughput (ended_at);
 ";
 
-/// The usage database, open for the life of the gateway.
+/// How long one row's timeframe is: the seconds it groups, and so how often the seconds
+/// reach the database. The meter itself is always one second — every second of a
+/// timeframe that moved something is kept — so this is a flushing interval, not a
+/// resolution, and it is not configurable.
+pub const TIMEFRAME: Duration = Duration::from_secs(60);
+
+/// The longest range a read is given the sampled seconds for. Past it a point on the
+/// graph spans more than a timeframe anyway, and the seconds would be more bytes than
+/// the page has pixels to draw them on.
+pub const TRACE_SPAN_SECS: u64 = 3600;
+
+/// The sampled seconds as one blob: for each, its offset into the timeframe, its sent
+/// rate and its received rate, one unsigned LEB128 each, ascending by offset. A socket
+/// busy through a minute takes some three hundred bytes; one that moved in three of its
+/// seconds takes a dozen, and one that moved in none has no row at all.
+fn encode_seconds(seconds: &[Second]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(seconds.len() * 4);
+    for &Second(at, sent, received) in seconds {
+        for number in [u64::from(at), sent, received] {
+            let mut value = number;
+            loop {
+                let byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value == 0 {
+                    blob.push(byte);
+                    break;
+                }
+                blob.push(byte | 0x80);
+            }
+        }
+    }
+    blob
+}
+
+/// The seconds back out of a blob [`encode_seconds`] wrote. A blob that ends mid-number,
+/// or holds one too large to be a rate, is a corrupt row, not a rate of zero.
+fn decode_seconds(mut blob: &[u8]) -> anyhow::Result<Vec<Second>> {
+    let number = |blob: &mut &[u8]| -> anyhow::Result<u64> {
+        let mut value: u64 = 0;
+        for (index, &byte) in blob.iter().enumerate() {
+            let shift = 7 * index as u32;
+            anyhow::ensure!(shift < 64, "a throughput record's seconds hold a number too large");
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                *blob = &blob[index + 1..];
+                return Ok(value);
+            }
+        }
+        anyhow::bail!("a throughput record's seconds end mid-number")
+    };
+    let mut seconds = Vec::new();
+    while !blob.is_empty() {
+        let at = number(&mut blob)?;
+        let (sent, received) = (number(&mut blob)?, number(&mut blob)?);
+        let at = u32::try_from(at).context("a throughput record's second is too far into it")?;
+        seconds.push(Second(at, sent, received));
+    }
+    Ok(seconds)
+}
+
+/// The throughput database, open for the life of the gateway.
 ///
 /// One connection behind a mutex, used from blocking tasks only: the recorder writes a
 /// timeframe a minute and the browser reads on demand, so there is nothing to pool.
 #[derive(Debug)]
-pub struct UsageStore {
+pub struct ThroughputStore {
     connection: Mutex<Connection>,
-    pub interval: Duration,
     pub max_records: usize,
 }
 
-impl UsageStore {
+impl ThroughputStore {
     /// Open (or create) the database and trim it to `max_records`.
     ///
     /// A file that is not this module's database — not SQLite at all, another program's
     /// SQLite, or another schema version — is refused before anything is written to it,
     /// so a mistyped path never damages what is there.
-    pub fn open(config: &UsageConfig) -> anyhow::Result<Self> {
+    pub fn open(config: &MeterConfig) -> anyhow::Result<Self> {
         let path = &config.database;
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
@@ -524,11 +652,7 @@ impl UsageStore {
             .pragma_update(None, "synchronous", "NORMAL")
             .context("cannot set synchronous = NORMAL")?;
 
-        let store = Self {
-            connection: Mutex::new(connection),
-            interval: config.interval,
-            max_records: config.max_records,
-        };
+        let store = Self { connection: Mutex::new(connection), max_records: config.max_records };
         // A cap lowered between runs applies to what is already there.
         store.write(&[])?;
         Ok(store)
@@ -537,7 +661,7 @@ impl UsageStore {
     /// Check the database is this module's, creating the schema when `created` says the
     /// file is the one [`Self::open`] just made.
     fn adopt(connection: &mut Connection, path: &Path, created: bool) -> anyhow::Result<()> {
-        let not_ours = || format!("{} is not a remotex usage database", path.display());
+        let not_ours = || format!("{} is not a remotex throughput database", path.display());
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .with_context(not_ours)?;
@@ -552,7 +676,7 @@ impl UsageStore {
                 .and_then(|()| transaction.pragma_update(None, "application_id", APPLICATION_ID))
                 .and_then(|()| transaction.pragma_update(None, "user_version", SCHEMA_VERSION))
                 .and_then(|()| transaction.commit())
-                .with_context(|| format!("cannot create the usage schema in {}", path.display()))?;
+                .with_context(|| format!("cannot create the throughput schema in {}", path.display()))?;
             return Ok(());
         }
         anyhow::ensure!(application_id == APPLICATION_ID, "{}", not_ours());
@@ -560,7 +684,7 @@ impl UsageStore {
             transaction.query_row("PRAGMA user_version", [], |row| row.get(0)).with_context(not_ours)?;
         anyhow::ensure!(
             version == SCHEMA_VERSION,
-            "{} holds usage schema {version}, and this gateway reads only {SCHEMA_VERSION} — \
+            "{} holds throughput schema {version}, and this gateway reads only {SCHEMA_VERSION} — \
              move the file away to start a new one",
             path.display()
         );
@@ -580,15 +704,15 @@ impl UsageStore {
     /// nothing. No records trims every target's every socket.
     pub(crate) fn write(&self, records: &[Record]) -> anyhow::Result<()> {
         let mut connection = self.lock();
-        let transaction = connection.transaction().context("cannot begin a usage write")?;
+        let transaction = connection.transaction().context("cannot begin a throughput write")?;
         {
             let mut insert = transaction
                 .prepare_cached(
-                    "INSERT INTO usage (target, socket, started_at, ended_at, sent_bytes, received_bytes,
-                                        peak_sent_per_sec, peak_received_per_sec)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO throughput (target, socket, started_at, ended_at, sent_bytes, received_bytes,
+                                        peak_sent_per_sec, peak_received_per_sec, seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )
-                .context("cannot prepare the usage insert")?;
+                .context("cannot prepare the throughput insert")?;
             for record in records {
                 insert
                     .execute(params![
@@ -600,18 +724,19 @@ impl UsageStore {
                         sql_int(record.received_bytes)?,
                         sql_int(record.peak_sent_per_sec)?,
                         sql_int(record.peak_received_per_sec)?,
+                        encode_seconds(&record.seconds),
                     ])
-                    .context("cannot insert a usage record")?;
+                    .context("cannot insert a throughput record")?;
             }
 
             let mut series: Vec<(Option<String>, String)> = if records.is_empty() {
                 let mut select = transaction
-                    .prepare_cached("SELECT DISTINCT target, socket FROM usage")
-                    .context("cannot prepare the usage series query")?;
+                    .prepare_cached("SELECT DISTINCT target, socket FROM throughput")
+                    .context("cannot prepare the throughput series query")?;
                 select
                     .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                     .and_then(Iterator::collect)
-                    .context("cannot list the usage series")?
+                    .context("cannot list the throughput series")?
             } else {
                 records.iter().map(|record| (record.target.clone(), record.socket.name().to_owned())).collect()
             };
@@ -619,32 +744,35 @@ impl UsageStore {
             series.dedup();
             let mut trim = transaction
                 .prepare_cached(
-                    "DELETE FROM usage WHERE target IS ?1 AND socket = ?2 AND id <= (
-                         SELECT id FROM usage WHERE target IS ?1 AND socket = ?2
+                    "DELETE FROM throughput WHERE target IS ?1 AND socket = ?2 AND id <= (
+                         SELECT id FROM throughput WHERE target IS ?1 AND socket = ?2
                          ORDER BY id DESC LIMIT 1 OFFSET ?3
                      )",
                 )
-                .context("cannot prepare the usage trim")?;
+                .context("cannot prepare the throughput trim")?;
             let keep = i64::try_from(self.max_records).unwrap_or(i64::MAX);
             for (target, socket) in series {
-                trim.execute(params![target, socket, keep]).context("cannot trim usage records")?;
+                trim.execute(params![target, socket, keep]).context("cannot trim throughput records")?;
             }
         }
-        transaction.commit().context("cannot commit a usage write")
+        transaction.commit().context("cannot commit a throughput write")
     }
 
-    /// Every record whose timeframe ended after `since` (Unix seconds), oldest first.
-    pub fn records(&self, since: u64) -> anyhow::Result<Vec<Record>> {
+    /// Every record the `window` covers, oldest first, with the seconds that moved in
+    /// each when `seconds` asks for them — a range too long to draw them is read without
+    /// so much as decoding them.
+    pub fn records(&self, window: Window, seconds: bool) -> anyhow::Result<Vec<Record>> {
         let connection = self.lock();
         let mut select = connection
             .prepare_cached(
                 "SELECT target, socket, started_at, ended_at, sent_bytes, received_bytes,
-                        peak_sent_per_sec, peak_received_per_sec
-                 FROM usage WHERE ended_at > ?1 ORDER BY id",
+                        peak_sent_per_sec, peak_received_per_sec, seconds
+                 FROM throughput WHERE ended_at > ?1 AND (?2 IS NULL OR started_at < ?2) ORDER BY id",
             )
-            .context("cannot prepare the usage query")?;
+            .context("cannot prepare the throughput query")?;
+        let until = window.until.map(sql_int).transpose()?;
         let rows = select
-            .query_map([sql_int(since)?], |row| {
+            .query_map(params![sql_int(window.since)?, until], |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
@@ -656,14 +784,15 @@ impl UsageStore {
                         row.get::<_, i64>(6)?,
                         row.get::<_, i64>(7)?,
                     ],
+                    if seconds { row.get::<_, Vec<u8>>(8)? } else { Vec::new() },
                 ))
             })
-            .context("cannot query usage records")?;
+            .context("cannot query throughput records")?;
         rows.map(|row| {
-            let (target, socket, numbers) = row.context("cannot read a usage record")?;
+            let (target, socket, numbers, blob) = row.context("cannot read a throughput record")?;
             let socket = Socket::from_name(&socket)
-                .with_context(|| format!("a usage record names no socket: {socket:?}"))?;
-            let unsigned = |value: i64| u64::try_from(value).context("a usage record is negative");
+                .with_context(|| format!("a throughput record names no socket: {socket:?}"))?;
+            let unsigned = |value: i64| u64::try_from(value).context("a throughput record is negative");
             let [start, end, sent, received, peak_sent, peak_received] = numbers;
             Ok(Record {
                 target,
@@ -674,6 +803,7 @@ impl UsageStore {
                 received_bytes: unsigned(received)?,
                 peak_sent_per_sec: unsigned(peak_sent)?,
                 peak_received_per_sec: unsigned(peak_received)?,
+                seconds: decode_seconds(&blob)?,
             })
         })
         .collect()
@@ -690,35 +820,30 @@ pub(crate) fn unix_now() -> u64 {
 }
 
 /// Meters for `targets` (the `[[targets]]` names, in order), and with `config` the
-/// database they are recorded in; with no `[usage]`, counters nobody samples or records.
+/// database they are recorded in; with no `[meter]`, counters nobody samples or records.
 ///
 /// The database is opened and checked before this returns, so a path the gateway cannot
 /// use fails the start instead of every write after it. After that nothing fails: a write
 /// that does not succeed is logged and its records wait for the next attempt.
 ///
 /// Two tasks: the sampler takes the counters every second and closes the timeframe
-/// every `interval_secs`, never waiting on the database; the writer wakes at each close
+/// every [`TIMEFRAME`], never waiting on the database; the writer wakes at each close
 /// and commits whatever is waiting, so a write that takes seconds, or SQLite's busy
 /// wait, delays no sample and flattens no peak.
-pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Result<Usage> {
+pub fn start(config: Option<&MeterConfig>, targets: Vec<String>) -> anyhow::Result<Throughput> {
     let Some(config) = config else {
-        return Ok(Usage { meters: Arc::new(UsageMeters::new(targets)), store: None });
+        return Ok(Throughput { meters: Arc::new(ThroughputMeters::new(targets)), store: None });
     };
-    // Before the database is touched. The config check refuses such an interval too.
     let started = tokio::time::Instant::now();
-    let first_close = started
-        .checked_add(config.interval)
-        .with_context(|| format!("[usage].interval_secs {} is too long to schedule", config.interval.as_secs()))?;
-    let store = Arc::new(UsageStore::open(config)?);
-    let meters = Arc::new(UsageMeters::recorded(targets, store.max_records));
-    let usage = Usage { meters: Arc::clone(&meters), store: Some(Arc::clone(&store)) };
+    let store = Arc::new(ThroughputStore::open(config)?);
+    let meters = Arc::new(ThroughputMeters::recorded(targets, store.max_records));
+    let throughput = Throughput { meters: Arc::clone(&meters), store: Some(Arc::clone(&store)) };
     let closed = Arc::new(Notify::new());
 
     let sampler = Arc::clone(&meters);
     let wake = Arc::clone(&closed);
-    let interval = store.interval;
     tokio::spawn(async move {
-        let mut next_close = first_close;
+        let mut next_close = started + TIMEFRAME;
         let mut ticks = interval_at(started + SAMPLE_PERIOD, SAMPLE_PERIOD);
         // A late tick is taken once, not bunched: the counters keep counting meanwhile,
         // and the sample after it is spread over the seconds it actually spans.
@@ -731,7 +856,7 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
             }
             sampler.close_timeframe(unix_now());
             while next_close <= tick {
-                next_close += interval;
+                next_close += TIMEFRAME;
             }
             wake.notify_one();
         }
@@ -748,12 +873,12 @@ pub fn start(config: Option<&UsageConfig>, targets: Vec<String>) -> anyhow::Resu
             let writer = Arc::clone(&store);
             match tokio::task::spawn_blocking(move || writer.write(&batch)).await {
                 Ok(Ok(())) => meters.written(through),
-                Ok(Err(e)) => warn!("usage: {e:#}"),
-                Err(e) => warn!("usage: the write task failed: {e}"),
+                Ok(Err(e)) => warn!("throughput: {e:#}"),
+                Err(e) => warn!("throughput: the write task failed: {e}"),
             }
         }
     });
-    Ok(usage)
+    Ok(throughput)
 }
 
 /// How often the counters are sampled: the second the rate right now is measured over.
@@ -763,11 +888,12 @@ const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 mod tests {
     use super::*;
 
-    fn config(database: PathBuf, max_records: usize) -> UsageConfig {
-        UsageConfig { database, interval: Duration::from_secs(60), max_records }
+    fn config(database: PathBuf, max_records: usize) -> MeterConfig {
+        MeterConfig { database, max_records }
     }
 
-    /// A one-minute record whose bytes all moved in one second: its peaks are its bytes.
+    /// A one-minute record whose bytes all moved in the second after it began: its peaks
+    /// are its bytes, and that one second is all it carries.
     fn record(target: Option<&str>, socket: Socket, start: u64, sent_bytes: u64, received_bytes: u64) -> Record {
         Record {
             target: target.map(str::to_owned),
@@ -778,6 +904,7 @@ mod tests {
             received_bytes,
             peak_sent_per_sec: sent_bytes,
             peak_received_per_sec: received_bytes,
+            seconds: vec![Second(0, sent_bytes, received_bytes)],
         }
     }
 
@@ -787,7 +914,7 @@ mod tests {
 
     #[test]
     fn a_timeframe_records_each_target_and_socket_that_moved_data() {
-        let meters = UsageMeters::open_at(vec!["mac".to_owned(), "win".to_owned()], 100);
+        let meters = ThroughputMeters::open_at(vec!["mac".to_owned(), "win".to_owned()], 100);
         meters.counter(Some(1), Socket::Session).sent(1500);
         meters.counter(Some(1), Socket::Session).received(40);
         meters.counter(Some(0), Socket::Session).sent(3);
@@ -820,6 +947,7 @@ mod tests {
             Record {
                 sent_bytes: 2107,
                 peak_sent_per_sec: 1500,
+                seconds: vec![Second(0, 1500, 40), Second(1, 600, 0)],
                 ..record(Some("win"), Socket::Session, 100, 2107, 40)
             },
             record(None, Socket::Audio, 100, 5, 0),
@@ -840,18 +968,29 @@ mod tests {
         meters.counter(Some(0), Socket::Audio).sent(8);
         assert_eq!(
             meters.open_timeframe(230),
-            [Record { end: 230, peak_sent_per_sec: 0, ..record(Some("mac"), Socket::Audio, 220, 8, 0) }]
+            [Record {
+                end: 230,
+                peak_sent_per_sec: 0,
+                // Nothing has been sampled since the close, so no second is named yet.
+                seconds: vec![],
+                ..record(Some("mac"), Socket::Audio, 220, 8, 0)
+            }]
         );
         // A clock set back cannot end a timeframe before it began.
         assert_eq!(
             meters.open_timeframe(50),
-            [Record { end: 220, peak_sent_per_sec: 0, ..record(Some("mac"), Socket::Audio, 220, 8, 0) }]
+            [Record {
+                end: 220,
+                peak_sent_per_sec: 0,
+                seconds: vec![],
+                ..record(Some("mac"), Socket::Audio, 220, 8, 0)
+            }]
         );
     }
 
     #[test]
     fn closed_records_wait_for_the_writer_and_are_read_meanwhile() {
-        let meters = UsageMeters::recorded(vec!["mac".to_owned()], 1);
+        let meters = ThroughputMeters::recorded(vec!["mac".to_owned()], 1);
         assert_eq!(meters.unwritten_cap, 8, "one record per target and socket, and the picker's");
         let start = meters.lock_open().since;
         meters.counter(Some(0), Socket::Session).sent(10);
@@ -869,15 +1008,20 @@ mod tests {
         assert_eq!(snapshot.unwritten, waiting);
         assert_eq!(snapshot.open.len(), 1);
         let open = snapshot.open.clone();
-        let reading = snapshot.clone().with_written(first.clone(), 0);
+        let reading = snapshot.clone().with_written(first.clone(), Window::since(0));
         assert_eq!(reading, Reading { records: [first.clone(), second.clone()].concat(), open: open.clone() });
-        let reading = snapshot.clone().with_written(vec![], start + 60);
+        let reading = snapshot.clone().with_written(vec![], Window::since(start + 60));
         assert_eq!(reading.records, second, "a record that ended by `since` is left out, as the database leaves it");
+        // A window that ended before the read leaves out the timeframe still open, which
+        // began after it, and keeps the closed ones that began inside it.
+        let ended = Window { since: 0, until: Some(start + 120) };
+        let reading = snapshot.clone().with_written(vec![], ended);
+        assert_eq!(reading, Reading { records: [first.clone(), second.clone()].concat(), open: vec![] });
         // The open timeframe closed and was written between the snapshot and the
         // database read: the database's row is the whole of it, and the rows still
         // waiting are read from the snapshot after it.
         let written = Record { end: start + 180, received_bytes: 9, ..open[0].clone() };
-        let reading = snapshot.with_written(vec![written.clone()], 0);
+        let reading = snapshot.with_written(vec![written.clone()], Window::since(0));
         assert_eq!(reading, Reading { records: [vec![written], first.clone(), second.clone()].concat(), open: vec![] });
 
         // Written through the first: the second still waits.
@@ -898,7 +1042,7 @@ mod tests {
 
     #[test]
     fn a_sample_spans_the_seconds_since_the_last_one() {
-        let meters = UsageMeters::open_at(vec![], 100);
+        let meters = ThroughputMeters::open_at(vec![], 100);
         meters.counter(None, Socket::Session).sent(1000);
         meters.sample(105);
         assert_eq!(meters.live(), Live { at: 105, rates: vec![live(None, Socket::Session, 200, 0)] });
@@ -906,6 +1050,22 @@ mod tests {
         meters.counter(None, Socket::Session).received(30);
         meters.sample(105);
         assert_eq!(meters.live().rates, [live(None, Socket::Session, 0, 30)]);
+        // The first sample is the five seconds behind it, each at the rate they averaged,
+        // so the seconds hold every byte the timeframe counted rather than a fifth of
+        // them; the second sample is the same second again, its own bytes beside them.
+        let closed = meters.close_timeframe(160);
+        assert_eq!(closed[0].sent_bytes, 1000);
+        assert_eq!(
+            closed[0].seconds,
+            [
+                Second(0, 200, 0),
+                Second(1, 200, 0),
+                Second(2, 200, 0),
+                Second(3, 200, 0),
+                Second(4, 200, 0),
+                Second(4, 0, 30),
+            ]
+        );
         assert_eq!(per_second(7, 58), 0);
         assert_eq!(per_second(29, 58), 1, "rounded, not truncated");
     }
@@ -913,21 +1073,47 @@ mod tests {
     #[test]
     fn records_are_kept_across_a_reopen_and_read_from_a_time() {
         let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path().join("nested/usage.sqlite3"), 10);
+        let config = config(dir.path().join("nested/meter.sqlite3"), 10);
         let first = record(Some("mac"), Socket::Session, 0, 2048, 12);
         let second = record(None, Socket::Audio, 60, 9000, 0);
-        UsageStore::open(&config).unwrap().write(&[first.clone(), second.clone()]).unwrap();
+        ThroughputStore::open(&config).unwrap().write(&[first.clone(), second.clone()]).unwrap();
 
-        let store = UsageStore::open(&config).unwrap();
-        assert_eq!(store.records(0).unwrap(), [first, second.clone()]);
-        assert_eq!(store.records(60).unwrap(), [second], "a timeframe that ended by `since` is left out");
+        let store = ThroughputStore::open(&config).unwrap();
+        assert_eq!(store.records(Window::since(0), true).unwrap(), [first.clone(), second.clone()]);
+        assert_eq!(
+            store.records(Window::since(60), true).unwrap(),
+            std::slice::from_ref(&second),
+            "a timeframe that ended by `since` is left out"
+        );
+        assert_eq!(
+            store.records(Window::since(0), false).unwrap()[0].seconds,
+            [],
+            "a read of a range too long for them decodes none"
+        );
+        // A window of its own leaves out what began at its end as well.
+        assert_eq!(store.records(Window { since: 0, until: Some(60) }, true).unwrap(), std::slice::from_ref(&first));
+        assert_eq!(store.records(Window { since: 0, until: Some(61) }, true).unwrap(), [first, second]);
+    }
+
+    #[test]
+    fn the_seconds_that_moved_are_a_blob_of_varints_and_the_quiet_ones_are_nothing() {
+        assert_eq!(decode_seconds(&encode_seconds(&[])).unwrap(), []);
+        let seconds = vec![Second(0, 1, 0), Second(7, 400_000, 127), Second(59, 0, u64::MAX)];
+        assert_eq!(decode_seconds(&encode_seconds(&seconds)).unwrap(), seconds);
+        assert_eq!(encode_seconds(&[Second(3, 5, 9)]).len(), 3, "small numbers take a byte each");
+        let busy: Vec<Second> = (0..60).map(|at| Second(at, 400_000, 40_000)).collect();
+        assert_eq!(encode_seconds(&busy).len(), 420, "a minute busy in every second is a few hundred bytes");
+        assert_eq!(encode_seconds(&busy[..3]).len(), 21, "and a minute busy in three of them is nothing");
+        for corrupt in [vec![0x80], vec![0x00, 0x00], vec![0xff; 11]] {
+            assert!(decode_seconds(&corrupt).is_err(), "{corrupt:?}");
+        }
     }
 
     #[test]
     fn each_target_and_socket_keeps_its_newest_records_up_to_the_cap() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("usage.sqlite3");
-        let store = UsageStore::open(&config(path.clone(), 3)).unwrap();
+        let path = dir.path().join("meter.sqlite3");
+        let store = ThroughputStore::open(&config(path.clone(), 3)).unwrap();
         for timeframe in 0..5 {
             store.write(&[record(Some("mac"), Socket::Audio, timeframe, timeframe + 1, 0)]).unwrap();
         }
@@ -935,9 +1121,9 @@ mod tests {
         store.write(&[record(None, Socket::Audio, 6, 80, 0)]).unwrap();
         store.write(&[record(Some("mac"), Socket::Camera, 7, 0, 7)]).unwrap();
 
-        let sent = |store: &UsageStore, target: Option<&str>, socket| -> Vec<u64> {
+        let sent = |store: &ThroughputStore, target: Option<&str>, socket| -> Vec<u64> {
             store
-                .records(0)
+                .records(Window::since(0), true)
                 .unwrap()
                 .iter()
                 .filter(|r| r.target.as_deref() == target && r.socket == socket)
@@ -951,9 +1137,9 @@ mod tests {
         drop(store);
 
         // A cap lowered between runs applies to what the database already holds.
-        let store = UsageStore::open(&config(path, 1)).unwrap();
+        let store = ThroughputStore::open(&config(path, 1)).unwrap();
         assert_eq!(sent(&store, Some("mac"), Socket::Audio), [5]);
-        assert_eq!(store.records(0).unwrap().len(), 4);
+        assert_eq!(store.records(Window::since(0), true).unwrap().len(), 4);
     }
 
     #[cfg(unix)]
@@ -962,8 +1148,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("usage.sqlite3");
-        let store = UsageStore::open(&config(path.clone(), 10)).unwrap();
+        let path = dir.path().join("meter.sqlite3");
+        let store = ThroughputStore::open(&config(path.clone(), 10)).unwrap();
         store.write(&[record(Some("mac"), Socket::Session, 0, 1, 1)]).unwrap();
         for suffix in ["", "-wal", "-shm"] {
             let file = PathBuf::from(format!("{}{suffix}", path.display()));
@@ -973,35 +1159,35 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_is_not_a_usage_database_is_refused_untouched() {
+    fn a_file_that_is_not_a_throughput_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();
 
         let text = dir.path().join("notes.txt");
         std::fs::write(&text, b"not a database, but somebody's").unwrap();
-        let error = UsageStore::open(&config(text.clone(), 1)).expect_err("not SQLite");
-        assert!(format!("{error:#}").contains("is not a remotex usage database"), "{error:#}");
+        let error = ThroughputStore::open(&config(text.clone(), 1)).expect_err("not SQLite");
+        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&text).unwrap(), b"not a database, but somebody's");
 
         let empty = dir.path().join("empty.sqlite3");
         std::fs::write(&empty, b"").unwrap();
-        let error = UsageStore::open(&config(empty.clone(), 1)).expect_err("an existing empty file");
-        assert!(format!("{error:#}").contains("is not a remotex usage database"), "{error:#}");
+        let error = ThroughputStore::open(&config(empty.clone(), 1)).expect_err("an existing empty file");
+        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&empty).unwrap(), b"");
 
         let other = dir.path().join("other.sqlite3");
-        Connection::open(&other).unwrap().execute_batch("CREATE TABLE usage (x INTEGER)").unwrap();
+        Connection::open(&other).unwrap().execute_batch("CREATE TABLE throughput (x INTEGER)").unwrap();
         let before = std::fs::read(&other).unwrap();
-        let error = UsageStore::open(&config(other.clone(), 1)).expect_err("another program's SQLite");
-        assert!(format!("{error:#}").contains("is not a remotex usage database"), "{error:#}");
+        let error = ThroughputStore::open(&config(other.clone(), 1)).expect_err("another program's SQLite");
+        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&other).unwrap(), before);
 
         let older = dir.path().join("older.sqlite3");
         let connection = Connection::open(&older).unwrap();
-        connection.execute_batch("CREATE TABLE usage (x INTEGER)").unwrap();
+        connection.execute_batch("CREATE TABLE throughput (x INTEGER)").unwrap();
         connection.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
         connection.pragma_update(None, "user_version", 1).unwrap();
         drop(connection);
-        let error = UsageStore::open(&config(older, 1)).expect_err("another schema version");
-        assert!(format!("{error:#}").contains("holds usage schema 1"), "{error:#}");
+        let error = ThroughputStore::open(&config(older, 1)).expect_err("another schema version");
+        assert!(format!("{error:#}").contains("holds throughput schema 1"), "{error:#}");
     }
 }

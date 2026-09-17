@@ -18,6 +18,11 @@ pub enum AppError {
     #[error("not found")]
     NotFound,
 
+    /// The request's own parameters do not make sense together — rendered as
+    /// `400 Bad Request` carrying the reason, which names only what the caller sent.
+    #[error("{0}")]
+    BadRequest(&'static str),
+
     /// No valid auth session: a bad login, a missing/expired
     /// `remotex_session` cookie on a guarded route — rendered as
     /// `401 Unauthorized`. The browser reacts by showing the login screen.
@@ -50,6 +55,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
+            AppError::BadRequest(why) => (StatusCode::BAD_REQUEST, why).into_response(),
             AppError::Unauthorized => {
                 (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
             }

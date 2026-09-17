@@ -87,7 +87,7 @@ The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
 The config contains the web-login hash and target credentials. Create it as the
 account that will run `remotex serve`, mode `0600`. The package ships only the
 public [`remotex.example.toml`](../remotex.example.toml) from which to create it.
-The same account owns the state directory, where a `[usage]` database is kept.
+The same account owns the state directory, where a `[meter]` database is kept.
 
 On Linux:
 
@@ -111,7 +111,7 @@ ${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml
 ```
 
 On Windows, from PowerShell 7 (`pwsh`) opened after the install, where only the account
-that runs the gateway may read the directory — the config and the usage database
+that runs the gateway may read the directory — the config and the throughput database
 with its SQLite files inherit that:
 
 ```powershell

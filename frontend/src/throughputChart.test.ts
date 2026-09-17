@@ -7,7 +7,7 @@ import {
   runs,
   SCALE_WIDTH,
   tipLeft,
-} from "./usageChart.ts";
+} from "./throughputChart.ts";
 
 test("the read seconds are drawn in runs, broken by each gap", () => {
   assert.deepEqual(runs([1, 2, 3]), [[0, 3]]);

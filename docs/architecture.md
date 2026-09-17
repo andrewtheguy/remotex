@@ -1602,10 +1602,10 @@ then read per request, which is what lets an operator swap the image without a
 restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
 
-`[usage]` is top-level for the same reason and records the data usage of the
+`[meter]` is top-level for the same reason and records the throughput of the
 browser's four WebSockets in an SQLite database, one row per target, socket and
 timeframe, so targets can be compared, and measures the rate they move at. The
-database is `usage.sqlite3` in the
+database is `meter.sqlite3` in the
 gateway's state directory unless `database` names another, and a relative
 `database` is taken from there as well: the installation's state directory beside
 its config and web paths when `serve` reads the installed config, the config
@@ -1618,42 +1618,77 @@ an atomic beside its state so a frame never takes the session lock; bytes moved
 on the picker count under no target. Once a second the counters are taken as a
 sample: what moved in that second, over the seconds since the last sample, is the
 rate right now, and it is added to the open timeframe, which also keeps the
-busiest second per direction it has seen. Every `interval_secs` the open
-timeframe is closed and each target's socket that moved data gains a row holding
-its bytes and its peaks. The rows wait in memory for a separate writer task, so
+busiest second per direction it has seen and the second itself where it moved
+anything. A sample the runtime delayed is that rate in each of the seconds behind
+it rather than in one of them: what moved over five seconds is drawn as five
+seconds at a fifth of it, not as one busy second beside four the graph would read
+as idle. Every minute the open timeframe is closed and each target's socket that
+moved data gains a row holding its bytes, its peaks and its seconds. The second is
+the meter's resolution and the minute is only how often it reaches the disk;
+neither is a configuration key. The seconds travel as one blob of unsigned LEB128
+triples — the second of the timeframe it is, counted from the second the timeframe
+begins, then the sent rate and the received rate — and a second that
+moved nothing is not among them, so a socket busy through a whole minute costs
+some four hundred bytes and one that moved in three of its seconds costs a dozen.
+A trickle that rounds to nothing a second is in the row's bytes but is no second
+of the graph's. The rows wait in memory for a separate writer task, so
 a slow write or SQLite's busy wait never delays a sample; the writer adds them
 and deletes the rows past `max_records` per target and socket oldest first, all
-in one transaction, so a crash leaves the timeframe written or not at all. It is
+in one transaction, so a crash leaves the timeframe written or not at all. The
+default keeps a week of minutes per target and socket. It is
 best effort by design: the open timeframe dies with the process, and a failed
-write is retried at the next close. A file that is not this gateway's usage
+write is retried at the next close. A file that is not this gateway's throughput
 database — not SQLite, SQLite without its application id, or another schema
 version — is refused at startup before anything is written to it. The page reads
-two things and draws one graph from them. `GET /api/usage/live` is the last
-sample, per target and socket, which the "Data usage" view polls once a second
+two things and draws one graph from them. `GET /api/throughput/live` is the last
+sample, per target and socket, which the "Throughput" view polls once a second
 while it is open and not paused, one poll out at a time, keeps for the last five
 minutes, and shows the way a network meter does: the rate now over a graph of the
 chosen range, one per direction on its own scale, narrowed to a target or a socket
-by its filters. `GET /api/usage?within=<seconds>` is the recorded rows, counted
+by its filters. Four grid lines carry the scale and its rates, and a dashed line in
+the direction's own colour crosses the plot at the busiest second of the range — the
+same second the tile beside the graph names, so the line carries no rate of its own.
+The scale fits that second rather than the highest step drawn, which is what keeps
+the line on the plot: second by second the two are one number, but a recorded step is
+an average over its timeframe and the busiest second inside it stands above that. A
+range that moved nothing gets no line, since one at zero only traces the axis.
+`GET /api/throughput?within=<seconds>` is the recorded rows, counted
 back from the gateway's clock the rows were stamped with rather than the
 browser's, with the gateway's clock at the read and the open timeframe as it
-stands. The range is one select — the last 60 seconds up to the last 30 days,
-everything kept, or any whole number of seconds, minutes, hours or days — and it
-decides which of the two the graph is drawn from. A range no longer than the five
+stands; `?from=<unix>&to=<unix>` reads a range that names its own ends instead,
+and a query that carries both forms, or ends where it begins, is refused as the
+nonsense it is. The range is one select — the last 60 seconds up to the last 30
+days, everything kept, any whole number of seconds, minutes, hours or days, or
+"Between…", two times typed in the browser's own zone and sent as the seconds
+they come to. A range that ends now decides which of the two sources the graph is
+drawn from: one no longer than the five
 minutes of samples kept is drawn from them second by second, with a gap for a
 second not read, its right edge following the gateway's clock rather than the last
-sample so a failing poll leaves gaps. A longer one is drawn from the recorded rows,
-read when the range is chosen and again as each timeframe closes: a point is the
-average over one timeframe, or over as many as keep the graph within 600 points, a
-row's bytes shared between the points it overlaps and a timeframe with no row
-drawn as zero, while the peak beside the rate now is the busiest second any one
-row in the range carries. That read
+sample so a failing poll leaves gaps. A longer one, and every range between two
+times however short — the seconds kept are the view's own, not any clock's — is
+drawn from the recorded rows. A read whose range is an hour or less is answered
+with the seconds that moved in it, says so in the read itself rather than leaving
+the page to guess from rows a quiet range has none of, and is drawn a point per
+second, or per as many seconds as keep the graph within 600 points, each the average over its own
+length with the quiet seconds counted as the zeroes they are; a read that is
+answered without them is drawn
+a point per timeframe instead: the average over one, or over as many as keep the
+graph within 600 points, a row's bytes shared between the points it overlaps and a
+timeframe with no row drawn as zero. The rows are read when the range is chosen and
+again every ten seconds while the read carries the seconds, or as each timeframe
+closes while it does not, since a graph of timeframe averages has nothing new to say until
+one of them ends. The peak beside the rate now, which the graph's scale and its
+dashed line both sit at, is the busiest second any one row in the range carries.
+A range between two times is drawn between them, and stops at the read where it
+reaches past it, since nothing is recorded ahead of the clock; its axis stands at
+the times themselves where the others stand at how far back they reach. That read
 takes the open timeframe and the rows still waiting for the writer together under
 one lock before it queries the database, then counts a row the database has
 meanwhile once, from the database, so a timeframe closed during the read is never
 missing from it nor counted twice. Both are behind the login, and `/api/config` says whether there is a
 database to offer. The gateway stores bytes, peaks and times; the page divides
-for an average and shows every rate in decimal bits per second, as a network
-meter does. What an
+for an average where it is given no seconds, and shows every rate in decimal bits
+per second, as a network meter does. What an
 engine exchanges with its remote is a different link and is not counted.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,

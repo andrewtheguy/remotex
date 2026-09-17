@@ -92,9 +92,10 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # own SSE/AVX/NEON kernels at run time, which is the CPU floor packaging/README.md
 # requires.
 webp = { version = "0.3", default-features = false }
-# SQLite, for `[usage]`: the browser sockets' data usage per timeframe, which the page
-# reads back through `GET /api/usage` (src/usage.rs). `bundled` compiles SQLite's one C
-# file with `cc`, the same bargain as `webp` above — no system library to find.
+# SQLite, for `[meter]`: the browser sockets' throughput per timeframe, which the page
+# reads back through `GET /api/throughput` (src/throughput.rs). `bundled` compiles
+# SQLite's one C file with `cc`, the same bargain as `webp` above — no system library
+# to find.
 rusqlite = { version = "0.40", features = ["bundled"] }
 # libvpx, for VP9 — the video codec, for either streaming mode: the whole framebuffer
 # under `render_type = "video"`, or moving regions under `render_motion = true`

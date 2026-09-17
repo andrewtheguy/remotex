@@ -137,13 +137,13 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     let socket_path = instance.socket_path();
     let config = file.resolve_embedded(token.clone(), socket_path.clone(), &instance.dir)?;
 
-    // Before the handshake too, so a usage database the gateway cannot use is a refused
+    // Before the handshake too, so a throughput database the gateway cannot use is a refused
     // start the launcher reports rather than a gateway that silently records nothing.
-    let usage = crate::usage::start(
-        config.usage.as_ref(),
+    let throughput = crate::throughput::start(
+        config.meter.as_ref(),
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
-        .context("cannot record websocket data usage ([usage].database)")?;
+        .context("cannot record websocket throughput ([meter].database)")?;
 
     let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {
         anyhow::bail!("the embedded gateway must listen on its private Unix socket");
@@ -175,7 +175,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         );
     }
 
-    let app = crate::server::router(config, usage);
+    let app = crate::server::router(config, throughput);
     listener
         .set_nonblocking(true)
         .context("cannot make the listening socket non-blocking")?;

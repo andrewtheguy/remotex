@@ -76,7 +76,7 @@ use crate::{
     protocol::{self, ClientMsg, ServerMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
-    usage::{Socket, UsageMeters},
+    throughput::{Socket, ThroughputMeters},
     wire::Wire,
 };
 
@@ -451,7 +451,7 @@ where
     Ok(())
 }
 
-/// The bytes a data frame occupies on the wire, for [`crate::usage`]: its payload and
+/// The bytes a data frame occupies on the wire, for [`crate::throughput`]: its payload and
 /// its header, whose length field grows past 125 and 65535 bytes and whose four-byte
 /// mask only frames from the browser carry (RFC 6455 §5.2).
 ///
@@ -473,22 +473,22 @@ fn data_frame_len(msg: &Message, masked: bool) -> Option<u64> {
     Some((2 + length_field + mask + payload) as u64)
 }
 
-/// Split an attached socket into halves that count every data frame into `usage`, under
+/// Split an attached socket into halves that count every data frame into `throughput`, under
 /// the target `sessions` has selected when the frame moves.
 fn metered(
     socket: WebSocket,
     sessions: Arc<SessionManager>,
-    usage: Arc<UsageMeters>,
+    throughput: Arc<ThroughputMeters>,
     kind: Socket,
 ) -> (
     impl futures_util::Sink<Message, Error = axum::Error> + Send + Unpin,
     impl futures_util::Stream<Item = Result<Message, axum::Error>> + Send + Unpin,
 ) {
     let (ws_tx, ws_rx) = socket.split();
-    let (outbound_sessions, outbound_usage) = (Arc::clone(&sessions), Arc::clone(&usage));
+    let (outbound_sessions, outbound_throughput) = (Arc::clone(&sessions), Arc::clone(&throughput));
     let ws_tx = ws_tx.with(move |msg: Message| {
         if let Some(bytes) = data_frame_len(&msg, false) {
-            outbound_usage.counter(outbound_sessions.selected_target(), kind).sent(bytes);
+            outbound_throughput.counter(outbound_sessions.selected_target(), kind).sent(bytes);
         }
         std::future::ready(Ok::<_, axum::Error>(msg))
     });
@@ -496,7 +496,7 @@ fn metered(
         if let Ok(msg) = frame
             && let Some(bytes) = data_frame_len(msg, true)
         {
-            usage.counter(sessions.selected_target(), kind).received(bytes);
+            throughput.counter(sessions.selected_target(), kind).received(bytes);
         }
     });
     (ws_tx, ws_rx)
@@ -552,7 +552,7 @@ pub async fn handler(
             display,
             params.chroma,
             HEARTBEAT_TIMINGS,
-            Arc::clone(&state.usage.meters),
+            Arc::clone(&state.throughput.meters),
         )
     })
 }
@@ -563,7 +563,7 @@ pub async fn audio_handler(
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        audio(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
+        audio(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.throughput.meters))
     })
 }
 
@@ -577,7 +577,7 @@ async fn audio(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<UsageMeters>,
+    throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = token.and_then(|t| sessions.attach_audio(&t).ok());
     let Some(attachment) = attachment else {
@@ -593,7 +593,7 @@ async fn audio(
 
     info!("ws: an audio socket attached");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Audio);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Audio);
     let (audio_id, mut packets, mut evicted) =
         (attachment.id, attachment.packets, attachment.evicted);
     // The same encoder the session socket uses, so the two cannot disagree about a
@@ -692,7 +692,7 @@ pub async fn camera_handler(
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
+        camera(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.throughput.meters))
     })
 }
 
@@ -709,7 +709,7 @@ async fn camera(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<UsageMeters>,
+    throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_camera(&token),
@@ -732,7 +732,7 @@ async fn camera(
 
     info!("ws: a camera socket attached");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Camera);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Camera);
     let (camera_id, mut signals, mut evicted) =
         (attachment.id, attachment.signals, attachment.evicted);
     let mut heartbeat = interval(heartbeat_timings.interval);
@@ -858,7 +858,7 @@ pub async fn mic_handler(
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.usage.meters))
+        mic(socket, state.sessions, params.session, HEARTBEAT_TIMINGS, Arc::clone(&state.throughput.meters))
     })
 }
 
@@ -872,7 +872,7 @@ async fn mic(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<UsageMeters>,
+    throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = match token {
         Some(token) => sessions.attach_mic(&token),
@@ -895,7 +895,7 @@ async fn mic(
 
     info!("ws: a microphone socket attached");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Mic);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Mic);
     let (mic_id, mut signals, mut evicted) = (attachment.id, attachment.signals, attachment.evicted);
     let mut heartbeat = interval(heartbeat_timings.interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -973,7 +973,7 @@ async fn session(
     display: Option<protocol::HostDisplay>,
     chroma: Chroma,
     heartbeat_timings: HeartbeatTimings,
-    usage: Arc<UsageMeters>,
+    throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = match token {
         Some(t) => sessions.attach(&t, display, chroma).await.ok(),
@@ -992,7 +992,7 @@ async fn session(
 
     info!("ws: client attached to the session slot");
 
-    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), usage, Socket::Session);
+    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Session);
     let (attach_id, mut events) = (attachment.id, attachment.events);
 
     // How many times the client has said it lost its tile cache. The inbound half
@@ -1602,17 +1602,17 @@ mod tests {
             },
         ));
         let token = sessions.claim(false, None).unwrap();
-        let usage = Arc::new(UsageMeters::new(vec!["fake".to_owned()]));
-        let served_usage = Arc::clone(&usage);
+        let throughput = Arc::new(ThroughputMeters::new(vec!["fake".to_owned()]));
+        let served_throughput = Arc::clone(&throughput);
         let app = Router::new().route(
             "/ws",
             any(move |ws: WebSocketUpgrade| {
                 let sessions = Arc::clone(&sessions);
                 let token = token.clone();
-                let usage = Arc::clone(&served_usage);
+                let throughput = Arc::clone(&served_throughput);
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, HEARTBEAT_TIMINGS, usage)
+                        session(socket, sessions, Some(token), None, Chroma::Full, HEARTBEAT_TIMINGS, throughput)
                     })
                 }
             }),
@@ -1658,7 +1658,7 @@ mod tests {
         // Counted as the wire carries them, computed here from RFC 6455 rather than by
         // the function under test: a browser's short text frame is a two-byte header, a
         // four-byte mask and its payload.
-        let records = usage.close_timeframe(crate::usage::unix_now());
+        let records = throughput.close_timeframe(crate::throughput::unix_now());
         let received: u64 = records.iter().map(|record| record.received_bytes).sum();
         let texts = [
             r#"{"type":"connect","target":"fake"}"#,

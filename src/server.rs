@@ -18,7 +18,7 @@ use crate::{
     config::AppConfig,
     error::{ApiResult, AppError},
     session::SessionManager,
-    usage::{self, Usage},
+    throughput::{self, Throughput},
     ws,
 };
 
@@ -33,8 +33,8 @@ pub struct AppState {
     /// gateway's client carries the launch token the control plane seeded in that
     /// same cookie and there is no session to look up, so this stays empty there.
     pub auth: Arc<AuthSessions>,
-    /// Every browser socket's byte counters, and the database `[usage]` records them in.
-    pub usage: Usage,
+    /// Every browser socket's byte counters, and the database `[meter]` records them in.
+    pub throughput: Throughput,
 }
 
 /// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
@@ -207,11 +207,11 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
 ///   is the same binary and serves the same SPA.
 ///
-/// `usage` is where the browser sockets count their bytes and, when `[usage]` is set,
-/// the database [`crate::usage::start`] records them in and `/api/usage` reads.
-pub fn router(config: AppConfig, usage: Usage) -> Router {
+/// `throughput` is where the browser sockets count their bytes and, when `[meter]` is set,
+/// the database [`crate::throughput::start`] records them in and `/api/throughput` reads.
+pub fn router(config: AppConfig, throughput: Throughput) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
-    router_with_sessions(config, sessions, usage)
+    router_with_sessions(config, sessions, throughput)
 }
 
 /// [`router`] over a caller-supplied session slot.
@@ -222,7 +222,7 @@ pub fn router(config: AppConfig, usage: Usage) -> Router {
 pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
-    usage: Usage,
+    throughput: Throughput,
 ) -> Router {
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
@@ -253,7 +253,7 @@ pub(crate) fn router_with_sessions(
         config,
         sessions,
         auth: Arc::new(AuthSessions::default()),
-        usage,
+        throughput,
     };
     let require_auth = middleware::from_fn_with_state(state.clone(), require_auth);
 
@@ -271,8 +271,8 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
-                .route("/usage", get(usage_handler))
-                .route("/usage/live", get(usage_live_handler))
+                .route("/throughput", get(throughput_handler))
+                .route("/throughput/live", get(throughput_live_handler))
                 .route_layer(require_auth.clone()),
         )
         .fallback(|| async { AppError::NotFound });
@@ -539,9 +539,9 @@ struct ConfigResponse {
     /// the client already knows its gateway's origin, and a URL here would be a
     /// second spelling of it.
     logo: bool,
-    /// Whether `GET /api/usage` has a database to read, so the page offers the view only
+    /// Whether `GET /api/throughput` has a database to read, so the page offers the view only
     /// where there is something in it.
-    usage: bool,
+    throughput: bool,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
@@ -550,7 +550,7 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         branding: state.config.branding.text.clone(),
         logo: state.config.branding.logo.is_some(),
-        usage: state.usage.store.is_some(),
+        throughput: state.throughput.store.is_some(),
     })
 }
 
@@ -641,53 +641,99 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
 }
 
 #[derive(Deserialize)]
-struct UsageQuery {
+struct ThroughputQuery {
     /// Seconds back from the gateway's own clock: only timeframes that ended within them.
-    /// Absent reads everything kept. Relative, so a browser's clock never moves the range.
+    /// Relative, so a browser's clock never moves the range.
     within: Option<u64>,
+    /// The range's own start and end, in Unix seconds, for a range the page names
+    /// outright: only timeframes that ended after `from` and began before `to`. Read
+    /// against the gateway's clock, the one the records are stamped with.
+    from: Option<u64>,
+    to: Option<u64>,
+}
+
+impl ThroughputQuery {
+    /// The records this query asks for, `now` being the gateway's clock at the read, or
+    /// what makes the query nonsense. No bound at all reads everything kept.
+    fn window(&self, now: u64) -> Result<throughput::Window, &'static str> {
+        if self.within.is_some() && (self.from.is_some() || self.to.is_some()) {
+            return Err("within and from/to name two ranges: ask with one");
+        }
+        if let (Some(from), Some(to)) = (self.from, self.to)
+            && to <= from
+        {
+            return Err("to must come after from");
+        }
+        let back = || self.within.map(|within| now.saturating_sub(within));
+        Ok(throughput::Window { since: self.from.or_else(back).unwrap_or(0), until: self.to })
+    }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsageResponse {
+struct ThroughputResponse {
     /// The gateway's clock at the read, in Unix seconds, which `open` ends at.
     now: u64,
+    /// The seconds one row's timeframe groups, which a range too long for the sampled
+    /// seconds is drawn a point per.
     interval_secs: u64,
     max_records: usize,
+    /// Whether the rows carry the seconds that moved. The range decides it, so the page
+    /// knows which kind of answer it holds without keeping the threshold of its own.
+    has_seconds: bool,
     /// The written timeframes, oldest first.
-    records: Vec<usage::Record>,
+    records: Vec<throughput::Record>,
     /// The timeframe still being counted, as it stands at `now`.
-    open: Vec<usage::Record>,
+    open: Vec<throughput::Record>,
 }
 
-/// The recorded data usage of the browser sockets, read when the page asks for it.
-/// 404 on a gateway with no `[usage]`: there is no database to read.
-async fn usage_handler(
+/// The recorded throughput of the browser sockets, read when the page asks for it.
+/// 404 on a gateway with no `[meter]`: there is no database to read.
+async fn throughput_handler(
     State(state): State<AppState>,
-    Query(query): Query<UsageQuery>,
-) -> ApiResult<Json<UsageResponse>> {
-    let store = state.usage.store.clone().ok_or(AppError::NotFound)?;
-    let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
-    let now = usage::unix_now();
-    let since = query.within.map_or(0, |within| now.saturating_sub(within));
+    Query(query): Query<ThroughputQuery>,
+) -> ApiResult<Json<ThroughputResponse>> {
+    let store = state.throughput.store.clone().ok_or(AppError::NotFound)?;
+    let max_records = store.max_records;
+    let now = throughput::unix_now();
+    let window = query.window(now).map_err(AppError::BadRequest)?;
+    // Short enough to draw a point a second: the range is answered with the seconds that
+    // moved, and a longer one with the timeframes alone.
+    let span = window.until.unwrap_or(now).saturating_sub(window.since);
+    let seconds = span <= throughput::TRACE_SPAN_SECS;
     // The meters before the database: a timeframe closed between the two is in the
     // snapshot, and one written between the two is counted once, from the database.
-    let snapshot = state.usage.meters.snapshot(now);
-    let written = tokio::task::spawn_blocking(move || store.records(since))
+    let snapshot = state.throughput.meters.snapshot(now);
+    let written = tokio::task::spawn_blocking(move || store.records(window, seconds))
         .await
         .map_err(anyhow::Error::from)??;
-    let usage::Reading { records, open } = snapshot.with_written(written, since);
-    Ok(Json(UsageResponse { now, interval_secs, max_records, records, open }))
+    let throughput::Reading { mut records, mut open } = snapshot.with_written(written, window);
+    if !seconds {
+        // The rows from memory carry theirs whatever the range: drop them with the rest.
+        for record in records.iter_mut().chain(&mut open) {
+            record.seconds.clear();
+        }
+    }
+    Ok(Json(ThroughputResponse {
+        now,
+        interval_secs: throughput::TIMEFRAME.as_secs(),
+        max_records,
+        has_seconds: seconds,
+        records,
+        open,
+    }))
 }
 
 /// The rate right now: what the last one-second sample found moving on each target's
-/// socket. Polled by the "Data usage" view while it is open. 404 on a gateway with no
-/// `[usage]`: nothing samples the counters there.
-async fn usage_live_handler(State(state): State<AppState>) -> ApiResult<Json<usage::Live>> {
-    if state.usage.store.is_none() {
+/// socket. Polled by the "Throughput" view while it is open. 404 on a gateway with no
+/// `[meter]`: nothing samples the counters there.
+async fn throughput_live_handler(
+    State(state): State<AppState>,
+) -> ApiResult<Json<throughput::Live>> {
+    if state.throughput.store.is_none() {
         return Err(AppError::NotFound);
     }
-    Ok(Json(state.usage.meters.live()))
+    Ok(Json(state.throughput.meters.live()))
 }
 
 #[derive(Deserialize, Default)]
@@ -887,7 +933,7 @@ mod tests {
             source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
         });
 
-        let response = router(config, Usage::default())
+        let response = router(config, Throughput::default())
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/logo")
@@ -909,7 +955,7 @@ mod tests {
     /// assertion below is about the redirect, and a request that is *not*
     /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        router(router_config(dev_hostname), Usage::default())
+        router(router_config(dev_hostname), Throughput::default())
     }
 
     /// The config both test routers are built from, so the only thing that ever
@@ -964,7 +1010,7 @@ mod tests {
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
-            usage: None,
+            meter: None,
         }
     }
 
@@ -1304,12 +1350,12 @@ mod tests {
                 logo: None,
             },
             dev_hostname: None,
-            usage: None,
+            meter: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router_with_sessions(config, sessions, Usage::default());
+        let app = router_with_sessions(config, sessions, Throughput::default());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1375,16 +1421,16 @@ mod tests {
         let json = serde_json::to_string(&ConfigResponse {
             branding: "remotex".to_owned(),
             logo: false,
-            usage: false,
+            throughput: false,
         })
         .unwrap();
-        assert_eq!(json, r#"{"branding":"remotex","logo":false,"usage":false}"#);
+        assert_eq!(json, r#"{"branding":"remotex","logo":false,"throughput":false}"#);
     }
 
-    /// `/api/usage` is behind the login, reads back from the gateway's clock, and is a 404
+    /// `/api/throughput` is behind the login, reads back from the gateway's clock, and is a 404
     /// on a gateway that records nothing.
     #[tokio::test]
-    async fn usage_is_read_behind_the_login() {
+    async fn throughput_is_read_behind_the_login() {
         use tower::ServiceExt as _;
 
         let get = |uri: &str, cookie: Option<&str>| {
@@ -1412,40 +1458,44 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let store = usage::UsageStore::open(&usage::UsageConfig {
-            database: dir.path().join("usage.sqlite3"),
-            interval: std::time::Duration::from_secs(60),
+        let store = throughput::ThroughputStore::open(&throughput::MeterConfig {
+            database: dir.path().join("meter.sqlite3"),
             max_records: 10,
         })
         .unwrap();
-        let record = |start, sent_bytes| usage::Record {
+        let record = |start, sent_bytes| throughput::Record {
             target: Some("mac".to_owned()),
-            socket: usage::Socket::Session,
+            socket: throughput::Socket::Session,
             start,
             end: start + 60,
             sent_bytes,
             received_bytes: 7,
             peak_sent_per_sec: sent_bytes / 2,
             peak_received_per_sec: 7,
+            // Two seconds of it moved: the rest of the minute was quiet.
+            seconds: vec![
+                throughput::Second(0, sent_bytes / 2, 3),
+                throughput::Second(30, sent_bytes / 2, 4),
+            ],
         };
-        let now = usage::unix_now();
+        let now = throughput::unix_now();
         store.write(&[record(now - 600, 100), record(now - 100, 200)]).unwrap();
         // A timeframe closed but not written yet, then the one still being counted:
         // one sample of the picker's, and bytes since.
-        let meters = Arc::new(usage::UsageMeters::open_at(vec!["mac".to_owned()], now - 20));
-        meters.counter(None, usage::Socket::Session).sent(30);
+        let meters = Arc::new(throughput::ThroughputMeters::open_at(vec!["mac".to_owned()], now - 20));
+        meters.counter(None, throughput::Socket::Session).sent(30);
         meters.sample(now - 19);
         meters.close_timeframe(now - 10);
-        meters.counter(None, usage::Socket::Session).received(4);
+        meters.counter(None, throughput::Socket::Session).received(4);
         meters.sample(now - 9);
-        meters.counter(None, usage::Socket::Session).received(2);
-        let app = router(router_config(None), Usage { meters, store: Some(Arc::new(store)) });
+        meters.counter(None, throughput::Socket::Session).received(2);
+        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) });
 
-        let response = app.clone().oneshot(get("/api/usage", None)).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let cookie = log_in(app.clone()).await;
-        let response = app.clone().oneshot(get("/api/usage?within=300", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput?within=300", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         let mut json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1460,19 +1510,48 @@ mod tests {
                 "now": read_at,
                 "intervalSecs": 60,
                 "maxRecords": 10,
+                "hasSeconds": true,
                 "records": [
-                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7},
-                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0}
+                    {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7, "seconds": [[0, 100, 3], [30, 100, 4]]},
+                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0, "seconds": [[0, 30, 0]]}
                 ],
                 "open": [
-                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4}
+                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4, "seconds": [[0, 0, 4]]}
                 ],
             })
         );
 
-        let response = app.clone().oneshot(get("/api/usage/live", None)).await.unwrap();
+        // A range too long to draw a point a second is answered without the seconds, from
+        // the database and from the meters alike.
+        let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["hasSeconds"], serde_json::json!(false), "the range says so itself");
+        for record in json["records"].as_array().unwrap().iter().chain(json["open"].as_array().unwrap()) {
+            assert_eq!(record["seconds"], serde_json::json!([]), "{record}");
+        }
+
+        // A range named outright: the timeframes inside it alone, and not the one still
+        // being counted, which began after that range ended.
+        let named = format!("/api/throughput?from={}&to={}", now - 700, now - 500);
+        let response = app.clone().oneshot(get(&named, Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["records"], serde_json::json!([{"target": "mac", "socket": "session", "start": now - 600, "end": now - 540, "sentBytes": 100, "receivedBytes": 7, "peakSentPerSec": 50, "peakReceivedPerSec": 7, "seconds": [[0, 50, 3], [30, 50, 4]]}]));
+        assert_eq!(json["open"], serde_json::json!([]));
+
+        // Two ranges in one query, or one that ends where it begins, is no query at all.
+        for query in [format!("?within=300&to={now}"), format!("?from={now}&to={now}")] {
+            let response =
+                app.clone().oneshot(get(&format!("/api/throughput{query}"), Some(&cookie))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+
+        let response = app.clone().oneshot(get("/api/throughput/live", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let response = app.clone().oneshot(get("/api/usage/live", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput/live", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
@@ -1480,11 +1559,11 @@ mod tests {
             format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":0,"receivedPerSec":4}}]}}"#, now - 9)
         );
 
-        let app = router(router_config(None), Usage::default());
+        let app = router(router_config(None), Throughput::default());
         let cookie = log_in(app.clone()).await;
-        let response = app.clone().oneshot(get("/api/usage", Some(&cookie))).await.unwrap();
+        let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let response = app.oneshot(get("/api/usage/live", Some(&cookie))).await.unwrap();
+        let response = app.oneshot(get("/api/throughput/live", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

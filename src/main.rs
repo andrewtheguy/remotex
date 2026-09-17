@@ -141,15 +141,15 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
 }
 
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
-    if let Some(recording) = &config.usage {
-        info!("recording websocket data usage to {}", recording.database.display());
+    if let Some(recording) = &config.meter {
+        info!("recording websocket throughput to {}", recording.database.display());
     }
-    let usage = remotex::usage::start(
-        config.usage.as_ref(),
+    let throughput = remotex::throughput::start(
+        config.meter.as_ref(),
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
-        .context("cannot record websocket data usage ([usage].database)")?;
-    let app = server::router(config.clone(), usage);
+        .context("cannot record websocket throughput ([meter].database)")?;
+    let app = server::router(config.clone(), throughput);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

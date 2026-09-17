@@ -1,15 +1,19 @@
-// Drawing one direction of the data usage meter: the points of a range on a
+// Drawing one direction of the throughput meter: the points of a range on a
 // canvas, an area under a line, a dot on the newest second, four grid lines with
-// their rate at the right edge, and a gap where a point was not read. The rendering
-// is the panel's (UsagePanel.tsx); this is the geometry and the strokes.
+// their rate at the right edge, an unlabelled dashed line across the busiest second
+// of the range, and a gap where a point was not read. The rendering is the panel's
+// (ThroughputPanel.tsx); this is the geometry and the strokes.
 
-import { formatRate } from "./usage.ts";
+import { formatRate } from "./throughput.ts";
 
 /// Room at the right edge for the scale's labels, in CSS pixels.
 export const SCALE_WIDTH = 68;
 
 const PAD_TOP = 6;
 const PAD_BOTTOM = 4;
+const LABEL_FONT = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+/// The max line's dash, in CSS pixels: on, then off.
+const MAX_DASH = [4, 4];
 
 export interface ChartInk {
   line: string;
@@ -26,6 +30,8 @@ export interface ChartLayout {
   points: readonly (number | null)[];
   /** The rate at the top of the plot. */
   top: number;
+  /** The rate the max line marks; `0` draws none. */
+  max: number;
 }
 
 /** The runs of read seconds in `points`, each as `[from, to)`. */
@@ -54,6 +60,11 @@ function plotY(value: number, layout: ChartLayout): number {
   return PAD_TOP + plotHeight - (value / layout.top) * plotHeight;
 }
 
+/// The y a one-pixel horizontal line at `value` is stroked on, on the pixel grid.
+function lineY(value: number, layout: ChartLayout): number {
+  return Math.round(plotY(value, layout)) + 0.5;
+}
+
 function drawGrid(
   ctx: CanvasRenderingContext2D,
   layout: ChartLayout,
@@ -63,12 +74,12 @@ function drawGrid(
   ctx.strokeStyle = ink.grid;
   ctx.lineWidth = 1;
   ctx.fillStyle = ink.label;
-  ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.font = LABEL_FONT;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   for (let g = 0; g <= 4; g++) {
     const value = (layout.top * g) / 4;
-    const y = Math.round(plotY(value, layout)) + 0.5;
+    const y = lineY(value, layout);
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(plotWidth, y);
@@ -77,6 +88,27 @@ function drawGrid(
       ctx.fillText(formatRate(value), plotWidth + 6, y);
     }
   }
+}
+
+/// The busiest second of the range: one dashed line across the plot in the direction's
+/// own ink, drawn over the area so the fill does not swallow it, and dashed so it reads
+/// as a mark on the graph rather than as data. It carries no rate of its own — the tile
+/// beside the graph names the same second.
+function drawMax(
+  ctx: CanvasRenderingContext2D,
+  layout: ChartLayout,
+  ink: ChartInk,
+) {
+  const y = lineY(layout.max, layout);
+  ctx.strokeStyle = ink.line;
+  ctx.lineWidth = 1;
+  ctx.setLineDash(MAX_DASH);
+  ctx.beginPath();
+  ctx.moveTo(0, y);
+  ctx.lineTo(layout.width - SCALE_WIDTH, y);
+  ctx.stroke();
+  // Nothing else on the canvas dashes.
+  ctx.setLineDash([]);
 }
 
 /// The line through the read seconds `from` up to `to`, as the current path.
@@ -156,6 +188,10 @@ export function drawChart(
   drawGrid(ctx, layout, ink);
   for (const [from, to] of runs(layout.points)) {
     drawRun(ctx, layout, ink, from, to);
+  }
+  // A range that moved nothing gets no line: one at zero only traces the axis.
+  if (layout.max > 0) {
+    drawMax(ctx, layout, ink);
   }
   drawNewest(ctx, layout, ink);
 }

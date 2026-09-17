@@ -46,20 +46,25 @@
 #DwAEhQGAhKmMIQAAAABJRU5ErkJggg==
 #"""
 
-# Data usage of the browser's WebSockets (/ws, /ws/audio, /ws/camera, /ws/mic),
-# kept in an SQLite database and shown by the page's "Data usage" view, which
+# Throughput of the browser's WebSockets (/ws, /ws/audio, /ws/camera, /ws/mic),
+# kept in an SQLite database and shown by the page's "Throughput" view, which
 # reads it when opened. Only the hop between the browser and this gateway is
 # counted: the bytes of every text and binary frame, WebSocket headers included,
 # written to the browser (sent) and read from it (received).
 #
 # Bytes are grouped by the target the session had selected when they moved, and
-# by "no target" while the browser sits on the picker. Every interval_secs one
-# record is added per target and socket that moved data in that timeframe — an
-# idle socket adds none — in one transaction. Each target's socket keeps its
-# newest max_records records. Best effort: the timeframe being counted when the
-# gateway stops is lost. Without a [usage] table, nothing is recorded.
+# by "no target" while the browser sits on the picker. The meter reads the
+# counters once a second, and every minute one record is added per target and
+# socket that moved data in that minute — an idle socket adds none — in one
+# transaction, carrying the minute's bytes, its busiest second and each second of
+# it that moved. A second that moved nothing is not stored. The second is the
+# meter's resolution and the minute is only how often it reaches the disk;
+# neither is configurable. Each target's socket keeps its newest max_records
+# records, so the default is a week of minutes for a socket busy all week. Best
+# effort: the minute being counted when the gateway stops is lost. Without a
+# [meter] table, nothing is recorded.
 #
-# The database is usage.sqlite3 in the gateway's state directory unless database
+# The database is meter.sqlite3 in the gateway's state directory unless database
 # names another file; a relative path is taken from that directory too. The state
 # directory is /var/lib/remotex for the Linux packages, /usr/local/var/remotex for
 # the macOS package, %ProgramData%\remotex on Windows, /opt/remotex/var in the
@@ -67,10 +72,9 @@
 # directory. The directory must be writable: SQLite keeps its -wal and -shm files
 # beside the database.
 #
-#[usage]
-#database = "usage.sqlite3"
-#interval_secs = 60
-#max_records = 1440
+#[meter]
+#database = "meter.sqlite3"
+#max_records = 10080
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,

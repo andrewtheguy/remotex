@@ -63,7 +63,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         auth: common::test_auth(),
         branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
-        usage: None,
+        meter: None,
         targets: vec![TargetConfig {
             name: TARGET.to_owned(),
             protocol: Protocol::Vnc,

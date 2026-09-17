@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
-import UsagePanel, { useUsageAvailable } from "./UsagePanel.tsx";
+import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
@@ -54,9 +54,9 @@ export default function TargetPicker({
 }) {
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Offered only on a gateway with `[usage]`; the view replaces the list while open.
-  const usageAvailable = useUsageAvailable();
-  const [showUsage, setShowUsage] = useState(false);
+  // Offered only on a gateway with `[meter]`; the view replaces the list while open.
+  const throughputAvailable = useThroughputAvailable();
+  const [showThroughput, setShowThroughput] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,14 +86,14 @@ export default function TargetPicker({
     };
   }, [onUnauthorized]);
 
-  if (showUsage) {
+  if (showThroughput) {
     return (
       <div className="picker-screen">
-        <div className="picker-panel usage-panel">
+        <div className="picker-panel throughput-panel">
           <span className="picker-brand">{branding}</span>
-          <UsagePanel
+          <ThroughputPanel
             closeLabel="Back to targets"
-            onClose={() => setShowUsage(false)}
+            onClose={() => setShowThroughput(false)}
             onUnauthorized={onUnauthorized}
           />
         </div>
@@ -149,14 +149,14 @@ export default function TargetPicker({
             <span>Play the remote's sound, if compatible</span>
           </label>
         </div>
-        {usageAvailable && (
+        {throughputAvailable && (
           <button
             type="button"
             className="picker-logout"
-            onClick={() => setShowUsage(true)}
+            onClick={() => setShowThroughput(true)}
             disabled={pendingTarget !== null}
           >
-            Data usage
+            Throughput
           </button>
         )}
         <button

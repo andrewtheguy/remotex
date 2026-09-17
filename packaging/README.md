@@ -44,7 +44,7 @@ The live config is deliberately outside the manifests:
 example with mode `0600` and ownership of the account that runs the gateway.
 That keeps both upgrades and removals away from stored credentials.
 
-What the gateway keeps between runs — today only the `[usage]` database — is
+What the gateway keeps between runs — today only the `[meter]` database — is
 outside the manifests for the same reason, in a state directory the gateway
 creates when it first needs it: `/var/lib/remotex` on Linux,
 `/usr/local/var/remotex` on macOS and `%ProgramData%\remotex` on Windows. The

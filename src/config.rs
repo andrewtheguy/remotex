@@ -7,7 +7,6 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -19,7 +18,7 @@ use crate::audio::PcmFormat;
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::{HostDisplay, JpegSampling};
-use crate::usage::UsageConfig;
+use crate::throughput::MeterConfig;
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
@@ -1485,37 +1484,31 @@ pub struct ConfigFile {
     /// that refusal is the whole of the migration.
     #[serde(default)]
     pub branding: Option<BrandingSection>,
-    /// The `[usage]` table: where the browser sockets' data usage is recorded. Absent
+    /// The `[meter]` table: where the browser sockets' throughput is recorded. Absent
     /// records nothing. Top-level for [`Self::branding`]'s reason — an embedded config
     /// may set it too.
     #[serde(default)]
-    pub usage: Option<UsageSection>,
+    pub meter: Option<MeterSection>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
 
-/// The `[usage]` table as written. See [`crate::usage`].
+/// The `[meter]` table as written. See [`crate::throughput`].
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UsageSection {
-    /// The SQLite database the records are kept in. Absent is `usage.sqlite3` in the
+pub struct MeterSection {
+    /// The SQLite database the records are kept in. Absent is `meter.sqlite3` in the
     /// gateway's state directory, and a relative path is taken from that directory too.
     pub database: Option<PathBuf>,
-    /// Seconds in one timeframe, which is also how often it is written.
-    #[serde(default = "default_usage_interval_secs")]
-    pub interval_secs: u64,
-    /// Records kept per target and socket; the oldest go first.
-    #[serde(default = "default_usage_max_records")]
+    /// Records kept per target and socket; the oldest go first. One record is one
+    /// timeframe, whose length is the gateway's to decide, not this file's.
+    #[serde(default = "default_meter_max_records")]
     pub max_records: usize,
 }
 
-fn default_usage_interval_secs() -> u64 {
-    60
-}
-
-/// A day of one-minute timeframes, for a socket busy all day.
-fn default_usage_max_records() -> usize {
-    1440
+/// A week of one-minute timeframes, for a socket busy all week.
+fn default_meter_max_records() -> usize {
+    10_080
 }
 
 /// Resolved runtime configuration: the web server plus every target profile it
@@ -1543,8 +1536,8 @@ pub struct AppConfig {
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
     pub dev_hostname: Option<String>,
-    /// `[usage]`, resolved. `None` records nothing.
-    pub usage: Option<UsageConfig>,
+    /// `[meter]`, resolved. `None` records nothing.
+    pub meter: Option<MeterConfig>,
 }
 
 impl ConfigFile {
@@ -1596,19 +1589,13 @@ impl ConfigFile {
                 "config has no [[targets]] — at least one target profile is required"
             );
         }
-        if let Some(usage) = &config.usage {
+        if let Some(meter) = &config.meter {
             anyhow::ensure!(
-                usage.database.as_ref().is_none_or(|database| !database.as_os_str().is_empty()),
-                "[usage].database is empty — name the SQLite file, or leave the key out for \
-                 usage.sqlite3 in the gateway's state directory"
+                meter.database.as_ref().is_none_or(|database| !database.as_os_str().is_empty()),
+                "[meter].database is empty — name the SQLite file, or leave the key out for \
+                 meter.sqlite3 in the gateway's state directory"
             );
-            anyhow::ensure!(usage.interval_secs >= 1, "[usage].interval_secs must be at least 1");
-            anyhow::ensure!(
-                std::time::Instant::now().checked_add(Duration::from_secs(usage.interval_secs)).is_some(),
-                "[usage].interval_secs {} is too long to schedule",
-                usage.interval_secs
-            );
-            anyhow::ensure!(usage.max_records >= 1, "[usage].max_records must be at least 1");
+            anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -2113,7 +2100,7 @@ impl ConfigFile {
     /// gateway itself: it names the instance, and multiple local instances are
     /// easier to tell apart if they can be called different things.
     ///
-    /// `state_dir` is the instance directory, where `[usage]` keeps its database.
+    /// `state_dir` is the instance directory, where `[meter]` keeps its database.
     #[cfg(all(feature = "embedded-gateway", unix))]
     pub fn resolve_embedded(
         self,
@@ -2129,17 +2116,16 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_ref())?,
             dev_hostname: None,
-            usage: Self::resolve_usage(self.usage, state_dir),
+            meter: Self::resolve_meter(self.meter, state_dir),
         })
     }
 
-    /// The `[usage]` table resolved, its database placed in `state_dir`. Its values were
+    /// The `[meter]` table resolved, its database placed in `state_dir`. Its values were
     /// checked by [`Self::parse_with`].
-    fn resolve_usage(section: Option<UsageSection>, state_dir: &Path) -> Option<UsageConfig> {
-        section.map(|section| UsageConfig {
+    fn resolve_meter(section: Option<MeterSection>, state_dir: &Path) -> Option<MeterConfig> {
+        section.map(|section| MeterConfig {
             // `join` keeps an absolute path as written.
-            database: state_dir.join(section.database.as_deref().unwrap_or(Path::new(USAGE_DATABASE))),
-            interval: Duration::from_secs(section.interval_secs),
+            database: state_dir.join(section.database.as_deref().unwrap_or(Path::new(METER_DATABASE))),
             max_records: section.max_records,
         })
     }
@@ -2186,7 +2172,7 @@ impl ConfigFile {
     /// over `[server].listen`. That is the whole precedence: one address, from the
     /// command line if it is there and from the file otherwise.
     ///
-    /// `state_dir` is where `[usage]` keeps its database; see [`state_dir`].
+    /// `state_dir` is where `[meter]` keeps its database; see [`state_dir`].
     pub fn resolve_with(self, listen: Option<&str>, state_dir: &Path) -> anyhow::Result<AppConfig> {
         let server = self.server.unwrap_or_default();
         let listen = match (listen, server.listen.as_deref()) {
@@ -2219,7 +2205,7 @@ impl ConfigFile {
                 .map(dev_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
-            usage: Self::resolve_usage(self.usage, state_dir),
+            meter: Self::resolve_meter(self.meter, state_dir),
         })
     }
 }
@@ -2387,8 +2373,8 @@ struct InstalledLayout {
     state_dir: PathBuf,
 }
 
-/// The `[usage]` database's file name when the config names none.
-const USAGE_DATABASE: &str = "usage.sqlite3";
+/// The `[meter]` database's file name when the config names none.
+const METER_DATABASE: &str = "meter.sqlite3";
 
 /// The state directory of a gateway serving the config at `config`: the installation's
 /// when that is the installed config, and otherwise the config file's own directory.
@@ -2844,45 +2830,46 @@ mod tests {
     /// No table records nothing; a table names its database and may leave the rest to the
     /// defaults.
     #[test]
-    fn usage_is_recorded_in_the_state_directory_unless_a_database_is_named() {
+    fn meter_is_recorded_in_the_state_directory_unless_a_database_is_named() {
         let state = Path::new("/var/lib/remotex");
-        let usage = |table: &str| {
+        let meter = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
-            ConfigFile::parse(&toml).unwrap().resolve_with(None, state).unwrap().usage
+            ConfigFile::parse(&toml).unwrap().resolve_with(None, state).unwrap().meter
         };
-        assert_eq!(usage(""), None, "no [usage] records nothing");
+        assert_eq!(meter(""), None, "no [meter] records nothing");
         assert_eq!(
-            usage("[usage]"),
-            Some(UsageConfig {
-                database: PathBuf::from("/var/lib/remotex/usage.sqlite3"),
-                interval: Duration::from_secs(60),
-                max_records: 1440,
+            meter("[meter]"),
+            Some(MeterConfig {
+                database: PathBuf::from("/var/lib/remotex/meter.sqlite3"),
+                max_records: 10_080,
             })
         );
         assert_eq!(
-            usage("[usage]\ndatabase = \"/srv/usage/remotex.sqlite3\"").unwrap().database,
-            Path::new("/srv/usage/remotex.sqlite3")
+            meter("[meter]\ndatabase = \"/srv/meter/remotex.sqlite3\"").unwrap().database,
+            Path::new("/srv/meter/remotex.sqlite3")
         );
         assert_eq!(
-            usage("[usage]\ndatabase = \"usage/uat.sqlite3\"").unwrap().database,
-            Path::new("/var/lib/remotex/usage/uat.sqlite3"),
+            meter("[meter]\ndatabase = \"meter/uat.sqlite3\"").unwrap().database,
+            Path::new("/var/lib/remotex/meter/uat.sqlite3"),
             "a relative database is taken from the state directory"
         );
 
-        let usage = usage("[usage]\ninterval_secs = 300\nmax_records = 12").unwrap();
-        assert_eq!((usage.interval, usage.max_records), (Duration::from_secs(300), 12));
+        assert_eq!(meter("[meter]\nmax_records = 12").unwrap().max_records, 12);
+        assert!(
+            ConfigFile::parse(&format!("[meter]\ninterval_secs = 60\n{}", minimal())).is_err(),
+            "the meter's second is not the file's to set"
+        );
     }
 
     #[test]
-    fn a_usage_table_that_records_nothing_is_refused() {
+    fn a_meter_table_that_records_nothing_is_refused() {
         for (bad, says) in [
-            ("database = \"\"", "[usage].database"),
-            ("database = \"u.sqlite3\"\ninterval_secs = 0", "[usage].interval_secs"),
-            ("interval_secs = 18446744073709551615", "too long to schedule"),
-            ("database = \"u.sqlite3\"\nmax_records = 0", "[usage].max_records"),
+            ("database = \"\"", "[meter].database"),
+            ("database = \"u.sqlite3\"\ninterval_secs = 60", "interval_secs"),
+            ("database = \"u.sqlite3\"\nmax_records = 0", "[meter].max_records"),
             ("database = \"u.sqlite3\"\nmax_count = 3", "max_count"),
         ] {
-            let toml = format!("[usage]\n{bad}\n{}", minimal());
+            let toml = format!("[meter]\n{bad}\n{}", minimal());
             let err = ConfigFile::parse(&toml).expect_err(bad);
             assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
         }
