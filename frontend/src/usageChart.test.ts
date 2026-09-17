@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import {
   plotX,
-  pointedSecond,
+  pointedIndex,
   runs,
   SCALE_WIDTH,
   tipLeft,
@@ -24,11 +24,11 @@ test("the seconds span the plot, which stops short of the scale", () => {
   const width = 100 + SCALE_WIDTH;
   assert.equal(plotX(0, 60, width), 0);
   assert.equal(plotX(59, 60, width), 100);
-  assert.equal(pointedSecond(0, 60, width), 0);
-  assert.equal(pointedSecond(100, 60, width), 59);
-  assert.equal(pointedSecond(50, 60, width), 30);
-  assert.equal(pointedSecond(-1, 60, width), null);
-  assert.equal(pointedSecond(101, 60, width), null, "over the scale");
+  assert.equal(pointedIndex(0, 60, width), 0);
+  assert.equal(pointedIndex(100, 60, width), 59);
+  assert.equal(pointedIndex(50, 60, width), 30);
+  assert.equal(pointedIndex(-1, 60, width), null);
+  assert.equal(pointedIndex(101, 60, width), null, "over the scale");
 });
 
 test("the tooltip sits over its second but inside the plot", () => {

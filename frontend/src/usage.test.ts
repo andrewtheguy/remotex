@@ -2,28 +2,27 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  agoLabel,
   appendLive,
   clockNow,
   customUsageRange,
   formatRate,
-  GRAPH_WINDOWS,
-  graphWindowLabel,
   LIVE_HISTORY_SECS,
   type LiveRate,
   liveSeries,
-  liveTargets,
   liveTotals,
+  MAX_GRAPH_POINTS,
   rateScale,
+  recordedSeries,
+  spanLabel,
   targetLabel,
   USAGE_PRESETS,
   type UsageLive,
   type UsageRecord,
-  usageByTarget,
+  type UsageReport,
+  usageRangeIsLive,
   usageRangeKey,
   usageRangeLabel,
-  usageRate,
-  usageTotals,
+  usageTargets,
   usageWithin,
 } from "./usage.ts";
 
@@ -44,12 +43,6 @@ const record = (
   receivedBytes,
   peakSentPerSec: sentBytes,
   peakReceivedPerSec: receivedBytes,
-});
-
-test("a rate is bytes over seconds, and none over no time", () => {
-  assert.equal(usageRate(6000, 60), 100);
-  assert.equal(usageRate(0, 60), 0);
-  assert.equal(usageRate(500, 0), null, "a timeframe that just began");
 });
 
 test("a rate in bytes per second is shown in decimal bits per second", () => {
@@ -88,8 +81,7 @@ const rate = (
 
 const sample = (at: number, ...rates: LiveRate[]): UsageLive => ({ at, rates });
 
-test("the history keeps one sample per second, newest last, as long as the longest window", () => {
-  assert.equal(LIVE_HISTORY_SECS, Math.max(...GRAPH_WINDOWS));
+test("the history keeps one sample per second, newest last, as long as the longest sampled range", () => {
   let history = appendLive([], sample(100));
   history = appendLive(history, sample(101));
   assert.deepEqual(
@@ -106,6 +98,13 @@ test("the history keeps one sample per second, newest last, as long as the longe
   assert.equal(history[0].at, 105, "the oldest fall off");
 });
 
+/// A series whose busiest second is its highest point, as a sampled one's is.
+const series = (points: (number | null)[], peak: number) => ({
+  points,
+  peak,
+  busiest: peak,
+});
+
 test("a series is the window's seconds up to now, summed over what is kept, with gaps for seconds not read", () => {
   const history = [
     sample(10, rate("mac", "session", 1000, 10)),
@@ -114,28 +113,27 @@ test("a series is the window's seconds up to now, summed over what is kept, with
     sample(13, rate("win", "session", 50, 5)),
   ];
   const all = liveSeries(history, 5, () => true, 13);
-  assert.deepEqual(all.sent, {
-    points: [null, 1000, 2300, null, 50],
-    peak: 2300,
-  });
-  assert.deepEqual(all.received, { points: [null, 10, 20, null, 5], peak: 20 });
+  assert.deepEqual(all.sent, series([null, 1000, 2300, null, 50], 2300));
+  assert.deepEqual(all.received, series([null, 10, 20, null, 5], 20));
+  assert.equal(all.stepSecs, 1);
+  assert.equal(all.end, 13);
   const mac = liveSeries(history, 3, (r) => r.target === "mac", 13);
-  assert.deepEqual(mac.sent, { points: [2000, null, 0], peak: 2000 });
-  assert.deepEqual(mac.received, { points: [20, null, 0], peak: 20 });
+  assert.deepEqual(mac.sent, series([2000, null, 0], 2000));
+  assert.deepEqual(mac.received, series([20, null, 0], 20));
   const audio = liveSeries(history, 2, (r) => r.socket === "audio", 13);
-  assert.deepEqual(audio.sent, { points: [null, 0], peak: 0 });
+  assert.deepEqual(audio.sent, series([null, 0], 0));
   // Reads have failed since the newest sample: it slides left and gaps follow it.
   const stale = liveSeries(history, 4, () => true, 15);
-  assert.deepEqual(stale.sent, { points: [null, 50, null, null], peak: 50 });
+  assert.deepEqual(stale.sent, series([null, 50, null, null], 50));
   // Nothing read yet, or a window that ends before the samples: gaps throughout.
-  assert.deepEqual(liveSeries(history, 3, () => true, null).sent, {
-    points: [null, null, null],
-    peak: 0,
-  });
-  assert.deepEqual(liveSeries(history, 2, () => true, 9).sent, {
-    points: [null, null],
-    peak: 0,
-  });
+  assert.deepEqual(
+    liveSeries(history, 3, () => true, null).sent,
+    series([null, null, null], 0),
+  );
+  assert.deepEqual(
+    liveSeries(history, 2, () => true, 9).sent,
+    series([null, null], 0),
+  );
 });
 
 test("the clock is the last sample's second plus the whole seconds since it was read", () => {
@@ -170,26 +168,104 @@ test("a scale tops out at a round number of bits per second above the peak", () 
   }
 });
 
-test("the graph's targets are those any sample saw, by label", () => {
-  assert.deepEqual(
-    liveTargets([
-      sample(1, rate("win", "session", 1, 1)),
-      sample(2, rate(null, "session", 1, 1), rate("mac", "audio", 1, 0)),
-      sample(3, rate("win", "audio", 1, 1)),
-    ]),
-    ["mac", null, "win"],
+const report = (
+  now: number,
+  records: UsageRecord[],
+  open: UsageRecord[] = [],
+): UsageReport => ({ now, intervalSecs: 60, maxRecords: 1440, records, open });
+
+test("a recorded range is a point per timeframe, the average over it, zero where nothing moved", () => {
+  const read = report(
+    600,
+    [
+      record("mac", "session", 6000, 60, 300),
+      record("mac", "audio", 1200, 0, 300),
+      record("win", "session", 600, 0, 420),
+    ],
+    [{ ...record("mac", "session", 300, 30, 540, 600), peakSentPerSec: 250 }],
   );
-  assert.deepEqual(liveTargets([]), []);
+  const all = recordedSeries(read, 360, () => true);
+  assert.equal(all.stepSecs, 60);
+  assert.equal(all.end, 600);
+  assert.deepEqual(all.sent.points, [0, 120, 0, 10, 0, 5]);
+  assert.deepEqual(all.received.points, [0, 1, 0, 0, 0, 0.5]);
+  assert.equal(all.sent.peak, 120, "the scale fits the averages");
+  assert.equal(all.sent.busiest, 6000, "one socket's busiest second");
+  const audio = recordedSeries(read, 360, (s) => s.socket === "audio");
+  assert.deepEqual(audio.sent.points, [0, 20, 0, 0, 0, 0]);
+  assert.equal(audio.sent.busiest, 1200);
+  // A row that began before the range gives it only the part inside.
+  const clipped = recordedSeries(
+    report(600, [record("mac", "session", 6000, 0, 450, 510)]),
+    120,
+    () => true,
+  );
+  assert.deepEqual(clipped.sent.points, [50, 0]);
 });
 
-test("a window is named by its length", () => {
-  assert.equal(graphWindowLabel(60), "last 60 seconds");
-  assert.equal(graphWindowLabel(300), "last 5 minutes");
-  assert.equal(agoLabel(60), "60 s ago");
-  assert.equal(agoLabel(300), "5 min ago");
+test("a recorded range past the most points shares them between timeframes", () => {
+  const within = MAX_GRAPH_POINTS * 60 * 3;
+  const now = within + 1000;
+  const shared = recordedSeries(
+    report(now, [
+      record("mac", "session", 18_000, 0, now - 180, now - 120),
+      record("mac", "session", 18_000, 0, now - 60, now),
+    ]),
+    within,
+    () => true,
+  );
+  assert.equal(shared.stepSecs, 180);
+  assert.equal(shared.sent.points.length, MAX_GRAPH_POINTS);
+  assert.equal(shared.sent.points.at(-1), 200);
+  assert.equal(shared.sent.points.at(-2), 0);
+});
+
+test("everything kept reaches back to the oldest row, whatever the filters keep", () => {
+  const read = report(1000, [
+    record("win", "session", 600, 0, 400),
+    record("mac", "session", 600, 0, 880),
+  ]);
+  const mac = recordedSeries(read, null, (s) => s.target === "mac");
+  assert.equal(mac.sent.points.length, 10);
+  assert.deepEqual(mac.sent.points.slice(-2), [10, 0]);
+  const none = recordedSeries(report(1000, []), null, () => true);
+  assert.deepEqual(none.sent, series([0, 0], 0));
+});
+
+test("the targets are those any sample or row saw, by label", () => {
+  assert.deepEqual(
+    usageTargets(
+      [
+        sample(1, rate("win", "session", 1, 1)),
+        sample(2, rate(null, "session", 1, 1), rate("mac", "audio", 1, 0)),
+      ],
+      [record("linux", "session", 1, 1), record("win", "audio", 1, 1)],
+    ),
+    ["linux", "mac", null, "win"],
+  );
+  assert.deepEqual(usageTargets([], []), []);
+  assert.equal(targetLabel(null), "No target (picker)");
+  assert.equal(targetLabel("mac"), "mac");
+});
+
+test("a length of time is named in its largest unit", () => {
+  assert.equal(spanLabel(45), "45 s");
+  assert.equal(spanLabel(60), "1 min");
+  assert.equal(spanLabel(300), "5 min");
+  assert.equal(spanLabel(5400), "1.5 h");
+  assert.equal(spanLabel(86_400 * 7), "7 d");
+});
+
+test("a range no longer than the seconds kept is drawn from them", () => {
+  assert.ok(usageRangeIsLive({ amount: 60, unit: "seconds" }));
+  assert.ok(usageRangeIsLive({ amount: 5, unit: "minutes" }));
+  assert.equal(usageWithin({ amount: 5, unit: "minutes" }), LIVE_HISTORY_SECS);
+  assert.ok(!usageRangeIsLive({ amount: 15, unit: "minutes" }));
+  assert.ok(!usageRangeIsLive("all"));
 });
 
 test("a range asks for its length, and everything kept for no bound", () => {
+  assert.equal(usageWithin({ amount: 60, unit: "seconds" }), 60);
   assert.equal(usageWithin({ amount: 15, unit: "minutes" }), 900);
   assert.equal(usageWithin({ amount: 1, unit: "hours" }), 3600);
   assert.equal(usageWithin({ amount: 24, unit: "hours" }), 86_400);
@@ -203,7 +279,7 @@ test("the presets step up without a jump, each spelled by one key", () => {
   const bounded = seconds.slice(0, -1) as number[];
   for (let i = 1; i < bounded.length; i++) {
     assert.ok(bounded[i] > bounded[i - 1], "ascending");
-    assert.ok(bounded[i] <= bounded[i - 1] * 4, `no jump past 4x at ${i}`);
+    assert.ok(bounded[i] <= bounded[i - 1] * 5, `no jump past 5x at ${i}`);
   }
   assert.equal(
     new Set(USAGE_PRESETS.map(usageRangeKey)).size,
@@ -233,67 +309,4 @@ test("a custom range takes a whole number of at least one", () => {
   assert.equal(customUsageRange("1.5", "hours"), null);
   assert.equal(customUsageRange("-3", "hours"), null);
   assert.equal(customUsageRange("abc", "hours"), null);
-});
-
-test("totals are summed per socket and over every socket, with the seconds they span and their busiest second", () => {
-  const totals = usageTotals([
-    record("mac", "session", 1000, 10),
-    record("win", "session", 500, 5),
-    record(null, "mic", 0, 900, 60),
-    // A second socket in a timeframe already spanned adds bytes, not seconds.
-    record("mac", "audio", 200, 0),
-  ]);
-  const t = (
-    sent: number,
-    received: number,
-    seconds: number,
-    peakSent: number,
-    peakReceived: number,
-  ) => ({ sent, received, seconds, peakSent, peakReceived });
-  assert.deepEqual(totals.session, t(1500, 15, 60, 1000, 10));
-  assert.deepEqual(totals.mic, t(0, 900, 60, 0, 900));
-  assert.deepEqual(totals.audio, t(200, 0, 60, 200, 0));
-  assert.deepEqual(totals.camera, t(0, 0, 0, 0, 0));
-  // A peak is one socket's busiest second, never two sockets' added together.
-  assert.deepEqual(totals.all, t(1700, 915, 120, 1000, 900));
-});
-
-test("targets are compared by everything they moved, busiest first", () => {
-  assert.deepEqual(
-    usageByTarget([
-      record("mac", "session", 100, 10),
-      record(null, "session", 5, 5),
-      record("win", "session", 4000, 20),
-      record("mac", "audio", 900, 0),
-      record("mac", "session", 0, 10, 60, 90),
-    ]),
-    [
-      {
-        target: "win",
-        sent: 4000,
-        received: 20,
-        seconds: 60,
-        peakSent: 4000,
-        peakReceived: 20,
-      },
-      {
-        target: "mac",
-        sent: 1000,
-        received: 20,
-        seconds: 90,
-        peakSent: 900,
-        peakReceived: 10,
-      },
-      {
-        target: null,
-        sent: 5,
-        received: 5,
-        seconds: 60,
-        peakSent: 5,
-        peakReceived: 5,
-      },
-    ],
-  );
-  assert.equal(targetLabel(null), "No target (picker)");
-  assert.equal(targetLabel("mac"), "mac");
 });

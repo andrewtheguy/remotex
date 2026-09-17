@@ -540,7 +540,7 @@ body {
   cursor: default;
 }
 
-/* The "Data usage" view takes the picker's place, wider for its graph and tables. */
+/* The "Data usage" view takes the picker's place, wider for its graphs. */
 .picker-panel.usage-panel {
   width: min(760px, 100%);
   gap: 0.25rem;
@@ -587,13 +587,6 @@ body {
   background: #161b22;
   border: 1px solid #30363d;
   border-radius: 6px;
-}
-
-.usage-read-at {
-  margin: 0 0 0.5rem;
-  color: #6e7681;
-  font-size: 0.75rem;
-  text-align: center;
 }
 
 /* The meter: each direction's rate now, then its graph over the window. */
@@ -727,58 +720,6 @@ body {
   .usage-tile-value {
     font-size: 1.35rem;
   }
-}
-
-/* The direction a pair of columns belongs to, over its own header row. */
-.usage-table th.usage-group {
-  text-align: center;
-  border-bottom: none;
-}
-
-.usage-table thead tr + tr th {
-  top: 1.85rem;
-}
-
-.usage-heading {
-  margin: 1rem 0 0.4rem;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: #8b949e;
-}
-
-.usage-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.82rem;
-  color: #c9d1d9;
-  font-variant-numeric: tabular-nums;
-}
-
-.usage-table th,
-.usage-table td {
-  padding: 0.35rem 0.6rem;
-  text-align: right;
-  border-bottom: 1px solid #21262d;
-  white-space: nowrap;
-}
-
-.usage-table th:first-child,
-.usage-table td:first-child {
-  text-align: left;
-}
-
-.usage-table thead th {
-  position: sticky;
-  top: 0;
-  color: #8b949e;
-  font-weight: 600;
-  background: #0d1117;
-}
-
-.usage-table .usage-total th,
-.usage-table .usage-total td {
-  font-weight: 600;
-  color: #e6edf3;
 }
 
 /* Phase 9: the floating chrome. A draggable FAB pinned in viewport space
@@ -933,7 +874,7 @@ body {
   outline: none;
 }
 
-/* The Info card switched to "Data usage": wider for its tables. */
+/* The Info card switched to "Data usage": wider for its graphs. */
 .help-card.usage-card {
   display: flex;
   flex-direction: column;
