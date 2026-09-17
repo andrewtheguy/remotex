@@ -213,8 +213,7 @@ not mentioned. Each line was checked field by field against the spec text.
   Quality Mode only when both sides reach 6, Training Confirm echo, WaveInfo and
   Wave reassembly with the four carried bytes, Wave2, `wFormatNo` indexing the
   client's list, confirms on the receiving transport with `wTimeStamp` advanced by
-  the milliseconds from network arrival to sending, time held through a
-  reactivation included (3.2.5.2.1.6), `WAVEFORMATEX` layout.
+  the milliseconds from arrival to sending (3.2.5.2.1.6), `WAVEFORMATEX` layout.
 - **Graphics pipeline:** every server-to-client PDU's field order, ResetGraphics
   with 20-byte monitor definitions and the pad read past, CapsAdvertise with
   distinct versions and valid flags, FrameAcknowledge after compositing with a

@@ -2,19 +2,19 @@
 //!
 //! No container stands in here: the client speaks NLA to a current Windows host and
 //! nothing else, and what this exercises — the graphics pipeline's surfaces and
-//! codecs, a graphics reset, or bitmap updates and a Deactivation-Reactivation
-//! Sequence — is that host's behaviour. So, like `classify_render_e2e`, it
+//! codecs and a graphics reset, or bitmap updates at the opening size — is that
+//! host's behaviour. So, like `classify_render_e2e`, it
 //! borrows a target from the operator's `tmp/test_uat.toml`, named by
 //! [`TARGET_ENV`] rather than written here, and drives [`remotex::rdp_client`]
 //! directly with no gateway in front of it.
 //!
-//! It connects, waits for a painted desktop, asks for a new size the way the
-//! engine does — repeating the layout until the host answers, because a Windows
+//! It connects, waits for a painted desktop, under the pipeline asks for a new size
+//! the way the engine does — repeating the layout until the host answers, because a Windows
 //! host ignores the first few seconds of them — puts the size back, takes the
 //! remote clipboard over, and disconnects.
 //!
 //! What is asserted is the client's contract: a desktop arrives, gets painted,
-//! and a requested size comes back as a resize of that size with a framebuffer to
+//! and under the pipeline a requested size comes back as a resize of that size with a framebuffer to
 //! match. Counts are printed, not asserted — they are the host's business.
 //!
 //! ## The graphics pipeline, measured
@@ -313,7 +313,8 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         domain: target.domain.clone(),
         width: OPENING.0,
         height: OPENING.1,
-        resize: true,
+        // A resize is the pipeline's graphics reset; the bitmap path has none.
+        resize: egfx(),
         egfx: egfx(),
         clipboard: true,
         audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
@@ -585,7 +586,7 @@ async fn case() {
     let drawn = |t: &Tally| if egfx { t.frames > 0 } else { t.paints > 0 };
     let mut tally = Tally::default();
     pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(8), |t| {
-        t.resize_ready && t.clipboard_ready && drawn(t)
+        (t.resize_ready || !egfx) && t.clipboard_ready && drawn(t)
     })
     .await;
     // And a moment more, so a desktop still arriving is counted whole.
@@ -596,10 +597,10 @@ async fn case() {
     dump(&session, "opening");
     assert!(drawn(&tally), "the host drew nothing");
     assert!(on > 0, "the desktop decoded to pure black");
-    assert!(tally.resize_ready, "the host never offered Display Control");
+    assert_eq!(tally.resize_ready, egfx, "Display Control is offered under the pipeline alone");
     assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
 
-    for size in [RESIZED, OPENING] {
+    for size in if egfx { &[RESIZED, OPENING][..] } else { &[] }.iter().copied() {
         let took = resize_to(&session, &mut events, &mut tally, size).await;
         // Let the repaint after the resize land.
         tally.paints = 0;

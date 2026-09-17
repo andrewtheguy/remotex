@@ -104,9 +104,7 @@ asked for again — there is no repaint for a clipboard. So nothing on a channel
 dropped in the two windows where the share is busy with itself, the capability
 exchange and the wait for a Demand Active that precedes it. `connect::activate`
 hands back what arrived on a channel and the session acts on it once the share is
-live; the clipboard alone is answered in place, because a Format Data Request is a
-remote application stopped inside its own paste and it has no idea a desktop is
-being rebuilt. A server opens the clipboard as soon as the channel is up, which can
+live. A server opens the clipboard as soon as the channel is up, which can
 be mid-finalization, and a Monitor Ready read past there is a session whose
 clipboard never starts.
 
@@ -151,8 +149,7 @@ EndFrame is acknowledged (`queueDepth` unavailable), which a Windows host requir
 or it throttles and then stops; and each surfaces to the engine as `Event::Frame`
 after the paints it covers, which is the frame boundary the engine's flush was
 built to guess at. A monitor layout is answered by ResetGraphics, which resizes the
-framebuffer and surfaces as `Event::Resize` — no reactivation, and the channels
-untouched.
+framebuffer and surfaces as `Event::Resize`, the channels untouched.
 
 The compositor decodes everything a current Windows host sends, measured against
 one with `tests/rdp_client_probe.rs`, which prints the host's codec and command
@@ -186,9 +183,10 @@ and commands it carried when it ends, at `info`.
 
 With `egfx = false` the pipeline is not advertised, so the server draws with bitmap
 updates, decoded by the planar bitmap codec (`proto/planar.rs`). The client
-announces no drawing orders either, so the path is bitmaps throughout. That is what
-makes a resize a full reactivation, after which a Windows host re-renders the
-desktop sharp. Every server that is not Windows takes this path whatever the key.
+announces no drawing orders either, so the path is bitmaps throughout. The desktop
+keeps its opening size: a resize is the pipeline's graphics reset, Display Control is
+not taken without it, and `resize = true` beside `egfx = false` is refused at config
+parse. Every server that is not Windows takes this path whatever the key.
 
 The path is 32 bits per pixel and nothing else: the planar codec is the only one
 decoded, and the interleaved run-length coding a shallower session would use is
@@ -241,14 +239,12 @@ desktop-size requests, and also matches the client's display density: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
 stretched. The opening handshake is always 1x; the client applies its screen
-density after `connected`, so a Retina client costs a graphics reset on the default
-pipeline path and a reactivation on the bitmap path. RDP reports no scale factor
-back, so the density here is declared rather than measured. The layout
-always says a monitor is upright: a window taller than it is wide is not a rotated
+density after `connected`, so a Retina client costs one graphics reset. RDP
+reports no scale factor back, so the density here is declared rather than measured.
+The layout always says a monitor is upright: a window taller than it is wide is not a rotated
 screen, and a server told otherwise turns the desktop on its side.
 
-A size change that is *real* costs a graphics reset under the pipeline and a full
-Deactivation-Reactivation Sequence without it; the client runs either and reports a
+A size change that is *real* costs a graphics reset, which the client reports as a
 new desktop size. Asking twice for the same
 size triggers one change, and a request equal to the current size never triggers
 one. A layout is asked for on a bounded schedule rather than once, because a
@@ -435,9 +431,8 @@ for high quality; the host sends a training probe, echoed back; then Wave2
 buffers, each confirmed by block number and each handed to the engine's
 `AudioSink` — from there to the same `AudioBridge` every other engine feeds, on the
 client's thread, never through the event queue. Each confirm goes out once its
-buffer is with the sink, its timestamp the host's plus the milliseconds since the
-PDU came off the network — held through a rebuilt share included — as MS-RDPEA
-3.2.5.2.1.6 has it. Close keeps the format: a Windows host sends its
+buffer is with the sink, its timestamp the host's plus the milliseconds that took,
+as MS-RDPEA 3.2.5.2.1.6 has it. Close keeps the format: a Windows host sends its
 format list once per channel and a Close after every stream.
 
 The measured part: a Windows host negotiates nothing until something plays. A
@@ -454,5 +449,5 @@ not refuse, it simply stops answering. `CHANNEL_FLAG_SHOW_PROTOCOL` on the wrong
 channel, a monitor layout sent too early, a Format Data Request left unanswered,
 and `rdpsnd` named without `rdpdr` all look from here exactly like a working
 session in which nothing happens. That is why the probes assert on what the *host* does — that it opens a
-channel, takes a format list, rebuilds a desktop at the size that was asked for —
+channel, takes a format list, resets the graphics to the size that was asked for —
 rather than on what this client sent.

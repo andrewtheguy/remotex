@@ -71,7 +71,7 @@ use crate::tiles::{self, Rect, Shadow};
 // Hence a schedule rather than a single attempt, and one retry rather than two:
 // FreeRDP's own Display Control client (client/X11/xf_disp.c) holds a single
 // desired layout and re-sends *that* — size and scale factors ride the same PDU —
-// so a size and a density can never race into two reactivations that desync
+// so a size and a density can never race into two graphics resets that desync
 // `applied` from the desktop actually negotiated. The total is bounded because a
 // server that will never honour this — anything not Windows, most likely — must
 // not be asked forever.
@@ -222,9 +222,9 @@ async fn session(
     // 1x, always: the opening handshake uses the point-sized geometry above, and
     // the attached client's density is applied through `HostDisplay` after
     // `ServerMsg::Connected`. A Retina client is therefore one layout change away
-    // from where it wants to be: a graphics reset under the default EGFX path, or a
-    // reactivation on the bitmap path. Keeping density mid-session also lets a later
-    // attachment state its own screen instead of inheriting the first one's.
+    // from where it wants to be: a graphics reset. Keeping density mid-session also
+    // lets a later attachment state its own screen instead of inheriting the first
+    // one's.
     if sink
         .msg(ServerMsg::Resize { w: width, h: height, scale: Density::One.scale() })
         .await

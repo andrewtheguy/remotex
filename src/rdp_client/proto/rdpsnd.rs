@@ -173,10 +173,11 @@ impl Rdpsnd {
         Self::default()
     }
 
-    /// One whole PDU from the server. `arrived` is when the network PDU that completed
-    /// it was read, which a Wave Confirm's timestamp counts from — for one kept back
-    /// while the share was rebuilt, well before it reaches here.
-    pub fn push(&mut self, pdu: &[u8], arrived: Instant) -> Result<Turn, Malformed> {
+    /// One whole PDU from the server.
+    pub fn push(&mut self, pdu: &[u8]) -> Result<Turn, Malformed> {
+        // The moment the whole PDU is in hand, which a Wave Confirm's timestamp counts
+        // from.
+        let arrived = Instant::now();
         if let Some(pending) = self.pending.take() {
             return self.wave(pending, pdu, arrived);
         }
@@ -436,7 +437,7 @@ mod tests {
     fn the_one_pcm_format_is_taken_and_the_rest_passed_over() {
         let mut snd = Rdpsnd::new();
         let adpcm = audio_format(0x0002, 2, 22_050, 4, &[2, 0]);
-        let turn = snd.push(&server_formats(8, &[adpcm, cd()]), Instant::now()).unwrap();
+        let turn = snd.push(&server_formats(8, &[adpcm, cd()])).unwrap();
         assert_eq!(turn.output, Output::Negotiated);
         assert_eq!(turn.replies.len(), 2);
         let formats = &turn.replies[0];
@@ -454,13 +455,13 @@ mod tests {
     fn a_host_without_the_format_is_answered_with_none() {
         let mut snd = Rdpsnd::new();
         let mono = audio_format(WAVE_FORMAT_PCM, 1, 44_100, 16, &[]);
-        let turn = snd.push(&server_formats(5, &[mono]), Instant::now()).unwrap();
+        let turn = snd.push(&server_formats(5, &[mono])).unwrap();
         assert_eq!(turn.output, Output::NoFormat { offered: 1 });
         assert_eq!(turn.replies.len(), 1);
         assert_eq!(&turn.replies[0][..4], &[SNDC_FORMATS, 0, 20, 0]);
         assert_eq!(&turn.replies[0][18..20], &0u16.to_le_bytes(), "no formats");
         // A buffer after that is not one this client agreed to.
-        let turn = snd.push(&wave2(0, 1, &[1, 2, 3, 4]), Instant::now()).unwrap();
+        let turn = snd.push(&wave2(0, 1, &[1, 2, 3, 4])).unwrap();
         assert_eq!(turn.output, Output::Nothing);
         assert_eq!(turn.replies.len(), 1, "but it is still confirmed");
     }
@@ -471,7 +472,7 @@ mod tests {
         let mut snd = Rdpsnd::new();
         let mut body = vec![0x34, 0x12, 0x00, 0x04];
         body.extend_from_slice(&[0xAA; 1020]);
-        let turn = snd.push(&server(SNDC_TRAINING, &body), Instant::now()).unwrap();
+        let turn = snd.push(&server(SNDC_TRAINING, &body)).unwrap();
         assert_eq!(turn.output, Output::Nothing);
         assert_eq!(turn.replies, vec![vec![SNDC_TRAINING, 0, 4, 0, 0x34, 0x12, 0x00, 0x04]]);
     }
@@ -481,30 +482,17 @@ mod tests {
     #[test]
     fn a_wave2_is_the_buffer_and_its_confirm() {
         let mut snd = Rdpsnd::new();
-        snd.push(&server_formats(8, &[cd()]), Instant::now()).unwrap();
-        let turn = snd.push(&wave2(0, 7, &[1, 2, 3, 4, 5, 6, 7, 8]), Instant::now()).unwrap();
+        snd.push(&server_formats(8, &[cd()])).unwrap();
+        let turn = snd.push(&wave2(0, 7, &[1, 2, 3, 4, 5, 6, 7, 8])).unwrap();
         assert!(turn.replies.is_empty(), "confirmed once the buffer is handed on, not before");
         let Output::Wave { samples, confirm } = turn.output else { panic!("a buffer") };
         assert_eq!(samples, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         // Sent five milliseconds after it arrived: the host's timestamp, plus five.
         let sent = confirm.encode_at(confirm.arrived + std::time::Duration::from_millis(5));
         assert_eq!(sent, vec![SNDC_WAVECONFIRM, 0, 4, 0, 0x39, 0x12, 7, 0]);
-        let turn = snd.push(&wave2(1, 8, &[9, 9]), Instant::now()).unwrap();
+        let turn = snd.push(&wave2(1, 8, &[9, 9])).unwrap();
         assert_eq!(turn.output, Output::Nothing);
         assert_eq!(turn.replies[0][6], 8);
-    }
-
-    /// The confirm counts from the arrival it was given, not from when the PDU was
-    /// decoded, so time a PDU spent held back is counted too.
-    #[test]
-    fn a_confirm_counts_from_the_arrival_it_was_given() {
-        let mut snd = Rdpsnd::new();
-        snd.push(&server_formats(8, &[cd()]), Instant::now()).unwrap();
-        let arrived = Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let turn = snd.push(&wave2(0, 2, &[1, 2, 3, 4]), arrived).unwrap();
-        let Output::Wave { confirm, .. } = turn.output else { panic!("a buffer") };
-        assert_eq!(confirm.arrived, arrived);
     }
 
     /// The timestamp is sixteen bits of milliseconds, and wraps rather than saturating.
@@ -521,14 +509,14 @@ mod tests {
     #[test]
     fn a_wave_info_and_its_wave_pdu_come_back_as_one_buffer() {
         let mut snd = Rdpsnd::new();
-        snd.push(&server_formats(8, &[cd()]), Instant::now()).unwrap();
+        snd.push(&server_formats(8, &[cd()])).unwrap();
         // Body: wTimeStamp, wFormatNo 0, cBlockNo 3, pad, the first four bytes; the
         // body size counts the whole buffer of 8 behind the 8 header bytes.
         let mut info = vec![SNDC_WAVE, 0, 16, 0];
         info.extend_from_slice(&[0x11, 0x22, 0, 0, 3, 0, 0, 0, 1, 2, 3, 4]);
-        let turn = snd.push(&info, Instant::now()).unwrap();
+        let turn = snd.push(&info).unwrap();
         assert_eq!(turn, Turn { replies: Vec::new(), output: Output::Nothing });
-        let turn = snd.push(&[0xEE, 0xEE, 0xEE, 0xEE, 5, 6, 7, 8], Instant::now()).unwrap();
+        let turn = snd.push(&[0xEE, 0xEE, 0xEE, 0xEE, 5, 6, 7, 8]).unwrap();
         let Output::Wave { samples, confirm } = turn.output else { panic!("a buffer") };
         assert_eq!(samples, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let sent = confirm.encode_at(confirm.arrived);
@@ -540,13 +528,13 @@ mod tests {
     #[test]
     fn a_close_is_reported_and_a_short_pdu_refused() {
         let mut snd = Rdpsnd::new();
-        snd.push(&server_formats(8, &[cd()]), Instant::now()).unwrap();
-        assert_eq!(snd.push(&server(SNDC_CLOSE, &[]), Instant::now()).unwrap().output, Output::Closed);
-        let Output::Wave { samples, .. } = snd.push(&wave2(0, 1, &[1, 2, 3, 4]), Instant::now()).unwrap().output else {
+        snd.push(&server_formats(8, &[cd()])).unwrap();
+        assert_eq!(snd.push(&server(SNDC_CLOSE, &[])).unwrap().output, Output::Closed);
+        let Output::Wave { samples, .. } = snd.push(&wave2(0, 1, &[1, 2, 3, 4])).unwrap().output else {
             panic!("the next stream needs no new format list");
         };
         assert_eq!(samples, vec![1, 2, 3, 4]);
-        assert!(snd.push(&[SNDC_WAVE2, 0, 20, 0, 1, 2], Instant::now()).is_err());
-        assert!(snd.push(&[SNDC_WAVE2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], Instant::now()).is_err(), "a body too small for its fields");
+        assert!(snd.push(&[SNDC_WAVE2, 0, 20, 0, 1, 2]).is_err());
+        assert!(snd.push(&[SNDC_WAVE2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err(), "a body too small for its fields");
     }
 }

@@ -11,9 +11,8 @@ reaches every target — RDP, VNC and Macs alike — with nothing to install per
 platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
 for rather than scaled on the client; plain `vnc`, Apple High Performance and
-`rdp` can all be handed the window. On RDP a resize is a graphics reset under the
-default graphics pipeline, and a reactivation — after which a Windows host
-re-renders the desktop sharp at the new size — with `egfx = false`.
+`rdp` can all be handed the window. On RDP a resize is a graphics reset of the
+default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 
 - RDP uses a built-in client, protocol and all: the desktop over the graphics
   pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and

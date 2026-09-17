@@ -2,7 +2,6 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Result, anyhow, bail};
 use log::{debug, info, warn};
@@ -45,18 +44,18 @@ pub struct Connect {
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
-    /// A server answers a monitor layout by resizing the desktop: with a graphics
-    /// reset under [`Connect::egfx`], and without it with a Deactivation-Reactivation
-    /// Sequence that tears the desktop and the capability set down and builds them
-    /// again. Either way this client sees one [`Event::Resize`] at the end of it.
+    /// A resize is the graphics pipeline's: a server answers a monitor layout with a
+    /// graphics reset, which this client reports as one [`Event::Resize`]. Without
+    /// [`Connect::egfx`] the channel is not taken and the desktop keeps its opening
+    /// size.
     pub resize: bool,
     /// Whether to offer the graphics pipeline (MS-RDPEGFX).
     ///
     /// Offered, a Windows host draws the desktop through surfaces on a dynamic
     /// channel of its own, marks every frame's end — [`Event::Frame`] — and answers a
-    /// monitor layout with a graphics reset rather than a reactivation. Not offered,
-    /// the host draws with bitmap updates on the share, which is the path every
-    /// other server takes anyway.
+    /// monitor layout with a graphics reset. Not offered, the host draws with bitmap
+    /// updates on the share at the opening size, which is the path every other
+    /// server takes anyway.
     pub egfx: bool,
     /// Whether to open MS-RDPECLIP, which is what makes the clipboard side of
     /// [`Input`] do anything.
@@ -590,9 +589,8 @@ struct Active<'a> {
     /// PDUs that arrived on a static virtual channel while the share was not live —
     /// the capability exchange, where a server opens the clipboard, and the wait for
     /// a Demand Active before it. Acted on in order once it is, because nothing on a
-    /// channel can be asked for again — see [`connect::activate`]. Each keeps when it
-    /// arrived, which a sound buffer's confirm counts from.
-    deferred: Vec<(u16, Vec<u8>, Instant)>,
+    /// channel can be asked for again — see [`connect::activate`].
+    deferred: Vec<(u16, Vec<u8>)>,
 
     framebuffer: &'a Framebuffer,
     events: &'a mpsc::Sender<Event>,
@@ -634,9 +632,9 @@ struct Sound {
 impl Sound {
     /// One whole PDU from either transport: what it meant goes to the sink at once,
     /// and what it earned goes back to the caller to send on the channel it came in
-    /// on. `arrived` is when the network PDU that completed it was read.
-    fn push(&mut self, pdu: &[u8], arrived: Instant) -> Result<Vec<Vec<u8>>> {
-        let rdpsnd::Turn { mut replies, output } = self.proto.push(pdu, arrived)?;
+    /// on.
+    fn push(&mut self, pdu: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let rdpsnd::Turn { mut replies, output } = self.proto.push(pdu)?;
         match output {
             rdpsnd::Output::Negotiated => {
                 let format = rdpsnd::CD_QUALITY;
@@ -802,7 +800,7 @@ impl<'a> Active<'a> {
             audio_chunks: channel::Reassembly::new(),
             device_chunks: channel::Reassembly::new(),
             dynamics: Dynamics {
-                resize: config.resize,
+                resize: config.resize && config.egfx,
                 egfx: config.egfx,
                 audio: wants_audio,
                 ..Dynamics::default()
@@ -833,8 +831,8 @@ impl<'a> Active<'a> {
         self.refresh().await?;
         // What arrived on a channel in the same window was kept instead, because a
         // channel's PDUs cannot be asked for again.
-        for (channel, payload, arrived) in std::mem::take(&mut self.deferred) {
-            self.on_channel(channel, &payload, arrived).await?;
+        for (channel, payload) in std::mem::take(&mut self.deferred) {
+            self.on_channel(channel, &payload).await?;
         }
         loop {
             tokio::select! {
@@ -910,7 +908,7 @@ impl<'a> Active<'a> {
                 self.on_share(data.payload).await
             }
             mcs::Indication::Data(data) => {
-                self.on_channel(data.channel, data.payload, Instant::now()).await?;
+                self.on_channel(data.channel, data.payload).await?;
                 Ok(None)
             }
         }
@@ -921,16 +919,16 @@ impl<'a> Active<'a> {
     /// The same routing wherever a channel's PDU is read from — the main loop, the
     /// capability exchange it was kept from, the reactivation that would otherwise
     /// have dropped it — so that a channel stays open across everything the share
-    /// does. `arrived` is when it was read off the network, however long ago that was.
-    async fn on_channel(&mut self, channel: u16, payload: &[u8], arrived: Instant) -> Result<()> {
+    /// does.
+    async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
         if self.dynamic.is_some_and(|dynamic| dynamic.number == channel) {
-            return self.on_dynamic(payload, arrived).await;
+            return self.on_dynamic(payload).await;
         }
         if self.clipboard.is_some_and(|clipboard| clipboard.number == channel) {
             return self.on_clipboard(payload).await;
         }
         if self.audio.is_some_and(|audio| audio.number == channel) {
-            return self.on_audio(payload, arrived).await;
+            return self.on_audio(payload).await;
         }
         if self.devices.is_some_and(|devices| devices.number == channel) {
             return self.on_devices(payload).await;
@@ -1005,7 +1003,7 @@ impl<'a> Active<'a> {
     /// The dynamic virtual channel, which the server opens as soon as the share is
     /// live. Everything it says is answered, because a channel whose Create Request
     /// goes unanswered is never opened.
-    async fn on_dynamic(&mut self, payload: &[u8], arrived: Instant) -> Result<()> {
+    async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates) = {
             let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
@@ -1048,7 +1046,7 @@ impl<'a> Active<'a> {
                         bail!("the host sent sound on a channel this client never accepted");
                     };
                     let mut replies = Vec::new();
-                    for reply in sound.push(data, arrived)? {
+                    for reply in sound.push(data)? {
                         replies.push(dvc::data(channel, &reply)?);
                     }
                     (replies, Vec::new())
@@ -1268,7 +1266,7 @@ impl<'a> Active<'a> {
 
     /// The static sound channel. The host speaks first at every step, every PDU is
     /// answered on the channel it came in on, and the buffers go to the sink.
-    async fn on_audio(&mut self, payload: &[u8], arrived: Instant) -> Result<()> {
+    async fn on_audio(&mut self, payload: &[u8]) -> Result<()> {
         let replies = {
             let Self { audio_chunks, sound, .. } = self;
             let pdu = match audio_chunks.push(payload)? {
@@ -1282,7 +1280,7 @@ impl<'a> Active<'a> {
             let Some(sound) = sound else {
                 bail!("the host sent sound on a channel this client never asked for");
             };
-            sound.push(pdu, arrived)?
+            sound.push(pdu)?
         };
         if let Some(audio) = self.audio {
             for reply in replies {
@@ -1435,9 +1433,9 @@ impl<'a> Active<'a> {
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 
-    /// The Deactivation-Reactivation Sequence: the server tore the desktop down and
-    /// is building it again — its answer to a monitor layout, and the only way a
-    /// desktop ever changes size.
+    /// The Deactivation-Reactivation Sequence: the server tore the share down and
+    /// is building it again. Never this client's doing — a resize is a graphics
+    /// reset — but a host may run one of its own accord.
     ///
     /// `true` means the session was asked to stop part-way through. A server owes
     /// this sequence a reply it can take as long as it likes over — and a server
@@ -1460,12 +1458,8 @@ impl<'a> Active<'a> {
             if fastpath::is_output(self.frame[0]) {
                 continue;
             }
-            // Read out of `self` and acted on outside it, as the main loop's frames
-            // are: answering one writes to the very channel it came off.
-            let frame = std::mem::take(&mut self.frame);
-            let demand = self.reactivating(&frame).await;
-            self.frame = frame;
-            if let Some(demand) = demand? {
+            let Self { frame, io_channel, deferred, .. } = self;
+            if let Some(demand) = reactivating(frame, *io_channel, deferred)? {
                 break demand;
             }
         };
@@ -1491,41 +1485,10 @@ impl<'a> Active<'a> {
         // past above, so the repaint is asked for here rather than waited for.
         self.refresh().await?;
         // And what a channel carried while all that happened, in the order it came.
-        for (channel, payload, arrived) in std::mem::take(&mut self.deferred) {
-            self.on_channel(channel, &payload, arrived).await?;
+        for (channel, payload) in std::mem::take(&mut self.deferred) {
+            self.on_channel(channel, &payload).await?;
         }
         Ok(false)
-    }
-
-    /// One frame read while the server is rebuilding the desktop. `Some` is the
-    /// Demand Active that ends the wait.
-    ///
-    /// A resize is not the whole session, and a channel is not the share's: what
-    /// arrives on one while this is waiting is either answered here or kept for
-    /// afterwards, never dropped. The clipboard is answered here, because a Format
-    /// Data Request is a remote application stopped inside its own paste and it has
-    /// no idea a desktop is being rebuilt. Every other channel waits for the share
-    /// to be live, where acting on one cannot ask a server busy rebuilding a desktop
-    /// for another layout of it.
-    ///
-    /// Only the share's own PDUs are read past — the updates for a desktop that is
-    /// going away, and the acks for one.
-    async fn reactivating(&mut self, frame: &[u8]) -> Result<Option<DemandActive>> {
-        let mcs::Indication::Data(data) = mcs::send_data_indication(frame)? else {
-            bail!("the host left the conference while rebuilding the desktop");
-        };
-        if self.clipboard.is_some_and(|clipboard| clipboard.number == data.channel) {
-            self.on_clipboard(data.payload).await?;
-            return Ok(None);
-        }
-        if data.channel != self.io_channel {
-            self.deferred.push((data.channel, data.payload.to_vec(), Instant::now()));
-            return Ok(None);
-        }
-        match share::decode(data.payload)? {
-            Pdu::DemandActive { source, body } => Ok(Some(DemandActive::decode(source, body)?)),
-            _ => Ok(None),
-        }
     }
 
     /// `first`, then whatever else is already queued behind it, with consecutive
@@ -1810,6 +1773,30 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
+}
+
+/// One frame read while the server is rebuilding the desktop. `Some` is the Demand
+/// Active that ends the wait.
+///
+/// A channel is not the share's: what arrives on one while this is waiting is kept
+/// for when the share is live, never dropped. Only the share's own PDUs are read
+/// past — the updates for a desktop that is going away, and the acks for one.
+fn reactivating(
+    frame: &[u8],
+    io_channel: u16,
+    deferred: &mut Vec<(u16, Vec<u8>)>,
+) -> Result<Option<DemandActive>> {
+    let mcs::Indication::Data(data) = mcs::send_data_indication(frame)? else {
+        bail!("the host left the conference while rebuilding the desktop");
+    };
+    if data.channel != io_channel {
+        deferred.push((data.channel, data.payload.to_vec()));
+        return Ok(None);
+    }
+    match share::decode(data.payload)? {
+        Pdu::DemandActive { source, body } => Ok(Some(DemandActive::decode(source, body)?)),
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]

@@ -1249,8 +1249,8 @@ and its compositor carries the copies and caches between them, so the desktop is
 lit and sharp; a rectangle that will not decode is left for the host to draw again,
 not made the end of the session. `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
-carry no frame boundary, and a resize is a full Deactivation-Reactivation Sequence,
-after which a Windows host re-renders the desktop sharp at the new size and density.
+carry no frame boundary, and the desktop keeps its opening size — `resize = true` is
+refused beside it, because an RDP resize is the pipeline's graphics reset.
 On either path the pointer travels as its own shape rather than in the framebuffer.
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
