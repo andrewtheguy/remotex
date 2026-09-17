@@ -1604,7 +1604,8 @@ with the state around it.
 
 `[usage]` is top-level for the same reason and records the data usage of the
 browser's four WebSockets in an SQLite database, one row per target, socket and
-timeframe, so targets can be compared. The database is `usage.sqlite3` in the
+timeframe, so targets can be compared, and measures the rate they move at. The
+database is `usage.sqlite3` in the
 gateway's state directory unless `database` names another, and a relative
 `database` is taken from there as well: the installation's state directory beside
 its config and web paths when `serve` reads the installed config, the config
@@ -1614,18 +1615,40 @@ reads — text and binary frames with their headers, never the heartbeat's pings
 pongs, so an idle connection records nothing — into the counters of the target
 the session has selected at that moment, which the session manager publishes in
 an atomic beside its state so a frame never takes the session lock; bytes moved
-on the picker count under no target. Every `interval_secs` the counters are
-taken, each target's socket that moved data gains a row, and the rows past
-`max_records` per target and socket are deleted oldest first,
-all in one transaction, so a crash leaves the timeframe written or not at all. It
-is best effort by design: the open timeframe dies with the process, and a failed
-write is retried with the next one. A file that is not this gateway's usage
+on the picker count under no target. Once a second the counters are taken as a
+sample: what moved in that second, over the seconds since the last sample, is the
+rate right now, and it is added to the open timeframe, which also keeps the
+busiest second per direction it has seen. Every `interval_secs` the open
+timeframe is closed and each target's socket that moved data gains a row holding
+its bytes and its peaks. The rows wait in memory for a separate writer task, so
+a slow write or SQLite's busy wait never delays a sample; the writer adds them
+and deletes the rows past `max_records` per target and socket oldest first, all
+in one transaction, so a crash leaves the timeframe written or not at all. It is
+best effort by design: the open timeframe dies with the process, and a failed
+write is retried at the next close. A file that is not this gateway's usage
 database — not SQLite, SQLite without its application id, or another schema
 version — is refused at startup before anything is written to it. The page reads
-the rows on demand: `GET /api/usage?within=<seconds>` behind the login, counted
-back from the gateway's clock the rows were stamped with rather than the browser's, which
-the picker's "Data usage" view calls when it opens and when asked to refresh, and
-`/api/config` says whether there is a database to offer. What an
+two things. `GET /api/usage/live` is the last sample, per target and socket,
+which the "Data usage" view polls once a second while it is open and not paused,
+one poll out at a time, keeps for the last five minutes, and shows the way a
+network meter does: the rate now over a graph of the last minute or five, one per
+direction on its own scale, narrowed to a target or a socket by its filters, with
+a gap for a second not read, the graph's right edge following the gateway's clock
+rather than the last sample so a failing poll leaves gaps; `GET
+/api/usage?within=<seconds>` is the recorded rows, counted back from the gateway's
+clock the rows were stamped with rather than the browser's, with the gateway's
+clock at the read and the open timeframe as it stands, which the view reads when
+it opens and when asked to refresh and sums per target and per socket. That read
+takes the open timeframe and the rows still waiting for the writer together under
+one lock before it queries the database, then counts a row the database has
+meanwhile once, from the database, so a timeframe closed during the read is never
+missing from it nor counted twice. Both are behind the login, and `/api/config` says whether there is a
+database to offer. The gateway stores bytes, peaks and times; the page divides
+for an average — a row's bytes over the seconds its timeframe spans, and for a
+target or socket over a range, its bytes over the seconds of the timeframes it
+has rows in, one timeframe counted once however many sockets moved in it — and
+shows every rate in decimal bits per second, as a network meter does. The range
+is any whole number of minutes, hours or days back, or everything kept. What an
 engine exchanges with its remote is a different link and is not counted.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
