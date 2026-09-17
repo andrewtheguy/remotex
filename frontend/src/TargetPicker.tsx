@@ -54,7 +54,7 @@ export default function TargetPicker({
 }) {
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Offered only on a gateway with `[meter]`; the view replaces the list while open.
+  // Offered only on a gateway with `[meter].enabled`; the view replaces the list while open.
   const throughputAvailable = useThroughputAvailable();
   const [showThroughput, setShowThroughput] = useState(false);
 

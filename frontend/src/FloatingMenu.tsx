@@ -262,7 +262,7 @@ function ModalOverlay({
   );
 }
 
-// The Info card's way into "Throughput", offered only on a gateway with `[meter]`.
+// The Info card's way into "Throughput", offered only on a gateway with `[meter].enabled`.
 function ThroughputButton({ onOpen }: { onOpen: () => void }) {
   if (!useThroughputAvailable()) {
     return null;

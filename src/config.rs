@@ -1484,9 +1484,9 @@ pub struct ConfigFile {
     /// that refusal is the whole of the migration.
     #[serde(default)]
     pub branding: Option<BrandingSection>,
-    /// The `[meter]` table: where the browser sockets' throughput is recorded. Absent
-    /// records nothing. Top-level for [`Self::branding`]'s reason — an embedded config
-    /// may set it too.
+    /// The `[meter]` table: where the browser sockets' throughput is recorded. Absent,
+    /// or present with `enabled = false`, records nothing; present it must say which.
+    /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
     #[serde(default)]
@@ -1497,6 +1497,13 @@ pub struct ConfigFile {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterSection {
+    /// Whether the throughput is recorded at all. Required, so a `[meter]` table says
+    /// in as many words which it is: the other keys are the settings, checked either
+    /// way, and this one alone decides whether anything is recorded. A table that
+    /// leaves it out is refused rather than read as off — the settings under it are
+    /// there to be used, and guessing which way an operator meant them is the one
+    /// thing a config file should never do.
+    pub enabled: bool,
     /// The SQLite database the records are kept in. Absent is `meter.sqlite3` in the
     /// gateway's state directory, and a relative path is taken from that directory too.
     pub database: Option<PathBuf>,
@@ -2120,10 +2127,10 @@ impl ConfigFile {
         })
     }
 
-    /// The `[meter]` table resolved, its database placed in `state_dir`. Its values were
-    /// checked by [`Self::parse_with`].
+    /// The `[meter]` table resolved, its database placed in `state_dir`. `None` unless
+    /// the table says `enabled = true`. Its values were checked by [`Self::parse_with`].
     fn resolve_meter(section: Option<MeterSection>, state_dir: &Path) -> Option<MeterConfig> {
-        section.map(|section| MeterConfig {
+        section.filter(|section| section.enabled).map(|section| MeterConfig {
             // `join` keeps an absolute path as written.
             database: state_dir.join(section.database.as_deref().unwrap_or(Path::new(METER_DATABASE))),
             max_records: section.max_records,
@@ -2827,8 +2834,8 @@ mod tests {
         assert!(format!("{err:#}").contains("branding"), "{err:#}");
     }
 
-    /// No table records nothing; a table names its database and may leave the rest to the
-    /// defaults.
+    /// Nothing is recorded until `enabled = true`; an enabled table names its database
+    /// and may leave the rest to the defaults.
     #[test]
     fn meter_is_recorded_in_the_state_directory_unless_a_database_is_named() {
         let state = Path::new("/var/lib/remotex");
@@ -2838,36 +2845,52 @@ mod tests {
         };
         assert_eq!(meter(""), None, "no [meter] records nothing");
         assert_eq!(
-            meter("[meter]"),
+            meter("[meter]\nenabled = false\ndatabase = \"kept.sqlite3\""),
+            None,
+            "the settings are kept, the switch is off"
+        );
+        assert_eq!(
+            meter("[meter]\nenabled = true"),
             Some(MeterConfig {
                 database: PathBuf::from("/var/lib/remotex/meter.sqlite3"),
                 max_records: 10_080,
             })
         );
         assert_eq!(
-            meter("[meter]\ndatabase = \"/srv/meter/remotex.sqlite3\"").unwrap().database,
+            meter("[meter]\nenabled = true\ndatabase = \"/srv/meter/remotex.sqlite3\"")
+                .unwrap()
+                .database,
             Path::new("/srv/meter/remotex.sqlite3")
         );
         assert_eq!(
-            meter("[meter]\ndatabase = \"meter/uat.sqlite3\"").unwrap().database,
+            meter("[meter]\nenabled = true\ndatabase = \"meter/uat.sqlite3\"").unwrap().database,
             Path::new("/var/lib/remotex/meter/uat.sqlite3"),
             "a relative database is taken from the state directory"
         );
 
-        assert_eq!(meter("[meter]\nmax_records = 12").unwrap().max_records, 12);
+        assert_eq!(meter("[meter]\nenabled = true\nmax_records = 12").unwrap().max_records, 12);
         assert!(
-            ConfigFile::parse(&format!("[meter]\ninterval_secs = 60\n{}", minimal())).is_err(),
+            ConfigFile::parse(&format!(
+                "[meter]\nenabled = true\ninterval_secs = 60\n{}",
+                minimal()
+            ))
+            .is_err(),
             "the meter's second is not the file's to set"
         );
     }
 
+    /// The keys are checked as written, enabled or not: a disabled table is still a
+    /// config the operator means to turn on. And a table that never says which it is
+    /// is refused rather than guessed at.
     #[test]
     fn a_meter_table_that_records_nothing_is_refused() {
         for (bad, says) in [
-            ("database = \"\"", "[meter].database"),
-            ("database = \"u.sqlite3\"\ninterval_secs = 60", "interval_secs"),
-            ("database = \"u.sqlite3\"\nmax_records = 0", "[meter].max_records"),
-            ("database = \"u.sqlite3\"\nmax_count = 3", "max_count"),
+            ("database = \"u.sqlite3\"", "enabled"),
+            ("enabled = false\ndatabase = \"\"", "[meter].database"),
+            ("enabled = true\ndatabase = \"\"", "[meter].database"),
+            ("enabled = true\ndatabase = \"u.sqlite3\"\ninterval_secs = 60", "interval_secs"),
+            ("enabled = true\ndatabase = \"u.sqlite3\"\nmax_records = 0", "[meter].max_records"),
+            ("enabled = true\ndatabase = \"u.sqlite3\"\nmax_count = 3", "max_count"),
         ] {
             let toml = format!("[meter]\n{bad}\n{}", minimal());
             let err = ConfigFile::parse(&toml).expect_err(bad);

@@ -17,7 +17,8 @@ re-renders the desktop sharp at the new size — with `egfx = false`.
 
 - RDP uses a built-in client, protocol and all: the desktop over the graphics
   pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and
-  resize, spoken to a current Windows host over NLA. It carries the clipboard and
+  resize, spoken to a current Windows host over NLA — tested on Windows 10 and 11,
+  not on older Windows or xrdp. It carries the clipboard and
   sound (MS-RDPEA), and does not carry touch. See
   [`docs/rdp-client.md`](docs/rdp-client.md).
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
@@ -253,7 +254,7 @@ docker run -d --name remotex -p 52380:52380 \
 ```
 
 Set `[server].listen = "0.0.0.0:52380"` in the mounted config, or pass the same
-address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[meter]` set, mount a volume
+address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[meter].enabled` set, mount a volume
 at `/opt/remotex/var` too, or the records go with the container. Images are
 published for Linux amd64 and arm64 with `latest` and `v<version>` tags.
 

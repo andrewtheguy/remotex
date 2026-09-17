@@ -16,7 +16,10 @@ The target is a current Windows host and only that: no xrdp or other RDP server'
 behavior, and no legacy fallbacks for older hosts. Only what such a host was seen
 to send is implemented, and anything else — a codec, subcodec or PDU this client
 lacks — is refused by name in the log rather than guessed at, so it shows up as a
-named refusal instead of a wrong picture. Where [MS-RDPBCGR] is silent
+named refusal instead of a wrong picture. What "current" has been tested against
+is Windows 10 and Windows 11. An older Windows and xrdp are both untested here —
+not declared unsupported, just never driven, so whether one connects is unknown
+rather than promised either way. Where [MS-RDPBCGR] is silent
 or wrong about what such a host really does — and it is, in places, about both —
 the reference is FreeRDP's `libfreerdp/core`, and the arbiter is a real host:
 `tests/rdp_proto_probe.rs` and `tests/rdp_client_probe.rs` drive one named in the
