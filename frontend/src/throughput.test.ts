@@ -330,6 +330,32 @@ test("everything kept reaches back to the oldest row, whatever the filters keep"
   assert.deepEqual(none.sent, series([0, 0], 0));
 });
 
+test("a range of one step is that step twice, and one not yet begun is nothing read", () => {
+  // Everything kept, over a single timeframe: one number, not a ramp up to it.
+  const one = recordedSeries(
+    report(600, [record("mac", "session", 6000, 0, 540)]),
+    back(null),
+    () => true,
+  );
+  assert.equal(one.stepSecs, 60);
+  assert.deepEqual(one.sent.points, [100, 100]);
+
+  // A window that begins after the read: the second before the read is not its second.
+  const ahead = recordedSeries(
+    report(600, [record("mac", "session", 6000, 0, 540)]),
+    throughputBounds({ from: 1200, to: 1800 }),
+    () => true,
+  );
+  assert.deepEqual(ahead.sent.points, [null, null]);
+  assert.equal(ahead.sent.busiest, 0);
+  assert.equal(
+    ahead.spanSecs,
+    600,
+    "the range it names, so the axis says the same",
+  );
+  assert.equal(ahead.end, 1800);
+});
+
 test("the targets are those any sample or row saw, by label", () => {
   assert.deepEqual(
     throughputTargets(

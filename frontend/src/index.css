@@ -569,9 +569,11 @@ body {
   margin-top: 0;
 }
 
-/* A custom range: "Last [amount] [unit] Apply", inline with the selects. */
+/* A custom range: "Last [amount] [unit] Apply", inline with the selects. The two times
+   of a window are wider than a phone's screen together, so the row wraps. */
 .throughput-custom {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
   font-size: 0.85rem;
@@ -589,9 +591,11 @@ body {
   border-radius: 6px;
 }
 
-/* The two times of a window: as wide as the browser's own date and time fields need. */
+/* The two times of a window: as wide as the browser's own date and time fields need,
+   and never wider than the row they wrap in. */
 .throughput-custom input[type="datetime-local"] {
   width: auto;
+  max-width: 100%;
 }
 
 /* The meter: each direction's rate now, then its graph over the window. */

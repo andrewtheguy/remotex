@@ -486,23 +486,6 @@ export function reportHasSeconds(report: ThroughputReport): boolean {
 /** The most points a recorded range is drawn with; past it, timeframes share one. */
 export const MAX_GRAPH_POINTS = 600;
 
-/**
- * Each direction of a report over `bounds` — the seconds the range covers, ending where
- * it ends or at the gateway's clock at the read — from the rows `keep` admits with the
- * open timeframe among them.
- *
- * A point is the average over its step. Where the rows carry the seconds that moved, a
- * step is a second, or as many seconds as it takes to stay within `MAX_GRAPH_POINTS`,
- * and the rates of the seconds inside it are averaged over its whole length, the ones
- * that moved nothing counted as the zeroes they are. Where they do not — a range too
- * long for the gateway to send them — a step is a timeframe, or as many as it takes,
- * and a row's bytes are shared between the steps it overlaps. The range begins at its
- * cutoff exactly: the part of a row before it is left out, and the oldest step, which
- * the cutoff may fall inside, averages over the seconds it has after it. A timeframe
- * nothing moved in has no row, so a step with none is zero and a recorded range has no
- * gaps. The busiest second is one row's: one socket's, never two sockets' seconds added
- * together.
- */
 /** The steps a recorded range is drawn as, in the gateway's own seconds. */
 interface Grid {
   /** The second the oldest step begins at; the range may begin inside it. */
@@ -596,6 +579,24 @@ function spanOf(
     : Math.max(1, end - (bounds.end - bounds.within));
 }
 
+/**
+ * Each direction of a report over `bounds` — the seconds the range covers, ending where
+ * it ends or at the gateway's clock at the read — from the rows `keep` admits with the
+ * open timeframe among them.
+ *
+ * A point is the average over its step. Where the rows carry the seconds that moved, a
+ * step is a second, or as many seconds as it takes to stay within `MAX_GRAPH_POINTS`,
+ * and the rates of the seconds inside it are averaged over its whole length, the ones
+ * that moved nothing counted as the zeroes they are. Where they do not — a range too
+ * long for the gateway to send them — a step is a timeframe, or as many as it takes,
+ * and a row's bytes are shared between the steps it overlaps. The range begins at its
+ * cutoff exactly: the part of a row before it is left out, and the oldest step, which
+ * the cutoff may fall inside, averages over the seconds it has after it. A timeframe
+ * nothing moved in has no row, so a step with none is zero and a recorded range has no
+ * gaps. The busiest second is one row's: one socket's, never two sockets' seconds added
+ * together. A range of one step is that one number twice, so it is drawn as the flat it
+ * is, and one that has not begun yet is drawn as nothing read.
+ */
 export function recordedSeries(
   report: ThroughputReport,
   bounds: ThroughputBounds,
@@ -606,6 +607,19 @@ export function recordedSeries(
   // Never past the read: nothing is recorded after it, so a range that reaches into the
   // future is drawn up to it and no further.
   const end = Math.min(bounds.end ?? report.now, report.now);
+  const { within, end: until } = bounds;
+  if (within !== null && until !== null && until - within >= end) {
+    // A range that has not begun: nothing is recorded ahead of the clock, and the second
+    // before the read is not this range's, so it holds nothing read at all.
+    const unread: RateSeries = { points: [null, null], busiest: 0 };
+    return {
+      sent: unread,
+      received: unread,
+      stepSecs: within / 2,
+      spanSecs: within,
+      end: until,
+    };
+  }
   const span = spanOf(bounds, end, interval, rows);
   const cutoff = end - span;
   const kept = rows.filter((row) => keep(row) && row.end > cutoff);
@@ -613,7 +627,8 @@ export function recordedSeries(
   const stepSecs = detailed
     ? Math.max(1, Math.ceil(span / MAX_GRAPH_POINTS))
     : interval * Math.ceil(Math.ceil(span / interval) / MAX_GRAPH_POINTS);
-  const count = Math.max(2, Math.ceil(span / stepSecs));
+  const steps = Math.ceil(span / stepSecs);
+  const count = Math.max(2, steps);
   const grid: Grid = {
     first: end - count * stepSecs,
     cutoff,
@@ -642,6 +657,12 @@ export function recordedSeries(
       sent[i] /= secs;
       received[i] /= secs;
     }
+  }
+  if (steps < 2) {
+    // The range is one step, and a graph is drawn from two points: the second point says
+    // what the first does, rather than a step before the range that nothing falls in.
+    sent[0] = sent[1];
+    received[0] = received[1];
   }
   const series = (points: number[], busiest: number): RateSeries => ({
     points,
