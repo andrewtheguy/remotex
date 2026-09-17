@@ -2447,12 +2447,21 @@ export function useRemoteDesktop(
   // thing typed reaches the remote — the surface is the only thing on it worth
   // focusing, and a keyboard is not obliged to wait for a pointer to arrive
   // first. Not on the picker, whose own controls own focus there.
+  //
+  // And takes it back the moment nothing is over it any more, which is the same
+  // sentence: the key listeners live on the surface, so reattaching them to an
+  // unfocused surface is a live desktop that nothing types into. Every way out of
+  // view-only lands here — the ✕, the chord that hides the whole menu, a button
+  // that closed the drawer behind it — rather than each of them remembering. The
+  // one panel that wants the keys for itself still gets them: the clipboard editor
+  // opens only once its fetch has answered, which is a later commit than the one
+  // that closed the drawer, so its own focus lands after this.
   useEffect(() => {
-    if (mode !== "desktop") {
+    if (mode !== "desktop" || viewOnly) {
       return;
     }
     overlayRef.current?.focus({ preventScroll: true });
-  }, [mode, overlayRef]);
+  }, [mode, viewOnly, overlayRef]);
 
   return {
     status,

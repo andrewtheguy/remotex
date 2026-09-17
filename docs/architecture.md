@@ -1509,8 +1509,12 @@ sync stands down with them, in both directions — a remote copy arriving behind
 card is not mirrored onto the browser's clipboard, and the browser's is not pushed
 to the remote — because for as long as the menu is up that clipboard holds what was
 copied off this page rather than anything the remote sent. The surface keeps
-painting, under a dimmed layer that says which of the two it is doing, and closing
-the drawer hands the keyboard back along with the input.
+painting, under a dimmed layer that says which of the two it is doing. Every way
+back out hands the keyboard to the surface as it goes, because the key listeners
+live there: the ✕, the chord that hides the menu, a drawer button that closed the
+drawer behind it. The soft keyboard is the one control in this menu that is itself
+keyboard input, so a key pressed there takes the drawer down as it sends — the
+label never stands over a remote being typed on.
 
 Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or

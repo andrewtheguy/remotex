@@ -1200,15 +1200,21 @@ export default function FloatingMenu({
       suppressClickRef.current = false;
       return;
     }
-    // Closing gives the keyboard back along with the input: the remote's key
-    // listeners sit on the desktop surface rather than the window, and this button
-    // holds focus after the click that closed its drawer — so a desktop that is
-    // live again would still have nothing typing into it.
-    if (open) {
-      onFocusDesktop();
-    }
-    setOpen(!open);
-  }, [open, onFocusDesktop]);
+    setOpen((prev) => !prev);
+  }, []);
+
+  // A soft key is input, and the drawer standing over a view-only desktop says
+  // input is not happening — so pressing one takes the drawer down with it rather
+  // than typing on a remote the label promised was untouched. The panel itself
+  // stays: it is closed by its own Close, and it is the half of this the user just
+  // said they meant.
+  const onSoftKey = useCallback(
+    (codes: string[]) => {
+      setOpen(false);
+      sendKeyCombo(codes);
+    },
+    [sendKeyCombo],
+  );
 
   // Open the on-screen keyboard and collapse the drawer so the panel has the
   // screen to itself; toggling the button again closes the panel.
@@ -1527,7 +1533,7 @@ export default function FloatingMenu({
         panel={panel}
         onClose={closePanel}
         onDockedHeightChange={onDockedHeight}
-        sendKeyCombo={sendKeyCombo}
+        sendKeyCombo={onSoftKey}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}
         displays={displays}
