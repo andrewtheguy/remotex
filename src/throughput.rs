@@ -384,19 +384,41 @@ pub struct Reading {
     pub open: Vec<Record>,
 }
 
+/// The seconds a read of the records covers: every timeframe that ended after `since`
+/// and, when the read names an end, began before `until`. Unix seconds on the gateway's
+/// own clock, which stamped the records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub since: u64,
+    pub until: Option<u64>,
+}
+
+impl Window {
+    /// Everything kept that ended after `since`, up to now.
+    pub fn since(since: u64) -> Self {
+        Self { since, until: None }
+    }
+
+    /// Whether a timeframe falls in this window: any part of it does.
+    fn covers(&self, record: &Record) -> bool {
+        record.end > self.since && self.until.is_none_or(|until| record.start < until)
+    }
+}
+
 impl Snapshot {
-    /// This snapshot beside `written`, the database's records read after it and back
-    /// to `since`: an unwritten record the database has meanwhile is counted from the
-    /// database, one it lacks is counted from here if its timeframe ended after `since`,
-    /// and an open record the database has a row for — the timeframe closed and was
-    /// written in between — yields to that row, as the whole of it.
-    pub fn with_written(self, written: Vec<Record>, since: u64) -> Reading {
+    /// This snapshot beside `written`, the database's records read after it over the
+    /// same `window`: an unwritten record the database has meanwhile is counted from the
+    /// database, one it lacks is counted from here if the window covers it, and an open
+    /// record the database has a row for — the timeframe closed and was written in
+    /// between — yields to that row, as the whole of it.
+    pub fn with_written(self, written: Vec<Record>, window: Window) -> Reading {
         let keys: HashSet<(Option<&str>, Socket, u64)> =
             written.iter().map(|record| (record.target.as_deref(), record.socket, record.start)).collect();
         let unwritten = |record: &Record| !keys.contains(&(record.target.as_deref(), record.socket, record.start));
+        let kept = |record: &Record| window.covers(record) && unwritten(record);
         let mut records = written.clone();
-        records.extend(self.unwritten.into_iter().filter(|record| record.end > since && unwritten(record)));
-        let open = self.open.into_iter().filter(unwritten).collect();
+        records.extend(self.unwritten.into_iter().filter(kept));
+        let open = self.open.into_iter().filter(kept).collect();
         Reading { records, open }
     }
 }
@@ -633,18 +655,19 @@ impl ThroughputStore {
         transaction.commit().context("cannot commit a throughput write")
     }
 
-    /// Every record whose timeframe ended after `since` (Unix seconds), oldest first.
-    pub fn records(&self, since: u64) -> anyhow::Result<Vec<Record>> {
+    /// Every record the `window` covers, oldest first.
+    pub fn records(&self, window: Window) -> anyhow::Result<Vec<Record>> {
         let connection = self.lock();
         let mut select = connection
             .prepare_cached(
                 "SELECT target, socket, started_at, ended_at, sent_bytes, received_bytes,
                         peak_sent_per_sec, peak_received_per_sec
-                 FROM throughput WHERE ended_at > ?1 ORDER BY id",
+                 FROM throughput WHERE ended_at > ?1 AND (?2 IS NULL OR started_at < ?2) ORDER BY id",
             )
             .context("cannot prepare the throughput query")?;
+        let until = window.until.map(sql_int).transpose()?;
         let rows = select
-            .query_map([sql_int(since)?], |row| {
+            .query_map(params![sql_int(window.since)?, until], |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
@@ -869,15 +892,20 @@ mod tests {
         assert_eq!(snapshot.unwritten, waiting);
         assert_eq!(snapshot.open.len(), 1);
         let open = snapshot.open.clone();
-        let reading = snapshot.clone().with_written(first.clone(), 0);
+        let reading = snapshot.clone().with_written(first.clone(), Window::since(0));
         assert_eq!(reading, Reading { records: [first.clone(), second.clone()].concat(), open: open.clone() });
-        let reading = snapshot.clone().with_written(vec![], start + 60);
+        let reading = snapshot.clone().with_written(vec![], Window::since(start + 60));
         assert_eq!(reading.records, second, "a record that ended by `since` is left out, as the database leaves it");
+        // A window that ended before the read leaves out the timeframe still open, which
+        // began after it, and keeps the closed ones that began inside it.
+        let ended = Window { since: 0, until: Some(start + 120) };
+        let reading = snapshot.clone().with_written(vec![], ended);
+        assert_eq!(reading, Reading { records: [first.clone(), second.clone()].concat(), open: vec![] });
         // The open timeframe closed and was written between the snapshot and the
         // database read: the database's row is the whole of it, and the rows still
         // waiting are read from the snapshot after it.
         let written = Record { end: start + 180, received_bytes: 9, ..open[0].clone() };
-        let reading = snapshot.with_written(vec![written.clone()], 0);
+        let reading = snapshot.with_written(vec![written.clone()], Window::since(0));
         assert_eq!(reading, Reading { records: [vec![written], first.clone(), second.clone()].concat(), open: vec![] });
 
         // Written through the first: the second still waits.
@@ -919,8 +947,15 @@ mod tests {
         ThroughputStore::open(&config).unwrap().write(&[first.clone(), second.clone()]).unwrap();
 
         let store = ThroughputStore::open(&config).unwrap();
-        assert_eq!(store.records(0).unwrap(), [first, second.clone()]);
-        assert_eq!(store.records(60).unwrap(), [second], "a timeframe that ended by `since` is left out");
+        assert_eq!(store.records(Window::since(0)).unwrap(), [first.clone(), second.clone()]);
+        assert_eq!(
+            store.records(Window::since(60)).unwrap(),
+            std::slice::from_ref(&second),
+            "a timeframe that ended by `since` is left out"
+        );
+        // A window of its own leaves out what began at its end as well.
+        assert_eq!(store.records(Window { since: 0, until: Some(60) }).unwrap(), std::slice::from_ref(&first));
+        assert_eq!(store.records(Window { since: 0, until: Some(61) }).unwrap(), [first, second]);
     }
 
     #[test]
@@ -937,7 +972,7 @@ mod tests {
 
         let sent = |store: &ThroughputStore, target: Option<&str>, socket| -> Vec<u64> {
             store
-                .records(0)
+                .records(Window::since(0))
                 .unwrap()
                 .iter()
                 .filter(|r| r.target.as_deref() == target && r.socket == socket)
@@ -953,7 +988,7 @@ mod tests {
         // A cap lowered between runs applies to what the database already holds.
         let store = ThroughputStore::open(&config(path, 1)).unwrap();
         assert_eq!(sent(&store, Some("mac"), Socket::Audio), [5]);
-        assert_eq!(store.records(0).unwrap().len(), 4);
+        assert_eq!(store.records(Window::since(0)).unwrap().len(), 4);
     }
 
     #[cfg(unix)]

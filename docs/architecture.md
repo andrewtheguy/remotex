@@ -1643,17 +1643,26 @@ range that moved nothing gets no line, since one at zero only traces the axis.
 `GET /api/throughput?within=<seconds>` is the recorded rows, counted
 back from the gateway's clock the rows were stamped with rather than the
 browser's, with the gateway's clock at the read and the open timeframe as it
-stands. The range is one select — the last 60 seconds up to the last 30 days,
-everything kept, or any whole number of seconds, minutes, hours or days — and it
-decides which of the two the graph is drawn from. A range no longer than the five
+stands; `?from=<unix>&to=<unix>` reads a range that names its own ends instead,
+and a query that carries both forms, or ends where it begins, is refused as the
+nonsense it is. The range is one select — the last 60 seconds up to the last 30
+days, everything kept, any whole number of seconds, minutes, hours or days, or
+"Between…", two times typed in the browser's own zone and sent as the seconds
+they come to. A range that ends now decides which of the two sources the graph is
+drawn from: one no longer than the five
 minutes of samples kept is drawn from them second by second, with a gap for a
 second not read, its right edge following the gateway's clock rather than the last
-sample so a failing poll leaves gaps. A longer one is drawn from the recorded rows,
+sample so a failing poll leaves gaps. A longer one, and every range between two
+times however short — the seconds kept are the view's own, not any clock's — is
+drawn from the recorded rows,
 read when the range is chosen and again as each timeframe closes: a point is the
 average over one timeframe, or over as many as keep the graph within 600 points, a
 row's bytes shared between the points it overlaps and a timeframe with no row
 drawn as zero, while the peak beside the rate now, which the graph's scale and its
-dashed line both sit at, is the busiest second any one row in the range carries. That read
+dashed line both sit at, is the busiest second any one row in the range carries.
+A range between two times is drawn between them, and stops at the read where it
+reaches past it, since nothing is recorded ahead of the clock; its axis stands at
+the times themselves where the others stand at how far back they reach. That read
 takes the open timeframe and the rows still waiting for the writer together under
 one lock before it queries the database, then counts a row the database has
 meanwhile once, from the database, so a timeframe closed during the read is never

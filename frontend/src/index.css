@@ -589,6 +589,11 @@ body {
   border-radius: 6px;
 }
 
+/* The two times of a window: as wide as the browser's own date and time fields need. */
+.throughput-custom input[type="datetime-local"] {
+  width: auto;
+}
+
 /* The meter: each direction's rate now, then its graph over the window. */
 .throughput-meter {
   display: flex;

@@ -96,8 +96,26 @@ export interface ThroughputSpan {
   unit: ThroughputUnit;
 }
 
-/** How far back the graph reaches: a span back from now, or everything kept. */
-export type ThroughputRange = ThroughputSpan | "all";
+/**
+ * A range the page names outright, in Unix seconds on the gateway's clock: from `from`
+ * up to, but not into, `to`.
+ */
+export interface ThroughputWindow {
+  from: number;
+  to: number;
+}
+
+/**
+ * How far back the graph reaches: a span back from now, everything kept, or a window
+ * between two times.
+ */
+export type ThroughputRange = ThroughputSpan | "all" | ThroughputWindow;
+
+export function isThroughputWindow(
+  range: ThroughputRange,
+): range is ThroughputWindow {
+  return range !== "all" && "from" in range;
+}
 
 /** The ranges the select offers before "Custom"; any other range is custom. */
 export const THROUGHPUT_PRESETS: readonly ThroughputRange[] = [
@@ -124,12 +142,32 @@ export const DEFAULT_THROUGHPUT_RANGE: ThroughputSpan = {
 
 /** The select's value for a range: the same range spells the same key. */
 export function throughputRangeKey(range: ThroughputRange): string {
-  return range === "all" ? "all" : `${range.amount}:${range.unit}`;
+  if (range === "all") {
+    return "all";
+  }
+  return isThroughputWindow(range)
+    ? `window:${range.from}:${range.to}`
+    : `${range.amount}:${range.unit}`;
+}
+
+/** A Unix second as a local time, with the day before it where the range needs one. */
+export function timeLabel(unixSecs: number, withDay: boolean): string {
+  return new Date(unixSecs * 1000).toLocaleString(
+    [],
+    withDay
+      ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+      : { hour: "numeric", minute: "2-digit" },
+  );
 }
 
 export function throughputRangeLabel(range: ThroughputRange): string {
   if (range === "all") {
     return "Everything kept";
+  }
+  if (isThroughputWindow(range)) {
+    const day = (at: number) => new Date(at * 1000).toDateString();
+    const crosses = day(range.from) !== day(range.to);
+    return `${timeLabel(range.from, true)} – ${timeLabel(range.to, crosses)}`;
   }
   const unit = range.amount === 1 ? range.unit.slice(0, -1) : range.unit;
   return `Last ${range.amount} ${unit}`;
@@ -152,12 +190,70 @@ export function customThroughputRange(
     : null;
 }
 
+/** A Unix second as a `datetime-local` input's value, in this browser's time zone. */
+export function localInputValue(unixSecs: number): string {
+  const at = new Date(unixSecs * 1000);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  const day = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+  return `${day}T${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
 /**
- * The seconds a range reads back, or `null` for everything kept. The gateway counts
- * them back from its own clock, which the records were stamped with.
+ * A `datetime-local` value as a Unix second, or `null` when it names no minute — the
+ * input is empty, or half typed. The time is this browser's, as the input means it.
  */
-export function throughputWithin(range: ThroughputRange): number | null {
-  return range === "all" ? null : range.amount * UNIT_SECONDS[range.unit];
+export function parseLocalInput(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
+    return null;
+  }
+  const at = new Date(value).getTime();
+  return Number.isNaN(at) ? null : Math.floor(at / 1000);
+}
+
+/**
+ * A window from the two times typed, or `null` unless both name a minute and the second
+ * comes after the first.
+ */
+export function customThroughputWindow(
+  from: string,
+  to: string,
+): ThroughputRange | null {
+  const begins = parseLocalInput(from);
+  const ends = parseLocalInput(to);
+  return begins !== null && ends !== null && ends > begins
+    ? { from: begins, to: ends }
+    : null;
+}
+
+/**
+ * What a range comes to at a read: the seconds it covers, `null` for everything kept,
+ * and the second it ends at, `null` for whenever the read lands.
+ */
+export interface ThroughputBounds {
+  within: number | null;
+  end: number | null;
+}
+
+export function throughputBounds(range: ThroughputRange): ThroughputBounds {
+  if (range === "all") {
+    return { within: null, end: null };
+  }
+  return isThroughputWindow(range)
+    ? { within: range.to - range.from, end: range.to }
+    : { within: range.amount * UNIT_SECONDS[range.unit], end: null };
+}
+
+/**
+ * The query a read of `bounds` asks with: a length alone for a range that ends at the
+ * read, so the gateway counts it back from its own clock and this browser's never moves
+ * it, and both ends outright for one that ends earlier, which only a clock can name.
+ */
+export function throughputQuery(bounds: ThroughputBounds): string {
+  const { within, end } = bounds;
+  if (end === null) {
+    return within === null ? "" : `?within=${within}`;
+  }
+  return `?from=${within === null ? 0 : end - within}&to=${end}`;
 }
 
 export type ThroughputResult =
@@ -166,12 +262,10 @@ export type ThroughputResult =
   | { kind: "error"; message: string };
 
 export async function fetchThroughput(
-  within: number | null,
+  bounds: ThroughputBounds,
 ): Promise<ThroughputResult> {
   try {
-    const res = await gatewayFetch(
-      within === null ? "/api/throughput" : `/api/throughput?within=${within}`,
-    );
+    const res = await gatewayFetch(`/api/throughput${throughputQuery(bounds)}`);
     if (res.status === 401) {
       return { kind: "unauthorized" };
     }
@@ -252,9 +346,17 @@ export function liveTotals(rates: readonly LiveRate[]): {
  */
 export const LIVE_HISTORY_SECS = 300;
 
-/** Whether a range is drawn from the sampled seconds rather than the recorded rows. */
+/**
+ * Whether a range is drawn from the sampled seconds rather than the recorded rows. A
+ * window is never: the seconds kept are the last five minutes of this view's life, not
+ * of any clock, so a range that names its own times is read back from the rows however
+ * short it is.
+ */
 export function throughputRangeIsLive(range: ThroughputRange): boolean {
-  const within = throughputWithin(range);
+  if (isThroughputWindow(range)) {
+    return false;
+  }
+  const within = throughputBounds(range).within;
   return within !== null && within <= LIVE_HISTORY_SECS;
 }
 
@@ -366,9 +468,9 @@ export function liveSeries(
 export const MAX_GRAPH_POINTS = 600;
 
 /**
- * Each direction over the last `within` seconds of a report — or, for `null`, since
- * its oldest row — up to the gateway's clock at the read, from the rows `keep` admits
- * with the open timeframe among them. A point is the average over its step: one
+ * Each direction of a report over `bounds` — the seconds the range covers, ending where
+ * it ends or at the gateway's clock at the read — from the rows `keep` admits with the
+ * open timeframe among them. A point is the average over its step: one
  * timeframe, or as many as it takes to stay within `MAX_GRAPH_POINTS`, a row's bytes
  * shared between the steps it overlaps. The range begins at its cutoff exactly: the
  * part of a row before it is left out, and the oldest step, which the cutoff may fall
@@ -378,22 +480,30 @@ export const MAX_GRAPH_POINTS = 600;
  */
 export function recordedSeries(
   report: ThroughputReport,
-  within: number | null,
+  bounds: ThroughputBounds,
   keep: (source: ThroughputSource) => boolean,
 ): ThroughputSeries {
   const rows = [...report.records, ...report.open];
   const interval = Math.max(1, report.intervalSecs);
-  const span =
-    within ??
-    Math.max(
+  // Never past the read: nothing is recorded after it, so a range that reaches into the
+  // future is drawn up to it and no further.
+  const end = Math.min(bounds.end ?? report.now, report.now);
+  let span: number;
+  if (bounds.within === null) {
+    span = Math.max(
       interval,
-      report.now - rows.reduce((min, r) => Math.min(min, r.start), report.now),
+      end - rows.reduce((min, r) => Math.min(min, r.start), end),
     );
+  } else if (bounds.end === null) {
+    span = bounds.within;
+  } else {
+    span = Math.max(1, end - (bounds.end - bounds.within));
+  }
   const timeframes = Math.ceil(span / interval);
   const stepSecs = interval * Math.ceil(timeframes / MAX_GRAPH_POINTS);
   const count = Math.max(2, Math.ceil(span / stepSecs));
-  const first = report.now - count * stepSecs;
-  const cutoff = report.now - span;
+  const first = end - count * stepSecs;
+  const cutoff = end - span;
   const sent = new Array<number>(count).fill(0);
   const received = new Array<number>(count).fill(0);
   let busiestSent = 0;
@@ -436,7 +546,7 @@ export function recordedSeries(
     received: series(received, busiestReceived),
     stepSecs,
     spanSecs: span,
-    end: report.now,
+    end,
   };
 }
 

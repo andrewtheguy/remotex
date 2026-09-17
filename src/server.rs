@@ -643,8 +643,30 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
 #[derive(Deserialize)]
 struct ThroughputQuery {
     /// Seconds back from the gateway's own clock: only timeframes that ended within them.
-    /// Absent reads everything kept. Relative, so a browser's clock never moves the range.
+    /// Relative, so a browser's clock never moves the range.
     within: Option<u64>,
+    /// The range's own start and end, in Unix seconds, for a range the page names
+    /// outright: only timeframes that ended after `from` and began before `to`. Read
+    /// against the gateway's clock, the one the records are stamped with.
+    from: Option<u64>,
+    to: Option<u64>,
+}
+
+impl ThroughputQuery {
+    /// The records this query asks for, `now` being the gateway's clock at the read, or
+    /// what makes the query nonsense. No bound at all reads everything kept.
+    fn window(&self, now: u64) -> Result<throughput::Window, &'static str> {
+        if self.within.is_some() && (self.from.is_some() || self.to.is_some()) {
+            return Err("within and from/to name two ranges: ask with one");
+        }
+        if let (Some(from), Some(to)) = (self.from, self.to)
+            && to <= from
+        {
+            return Err("to must come after from");
+        }
+        let back = || self.within.map(|within| now.saturating_sub(within));
+        Ok(throughput::Window { since: self.from.or_else(back).unwrap_or(0), until: self.to })
+    }
 }
 
 #[derive(Serialize)]
@@ -669,14 +691,14 @@ async fn throughput_handler(
     let store = state.throughput.store.clone().ok_or(AppError::NotFound)?;
     let (interval_secs, max_records) = (store.interval.as_secs(), store.max_records);
     let now = throughput::unix_now();
-    let since = query.within.map_or(0, |within| now.saturating_sub(within));
+    let window = query.window(now).map_err(AppError::BadRequest)?;
     // The meters before the database: a timeframe closed between the two is in the
     // snapshot, and one written between the two is counted once, from the database.
     let snapshot = state.throughput.meters.snapshot(now);
-    let written = tokio::task::spawn_blocking(move || store.records(since))
+    let written = tokio::task::spawn_blocking(move || store.records(window))
         .await
         .map_err(anyhow::Error::from)??;
-    let throughput::Reading { records, open } = snapshot.with_written(written, since);
+    let throughput::Reading { records, open } = snapshot.with_written(written, window);
     Ok(Json(ThroughputResponse { now, interval_secs, max_records, records, open }))
 }
 
@@ -1471,6 +1493,23 @@ mod tests {
                 ],
             })
         );
+
+        // A range named outright: the timeframes inside it alone, and not the one still
+        // being counted, which began after that range ended.
+        let named = format!("/api/throughput?from={}&to={}", now - 700, now - 500);
+        let response = app.clone().oneshot(get(&named, Some(&cookie))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["records"], serde_json::json!([{"target": "mac", "socket": "session", "start": now - 600, "end": now - 540, "sentBytes": 100, "receivedBytes": 7, "peakSentPerSec": 50, "peakReceivedPerSec": 7}]));
+        assert_eq!(json["open"], serde_json::json!([]));
+
+        // Two ranges in one query, or one that ends where it begins, is no query at all.
+        for query in [format!("?within=300&to={now}"), format!("?from={now}&to={now}")] {
+            let response =
+                app.clone().oneshot(get(&format!("/api/throughput{query}"), Some(&cookie))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
 
         let response = app.clone().oneshot(get("/api/throughput/live", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

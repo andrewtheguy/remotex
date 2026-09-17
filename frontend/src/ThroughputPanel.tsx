@@ -1,15 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { gatewayConfig } from "./gatewayConfig.ts";
 import {
   appendLive,
   clockNow,
   customThroughputRange,
+  customThroughputWindow,
   DEFAULT_THROUGHPUT_RANGE,
   fetchThroughput,
   fetchThroughputLive,
   formatRate,
+  isThroughputWindow,
   liveSeries,
   liveTotals,
+  localInputValue,
   type RateSeries,
   rateScale,
   recordedSeries,
@@ -26,11 +35,12 @@ import {
   type ThroughputSource,
   type ThroughputUnit,
   targetLabel,
+  throughputBounds,
   throughputRangeIsLive,
   throughputRangeKey,
   throughputRangeLabel,
   throughputTargets,
-  throughputWithin,
+  timeLabel,
 } from "./throughput.ts";
 import {
   type ChartInk,
@@ -105,17 +115,6 @@ function targetKey(target: string | null): string {
   return target === null ? "picker" : `target:${target}`;
 }
 
-/// When a recorded point begins, to the minute: the day too once the range leaves
-/// today's.
-function pointLabel(unixSecs: number, withDay: boolean): string {
-  return new Date(unixSecs * 1000).toLocaleString(
-    [],
-    withDay
-      ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
-      : { hour: "numeric", minute: "2-digit" },
-  );
-}
-
 /// One direction's rate right now, large, and its busiest second in the range.
 function RateTile({
   name,
@@ -161,7 +160,7 @@ function pointName(
   }
   return end === null
     ? ""
-    : pointLabel(end - Math.min(ago + stepSecs, spanSecs), spanSecs > 86_400);
+    : timeLabel(end - Math.min(ago + stepSecs, spanSecs), spanSecs > 86_400);
 }
 
 /// The points of one direction on a canvas that fills its box (see throughputChart.ts),
@@ -173,6 +172,7 @@ function RateChart({
   spanSecs,
   end,
   rangeLabel,
+  axis,
   ink,
   small,
 }: {
@@ -182,6 +182,8 @@ function RateChart({
   spanSecs: number;
   end: number | null;
   rangeLabel: string;
+  /// What each end of the plot stands at: how long ago, or the time itself.
+  axis: readonly [string, string];
   ink: ChartInk;
   small?: boolean;
 }) {
@@ -278,8 +280,8 @@ function RateChart({
         )}
       </div>
       <div className="throughput-axis">
-        <span>{spanSecs > 0 && `${spanLabel(spanSecs)} ago`}</span>
-        <span>now</span>
+        <span>{axis[0]}</span>
+        <span>{axis[1]}</span>
       </div>
     </>
   );
@@ -290,10 +292,12 @@ function Meter({
   rates,
   series,
   rangeLabel,
+  axis,
 }: {
   rates: { sent: number; received: number } | null;
   series: ThroughputSeries;
   rangeLabel: string;
+  axis: readonly [string, string];
 }) {
   return (
     <section className="throughput-meter" aria-label="Rate right now">
@@ -320,6 +324,7 @@ function Meter({
         spanSecs={series.spanSecs}
         end={series.end}
         rangeLabel={rangeLabel}
+        axis={axis}
         ink={SENT_INK}
       />
       <RateChart
@@ -329,6 +334,7 @@ function Meter({
         spanSecs={series.spanSecs}
         end={series.end}
         rangeLabel={rangeLabel}
+        axis={axis}
         ink={RECEIVED_INK}
         small
       />
@@ -336,66 +342,110 @@ function Meter({
   );
 }
 
-/// The range select and, on "Custom", the amount and unit it is typed as. A custom
-/// range applies on Apply (or Enter), not per keystroke, so half a number is never
-/// read.
+/// How long a range the "Between…" fields open on.
+const SEEDED_WINDOW_SECS = 3600;
+
+/// The range select and, under it, the fields the two custom ranges are typed in:
+/// "Custom…" is a length back from now, "Between…" a start and an end of its own. Both
+/// apply on Apply (or Enter), not per keystroke, so half a number and half a date are
+/// never read.
 function RangeControls({
   range,
+  now,
   onChange,
 }: {
   range: ThroughputRange;
+  /// The gateway's second, which the fields open on; before the first read, this
+  /// browser's own.
+  now: number | null;
   onChange: (range: ThroughputRange) => void;
 }) {
-  const [custom, setCustom] = useState(
-    () =>
-      !THROUGHPUT_PRESETS.some(
-        (p) => throughputRangeKey(p) === throughputRangeKey(range),
-      ),
+  const listed = THROUGHPUT_PRESETS.some(
+    (p) => throughputRangeKey(p) === throughputRangeKey(range),
   );
-  const seed = range === "all" ? DEFAULT_THROUGHPUT_RANGE : range;
+  const [mode, setMode] = useState<"preset" | "span" | "window">(() => {
+    if (listed) {
+      return "preset";
+    }
+    return isThroughputWindow(range) ? "window" : "span";
+  });
+  const seed =
+    range === "all" || isThroughputWindow(range)
+      ? DEFAULT_THROUGHPUT_RANGE
+      : range;
   const [amount, setAmount] = useState(String(seed.amount));
   const [unit, setUnit] = useState<ThroughputUnit>(seed.unit);
-  const typed = customThroughputRange(amount, unit);
+  // The range on screen when the fields are opened, or the hour up to now.
+  const openOn = () => {
+    const clock = now ?? Math.floor(Date.now() / 1000);
+    const window = isThroughputWindow(range)
+      ? range
+      : { from: clock - SEEDED_WINDOW_SECS, to: clock };
+    return {
+      from: localInputValue(window.from),
+      to: localInputValue(window.to),
+    };
+  };
+  const [times, setTimes] = useState(openOn);
+  const typed =
+    mode === "window"
+      ? customThroughputWindow(times.from, times.to)
+      : customThroughputRange(amount, unit);
+
+  const apply = (e: FormEvent) => {
+    e.preventDefault();
+    if (typed !== null) {
+      onChange(typed);
+    }
+  };
+  const applyButton = (
+    <button
+      type="submit"
+      className="picker-logout"
+      disabled={
+        typed === null ||
+        throughputRangeKey(typed) === throughputRangeKey(range)
+      }
+    >
+      Apply
+    </button>
+  );
 
   return (
     <>
       <select
         aria-label="Time range"
-        value={custom ? "custom" : throughputRangeKey(range)}
+        value={mode === "preset" ? throughputRangeKey(range) : mode}
         onChange={(e) => {
-          if (e.target.value === "custom") {
-            setCustom(true);
+          if (e.target.value === "window") {
+            setTimes(openOn());
+          }
+          if (e.target.value === "span" || e.target.value === "window") {
+            setMode(e.target.value);
             return;
           }
-          setCustom(false);
-          const preset = THROUGHPUT_PRESETS.find(
+          setMode("preset");
+          const chosen = THROUGHPUT_PRESETS.find(
             (p) => throughputRangeKey(p) === e.target.value,
           );
-          if (preset !== undefined) {
-            onChange(preset);
+          if (chosen !== undefined) {
+            onChange(chosen);
           }
         }}
       >
-        {THROUGHPUT_PRESETS.map((preset) => (
+        {THROUGHPUT_PRESETS.map((choice) => (
           <option
-            key={throughputRangeKey(preset)}
-            value={throughputRangeKey(preset)}
+            key={throughputRangeKey(choice)}
+            value={throughputRangeKey(choice)}
           >
-            {throughputRangeLabel(preset)}
+            {throughputRangeLabel(choice)}
           </option>
         ))}
-        <option value="custom">Custom…</option>
+        <option value="span">Custom…</option>
+        <option value="window">Between…</option>
       </select>
-      {custom && (
-        <form
-          className="throughput-custom"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (typed !== null) {
-              onChange(typed);
-            }
-          }}
-        >
+      {mode === "span" && (
+        <form className="throughput-custom" onSubmit={apply}>
           <span>Last</span>
           <input
             aria-label="Amount"
@@ -417,20 +467,77 @@ function RangeControls({
               </option>
             ))}
           </select>
-          <button
-            type="submit"
-            className="picker-logout"
-            disabled={
-              typed === null ||
-              throughputRangeKey(typed) === throughputRangeKey(range)
-            }
-          >
-            Apply
-          </button>
+          {applyButton}
+        </form>
+      )}
+      {mode === "window" && (
+        <form className="throughput-custom" onSubmit={apply}>
+          <span>From</span>
+          <input
+            aria-label="Start"
+            type="datetime-local"
+            value={times.from}
+            onChange={(e) => setTimes({ ...times, from: e.target.value })}
+          />
+          <span>to</span>
+          <input
+            aria-label="End"
+            type="datetime-local"
+            value={times.to}
+            onChange={(e) => setTimes({ ...times, to: e.target.value })}
+          />
+          {applyButton}
         </form>
       )}
     </>
   );
+}
+
+/// What one range comes to at this read: the graph's series, drawn from the seconds
+/// kept or from the recorded rows, how the tiles name the range, and what each end of
+/// the plot stands at. Before the first answer it is a graph of nothing read, as wide
+/// as the range asked for.
+function meterView(
+  range: ThroughputRange,
+  read: {
+    report: ThroughputReport | null;
+    history: readonly ThroughputLive[];
+    now: number | null;
+  },
+  keep: (source: ThroughputSource) => boolean,
+): {
+  series: ThroughputSeries;
+  rangeLabel: string;
+  axis: readonly [string, string];
+} {
+  const { within, end } = throughputBounds(range);
+  const unread: RateSeries = { points: [null, null], busiest: 0 };
+  let series: ThroughputSeries;
+  if (throughputRangeIsLive(range) && within !== null) {
+    series = liveSeries(read.history, within, keep, read.now);
+  } else if (read.report !== null) {
+    series = recordedSeries(read.report, { within, end }, keep);
+  } else {
+    series = {
+      sent: unread,
+      received: unread,
+      stepSecs: (within ?? 0) / 2,
+      spanSecs: within ?? 0,
+      end: null,
+    };
+  }
+  const label = throughputRangeLabel(range);
+  return {
+    series,
+    // A window names itself; the rest read on after "peak 5.0 Mbps, ".
+    rangeLabel: isThroughputWindow(range)
+      ? label
+      : label[0].toLowerCase() + label.slice(1),
+    // A window stands at the times it names, the rest at how far back they reach.
+    axis: isThroughputWindow(range)
+      ? [timeLabel(range.from, true), timeLabel(series.end ?? range.to, true)]
+      : [series.spanSecs > 0 ? `${spanLabel(series.spanSecs)} ago` : "", "now"],
+  };
 }
 
 export default function ThroughputPanel({
@@ -474,7 +581,7 @@ export default function ThroughputPanel({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
-      const result = await fetchThroughput(throughputWithin(range));
+      const result = await fetchThroughput(throughputBounds(range));
       if (cancelled) {
         return;
       }
@@ -568,25 +675,7 @@ export default function ThroughputPanel({
     (selected === "all" || targetKey(source.target) === selected) &&
     (socketFilter === "all" || source.socket === socketFilter);
 
-  const within = throughputWithin(range);
-  let series: ThroughputSeries;
-  if (sampled && within !== null) {
-    series = liveSeries(history, within, keep, now);
-  } else if (report !== null) {
-    series = recordedSeries(report, within, keep);
-  } else {
-    // Still loading, or the read failed: a graph of nothing read, as wide as asked.
-    const unread = { points: [null, null], busiest: 0 };
-    series = {
-      sent: unread,
-      received: unread,
-      stepSecs: (within ?? 0) / 2,
-      spanSecs: within ?? 0,
-      end: null,
-    };
-  }
-  const label = throughputRangeLabel(range);
-  const rangeLabel = label[0].toLowerCase() + label.slice(1);
+  const view = meterView(range, { report, history, now }, keep);
 
   return (
     <>
@@ -622,7 +711,7 @@ export default function ThroughputPanel({
             </option>
           ))}
         </select>
-        <RangeControls range={range} onChange={changeRange} />
+        <RangeControls range={range} now={now} onChange={changeRange} />
         <button
           type="button"
           className="picker-logout"
@@ -635,8 +724,9 @@ export default function ThroughputPanel({
       {error && <p className="picker-error">{error}</p>}
       <Meter
         rates={live === null ? null : liveTotals(live.rates.filter(keep))}
-        series={series}
-        rangeLabel={rangeLabel}
+        series={view.series}
+        rangeLabel={view.rangeLabel}
+        axis={view.axis}
       />
       <button type="button" className="picker-logout" onClick={onClose}>
         {closeLabel}
