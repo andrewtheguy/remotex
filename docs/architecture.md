@@ -1628,27 +1628,32 @@ best effort by design: the open timeframe dies with the process, and a failed
 write is retried at the next close. A file that is not this gateway's usage
 database — not SQLite, SQLite without its application id, or another schema
 version — is refused at startup before anything is written to it. The page reads
-two things. `GET /api/usage/live` is the last sample, per target and socket,
-which the "Data usage" view polls once a second while it is open and not paused,
-one poll out at a time, keeps for the last five minutes, and shows the way a
-network meter does: the rate now over a graph of the last minute or five, one per
-direction on its own scale, narrowed to a target or a socket by its filters, with
-a gap for a second not read, the graph's right edge following the gateway's clock
-rather than the last sample so a failing poll leaves gaps; `GET
-/api/usage?within=<seconds>` is the recorded rows, counted back from the gateway's
-clock the rows were stamped with rather than the browser's, with the gateway's
-clock at the read and the open timeframe as it stands, which the view reads when
-it opens and when asked to refresh and sums per target and per socket. That read
+two things and draws one graph from them. `GET /api/usage/live` is the last
+sample, per target and socket, which the "Data usage" view polls once a second
+while it is open and not paused, one poll out at a time, keeps for the last five
+minutes, and shows the way a network meter does: the rate now over a graph of the
+chosen range, one per direction on its own scale, narrowed to a target or a socket
+by its filters. `GET /api/usage?within=<seconds>` is the recorded rows, counted
+back from the gateway's clock the rows were stamped with rather than the
+browser's, with the gateway's clock at the read and the open timeframe as it
+stands. The range is one select — the last 60 seconds up to the last 30 days,
+everything kept, or any whole number of seconds, minutes, hours or days — and it
+decides which of the two the graph is drawn from. A range no longer than the five
+minutes of samples kept is drawn from them second by second, with a gap for a
+second not read, its right edge following the gateway's clock rather than the last
+sample so a failing poll leaves gaps. A longer one is drawn from the recorded rows,
+read when the range is chosen and again as each timeframe closes: a point is the
+average over one timeframe, or over as many as keep the graph within 600 points, a
+row's bytes shared between the points it overlaps and a timeframe with no row
+drawn as zero, while the peak beside the rate now is the busiest second any one
+row in the range carries. That read
 takes the open timeframe and the rows still waiting for the writer together under
 one lock before it queries the database, then counts a row the database has
 meanwhile once, from the database, so a timeframe closed during the read is never
 missing from it nor counted twice. Both are behind the login, and `/api/config` says whether there is a
 database to offer. The gateway stores bytes, peaks and times; the page divides
-for an average — a row's bytes over the seconds its timeframe spans, and for a
-target or socket over a range, its bytes over the seconds of the timeframes it
-has rows in, one timeframe counted once however many sockets moved in it — and
-shows every rate in decimal bits per second, as a network meter does. The range
-is any whole number of minutes, hours or days back, or everything kept. What an
+for an average and shows every rate in decimal bits per second, as a network
+meter does. What an
 engine exchanges with its remote is a different link and is not counted.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,

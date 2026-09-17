@@ -1,6 +1,6 @@
-// Drawing one direction of the data usage meter: the seconds of a window on a
+// Drawing one direction of the data usage meter: the points of a range on a
 // canvas, an area under a line, a dot on the newest second, four grid lines with
-// their rate at the right edge, and a gap where a second was not read. The rendering
+// their rate at the right edge, and a gap where a point was not read. The rendering
 // is the panel's (UsagePanel.tsx); this is the geometry and the strokes.
 
 import { formatRate } from "./usage.ts";
@@ -22,7 +22,7 @@ export interface ChartInk {
 export interface ChartLayout {
   width: number;
   height: number;
-  /** A rate per second, oldest first; `null` for a second no sample covers. */
+  /** A rate per point, oldest first; `null` for one no sample covers. */
   points: readonly (number | null)[];
   /** The rate at the top of the plot. */
   top: number;
@@ -44,9 +44,9 @@ export function runs(points: readonly (number | null)[]): [number, number][] {
   return found;
 }
 
-/** The plot's x for the second at `index`, over `width` less the scale. */
+/** The plot's x for the point at `index`, over `width` less the scale. */
 export function plotX(index: number, count: number, width: number): number {
-  return (index / (count - 1)) * (width - SCALE_WIDTH);
+  return count > 1 ? (index / (count - 1)) * (width - SCALE_WIDTH) : 0;
 }
 
 function plotY(value: number, layout: ChartLayout): number {
@@ -160,8 +160,8 @@ export function drawChart(
   drawNewest(ctx, layout, ink);
 }
 
-/** The second under a pointer `px` from the plot's left, or `null` beside it. */
-export function pointedSecond(
+/** The point under a pointer `px` from the plot's left, or `null` beside it. */
+export function pointedIndex(
   px: number,
   count: number,
   width: number,
@@ -173,8 +173,16 @@ export function pointedSecond(
   return Math.round((px / plotWidth) * (count - 1));
 }
 
-/** Where the tooltip for the second at `index` sits: over it, kept inside the plot. */
-export function tipLeft(index: number, count: number, width: number): number {
+/**
+ * Where the tooltip for the point at `index` sits: over it, kept inside the plot,
+ * `half` being the room each side of its middle its text takes.
+ */
+export function tipLeft(
+  index: number,
+  count: number,
+  width: number,
+  half = 60,
+): number {
   const plotWidth = width - SCALE_WIDTH;
-  return Math.min(Math.max(plotX(index, count, width), 60), plotWidth - 60);
+  return Math.min(Math.max(plotX(index, count, width), half), plotWidth - half);
 }
