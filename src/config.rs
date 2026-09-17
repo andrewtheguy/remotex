@@ -1686,7 +1686,9 @@ impl ConfigFile {
             );
             // An RDP resize is a graphics reset, which only the pipeline has: the
             // bitmap path keeps its opening size, so the pair is refused rather than
-            // left to a channel whose layouts would go nowhere.
+            // left to a channel whose layouts would go nowhere. MS-RDPEDISP's other
+            // answer, a Deactivation-Reactivation Sequence, is left out on purpose: see
+            // "Bitmap updates" in docs/rdp-client.md.
             anyhow::ensure!(
                 !(target.protocol == Protocol::Rdp && target.resize && !target.egfx()),
                 "target {:?} sets resize with egfx = false, and an rdp desktop is resized \

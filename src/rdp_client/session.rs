@@ -962,7 +962,8 @@ impl<'a> Active<'a> {
         match share::decode(payload)? {
             // A resize is a graphics reset and nothing this client asks for rebuilds
             // the share, so a host that tears it down has ended what this session can
-            // carry.
+            // carry. The Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) is
+            // left out on purpose: see "Bitmap updates" in docs/rdp-client.md.
             Pdu::DeactivateAll => bail!("the host deactivated the share mid-session"),
             Pdu::DemandActive { .. } => {
                 bail!("the host demanded a share this session already has")

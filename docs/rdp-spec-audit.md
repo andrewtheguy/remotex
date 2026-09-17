@@ -174,7 +174,9 @@ not mentioned. Each line was checked field by field against the spec text.
   `pduSource` (3.2.5.3.14), Control Cooperate then Request Control, Font List;
   server Synchronize, Cooperate, Granted, Font Map; share control and data headers
   including `uncompressedLength`; compressed bodies refused; a mid-session Deactivate All
-  fatal, since nothing this client asks for rebuilds the share; Set Error Info fatal; Refresh Rect and
+  fatal, since nothing this client asks for rebuilds the share — the
+  Deactivation-Reactivation Sequence (1.3.1.3) is deliberately not implemented, see
+  [Bitmap updates](rdp-client.md#bitmap-updates); Set Error Info fatal; Refresh Rect and
   Suppress Output sent only when advertised.
 - **Fast-path input and output:** header, both length forms, event header packing,
   scancode flags, every mouse flag with the 9-bit rotation clamped, extended

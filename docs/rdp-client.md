@@ -188,6 +188,17 @@ keeps its opening size: a resize is the pipeline's graphics reset, Display Contr
 not taken without it, and `resize = true` beside `egfx = false` is refused at config
 parse. Every server that is not Windows takes this path whatever the key.
 
+That is a deliberate narrowing, not an oversight. MS-RDPEDISP 1.3 has a server
+without the pipeline answer a monitor layout with a Deactivation-Reactivation
+Sequence (MS-RDPBCGR 1.3.1.3), and the client does not implement it: rebuilding the
+share mid-session meant holding channel PDUs until it was live again, answering the
+clipboard in place meanwhile, and correcting Wave Confirm timestamps for the time
+held, all for a resize the pipeline does with one graphics reset. MS-RDPBCGR also
+allows the sequence when a logon is attached to an existing session. Windows does not
+use it there on either graphics path, measured by reclaiming a session left at another
+size, so a mid-session Deactivate All or second Demand Active ends the session with an
+error naming it rather than being carried.
+
 The path is 32 bits per pixel and nothing else: the planar codec is the only one
 decoded, and the interleaved run-length coding a shallower session would use is
 not. The depth is asked for in the GCC conference and in the Confirm Active, but
