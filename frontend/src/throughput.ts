@@ -294,14 +294,13 @@ export function appendLive(
 
 /**
  * One direction over a range: a rate per step, oldest first, `null` for a step nothing
- * was read in; `peak`, the highest of them, which the scale fits; and `busiest`, the
- * busiest second in the range, all in bytes per second. Second by second the two are
- * one number; over recorded timeframes a point is an average, and the busiest second
- * stands well above it.
+ * was read in, and `busiest`, the busiest second in the range, all in bytes per second.
+ * The scale fits `busiest`, so the graph is drawn under the peak it names rather than
+ * under the highest step: second by second the two are one number, but over recorded
+ * timeframes a step is an average and the busiest second stands above it.
  */
 export interface RateSeries {
   points: (number | null)[];
-  peak: number;
   busiest: number;
 }
 
@@ -350,10 +349,10 @@ export function liveSeries(
       }
     }
   }
-  const series = (points: (number | null)[]): RateSeries => {
-    const peak = highest(points);
-    return { points, peak, busiest: peak };
-  };
+  const series = (points: (number | null)[]): RateSeries => ({
+    points,
+    busiest: highest(points),
+  });
   return {
     sent: series(sent),
     received: series(received),
@@ -428,10 +427,10 @@ export function recordedSeries(
       received[i] += (row.receivedBytes * share) / (stepEnd - stepFrom);
     }
   }
-  const series = (points: number[], busiest: number): RateSeries => {
-    const peak = highest(points);
-    return { points, peak, busiest: Math.max(busiest, peak) };
-  };
+  const series = (points: number[], busiest: number): RateSeries => ({
+    points,
+    busiest: Math.max(busiest, highest(points)),
+  });
   return {
     sent: series(sent, busiestSent),
     received: series(received, busiestReceived),
@@ -444,7 +443,7 @@ export function recordedSeries(
 /**
  * The top of a graph's scale for a busiest second in bytes per second: a round number
  * of bits per second — 1, 2, 2.5 or 5 of a power of ten — at least a tenth above the
- * peak, and never below one kilobit per second, so nothing moved is not a scale of
+ * second, and never below one kilobit per second, so nothing moved is not a scale of
  * nothing.
  */
 export function rateScale(peakBytesPerSec: number): number {

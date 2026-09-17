@@ -102,10 +102,9 @@ test("the history keeps one sample per second, newest last, as long as the longe
 });
 
 /// A series whose busiest second is its highest point, as a sampled one's is.
-const series = (points: (number | null)[], peak: number) => ({
+const series = (points: (number | null)[], busiest: number) => ({
   points,
-  peak,
-  busiest: peak,
+  busiest,
 });
 
 test("a series is the window's seconds up to now, summed over what is kept, with gaps for seconds not read", () => {
@@ -198,8 +197,11 @@ test("a recorded range is a point per timeframe, the average over it, zero where
   assert.equal(all.end, 600);
   assert.deepEqual(all.sent.points, [0, 120, 0, 10, 0, 5]);
   assert.deepEqual(all.received.points, [0, 1, 0, 0, 0, 0.5]);
-  assert.equal(all.sent.peak, 120, "the scale fits the averages");
-  assert.equal(all.sent.busiest, 6000, "one socket's busiest second");
+  assert.equal(
+    all.sent.busiest,
+    6000,
+    "one socket's busiest second, well above the averages the steps hold",
+  );
   const audio = recordedSeries(read, 360, (s) => s.socket === "audio");
   assert.deepEqual(audio.sent.points, [0, 20, 0, 0, 0, 0]);
   assert.equal(audio.sent.busiest, 1200);

@@ -1633,7 +1633,14 @@ sample, per target and socket, which the "Throughput" view polls once a second
 while it is open and not paused, one poll out at a time, keeps for the last five
 minutes, and shows the way a network meter does: the rate now over a graph of the
 chosen range, one per direction on its own scale, narrowed to a target or a socket
-by its filters. `GET /api/throughput?within=<seconds>` is the recorded rows, counted
+by its filters. Four grid lines carry the scale and its rates, and a dashed line in
+the direction's own colour crosses the plot at the busiest second of the range — the
+same second the tile beside the graph names, so the line carries no rate of its own.
+The scale fits that second rather than the highest step drawn, which is what keeps
+the line on the plot: second by second the two are one number, but a recorded step is
+an average over its timeframe and the busiest second inside it stands above that. A
+range that moved nothing gets no line, since one at zero only traces the axis.
+`GET /api/throughput?within=<seconds>` is the recorded rows, counted
 back from the gateway's clock the rows were stamped with rather than the
 browser's, with the gateway's clock at the read and the open timeframe as it
 stands. The range is one select — the last 60 seconds up to the last 30 days,
@@ -1645,8 +1652,8 @@ sample so a failing poll leaves gaps. A longer one is drawn from the recorded ro
 read when the range is chosen and again as each timeframe closes: a point is the
 average over one timeframe, or over as many as keep the graph within 600 points, a
 row's bytes shared between the points it overlaps and a timeframe with no row
-drawn as zero, while the peak beside the rate now is the busiest second any one
-row in the range carries. That read
+drawn as zero, while the peak beside the rate now, which the graph's scale and its
+dashed line both sit at, is the busiest second any one row in the range carries. That read
 takes the open timeframe and the rows still waiting for the writer together under
 one lock before it queries the database, then counts a row the database has
 meanwhile once, from the database, so a timeframe closed during the read is never

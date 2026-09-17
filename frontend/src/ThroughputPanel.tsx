@@ -188,8 +188,8 @@ function RateChart({
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [hovered, setPointed] = useState<number | null>(null);
-  const top = rateScale(series.peak);
-  const { points } = series;
+  const { points, busiest } = series;
+  const top = rateScale(busiest);
   // A series of another length may replace this one under a resting pointer.
   const pointed = hovered !== null && hovered < points.length ? hovered : null;
   const sampled = stepSecs === 1;
@@ -216,13 +216,13 @@ function RateChart({
         surface.height = Math.round(height * dpr);
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawChart(ctx, { width, height, points, top }, ink);
+      drawChart(ctx, { width, height, points, top, max: busiest }, ink);
     };
     draw();
     const observer = new ResizeObserver(draw);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [points, top, ink]);
+  }, [points, top, busiest, ink]);
 
   const width = box.current?.clientWidth ?? 0;
   const pointedValue = pointed === null ? null : points[pointed];
@@ -576,7 +576,7 @@ export default function ThroughputPanel({
     series = recordedSeries(report, within, keep);
   } else {
     // Still loading, or the read failed: a graph of nothing read, as wide as asked.
-    const unread = { points: [null, null], peak: 0, busiest: 0 };
+    const unread = { points: [null, null], busiest: 0 };
     series = {
       sent: unread,
       received: unread,
