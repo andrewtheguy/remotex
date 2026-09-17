@@ -1500,6 +1500,22 @@ On a Mac host connected to a non-Mac remote, selected Command shortcuts are
 translated to Control. A Mac-keyboard toggle disables translation, and the
 gateway's `remoteOs` message suppresses it for Mac remotes.
 
+While the floating menu has something over the desktop — its drawer, or the one
+modal card that opens from it and leaves the drawer standing — the desktop is
+**view-only**. No input listener is attached at all (`useRemoteDesktop.ts`), which
+is what gives the page back the chords the surface would otherwise take: ⌘C and
+Ctrl+C among them, so the text on a card can be copied. The automatic clipboard
+sync stands down with them, in both directions — a remote copy arriving behind the
+card is not mirrored onto the browser's clipboard, and the browser's is not pushed
+to the remote — because for as long as the menu is up that clipboard holds what was
+copied off this page rather than anything the remote sent. The surface keeps
+painting, under a dimmed layer that says which of the two it is doing. Every way
+back out hands the keyboard to the surface as it goes, because the key listeners
+live there: the ✕, the chord that hides the menu, a drawer button that closed the
+drawer behind it. The soft keyboard is the one control in this menu that is itself
+keyboard input, so a key pressed there takes the drawer down as it sends — the
+label never stands over a remote being typed on.
+
 Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.

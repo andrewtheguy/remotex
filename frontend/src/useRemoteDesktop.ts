@@ -550,6 +550,12 @@ export function useRemoteDesktop(
   // what a finger does; the other two decide whether the switch is shown.
   const touchOffered = HAS_TOUCH && canTouch;
   const touchActive = touchOffered && touchEnabled;
+  // The floating menu is over the desktop, which it reports here (see
+  // FloatingMenu). The desktop keeps painting and stops taking input: no
+  // listener is attached at all, so the page keeps the keys — ⌘C and Ctrl+C
+  // included — and the clipboard bridge lets go of the browser's own, which is
+  // the only moment there is something on it that did not come from the remote.
+  const [viewOnly, setViewOnly] = useState(false);
   // The remembered "sound by default" preference, edited from the picker and
   // from the desktop menu alike (see AUDIO_KEY). Applied to a compatible
   // connection in `handleConnected`, and read there through a ref so the
@@ -567,6 +573,9 @@ export function useRemoteDesktop(
   // Read by the key handlers, which must not re-subscribe when it changes: a
   // teardown mid-chord would strand whatever is held.
   const macKeyOverridesActiveRef = useRef(macKeyOverridesActive);
+  // Read by the clipboard handlers, which must not re-subscribe — or push the
+  // browser's clipboard a second time — to learn that the menu opened.
+  const viewOnlyRef = useRef(viewOnly);
   // The last remote clipboard snapshot, whether fetched or pushed, and a
   // counter that ticks on every arrival. Fetching the same text twice must
   // still register as an answer, and a null-vs-string flag cannot express that.
@@ -611,6 +620,10 @@ export function useRemoteDesktop(
       // Storage blocked: the preference still holds for this tab.
     }
   }, [macKeyOverridesEnabled]);
+
+  useEffect(() => {
+    viewOnlyRef.current = viewOnly;
+  }, [viewOnly]);
 
   // Mirror the "by default" preference into its ref (the connection effect reads
   // it there) and persist it, whatever set it — the picker's toggle or the
@@ -1464,7 +1477,10 @@ export function useRemoteDesktop(
       const alreadyMirrored = text === lastFromRemoteRef.current;
       const echoedFromHost = text === lastToRemoteRef.current;
       lastFromRemoteRef.current = text;
-      if (alreadyMirrored || echoedFromHost) {
+      // Not while the menu is up. The browser's clipboard then holds whatever was
+      // copied off a panel, and a remote copy arriving behind the card would take
+      // it straight back off again.
+      if (alreadyMirrored || echoedFromHost || viewOnlyRef.current) {
         return;
       }
       void navigator.clipboard.writeText(text).catch(() => {});
@@ -2048,7 +2064,11 @@ export function useRemoteDesktop(
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
-      if (document.hidden || !document.hasFocus()) {
+      // The menu check is the ref rather than the dependency it looks like: a
+      // re-run calls this once itself, so gating the effect would push the
+      // browser's clipboard the moment the menu closed — the one value the
+      // remote has no business being given.
+      if (document.hidden || !document.hasFocus() || viewOnlyRef.current) {
         return;
       }
       void (async () => {
@@ -2059,6 +2079,12 @@ export function useRemoteDesktop(
           return; // no permission, or the user declined
         }
         if (
+          // Asked again on the far side of the await, which is where the menu can
+          // have opened: the read sits on a permission prompt for as long as the
+          // user takes to answer it, and what it then resolves with may be what was
+          // copied off a panel. Sending it would also stamp `lastToRemoteRef` with
+          // it, which is the mirror's echo guard.
+          viewOnlyRef.current ||
           text === "" ||
           overClipboardLimit(text) ||
           // Came from the remote a moment ago; sending it back is a loop.
@@ -2133,7 +2159,10 @@ export function useRemoteDesktop(
   // scaling pointer coordinates from the displayed size to the remote size.
   useEffect(() => {
     const el = overlayRef.current;
-    if (!el) {
+    // View-only is the absence of every listener below rather than a flag each
+    // of them tests, so there is no path left that could forward a key or a
+    // click while the menu has the screen.
+    if (!el || viewOnly) {
       return;
     }
 
@@ -2387,6 +2416,10 @@ export function useRemoteDesktop(
     el.addEventListener("blur", onBlur);
 
     return () => {
+      // Let go of whatever the remote is holding while the listeners that would
+      // have released it are still here: opening the menu is one of the ways
+      // this teardown runs, and a key held into it would stick on the guest.
+      releaseAll();
       gestures?.detach();
       passthrough?.detach();
       releaseKeysRef.current = null;
@@ -2408,18 +2441,27 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, gridRef, syncCursor, touchActive]);
+  }, [overlayRef, canvasRef, gridRef, syncCursor, touchActive, viewOnly]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth
   // focusing, and a keyboard is not obliged to wait for a pointer to arrive
   // first. Not on the picker, whose own controls own focus there.
+  //
+  // And takes it back the moment nothing is over it any more, which is the same
+  // sentence: the key listeners live on the surface, so reattaching them to an
+  // unfocused surface is a live desktop that nothing types into. Every way out of
+  // view-only lands here — the ✕, the chord that hides the whole menu, a button
+  // that closed the drawer behind it — rather than each of them remembering. The
+  // one panel that wants the keys for itself still gets them: the clipboard editor
+  // opens only once its fetch has answered, which is a later commit than the one
+  // that closed the drawer, so its own focus lands after this.
   useEffect(() => {
-    if (mode !== "desktop") {
+    if (mode !== "desktop" || viewOnly) {
       return;
     }
     overlayRef.current?.focus({ preventScroll: true });
-  }, [mode, overlayRef]);
+  }, [mode, viewOnly, overlayRef]);
 
   return {
     status,
@@ -2468,6 +2510,8 @@ export function useRemoteDesktop(
     touchEnabled,
     touchActive,
     setTouchEnabled,
+    viewOnly,
+    setViewOnly,
     onLocalShortcut,
     takeOver,
     retry,

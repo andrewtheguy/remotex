@@ -142,6 +142,9 @@ function readViewport(): Viewport {
 // clear the other — and this makes it impossible to express.
 type Panel = "clipboard" | "keyboard" | "display";
 
+// Which face the one modal card shows, when it is up at all.
+type Modal = "info" | "throughput";
+
 /// The window kind, subscribed to rather than read once.
 ///
 /// *Install page as app…* reparents this very document into the new window, so every
@@ -300,6 +303,28 @@ function ThroughputModal({
       />
     </ModalOverlay>
   );
+}
+
+/// Reports to the desktop that it is view-only for as long as this menu has
+/// something over it — the drawer, or the modal card that opens from it and leaves
+/// the drawer standing. Turning it off again is the effect's cleanup, so there is no
+/// path where the menu goes away and the desktop stays inert: unmounting the menu
+/// hands the input back too. The chord that hides the ☰ button takes the drawer with
+/// it, which is why the drawer's own state is not the whole answer.
+function useViewOnly(
+  drawerOpen: boolean,
+  chromeHidden: boolean,
+  modal: Modal | null,
+  report: (viewOnly: boolean) => void,
+) {
+  const anythingUp = (drawerOpen && !chromeHidden) || modal !== null;
+  useEffect(() => {
+    if (!anythingUp) {
+      return;
+    }
+    report(true);
+    return () => report(false);
+  }, [anythingUp, report]);
 }
 
 function usePanel() {
@@ -861,6 +886,7 @@ export default function FloatingMenu({
   onTouchChange,
   onLocalShortcut,
   onFocusDesktop,
+  onViewOnlyChange,
 }: {
   onLogout: () => void;
   // The throughput read came back 401: the login expired. See ThroughputPanel.
@@ -962,11 +988,15 @@ export default function FloatingMenu({
   // listeners live — they are scoped to the focused surface rather than the window,
   // so a control that keeps focus keeps the keys too. See useRemoteDesktop.
   onFocusDesktop: () => void;
+  // Whether this menu currently has something over the desktop, which turns the
+  // desktop view-only for as long as it does. The input path is the other side of
+  // the page, so this is reported rather than read. See useRemoteDesktop.
+  onViewOnlyChange: (viewOnly: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   // The one modal card, and which face it shows: Info, or the "Throughput" view its
   // button switches it to.
-  const [modal, setModal] = useState<"info" | "throughput" | null>(null);
+  const [modal, setModal] = useState<Modal | null>(null);
   const { panel, setPanel, closePanel, togglePanel } = usePanel();
   // True between pressing Clipboard and the remote's text arriving. The panel
   // stays closed for that moment so it never opens on stale text that visibly
@@ -1173,6 +1203,19 @@ export default function FloatingMenu({
     setOpen((prev) => !prev);
   }, []);
 
+  // A soft key is input, and the drawer standing over a view-only desktop says
+  // input is not happening — so pressing one takes the drawer down with it rather
+  // than typing on a remote the label promised was untouched. The panel itself
+  // stays: it is closed by its own Close, and it is the half of this the user just
+  // said they meant.
+  const onSoftKey = useCallback(
+    (codes: string[]) => {
+      setOpen(false);
+      sendKeyCombo(codes);
+    },
+    [sendKeyCombo],
+  );
+
   // Open the on-screen keyboard and collapse the drawer so the panel has the
   // screen to itself; toggling the button again closes the panel.
   const onSoftKeyboard = useCallback(() => {
@@ -1259,6 +1302,8 @@ export default function FloatingMenu({
           maxHeight: `${maxHeight}px`,
         };
   }, [resolvedPosition, viewport, floor]);
+
+  useViewOnly(open, hidden, modal, onViewOnlyChange);
 
   return (
     <>
@@ -1488,7 +1533,7 @@ export default function FloatingMenu({
         panel={panel}
         onClose={closePanel}
         onDockedHeightChange={onDockedHeight}
-        sendKeyCombo={sendKeyCombo}
+        sendKeyCombo={onSoftKey}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}
         displays={displays}

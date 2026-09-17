@@ -852,6 +852,35 @@ body {
   flex-basis: 100%;
 }
 
+/* The desktop while the menu is over it: dimmed, inert and labelled. Below the
+   ☰ button and its drawer (z-index 1000) and below every panel and card, so
+   everything the menu put on screen still reads at full contrast over it, and
+   above the framebuffer it covers. It takes the pointer instead of letting it
+   through: the input overlay beneath hides the browser's own cursor for engines
+   that composite their own into the pixels, and while the menu is up that cursor
+   is the one the user needs back. See RemoteDesktop.tsx. */
+.view-only {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(1, 4, 9, 0.62);
+  cursor: default;
+  z-index: 900;
+}
+
+.view-only-label {
+  padding: 0.5rem 0.9rem;
+  color: #e6edf3;
+  font-size: 0.95rem;
+  text-align: center;
+  background: rgba(22, 27, 34, 0.9);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(1, 4, 9, 0.5);
+}
+
 /* Gesture cheat-sheet, opened from the toolbar's Gestures button. */
 .help-overlay {
   position: fixed;
