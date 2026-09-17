@@ -101,8 +101,8 @@ clipboard never answers. `channel::SHOW_PROTOCOL` records both failures.
 
 A channel belongs to the connection, not to the share, and nothing on one can be
 asked for again — there is no repaint for a clipboard. So nothing on a channel is
-dropped in the two windows where the share is busy with itself, the capability
-exchange and the wait for a Demand Active that precedes it. `connect::activate`
+dropped while the share is busy with itself in the capability exchange.
+`connect::activate`
 hands back what arrived on a channel and the session acts on it once the share is
 live. A server opens the clipboard as soon as the channel is up, which can
 be mid-finalization, and a Monitor Ready read past there is a session whose

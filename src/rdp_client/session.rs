@@ -466,11 +466,8 @@ const COMMANDS_PER_TURN: usize = input::MAX_EVENTS;
 
 /// What the server said about the share this client is looking at.
 ///
-/// All of it is replaced wholesale when the server rebuilds the desktop, which is
-/// why it is one struct: after a Deactivation-Reactivation Sequence the share
-/// identifier, the size and the limits are all the new share's. The size alone
-/// also moves with a graphics pipeline reset, which resizes the output without
-/// rebuilding the share.
+/// Fixed for the session but for the size, which moves with a graphics pipeline
+/// reset.
 struct Share {
     /// Names the share, and every data PDU either side sends carries it.
     id: u32,
@@ -557,8 +554,7 @@ struct Active<'a> {
     cursors: pointer::Cache,
 
     /// The chunks of a virtual channel PDU, and the dynamic channel PDUs inside
-    /// them. Both outlive a reactivation: the channel is the connection's, not the
-    /// share's.
+    /// them.
     chunks: channel::Reassembly,
     incoming: dvc::Incoming,
     /// The clipboard channel's own chunks. One reassembler per channel: the pieces
@@ -572,7 +568,7 @@ struct Active<'a> {
     /// The dynamic channels this client takes, by the numbers the server gave them.
     dynamics: Dynamics,
     /// The graphics pipeline's surfaces and decompressor, for a session that offered
-    /// it. Outlives a reactivation with the channel it belongs to.
+    /// it.
     graphics: Option<Graphics>,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
@@ -586,10 +582,10 @@ struct Active<'a> {
     /// The most recent formats offered before that happened — the most recent only,
     /// for [`Self::pending_resize`]'s reason: each advertisement replaces the last.
     pending_formats: Option<Vec<u32>>,
-    /// PDUs that arrived on a static virtual channel while the share was not live —
-    /// the capability exchange, where a server opens the clipboard, and the wait for
-    /// a Demand Active before it. Acted on in order once it is, because nothing on a
-    /// channel can be asked for again — see [`connect::activate`].
+    /// PDUs that arrived on a static virtual channel during the capability exchange,
+    /// where a server opens the clipboard. Acted on in order once the share is live,
+    /// because nothing on a channel can be asked for again — see
+    /// [`connect::activate`].
     deferred: Vec<(u16, Vec<u8>)>,
 
     framebuffer: &'a Framebuffer,
@@ -827,7 +823,7 @@ impl<'a> Active<'a> {
         // Updates that arrived while the share was being finalized were read past
         // there — the server may start painting once it has the Font List, which is
         // before this client has the Font Map that ends the sequence — so the desktop
-        // is asked for again here, the way it is after a reactivation.
+        // is asked for again here.
         self.refresh().await?;
         // What arrived on a channel in the same window was kept instead, because a
         // channel's PDUs cannot be asked for again.
@@ -916,10 +912,8 @@ impl<'a> Active<'a> {
 
     /// One PDU on a static virtual channel, by the number the server gave it.
     ///
-    /// The same routing wherever a channel's PDU is read from — the main loop, the
-    /// capability exchange it was kept from, the reactivation that would otherwise
-    /// have dropped it — so that a channel stays open across everything the share
-    /// does.
+    /// The same routing wherever a channel's PDU is read from — the main loop, or the
+    /// capability exchange it was kept from.
     async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
         if self.dynamic.is_some_and(|dynamic| dynamic.number == channel) {
             return self.on_dynamic(payload).await;
@@ -966,20 +960,12 @@ impl<'a> Active<'a> {
     /// The slow path on the I/O channel: everything that is not a picture.
     async fn on_share(&mut self, payload: &[u8]) -> Result<Option<Result<()>>> {
         match share::decode(payload)? {
-            Pdu::DeactivateAll => {
-                let stopped = self.reactivate().await?;
-                if stopped {
-                    // Asked to stop mid-sequence: leave as politely as the loop
-                    // itself does, rather than dropping the connection.
-                    self.disconnect().await;
-                    return Ok(Some(Ok(())));
-                }
-                Ok(None)
-            }
-            // A share this client did not ask to be rebuilt: the server sends the
-            // Deactivate All first, and `reactivate` reads the Demand Active.
+            // A resize is a graphics reset and nothing this client asks for rebuilds
+            // the share, so a host that tears it down has ended what this session can
+            // carry.
+            Pdu::DeactivateAll => bail!("the host deactivated the share mid-session"),
             Pdu::DemandActive { .. } => {
-                bail!("the host demanded a share without deactivating the last one")
+                bail!("the host demanded a share this session already has")
             }
             Pdu::Data(data) if data.kind == share::SET_ERROR_INFO => {
                 match desktop::error_info(data.body) {
@@ -1395,18 +1381,6 @@ impl<'a> Active<'a> {
         Ok(())
     }
 
-    /// The desktop is now `width` × `height`: the framebuffer starts again, blank,
-    /// and the caller is told.
-    ///
-    /// A size this client cannot afford to hold ends the session instead: the
-    /// framebuffer is one allocation, sized by the server.
-    async fn redefine_desktop(&mut self, width: u32, height: u32) -> Result<()> {
-        affordable(width, height)?;
-        self.framebuffer.resize(width, height);
-        self.announce_desktop(width, height).await;
-        Ok(())
-    }
-
     /// The framebuffer has been resized and cleared; tell the caller.
     async fn announce_desktop(&mut self, width: u32, height: u32) {
         // Rectangles of the desktop that just went away name pixels that no longer
@@ -1431,64 +1405,6 @@ impl<'a> Active<'a> {
         debug!("rdp: sending a {width}x{height} monitor layout at {scale}%");
         let layout = display::monitor_layout(width, height, scale);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
-    }
-
-    /// The Deactivation-Reactivation Sequence: the server tore the share down and
-    /// is building it again. Never this client's doing — a resize is a graphics
-    /// reset — but a host may run one of its own accord.
-    ///
-    /// `true` means the session was asked to stop part-way through. A server owes
-    /// this sequence a reply it can take as long as it likes over — and a server
-    /// that never sends one leaves the reads below waiting forever — so every one of
-    /// them, the capability exchange included, gives way to a shutdown as the main
-    /// loop's does, rather than holding a connection nobody is watching until a write
-    /// finally times out.
-    async fn reactivate(&mut self) -> Result<bool> {
-        debug!("rdp: the server deactivated the desktop; reactivating");
-        let demand = loop {
-            let Self { stop, frames, frame, .. } = self;
-            let read = tokio::select! {
-                biased;
-                _ = stop.wait_for(|&stop| stop) => return Ok(true),
-                read = frames.next(frame) => read,
-            };
-            read?;
-            // Updates for a desktop that is about to be replaced: not what this is
-            // waiting for, and what is dropped with them is asked for again below.
-            if fastpath::is_output(self.frame[0]) {
-                continue;
-            }
-            let Self { frame, io_channel, deferred, .. } = self;
-            if let Some(demand) = reactivating(frame, *io_channel, deferred)? {
-                break demand;
-            }
-        };
-        info!("rdp: reactivated, desktop {}x{}", demand.width, demand.height);
-
-        let Self { frames, writer, frame, user, io_channel, stop, .. } = self;
-        // The same wait as above, for the same reason: the capability exchange ends
-        // with a Font Map the server owes and may never send, and a session nobody is
-        // watching must not be held open by it.
-        let deferred = tokio::select! {
-            biased;
-            _ = stop.wait_for(|&stop| stop) => return Ok(true),
-            activated = connect::activate(frames, writer, frame, *user, *io_channel, &demand) => {
-                activated?
-            }
-        };
-        self.deferred.extend(deferred);
-
-        self.share = Share::from(&demand);
-        self.fragments = Fragments::new(demand.multifragment);
-        self.redefine_desktop(u32::from(demand.width), u32::from(demand.height)).await?;
-        // The desktop is blank and the updates that would have filled it were read
-        // past above, so the repaint is asked for here rather than waited for.
-        self.refresh().await?;
-        // And what a channel carried while all that happened, in the order it came.
-        for (channel, payload) in std::mem::take(&mut self.deferred) {
-            self.on_channel(channel, &payload).await?;
-        }
-        Ok(false)
     }
 
     /// `first`, then whatever else is already queued behind it, with consecutive
@@ -1773,30 +1689,6 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
-}
-
-/// One frame read while the server is rebuilding the desktop. `Some` is the Demand
-/// Active that ends the wait.
-///
-/// A channel is not the share's: what arrives on one while this is waiting is kept
-/// for when the share is live, never dropped. Only the share's own PDUs are read
-/// past — the updates for a desktop that is going away, and the acks for one.
-fn reactivating(
-    frame: &[u8],
-    io_channel: u16,
-    deferred: &mut Vec<(u16, Vec<u8>)>,
-) -> Result<Option<DemandActive>> {
-    let mcs::Indication::Data(data) = mcs::send_data_indication(frame)? else {
-        bail!("the host left the conference while rebuilding the desktop");
-    };
-    if data.channel != io_channel {
-        deferred.push((data.channel, data.payload.to_vec()));
-        return Ok(None);
-    }
-    match share::decode(data.payload)? {
-        Pdu::DemandActive { source, body } => Ok(Some(DemandActive::decode(source, body)?)),
-        _ => Ok(None),
-    }
 }
 
 #[cfg(test)]

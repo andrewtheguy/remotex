@@ -230,7 +230,6 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     license::accept(payload)?;
 
     // 9. The capability exchange, and 10. the four PDUs that make the share live.
-    //     Both happen again, unchanged, every time the server rebuilds the desktop.
     let payload = receive(&mut frames, &mut frame, io_channel).await?;
     let Pdu::DemandActive { source, body } = share::decode(payload)? else {
         bail!("the host did not demand a share once licensing was done");
@@ -248,10 +247,6 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
 
 /// The capability exchange and the handshake after it: everything between a Demand
 /// Active and a live share.
-///
-/// Run once while connecting, and again every time the server tears the desktop down
-/// and builds it back — the Deactivation-Reactivation Sequence repeats this whole
-/// exchange, which is why it is one function rather than part of the sequence above.
 ///
 /// Fast-path updates that arrive part-way through are read past: the server may start
 /// painting a desktop before it has finished agreeing on one, and what is dropped

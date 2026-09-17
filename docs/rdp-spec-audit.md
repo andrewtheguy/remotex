@@ -173,8 +173,8 @@ not mentioned. Each line was checked field by field against the spec text.
 - **Finalization and share layer:** Synchronize addressed to the Demand Active's
   `pduSource` (3.2.5.3.14), Control Cooperate then Request Control, Font List;
   server Synchronize, Cooperate, Granted, Font Map; share control and data headers
-  including `uncompressedLength`; compressed bodies refused; Deactivate All to
-  reactivation with no input in the window; Set Error Info fatal; Refresh Rect and
+  including `uncompressedLength`; compressed bodies refused; a mid-session Deactivate All
+  fatal, since nothing this client asks for rebuilds the share; Set Error Info fatal; Refresh Rect and
   Suppress Output sent only when advertised.
 - **Fast-path input and output:** header, both length forms, event header packing,
   scancode flags, every mouse flag with the 9-bit rotation clamped, extended
