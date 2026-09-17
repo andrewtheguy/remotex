@@ -61,8 +61,11 @@
 # meter's resolution and the minute is only how often it reaches the disk;
 # neither is configurable. Each target's socket keeps its newest max_records
 # records, so the default is a week of minutes for a socket busy all week. Best
-# effort: the minute being counted when the gateway stops is lost. Without a
-# [meter] table, nothing is recorded.
+# effort: the minute being counted when the gateway stops is lost.
+#
+# enabled is the switch and it is off by default: without a [meter] table, and
+# with one that does not say enabled = true, nothing is recorded. The other keys
+# are checked either way, so a table can keep its settings while it is off.
 #
 # The database is meter.sqlite3 in the gateway's state directory unless database
 # names another file; a relative path is taken from that directory too. The state
@@ -73,6 +76,7 @@
 # beside the database.
 #
 #[meter]
+#enabled = false
 #database = "meter.sqlite3"
 #max_records = 10080
 

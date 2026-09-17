@@ -207,8 +207,9 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   secrets; everything it talks to is behind the cookie. An embedded gateway
 ///   is the same binary and serves the same SPA.
 ///
-/// `throughput` is where the browser sockets count their bytes and, when `[meter]` is set,
-/// the database [`crate::throughput::start`] records them in and `/api/throughput` reads.
+/// `throughput` is where the browser sockets count their bytes and, when `[meter].enabled`
+/// is set, the database [`crate::throughput::start`] records them in and
+/// `/api/throughput` reads.
 pub fn router(config: AppConfig, throughput: Throughput) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions, throughput)
@@ -688,7 +689,7 @@ struct ThroughputResponse {
 }
 
 /// The recorded throughput of the browser sockets, read when the page asks for it.
-/// 404 on a gateway with no `[meter]`: there is no database to read.
+/// 404 on a gateway with no enabled `[meter]`: there is no database to read.
 async fn throughput_handler(
     State(state): State<AppState>,
     Query(query): Query<ThroughputQuery>,
@@ -726,7 +727,7 @@ async fn throughput_handler(
 
 /// The rate right now: what the last one-second sample found moving on each target's
 /// socket. Polled by the "Throughput" view while it is open. 404 on a gateway with no
-/// `[meter]`: nothing samples the counters there.
+/// enabled `[meter]`: nothing samples the counters there.
 async fn throughput_live_handler(
     State(state): State<AppState>,
 ) -> ApiResult<Json<throughput::Live>> {

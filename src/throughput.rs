@@ -503,7 +503,7 @@ pub struct LiveRate {
 }
 
 /// A gateway's throughput: the counters the sockets add to, and the database they are
-/// recorded in when `[meter]` is set.
+/// recorded in when `[meter].enabled` is set.
 #[derive(Clone, Debug, Default)]
 pub struct Throughput {
     pub meters: Arc<ThroughputMeters>,
@@ -820,7 +820,8 @@ pub(crate) fn unix_now() -> u64 {
 }
 
 /// Meters for `targets` (the `[[targets]]` names, in order), and with `config` the
-/// database they are recorded in; with no `[meter]`, counters nobody samples or records.
+/// database they are recorded in; without an enabled `[meter]`, counters nobody samples
+/// or records.
 ///
 /// The database is opened and checked before this returns, so a path the gateway cannot
 /// use fails the start instead of every write after it. After that nothing fails: a write

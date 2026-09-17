@@ -1620,7 +1620,11 @@ with the state around it.
 
 `[meter]` is top-level for the same reason and records the throughput of the
 browser's four WebSockets in an SQLite database, one row per target, socket and
-timeframe, so targets can be compared, and measures the rate they move at. The
+timeframe, so targets can be compared, and measures the rate they move at.
+`enabled` is what turns it on and it defaults to false, so a gateway records
+nothing until the config says so and a table can hold its settings while it is
+off; the other keys are checked as written either way, so `check-config` refuses
+an unusable database before it is ever switched on. The
 database is `meter.sqlite3` in the
 gateway's state directory unless `database` names another, and a relative
 `database` is taken from there as well: the installation's state directory beside

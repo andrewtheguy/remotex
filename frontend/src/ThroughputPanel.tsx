@@ -70,7 +70,7 @@ import {
 // The target and socket filters narrow the tiles and the graphs alike. Every rate is
 // in bits per second; the bytes behind them stay in the model and the API.
 
-/// Whether to offer the view at all: only a gateway with `[meter]` records any.
+/// Whether to offer the view at all: only a gateway with `[meter].enabled` records any.
 export function useThroughputAvailable(): boolean {
   const [available, setAvailable] = useState(false);
   useEffect(() => {
