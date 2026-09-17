@@ -110,7 +110,9 @@ impl Counter {
 }
 
 /// A sampled second that moved something, as the page reads it:
-/// `[at, sentPerSec, receivedPerSec]`, `at` being seconds from its timeframe's start.
+/// `[at, sentPerSec, receivedPerSec]`, `at` naming the second by the whole second it
+/// begins, counted from the timeframe's start — so a minute holds 0 through 59 and
+/// never a sixtieth, which is the next timeframe's first.
 /// A second that moved nothing is not one of these: it is simply missing, and reads as
 /// zero, which is what keeps a timeframe of a busy socket around three hundred bytes
 /// and one of a quiet socket a handful.
@@ -134,9 +136,11 @@ struct Tally {
 }
 
 impl Tally {
-    /// Add a sample of `sent` and `received` bytes moved over `secs`, ending `at`
-    /// seconds into the timeframe. A sample that spans more than a second is that
-    /// second's; the ones it skipped moved nothing as far as anything here can tell.
+    /// Add a sample of `sent` and `received` bytes moved over `secs`, taken `at` seconds
+    /// into the timeframe. The sample covers the `secs` seconds behind it, and each of
+    /// them is written at the rate they averaged: a late sample spreads over the seconds
+    /// it waited instead of standing as one busy second among zeroes the graph would
+    /// draw the bytes away in.
     fn add(&mut self, sent: u64, received: u64, secs: u64, at: u32) {
         self.sent += sent;
         self.received += received;
@@ -146,8 +150,14 @@ impl Tally {
         self.peak_received = self.peak_received.max(self.now_received);
         // A trickle that rounds to nothing a second is no second of the graph's: it is
         // in the timeframe's bytes, and a zero here would only cost a row space.
-        if self.now_sent != 0 || self.now_received != 0 {
-            self.seconds.push(Second(at, self.now_sent, self.now_received));
+        if self.now_sent == 0 && self.now_received == 0 {
+            return;
+        }
+        // The seconds this sample covers, each named by the second it begins: the one
+        // ending at `at` is `at - 1`, and the sample before this one took the rest.
+        let spanned = u32::try_from(secs.max(1)).unwrap_or(u32::MAX);
+        for index in at.saturating_sub(spanned)..=at.saturating_sub(1) {
+            self.seconds.push(Second(index, self.now_sent, self.now_received));
         }
     }
 
@@ -894,7 +904,7 @@ mod tests {
             received_bytes,
             peak_sent_per_sec: sent_bytes,
             peak_received_per_sec: received_bytes,
-            seconds: vec![Second(1, sent_bytes, received_bytes)],
+            seconds: vec![Second(0, sent_bytes, received_bytes)],
         }
     }
 
@@ -937,7 +947,7 @@ mod tests {
             Record {
                 sent_bytes: 2107,
                 peak_sent_per_sec: 1500,
-                seconds: vec![Second(1, 1500, 40), Second(2, 600, 0)],
+                seconds: vec![Second(0, 1500, 40), Second(1, 600, 0)],
                 ..record(Some("win"), Socket::Session, 100, 2107, 40)
             },
             record(None, Socket::Audio, 100, 5, 0),
@@ -1040,6 +1050,22 @@ mod tests {
         meters.counter(None, Socket::Session).received(30);
         meters.sample(105);
         assert_eq!(meters.live().rates, [live(None, Socket::Session, 0, 30)]);
+        // The first sample is the five seconds behind it, each at the rate they averaged,
+        // so the seconds hold every byte the timeframe counted rather than a fifth of
+        // them; the second sample is the same second again, its own bytes beside them.
+        let closed = meters.close_timeframe(160);
+        assert_eq!(closed[0].sent_bytes, 1000);
+        assert_eq!(
+            closed[0].seconds,
+            [
+                Second(0, 200, 0),
+                Second(1, 200, 0),
+                Second(2, 200, 0),
+                Second(3, 200, 0),
+                Second(4, 200, 0),
+                Second(4, 0, 30),
+            ]
+        );
         assert_eq!(per_second(7, 58), 0);
         assert_eq!(per_second(29, 58), 1, "rounded, not truncated");
     }

@@ -22,7 +22,6 @@ import {
   type RateSeries,
   rateScale,
   recordedSeries,
-  reportHasSeconds,
   spanLabel,
   THROUGHPUT_PRESETS,
   THROUGHPUT_SOCKET_LABEL,
@@ -115,7 +114,7 @@ const RECEIVED_INK: ChartInk = {
 /// has nothing new to say until the next one closes, while one drawn a point per second
 /// moves on with every read.
 function readAgainSecs(report: ThroughputReport): number {
-  return reportHasSeconds(report)
+  return report.hasSeconds
     ? RECORDED_PERIOD_SECS
     : Math.max(RECORDED_PERIOD_SECS, report.intervalSecs);
 }

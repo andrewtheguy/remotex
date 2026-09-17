@@ -1619,11 +1619,15 @@ on the picker count under no target. Once a second the counters are taken as a
 sample: what moved in that second, over the seconds since the last sample, is the
 rate right now, and it is added to the open timeframe, which also keeps the
 busiest second per direction it has seen and the second itself where it moved
-anything. Every minute the open timeframe is closed and each target's socket that
+anything. A sample the runtime delayed is that rate in each of the seconds behind
+it rather than in one of them: what moved over five seconds is drawn as five
+seconds at a fifth of it, not as one busy second beside four the graph would read
+as idle. Every minute the open timeframe is closed and each target's socket that
 moved data gains a row holding its bytes, its peaks and its seconds. The second is
 the meter's resolution and the minute is only how often it reaches the disk;
 neither is a configuration key. The seconds travel as one blob of unsigned LEB128
-triples — offset into the timeframe, sent rate, received rate — and a second that
+triples — the second of the timeframe it is, counted from the second the timeframe
+begins, then the sent rate and the received rate — and a second that
 moved nothing is not among them, so a socket busy through a whole minute costs
 some four hundred bytes and one that moved in three of its seconds costs a dozen.
 A trickle that rounds to nothing a second is in the row's bytes but is no second
@@ -1663,15 +1667,16 @@ second not read, its right edge following the gateway's clock rather than the la
 sample so a failing poll leaves gaps. A longer one, and every range between two
 times however short — the seconds kept are the view's own, not any clock's — is
 drawn from the recorded rows. A read whose range is an hour or less is answered
-with the seconds that moved in it and drawn a point per second, or per as many
-seconds as keep the graph within 600 points, each the average over its own
+with the seconds that moved in it, says so in the read itself rather than leaving
+the page to guess from rows a quiet range has none of, and is drawn a point per
+second, or per as many seconds as keep the graph within 600 points, each the average over its own
 length with the quiet seconds counted as the zeroes they are; a read that is
 answered without them is drawn
 a point per timeframe instead: the average over one, or over as many as keep the
 graph within 600 points, a row's bytes shared between the points it overlaps and a
 timeframe with no row drawn as zero. The rows are read when the range is chosen and
-again every ten seconds while they carry the seconds, or as each timeframe closes
-while they do not, since a graph of timeframe averages has nothing new to say until
+again every ten seconds while the read carries the seconds, or as each timeframe
+closes while it does not, since a graph of timeframe averages has nothing new to say until
 one of them ends. The peak beside the rate now, which the graph's scale and its
 dashed line both sit at, is the busiest second any one row in the range carries.
 A range between two times is drawn between them, and stops at the read where it

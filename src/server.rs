@@ -678,6 +678,9 @@ struct ThroughputResponse {
     /// seconds is drawn a point per.
     interval_secs: u64,
     max_records: usize,
+    /// Whether the rows carry the seconds that moved. The range decides it, so the page
+    /// knows which kind of answer it holds without keeping the threshold of its own.
+    has_seconds: bool,
     /// The written timeframes, oldest first.
     records: Vec<throughput::Record>,
     /// The timeframe still being counted, as it stands at `now`.
@@ -715,6 +718,7 @@ async fn throughput_handler(
         now,
         interval_secs: throughput::TIMEFRAME.as_secs(),
         max_records,
+        has_seconds: seconds,
         records,
         open,
     }))
@@ -1506,12 +1510,13 @@ mod tests {
                 "now": read_at,
                 "intervalSecs": 60,
                 "maxRecords": 10,
+                "hasSeconds": true,
                 "records": [
                     {"target": "mac", "socket": "session", "start": now - 100, "end": now - 40, "sentBytes": 200, "receivedBytes": 7, "peakSentPerSec": 100, "peakReceivedPerSec": 7, "seconds": [[0, 100, 3], [30, 100, 4]]},
-                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0, "seconds": [[1, 30, 0]]}
+                    {"target": null, "socket": "session", "start": now - 20, "end": now - 10, "sentBytes": 30, "receivedBytes": 0, "peakSentPerSec": 30, "peakReceivedPerSec": 0, "seconds": [[0, 30, 0]]}
                 ],
                 "open": [
-                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4, "seconds": [[1, 0, 4]]}
+                    {"target": null, "socket": "session", "start": now - 10, "end": null, "sentBytes": 0, "receivedBytes": 6, "peakSentPerSec": 0, "peakReceivedPerSec": 4, "seconds": [[0, 0, 4]]}
                 ],
             })
         );
@@ -1522,6 +1527,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["hasSeconds"], serde_json::json!(false), "the range says so itself");
         for record in json["records"].as_array().unwrap().iter().chain(json["open"].as_array().unwrap()) {
             assert_eq!(record["seconds"], serde_json::json!([]), "{record}");
         }

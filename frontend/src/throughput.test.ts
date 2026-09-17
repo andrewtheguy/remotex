@@ -190,10 +190,12 @@ const report = (
   now: number,
   records: ThroughputRecord[],
   open: ThroughputRecord[] = [],
+  hasSeconds = [...records, ...open].some((row) => row.seconds.length > 0),
 ): ThroughputReport => ({
   now,
   intervalSecs: 60,
   maxRecords: 1440,
+  hasSeconds,
   records,
   open,
 });
@@ -299,6 +301,17 @@ test("the seconds a row names are drawn a point each, the quiet ones as zero", (
   );
   assert.equal(averaged.stepSecs, 60);
   assert.deepEqual(averaged.sent.points, [0, 100]);
+
+  // A read that carries them and found nothing moving is still drawn a point a second:
+  // an idle range is not a range answered without the seconds, and the read says which.
+  const quiet = recordedSeries(
+    report(240, [], [], true),
+    back(120),
+    () => true,
+  );
+  assert.equal(quiet.stepSecs, 1);
+  assert.equal(quiet.sent.points.length, 120);
+  assert.equal(quiet.sent.busiest, 0);
 });
 
 test("a recorded range past the most points shares them between timeframes", () => {

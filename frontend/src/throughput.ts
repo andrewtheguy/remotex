@@ -76,6 +76,12 @@ export interface ThroughputReport {
   now: number;
   intervalSecs: number;
   maxRecords: number;
+  /**
+   * Whether the rows carry the seconds that moved. The gateway answers a short enough
+   * range with them and a longer one without, and says which here: a range where nothing
+   * moved carries no seconds either, and that is not the same answer at all.
+   */
+  hasSeconds: boolean;
   /** The written timeframes, oldest first. */
   records: ThroughputRecord[];
   /** The timeframe still being counted, as it stood at `now`. */
@@ -472,17 +478,6 @@ export function liveSeries(
   };
 }
 
-/**
- * Whether a report carries the seconds that moved. The gateway answers a short enough
- * range with them and a longer one without, so this is how the page knows which it has
- * without keeping the gateway's threshold of its own.
- */
-export function reportHasSeconds(report: ThroughputReport): boolean {
-  return [...report.records, ...report.open].some(
-    (row) => row.seconds.length > 0,
-  );
-}
-
 /** The most points a recorded range is drawn with; past it, timeframes share one. */
 export const MAX_GRAPH_POINTS = 600;
 
@@ -584,10 +579,10 @@ function spanOf(
  * it ends or at the gateway's clock at the read — from the rows `keep` admits with the
  * open timeframe among them.
  *
- * A point is the average over its step. Where the rows carry the seconds that moved, a
+ * A point is the average over its step. Where the read carries the seconds that moved, a
  * step is a second, or as many seconds as it takes to stay within `MAX_GRAPH_POINTS`,
  * and the rates of the seconds inside it are averaged over its whole length, the ones
- * that moved nothing counted as the zeroes they are. Where they do not — a range too
+ * that moved nothing counted as the zeroes they are. Where it does not — a range too
  * long for the gateway to send them — a step is a timeframe, or as many as it takes,
  * and a row's bytes are shared between the steps it overlaps. The range begins at its
  * cutoff exactly: the part of a row before it is left out, and the oldest step, which
@@ -623,7 +618,7 @@ export function recordedSeries(
   const span = spanOf(bounds, end, interval, rows);
   const cutoff = end - span;
   const kept = rows.filter((row) => keep(row) && row.end > cutoff);
-  const detailed = kept.some((row) => row.seconds.length > 0);
+  const detailed = report.hasSeconds;
   const stepSecs = detailed
     ? Math.max(1, Math.ceil(span / MAX_GRAPH_POINTS))
     : interval * Math.ceil(Math.ceil(span / interval) / MAX_GRAPH_POINTS);
