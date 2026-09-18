@@ -198,9 +198,9 @@ See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
 on a sway output at scale 2 and why a second client's resize can come back
 prohibited. The one exception is a server that answers the density request the
 gateway puts in every generic `SetEncodings`, which today is wlshare: it reports
-its output's scale, the gateway labels the framebuffer with it and asks for the
-window in points × scale, and the browser's density is declared back to the
-server. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
+its output's scale, the gateway labels the framebuffer with it, and the
+browser's density is declared back to the server together with the window in
+points × that density, so the output changes mode and scale at once. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
 `audio = true` works on a plain VNC target too, through wlshare's audio
 extension: the gateway lists its pseudo-encoding, wlshare announces so and then

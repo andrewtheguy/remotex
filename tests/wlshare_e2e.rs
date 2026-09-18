@@ -254,16 +254,17 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     let mut view = View::new();
 
-    // A 2x browser opens the session. wlshare reports HEADLESS-1 at scale 1, the
-    // gateway declares 2x, and the output is set to it: the same pixels are
-    // relabelled at 2x and repainted.
+    // A 2x browser opens the session. wlshare reports HEADLESS-1 at scale 1, and
+    // the gateway declares 2x with the desktop's 1024x768 points in pixels at
+    // 2x: the output's mode and scale change in one configuration, and the
+    // logical size stays what it was.
     ws.send(Message::text(format!(
         r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}}}}"#
     )))
     .await
     .unwrap();
-    let doubled = Size { w: 1024, h: 768, scale: 2.0 };
-    view.until(&mut ws, "HEADLESS-1 relabelled at 2x", |v| {
+    let doubled = Size { w: 2048, h: 1536, scale: 2.0 };
+    view.until(&mut ws, "HEADLESS-1 at 2x, its logical size kept", |v| {
         v.size == Some(doubled) && v.displays.is_some()
     })
     .await;
@@ -276,7 +277,7 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     let first = view.output("HEADLESS-1");
     let second = view.output("HEADLESS-2");
     assert_eq!(view.active(), Some(first), "the configured output is shared first");
-    assert_eq!(sway_output(&container, "HEADLESS-1"), (1024, 768, 2.0));
+    assert_eq!(sway_output(&container, "HEADLESS-1"), (2048, 1536, 2.0));
 
     // The window's points are asked for in the output's pixels.
     ws.send(Message::text(r#"{"type":"viewport","w":800,"h":600}"#)).await.unwrap();
