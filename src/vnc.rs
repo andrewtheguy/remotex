@@ -404,11 +404,12 @@ struct DesktopState {
     /// sets its output's scale to what is declared, and a client that could not
     /// then re-ask the pixels would be left with half a desktop.
     resize: bool,
-    /// A `ClientDensity` the reported scale did not match is out, and the
-    /// server has not answered it yet. The server answers every declaration
-    /// with a report, after setting the output's scale or in its place; resize
-    /// requests are held until that report, and it re-asks the window in
-    /// whatever pixels the server settled on — one redraw, not two.
+    /// A `ClientDensity` is out, and the server has not answered it yet. The
+    /// declaration carries the window in pixels at the declared density, and the
+    /// server sets the output's mode and scale to it in one configuration — one
+    /// redraw, not two — or refuses; either way it answers with a report. Resize
+    /// requests are held until that report, which re-asks the window only when
+    /// the server settled on pixels other than the ones declared.
     following: bool,
     /// The density last declared to the server, followed or not; `None` before
     /// the first declaration, and from a switch of output until the next — the
@@ -498,7 +499,12 @@ impl DesktopState {
     /// points × the reported scale, so the logical desktop is the window, and
     /// under the video ceiling when the target streams.
     fn generic_pixels(&self, points: (u16, u16)) -> (u16, u16) {
-        let scale = self.generic_scale();
+        self.pixels_at(points, self.generic_scale())
+    }
+
+    /// The pixels a window of `points` is at `scale`, under the video ceiling
+    /// when the target streams.
+    fn pixels_at(&self, points: (u16, u16), scale: f32) -> (u16, u16) {
         let px = |v: u16| (f32::from(v) * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16;
         let pixels = (px(points.0), px(points.1));
         if self.video { held_under_ceiling(pixels) } else { pixels }
@@ -559,16 +565,30 @@ impl DesktopState {
 
     /// The `ClientDensity` declaring `declared` to a reporting server, or `None`
     /// where the window does not drive the desktop size — see
-    /// [`Self::resize`]. A declaration the reported scale does not match opens
-    /// a follow ([`Self::following`]): the server is expected to set the
-    /// output's scale and report, and until it does no resize goes out.
-    fn declare_density(&mut self, declared: f32) -> Option<[u8; 8]> {
+    /// [`Self::resize`]. It carries the window in pixels at that density — the
+    /// newest one the browser asked for, or the desktop's own points before it
+    /// has asked — so the server changes mode and scale together. Every
+    /// declaration opens a follow ([`Self::following`]): the server answers it
+    /// with a report, and until it does no resize goes out. The window it
+    /// carries is no longer held: the answer asks again only if it was not
+    /// granted.
+    fn declare_density(&mut self, declared: f32) -> Option<[u8; 10]> {
         if !self.resize {
             return None;
         }
-        self.following = (self.generic_scale() - declared).abs() > 0.005;
+        let points = self.pending.take().or(self.viewport).unwrap_or_else(|| {
+            let point = |v: u16| (f32::from(v) / self.scale).round().max(1.0) as u16;
+            (point(self.size.0), point(self.size.1))
+        });
+        self.viewport = Some(points);
+        let pixels = self.pixels_at(points, declared);
+        debug!(
+            "vnc: declaring {declared}x for {}x{} pixels, a {}x{} point window",
+            pixels.0, pixels.1, points.0, points.1
+        );
+        self.following = true;
         self.declared = Some(declared);
-        Some(client_density(declared))
+        Some(client_density(pixels, declared))
     }
 
     /// The `ClientDensity` for a `HostDisplay` report mid-session, or `None`.
@@ -577,7 +597,7 @@ impl DesktopState {
     /// is out — the report answering that one declares the newest density
     /// then, so a browser that changes twice while the server is busy ends up
     /// followed to where it is, not to where it passed through.
-    fn host_density_changed(&mut self, declared: f32) -> Option<[u8; 8]> {
+    fn host_density_changed(&mut self, declared: f32) -> Option<[u8; 10]> {
         let changed = (self.host_density - declared).abs() > 0.005;
         self.host_density = declared;
         (changed && self.density == Density::Reported && !self.following)
@@ -591,18 +611,13 @@ impl DesktopState {
     /// would tell the new one. Declared on the terms a density change is: once
     /// the server has reported, and not while a declaration is out — the report
     /// answering that one declares instead, finding [`Self::declared`] cleared.
-    fn output_switched(&mut self) -> Option<[u8; 8]> {
+    /// The declaration carries the window, so the new output, whose size is its
+    /// own and not the window's, takes it in the same configuration.
+    fn output_switched(&mut self) -> Option<[u8; 10]> {
         self.declared = None;
-        let msg = (self.density == Density::Reported && !self.following)
+        (self.density == Density::Reported && !self.following)
             .then(|| self.declare_density(self.host_density))
-            .flatten();
-        // Outstanding even at the scale already reported: wlshare answers every
-        // declaration, and that answer is what asks for the window on the new
-        // output, whose size is its own and not the window's.
-        if msg.is_some() {
-            self.following = true;
-        }
-        msg
+            .flatten()
     }
 }
 
@@ -3614,10 +3629,9 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
 /// at a new density are a new canvas. Otherwise the rect carrying the new size
 /// is about to arrive and takes the label then. The first report is also the
 /// server's announcement that it listens: it declares the browser's density
-/// back and, when the reported scale already matches, releases the held
-/// resize. When it does not match, the server is about to set the output's
-/// scale to the declaration and report again, and the resize stays held for
-/// that report — the desktop is then drawn once, in the right pixels. Any
+/// back, carrying the held window in pixels at that density, and the server
+/// sets the output's mode and scale to it in one configuration and reports
+/// again — the desktop is then drawn once, in the right pixels. Any
 /// report that changes the scale, or answers a declaration, re-asks for the
 /// window in the new pixels, so a desktop toggled to 2x on the host keeps
 /// filling the window rather than shrinking to half of it. A report answering
@@ -3697,12 +3711,13 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
     // A relabel emptied the browser's canvas, and this message is outside any
     // `FramebufferUpdate`, so no request follows it by itself. A resize request
     // repaints through its rect, and a declaration through the report that
-    // answers it, which decides here again; with neither out, the whole
-    // framebuffer is asked for now, or the parts of the desktop that never
-    // change would stay blank.
+    // answers it, which decides here again — and a report naming a size the
+    // framebuffer does not have yet announces the rect that repaints. With none
+    // of those, the whole framebuffer is asked for now, or the parts of the
+    // desktop that never change would stay blank.
     let repaint = {
         let mut d = desktop.lock().unwrap();
-        let repaint = d.repaint_owed && !resized && !d.following;
+        let repaint = d.repaint_owed && !resized && !d.following && report.size == d.size;
         if repaint {
             d.repaint_owed = false;
         }
@@ -4481,15 +4496,19 @@ impl OutputScale {
     }
 }
 
-/// The wlshare `ClientDensity` declaration: the browser's density as 16.16
-/// unsigned fixed point, after three bytes of padding. Sent once the server has
-/// reported, and again whenever the client's screen changes density.
-fn client_density(scale: f32) -> [u8; 8] {
+/// The wlshare `ClientDensity` declaration, in `OutputScale`'s layout: padding,
+/// the window's width and height in pixels at the declared density, then the
+/// browser's density as 16.16 unsigned fixed point. Sent once the server has
+/// reported, whenever the client's screen changes density, and on a switch of
+/// output.
+fn client_density(pixels: (u16, u16), scale: f32) -> [u8; 10] {
     let fixed = (f64::from(scale) * 65536.0).round().clamp(1.0, f64::from(u32::MAX)) as u32;
-    let mut msg = [0u8; 8];
+    let mut msg = [0u8; 10];
     msg[0] = MSG_WLSHARE_DENSITY;
-    // msg[1..4]: padding
-    msg[4..8].copy_from_slice(&fixed.to_be_bytes());
+    // msg[1]: padding
+    msg[2..4].copy_from_slice(&pixels.0.to_be_bytes());
+    msg[4..6].copy_from_slice(&pixels.1.to_be_bytes());
+    msg[6..10].copy_from_slice(&fixed.to_be_bytes());
     msg
 }
 
@@ -5772,6 +5791,7 @@ mod tests {
             d.wire_scale = Some(2.0);
             d.host_density = 2.0;
             d.declared = Some(2.0);
+            d.viewport = Some((1728, 883));
         }
         let (sink, _rx) = test_sink();
         let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
@@ -5791,7 +5811,7 @@ mod tests {
         read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), client_density(2.0));
+        assert_eq!(written(&wire), client_density((3456, 1766), 2.0), "the window at the browser's density");
         {
             let d = desktop.lock().unwrap();
             assert!(d.following, "the new output is asked to follow");
@@ -5806,7 +5826,7 @@ mod tests {
         read_output_list(&mut output_list_body(0, &[]).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), client_density(2.0), "no output left to declare to");
+        assert_eq!(written(&wire), client_density((3456, 1766), 2.0), "no output left to declare to");
     }
 
     /// A switch while a declaration is out waits its turn, as a density change
@@ -5822,6 +5842,7 @@ mod tests {
             d.density = Density::Reported;
             d.wire_scale = Some(1.0);
             d.host_density = 1.0;
+            d.viewport = Some((960, 540));
         }
         let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
         let outputs = [
@@ -5834,31 +5855,33 @@ mod tests {
 
         // The browser moved to a 2x screen: declared, and the server is busy.
         assert!(send_decided(&uplink, &desktop, |d| d.host_density_changed(2.0)).await.unwrap());
-        assert_eq!(written(&wire), client_density(2.0));
+        let declared = client_density((1920, 1080), 2.0).to_vec();
+        assert_eq!(written(&wire), declared);
 
         // The switch lands before the answer: nothing more goes out yet.
         read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), client_density(2.0), "one declaration in flight at a time");
+        assert_eq!(written(&wire), declared, "one declaration in flight at a time");
 
         // The answer is the new output at its own 1x: the browser's 2x goes to it.
         let body = output_scale_body((1920, 1080), 1.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), [client_density(2.0).to_vec(), client_density(2.0).to_vec()].concat());
+        assert_eq!(written(&wire), [declared.clone(), declared].concat());
         let d = desktop.lock().unwrap();
         assert!(d.following);
         assert_eq!(d.declared, Some(2.0));
     }
 
-    /// A switch to an output already at the browser's density still waits for
-    /// the declaration's answer, and that answer asks for the window on the new
-    /// output: its size is the output's own, not the window's. Measured against
-    /// wlshare on a headless sway, where nothing else would ever ask.
+    /// A switch to an output already at the browser's density still declares,
+    /// and the declaration carries the window: the new output's size is its own,
+    /// not the window's, and it takes the window's in the same configuration.
+    /// Measured against wlshare on a headless sway, where nothing else would
+    /// ever ask.
     #[tokio::test]
-    async fn a_switch_at_the_same_density_asks_for_the_window_on_the_answer() {
+    async fn a_switch_at_the_same_density_carries_the_window_to_the_new_output() {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
         let screen = Screen { id: 1, flags: 0 };
@@ -5884,19 +5907,18 @@ mod tests {
         read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), client_density(2.0));
+        let declared = client_density((1600, 1200), 2.0);
+        assert_eq!(written(&wire), declared);
         assert!(desktop.lock().unwrap().following, "the declaration is out whatever its scale");
 
-        // The new output's own size arrives, then the answer at the same 2x.
+        // The new output's own size arrives, then the answer: the window's
+        // pixels at the same 2x, so nothing more is asked.
         desktop.lock().unwrap().size = (1280, 800);
-        let body = output_scale_body((1280, 800), 2.0);
+        let body = output_scale_body((1600, 1200), 2.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1280, 800)), &sink)
             .await
             .unwrap();
-        assert_eq!(
-            written(&wire),
-            [client_density(2.0).to_vec(), set_desktop_size((1600, 1200), screen).to_vec()].concat()
-        );
+        assert_eq!(written(&wire), declared);
         assert!(!desktop.lock().unwrap().following);
     }
 
@@ -6227,10 +6249,22 @@ mod tests {
     }
 
     #[test]
-    fn client_density_is_the_type_padding_and_a_16_16_scale() {
-        assert_eq!(client_density(2.0), [0xE0, 0, 0, 0, 0x00, 0x02, 0x00, 0x00]);
-        assert_eq!(client_density(1.0), [0xE0, 0, 0, 0, 0x00, 0x01, 0x00, 0x00]);
-        assert_eq!(&client_density(1.5)[4..], &[0x00, 0x01, 0x80, 0x00]);
+    fn client_density_is_the_type_padding_the_pixels_and_a_16_16_scale() {
+        assert_eq!(
+            client_density((3456, 1766), 2.0),
+            [0xE0, 0, 0x0D, 0x80, 0x06, 0xE6, 0x00, 0x02, 0x00, 0x00]
+        );
+        assert_eq!(&client_density((1728, 883), 1.0)[6..], &[0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(&client_density((2592, 1325), 1.5)[6..], &[0x00, 0x01, 0x80, 0x00]);
+    }
+
+    /// The declaration is the report's layout, so the report's own parser reads
+    /// it back: an independent decoder for the encoder.
+    #[test]
+    fn client_density_reads_back_as_an_output_scale() {
+        let msg = client_density((2592, 1325), 1.5);
+        let body: [u8; OUTPUT_SCALE_BODY] = msg[1..].try_into().unwrap();
+        assert_eq!(OutputScale::parse(&body).unwrap(), OutputScale { size: (2592, 1325), scale: 1.5 });
     }
 
     #[test]
@@ -7001,11 +7035,11 @@ mod tests {
     }
 
     /// A generic target holds its first resize until the server has said what
-    /// scale it draws at. When that scale is the browser's, it asks for the
-    /// window in points × scale at once, labels the framebuffer with it, and
-    /// declares the browser's density back.
+    /// scale it draws at. The report labels the framebuffer, and the held window
+    /// goes out with the browser's density, in points × that density, as one
+    /// declaration; its answer, naming those pixels, asks nothing more.
     #[tokio::test]
-    async fn a_resize_waits_for_the_scale_report_and_asks_in_pixels() {
+    async fn a_resize_waits_for_the_scale_report_and_goes_out_with_the_declaration() {
         let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let screen = Screen { id: 3, flags: 0 };
@@ -7026,23 +7060,34 @@ mod tests {
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1024, 768)), &sink)
             .await
             .unwrap();
-        let expected = [client_density(2.0).to_vec(), set_desktop_size((3456, 1766), screen).to_vec()].concat();
-        assert_eq!(written(&wire), expected);
+        let declared = client_density((3456, 1766), 2.0);
+        assert_eq!(written(&wire), declared);
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
             Some(ServerMsg::Resize { w: 1024, h: 768, scale }) if scale == 2.0
         ));
-        let d = desktop.lock().unwrap();
-        assert_eq!(d.density, Density::Reported);
-        assert_eq!(d.wire_scale, Some(2.0));
-        assert_eq!(d.pending, None);
-        assert_eq!(d.viewport, Some((1728, 883)));
-        assert!(!d.following);
+        {
+            let d = desktop.lock().unwrap();
+            assert_eq!(d.density, Density::Reported);
+            assert_eq!(d.wire_scale, Some(2.0));
+            assert_eq!(d.pending, None);
+            assert_eq!(d.viewport, Some((1728, 883)));
+            assert!(d.following);
+        }
+
+        // The answer names the window's pixels: its rect is on the way.
+        let body = output_scale_body((3456, 1766), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1024, 768)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), declared);
+        assert!(forwarded(&sink, &mut rx).await.is_none());
+        assert!(!desktop.lock().unwrap().following);
     }
 
-    /// A reported scale that is not the browser's opens a follow: the density is
-    /// declared, the resize stays held — a window that changes meanwhile is held
-    /// too — and the report answering the declaration releases it in the pixels
+    /// A reported scale that is not the browser's is declared with the window in
+    /// the browser's pixels. A window that changes while the server follows is
+    /// held, and the report answering the declaration releases it in the pixels
     /// the server settled on.
     #[tokio::test]
     async fn a_declared_density_holds_the_resize_until_the_server_has_followed() {
@@ -7062,31 +7107,29 @@ mod tests {
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), client_density(2.0), "declared, resize held");
+        let declared = client_density((3456, 1766), 2.0).to_vec();
+        assert_eq!(written(&wire), declared, "the window declared at 2x");
         assert!(forwarded(&sink, &mut rx).await.is_none(), "1x is what the browser already has");
         {
             let d = desktop.lock().unwrap();
             assert!(d.following);
-            assert_eq!(d.pending, Some((1728, 883)));
+            assert_eq!(d.pending, None, "the declaration carried it");
         }
 
-        // The window changes while the server is following: still held.
+        // The window changes while the server is following: held.
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 900)), false).await.unwrap();
-        assert_eq!(written(&wire), client_density(2.0), "nothing more on the wire");
+        assert_eq!(written(&wire), declared, "nothing more on the wire");
         assert_eq!(desktop.lock().unwrap().pending, Some((1600, 900)));
 
-        // The server has set the output to 2x: the same pixels relabelled, and
-        // the newest window asked for in points × 2.
-        let body = output_scale_body((1920, 1080), 2.0);
+        // The server set the output to the declared 3456×1766 at 2x: a label
+        // for the rect on its way, and the newest window asked for in points × 2.
+        let body = output_scale_body((3456, 1766), 2.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        let expected = [client_density(2.0).to_vec(), set_desktop_size((3200, 1800), screen).to_vec()].concat();
+        let expected = [declared, set_desktop_size((3200, 1800), screen).to_vec()].concat();
         assert_eq!(written(&wire), expected);
-        assert!(matches!(
-            forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Resize { w: 1920, h: 1080, scale }) if scale == 2.0
-        ));
+        assert!(forwarded(&sink, &mut rx).await.is_none(), "the rect carries the label");
         let d = desktop.lock().unwrap();
         assert!(!d.following);
         assert_eq!(d.pending, None);
@@ -7113,14 +7156,14 @@ mod tests {
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), client_density(2.0));
+        assert_eq!(written(&wire), client_density((3456, 1766), 2.0));
 
-        // Answered with the same 1x: the follow is over, the window is asked
-        // for at 1x, and the browser is told nothing new.
+        // Answered with the output as it was: the follow is over, the window is
+        // asked for at 1x, and the browser is told nothing new.
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        let expected = [client_density(2.0).to_vec(), set_desktop_size((1728, 883), screen).to_vec()].concat();
+        let expected = [client_density((3456, 1766), 2.0).to_vec(), set_desktop_size((1728, 883), screen).to_vec()].concat();
         assert_eq!(written(&wire), expected);
         assert!(forwarded(&sink, &mut rx).await.is_none());
         let d = desktop.lock().unwrap();
@@ -7128,8 +7171,9 @@ mod tests {
         assert_eq!(d.pending, None);
     }
 
-    /// A density change mid-session is declared and followed the same way: the
-    /// answering report re-asks the window in the new pixels.
+    /// A density change mid-session is declared with the window in the new
+    /// pixels, and a server that grants it answers with those pixels: one
+    /// reconfiguration, with nothing asked again.
     #[tokio::test]
     async fn a_density_change_mid_session_is_followed_by_the_answering_report() {
         let (uplink, wire) = test_uplink();
@@ -7149,17 +7193,15 @@ mod tests {
         assert!(send_decided(&uplink, &desktop, |d| d.host_density_changed(1.0)).await.unwrap());
         assert!(desktop.lock().unwrap().following);
 
-        let body = output_scale_body((3456, 1766), 1.0);
+        let body = output_scale_body((1728, 883), 1.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((3456, 1766)), &sink)
             .await
             .unwrap();
-        let expected = [client_density(1.0).to_vec(), set_desktop_size((1728, 883), screen).to_vec()].concat();
-        assert_eq!(written(&wire), expected);
-        assert!(matches!(
-            forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Resize { w: 3456, h: 1766, scale }) if scale == UNSCALED
-        ));
-        assert!(!desktop.lock().unwrap().following);
+        assert_eq!(written(&wire), client_density((1728, 883), 1.0));
+        assert!(forwarded(&sink, &mut rx).await.is_none(), "the rect carries the label");
+        let d = desktop.lock().unwrap();
+        assert!(!d.following);
+        assert_eq!(d.wire_scale, Some(UNSCALED));
     }
 
     /// A density that changes while a declaration is unanswered waits: the
@@ -7182,47 +7224,37 @@ mod tests {
 
         // To a 2x screen: declared, and the server is now busy following.
         assert!(send_decided(&uplink, &desktop, |d| d.host_density_changed(2.0)).await.unwrap());
-        assert_eq!(written(&wire), client_density(2.0));
+        let at_2x = client_density((3456, 1766), 2.0).to_vec();
+        assert_eq!(written(&wire), at_2x);
         assert!(desktop.lock().unwrap().following);
 
         // Back to 1x before the answer: recorded, not declared.
         assert!(!send_decided(&uplink, &desktop, |d| d.host_density_changed(1.0)).await.unwrap());
-        assert_eq!(written(&wire), client_density(2.0), "nothing more while the first is out");
+        assert_eq!(written(&wire), at_2x, "nothing more while the first is out");
         assert_eq!(desktop.lock().unwrap().host_density, 1.0);
 
-        // The server followed to 2x: the same pixels relabelled, the resize still
-        // held, and the browser's current 1x declared in the answer's place.
-        let body = output_scale_body((1920, 1080), 2.0);
+        // The server followed to 2x: the browser's current 1x is declared in the
+        // answer's place, with the window at 1x.
+        let body = output_scale_body((3456, 1766), 2.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        assert_eq!(written(&wire), [client_density(2.0).to_vec(), client_density(1.0).to_vec()].concat());
-        assert!(matches!(
-            forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Resize { w: 1920, h: 1080, scale }) if scale == 2.0
-        ));
+        let at_1x = client_density((1728, 883), 1.0).to_vec();
+        assert_eq!(written(&wire), [at_2x.clone(), at_1x.clone()].concat());
+        assert!(forwarded(&sink, &mut rx).await.is_none(), "the rect carries the label");
         {
             let d = desktop.lock().unwrap();
             assert!(d.following, "the second declaration is out");
             assert_eq!(d.declared, Some(1.0));
         }
 
-        // The answer to that one: 1x again, and only now is the window asked for.
-        let body = output_scale_body((1920, 1080), 1.0);
+        // The answer to that one names the window's pixels at 1x: nothing more.
+        let body = output_scale_body((1728, 883), 1.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
             .await
             .unwrap();
-        let expected = [
-            client_density(2.0).to_vec(),
-            client_density(1.0).to_vec(),
-            set_desktop_size((1728, 883), screen).to_vec(),
-        ]
-        .concat();
-        assert_eq!(written(&wire), expected);
-        assert!(matches!(
-            forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Resize { w: 1920, h: 1080, scale }) if scale == UNSCALED
-        ));
+        assert_eq!(written(&wire), [at_2x, at_1x].concat());
+        assert!(forwarded(&sink, &mut rx).await.is_none());
         let d = desktop.lock().unwrap();
         assert!(!d.following);
         assert_eq!(d.wire_scale, Some(1.0));
@@ -7402,8 +7434,8 @@ mod tests {
         assert_eq!(written(&wire), set_desktop_size((1728, 883), screen).to_vec());
 
         // A late report is still taken, as a first one: the current pixels are
-        // relabelled, the browser's density declared, and the window re-asked
-        // in points × scale.
+        // relabelled, and the browser's density declared with the window in
+        // points × that density.
         let before = written(&wire).len();
         let body = output_scale_body((1024, 768), 2.0);
         read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1024, 768)), &sink)
@@ -7414,8 +7446,7 @@ mod tests {
             forwarded(&sink, &mut rx).await,
             Some(ServerMsg::Resize { w: 1024, h: 768, scale }) if scale == 2.0
         ));
-        let expected = [client_density(2.0).to_vec(), set_desktop_size((3456, 1766), screen).to_vec()].concat();
-        assert_eq!(written(&wire)[before..], expected[..]);
+        assert_eq!(written(&wire)[before..], client_density((3456, 1766), 2.0)[..]);
 
         let mut d = desktop.lock().unwrap();
         d.first_update();

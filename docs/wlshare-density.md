@@ -82,34 +82,38 @@ framebuffer.
 
 ### Client → server: ClientDensity
 
-Sent once the first `OutputScale` has arrived, and again whenever the client's
-screen changes density (`hostDisplay`) — only on a target with `resize = true`,
-because the answer changes the output and a client that cannot then re-ask the
-pixels would be left with half a desktop. It carries the density the browser
-would like the desktop rendered at, quantized to 1x or 2x like every other
-engine's request ([`protocol::render_density`]).
+Sent once the first `OutputScale` has arrived, whenever the client's screen
+changes density (`hostDisplay`), and on a switch of shared output — only on a
+target with `resize = true`, because the answer changes the output. It carries
+the density the browser would like the desktop rendered at, quantized to 1x or
+2x like every other engine's request ([`protocol::render_density`]), *and* the
+window in pixels at that density, every time. A scale alone would change the
+desktop's logical size until a resize followed, and every application on it
+would redraw twice; carrying both makes a density change one output
+configuration. A resize at an unchanged density is still `SetDesktopSize`.
 
-wlshare sets the captured output's scale to it under the rules its
-`SetDesktopSize` handling already has — a headless output, resizing enabled,
-and the client owns the layout or nobody does yet — and **answers every
-declaration with an `OutputScale`**: after the compositor has applied the
-change, through the same head-scale path as a `swaymsg output … scale` in the
-measured Sway session, or at
-once with the scale as it is when nothing is to be changed or nothing can be
-(resizing disabled, another client owning the layout, a density out of the
-0.5–8 range, a configuration the compositor rejects). A configuration the
-compositor accepts without changing the head's scale is answered too: wlshare
-follows the `succeeded` with one round trip and reports the scale as it is
-when no head change arrived by then. The gateway relies on that answer
-arriving.
+wlshare sets the captured output's mode and scale to them in one
+wlr-output-management configuration, asking only for what differs, under the
+rules its `SetDesktopSize` handling already has — a headless output and resizing
+enabled — and **answers every declaration with an `OutputScale`**: after the
+compositor has applied the change, or at once with the output as it is when
+nothing is to be changed or nothing can be (resizing disabled, a density out of
+the 0.5–8 range, an empty size, a client without `ExtendedDesktopSize`, a
+configuration the compositor rejects). A configuration the compositor accepts
+without changing the head's scale is answered too: wlshare follows the
+`succeeded` with one round trip and reports the output as it is when no head
+change arrived by then. The gateway relies on that answer arriving. A new size
+then arrives as an `ExtendedDesktopSize` rectangle whose reason is this client.
 
 | Offset | Type | Field |
 |---|---|---|
 | 0 | U8 | `0xE0` |
-| 1 | U8[3] | padding |
-| 4 | U32 | scale, 16.16 fixed |
+| 1 | U8 | padding |
+| 2 | U16 | width, pixels |
+| 4 | U16 | height, pixels |
+| 6 | U32 | scale, 16.16 fixed |
 
-Eight bytes.
+Ten bytes: `OutputScale`'s layout in the other direction.
 
 ## What the gateway does with it
 
@@ -140,13 +144,15 @@ report.
   report arrives outside any `FramebufferUpdate` and an idle desktop would
   otherwise stay blank.
 - **Declare and follow.** The browser's density goes to the server on the first
-  report and on every change. When it differs from the reported scale, the
-  declaration is a request: the server answers it with an `OutputScale`, after
-  setting the output to it or at once with the scale unchanged when it refuses,
-  and every resize request is held (`DesktopState::following`) until that
-  report, including a window that changes size meanwhile, which replaces the
-  held one. The answering report then re-asks the window in whatever pixels
-  the server settled on: 2x when it followed, the old scale when it refused.
+  report, on every change and on a switch of output, with the window in points
+  × that density — the held window on the first report, or the desktop's own
+  points before the browser has sized one. Every declaration is a request: the
+  server answers it with an `OutputScale`, after setting the output's mode and
+  scale or at once with the output unchanged when it refuses, and every resize
+  request is held (`DesktopState::following`) until that report, including a
+  window that changes size meanwhile, which replaces the held one. The
+  answering report re-asks the window only when the server settled on other
+  pixels: nothing when it followed, points × the old scale when it refused.
   One declaration is out at a time: a density that changes while one is
   unanswered is recorded, and the answering report declares it then, so the
   server is walked through one transition at a time and ends at the browser's
@@ -181,26 +187,25 @@ uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> \
 swaymsg output HEADLESS-1 scale 2 ; sleep 7 ; swaymsg output HEADLESS-1 scale 1
 ```
 
-## Following the client, measured
+## Following the client
 
 A 2x browser connecting to an output at scale 1, with `resize = true`:
 
 ```
 resize  3456x1802  scale=1.0  -> 3456x1802 CSS px     connect: the framebuffer, unlabelled
-resize  3456x1802  scale=2.0  -> 1728x901 CSS px      OutputScale @ 2 answering the declaration: relabel
-resize  3456x1766  scale=2.0  -> 1728x883 CSS px      asked once, at points × 2; the rect follows
+                                                      ClientDensity 3456x1766 @ 2 declared
+resize  3456x1766  scale=2.0  -> 1728x883 CSS px      OutputScale 3456x1766 @ 2 answering it; the rect follows
 ```
 
-The first report says 1x; the gateway declares 2x and holds its resize. wlshare
-sets the output's scale, the compositor's head change produces the second
-report at 2x for the same pixels, and only then is the window asked for in
-points × 2: one mode change on the host, one desktop drawn. A 1x browser
-against the same output at scale 2 runs the mirror sequence, measured as
-`3456x1766 @ 1` (connect), `@ 2` (first report), `@ 1` (the answer), then
-`1728x883 @ 1` asked once; on a 1x browser the first report's label is a
-canvas the browser holds for one round trip. The Toggle Display
-Scale launcher entry on the host still works and is followed like any other
-scale change; the browser's density is re-declared only when it changes.
+The first report says 1x; the gateway declares 2x with the window at points ×
+2 and holds any resize. wlshare sets the output's mode and scale in one
+configuration, the compositor's head change produces the report at 2x for the
+declared pixels, and the rect that follows carries them: one output
+configuration on the host, one desktop drawn, and the logical size never
+passes through half or double the window. A 1x browser against the same
+output at scale 2 runs the mirror sequence. The Toggle Display Scale launcher
+entry on the host still works and is followed like any other scale change;
+the browser's density is re-declared only when it changes.
 
 Reproduce it with the host at `scale 1`:
 
