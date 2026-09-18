@@ -26,6 +26,13 @@
 //! arrive, uncopied and unconverted.
 //!
 //! wlshare is the server this was built against; see docs/wlshare-audio.md.
+//!
+//! Beside it this client lists wlshare's private silence pseudo-encoding
+//! ([`ENCODING_SILENCE`], `WLSA`), which lets wlshare send a count of silent
+//! frames ([`MSG_SILENCE`]) in place of a buffer of zeros. [`silence`] expands
+//! it back into exactly those zeros, so what reaches the bridge is the same
+//! either way and only the bytes on the wire differ. Any other server ignores
+//! an encoding it does not know and sends every sample.
 //! Apple's dialects are not asked: neither Screen Sharing subtype speaks this
 //! extension, and High Performance carries its system audio over the separate
 //! media stream in [`crate::vnc_apple_audio`].
@@ -40,6 +47,16 @@ pub const ENCODING: i32 = -259;
 pub const MSG_QEMU: u8 = 255;
 /// The submessage under [`MSG_QEMU`] that is audio.
 pub const SUBMESSAGE_AUDIO: u8 = 1;
+
+/// wlshare's silence pseudo-encoding, the ASCII bytes `WLSA`: a client that lists
+/// it takes [`MSG_SILENCE`] in place of a data message whose samples are all
+/// silence. Nothing is announced; listing it is the whole of it.
+pub const ENCODING_SILENCE: i32 = 0x574c_5341;
+/// The silence message's type, server → client: three bytes of padding and a
+/// `u32` count of frames follow. Outside every registered RFB message type.
+pub const MSG_SILENCE: u8 = 0xE4;
+/// The bytes of a silence message after its type.
+pub const SILENCE_BODY_LEN: usize = 7;
 
 /// Client operation: start sending audio.
 const CLIENT_ENABLE: u16 = 0;
@@ -172,6 +189,23 @@ pub fn carries_length(header: [u8; 3]) -> bool {
     header[0] == SUBMESSAGE_AUDIO && u16::from_be_bytes([header[1], header[2]]) == SERVER_DATA
 }
 
+/// The frames a silence message's body, the bytes after its type, stands for.
+///
+/// | Offset | Type | Field |
+/// |---|---|---|
+/// | 0 | U8 | message type, `0xE4` |
+/// | 1 | U8[3] | padding |
+/// | 4 | U32 | frames |
+pub fn silence_frames(body: [u8; SILENCE_BODY_LEN]) -> u32 {
+    u32::from_be_bytes([body[3], body[4], body[5], body[6]])
+}
+
+/// `frames` frames of silence in [`WANTED`]: signed samples, so every byte is
+/// zero.
+pub fn silence(frames: u32) -> Vec<u8> {
+    vec![0; frames as usize * usize::from(WANTED.channels) * 2]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +279,21 @@ mod tests {
         assert!(parse_server([0, 0, 1], 0).is_err());
         assert!(parse_server([2, 0, 1], 0).is_err());
         assert!(parse_server([1, 0, 3], 0).is_err());
+    }
+
+    /// A silence message as wlshare documents it — type, three bytes of padding,
+    /// a big-endian frame count — written out by hand rather than by a builder.
+    #[test]
+    fn a_silence_message_expands_to_its_frames_of_zeros() {
+        assert_eq!(ENCODING_SILENCE.to_be_bytes(), *b"WLSA");
+        let wire = [0xE4, 0, 0, 0, 0, 0, 0x03, 0xC0];
+        assert_eq!(wire[0], MSG_SILENCE);
+        let body: [u8; SILENCE_BODY_LEN] = wire[1..].try_into().unwrap();
+        assert_eq!(silence_frames(body), 960);
+        // 20 ms of 48 kHz stereo 16-bit: exactly the data message it replaced.
+        let expanded = silence(960);
+        assert_eq!(expanded.len(), 3840);
+        assert!(expanded.iter().all(|&b| b == 0));
+        assert!(silence(0).is_empty());
     }
 }

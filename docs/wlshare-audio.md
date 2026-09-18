@@ -104,6 +104,25 @@ set-format then enable, once, when the announcement arrives.
 | 4 | U32 | length of the samples (data only) |
 | 8 | U8[] | samples, interleaved, in the client's format |
 
+### Server → client: silence
+
+wlshare's own, not QEMU's. The gateway lists the private pseudo-encoding
+`0x574c5341` (`WLSA`) beside `-259`, and wlshare then sends a count of frames
+in place of any run of data messages whose every sample is silence — which,
+because its capture keeps the sink's monitor running, is what a desktop playing
+nothing produces: 192 kB/s of zeros at this format, now eight bytes per 20 ms.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | `0xE4` |
+| 1 | U8[3] | padding |
+| 4 | U32 | frames |
+
+It is lossless: silence here is exact zero, the gateway expands the count back
+into exactly those zeros, and the stream's timing is unchanged. Nothing is
+announced — listing the encoding is the whole negotiation — and any other
+server ignores it and sends every sample.
+
 ## What the gateway does with it
 
 `src/vnc_qemu_audio.rs` is the wire; `src/vnc.rs` keeps the extension's state
@@ -126,6 +145,10 @@ still taken.
 - A data length past a megabyte is read past rather than allocated: a buffer is
   20 ms, and a second of this format is 192 000 bytes, so anything larger is a
   server that has lost its framing.
+- A silence message becomes a buffer of that many frames of zeros on the
+  bridge, in order with the data around it, so nothing downstream can tell it
+  from the data message it replaced. A count worth more than a megabyte is
+  dropped the same way.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying
 it in band. wlshare drains its capture queue before every framebuffer update, so

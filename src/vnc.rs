@@ -1431,6 +1431,9 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, 
         // does not says nothing and the session runs in silence. See
         // [`crate::vnc_qemu_audio`].
         encodings.push(vnc_qemu_audio::ENCODING);
+        // And wlshare's silence extension beside it, so a desktop playing
+        // nothing is sent a count of silent frames rather than the frames.
+        encodings.push(vnc_qemu_audio::ENCODING_SILENCE);
     }
     if camera {
         // The wlshare camera extension, on a target that carries a camera, asked
@@ -2527,6 +2530,24 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             bridge.wave(samples);
                         }
                     }
+                }
+            }
+            // wlshare's silence message: a count of silent frames in place of the
+            // data message that would have carried them, expanded back into
+            // those zeros so the bridge sees the same stream either way. Only a
+            // session that asked for sound listed the encoding.
+            vnc_qemu_audio::MSG_SILENCE if audio_state != Audio::Off => {
+                let mut body = [0u8; vnc_qemu_audio::SILENCE_BODY_LEN];
+                reader.read_exact(&mut body).await?;
+                let frames = vnc_qemu_audio::silence_frames(body);
+                let bytes = u64::from(frames) * u64::from(vnc_qemu_audio::WANTED.channels) * 2;
+                if bytes > u64::from(MAX_AUDIO_SAMPLES) {
+                    warn!(
+                        "vnc: dropped {frames} frames of silence, over the \
+                         {MAX_AUDIO_SAMPLES} byte limit"
+                    );
+                } else if let Some(bridge) = audio {
+                    bridge.wave(vnc_qemu_audio::silence(frames));
                 }
             }
             // The wlshare camera extension's one message type: the server takes a
@@ -5305,17 +5326,17 @@ mod tests {
         // header alone is enough to prove it: an unrecognised encoding bails with
         // "not advertised" before any payload is read, and the promised ones do not.
         //
-        // Pixel encodings are the non-negative ones, the two wlshare requests
+        // Pixel encodings are the non-negative ones, the wlshare requests
         // aside: spelt in ASCII they are positive, and pseudo-encodings all the
         // same. The pseudo-encodings are excluded because a server never sends
         // one as a rectangle at all — the clipboard's arrives as a
-        // ServerCutText, the density report and the output list as their own
-        // messages, not here.
+        // ServerCutText, the density report, the output list and a count of
+        // silent frames as their own messages, not here.
         let pixel_encodings = rfb38_encoding_list(false, true, true, true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
-                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING, vnc_mic::ENCODING]
+                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING, vnc_mic::ENCODING, vnc_qemu_audio::ENCODING_SILENCE]
                         .contains(encoding)
             });
         for encoding in pixel_encodings {
@@ -5989,6 +6010,7 @@ mod tests {
         for clipboard in [false, true] {
             let asked = rfb38_encoding_list(false, clipboard, true, false, false);
             assert!(asked.contains(&vnc_qemu_audio::ENCODING));
+            assert!(asked.contains(&vnc_qemu_audio::ENCODING_SILENCE), "silence rides with audio");
             assert_eq!(
                 &asked[asked.len() - 2..],
                 &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
@@ -5998,6 +6020,11 @@ mod tests {
                 !rfb38_encoding_list(false, clipboard, false, false, false)
                     .contains(&vnc_qemu_audio::ENCODING),
                 "a target without audio does not ask"
+            );
+            assert!(
+                !rfb38_encoding_list(false, clipboard, false, false, false)
+                    .contains(&vnc_qemu_audio::ENCODING_SILENCE),
+                "nor for silence"
             );
             assert!(
                 !rfb38_encoding_list(true, clipboard, true, false, false)
@@ -6052,6 +6079,47 @@ mod tests {
         assert_eq!(bridge.negotiated_format(), Some(vnc_qemu_audio::SOURCE_FORMAT));
         assert_eq!(listener.queued_wave().as_deref(), Some(samples.as_slice()));
         assert!(listener.queued_wave().is_none(), "one message, one buffer");
+    }
+
+    /// wlshare's silence message reaches the queue as the zeros it stands for,
+    /// in order with the samples around it, so the bridge cannot tell it from
+    /// the data message it replaced.
+    #[tokio::test]
+    async fn a_count_of_silent_frames_reaches_the_queue_as_zeros() {
+        let silence = |frames: u32| {
+            let mut msg = vec![0xE4u8, 0, 0, 0];
+            msg.extend_from_slice(&frames.to_be_bytes());
+            msg
+        };
+        let wire = [
+            audio_announcement(),
+            server_audio(1, &[]),
+            server_audio(2, &[1, 2, 3, 4]),
+            silence(960),
+            server_audio(2, &[5, 6, 7, 8]),
+        ]
+        .concat();
+        let (_, _bridge, mut listener) = run_audio_wire(wire).await;
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[0u8; 3840][..]));
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[5, 6, 7, 8][..]));
+    }
+
+    /// A frame count past the byte limit is a server that lost its framing: the
+    /// message is read past, nothing is allocated, and the stream keeps its
+    /// place.
+    #[tokio::test]
+    async fn an_implausible_count_of_silent_frames_is_dropped() {
+        let wire = [
+            audio_announcement(),
+            server_audio(1, &[]),
+            vec![0xE4, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF],
+            server_audio(2, &[9, 9, 9, 9]),
+        ]
+        .concat();
+        let (_, _bridge, mut listener) = run_audio_wire(wire).await;
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[9, 9, 9, 9][..]));
+        assert!(listener.queued_wave().is_none());
     }
 
     /// The end of a stream takes the negotiated format with it: an open
