@@ -56,7 +56,8 @@ RUN printf '%s\n' \
     'listen = "0.0.0.0:5900"' \
     'output = "HEADLESS-1"' \
     'resize = true' \
-    'audio = false' \
+    'camera = true' \
+    'microphone = true' \
     > /etc/wlshare-e2e.toml
 # Start PipeWire and WirePlumber for the microphone node, then sway, add the second
 # output once its IPC answers, and run wlshare in the foreground. Neither audio

@@ -41,7 +41,7 @@ plain `vnc` target; it stays refused on Apple's standard Screen Sharing, which
 carries no sound and speaks no audio extension, and on High Performance it
 still means Apple's media stream and still needs the `apple-hp-audio` build.
 
-wlshare's own `audio` key (default `true`) is the server's side of the same
+wlshare's own `audio` key (default `false`) is the server's side of the same
 switch: with it off the extension is not announced, and a client that lists the
 pseudo-encoding is told nothing.
 

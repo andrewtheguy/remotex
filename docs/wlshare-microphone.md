@@ -31,7 +31,7 @@ is accepted on any plain `vnc` target and refused on both Apple subtypes. As on 
 it is capability only: the microphone is plugged when a browser enables it from the
 floating menu, per session and never remembered, and unplugged when that socket
 closes, the session changes hands, or the engine ends. wlshare's own `microphone`
-key (default `true`) is the server's side of the same switch.
+key (default `false`) is the server's side of the same switch.
 
 ## The wire
 

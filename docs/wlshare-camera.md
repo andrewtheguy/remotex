@@ -32,7 +32,7 @@ accepted on any plain `vnc` target and refused on both Apple subtypes, whose
 Screen Sharing has no camera to offer. As on RDP it is capability only: the camera
 is plugged when a browser enables it from the floating menu, per session and never
 remembered, and unplugged when that socket closes, the session changes hands, or
-the engine ends. wlshare's own `camera` key (default `true`) is the server's side
+the engine ends. wlshare's own `camera` key (default `false`) is the server's side
 of the same switch.
 
 ## The wire
