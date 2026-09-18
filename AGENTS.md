@@ -96,11 +96,12 @@ documentation.
   choices are Opus and unresampled PCM passthrough; do not add another encoder.
   Preserve claim-bound eviction and the source-format/resampling boundaries in
   [Audio frames](docs/architecture.md#audio-frames).
-- Generic VNC audio is `rfbproto`'s registered QEMU Audio extension, discovered
-  on the connection the way the density extension is: `audio = true` makes the
-  gateway ask, and a server that never announces it leaves the session silent
-  rather than failing it. Do not add a private audio extension, a second format,
-  or a configuration key naming the server. See
+- Generic VNC audio is wlshare's audio extension — FLAC frames, with the QEMU
+  Audio extension's control messages — discovered on the connection the way the
+  density extension is: `audio = true` makes the gateway ask, and a server that
+  never announces it leaves the session silent rather than failing it. Do not
+  take raw PCM from the RFB connection, add a second codec to it, or add a
+  configuration key naming the server. See
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
 - Apple High Performance system audio remains behind the non-default
   `apple-hp-audio` feature and absent from release artifacts. Do not add a second

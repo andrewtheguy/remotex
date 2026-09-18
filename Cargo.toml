@@ -139,6 +139,14 @@ fdk-aac = { package = "fdk-aac-prebuilt", git = "https://github.com/andrewtheguy
 # bytes to the socket, so there is no encoder to link and no codec licence to
 # carry. A second *encoder* was tried here and removed — see the pcm_stream module
 # doc for why compressing harder was the wrong axis.
+# FLAC, which is how wlshare carries a desktop's sound on the RFB connection
+# (src/vnc_audio.rs): lossless, so the Opus encode above stays the only lossy
+# step. symphonia's decoder, pure Rust, and only the FLAC bundle of it —
+# `symphonia-core` for the decoder trait and the packet it takes. Each frame
+# decodes on its own, with the stream header built here, so none of symphonia's
+# demuxing is used.
+symphonia-bundle-flac = "0.6"
+symphonia-core = "0.6"
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
@@ -260,6 +268,9 @@ name = "tui_control_plane_e2e"
 required-features = ["embedded-gateway"]
 
 [dev-dependencies]
+# FLAC frames for the audio decoder's tests, made the way wlshare makes them and
+# by an encoder that shares nothing with symphonia.
+flacenc = { version = "0.5", default-features = false }
 tokio-tungstenite = "0.29"
 # Scratch directories for the tests that need a real path on disk: an instance
 # directory to serve from, and the ones behind `Instance::origin_label`, which

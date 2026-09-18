@@ -47,7 +47,7 @@ use crate::protocol::{
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
 use crate::vnc_apple_audio::{self, MediaStream};
-use crate::vnc_qemu_audio::{self, ServerAudio};
+use crate::vnc_audio::{self, FrameDecoder, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::camera::CameraSignal;
@@ -173,11 +173,12 @@ const FENCE_BLOCK_AFTER: u32 = 1 << 1;
 /// Longest fence payload the extension defines. A server sending more is malformed;
 /// the excess is consumed to keep the stream in step and left out of the echo.
 const MAX_FENCE_PAYLOAD: usize = 64;
-/// Longest run of samples one QEMU Audio message may carry. A second of the
-/// format this client asks for is 192 000 bytes, and a buffer is 20 ms of it, so
-/// anything past a megabyte is a server that has lost its framing rather than
-/// one with a lot to say: its bytes are stepped over instead of allocated.
-const MAX_AUDIO_SAMPLES: u32 = 1 << 20;
+/// Longest FLAC frame one audio message may carry. A frame is 20 ms of the
+/// format this client asks for, 3840 bytes before compression, and FLAC never
+/// grows it by more than a few header bytes, so anything past 64 KiB is a
+/// server that has lost its framing rather than one with a lot to say: its
+/// bytes are stepped over instead of allocated.
+const MAX_AUDIO_FRAME: u32 = 1 << 16;
 /// Bytes per pixel of the format we force with SetPixelFormat.
 pub(crate) const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
@@ -445,8 +446,8 @@ enum Density {
     Reported,
 }
 
-/// The QEMU Audio extension's state on one connection — see
-/// [`crate::vnc_qemu_audio`]. Discovered exactly as [`Density`] is: a target
+/// wlshare's audio extension's state on one connection — see
+/// [`crate::vnc_audio`]. Discovered exactly as [`Density`] is: a target
 /// that asked for sound lists the pseudo-encoding, and what the server does
 /// with it decides the rest. Kept by the read loop, which is the only side that
 /// speaks the extension.
@@ -962,10 +963,10 @@ async fn session(
     // Sound reaches this engine two ways, and the target decides which: High
     // Performance negotiates Apple's media stream off the RFB connection
     // ([`vnc_apple_audio`]), and every other VNC target asks a generic server for
-    // the QEMU Audio extension on the connection itself ([`vnc_qemu_audio`]).
+    // wlshare's audio extension on the connection itself ([`vnc_audio`]).
     // Standard `ard` has neither, and the config file has already refused `audio`
     // there. The bridge the session built goes to whichever path this is.
-    let (media, qemu_audio) = match audio {
+    let (media, wlshare_audio) = match audio {
         Some(bridge) if high_performance => (Some(MediaStream::new(bridge, peer, local)), None),
         Some(bridge) if !apple => (None, Some(bridge)),
         _ => (None, None),
@@ -984,7 +985,7 @@ async fn session(
             apple,
             high_performance,
             media,
-            qemu_audio,
+            wlshare_audio,
             camera,
             microphone,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
@@ -1052,11 +1053,11 @@ struct Flags {
     /// read loop sends after the first display layout, and the receiver it then
     /// starts ([`vnc_apple_audio`]). `None` on every other target.
     media: Option<MediaStream>,
-    /// The desktop's sound over the QEMU Audio extension, when a generic target
+    /// The desktop's sound over wlshare's audio extension, when a generic target
     /// asked for it: the queue the read loop feeds the samples a server that
-    /// announces the extension then sends ([`vnc_qemu_audio`]). `None` on every
+    /// announces the extension then sends ([`vnc_audio`]). `None` on every
     /// Apple target and wherever `audio` was not asked for.
-    qemu_audio: Option<Arc<crate::audio::AudioBridge>>,
+    wlshare_audio: Option<Arc<crate::audio::AudioBridge>>,
     /// The browser's camera, on a generic target that carries one: the bridge the
     /// camera socket drives, lent to a server that announces the wlshare camera
     /// extension ([`vnc_camera`]). `None` on every Apple target, which the config
@@ -1425,15 +1426,12 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, 
         encodings.push(vnc_clipboard::ENCODING);
     }
     if audio {
-        // The QEMU Audio extension, on a target that asked for sound. Discovery
+        // wlshare's audio extension, on a target that asked for sound. Discovery
         // again, and by the same shape as the density request: a server that
         // speaks it announces so with a rectangle of this encoding, and one that
         // does not says nothing and the session runs in silence. See
-        // [`crate::vnc_qemu_audio`].
-        encodings.push(vnc_qemu_audio::ENCODING);
-        // And wlshare's silence extension beside it, so a desktop playing
-        // nothing is sent a count of silent frames rather than the frames.
-        encodings.push(vnc_qemu_audio::ENCODING_SILENCE);
+        // [`crate::vnc_audio`].
+        encodings.push(vnc_audio::ENCODING);
     }
     if camera {
         // The wlshare camera extension, on a target that carries a camera, asked
@@ -1620,7 +1618,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         apple,
         high_performance,
         media,
-        qemu_audio,
+        wlshare_audio,
         camera,
         microphone,
         host_density,
@@ -1681,7 +1679,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         clipboard: Arc::clone(&clipboard),
         shadow: Arc::clone(&shadow),
         display: Arc::clone(&display),
-        audio: qemu_audio,
+        audio: wlshare_audio,
         camera: camera.clone(),
         microphone: microphone.clone(),
     };
@@ -2108,7 +2106,7 @@ struct Shared {
     shadow: SharedShadow,
     display: SharedDisplay,
     /// Where the desktop's sound goes on a generic target that asked for it —
-    /// see [`Flags::qemu_audio`]. `None` is a session with no sound to carry,
+    /// see [`Flags::wlshare_audio`]. `None` is a session with no sound to carry,
     /// and the extension is then neither advertised nor read.
     audio: Option<Arc<crate::audio::AudioBridge>>,
     /// The browser's camera — see [`Flags::camera`]. `None` is a session with no
@@ -2132,10 +2130,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared { uplink, desktop, clipboard, display, audio, camera, microphone, .. } = &shared;
-    // Where the QEMU Audio extension stands here. `Off` on a session with no
-    // bridge to feed, which is also a session that never listed the encoding, so
-    // neither the announcement nor a sample can arrive.
+    // Where the audio extension stands here. `Off` on a session with no bridge
+    // to feed, which is also a session that never listed the encoding, so
+    // neither the announcement nor a frame can arrive.
     let mut audio_state = if audio.is_some() { Audio::Asked } else { Audio::Off };
+    // The running stream's FLAC decoder, from a begin to its end.
+    let mut flac: Option<FrameDecoder> = None;
     let mut full_repaint: Option<FullRepaint> = None;
     let mut apple_poll_paused = false;
     let mut apple_poll_deadline: Option<tokio::time::Instant> = None;
@@ -2290,12 +2290,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     info!(
                         "vnc: the server carries desktop audio; asking for {} Hz, {} channel, \
                          {}-bit sound",
-                        vnc_qemu_audio::SOURCE_FORMAT.sample_rate,
-                        vnc_qemu_audio::SOURCE_FORMAT.channels,
-                        vnc_qemu_audio::SOURCE_FORMAT.bits_per_sample
+                        vnc_audio::SOURCE_FORMAT.sample_rate,
+                        vnc_audio::SOURCE_FORMAT.channels,
+                        vnc_audio::SOURCE_FORMAT.bits_per_sample
                     );
-                    send(uplink, &vnc_qemu_audio::set_format(vnc_qemu_audio::WANTED)).await?;
-                    send(uplink, &vnc_qemu_audio::enable()).await?;
+                    send(uplink, &vnc_audio::set_format(vnc_audio::WANTED)).await?;
+                    send(uplink, &vnc_audio::enable()).await?;
                 } else if audio_state == Audio::Asked && painted {
                     // The announcement comes in an update of its own before any
                     // pixels, so pixels without one are a server that does not
@@ -2481,73 +2481,61 @@ async fn read_loop<R: AsyncRead + Unpin>(
             MSG_WLSHARE_OUTPUTS if apple.is_none() => {
                 read_output_list(&mut reader, uplink, desktop, display, &sink).await?;
             }
-            // The QEMU Audio extension's one message type: a stream beginning, a
-            // stream ending, or a run of samples ([`vnc_qemu_audio`]). Only a
+            // The QEMU message type, which wlshare's audio extension borrows for
+            // a stream beginning and a stream ending ([`vnc_audio`]). Only a
             // session that asked for sound reads it — nothing else listed the
             // encoding — and on the Apple dialects 255 is as unknown as it was.
-            vnc_qemu_audio::MSG_QEMU if audio_state != Audio::Off => {
+            vnc_audio::MSG_QEMU if audio_state != Audio::Off => {
                 let mut header = [0u8; 3];
                 reader.read_exact(&mut header).await?;
-                let length = if vnc_qemu_audio::carries_length(header) {
-                    reader.read_u32().await?
-                } else {
-                    0
-                };
                 // A submessage this client cannot measure is fatal rather than
                 // skipped: the QEMU submessages share no length field, so one it
                 // does not know leaves the stream at an offset nothing recovers
                 // from.
-                match vnc_qemu_audio::parse_server(header, length)? {
+                match vnc_audio::parse_server(header)? {
                     ServerAudio::Begin => {
                         info!("vnc: the server started the desktop's audio stream");
+                        flac = Some(FrameDecoder::new()?);
                         if let Some(bridge) = audio {
-                            bridge.publish_format(vnc_qemu_audio::SOURCE_FORMAT);
+                            bridge.publish_format(vnc_audio::SOURCE_FORMAT);
                         }
                     }
                     ServerAudio::End => {
                         info!("vnc: the server stopped the desktop's audio stream");
+                        flac = None;
                         if let Some(bridge) = audio {
                             bridge.clear_format();
                         }
                     }
-                    // Framed by its own length, so an implausible one is read
-                    // past rather than allocated, and the session keeps its
-                    // place in the stream.
-                    ServerAudio::Data { bytes } if bytes > MAX_AUDIO_SAMPLES => {
-                        discard(&mut reader, u64::from(bytes)).await?;
-                        warn!(
-                            "vnc: dropped a {bytes}-byte audio buffer, over the \
-                             {MAX_AUDIO_SAMPLES} byte limit"
-                        );
-                    }
-                    ServerAudio::Data { bytes } => {
-                        let mut samples = vec![0u8; bytes as usize];
-                        reader.read_exact(&mut samples).await?;
-                        // Interleaved little-endian 16-bit stereo is what this
-                        // client asked for and what the queue takes, so the
-                        // buffer goes on exactly as it arrived.
-                        if let Some(bridge) = audio {
-                            bridge.wave(samples);
-                        }
-                    }
                 }
             }
-            // wlshare's silence message: a count of silent frames in place of the
-            // data message that would have carried them, expanded back into
-            // those zeros so the bridge sees the same stream either way. Only a
-            // session that asked for sound listed the encoding.
-            vnc_qemu_audio::MSG_SILENCE if audio_state != Audio::Off => {
-                let mut body = [0u8; vnc_qemu_audio::SILENCE_BODY_LEN];
-                reader.read_exact(&mut body).await?;
-                let frames = vnc_qemu_audio::silence_frames(body);
-                let bytes = u64::from(frames) * u64::from(vnc_qemu_audio::WANTED.channels) * 2;
-                if bytes > u64::from(MAX_AUDIO_SAMPLES) {
-                    warn!(
-                        "vnc: dropped {frames} frames of silence, over the \
-                         {MAX_AUDIO_SAMPLES} byte limit"
-                    );
-                } else if let Some(bridge) = audio {
-                    bridge.wave(vnc_qemu_audio::silence(frames));
+            // One FLAC frame of the running stream, decoded into the 16-bit
+            // stereo this client asked for, which is what the queue takes.
+            // Framed by its own length, so an implausible one is read past
+            // rather than allocated, and one that does not decode costs its
+            // twenty milliseconds rather than the session: the next frame
+            // decodes on its own.
+            vnc_audio::MSG_FRAME if audio_state != Audio::Off => {
+                let mut header = [0u8; vnc_audio::FRAME_HEADER_LEN];
+                reader.read_exact(&mut header).await?;
+                let length = vnc_audio::frame_length(header);
+                if length > MAX_AUDIO_FRAME {
+                    discard(&mut reader, u64::from(length)).await?;
+                    warn!("vnc: dropped a {length}-byte audio frame, over the {MAX_AUDIO_FRAME} byte limit");
+                } else {
+                    let mut frame = vec![0u8; length as usize];
+                    reader.read_exact(&mut frame).await?;
+                    match flac.as_mut() {
+                        None => warn!("vnc: dropped an audio frame sent outside a stream"),
+                        Some(decoder) => match decoder.decode(frame) {
+                            Ok(samples) => {
+                                if let Some(bridge) = audio {
+                                    bridge.wave(samples);
+                                }
+                            }
+                            Err(e) => warn!("vnc: dropped an audio frame: {e:#}"),
+                        },
+                    }
                 }
             }
             // The wlshare camera extension's one message type: the server takes a
@@ -3123,10 +3111,10 @@ struct RectEffect {
     pixels: Option<Rect>,
     /// A `LastRect`: this update ends here, whatever its header's count claimed.
     last: bool,
-    /// The QEMU Audio extension's announcement rectangle — the server saying it
+    /// The audio extension's announcement rectangle — the server saying it
     /// can carry the desktop's sound. Acted on after the update rather than in
     /// the rect, so the enable goes out once however the announcement was
-    /// framed. See [`crate::vnc_qemu_audio`].
+    /// framed. See [`crate::vnc_audio`].
     audio_announced: bool,
 }
 
@@ -3324,14 +3312,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
             debug!("vnc: the Mac answered the media-stream offer ({len} bytes)");
             return Ok(RectEffect::NOTHING);
         }
-        // The QEMU Audio extension's announcement: an empty rectangle of the
+        // wlshare's audio announcement: an empty rectangle of the
         // pseudo-encoding this session listed, and the only way a generic server
-        // ever says it can carry sound ([`vnc_qemu_audio`]). It has no body —
+        // ever says it can carry sound ([`vnc_audio`]). It has no body —
         // the announcement is the rectangle — so there is nothing to read past.
         // Only a session that asked can see one: the encoding was advertised
         // nowhere else, and an unadvertised encoding still falls through to the
         // refusal below.
-        vnc_qemu_audio::ENCODING if shared.audio.is_some() => {
+        vnc_audio::ENCODING if shared.audio.is_some() => {
             return Ok(RectEffect::AUDIO_ANNOUNCED);
         }
         // A second rekey. The key could be recovered — the wrap key rotates to the
@@ -5330,13 +5318,14 @@ mod tests {
         // aside: spelt in ASCII they are positive, and pseudo-encodings all the
         // same. The pseudo-encodings are excluded because a server never sends
         // one as a rectangle at all — the clipboard's arrives as a
-        // ServerCutText, the density report, the output list and a count of
-        // silent frames as their own messages, not here.
+        // ServerCutText, the density report and the output list as their own
+        // messages, and the audio announcement is an empty rectangle with no
+        // pixels behind it.
         let pixel_encodings = rfb38_encoding_list(false, true, true, true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
-                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING, vnc_mic::ENCODING, vnc_qemu_audio::ENCODING_SILENCE]
+                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING, vnc_mic::ENCODING, vnc_audio::ENCODING]
                         .contains(encoding)
             });
         for encoding in pixel_encodings {
@@ -5933,15 +5922,15 @@ mod tests {
         assert_eq!(select_output(u32::MAX), [0xE1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
     }
 
-    // ── The QEMU Audio extension ────────────────────────────────────────────
+    // ── wlshare's audio extension ───────────────────────────────────────────
 
     /// A `FramebufferUpdate` whose whole content is the extension's
-    /// announcement: one empty rectangle of encoding -259.
+    /// announcement: one empty rectangle of encoding `WLSF`.
     fn audio_announcement() -> Vec<u8> {
         let mut wire = vec![0u8, 0]; // FramebufferUpdate, padding
         wire.extend_from_slice(&1u16.to_be_bytes());
         wire.extend_from_slice(&[0u8; 8]); // a 0x0 rect at the origin
-        wire.extend_from_slice(&(-259i32).to_be_bytes());
+        wire.extend_from_slice(b"WLSF");
         wire
     }
 
@@ -5961,17 +5950,40 @@ mod tests {
         wire
     }
 
-    /// Server messages spelt from the extension's text rather than built by
-    /// this module: type 255, submessage 1, a big-endian operation, and for
-    /// data a big-endian length before the samples.
-    fn server_audio(operation: u16, samples: &[u8]) -> Vec<u8> {
+    /// Begin and end spelt from the extension's text rather than built by this
+    /// module: type 255, submessage 1, a big-endian operation.
+    fn server_audio(operation: u16) -> Vec<u8> {
         let mut msg = vec![255u8, 1];
         msg.extend_from_slice(&operation.to_be_bytes());
-        if operation == 2 {
-            msg.extend_from_slice(&(samples.len() as u32).to_be_bytes());
-            msg.extend_from_slice(samples);
-        }
         msg
+    }
+
+    /// 20 ms of 48 kHz 16-bit stereo, every sample `value`, as the frame
+    /// message wlshare sends for it: type 0xE4, three bytes of padding, a
+    /// big-endian length and the FLAC frame flacenc makes of it. flacenc shares
+    /// nothing with the decoder the read loop uses.
+    fn server_frame(value: i16) -> Vec<u8> {
+        use flacenc::component::BitRepr as _;
+        use flacenc::error::Verify as _;
+        use flacenc::source::Fill as _;
+        let mut info = flacenc::component::StreamInfo::new(48_000, 2, 16).unwrap();
+        info.set_block_sizes(960, 960).unwrap();
+        let config = flacenc::config::Encoder::default().into_verified().unwrap();
+        let mut framebuf = flacenc::source::FrameBuf::with_size(2, 960).unwrap();
+        framebuf.fill_le_bytes(&frame_samples(value), 2).unwrap();
+        let frame = flacenc::encode_fixed_size_frame(&config, &framebuf, 0, &info).unwrap();
+        let mut sink = flacenc::bitsink::ByteSink::new();
+        frame.write(&mut sink).unwrap();
+        let frame = sink.into_inner();
+        let mut msg = vec![0xE4u8, 0, 0, 0];
+        msg.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        msg.extend_from_slice(&frame);
+        msg
+    }
+
+    /// The samples [`server_frame`] carries, as the queue should receive them.
+    fn frame_samples(value: i16) -> Vec<u8> {
+        value.to_le_bytes().repeat(960 * 2)
     }
 
     /// Run one wire through the read loop with a bridge attached, and hand back
@@ -6003,14 +6015,15 @@ mod tests {
     }
 
     /// The pseudo-encoding is asked for only where the target asked for sound,
-    /// and never of a Mac — whose audio is the media stream, not this.
+    /// and never of a Mac — whose audio is the media stream, not this. QEMU's
+    /// own, which promises raw samples, is never asked.
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
-        assert_eq!(vnc_qemu_audio::ENCODING, -259);
+        assert_eq!(vnc_audio::ENCODING.to_be_bytes(), *b"WLSF");
         for clipboard in [false, true] {
             let asked = rfb38_encoding_list(false, clipboard, true, false, false);
-            assert!(asked.contains(&vnc_qemu_audio::ENCODING));
-            assert!(asked.contains(&vnc_qemu_audio::ENCODING_SILENCE), "silence rides with audio");
+            assert!(asked.contains(&vnc_audio::ENCODING));
+            assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
             assert_eq!(
                 &asked[asked.len() - 2..],
                 &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
@@ -6018,17 +6031,12 @@ mod tests {
             );
             assert!(
                 !rfb38_encoding_list(false, clipboard, false, false, false)
-                    .contains(&vnc_qemu_audio::ENCODING),
+                    .contains(&vnc_audio::ENCODING),
                 "a target without audio does not ask"
             );
             assert!(
-                !rfb38_encoding_list(false, clipboard, false, false, false)
-                    .contains(&vnc_qemu_audio::ENCODING_SILENCE),
-                "nor for silence"
-            );
-            assert!(
                 !rfb38_encoding_list(true, clipboard, true, false, false)
-                    .contains(&vnc_qemu_audio::ENCODING),
+                    .contains(&vnc_audio::ENCODING),
                 "no Mac is asked"
             );
         }
@@ -6062,64 +6070,70 @@ mod tests {
     }
 
     /// The announcement rectangle is answered with the format this client wants
-    /// and the switch that starts the stream, and the samples that follow reach
-    /// the queue as they arrived — little-endian, uncopied, unconverted.
+    /// and the switch that starts the stream, and the FLAC frames that follow
+    /// reach the queue as the samples they encode, one buffer a frame.
     #[tokio::test]
-    async fn an_announced_audio_stream_is_turned_on_and_its_samples_reach_the_queue() {
-        let samples: Vec<u8> = (0..16).collect();
+    async fn an_announced_audio_stream_is_turned_on_and_its_frames_reach_the_queue() {
         let wire = [
             audio_announcement(),
-            server_audio(1, &[]), // begin
-            server_audio(2, &samples),
+            server_audio(1), // begin
+            server_frame(1234),
+            server_frame(-5),
         ]
         .concat();
         let (written, bridge, mut listener) = run_audio_wire(wire).await;
         // Set-format then enable, byte for byte: S16, two channels, 48 000 Hz.
         assert_eq!(written, vec![255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 0]);
-        assert_eq!(bridge.negotiated_format(), Some(vnc_qemu_audio::SOURCE_FORMAT));
-        assert_eq!(listener.queued_wave().as_deref(), Some(samples.as_slice()));
+        assert_eq!(bridge.negotiated_format(), Some(vnc_audio::SOURCE_FORMAT));
+        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(1234).as_slice()));
+        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(-5).as_slice()));
         assert!(listener.queued_wave().is_none(), "one message, one buffer");
     }
 
-    /// wlshare's silence message reaches the queue as the zeros it stands for,
-    /// in order with the samples around it, so the bridge cannot tell it from
-    /// the data message it replaced.
+    /// A frame length past the limit is a server that lost its framing, and a
+    /// frame that does not decode is one frame's worth of sound: either is
+    /// read past, and the stream keeps its place for the frame after it.
     #[tokio::test]
-    async fn a_count_of_silent_frames_reaches_the_queue_as_zeros() {
-        let silence = |frames: u32| {
-            let mut msg = vec![0xE4u8, 0, 0, 0];
-            msg.extend_from_slice(&frames.to_be_bytes());
-            msg
-        };
+    async fn an_implausible_or_undecodable_frame_is_dropped() {
+        let mut garbage = vec![0xE4u8, 0, 0, 0];
+        garbage.extend_from_slice(&16u32.to_be_bytes());
+        garbage.extend_from_slice(&[0xAB; 16]);
         let wire = [
             audio_announcement(),
-            server_audio(1, &[]),
-            server_audio(2, &[1, 2, 3, 4]),
-            silence(960),
-            server_audio(2, &[5, 6, 7, 8]),
+            server_audio(1),
+            vec![0xE4, 0, 0, 0, 0x00, 0x01, 0x00, 0x01],
+            vec![0u8; 0x1_0001],
+            garbage,
+            server_frame(9),
         ]
         .concat();
         let (_, _bridge, mut listener) = run_audio_wire(wire).await;
-        assert_eq!(listener.queued_wave().as_deref(), Some(&[1, 2, 3, 4][..]));
-        assert_eq!(listener.queued_wave().as_deref(), Some(&[0u8; 3840][..]));
-        assert_eq!(listener.queued_wave().as_deref(), Some(&[5, 6, 7, 8][..]));
+        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(9).as_slice()));
+        assert!(listener.queued_wave().is_none());
     }
 
-    /// A frame count past the byte limit is a server that lost its framing: the
-    /// message is read past, nothing is allocated, and the stream keeps its
-    /// place.
+    /// QEMU's raw data operation is not something a server that announced this
+    /// extension sends, and it cannot be measured as anything else: fatal.
     #[tokio::test]
-    async fn an_implausible_count_of_silent_frames_is_dropped() {
-        let wire = [
-            audio_announcement(),
-            server_audio(1, &[]),
-            vec![0xE4, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF],
-            server_audio(2, &[9, 9, 9, 9]),
-        ]
-        .concat();
-        let (_, _bridge, mut listener) = run_audio_wire(wire).await;
-        assert_eq!(listener.queued_wave().as_deref(), Some(&[9, 9, 9, 9][..]));
-        assert!(listener.queued_wave().is_none());
+    async fn raw_qemu_samples_end_the_session() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let bridge = Arc::new(crate::audio::AudioBridge::new());
+        let shared = test_shared_with_audio(
+            test_shared(uplink, shared_desktop((2, 2), None, None), test_shadow((2, 2))),
+            &bridge,
+        );
+        let wire = [audio_announcement(), server_audio(1), vec![255, 1, 0, 2, 0, 0, 0, 4, 1, 2, 3, 4]].concat();
+        let err = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: true, poll: false },
+            None,
+            sink,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("operation 2"), "{err:#}");
     }
 
     /// The end of a stream takes the negotiated format with it: an open
@@ -6129,9 +6143,9 @@ mod tests {
     async fn the_end_of_an_audio_stream_clears_the_negotiated_format() {
         let wire = [
             audio_announcement(),
-            server_audio(1, &[]),
-            server_audio(2, &[1, 2, 3, 4]),
-            server_audio(0, &[]), // end
+            server_audio(1),
+            server_frame(3),
+            server_audio(0), // end
         ]
         .concat();
         let (_, bridge, _listener) = run_audio_wire(wire).await;
@@ -6176,14 +6190,14 @@ mod tests {
         let wire = [
             pixels_without_announcement(),
             audio_announcement(),
-            server_audio(1, &[]),
-            server_audio(2, &[7, 7, 7, 7]),
+            server_audio(1),
+            server_frame(7),
         ]
         .concat();
         let (written, bridge, mut listener) = run_audio_wire(wire).await;
         assert_eq!(written, vec![255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 0]);
-        assert_eq!(bridge.negotiated_format(), Some(vnc_qemu_audio::SOURCE_FORMAT));
-        assert_eq!(listener.queued_wave().as_deref(), Some(&[7, 7, 7, 7][..]));
+        assert_eq!(bridge.negotiated_format(), Some(vnc_audio::SOURCE_FORMAT));
+        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(7).as_slice()));
     }
 
     /// The QEMU submessages share no length field, so one this client cannot

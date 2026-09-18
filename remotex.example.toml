@@ -237,8 +237,8 @@ password = "change-me"
 # stream — EXPERIMENTAL, and only in a gateway built by hand with
 # `cargo build --release --features apple-hp-audio`, because that stream is AAC-ELD
 # and the decoder's licence keeps it out of every release binary; any other build
-# refuses the key at startup. A plain "vnc" target asks the server for the QEMU
-# Audio extension, and one that never announces it gives a silent session; Standard
+# refuses the key at startup. A plain "vnc" target asks the server for wlshare's
+# audio extension, and one that never announces it gives a silent session; Standard
 # Apple "ard" has no sound and refuses the key rather than ignoring it.
 #
 # The channel has to be negotiated when the connection is made, so an audio
@@ -251,7 +251,7 @@ password = "change-me"
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound works wherever the target carries it — an "rdp" target,
-# a plain "vnc" server that speaks the QEMU extension, or "ard-high-performance" in
+# a plain "vnc" server that speaks wlshare's extension, or "ard-high-performance" in
 # an apple-hp-audio build.
 #
 # Off leaves the remote's sound where it is.

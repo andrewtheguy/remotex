@@ -202,12 +202,11 @@ its output's scale, the gateway labels the framebuffer with it and asks for the
 window in points × scale, and the browser's density is declared back to the
 server. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
-`audio = true` works on a plain VNC target too, through the QEMU Audio
-extension `rfbproto` registers: the gateway lists its pseudo-encoding, a server
-that speaks it announces so and then streams the desktop's sound on the RFB
-connection itself, and a server that does not — wayvnc, TigerVNC, x11vnc — gives
-the desktop and no sound. wlshare speaks it, capturing the default sink's
-monitor from PipeWire. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
+`audio = true` works on a plain VNC target too, through wlshare's audio
+extension: the gateway lists its pseudo-encoding, wlshare announces so and then
+streams the desktop's sound on the RFB connection itself as lossless FLAC,
+captured from the default sink's monitor in PipeWire, and a server that does not
+speak it — wayvnc, TigerVNC, x11vnc, QEMU — gives the desktop and no sound. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
 Two redirections send this browser's own media the other way and are
 **experimental**, for lack of tests: `camera = true` offers the remote a virtual
