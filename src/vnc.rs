@@ -576,8 +576,11 @@ impl DesktopState {
         if !self.resize {
             return None;
         }
+        // The reported scale, not the canvas's label: a first report is declared
+        // back before it relabels the canvas.
         let points = self.pending.take().or(self.viewport).unwrap_or_else(|| {
-            let point = |v: u16| (f32::from(v) / self.scale).round().max(1.0) as u16;
+            let scale = self.generic_scale();
+            let point = |v: u16| (f32::from(v) / scale).round().max(1.0) as u16;
             (point(self.size.0), point(self.size.1))
         });
         self.viewport = Some(points);
@@ -7083,6 +7086,27 @@ mod tests {
         assert_eq!(written(&wire), declared);
         assert!(forwarded(&sink, &mut rx).await.is_none());
         assert!(!desktop.lock().unwrap().following);
+    }
+
+    /// With no window asked for yet, the declaration keeps the desktop's logical
+    /// size, in the points the report says it is drawn at — not the canvas's
+    /// label, which the report has not relabelled yet.
+    #[tokio::test]
+    async fn a_declaration_with_no_window_keeps_the_reported_logical_size() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1280, 800), Some(Screen { id: 3, flags: 0 }), None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.density = Density::Asked;
+            d.host_density = 2.0;
+        }
+        let body = output_scale_body((1280, 800), 2.0);
+        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1280, 800)), &sink)
+            .await
+            .unwrap();
+        assert_eq!(written(&wire), client_density((1280, 800), 2.0));
+        assert_eq!(desktop.lock().unwrap().viewport, Some((640, 400)));
     }
 
     /// A reported scale that is not the browser's is declared with the window in
