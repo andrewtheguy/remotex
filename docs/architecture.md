@@ -1397,8 +1397,10 @@ What the feature gates is `src/aac_eld.rs`, the decoder, and the receiver that
 needs it: AAC-ELD is decodable by no browser's WebCodecs and no native FFmpeg
 decoder, the Mac's transmitter emits it whatever codec the offer agrees (measured:
 an offer with AAC-ELD removed was accepted and streamed AAC-ELD anyway), and the
-one portable decoder is Fraunhofer's fdk-aac (`fdk-aac-prebuilt`, a downloaded
-static archive like `opus` and `vpx-sys`), whose licence is not OSI-approved. Two
+decoder is Fraunhofer's fdk-aac (`fdk-aac-prebuilt`, a downloaded static archive
+like `opus` and `vpx-sys`), whose licence is not OSI-approved. Fraunhofer's pure-Rust
+port, under the same licence, is a potential replacement; see
+[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio). Two
 consequences are worth knowing before enabling it: the Mac refuses an audio-only
 stream, so a screen-video offer whose HEVC picture is never received rides beside
 every audio offer; and the audio arrives by UDP at the gateway's address on the

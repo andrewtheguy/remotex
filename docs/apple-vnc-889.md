@@ -539,13 +539,45 @@ file are those. RTCP is told apart by the whole byte.
 **Decoding AAC-ELD is the catch, and it is forced — the transmitter's codec is
 decoupled from the negotiation.** AAC-ELD (MPEG-4 object type 39) is decodable by
 neither FFmpeg's native `aac` decoder nor any browser's WebCodecs `AudioDecoder`, so
-the stream cannot pass through and the gateway must decode. The only open decoder is
+the stream cannot pass through and the gateway must decode. The gateway uses
 Fraunhofer **fdk-aac** (licence not OSI-approved); Apple's own **AudioToolbox**
-(`aac_at`) decodes it too, but only when the gateway runs on macOS. The
+(`aac_at`) decodes it too, but only when the gateway runs on macOS, and Fraunhofer's
+pure-Rust port of the same decoder is a potential replacement (below). The
 AudioSpecificConfig fdk-aac wants is `F8 E6 50 00` — object type 39, 48 kHz,
 stereo, 480-sample frames, no SBR, no resilience tools — which decoded 375 of the
 377 captured units cleanly (the other two were RTCP, above); 512-sample frames
 concealed most of the stream and every other flag combination was refused.
+
+**A potential alternative to fdk-aac: Fraunhofer's Rust decoder.** Android 17 ships
+"FDK2 AAC", a pure-Rust port of the fdk-aac decoder, in AOSP at
+[`platform/external/aac`, `rust/`](https://android.googlesource.com/platform/external/aac/+/refs/tags/android-17.0.0_r1/rust)
+(tag `android-17.0.0_r1`). It is a Cargo crate named `aac` with no C code and no
+native build, only ordinary crates.io dependencies, and it builds and runs on Linux
+as well as Android. It decodes AAC-ELD, and takes the stream in the same shape:
+`AacDecoderInstance::new(TransportType::Mp4Raw)`, `config_raw(F8 E6 50 00)`, then
+`fill` and `decode` per access unit, returning interleaved `f32` rather than `i16`.
+Symphonia is not an option: its AAC decoder, 0.6.1 included, decodes AAC-LC only
+and refuses any other object type.
+
+It was measured against genuine Apple AAC-ELD without a Screen Sharing session.
+`afconvert` on the Mac encodes through AudioToolbox:
+`afconvert -f m4af -d "aace@48000#480" -b 320000 src.wav out.m4a` writes AAC-ELD
+whose AudioSpecificConfig is the stream's `F8 E6 50 00`, with 480-frame packets and
+240 samples of priming. On 10 s of stereo tones (1001 packets, macOS 26.6.2), both
+decoders decoded every packet without error. They agreed with each other at 85 dB
+SNR (within 3 LSB, because the Rust port is floating-point and fdk-aac is
+fixed-point), and each reproduced the source at 40 dB SNR once aligned by the
+240-sample priming. The Rust decoder took about 30 µs per 10 ms frame in a release
+build, and returned errors instead of panicking on garbage input, recovering on the
+next valid unit. The same `afconvert` file is not the transmitter's exact bitstream
+— the ASC matches, but the agent's bitrate mode and tool choices are not proven
+identical — so a live High Performance session remains the final check.
+
+It would replace fdk-aac, not sit beside it, and it would not change why the
+feature is gated: its licence is the same "Fraunhofer FDK AAC Codec Library for
+Android" text, not OSI-approved and with no patent grant. What it would remove is
+the C side — the prebuilt static archive and its `-sys` crate. It is not on
+crates.io, so it would be a git dependency on AOSP or a mirror.
 
 That the codec cannot be moved off AAC-ELD is now **proven, not assumed.** Offering
 a codec set that excludes AAC-ELD does not change the stream. Building a

@@ -205,8 +205,8 @@ Linux builds both `.deb` and `.rpm`; macOS builds `.pkg`. See
 
 The Mac's system audio on an `ard-high-performance` target is behind a Cargo
 feature that no release binary, package or container image includes: the stream is
-AAC-ELD, and the only portable decoder for it is Fraunhofer's fdk-aac, whose licence
-is not OSI-approved. To have it, build the gateway from source with the feature:
+AAC-ELD, and the portable decoders for it are Fraunhofer's fdk-aac and its Rust port,
+whose licence is not OSI-approved. To have it, build the gateway from source with the feature:
 
 ```sh
 bun install --cwd frontend
