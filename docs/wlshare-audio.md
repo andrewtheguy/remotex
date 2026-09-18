@@ -13,10 +13,11 @@ session runs in silence.
 Measured 2026-09-09 on `workstation-wsl`, a headless sway with one `HEADLESS-1`
 output and PipeWire's own dummy sink, through `tmp/audio_ws_probe.py`.
 
-The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which
-captures the **default sink's monitor** from PipeWire — what the desktop is
-playing, whatever is playing it — and sends it as FLAC frames of the format the
-client asked for.
+The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which,
+while any client listens, has the desktop play into a PipeWire sink of its own
+rather than the host's, so the host is silent the way a remote desktop's is. It
+captures that sink's monitor — what the desktop is playing, whatever is playing
+it — and sends it as FLAC frames of the format the client asked for.
 
 ## Configuration
 
@@ -164,11 +165,24 @@ sound is never held behind a ZRLE frame it was ready before; the browser's
 
 ## What wlshare does
 
+While any client listens, the desktop plays into the **speaker**, a
+`support.null-audio-sink` named `wlshare-speaker` ("wlshare remote audio") that
+`crates/wlshare/src/audio.rs` makes with the first client's enable and removes
+with the last one's disable or disconnect. Its `priority.session` is 100000,
+above what WirePlumber gives any host sink, the one the user configured
+included, so it is the default while it exists and every stream that follows
+the default moves to it. Nothing on the host is muted and no default is
+written: the node belongs to wlshare's PipeWire connection, so when it goes —
+or wlshare dies — WirePlumber makes the host's sink the default again and the
+streams follow it back. A stream an application pinned to a sink of its own
+stays there and is heard on the host.
+
 `crates/wlshare/src/audio.rs` starts one PipeWire capture per client that
 enables audio, on a thread of its own, and stops it on a disable or when the
 client goes. The stream is a `Stream/Input/Audio` node with
-`stream.capture.sink = "true"`, which is what makes PipeWire connect it to the
-**default sink's monitor** rather than to a microphone, and `node.latency` asks
+`stream.capture.sink = "true"` and `target.object` the speaker, which is what
+makes PipeWire connect it to the **speaker's monitor** rather than to a
+microphone, and `node.latency` asks
 for 20 ms buffers. The process callback runs on that capture's own loop thread
 rather than on the graph's real-time one — `RT_PROCESS` is deliberately not set,
 since the callback encodes, allocates, takes a mutex and wakes a task, none of
@@ -184,8 +198,8 @@ first buffers of a session are often smaller than 20 ms — 512 frames where 960
 were asked for, measured. The encoder keeps what does not fill a frame for the
 next buffer, so every frame on the wire is exactly 20 ms.
 
-A headless session still has a sink to capture: PipeWire's Dummy Output is one,
-and no `null-sink` needs configuring.
+A headless session needs no sink of its own, and no `null-sink` needs
+configuring: the speaker is one.
 
 ## Measured
 

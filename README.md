@@ -204,8 +204,9 @@ points × that density, so the output changes mode and scale at once. See [`docs
 
 `audio = true` works on a plain VNC target too, through wlshare's audio
 extension: the gateway lists its pseudo-encoding, wlshare announces so and then
-streams the desktop's sound on the RFB connection itself as lossless FLAC,
-captured from the default sink's monitor in PipeWire, and a server that does not
+streams the desktop's sound on the RFB connection itself as lossless FLAC. While
+a client listens the host is silent: the desktop plays into a PipeWire sink of
+wlshare's own, whose monitor is what is captured, and a server that does not
 speak it — wayvnc, TigerVNC, x11vnc, QEMU — gives the desktop and no sound. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
 Two redirections send this browser's own media the other way and are
