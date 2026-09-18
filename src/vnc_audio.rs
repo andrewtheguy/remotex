@@ -242,6 +242,11 @@ impl FrameDecoder {
     /// frames of [`SOURCE_FORMAT`]: a frame of any other shape is not one this
     /// client asked for.
     pub fn decode(&mut self, frame: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+        // symphonia's decoder expects a demuxer to have vetted the frame: it
+        // takes the channels from the STREAMINFO built here, not from the
+        // frame, and leaves the frame's CRC-16 unchecked. Both are this
+        // client's to check.
+        check_frame(&frame)?;
         let packet = Packet::new(0, Timestamp::new(0), Duration::new(u64::from(BLOCK_FRAMES)), frame);
         let decoded = self.decoder.decode(&packet).context("decoding a FLAC frame")?;
         anyhow::ensure!(
@@ -257,6 +262,75 @@ impl FrameDecoder {
         decoded.copy_to_vec_interleaved(&mut self.samples);
         Ok(self.samples.iter().flat_map(|sample| sample.to_le_bytes()).collect())
     }
+}
+
+/// Check a FLAC frame's header against [`SOURCE_FORMAT`] and [`BLOCK_FRAMES`],
+/// and its CRC-8 and CRC-16, as the FLAC specification lays them out.
+fn check_frame(frame: &[u8]) -> anyhow::Result<()> {
+    anyhow::ensure!(frame.len() >= 8, "a FLAC frame of {} bytes", frame.len());
+    anyhow::ensure!(frame[..2] == [0xFF, 0xF8], "not a fixed-blocking FLAC frame");
+    let (block_code, rate_code) = (frame[2] >> 4, frame[2] & 0xF);
+    let (channel_code, size_code) = (frame[3] >> 4, (frame[3] >> 1) & 0b111);
+    anyhow::ensure!(
+        matches!(channel_code, 0x1 | 0x8..=0xA),
+        "a FLAC frame with channel assignment {channel_code}, not stereo"
+    );
+    anyhow::ensure!(
+        matches!(size_code, 0 | 0x4) && frame[3] & 1 == 0,
+        "a FLAC frame of sample size code {size_code}, not 16 bits"
+    );
+    // The frame number, UTF-8 coded: a lead byte's leading ones count its bytes.
+    let number_len = match frame[4].leading_ones() {
+        0 => 1,
+        n @ 2..=7 => n as usize,
+        _ => anyhow::bail!("a FLAC frame number that is not UTF-8 coded"),
+    };
+    let mut at = 4 + number_len;
+    let mut field = |len: usize| -> anyhow::Result<u32> {
+        let bytes = frame.get(at..at + len).context("a truncated FLAC frame header")?;
+        at += len;
+        Ok(bytes.iter().fold(0, |value, &byte| value << 8 | u32::from(byte)))
+    };
+    let block = match block_code {
+        0x6 => field(1)? + 1,
+        0x7 => field(2)? + 1,
+        _ => 0,
+    };
+    anyhow::ensure!(block == u32::from(BLOCK_FRAMES), "a FLAC frame whose block is not {BLOCK_FRAMES} frames");
+    let rate = match rate_code {
+        0x0 | 0xA => SOURCE_FORMAT.sample_rate,
+        0xC => field(1)? * 1000,
+        0xD => field(2)?,
+        0xE => field(2)? * 10,
+        _ => 0,
+    };
+    anyhow::ensure!(rate == SOURCE_FORMAT.sample_rate, "a FLAC frame not at {} Hz", SOURCE_FORMAT.sample_rate);
+    anyhow::ensure!(
+        frame.get(at) == Some(&crc8(&frame[..at])),
+        "a FLAC frame header whose CRC-8 does not match"
+    );
+    let (body, crc) = frame.split_at(frame.len() - 2);
+    anyhow::ensure!(
+        u16::from_be_bytes([crc[0], crc[1]]) == crc16(body),
+        "a FLAC frame whose CRC-16 does not match"
+    );
+    Ok(())
+}
+
+/// FLAC's header CRC: polynomial 0x07, initialised to zero.
+fn crc8(bytes: &[u8]) -> u8 {
+    bytes.iter().fold(0, |crc, &byte| {
+        (0..8).fold(crc ^ byte, |crc, _| if crc & 0x80 != 0 { crc << 1 ^ 0x07 } else { crc << 1 })
+    })
+}
+
+/// FLAC's frame CRC: polynomial 0x8005, initialised to zero.
+fn crc16(bytes: &[u8]) -> u16 {
+    bytes.iter().fold(0, |crc, &byte| {
+        (0..8).fold(crc ^ u16::from(byte) << 8, |crc, _| {
+            if crc & 0x8000 != 0 { crc << 1 ^ 0x8005 } else { crc << 1 }
+        })
+    })
 }
 
 #[cfg(test)]
@@ -424,6 +498,20 @@ mod tests {
         frame.write(&mut sink).unwrap();
         assert!(decoder.decode(sink.into_inner()).is_err(), "half a block");
         assert!(decoder.decode(vec![0xAB; 64]).is_err(), "not a frame");
+        // A whole block, but of one channel.
+        let mut info = StreamInfo::new(48_000, 1, 16).unwrap();
+        info.set_block_sizes(960, 960).unwrap();
+        let mut framebuf = FrameBuf::with_size(1, 960).unwrap();
+        framebuf.fill_le_bytes(&signal(1)[..960 * 2], 2).unwrap();
+        let frame = flacenc::encode_fixed_size_frame(&config, &framebuf, 0, &info).unwrap();
+        let mut sink = ByteSink::new();
+        frame.write(&mut sink).unwrap();
+        assert!(decoder.decode(sink.into_inner()).is_err(), "mono");
+        // A good frame with one bit of its samples flipped.
+        let mut damaged = encode(&signal(1)).remove(0);
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 1;
+        assert!(decoder.decode(damaged).is_err(), "a bit flipped");
         // And a good frame still decodes after both.
         let pcm = signal(1);
         assert_eq!(decoder.decode(encode(&pcm).remove(0)).unwrap(), pcm);

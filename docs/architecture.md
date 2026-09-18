@@ -874,7 +874,7 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
 | `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps | 44 100 | 0 (self-describing) | empty |
+| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP, 48 000 for wlshare and High Performance | 0 (self-describing) | empty |
 
 Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
 the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
@@ -899,12 +899,14 @@ Opus packet reaches after decoding. That makes it the only option whose packets
 reach no decoder at all — which is a property of the path, not a compatibility
 escape hatch: the client refuses to start without WebCodecs either way.
 
-It also makes it the only option whose `sampleRate` is not 48 000. An
+It also makes it the only option whose `sampleRate` follows the source: 44.1 kHz
+from an RDP host, 48 kHz from wlshare and from High Performance. An
 `AudioBuffer` carries its own rate, so a context built at 48 kHz before the
 format arrived simply resamples on playback, exactly as the OS mixer would for
 any buffer that is not at the device's rate.
 
-The bandwidth is the whole of the trade: 1.41 Mbit/s is fifteen times Opus, and
+The bandwidth is the whole of the trade: 1.41 Mbit/s at 44.1 kHz, 1.54 at 48, is
+fifteen times Opus or more, and
 is a local-network proposition only. It is not a quality argument — Opus at 96
 kbps is well clear of audible loss on this material. Guacamole carries desktop
 audio this way and only this way (its single encoder emits
@@ -964,7 +966,8 @@ is up, which is what keeps a 48 kHz stream from being encoded as 44.1.
 An audio-enabled **generic VNC** engine has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
 with an empty rectangle, at which point the gateway names the format it wants —
-48 kHz, 16-bit stereo, little-endian — and turns the stream on; the sound then
+48 kHz, 16-bit stereo, little-endian, so under `pcm` the packets are 48 kHz as
+High Performance's are — and turns the stream on; the sound then
 arrives as FLAC frames on the RFB connection itself, and each is decoded into
 exactly the samples wlshare captured, in the format the queue takes. A server
 that announces nothing gives a desktop and no sound, which is the whole of the
