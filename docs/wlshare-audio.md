@@ -3,9 +3,9 @@
 How a wlroots-based Wayland desktop behind wlshare hands the gateway its sound,
 on the RFB connection it already has, so a `vnc` target plays through the
 browser the way an RDP one does. Standard RFB carries pixels and a clipboard and
-nothing else; this is the one audio extension `rfbproto` registers, spoken by
-QEMU as a server and gtk-vnc as a client, and now by wlshare and this gateway.
-It is discovered rather than configured, exactly as the density extension is
+nothing else; this is wlshare's private audio extension, which carries the sound
+as lossless FLAC and borrows its control messages from the QEMU Audio extension
+`rfbproto` registers. It is discovered rather than configured, exactly as the density extension is
 ([`wlshare-density.md`](wlshare-density.md)): the client lists a pseudo-encoding,
 a server that speaks it announces so, and one that does not says nothing and the
 session runs in silence.
@@ -15,8 +15,8 @@ output and PipeWire's own dummy sink, through `tmp/audio_ws_probe.py`.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which
 captures the **default sink's monitor** from PipeWire — what the desktop is
-playing, whatever is playing it — and sends it in the format the client asked
-for.
+playing, whatever is playing it — and sends it as FLAC frames of the format the
+client asked for.
 
 ## Configuration
 
@@ -34,7 +34,8 @@ audio = true
 `audio = true` is the whole of it, and it is what makes the gateway *ask*.
 Nothing names the server or the extension: a target that asks and connects to
 wayvnc, TigerVNC or x11vnc gets a desktop and no sound, which is what those
-servers have to give. On the gateway side `audio = true` is now accepted on any
+servers have to give. So does QEMU, whose own audio extension carries raw
+samples and is not asked for. On the gateway side `audio = true` is now accepted on any
 plain `vnc` target; it stays refused on Apple's standard Screen Sharing, which
 carries no sound and speaks no audio extension, and on High Performance it
 still means Apple's media stream and still needs the `apple-hp-audio` build.
@@ -45,24 +46,25 @@ pseudo-encoding is told nothing.
 
 ## The wire
 
-One registered pseudo-encoding and one registered message type, in both
-directions. `rfbproto` calls it the QEMU Audio extension.
+One private pseudo-encoding and one private message type, beside the QEMU Audio
+extension's message type for everything else.
 
-- **Pseudo-encoding** `-259`, listed in the client's `SetEncodings` beside the
-  standard ones. A server that does not know it ignores it, as RFB requires.
+- **Pseudo-encoding** `0x574c5346`, `WLSF` in ASCII, listed in the client's
+  `SetEncodings` beside the standard ones. A server that does not know it
+  ignores it, as RFB requires. QEMU's own pseudo-encoding, `-259`, is not
+  listed: what it promises is raw samples.
 - **Message type** `255` with **submessage** `1`, the QEMU extensions' shared
-  type. Nothing else under type 255 is advertised by this client, and a
-  submessage it does not know is fatal: the QEMU submessages share no length
-  field, so one that cannot be measured leaves the stream at an offset nothing
-  recovers from.
-- **Samples** are little-endian. The specification says nothing about the byte
-  order of a sample wider than eight bits; QEMU writes host-native samples and
-  gtk-vnc reads little-endian ones. Host-native is safe because every host this
-  runs on is little-endian, which is what gtk-vnc already expects.
+  type, for the client's set-format, enable and disable and the server's begin
+  and end. Nothing else under type 255 is advertised by this client, and a
+  submessage or operation it does not know is fatal: the QEMU submessages share
+  no length field, so one that cannot be measured leaves the stream at an
+  offset nothing recovers from. That includes QEMU's operation 2, raw data.
+- **Message type** `0xE4`, server → client, for the sound itself: one FLAC frame
+  a message.
 
 ### Server → client: the announcement
 
-An **empty pseudo-rectangle** of encoding `-259` inside a `FramebufferUpdate` —
+An **empty pseudo-rectangle** of encoding `WLSF` inside a `FramebufferUpdate` —
 the only way support is announced, the same shape ExtendedDesktopSize uses.
 wlshare sends it as its own update, ahead of any pixels, on the first
 `SetEncodings` that lists the encoding.
@@ -73,7 +75,7 @@ wlshare sends it as its own update, ahead of any pixels, on the first
 | 2 | U16 | y, 0 |
 | 4 | U16 | width, 0 |
 | 6 | U16 | height, 0 |
-| 8 | S32 | encoding, `-259` |
+| 8 | S32 | encoding, `0x574c5346` |
 
 ### Client → server: set format, enable, disable
 
@@ -87,68 +89,73 @@ passthrough encoder's PCM, and so needs no resampler on either path.
 | 0 | U8 | `255` |
 | 1 | U8 | `1` |
 | 2 | U16 | operation: 0 enable, 1 disable, 2 set format |
-| 4 | U8 | sample format (set format only): 0 U8, 1 S8, 2 U16, **3 S16**, 4 U32, 5 S32 |
+| 4 | U8 | sample format (set format only): 0 U8, 1 S8, 2 U16, **3 S16** |
 | 5 | U8 | channels, 1 or 2 |
-| 6 | U32 | frequency, up to 192 000 in wlshare |
+| 6 | U32 | frequency, 8 000 to 96 000 in wlshare |
 
 Four bytes for an enable or a disable, ten for a set-format. The gateway sends
-set-format then enable, once, when the announcement arrives.
+set-format then enable, once, when the announcement arrives. QEMU's 32-bit
+formats, 4 and 5, are refused by wlshare, since FLAC stores at most 24 bits.
 
-### Server → client: begin, data, end
+### Server → client: begin, end
 
 | Offset | Type | Field |
 |---|---|---|
 | 0 | U8 | `255` |
 | 1 | U8 | `1` |
-| 2 | U16 | operation: 0 end, 1 begin, 2 data |
-| 4 | U32 | length of the samples (data only) |
-| 8 | U8[] | samples, interleaved, in the client's format |
+| 2 | U16 | operation: 0 end, 1 begin |
 
-### Server → client: silence
-
-wlshare's own, not QEMU's. The gateway lists the private pseudo-encoding
-`0x574c5341` (`WLSA`) beside `-259`, and wlshare then sends a count of frames
-in place of any run of data messages whose every sample is silence — which,
-because its capture keeps the sink's monitor running, is what a desktop playing
-nothing produces: 192 kB/s of zeros at this format, now eight bytes per 20 ms.
+### Server → client: a FLAC frame
 
 | Offset | Type | Field |
 |---|---|---|
 | 0 | U8 | `0xE4` |
 | 1 | U8[3] | padding |
-| 4 | U32 | frames |
+| 4 | U32 | length of the frame |
+| 8 | U8[] | one FLAC frame |
 
-It is lossless: silence here is exact zero, the gateway expands the count back
-into exactly those zeros, and the stream's timing is unchanged. Nothing is
-announced — listing the encoding is the whole negotiation — and any other
-server ignores it and sends every sample.
+Sent between a begin and an end. Every frame holds exactly `frequency / 50`
+frames of samples — 20 ms, **960** at the gateway's 48 kHz — in FLAC's
+fixed-blocking mode, numbered from zero at each begin. The FLAC stream header,
+`STREAMINFO`, is never sent: everything in it follows from the format the client
+set and that block size, so the client builds it (`vnc_audio::streaminfo`). An
+unsigned format has the top bit of every sample flipped before it is encoded,
+mapping it onto the signed range with silence on zero, and flipped back after;
+the gateway asks for a signed one, so it never flips. Decoded samples are
+interleaved, little-endian, and bit for bit what wlshare captured.
+
+FLAC is lossless, so the gateway's Opus encode stays the only lossy step on the
+way to the browser, and passthrough stays exactly the desktop's samples. On the
+RFB connection music and speech cost about two-thirds of their 1.5 Mbit/s PCM
+rate or less, and a desktop playing nothing, whose capture still runs, a few
+bytes a frame.
 
 ## What the gateway does with it
 
-`src/vnc_qemu_audio.rs` is the wire; `src/vnc.rs` keeps the extension's state
-per connection as `Audio`: `Off` where no sound was asked for and on the Apple
-dialects, `Asked` from the handshake, `Announced` once the rectangle has
-arrived and the stream has been turned on, and `Unanswered` once pixels have
-arrived with no announcement in front of them — a server that announces late is
-still taken.
+`src/vnc_audio.rs` is the wire and the decoder; `src/vnc.rs` keeps the
+extension's state per connection as `Audio`: `Off` where no sound was asked for
+and on the Apple dialects, `Asked` from the handshake, `Announced` once the
+rectangle has arrived and the stream has been turned on, and `Unanswered` once
+pixels have arrived with no announcement in front of them — a server that
+announces late is still taken.
 
 - The announcement is answered after the update it arrived in, not inside it,
   so the enable goes out once however the update was framed.
-- `begin` publishes the negotiated format on `AudioBridge`; `end` clears it,
-  which leaves an open `/ws/audio` response filling with silence rather than
-  ending. A desktop going quiet must not cost the listener its stream.
-- Each `data` message's samples go to the bridge as they arrived — interleaved
-  little-endian 16-bit stereo is what was asked for and what the queue takes,
-  so nothing is copied or converted between the socket and the encoder. From
-  there the path is every target's: the queue, the Opus or passthrough encoder,
-  `/ws/audio` ([Audio frames](architecture.md#audio-frames)).
-- A data length past a megabyte is read past rather than allocated: a buffer is
-  20 ms, and a second of this format is 192 000 bytes, so anything larger is a
-  server that has lost its framing.
-- A silence message becomes a buffer of that many frames of zeros on the
-  bridge, in order with the data around it, so nothing downstream can tell it
-  from the data message it replaced. A count worth more than a megabyte is
-  dropped the same way.
+- `begin` makes a fresh FLAC decoder and publishes the negotiated format on
+  `AudioBridge`; `end` drops the decoder and clears the format, which leaves an
+  open `/ws/audio` response filling with silence rather than ending. A desktop
+  going quiet must not cost the listener its stream.
+- Each frame is decoded by symphonia's FLAC decoder into interleaved
+  little-endian 16-bit stereo, which is what was asked for and what the queue
+  takes, and goes to the bridge as one wave buffer. From there the path is every
+  target's: the queue, the Opus or passthrough encoder, `/ws/audio`
+  ([Audio frames](architecture.md#audio-frames)).
+- A frame that does not decode, or does not hold exactly 960 stereo frames, is
+  dropped with a warning: each FLAC frame decodes on its own, so it costs its
+  20 ms and nothing after it. So is a frame outside a begin and an end.
+- A frame length past 64 KiB is read past rather than allocated: a frame is
+  3840 bytes of samples before compression, and FLAC adds a few header bytes at
+  worst, so anything larger is a server that has lost its framing.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying
 it in band. wlshare drains its capture queue before every framebuffer update, so
@@ -164,22 +171,28 @@ client goes. The stream is a `Stream/Input/Audio` node with
 **default sink's monitor** rather than to a microphone, and `node.latency` asks
 for 20 ms buffers. The process callback runs on that capture's own loop thread
 rather than on the graph's real-time one — `RT_PROCESS` is deliberately not set,
-since the callback allocates, takes a mutex and wakes a task, none of which is
-real-time safe: on the data thread it could stall the whole audio graph and give
-every application on the host an xrun. It copies whole frames into a sixteen-deep
-queue, dropping the oldest when a client cannot keep up — a dropped buffer is a
+since the callback encodes, allocates, takes a mutex and wakes a task, none of
+which is real-time safe: on the data thread it could stall the whole audio graph
+and give every application on the host an xrun. It encodes with `flacenc` there,
+off the session's task, and queues each finished frame in a sixteen-deep queue,
+dropping the oldest when a client cannot keep up — a dropped frame is a 20 ms
 hole, and a stalled capture callback is worse. A set-format on a running stream
 restarts the capture in the new format.
 
 PipeWire honours its own quantum before settling on the requested one, so the
 first buffers of a session are often smaller than 20 ms — 512 frames where 960
-were asked for, measured. Nothing downstream cares: every buffer is a whole
-number of frames and the encoder cuts its own packets.
+were asked for, measured. The encoder keeps what does not fill a frame for the
+next buffer, so every frame on the wire is exactly 20 ms.
 
 A headless session still has a sink to capture: PipeWire's Dummy Output is one,
 and no `null-sink` needs configuring.
 
 ## Measured
+
+These were taken while the RFB connection carried raw PCM, before FLAC replaced
+it. What reaches the browser is unchanged, since FLAC is lossless and the gateway
+hands the bridge the same samples; the RFB leg's own rate has not been measured
+on a live desktop.
 
 With a 6-second 440/660 Hz stereo tone playing into the default sink through
 `pw-play`, a passthrough target on this host:

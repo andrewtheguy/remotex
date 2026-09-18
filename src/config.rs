@@ -764,8 +764,8 @@ pub struct TargetConfig {
     pub clipboard: bool,
     /// Carry the remote's sound. Packets are sent only while the attached client
     /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
-    /// asks a generic server for the QEMU Audio extension and is answered by one
-    /// that speaks it, wlshare today — see [`crate::vnc_qemu_audio`]; an
+    /// asks a generic server for wlshare's audio extension, FLAC on the RFB
+    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]; an
     /// `ard-high-performance` target negotiates the Mac's system audio over its
     /// media stream, and only in a gateway built with the `apple-hp-audio` feature
     /// — see [`crate::vnc_apple_audio`]. Refused on Apple's standard Screen
@@ -1138,8 +1138,8 @@ impl TargetConfig {
     /// remote has said anything: what the RDP engine asks a server to redirect
     /// ([`crate::audio::PCM_CD_QUALITY`]), what the Mac's AAC-ELD decodes to
     /// ([`crate::vnc_apple_audio::SOURCE_FORMAT`]), or what a generic VNC server
-    /// is asked to send over the QEMU Audio extension
-    /// ([`crate::vnc_qemu_audio::SOURCE_FORMAT`]) — the last of which this client
+    /// is asked to send over wlshare's audio extension
+    /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
     /// session builds its encoder from this when the audio socket opens before the
     /// remote's channel is up, so it has to be the source's — an encoder built for
@@ -1154,7 +1154,7 @@ impl TargetConfig {
             // generic case is what makes that a decision rather than a default.
             Protocol::Vnc => match self.subtype {
                 Some(Subtype::ArdHighPerformance) => crate::vnc_apple_audio::SOURCE_FORMAT,
-                None | Some(Subtype::Ard) => crate::vnc_qemu_audio::SOURCE_FORMAT,
+                None | Some(Subtype::Ard) => crate::vnc_audio::SOURCE_FORMAT,
             },
         }
     }
@@ -1696,13 +1696,13 @@ impl ConfigFile {
                 target.name
             );
             // Audio is carried by three paths and refused elsewhere rather than
-            // ignored: MS-RDPEA on RDP, the QEMU Audio extension on a generic VNC
-            // target ([`crate::vnc_qemu_audio`]), and Apple's media stream on High
+            // ignored: MS-RDPEA on RDP, wlshare's audio extension on a generic VNC
+            // target ([`crate::vnc_audio`]), and Apple's media stream on High
             // Performance mode — the last only in a build with the AAC-ELD decoder
             // the Mac's stream needs (the `apple-hp-audio` feature, off by default
             // and absent from every release binary). What is left is Apple's
             // standard Screen Sharing, which carries no sound and does not speak
-            // the QEMU extension either, so `audio = true` there could only ever be
+            // wlshare's extension either, so `audio = true` there could only ever be
             // a mistake about what the subtype carries. Naming each case at parse
             // time is the difference between a config error and a session that is
             // silent for no stated reason.
@@ -1716,7 +1716,7 @@ impl ConfigFile {
             // encoders — is protocol-agnostic, which is why this rule is about the
             // *engine* and the *build* and not about any of them.
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-            // generic VNC target, asked for the way the QEMU Audio extension is: a
+            // generic VNC target, asked for the way its audio extension is: a
             // server that never announces it leaves the camera unplugged. Apple's
             // Screen Sharing speaks no such extension, in either subtype.
             anyhow::ensure!(
@@ -1742,7 +1742,7 @@ impl ConfigFile {
                     target.subtype != Some(Subtype::Ard),
                     "target {:?} sets audio on a {} target, and Apple's standard Screen Sharing \
                      carries none: its system audio exists in High Performance mode alone, and \
-                     the QEMU Audio extension a generic vnc target is asked for is not something \
+                     wlshare's audio extension a generic vnc target is asked for is not something \
                      a Mac speaks. Remove the key to start the session without sound.",
                     target.name,
                     Subtype::Ard.name()
@@ -4794,7 +4794,7 @@ mod tests {
     /// with nothing anywhere to say why.
     #[test]
     fn audio_belongs_to_rdp_and_generic_vnc() {
-        // A plain `vnc` target asks a generic server for the QEMU Audio
+        // A plain `vnc` target asks a generic server for wlshare's audio
         // extension, and gets silence from one that does not speak it. That is
         // discovery, not a config error.
         let config = ConfigFile::parse(&format!(
@@ -4816,7 +4816,7 @@ mod tests {
         assert!(config.targets[0].audio);
         assert_eq!(
             config.targets[0].audio_source_format(),
-            crate::vnc_qemu_audio::SOURCE_FORMAT
+            crate::vnc_audio::SOURCE_FORMAT
         );
 
         // An rdp target negotiates MS-RDPEA when it connects, and what the host
@@ -5040,7 +5040,7 @@ mod tests {
         assert!(rendered.contains("on a ard target"), "{rendered}");
         assert!(rendered.contains("High Performance"), "{rendered}");
         assert!(
-            rendered.contains("QEMU Audio"),
+            rendered.contains("wlshare's audio extension"),
             "the other path a vnc target can have is named too: {rendered}"
         );
     }
@@ -5108,9 +5108,9 @@ mod tests {
         .unwrap()
         .resolve()
         .unwrap();
-        assert_eq!(vnc.targets[0].audio_source_format(), crate::vnc_qemu_audio::SOURCE_FORMAT);
-        assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.sample_rate, 48_000);
-        assert_eq!(crate::vnc_qemu_audio::SOURCE_FORMAT.bits_per_sample, 16);
+        assert_eq!(vnc.targets[0].audio_source_format(), crate::vnc_audio::SOURCE_FORMAT);
+        assert_eq!(crate::vnc_audio::SOURCE_FORMAT.sample_rate, 48_000);
+        assert_eq!(crate::vnc_audio::SOURCE_FORMAT.bits_per_sample, 16);
     }
 
     /// An unset codec reads as Opus, and passthrough can be asked for by name.

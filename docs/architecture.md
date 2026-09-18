@@ -874,7 +874,7 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
 | `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps | 44 100 | 0 (self-describing) | empty |
+| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP, 48 000 for wlshare and High Performance | 0 (self-describing) | empty |
 
 Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
 the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
@@ -899,12 +899,14 @@ Opus packet reaches after decoding. That makes it the only option whose packets
 reach no decoder at all — which is a property of the path, not a compatibility
 escape hatch: the client refuses to start without WebCodecs either way.
 
-It also makes it the only option whose `sampleRate` is not 48 000. An
+It also makes it the only option whose `sampleRate` follows the source: 44.1 kHz
+from an RDP host, 48 kHz from wlshare and from High Performance. An
 `AudioBuffer` carries its own rate, so a context built at 48 kHz before the
 format arrived simply resamples on playback, exactly as the OS mixer would for
 any buffer that is not at the device's rate.
 
-The bandwidth is the whole of the trade: 1.41 Mbit/s is fifteen times Opus, and
+The bandwidth is the whole of the trade: 1.41 Mbit/s at 44.1 kHz, 1.54 at 48, is
+fifteen times Opus or more, and
 is a local-network proposition only. It is not a quality argument — Opus at 96
 kbps is well clear of audible loss on this material. Guacamole carries desktop
 audio this way and only this way (its single encoder emits
@@ -962,15 +964,16 @@ wave buffers can be in — when the audio socket opens before the remote's chann
 is up, which is what keeps a 48 kHz stream from being encoded as 44.1.
 
 An audio-enabled **generic VNC** engine has no channel to negotiate either. It
-lists the QEMU Audio pseudo-encoding, and a server that speaks it announces so
+lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
 with an empty rectangle, at which point the gateway names the format it wants —
-48 kHz, 16-bit stereo, little-endian — and turns the stream on; the samples then
-arrive as messages on the RFB connection itself and reach the bridge uncopied,
-since that format is already what the queue takes. A server that announces
-nothing gives a desktop and no sound, which is the whole of the failure mode:
-asking costs such a session nothing. wlshare is the server this was built
-against — see [`wlshare-audio.md`](wlshare-audio.md) — and the extension is
-`rfbproto`'s, not a private one.
+48 kHz, 16-bit stereo, little-endian, so under `pcm` the packets are 48 kHz as
+High Performance's are — and turns the stream on; the sound then
+arrives as FLAC frames on the RFB connection itself, and each is decoded into
+exactly the samples wlshare captured, in the format the queue takes. A server
+that announces nothing gives a desktop and no sound, which is the whole of the
+failure mode: asking costs such a session nothing. The extension is wlshare's
+own, its control messages borrowed from `rfbproto`'s QEMU Audio extension — see
+[`wlshare-audio.md`](wlshare-audio.md).
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -1308,12 +1311,11 @@ does not — a motion or streaming plan — the pixels are read back out of the 
 as before. Either way a source the shadow does not know costs one non-incremental
 repaint rather than an invented picture.
 
-Generic `vnc` asked for `audio` also advertises the **QEMU Audio**
-pseudo-encoding (`-259`), the one audio extension `rfbproto` registers.
-`src/vnc_qemu_audio.rs` is that wire: the server announces support with an empty
-rectangle of the encoding, the client answers with a set-format and an enable,
-and message 255 submessage 1 then carries begin, a run of sample buffers, and
-end. Discovery works the way the density extension's does, and a server that
+Generic `vnc` asked for `audio` also advertises wlshare's **audio**
+pseudo-encoding (`WLSF`). `src/vnc_audio.rs` is that wire: the server announces
+support with an empty rectangle of the encoding, the client answers with the
+QEMU Audio extension's set-format and enable, and the server sends QEMU's begin,
+a run of FLAC frames in message `0xE4`, and QEMU's end. Discovery works the way the density extension's does, and a server that
 never announces leaves the session silent rather than failing it. See
 [`wlshare-audio.md`](wlshare-audio.md).
 

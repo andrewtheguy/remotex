@@ -2,8 +2,8 @@
 
 How the browser's microphone reaches a wlroots-based Wayland desktop behind
 wlshare, on the RFB connection the session already has, so a `vnc` target can take
-a microphone the way an RDP one does over MS-RDPEAI. The QEMU Audio extension
-carries sound from the server only, so this is wlshare's fourth private extension,
+a microphone the way an RDP one does over MS-RDPEAI. The audio extension
+([`wlshare-audio.md`](wlshare-audio.md)) carries sound from the server only, so this is wlshare's fourth private extension,
 the camera's twin ([`wlshare-camera.md`](wlshare-camera.md)). It is discovered
 rather than configured: the client lists a pseudo-encoding, a server that speaks it
 answers, and one that does not says nothing and the browser's microphone is never
