@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { altAsCommand } from "./altAsCommand.ts";
 import {
   type AudioPlayer,
   createAudioContext,
@@ -574,6 +575,12 @@ export function useRemoteDesktop(
   // Read by the key handlers, which must not re-subscribe when it changes: a
   // teardown mid-chord would strand whatever is held.
   const macKeyOverridesActiveRef = useRef(macKeyOverridesActive);
+  // The mirror of the condition above, and the whole of what turns the left Alt
+  // key into Command: a keyboard with no Command key of its own, driving a Mac
+  // that wants one (see altAsCommand.ts). No preference — a PC keyboard has no
+  // use for the left Option key that is worth the control.
+  const altAsCommandActive = !IS_MAC_HOST && remoteIsMac;
+  const altAsCommandActiveRef = useRef(altAsCommandActive);
   // Read by the clipboard handlers, which must not re-subscribe — or push the
   // browser's clipboard a second time — to learn that the menu opened.
   const viewOnlyRef = useRef(viewOnly);
@@ -596,13 +603,20 @@ export function useRemoteDesktop(
     ((snapshot: ClipboardSnapshot | null) => void)[]
   >([]);
 
+  // Either translation changing mid-session sweeps what is held: the codes that
+  // went out under the old one are the codes the remote is holding, and the
+  // handlers would otherwise release them under the new one.
   useEffect(() => {
-    if (macKeyOverridesActiveRef.current === macKeyOverridesActive) {
+    if (
+      macKeyOverridesActiveRef.current === macKeyOverridesActive &&
+      altAsCommandActiveRef.current === altAsCommandActive
+    ) {
       return;
     }
     macKeyOverridesActiveRef.current = macKeyOverridesActive;
+    altAsCommandActiveRef.current = altAsCommandActive;
     releaseKeysRef.current?.();
-  }, [macKeyOverridesActive]);
+  }, [macKeyOverridesActive, altAsCommandActive]);
 
   useEffect(() => {
     try {
@@ -2379,12 +2393,20 @@ export function useRemoteDesktop(
         macKeyOverridesActiveRef.current,
       );
       for (const key of translated) {
+        // The code on the wire, which on a PC keyboard driving a Mac is not the
+        // code that was typed: the left Alt key is Command there
+        // (altAsCommand.ts). `pressedKeys` follows the substitution for the same
+        // reason it follows the translator — a sweep must release what the
+        // remote was told about.
+        const wire = altAsCommandActiveRef.current
+          ? altAsCommand(key.code)
+          : key.code;
         if (key.pressed) {
-          pressedKeys.add(key.code);
+          pressedKeys.add(wire);
         } else {
-          pressedKeys.delete(key.code);
+          pressedKeys.delete(wire);
         }
-        send({ type: "key", ...key });
+        send({ type: "key", ...key, code: wire });
       }
     };
     // A lapsed modifier goes out as the keyup it stands in for, through the

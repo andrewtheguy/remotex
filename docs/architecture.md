@@ -1306,7 +1306,9 @@ Apple Standard mode maps X11 modifiers by its own table. Measured on macOS 26,
 `Alt_L`/`Alt_R` and `Super_L`/`Super_R` all arrive as Command,
 `Meta_L`/`Meta_R` arrive as the corresponding Option key, and `Mode_switch` and
 `ISO_Level3_Shift` do nothing. The engine therefore sends a keyboard's Alt codes
-as Meta on a Mac (`keymap::apple_keysym`) and leaves Windows keys as Super. The
+as Meta on a Mac (`keymap::apple_keysym`) and leaves Windows keys as Super; which
+physical key a browser calls `AltLeft` is settled before that, in the page, which
+is the only end that knows what the host keyboard is. The
 server also drops pointer and key input during the first seconds of a session;
 `tests/ws_probe.py --key` waits eight seconds before injecting for that reason.
 
@@ -1526,6 +1528,21 @@ stays hidden. See `frontend/src/touchPassthrough.ts`.
 On a Mac host connected to a non-Mac remote, selected Command shortcuts are
 translated to Control. A Mac-keyboard toggle disables translation, and the
 gateway's `remoteOs` message suppresses it for Mac remotes.
+
+The mirror of that is a keyboard with no Command key of its own. A PC keyboard
+reaches a Mac the way the same keyboard plugged into one does — Windows key
+Command, Alt keys Option — which leaves Command behind the key a Windows host
+guards hardest: it keeps Super+C for itself, beside Super+L and the rest of the
+Super chords it reserves, so the chord never becomes a key event the page can
+forward and copy cannot be typed at the Mac at all. On a non-Mac host driving a
+Mac remote the page therefore sends the left Alt key as the left Command and
+both Windows keys as the right, which is RealVNC's default from a PC keyboard,
+and leaves the right Alt key as Option
+(`frontend/src/altAsCommand.ts`). Held keys follow the code that went out, as
+they do for a translated Command chord, so a release lifts the Command rather
+than the Alt. The left Option key is what it costs, and the soft keyboard still
+carries it: those chords are sent by code and never pass through the
+substitution. Neither side of this is a preference.
 
 While the floating menu has something over the desktop — its drawer, or the one
 modal card that opens from it and leaves the drawer standing — the desktop is
