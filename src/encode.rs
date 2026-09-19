@@ -1151,6 +1151,7 @@ impl TileSink {
         // The client's own half of the verdict. Free to read whether or not the
         // walk is lag-aware; `observe` is what knows.
         let lag = self.shared.feedback.lag(now);
+        let before = video.congestion.quality;
         let Some(wanted) = video.congestion.observe(blocked, lag, now) else {
             return;
         };
@@ -1158,6 +1159,9 @@ impl TileSink {
         // A region that appears while the link is behind has no more room than the
         // ones already running.
         if let Err(e) = video.regions.set_quality(wanted) {
+            // The streams kept the quality they had, so the walk does too: its next
+            // verdict starts from what is actually in force.
+            video.congestion.quality = before;
             warn!("{}: could not move the video quality to {wanted}: {e:#}", self.engine);
         } else {
             debug!("{}: video quality now {wanted} (the dial asks for {dial})", self.engine);
@@ -1522,13 +1526,14 @@ async fn settle_stream(engine: &'static str, shared: &Shared) {
         return;
     }
     let dial = video.congestion.dial;
-    video.congestion.settle(now);
-    // Left owed on failure, so the next tick tries again; the picture on screen is
+    // The encoder first and the walk only after it: on failure nothing is recorded,
+    // the settle stays owed, and the next tick tries again. The picture on screen is
     // still a good one, only a coarser one.
     if let Err(e) = video.regions.set_quality(dial) {
         warn!("{engine}: could not take the video quality back to {dial}: {e:#}");
         return;
     }
+    video.congestion.settle(now);
     video.regions.refresh();
     video.coarse_at = None;
     drop(video);

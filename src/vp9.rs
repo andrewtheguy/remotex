@@ -418,18 +418,25 @@ impl Stream {
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
         let quality = quality.clamp(QUALITY_MIN, QUALITY_MAX);
         let q = q_for(quality);
-        self.quality = quality;
-        if q == self.cfg.rc_min_quantizer {
+        // Against the committed quality rather than `cfg`: a `cq_level` refused after the config
+        // was accepted leaves `cfg` already at `q`, and the retry must still send the control.
+        if q == q_for(self.quality) {
+            self.quality = quality;
             return Ok(());
         }
-        self.cfg.rc_min_quantizer = q;
-        self.cfg.rc_max_quantizer = q;
+        // Edited on a copy and kept only once libvpx has accepted it, so a refusal leaves
+        // `cfg` describing the encoder as it still is.
+        let mut cfg = self.cfg;
+        cfg.rc_min_quantizer = q;
+        cfg.rc_max_quantizer = q;
         // SAFETY: `cfg` is the struct libvpx validated at init with two fields changed, and `ctx`
         // is live. libvpx re-validates it and returns a code rather than accepting nonsense.
         unsafe {
-            vpx!(vpx::vpx_codec_enc_config_set(&mut self.ctx, &self.cfg), "enc_config_set")?;
+            vpx!(vpx::vpx_codec_enc_config_set(&mut self.ctx, &cfg), "enc_config_set")?;
+            self.cfg = cfg;
             self.control(vpx::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL, q as c_int, "cq_level")?;
         }
+        self.quality = quality;
         Ok(())
     }
 

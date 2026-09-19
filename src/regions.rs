@@ -1322,12 +1322,17 @@ impl Regions {
     /// One link, one verdict: the streams share a socket, and a policy that treated
     /// them separately would be reasoning about a bottleneck none of them can see on
     /// its own.
+    ///
+    /// Recorded only once every stream has taken it. A stream that refuses keeps the
+    /// quality it had, and so does the table — which is what [`Self::put_back`]
+    /// brings any stream that did take it back to — so a failure leaves one
+    /// consistent quality in force, and a caller retrying sees the old one.
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
-        self.quality = quality;
         for live in &mut self.live {
             live.stream.set_quality(quality)?;
             live.quality = quality;
         }
+        self.quality = quality;
         Ok(())
     }
 
