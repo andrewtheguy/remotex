@@ -246,6 +246,37 @@ has an answer rather than being rediscovered.
   pointer transforms. High Performance mode is unaffected because it uses one
   virtual display rather than a mosaic of physical displays.
 
+### Alt as Command on a Mac remote
+
+A PC keyboard reaches a Mac with its Windows key as Command and its Alt keys as
+Option ([`architecture.md`](architecture.md) has the measured table), which is the
+layout a Mac gives the same keyboard plugged into it. From a Windows host that
+leaves Command behind the one key the host guards hardest: Windows keeps
+Super+C for itself, beside Super+L and the rest of the Super chords it reserves,
+so the chord never becomes a key event the page can forward and Command-C — copy
+— cannot be typed at the Mac at all. The other everyday chords survive only as
+long as Windows has no use for their letter.
+
+The way out is to let Alt be Command. Alt+C is an ordinary key event on every
+host, and the engine already chooses the keysym a Mac is sent per DOM code
+(`keymap::apple_keysym`), so sending the Alt codes as the Super a Mac reads as
+Command, and the Windows keys as the Meta it reads as Option, is a second table
+rather than a new mechanism. What needs deciding is where the choice lives and
+what it costs:
+
+- It is the *host keyboard's* property, not the target's: the same Mac reached from
+  a Mac wants Command left alone. That puts it beside the Mac host's Command
+  preference in the browser, offered only when the remote reports itself a Mac and
+  the host is not one, and swapped in the page before the code reaches the wire —
+  which also keeps held-key release and the soft keyboard on the codes they
+  already track.
+- Alt chords the local browser keeps — Alt+D, Alt+F, Alt+Left — are not the page's
+  to forward in a windowed tab, the same boundary the Command translator has. An
+  app window or immersive full screen hands them over.
+- Option moves to the Windows key and inherits its reservations, which matters less:
+  Option chords type symbols, and the soft keyboard carries both sides of every
+  modifier for the ones the host will not part with.
+
 ### A virtual-display remote session for sway
 
 Console-style remote control of a physical sway machine, the way Apple's High
