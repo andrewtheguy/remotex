@@ -614,6 +614,18 @@ untouched; which cells deserve losslessness was the operator's call, not the
 link's. Without the key, nothing changes: pressure-only walk for streams, fixed
 quality for tiles.
 
+The walk only runs when a round is taken, and under `video` a round is only
+taken when something changed, so a desktop that stops moving right after the link
+coarsened it would keep that picture, and the walk would stay below the dial, until
+something changed again. The order task's cleanup tick is what comes back for it.
+Once the stream has been idle `CLEANUP_IDLE` since a round that went out below the
+dial, and on a `render_adaptive` target the lag has cleared, it takes the dial back
+and marks the unchanged mirror dirty. The engine encodes that as one inter frame.
+libvpx codes the residual of unchanged blocks at the finer quantizer, so the frame
+sharpens the whole desktop without a keyframe; the vp9 test
+`a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards that. A
+stream that went out at the dial owes nothing and sends nothing when it goes quiet.
+
 That signal only works because those queues are shallow. `FRAME_BUFFER` is 64, sized
 for tiles — a 1080p repaint is ~17 bands — but under `video` one message is a whole
 frame, and 64 of them in each of two queues in series is seconds of buffered

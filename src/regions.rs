@@ -129,7 +129,9 @@ fn record_end(ended: &mut Vec<u8>, id: u8) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
     /// `render_type = "video"`: one stream over the whole desktop, for the whole
-    /// session. No cells, no debts, no cleanup — nothing else is being sent.
+    /// session. No cells, no debts, no cleanup tiles — nothing else is being sent. A
+    /// picture the congestion walk coarsened is sharpened by the stream itself
+    /// ([`Regions::refresh`]).
     Whole,
     /// `render_motion = true`: a stream per coalesced moving region, with
     /// the base codec carrying every cell outside one.
@@ -1332,6 +1334,19 @@ impl Regions {
     /// The dial every live stream is encoding at, for the totals.
     pub fn quality(&self) -> u8 {
         self.quality
+    }
+
+    /// Mark every live stream dirty over pixels it has already carried, so the next
+    /// round re-encodes them at the quality now in force.
+    ///
+    /// The whole-desktop stream's settle ([`crate::encode`]): a screen that stopped
+    /// changing while the link had the dial walked down would otherwise keep that
+    /// coarse picture until it next changed. An inter frame over the unchanged mirror
+    /// at a finer quantizer sharpens it; no keyframe is needed.
+    pub fn refresh(&mut self) {
+        for live in &mut self.live {
+            live.dirty = true;
+        }
     }
 
     /// Arm a keyframe on every live stream. Its callers are exactly the moments a
