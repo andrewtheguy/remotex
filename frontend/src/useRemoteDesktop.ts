@@ -16,6 +16,7 @@ import {
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
+import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
@@ -2179,6 +2180,9 @@ export function useRemoteDesktop(
     // table. A windowed browser tab still keeps those keydowns before the page can
     // see them, but there is no client mode to toggle around that browser boundary.
     const macKeys = new MacKeyboardTranslator();
+    // The physical modifiers, so one whose keyup the local system kept is
+    // released on the next event that reports it up (see heldModifiers.ts).
+    const heldModifiers = new HeldModifiers();
 
     // Client point to remote pixels. Map through the canvas rect (not the
     // overlay): it reflects the displayed framebuffer under the current touch
@@ -2271,6 +2275,7 @@ export function useRemoteDesktop(
     const toRemote = (e: MouseEvent) => toRemotePoint(e.clientX, e.clientY);
 
     const onMouseMove = (e: MouseEvent) => {
+      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
       const { x, y } = toRemote(e);
       // Keep the gesture cursor in sync with real mouse input on hybrid
       // touch+mouse devices.
@@ -2279,6 +2284,7 @@ export function useRemoteDesktop(
     };
     const onMouseDown = (e: MouseEvent) => {
       el.focus(); // take keyboard focus on pointer interaction
+      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
       const button = mouseButtonFromEvent(e.button);
       if (!button) {
         return;
@@ -2307,6 +2313,7 @@ export function useRemoteDesktop(
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
       send({
         type: "wheel",
         dx: e.deltaX,
@@ -2341,6 +2348,7 @@ export function useRemoteDesktop(
       // above needs, and resetting it first would say a chord is over while its
       // codes are still going out.
       macKeys.reset();
+      heldModifiers.clear();
     };
     const releaseAll = () => {
       releaseKeys();
@@ -2379,8 +2387,18 @@ export function useRemoteDesktop(
         send({ type: "key", ...key });
       }
     };
+    // A lapsed modifier goes out as the keyup it stands in for, through the
+    // translator, so a translated Command lifts its synthetic Control with it.
+    // Before the event that exposed it: the click or key that follows must not
+    // arrive wearing a modifier nobody is holding.
+    const releaseLapsed = (lapsed: string[], e: KeyboardEvent | MouseEvent) => {
+      for (const code of lapsed) {
+        emitKey(code, false, e.getModifierState("CapsLock"), e.metaKey);
+      }
+    };
     const sendTranslated = (e: KeyboardEvent, pressed: boolean) => {
       e.preventDefault();
+      releaseLapsed(heldModifiers.key(e.code, pressed, modifierFlags(e)), e);
       emitKey(e.code, pressed, e.getModifierState("CapsLock"), e.metaKey);
     };
     const onKeyDown = (e: KeyboardEvent) => sendTranslated(e, true);
