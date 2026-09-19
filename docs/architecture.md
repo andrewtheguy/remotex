@@ -1497,6 +1497,17 @@ against. A close chord the page never sees — and Alt+F4, which no window catch
 ends the session without asking: the client raises no leave-site dialog, because a
 dialog on every deliberate window close is worse than the session it saves.
 
+A key held on the remote is let go by the page, never by the gateway, and the page
+hears of a release two ways: the key's `keyup`, or the overlay's `blur`, which sweeps
+everything still down. The local system can withhold both for a modifier — a chord it
+keeps for itself, such as a window manager's move-window drag or a screenshot
+shortcut, swallows the `keyup` without ever taking focus — so `heldModifiers.ts`
+follows the physical modifiers and checks them against the modifier state every later
+key, mouse and wheel event carries. One the event reports as up is released before
+that event is forwarded, through the Command translator like the `keyup` it stands in
+for. The soft keyboard's sticky modifiers are outside it: the page holds those, and
+no event's flags know them.
+
 The canvas is presented at the remote's point size, derived from framebuffer
 pixels and remote scale. Desktop clients scroll when necessary. Touch clients
 use fit-to-width presentation, pinch zoom, pan, a virtual cursor, and
