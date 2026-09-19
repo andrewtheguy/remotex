@@ -268,28 +268,29 @@ server. RealVNC reaches Option through its own server's reading of
 `ISO_Level3_Shift`, which Screen Sharing ignores; there Option comes from
 `Meta_L` and `Meta_R` alone.
 
-Alt+C is an ordinary key event on every host, and the engine already chooses the
-keysym a Mac is sent per DOM code (`keymap::apple_keysym`), so either shape is a
-change of table rather than a new mechanism:
+The plan is RealVNC's split, as the default and with no control: from a PC
+keyboard `AltLeft` is Command, `AltRight` stays Option, and the Windows keys stay
+Command. Alt+C is an ordinary key event on every host, so copy works from Windows;
+Option stays reachable on the right; and there is nothing to choose or store. What
+it gives up is the *left* Option key from a PC keyboard, which RealVNC gives up
+too, and which the soft keyboard still carries.
 
-- **RealVNC's split, as the default.** `AltLeft` goes as `Alt_L` and is Command,
-  `AltRight` stays `Meta_R` and is Option, the Windows keys stay Command. Nothing
-  to choose and nothing to store; what it gives up is the *left* Option key from a
-  PC keyboard, which RealVNC gives up too. It cannot live in the engine's table
-  alone: a Mac host's left Option key is `AltLeft` as well and must stay Option,
-  and the engine is told nothing about the host. The page knows (`IS_MAC_HOST`),
-  so the split belongs there, sending `AltLeft` from a PC keyboard as a code the
-  engine already maps to Command.
-- **A swap, as a preference.** Both Alt keys are Command and the Windows keys are
-  Option, beside the Mac host's Command preference in the browser and offered only
-  when the remote reports itself a Mac and the host is not one. Both sides of both
-  modifiers survive, at the price of a control, and of Option inheriting the
-  Windows key's reservations — which matters less, since Option chords type
-  symbols and the soft keyboard carries every modifier the host will not part with.
+It cannot live in the engine's table alone. A Mac host's left Option key is
+`AltLeft` as well and must stay Option, and the engine is told nothing about the
+host. The page knows (`IS_MAC_HOST`) and knows the remote is a Mac
+(`ServerMsg::RemoteOs`), so the substitution belongs there, beside the Command
+translator it is the mirror of: on a non-Mac host driving a Mac, `AltLeft` goes
+out as a code the engine already maps to Command, and held-key release follows
+the code that was sent, as it does for a translated Command chord.
 
-Under either, Alt chords the local browser keeps — Alt+D, Alt+F, Alt+Left — are
-not the page's to forward in a windowed tab, the same boundary the Command
-translator has. An app window or immersive full screen hands them over.
+Alt chords the local browser keeps — Alt+D, Alt+F, Alt+Left — are not the page's
+to forward in a windowed tab, the same boundary the Command translator has. An app
+window or immersive full screen hands them over.
+
+A full swap — both Alt keys Command, the Windows keys Option, as a browser
+preference — was the alternative. It keeps both sides of both modifiers, but at the
+price of a control, and it moves Option behind the very key whose chords Windows
+reserves.
 
 ### A virtual-display remote session for sway
 
