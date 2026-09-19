@@ -1641,7 +1641,7 @@ dependencies = [
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260906161241-e55a2da#e55a2da7624cc9c493165375c88079d85e49af5c"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260918235810-31a9bf7#31a9bf7ba659ae668e7ef58883d3009b87f5e2a3"
 
 [[package]]
 name = "libwebp-sys"
