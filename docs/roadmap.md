@@ -275,11 +275,11 @@ change of table rather than a new mechanism:
 - **RealVNC's split, as the default.** `AltLeft` goes as `Alt_L` and is Command,
   `AltRight` stays `Meta_R` and is Option, the Windows keys stay Command. Nothing
   to choose and nothing to store; what it gives up is the *left* Option key from a
-  PC keyboard, which RealVNC gives up too. A Mac host is untouched either way: its
-  Option key is `AltLeft` as well, so the table would have to know the host, which
-  the page already tells the engine nothing about — the split is cleanest applied
-  in the page, where `IS_MAC_HOST` is known, by sending a code the engine maps to
-  Command.
+  PC keyboard, which RealVNC gives up too. It cannot live in the engine's table
+  alone: a Mac host's left Option key is `AltLeft` as well and must stay Option,
+  and the engine is told nothing about the host. The page knows (`IS_MAC_HOST`),
+  so the split belongs there, sending `AltLeft` from a PC keyboard as a code the
+  engine already maps to Command.
 - **A swap, as a preference.** Both Alt keys are Command and the Windows keys are
   Option, beside the Mac host's Command preference in the browser and offered only
   when the remote reports itself a Mac and the host is not one. Both sides of both
