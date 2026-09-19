@@ -260,29 +260,36 @@ long as Windows has no use for their letter.
 The way out is to let Alt be Command, and it is what other viewers already do. A
 viewer that sends a PC keyboard's X11 keysyms untouched gets it for free, because
 Apple's server reads `Alt_L` and `Alt_R` as Command — this gateway did too until
-it began sending Alt as Meta to reach Option — and RealVNC makes the pairing
-explicit and configurable: its
-[keyboard mapping to and from a Mac](https://help.realvnc.com/hc/en-us/articles/360002250597-Keyboard-Mapping-To-and-From-a-Mac)
-maps `Alt_L` to the left Command key by default, with `LeftCmdKey`, `LeftOptKey`
-and their right-hand twins choosing among `Alt`, `Super` and extended characters.
-Alt+C is an ordinary key event on every host, and the engine already chooses the
-keysym a Mac is sent per DOM code (`keymap::apple_keysym`), so Alt as the Alt a Mac
-reads as Command, and the Windows keys as the Meta it reads as Option, is a second
-table rather than a new mechanism. What needs deciding is where the choice lives
-and what it costs:
+it began sending Alt as Meta to reach Option. RealVNC documents it as its default
+in [Keyboard Mapping To and From a Mac](https://help.realvnc.com/hc/en-us/articles/360002250597-Keyboard-Mapping-To-and-From-a-Mac):
+from a PC keyboard, left Alt or the Windows key is Command, and right Alt — AltGr
+off a US layout — is Option. Only the Command half of that carries to Apple's
+server. RealVNC reaches Option through its own server's reading of
+`ISO_Level3_Shift`, which Screen Sharing ignores; there Option comes from
+`Meta_L` and `Meta_R` alone.
 
-- It is the *host keyboard's* property, not the target's: the same Mac reached from
-  a Mac wants Command left alone. That puts it beside the Mac host's Command
-  preference in the browser, offered only when the remote reports itself a Mac and
-  the host is not one, and swapped in the page before the code reaches the wire —
-  which also keeps held-key release and the soft keyboard on the codes they
-  already track.
-- Alt chords the local browser keeps — Alt+D, Alt+F, Alt+Left — are not the page's
-  to forward in a windowed tab, the same boundary the Command translator has. An
-  app window or immersive full screen hands them over.
-- Option moves to the Windows key and inherits its reservations, which matters less:
-  Option chords type symbols, and the soft keyboard carries both sides of every
-  modifier for the ones the host will not part with.
+Alt+C is an ordinary key event on every host, and the engine already chooses the
+keysym a Mac is sent per DOM code (`keymap::apple_keysym`), so either shape is a
+change of table rather than a new mechanism:
+
+- **RealVNC's split, as the default.** `AltLeft` goes as `Alt_L` and is Command,
+  `AltRight` stays `Meta_R` and is Option, the Windows keys stay Command. Nothing
+  to choose and nothing to store; what it gives up is the *left* Option key from a
+  PC keyboard, which RealVNC gives up too. A Mac host is untouched either way: its
+  Option key is `AltLeft` as well, so the table would have to know the host, which
+  the page already tells the engine nothing about — the split is cleanest applied
+  in the page, where `IS_MAC_HOST` is known, by sending a code the engine maps to
+  Command.
+- **A swap, as a preference.** Both Alt keys are Command and the Windows keys are
+  Option, beside the Mac host's Command preference in the browser and offered only
+  when the remote reports itself a Mac and the host is not one. Both sides of both
+  modifiers survive, at the price of a control, and of Option inheriting the
+  Windows key's reservations — which matters less, since Option chords type
+  symbols and the soft keyboard carries every modifier the host will not part with.
+
+Under either, Alt chords the local browser keeps — Alt+D, Alt+F, Alt+Left — are
+not the page's to forward in a windowed tab, the same boundary the Command
+translator has. An app window or immersive full screen hands them over.
 
 ### A virtual-display remote session for sway
 
