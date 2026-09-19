@@ -194,6 +194,10 @@ pub struct Stream {
     /// Where this stream's timestamps are measured from. Real elapsed time rather than a frame
     /// counter, so a pts is a millisecond on the `g_timebase` set below.
     started: std::time::Instant,
+    /// How many retunes [`Self::set_quality`] still refuses, for a test that needs libvpx to
+    /// say no.
+    #[cfg(test)]
+    refusals: u32,
 }
 
 impl Stream {
@@ -308,6 +312,8 @@ impl Stream {
             keyframe_owed: false,
             decode: codec_string(coded.w(), coded.h(), chroma),
             started: std::time::Instant::now(),
+            #[cfg(test)]
+            refusals: 0,
         };
 
         // SAFETY: `ctx` is live and each control's argument really is an `int` — the one thing
@@ -405,6 +411,13 @@ impl Stream {
         self.keyframe_owed = true;
     }
 
+    /// Make the next `count` retunes that would change the quantizer fail, as a libvpx refusal
+    /// would.
+    #[cfg(test)]
+    pub fn refuse_retunes(&mut self, count: u32) {
+        self.refusals = count;
+    }
+
     /// Move the dial on the live encoder, without a keyframe.
     ///
     /// This is how a congested link gives up quality (see `Congestion` in [`crate::encode`]), and
@@ -418,18 +431,30 @@ impl Stream {
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
         let quality = quality.clamp(QUALITY_MIN, QUALITY_MAX);
         let q = q_for(quality);
-        self.quality = quality;
-        if q == self.cfg.rc_min_quantizer {
+        #[cfg(test)]
+        if q != q_for(self.quality) && self.refusals > 0 {
+            self.refusals -= 1;
+            anyhow::bail!("a retune refused on the test's orders");
+        }
+        // Against the committed quality rather than `cfg`: a `cq_level` refused after the config
+        // was accepted leaves `cfg` already at `q`, and the retry must still send the control.
+        if q == q_for(self.quality) {
+            self.quality = quality;
             return Ok(());
         }
-        self.cfg.rc_min_quantizer = q;
-        self.cfg.rc_max_quantizer = q;
+        // Edited on a copy and kept only once libvpx has accepted it, so a refusal leaves
+        // `cfg` describing the encoder as it still is.
+        let mut cfg = self.cfg;
+        cfg.rc_min_quantizer = q;
+        cfg.rc_max_quantizer = q;
         // SAFETY: `cfg` is the struct libvpx validated at init with two fields changed, and `ctx`
         // is live. libvpx re-validates it and returns a code rather than accepting nonsense.
         unsafe {
-            vpx!(vpx::vpx_codec_enc_config_set(&mut self.ctx, &self.cfg), "enc_config_set")?;
+            vpx!(vpx::vpx_codec_enc_config_set(&mut self.ctx, &cfg), "enc_config_set")?;
+            self.cfg = cfg;
             self.control(vpx::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL, q as c_int, "cq_level")?;
         }
+        self.quality = quality;
         Ok(())
     }
 
@@ -637,6 +662,12 @@ mod tests {
     /// The other half of the archive, so a test's claim is a round trip and not a byte
     /// count. One decoder per call: every unit these tests decode is a keyframe.
     fn decode(unit: &AccessUnit) -> Decoded {
+        decode_chain(std::slice::from_ref(unit))
+    }
+
+    /// A chain of units through one decoder, keyframe first, and the picture the last
+    /// one leaves on screen.
+    fn decode_chain(units: &[AccessUnit]) -> Decoded {
         // SAFETY: the same contract as the encoder's calls — zeroed context written through
         // by `dec_init_ver`, `unit.data` outlives the decode, and the frame libvpx hands back
         // is copied out before the context is destroyed.
@@ -656,20 +687,24 @@ mod tests {
                 "dec_init_ver"
             )
             .expect("a decoder");
-            vpx!(
-                vpx::vpx_codec_decode(
-                    &mut ctx,
-                    unit.data.as_ptr(),
-                    unit.data.len() as std::os::raw::c_uint,
-                    std::ptr::null_mut(),
-                    0
-                ),
-                "decode"
-            )
-            .expect("a decode");
-            let mut iter: vpx::vpx_codec_iter_t = std::ptr::null();
-            let img = vpx::vpx_codec_get_frame(&mut ctx, &mut iter);
-            assert!(!img.is_null(), "the unit decoded to no frame");
+            let mut img: *mut vpx::vpx_image_t = std::ptr::null_mut();
+            for unit in units {
+                vpx!(
+                    vpx::vpx_codec_decode(
+                        &mut ctx,
+                        unit.data.as_ptr(),
+                        unit.data.len() as std::os::raw::c_uint,
+                        std::ptr::null_mut(),
+                        0
+                    ),
+                    "decode"
+                )
+                .expect("a decode");
+                let mut iter: vpx::vpx_codec_iter_t = std::ptr::null();
+                img = vpx::vpx_codec_get_frame(&mut ctx, &mut iter);
+                assert!(!img.is_null(), "the unit decoded to no frame");
+            }
+            assert!(!img.is_null(), "no unit to decode");
             let img = &*img;
             let (w, h) = (img.d_w as usize, img.d_h as usize);
             let (cw, ch) = (
@@ -774,6 +809,56 @@ mod tests {
         );
         // And it is not sticky: the frame after a forced keyframe is an ordinary one.
         assert!(!moving(&mut mirror, &mut stream, 4).keyframe);
+    }
+
+    /// What a whole-desktop stream's settle frame rests on: re-encoding a picture that has not
+    /// changed, at a finer quantizer, sharpens the *unchanged* blocks — as an ordinary inter frame,
+    /// with no keyframe. Were libvpx to skip blocks whose source had not moved, a desktop sent
+    /// coarse under congestion would stay coarse until it next changed, and the settle in
+    /// [`crate::encode`] would have to spend a keyframe instead.
+    #[test]
+    fn a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe() {
+        let (w, h) = (320u16, 240u16);
+        // Speckle, so a coarse quantizer has detail to lose.
+        let mut picture = flat(w, h, [240, 240, 240]);
+        let mut seed = 12_345u32;
+        for px in picture.chunks_mut(3) {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            if (seed >> 16).is_multiple_of(5) {
+                px.copy_from_slice(&[20, 20, 20]);
+            }
+        }
+        let mut source = Yuv::new(w, h, Chroma::Subsampled);
+        source.read_rgb(&picture).expect("a conversion");
+        let luma = source.planes().0.to_vec();
+        let error = |decoded: &Decoded| {
+            let sum: u64 = decoded
+                .y
+                .iter()
+                .zip(&luma)
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum();
+            sum as f64 / luma.len() as f64
+        };
+
+        let (mut mirror, mut stream) = whole(w, h, QUALITY_MIN);
+        mirror.blit(rect(0, 0, w, h), &picture).expect("a full-screen blit");
+        let mut units = vec![stream.encode(&mirror, None).expect("an encode").expect("a unit")];
+        let coarse = error(&decode_chain(&units));
+
+        stream.set_quality(90).expect("the encoder to accept a new quantizer");
+        let settle = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+        assert!(!settle.keyframe, "the settle frame cost a keyframe");
+        units.push(settle);
+        let settled = error(&decode_chain(&units));
+
+        let (_, mut fresh) = whole(w, h, 90);
+        let fine = error(&decode(&fresh.encode(&mirror, None).expect("an encode").expect("a unit")));
+        assert!(
+            settled < coarse / 4.0 && settled < fine * 2.0,
+            "one frame at quality 90 left the unchanged picture at error {settled:.2} (coarse \
+             {coarse:.2}, a quality-90 keyframe {fine:.2}): the encoder skipped blocks that did not move"
+        );
     }
 
     /// The mechanism the congestion loop rests on: quality can be given up mid-stream without

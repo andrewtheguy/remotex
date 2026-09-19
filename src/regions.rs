@@ -129,7 +129,9 @@ fn record_end(ended: &mut Vec<u8>, id: u8) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
     /// `render_type = "video"`: one stream over the whole desktop, for the whole
-    /// session. No cells, no debts, no cleanup — nothing else is being sent.
+    /// session. No cells, no debts, no cleanup tiles — nothing else is being sent. A
+    /// picture the congestion walk coarsened is sharpened by the stream itself
+    /// ([`Regions::refresh`]).
     Whole,
     /// `render_motion = true`: a stream per coalesced moving region, with
     /// the base codec carrying every cell outside one.
@@ -147,8 +149,8 @@ struct Live {
     cells: Vec<(u16, u16)>,
     stream: Stream,
     /// The dial this stream's encoder is *known* to be running at — recorded only on
-    /// a successful `set_quality`, unlike the stream's own notion, which is updated
-    /// before the calls that can fail. What [`Regions::put_back`] compares
+    /// a successful `set_quality`, so it can trail [`Regions::quality`] after a
+    /// refusal. What [`Regions::put_back`] compares
     /// against, so an unchanged dial costs a returned stream nothing and a failed
     /// retune is retried instead of believed.
     quality: u8,
@@ -633,6 +635,14 @@ impl Regions {
     #[cfg(test)]
     pub fn retuned_at(&self) -> Option<Instant> {
         self.retuned_at
+    }
+
+    /// Make every live stream refuse its next `count` retunes.
+    #[cfg(test)]
+    pub fn refuse_retunes(&mut self, count: u32) {
+        for live in &mut self.live {
+            live.stream.refuse_retunes(count);
+        }
     }
 
     /// The rectangles streaming right now, for the replay's trace.
@@ -1320,18 +1330,36 @@ impl Regions {
     /// One link, one verdict: the streams share a socket, and a policy that treated
     /// them separately would be reasoning about a bottleneck none of them can see on
     /// its own.
+    ///
+    /// Recorded only once every stream has taken it. A stream that refuses keeps the
+    /// quality it had, and so does the table — which is what [`Self::put_back`]
+    /// brings any stream that did take it back to — so a failure leaves one
+    /// consistent quality in force, and a caller retrying sees the old one.
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
-        self.quality = quality;
         for live in &mut self.live {
             live.stream.set_quality(quality)?;
             live.quality = quality;
         }
+        self.quality = quality;
         Ok(())
     }
 
     /// The dial every live stream is encoding at, for the totals.
     pub fn quality(&self) -> u8 {
         self.quality
+    }
+
+    /// Mark every live stream dirty over pixels it has already carried, so the next
+    /// round re-encodes them at the quality now in force.
+    ///
+    /// The whole-desktop stream's settle ([`crate::encode`]): a screen that stopped
+    /// changing while the link had the dial walked down would otherwise keep that
+    /// coarse picture until it next changed. An inter frame over the unchanged mirror
+    /// at a finer quantizer sharpens it; no keyframe is needed.
+    pub fn refresh(&mut self) {
+        for live in &mut self.live {
+            live.dirty = true;
+        }
     }
 
     /// Arm a keyframe on every live stream. Its callers are exactly the moments a
@@ -1427,6 +1455,13 @@ fn rendezvous_arrive(rendezvous: &Option<std::sync::Arc<Rendezvous>>) {
 }
 
 impl Round {
+    /// The coarsest quality any of this round's encoders is running at — which can sit
+    /// below [`Regions::quality`] while a stream that refused a retune waits for
+    /// [`Regions::put_back`] to try again. `None` for a round with no streams.
+    pub fn quality(&self) -> Option<u8> {
+        self.live.iter().map(|live| live.quality).min()
+    }
+
     /// Encode every stream with pixels waiting. Blocking: call it on a worker.
     ///
     /// The dirty streams encode **concurrently** — one scoped thread per stream past
