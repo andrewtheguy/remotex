@@ -194,6 +194,10 @@ pub struct Stream {
     /// Where this stream's timestamps are measured from. Real elapsed time rather than a frame
     /// counter, so a pts is a millisecond on the `g_timebase` set below.
     started: std::time::Instant,
+    /// How many retunes [`Self::set_quality`] still refuses, for a test that needs libvpx to
+    /// say no.
+    #[cfg(test)]
+    refusals: u32,
 }
 
 impl Stream {
@@ -308,6 +312,8 @@ impl Stream {
             keyframe_owed: false,
             decode: codec_string(coded.w(), coded.h(), chroma),
             started: std::time::Instant::now(),
+            #[cfg(test)]
+            refusals: 0,
         };
 
         // SAFETY: `ctx` is live and each control's argument really is an `int` — the one thing
@@ -405,6 +411,13 @@ impl Stream {
         self.keyframe_owed = true;
     }
 
+    /// Make the next `count` retunes that would change the quantizer fail, as a libvpx refusal
+    /// would.
+    #[cfg(test)]
+    pub fn refuse_retunes(&mut self, count: u32) {
+        self.refusals = count;
+    }
+
     /// Move the dial on the live encoder, without a keyframe.
     ///
     /// This is how a congested link gives up quality (see `Congestion` in [`crate::encode`]), and
@@ -418,6 +431,11 @@ impl Stream {
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
         let quality = quality.clamp(QUALITY_MIN, QUALITY_MAX);
         let q = q_for(quality);
+        #[cfg(test)]
+        if q != q_for(self.quality) && self.refusals > 0 {
+            self.refusals -= 1;
+            anyhow::bail!("a retune refused on the test's orders");
+        }
         // Against the committed quality rather than `cfg`: a `cq_level` refused after the config
         // was accepted leaves `cfg` already at `q`, and the retry must still send the control.
         if q == q_for(self.quality) {

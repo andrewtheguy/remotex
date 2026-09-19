@@ -1037,7 +1037,10 @@ impl TileSink {
             return Ok(());
         };
         video.due_at = Some(now + VIDEO_FRAME_INTERVAL);
-        let quality = video.regions.quality();
+        // What the round's encoders really run at, not the table: a stream that refused
+        // a retune is still coarse, and the settle it owes must not be cleared by a
+        // table that has already reached the dial.
+        let quality = round.quality().unwrap_or_else(|| video.regions.quality());
         video.coarse_at = (quality < video.congestion.dial).then_some(now);
         // Dropped before the spawn and the push: the whole point is that `damage`
         // gets the lock back while the worker encodes.
@@ -2670,6 +2673,44 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
         assert!(frame_rx.try_recv().is_err(), "an idle stream at its dial was re-encoded");
+    }
+
+    /// The settle owed is judged by the quality a round's encoder really ran at, not the
+    /// table's: a stream that refused the retune back to the dial while its round was
+    /// out still encodes coarse, and must still be settled once its retry succeeds.
+    #[tokio::test(start_paused = true)]
+    async fn a_round_a_refused_retune_kept_coarse_is_still_settled() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        coarse_round(&sink, &mut frame_rx, 1).await;
+        coarsen(&sink, 20).await;
+        coarse_round(&sink, &mut frame_rx, 2).await;
+
+        // The walk takes the dial back while a round is out, and the stream refuses it
+        // when the round comes home.
+        let area = rect(0, 0, 320, 64);
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 3)).await.unwrap();
+        {
+            let mut video = sink.shared.video.lock().await;
+            video.regions.refuse_retunes(1);
+            let round = video.regions.take_round().expect("damage makes a round");
+            video.congestion.quality = 60;
+            video.regions.set_quality(60).expect("a table with its streams out takes anything");
+            video.regions.put_back(round, tokio::time::Instant::now());
+            assert_eq!(video.regions.quality(), 60, "the table is at the dial");
+        }
+        // Encoded at the refused stream's 20; its put_back retries and succeeds.
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain_units(&mut frame_rx, 1).await;
+        assert!(sink.due_at().await.is_none(), "the coarse round left pixels uncarried");
+
+        tokio::time::sleep(CLEANUP_IDLE * 4).await;
+        assert!(sink.due_at().await.is_some(), "a round encoded below the dial was never settled");
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let units = drain_units(&mut frame_rx, 1).await;
+        assert!(!units[0].keyframe, "a settle is an inter frame, not a keyframe");
     }
 
     /// Under `render_adaptive`, the settle waits for the client's lag to clear — the

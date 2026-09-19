@@ -149,8 +149,8 @@ struct Live {
     cells: Vec<(u16, u16)>,
     stream: Stream,
     /// The dial this stream's encoder is *known* to be running at — recorded only on
-    /// a successful `set_quality`, unlike the stream's own notion, which is updated
-    /// before the calls that can fail. What [`Regions::put_back`] compares
+    /// a successful `set_quality`, so it can trail [`Regions::quality`] after a
+    /// refusal. What [`Regions::put_back`] compares
     /// against, so an unchanged dial costs a returned stream nothing and a failed
     /// retune is retried instead of believed.
     quality: u8,
@@ -635,6 +635,14 @@ impl Regions {
     #[cfg(test)]
     pub fn retuned_at(&self) -> Option<Instant> {
         self.retuned_at
+    }
+
+    /// Make every live stream refuse its next `count` retunes.
+    #[cfg(test)]
+    pub fn refuse_retunes(&mut self, count: u32) {
+        for live in &mut self.live {
+            live.stream.refuse_retunes(count);
+        }
     }
 
     /// The rectangles streaming right now, for the replay's trace.
@@ -1447,6 +1455,13 @@ fn rendezvous_arrive(rendezvous: &Option<std::sync::Arc<Rendezvous>>) {
 }
 
 impl Round {
+    /// The coarsest quality any of this round's encoders is running at — which can sit
+    /// below [`Regions::quality`] while a stream that refused a retune waits for
+    /// [`Regions::put_back`] to try again. `None` for a round with no streams.
+    pub fn quality(&self) -> Option<u8> {
+        self.live.iter().map(|live| live.quality).min()
+    }
+
     /// Encode every stream with pixels waiting. Blocking: call it on a worker.
     ///
     /// The dirty streams encode **concurrently** — one scoped thread per stream past
