@@ -16,8 +16,8 @@
 //                         natural direction: content follows the fingers
 //
 // The state machine keeps its thresholds local to this file. The output layer
-// sends remotex ClientMsg JSON (a scroll tick is one wheel message; the server
-// turns any nonzero delta into one notch), and the view transform is owned by
+// sends remotex ClientMsg JSON (a scroll tick is one wheel message carrying the
+// finger travel it stands for), and the view transform is owned by
 // useRemoteDesktop's applyCanvasCss, reached through GestureDeps.
 
 import type { ClientMsg } from "./protocol.ts";
@@ -334,9 +334,9 @@ export function attachTouchGestures(
   // One scroll step at the cursor, carrying the finger travel it stands for.
   //
   // Pixels, because that is what the deltas are: a step is a step's worth of
-  // finger movement. An Apple VNC target spends the distance as as many wheel
-  // pulses as it is worth there; every other target reads only the sign, so a
-  // step is a notch and this changes nothing for it.
+  // finger movement. RDP spends the distance as proportional wheel rotation and
+  // an Apple VNC target as as many wheel pulses as it is worth there; generic
+  // VNC reads only the sign, so a step is a notch there.
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });

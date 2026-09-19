@@ -38,6 +38,7 @@ use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay,
     MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED,
+    WheelUnit,
 };
 use crate::rdp_camera;
 use crate::rdp_mic;
@@ -878,6 +879,8 @@ async fn active_loop(
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
     let mut last_pos: (u16, u16) = (desktop.0 / 2, desktop.1 / 2);
+    // The scroll distance not yet worth a rotation unit.
+    let mut wheel = WheelRotation::default();
     // The pointer shape, on its way to the browser that draws it.
     let mut pointer = Pointer::default();
 
@@ -1239,7 +1242,7 @@ async fn active_loop(
                     }).await?;
                     continue;
                 }
-                for event in translate_input(msg, &mut last_pos) {
+                for event in translate_input(msg, &mut last_pos, &mut wheel) {
                     event.apply(input);
                 }
                 continue;
@@ -1488,8 +1491,98 @@ impl RemoteInput {
 /// One notch of a conventional wheel, in the rotation units RDP counts.
 const WHEEL_NOTCH: i16 = 120;
 
+/// Scroll distance turned into RDP wheel rotation, carrying the sub-unit
+/// remainder per axis between events.
+///
+/// RDP has no touchpad input — no spec in the corpus has one — and a Windows
+/// client's precision touchpad reaches the host the same way it reaches a local
+/// app: as wheel rotations smaller than a notch. `WheelRotationMask` carries any
+/// rotation, not multiples of 120 (MS-RDPBCGR 2.2.8.1.1.3.1.1.3), and the browser
+/// cannot tell a touchpad from a mouse, so rotation is simply proportional to the
+/// distance asked for. A mouse notch, which the browser reports as a notch's
+/// worth of distance, is still one notch; a touchpad's stream of few-pixel
+/// deltas is as many small rotations as the fingers travelled, where spending
+/// every event as a whole notch scrolled several times too far.
+#[derive(Debug, Default)]
+struct WheelRotation {
+    pending: (f32, f32),
+}
+
+impl WheelRotation {
+    /// The pixel distance one notch is worth: what Chromium reports for a mouse
+    /// notch on Windows at the default of three lines per notch.
+    const NOTCH_PX: f32 = 100.0;
+    /// Windows' default of three lines per notch, which is what a browser reporting
+    /// lines counts.
+    const NOTCH_LINES: f32 = 3.0;
+    /// The most one event may spend, in notches: a single absurd delta must not
+    /// scroll a document away. Surplus is dropped rather than carried, so a flick
+    /// cannot leave rotation trickling out under the next few events.
+    const MAX_NOTCHES: f32 = 5.0;
+    /// The largest piece a rotation is sent in: a whole number of notches inside
+    /// the nine bits the field carries, so a split flick lands on notch
+    /// boundaries for an app that only counts whole ones.
+    const CHUNK: i32 = 2 * WHEEL_NOTCH as i32;
+
+    /// The rotations to send for one wheel event, as (horizontal, vertical), in
+    /// RDP's sign: positive is up and right.
+    fn rotations(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (Vec<i16>, Vec<i16>) {
+        let notches = |delta: f32| match unit {
+            WheelUnit::Pixel => delta / Self::NOTCH_PX,
+            WheelUnit::Line => delta / Self::NOTCH_LINES,
+            // Windows' "one screen at a time" setting sends a notch per page.
+            WheelUnit::Page => delta,
+        };
+        // The DOM's deltaY is positive downward and RDP's rotation positive
+        // upward; both agree that positive x is rightward.
+        let x = Self::spend(&mut self.pending.0, notches(dx));
+        let y = Self::spend(&mut self.pending.1, -notches(dy));
+        (Self::chunks(x), Self::chunks(y))
+    }
+
+    /// Add one axis' worth of notches and take the whole rotation units out of
+    /// it, leaving the fraction for the next event.
+    fn spend(pending: &mut f32, notches: f32) -> i32 {
+        if notches == 0.0 || !notches.is_finite() {
+            return 0;
+        }
+        // A reversal starts over rather than first paying off the remainder of
+        // the direction the user just left.
+        if pending.signum() != notches.signum() {
+            *pending = 0.0;
+        }
+        *pending += notches * f32::from(WHEEL_NOTCH);
+        let max = Self::MAX_NOTCHES * f32::from(WHEEL_NOTCH);
+        // A hair of tolerance, so a glide whose deltas add up to a whole unit is
+        // not a unit short to float rounding. What it overshoots by leaves the
+        // remainder a hair past zero, which the next event's reversal check drops.
+        let whole = (*pending * (1.0 + 1e-4)).trunc();
+        if whole.abs() >= max {
+            *pending = 0.0;
+            return (whole.signum() * max) as i32;
+        }
+        *pending -= whole;
+        whole as i32
+    }
+
+    /// One rotation as the events that carry it, none larger than [`Self::CHUNK`].
+    fn chunks(mut rotation: i32) -> Vec<i16> {
+        let mut out = Vec::new();
+        while rotation != 0 {
+            let step = rotation.clamp(-Self::CHUNK, Self::CHUNK);
+            out.push(step as i16);
+            rotation -= step;
+        }
+        out
+    }
+}
+
 /// Translate one browser input message into what to do to the remote.
-fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInput> {
+fn translate_input(
+    input: ClientMsg,
+    last_pos: &mut (u16, u16),
+    wheel: &mut WheelRotation,
+) -> Vec<RemoteInput> {
     match input {
         ClientMsg::MouseMove { x, y } => {
             let (x, y) = (clamp_u16(x), clamp_u16(y));
@@ -1515,29 +1608,15 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInp
                 y: last_pos.1,
             }]
         }
-        // The unit is dropped: RDP spends a notch as 120 rotation units whatever
-        // the delta was measured in, and the guest applies its own scrolling.
-        ClientMsg::Wheel { dx, dy, .. } => {
-            let mut events = Vec::new();
-            // RDP: positive rotation is up/forward. The DOM deltaY is positive
-            // when scrolling down, so invert it.
-            if dy != 0.0 {
-                events.push(RemoteInput::Wheel {
-                    delta: if dy > 0.0 { -WHEEL_NOTCH } else { WHEEL_NOTCH },
-                    horizontal: false,
-                    x: last_pos.0,
-                    y: last_pos.1,
-                });
-            }
-            if dx != 0.0 {
-                events.push(RemoteInput::Wheel {
-                    delta: if dx > 0.0 { WHEEL_NOTCH } else { -WHEEL_NOTCH },
-                    horizontal: true,
-                    x: last_pos.0,
-                    y: last_pos.1,
-                });
-            }
-            events
+        ClientMsg::Wheel { dx, dy, unit } => {
+            let (horizontal, vertical) = wheel.rotations(dx, dy, unit);
+            let (x, y) = *last_pos;
+            let vertical = vertical.into_iter().map(|delta| (delta, false));
+            let horizontal = horizontal.into_iter().map(|delta| (delta, true));
+            vertical
+                .chain(horizontal)
+                .map(|(delta, horizontal)| RemoteInput::Wheel { delta, horizontal, x, y })
+                .collect()
         }
         // Passthrough contacts are offered only once an engine reports
         // `TouchReady`, and this one opens no touch channel to report — so one
@@ -1800,7 +1879,6 @@ fn pack_rgb(frame: &Frame, rect: Rect, buf: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::WheelUnit;
 
     fn rect(left: u16, top: u16, right: u16, bottom: u16) -> Rect {
         Rect { left, top, right, bottom }
@@ -2061,7 +2139,7 @@ mod tests {
     #[test]
     fn mouse_move_sets_flags_and_updates_last_pos() {
         let mut last = (0, 0);
-        let events = translate_input(ClientMsg::MouseMove { x: 100, y: 200 }, &mut last);
+        let events = translate(ClientMsg::MouseMove { x: 100, y: 200 }, &mut last);
         assert_eq!(events, vec![RemoteInput::Move { x: 100, y: 200 }]);
         assert_eq!(last, (100, 200));
     }
@@ -2069,7 +2147,7 @@ mod tests {
     #[test]
     fn negative_and_huge_coords_are_clamped() {
         let mut last = (0, 0);
-        let events = translate_input(ClientMsg::MouseMove { x: -5, y: 70000 }, &mut last);
+        let events = translate(ClientMsg::MouseMove { x: -5, y: 70000 }, &mut last);
         assert_eq!(events, vec![RemoteInput::Move { x: 0, y: u16::MAX }]);
         assert_eq!(last, (0, u16::MAX));
     }
@@ -2079,7 +2157,7 @@ mod tests {
     #[test]
     fn a_touch_contact_is_dropped_and_leaves_the_pointer_alone() {
         let mut last = (7, 9);
-        let events = translate_input(
+        let events = translate(
             ClientMsg::Touch { id: 3, phase: crate::protocol::TouchPhase::Down, x: 100, y: 200 },
             &mut last,
         );
@@ -2090,7 +2168,7 @@ mod tests {
     #[test]
     fn button_press_uses_last_pos_and_down_flag() {
         let mut last = (7, 9);
-        let events = translate_input(
+        let events = translate(
             ClientMsg::MouseButton { button: MouseButton::Right, pressed: true, clicks: 1 },
             &mut last,
         );
@@ -2099,7 +2177,7 @@ mod tests {
             vec![RemoteInput::Button { button: RdpButton::Right, down: true, x: 7, y: 9 }]
         );
 
-        let events = translate_input(
+        let events = translate(
             ClientMsg::MouseButton { button: MouseButton::Right, pressed: false, clicks: 1 },
             &mut last,
         );
@@ -2118,7 +2196,7 @@ mod tests {
         for (button, expected) in
             [(MouseButton::Back, RdpButton::X1), (MouseButton::Forward, RdpButton::X2)]
         {
-            let events = translate_input(
+            let events = translate(
                 ClientMsg::MouseButton { button, pressed: true, clicks: 1 },
                 &mut last,
             );
@@ -2130,50 +2208,101 @@ mod tests {
         }
     }
 
+    /// Input that carries no scroll, translated with a wheel that has none pending.
+    fn translate(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInput> {
+        translate_input(input, last_pos, &mut WheelRotation::default())
+    }
+
+    fn scroll(wheel: &mut WheelRotation, dx: f32, dy: f32, unit: WheelUnit) -> Vec<RemoteInput> {
+        translate_input(ClientMsg::Wheel { dx, dy, unit }, &mut (1, 2), wheel)
+    }
+
+    fn vertical(delta: i16) -> RemoteInput {
+        RemoteInput::Wheel { delta, horizontal: false, x: 1, y: 2 }
+    }
+
     /// The sign convention, which is the easiest thing here to get backwards: the
     /// DOM's deltaY is positive downward and RDP's rotation is positive upward.
     #[test]
     fn wheel_down_is_negative_vertical() {
-        let mut last = (1, 2);
-        let events =
-            translate_input(ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Pixel }, &mut last);
-        assert_eq!(
-            events,
-            vec![RemoteInput::Wheel { delta: -WHEEL_NOTCH, horizontal: false, x: 1, y: 2 }]
-        );
-
-        let events = translate_input(
-            ClientMsg::Wheel { dx: 0.0, dy: -3.0, unit: WheelUnit::Pixel },
-            &mut last,
-        );
-        assert_eq!(
-            events,
-            vec![RemoteInput::Wheel { delta: WHEEL_NOTCH, horizontal: false, x: 1, y: 2 }]
-        );
+        let wheel = &mut WheelRotation::default();
+        assert_eq!(scroll(wheel, 0.0, 100.0, WheelUnit::Pixel), vec![vertical(-WHEEL_NOTCH)]);
+        assert_eq!(scroll(wheel, 0.0, -100.0, WheelUnit::Pixel), vec![vertical(WHEEL_NOTCH)]);
 
         // Horizontal is its own event, and both axes at once are two.
-        let events = translate_input(
-            ClientMsg::Wheel { dx: 2.0, dy: 2.0, unit: WheelUnit::Pixel },
-            &mut last,
+        let events = scroll(wheel, 100.0, 100.0, WheelUnit::Pixel);
+        assert_eq!(
+            events,
+            vec![
+                vertical(-WHEEL_NOTCH),
+                RemoteInput::Wheel { delta: WHEEL_NOTCH, horizontal: true, x: 1, y: 2 },
+            ]
         );
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], RemoteInput::Wheel { horizontal: false, .. }));
-        assert!(matches!(
-            events[1],
-            RemoteInput::Wheel { delta: WHEEL_NOTCH, horizontal: true, .. }
-        ));
 
         // No movement, no event.
-        assert!(
-            translate_input(ClientMsg::Wheel { dx: 0.0, dy: 0.0, unit: WheelUnit::Pixel }, &mut last)
-                .is_empty()
+        assert!(scroll(wheel, 0.0, 0.0, WheelUnit::Pixel).is_empty());
+    }
+
+    /// A mouse notch is one notch whichever unit the browser counts it in.
+    #[test]
+    fn a_mouse_notch_is_one_notch_in_every_unit() {
+        for (delta, unit) in [(100.0, WheelUnit::Pixel), (3.0, WheelUnit::Line), (1.0, WheelUnit::Page)] {
+            let wheel = &mut WheelRotation::default();
+            assert_eq!(scroll(wheel, 0.0, delta, unit), vec![vertical(-WHEEL_NOTCH)], "{unit:?}");
+        }
+    }
+
+    /// A touchpad's few-pixel deltas are small rotations, not a notch each — the
+    /// latter scrolled a Windows host many times too far — and the fraction too
+    /// small for a rotation unit carries into the next event.
+    #[test]
+    fn a_touchpad_glide_scrolls_the_distance_it_travelled() {
+        let wheel = &mut WheelRotation::default();
+        assert_eq!(scroll(wheel, 0.0, 5.0, WheelUnit::Pixel), vec![vertical(-6)]);
+        assert!(scroll(wheel, 0.0, 0.5, WheelUnit::Pixel).is_empty());
+        assert_eq!(scroll(wheel, 0.0, 0.5, WheelUnit::Pixel), vec![vertical(-1)]);
+
+        let wheel = &mut WheelRotation::default();
+        let total: i32 = (0..50)
+            .flat_map(|_| scroll(wheel, 0.0, 2.0, WheelUnit::Pixel))
+            .map(|event| match event {
+                RemoteInput::Wheel { delta, .. } => i32::from(delta),
+                other => panic!("not a wheel event: {other:?}"),
+            })
+            .sum();
+        assert_eq!(total, -i32::from(WHEEL_NOTCH), "100px of glide is one notch");
+    }
+
+    /// A reversal does not first pay off the remainder of the direction left.
+    #[test]
+    fn a_reversal_drops_the_remainder() {
+        let wheel = &mut WheelRotation::default();
+        assert!(scroll(wheel, 0.0, 0.5, WheelUnit::Pixel).is_empty());
+        assert_eq!(scroll(wheel, 0.0, -1.0, WheelUnit::Pixel), vec![vertical(1)]);
+    }
+
+    /// More than the rotation field carries is split on notch boundaries rather
+    /// than clamped, and one event is held to a bounded scroll.
+    #[test]
+    fn a_flick_is_split_and_capped() {
+        let wheel = &mut WheelRotation::default();
+        assert_eq!(
+            scroll(wheel, 0.0, -400.0, WheelUnit::Pixel),
+            vec![vertical(240), vertical(240)]
         );
+        assert_eq!(
+            scroll(wheel, 0.0, 10_000.0, WheelUnit::Pixel),
+            vec![vertical(-240), vertical(-240), vertical(-120)]
+        );
+        // The surplus is dropped, not carried into the next event.
+        assert_eq!(scroll(wheel, 0.0, 1.0, WheelUnit::Pixel), vec![vertical(-1)]);
+        assert!(scroll(wheel, 0.0, f32::NAN, WheelUnit::Pixel).is_empty());
     }
 
     #[test]
     fn key_maps_scancode_release_and_extended() {
         let mut last = (0, 0);
-        let events = translate_input(
+        let events = translate(
             ClientMsg::Key { code: "KeyA".into(), pressed: true, caps: false },
             &mut last,
         );
@@ -2182,7 +2311,7 @@ mod tests {
             vec![RemoteInput::Key { scancode: 0x1E, extended: false, down: true }]
         );
 
-        let events = translate_input(
+        let events = translate(
             ClientMsg::Key { code: "KeyA".into(), pressed: false, caps: false },
             &mut last,
         );
@@ -2193,7 +2322,7 @@ mod tests {
 
         // An extended key carries the E0 prefix, which the RDP client sends as
         // the fast-path EXTENDED flag.
-        let events = translate_input(
+        let events = translate(
             ClientMsg::Key { code: "ArrowUp".into(), pressed: true, caps: false },
             &mut last,
         );
@@ -2205,7 +2334,7 @@ mod tests {
     fn unmapped_key_produces_no_events() {
         let mut last = (0, 0);
         assert!(
-            translate_input(
+            translate(
                 ClientMsg::Key { code: "NoSuchKey".into(), pressed: true, caps: false },
                 &mut last,
             )
