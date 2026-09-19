@@ -257,12 +257,19 @@ so the chord never becomes a key event the page can forward and Command-C — co
 — cannot be typed at the Mac at all. The other everyday chords survive only as
 long as Windows has no use for their letter.
 
-The way out is to let Alt be Command. Alt+C is an ordinary key event on every
-host, and the engine already chooses the keysym a Mac is sent per DOM code
-(`keymap::apple_keysym`), so sending the Alt codes as the Super a Mac reads as
-Command, and the Windows keys as the Meta it reads as Option, is a second table
-rather than a new mechanism. What needs deciding is where the choice lives and
-what it costs:
+The way out is to let Alt be Command, and it is what other viewers already do. A
+viewer that sends a PC keyboard's X11 keysyms untouched gets it for free, because
+Apple's server reads `Alt_L` and `Alt_R` as Command — this gateway did too until
+it began sending Alt as Meta to reach Option — and RealVNC makes the pairing
+explicit and configurable: its
+[keyboard mapping to and from a Mac](https://help.realvnc.com/hc/en-us/articles/360002250597-Keyboard-Mapping-To-and-From-a-Mac)
+maps `Alt_L` to the left Command key by default, with `LeftCmdKey`, `LeftOptKey`
+and their right-hand twins choosing among `Alt`, `Super` and extended characters.
+Alt+C is an ordinary key event on every host, and the engine already chooses the
+keysym a Mac is sent per DOM code (`keymap::apple_keysym`), so Alt as the Alt a Mac
+reads as Command, and the Windows keys as the Meta it reads as Option, is a second
+table rather than a new mechanism. What needs deciding is where the choice lives
+and what it costs:
 
 - It is the *host keyboard's* property, not the target's: the same Mac reached from
   a Mac wants Command left alone. That puts it beside the Mac host's Command
