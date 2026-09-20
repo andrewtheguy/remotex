@@ -473,7 +473,7 @@ fn report_stale(
     }
     let name = |f: Option<u8>| match f {
         Some(1) => "png".to_string(),
-        Some(3) => "webp".to_string(),
+        Some(2) => "webp".to_string(),
         Some(other) => format!("format {other}"),
         None => "never sent as a still".to_string(),
     };
@@ -493,7 +493,7 @@ fn report_stale(
         recoded,
         swaps
             .iter()
-            .filter(|((from, to), _)| *from == Some(3) && *to == Some(1))
+            .filter(|((from, to), _)| *from == Some(2) && *to == Some(1))
             .map(|(_, count)| *count)
             .sum::<usize>(),
         settled.len(),
