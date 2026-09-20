@@ -764,8 +764,9 @@ pub struct TargetConfig {
     pub image_quality: Option<u8>,
     /// The quality (1–100) a VP9 stream holds on a link that can carry it — the
     /// whole desktop under [`RenderType::Video`], or one coalesced moving region
-    /// under [`Self::render_motion`]. Required by each of those and refused
-    /// without either, since nothing else this gateway sends is a stream.
+    /// under [`Self::render_motion`]. `None` reads as [`DEFAULT_VIDEO_QUALITY`];
+    /// refused on a target that streams neither way, since nothing else this
+    /// gateway sends is a stream.
     ///
     /// One key for both because it is one dial: the two reach the same encoder
     /// through the same congestion walk, floored by the same
@@ -851,7 +852,8 @@ pub struct TargetConfig {
     /// a lattice encoded into tiles would not survive a scroll.
     #[serde(default)]
     pub render_grid_debug: bool,
-    /// Let [`Self::video_quality`] track the measured link.
+    /// Let [`Self::video_quality`] track the measured link — on unless the
+    /// operator turned it off.
     ///
     /// The configured quality stays the *ceiling* — a link with room to spare
     /// never earns a better picture than the one asked for — and the walk's floor
@@ -867,12 +869,18 @@ pub struct TargetConfig {
     /// coming back for it costs a second encode of something that was not going
     /// to be sent again. A stream pays nothing like it — its next frame sharpens
     /// it, and a region that stops is owed a cleanup whatever quality it ran at.
+    ///
+    /// `Option` rather than a bare `bool` so that `false` on a target that streams
+    /// nothing is refused the same way `true` is: neither would be read, and a key
+    /// that was written names an expectation. Resolved by the accessor of the same
+    /// name.
     #[serde(default)]
-    pub render_adaptive: bool,
+    pub render_adaptive: Option<bool>,
     /// Floor (1–100) for [`Self::render_adaptive`]; `None` reads as
     /// [`DEFAULT_RENDER_ADAPTIVE_MIN`]. Must not exceed [`Self::video_quality`] —
     /// a floor above the ceiling is a contradiction better refused than resolved.
-    /// Requires `render_adaptive`.
+    /// Refused beside `render_adaptive = false`, and on a target that streams
+    /// nothing.
     #[serde(default)]
     pub render_adaptive_min: Option<u8>,
 }
@@ -881,6 +889,12 @@ pub struct TargetConfig {
 /// [`TargetConfig::render_adaptive_min`] is unset. Low enough to matter on a
 /// struggling link, high enough that text stays legible.
 pub const DEFAULT_RENDER_ADAPTIVE_MIN: u8 = 20;
+
+/// The stream quality a target streams at when [`TargetConfig::video_quality`] is
+/// unset — the ceiling of the adaptive walk, not a promise. High enough that a link
+/// with room to spare shows a desktop worth looking at, and the walk is what takes
+/// it down on one that has not.
+pub const DEFAULT_VIDEO_QUALITY: u8 = 90;
 
 /// The Opus bitrate (kbit/s) when [`TargetConfig::audio_bitrate`] is unset —
 /// [`crate::opus_stream`]'s long-standing default, well clear of where stereo
@@ -933,14 +947,28 @@ impl TargetConfig {
         self.render_subtype.unwrap_or_default()
     }
 
+    /// The ceiling every VP9 stream of this target holds to, resolved: what the
+    /// operator wrote, else [`DEFAULT_VIDEO_QUALITY`]. Only a target that
+    /// [`Self::streams_video`] has one to read — parse refuses the key on any
+    /// other.
+    pub fn video_quality(&self) -> u8 {
+        self.video_quality.unwrap_or(DEFAULT_VIDEO_QUALITY)
+    }
+
+    /// The adaptive walk, resolved: on unless the operator turned it off.
+    pub fn render_adaptive(&self) -> bool {
+        self.render_adaptive.unwrap_or(true)
+    }
+
     /// The tile encoders to use for this target. This is the whole of the render
     /// dial as the engines see it: the axes and the qualities collapse to one
     /// [`RenderPlan`], so `rdp::run` / `vnc::run` need not know the config enums.
     ///
-    /// A lossy codec carries its quality, which [`ConfigFile::parse_with`] has
-    /// already guaranteed is present and in range; each `None` arm falls back to
-    /// the safe answer — lossless PNG for the base, no motion encode at all —
-    /// rather than trusting that here.
+    /// A lossy base codec carries its quality, which [`ConfigFile::parse_with`] has
+    /// already guaranteed is present and in range; the `None` arm falls back to the
+    /// safe answer — lossless PNG — rather than trusting that here. A stream's
+    /// quality has a default instead ([`Self::video_quality`]), so the two stream
+    /// shapes read it off the switch that put them there.
     ///
     /// `decoder` is the most colour the attached browser said its `VideoDecoder`
     /// takes, carried on the session socket and held with its attachment
@@ -951,15 +979,15 @@ impl TargetConfig {
     /// not at all.
     pub fn render_plan(&self, decoder: Chroma) -> RenderPlan {
         let adaptive = self
-            .render_adaptive
+            .render_adaptive()
             .then(|| self.render_adaptive_min.unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN));
         let chroma = match self.render_chroma.unwrap_or_default() {
             ChromaChoice::Subsampled => Chroma::Subsampled,
             ChromaChoice::Full => Chroma::Full,
             ChromaChoice::Auto => decoder,
         };
-        if let (RenderType::Video, Some(quality)) = (self.render_type, self.video_quality) {
-            return RenderPlan::Video { quality, adaptive, chroma };
+        if self.render_type == RenderType::Video {
+            return RenderPlan::Video { quality: self.video_quality(), adaptive, chroma };
         }
         let base = match (self.render_subtype(), self.image_quality) {
             (RenderSubtype::Webp, Some(quality)) => TileCodec::Webp { quality },
@@ -968,10 +996,9 @@ impl TargetConfig {
             }
             _ => TileCodec::Png,
         };
-        let motion = match (self.render_motion, self.video_quality) {
-            (true, Some(quality)) => Some(MotionEncode { quality, adaptive, chroma }),
-            _ => None,
-        };
+        let motion = self
+            .render_motion
+            .then(|| MotionEncode { quality: self.video_quality(), adaptive, chroma });
         RenderPlan::Tiles { base, motion, debug: self.render_motion_debug }
     }
 
@@ -980,14 +1007,20 @@ impl TargetConfig {
     ///
     /// There is no browser here for [`ChromaChoice::Auto`] to resolve against, and
     /// picking one of its two answers to print would name a colour this target may
-    /// never send. So that target is described at the colour it asks for, with the
-    /// condition said out loud rather than settled behind the reader's back. Every
-    /// other target has one answer already and reads as its plan.
+    /// never send. So the colour comes off that target's plan line and is stated
+    /// after it as the condition it is — a segment of its own, naming the colour it
+    /// is about. A bare `where the browser takes it` appended to the line would
+    /// qualify whatever the line happens to end with, and what a streaming target's
+    /// line ends with is its adaptive floor, which no browser decides.
+    ///
+    /// Every other target has one answer already and reads as its plan: the
+    /// `decoder` argument reaches nothing but [`ChromaChoice::Auto`], so passing
+    /// 4:2:0 here resolves `auto` to the colour [`RenderPlan::describe`] leaves
+    /// unsaid and leaves `"420"` and `"444"` exactly as they were.
     pub fn render_summary(&self) -> String {
-        let auto = self.render_chroma == Some(ChromaChoice::Auto);
-        let line = self.render_plan(if auto { Chroma::Full } else { Chroma::Subsampled }).describe();
-        if auto {
-            return format!("{line} where the browser takes it, else 4:2:0");
+        let line = self.render_plan(Chroma::Subsampled).describe();
+        if self.render_chroma == Some(ChromaChoice::Auto) {
+            return format!("{line} · 4:4:4 where the browser takes it, else 4:2:0");
         }
         line
     }
@@ -1882,27 +1915,46 @@ impl ConfigFile {
                  render_type = \"tiles\" to keep the grid",
                 target.name
             );
-            // One dial, one demand, written off the question it actually turns on:
-            // does this target put a VP9 stream on the wire at all. Both ways of
-            // doing so need a quality and neither has a default — a quality nobody
-            // chose is not a quality — and a target that streams nothing has nothing
-            // for the key to describe. Asking `streams_video` rather than matching
-            // the two shapes is what keeps that one rule one rule.
+            // The three stream keys ask one question: does this target put a VP9
+            // stream on the wire at all. A target that streams gets the whole dial,
+            // defaults included; one that streams nothing has nothing for any of the
+            // three to describe, so each is refused there rather than left inert.
+            // Asking `streams_video` rather than matching the two shapes is what
+            // keeps that one rule one rule.
             if target.streams_video() {
-                let q = target.video_quality.with_context(|| format!(
-                    "target {:?} streams video but sets no video_quality — it needs one, \
-                     an integer 1–100. It is the quality the stream holds on a link that \
-                     can carry it, and a link that cannot will fall below it. Under \
-                     render_motion it can go very low: motion hides the artifacts, and a \
-                     region that stops moving is re-sent at the base encode",
-                    target.name
-                ))?;
+                if let Some(q) = target.video_quality {
+                    anyhow::ensure!(
+                        (1..=100).contains(&q),
+                        "target {:?} sets video_quality = {q}, which is out of range — it \
+                         must be 1–100",
+                        target.name
+                    );
+                }
                 anyhow::ensure!(
-                    (1..=100).contains(&q),
-                    "target {:?} sets video_quality = {q}, which is out of range — it \
-                     must be 1–100",
+                    target.render_adaptive_min.is_none() || target.render_adaptive(),
+                    "target {:?} sets render_adaptive_min beside render_adaptive = false — \
+                     the floor belongs to the adaptive walk, and without the walk nothing \
+                     would read it",
                     target.name
                 );
+                if let Some(floor) = target.render_adaptive_min {
+                    anyhow::ensure!(
+                        (1..=100).contains(&floor),
+                        "target {:?} sets render_adaptive_min = {floor}, which is out of \
+                         range — it must be 1–100",
+                        target.name
+                    );
+                    // A floor above the ceiling is a contradiction, and the stream's
+                    // quality is the ceiling the walk must fit under.
+                    let ceiling = target.video_quality();
+                    anyhow::ensure!(
+                        floor <= ceiling,
+                        "target {:?} sets render_adaptive_min = {floor} above its \
+                         video_quality of {ceiling}, which leaves the adaptive walk nowhere \
+                         to go",
+                        target.name
+                    );
+                }
             } else {
                 anyhow::ensure!(
                     target.video_quality.is_none(),
@@ -1912,43 +1964,25 @@ impl ConfigFile {
                      render_type = \"video\" to stream the whole desktop",
                     target.name
                 );
-            }
-            // The adaptive switch moves a stream's quality and nothing else, so it
-            // asks the question `video_quality` does. A still is sent once: there is
-            // no next frame to sharpen a tile the link coarsened, so tiles keep the
-            // quality they were configured with, lossy or not.
-            anyhow::ensure!(
-                !target.render_adaptive || target.streams_video(),
-                "target {:?} sets render_adaptive, which moves the quality of a VP9 \
-                 stream, and this target sends none — a tile is sent once, at the \
-                 quality it was configured with. Set render_motion to stream the cells \
-                 in motion, or render_type = \"video\" to stream the whole desktop",
-                target.name
-            );
-            anyhow::ensure!(
-                target.render_adaptive_min.is_none() || target.render_adaptive,
-                "target {:?} sets render_adaptive_min but not render_adaptive — the floor \
-                 belongs to the adaptive walk, and without the walk nothing would read it",
-                target.name
-            );
-            if let Some(floor) = target.render_adaptive_min {
+                // The adaptive switch moves a stream's quality and nothing else. A
+                // still is sent once: there is no next frame to sharpen a tile the
+                // link coarsened, so tiles keep the quality they were configured
+                // with, lossy or not — and turning a walk off where none runs says
+                // as little as turning it on.
                 anyhow::ensure!(
-                    (1..=100).contains(&floor),
-                    "target {:?} sets render_adaptive_min = {floor}, which is out of range — \
-                     it must be 1–100",
+                    target.render_adaptive.is_none(),
+                    "target {:?} sets render_adaptive, which moves the quality of a VP9 \
+                     stream, and this target sends none — a tile is sent once, at the \
+                     quality it was configured with. Set render_motion to stream the cells \
+                     in motion, or render_type = \"video\" to stream the whole desktop",
                     target.name
                 );
-                // A floor above the ceiling is a contradiction, and the stream's
-                // quality is the ceiling the walk must fit under.
-                if let Some(ceiling) = target.video_quality {
-                    anyhow::ensure!(
-                        floor <= ceiling,
-                        "target {:?} sets render_adaptive_min = {floor} above its \
-                         video_quality of {ceiling}, which leaves the adaptive walk nowhere \
-                         to go",
-                        target.name
-                    );
-                }
+                anyhow::ensure!(
+                    target.render_adaptive_min.is_none(),
+                    "target {:?} sets render_adaptive_min, the floor of a VP9 stream's \
+                     adaptive walk, and this target sends no stream to walk",
+                    target.name
+                );
             }
         }
         Ok(config)
@@ -3166,7 +3200,7 @@ mod tests {
                     quality: 60,
                     debug: false,
                 },
-                motion: Some(MotionEncode { quality: 30, adaptive: None, chroma: Chroma::Subsampled }),
+                motion: Some(MotionEncode { quality: 30, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }),
                 debug: false,
             }
         );
@@ -3198,15 +3232,15 @@ mod tests {
         };
         assert_eq!(
             video(""),
-            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
+            RenderPlan::Video { quality: 100, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }
         );
         assert_eq!(
             video("render_chroma = \"420\""),
-            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
+            RenderPlan::Video { quality: 100, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }
         );
         assert_eq!(
             video("render_chroma = \"444\""),
-            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Full }
+            RenderPlan::Video { quality: 100, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Full }
         );
         let cfg = ConfigFile::parse(
             r#"
@@ -3226,7 +3260,7 @@ mod tests {
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
-                motion: Some(MotionEncode { quality: 30, adaptive: None, chroma: Chroma::Full }),
+                motion: Some(MotionEncode { quality: 30, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Full }),
                 debug: false,
             }
         );
@@ -3303,11 +3337,11 @@ mod tests {
         assert_eq!(video.render_chroma, Some(ChromaChoice::Auto));
         assert_eq!(
             video.render_plan(Chroma::Full),
-            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Full }
+            RenderPlan::Video { quality: 100, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Full }
         );
         assert_eq!(
             video.render_plan(Chroma::Subsampled),
-            RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
+            RenderPlan::Video { quality: 100, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }
         );
 
         let motion = target("render_motion = true\nvideo_quality = 30");
@@ -3338,6 +3372,10 @@ mod tests {
     /// The TUI reads a config file with no browser in front of it, so `auto` is the
     /// one target it cannot describe by resolving: it says what the answer decides
     /// instead of picking one. Every other target reads as its plan.
+    ///
+    /// The condition is a segment naming its own colour rather than a clause hung
+    /// off the end of the line, because the end of a streaming line is the adaptive
+    /// floor — which is not a thing any browser decides.
     #[test]
     fn a_target_card_states_an_auto_chroma_rather_than_resolving_it() {
         let summary = |extra: &str| {
@@ -3358,12 +3396,30 @@ mod tests {
             .targets[0]
                 .render_summary()
         };
-        assert_eq!(summary(""), "video q60");
-        assert_eq!(summary("render_chroma = \"420\""), "video q60");
-        assert_eq!(summary("render_chroma = \"444\""), "video q60 4:4:4");
+        assert_eq!(summary(""), "video q60 · adaptive ≥20");
+        assert_eq!(summary("render_chroma = \"420\""), "video q60 · adaptive ≥20");
+        assert_eq!(summary("render_chroma = \"444\""), "video q60 4:4:4 · adaptive ≥20");
         assert_eq!(
             summary("render_chroma = \"auto\""),
-            "video q60 4:4:4 where the browser takes it, else 4:2:0"
+            "video q60 · adaptive ≥20 · 4:4:4 where the browser takes it, else 4:2:0"
+        );
+        // And with the walk off there is no floor for it to be read against, which
+        // is the same sentence one segment shorter.
+        assert_eq!(
+            summary("render_chroma = \"auto\"\nrender_adaptive = false"),
+            "video q60 · 4:4:4 where the browser takes it, else 4:2:0"
+        );
+        // A motion target's condition names the colour the same way, at the end of
+        // a line that already carries two encodes.
+        assert_eq!(
+            parse_target(
+                "render_motion = true\nvideo_quality = 40\nrender_chroma = \"auto\""
+            )
+            .unwrap()
+            .targets[0]
+                .render_summary(),
+            "motion · base lossless png, moving stream q40 · adaptive ≥20 · 4:4:4 where \
+             the browser takes it, else 4:2:0"
         );
 
         // A target with no stream has no chroma to qualify, whatever it is.
@@ -3541,12 +3597,19 @@ mod tests {
             "#,
         )
         .expect("video with a quality");
-        assert_eq!(cfg.targets[0].render_plan(Chroma::Full), RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled });
+        assert_eq!(
+            cfg.targets[0].render_plan(Chroma::Full),
+            RenderPlan::Video {
+                quality: 60,
+                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                chroma: Chroma::Subsampled
+            }
+        );
     }
 
     #[test]
-    fn video_without_a_quality_is_rejected() {
-        let err = ConfigFile::parse(
+    fn video_without_a_quality_streams_at_the_default() {
+        let cfg = ConfigFile::parse(
             r#"
             [[targets]]
             name = "a"
@@ -3557,8 +3620,15 @@ mod tests {
             render_type = "video"
             "#,
         )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("video_quality"), "{err:#}");
+        .expect("video needs no quality");
+        assert_eq!(
+            cfg.targets[0].render_plan(Chroma::Full),
+            RenderPlan::Video {
+                quality: DEFAULT_VIDEO_QUALITY,
+                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                chroma: Chroma::Subsampled
+            }
+        );
     }
 
     #[test]
@@ -3727,7 +3797,7 @@ mod tests {
             t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
-                motion: Some(MotionEncode { quality: 10, adaptive: None, chroma: Chroma::Subsampled }),
+                motion: Some(MotionEncode { quality: 10, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }),
                 debug: false,
             }
         );
@@ -3758,7 +3828,7 @@ mod tests {
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Webp { quality: 60 },
-                motion: Some(MotionEncode { quality: 10, adaptive: None, chroma: Chroma::Subsampled }),
+                motion: Some(MotionEncode { quality: 10, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }),
                 debug: false,
             }
         );
@@ -3795,37 +3865,47 @@ mod tests {
             (
                 "motion over a classify base",
                 "render_motion = true\nrender_subtype = \"classify\"\nimage_quality = 60\nvideo_quality = 15",
-                "motion · base classified png / webp q60, moving stream q15",
+                "motion · base classified png / webp q60, moving stream q15 · adaptive ≥20",
             ),
             (
                 "motion over a lossless base",
                 "render_motion = true\nvideo_quality = 30",
-                "motion · base lossless png, moving stream q30",
+                "motion · base lossless png, moving stream q30 · adaptive ≥20",
             ),
             (
                 "motion over a lossy base",
                 "render_motion = true\nrender_subtype = \"webp\"\nimage_quality = 70\nvideo_quality = 40",
-                "motion · base webp q70, moving stream q40",
+                "motion · base webp q70, moving stream q40 · adaptive ≥20",
             ),
             (
                 "the debug outlines, which are a different session to be looking at",
                 "render_motion = true\nvideo_quality = 30\nrender_motion_debug = true",
-                "motion · base lossless png, moving stream q30 (debug outlines)",
+                "motion · base lossless png, moving stream q30 · adaptive ≥20 (debug outlines)",
             ),
             (
                 "the whole desktop as one stream",
                 "render_type = \"video\"\nvideo_quality = 60",
-                "video q60",
+                "video q60 · adaptive ≥20",
             ),
             (
                 "the whole desktop as one stream with every pixel's colour",
                 "render_type = \"video\"\nvideo_quality = 60\nrender_chroma = \"444\"",
-                "video q60 4:4:4",
+                "video q60 4:4:4 · adaptive ≥20",
             ),
             (
                 "a stream per region with every pixel's colour",
                 "render_motion = true\nvideo_quality = 40\nrender_chroma = \"444\"",
-                "motion · base lossless png, moving stream q40 4:4:4",
+                "motion · base lossless png, moving stream q40 4:4:4 · adaptive ≥20",
+            ),
+            (
+                "the whole desktop as one stream, held to its dial",
+                "render_type = \"video\"\nvideo_quality = 60\nrender_adaptive = false",
+                "video q60",
+            ),
+            (
+                "a stream per region, held to its dial",
+                "render_motion = true\nvideo_quality = 30\nrender_adaptive = false",
+                "motion · base lossless png, moving stream q30",
             ),
         ];
 
@@ -3853,11 +3933,11 @@ mod tests {
         );
     }
 
-    /// The moving encode is the whole point of the switch and its dial has no
-    /// default: a quality nobody chose is not a quality.
+    /// The moving encode is the whole point of the switch, and the switch alone is
+    /// enough: the dial it reads defaults like the walk that moves it.
     #[test]
-    fn motion_without_a_motion_quality_is_rejected() {
-        let err = ConfigFile::parse(
+    fn motion_without_a_motion_quality_takes_the_default() {
+        let cfg = ConfigFile::parse(
             r#"
             [[targets]]
             name = "a"
@@ -3868,8 +3948,15 @@ mod tests {
             render_motion = true
             "#,
         )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("video_quality"), "{err:#}");
+        .expect("motion needs no quality");
+        assert_eq!(
+            motion_of(cfg.targets[0].render_plan(Chroma::Full)),
+            Some(MotionEncode {
+                quality: DEFAULT_VIDEO_QUALITY,
+                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                chroma: Chroma::Subsampled
+            })
+        );
     }
 
     #[test]
@@ -4005,14 +4092,11 @@ mod tests {
         }
     }
 
-    /// The other half of one key serving both: each way of carrying a stream
-    /// demands it under the same name, and neither invents a default.
+    /// The other half of one key serving both: each way of carrying a stream reads
+    /// it under the same name, takes the same default, and refuses the same range.
     #[test]
-    fn both_ways_of_streaming_demand_the_same_quality_key() {
+    fn both_ways_of_streaming_read_the_same_quality_key() {
         for keys in ["render_type = \"video\"", "render_motion = true"] {
-            let err = parse_target(keys).unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(msg.contains("no video_quality"), "{keys}: {msg}");
             let err = parse_target(&format!("{keys}\nvideo_quality = 0")).unwrap_err();
             assert!(format!("{err:#}").contains("out of range"), "{keys}");
         }
@@ -4022,7 +4106,11 @@ mod tests {
                 .unwrap()
                 .targets[0]
                 .render_plan(Chroma::Full),
-            RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled }
+            RenderPlan::Video {
+                quality: 60,
+                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                chroma: Chroma::Subsampled
+            }
         );
         assert_eq!(
             motion_of(
@@ -4031,7 +4119,11 @@ mod tests {
                     .targets[0]
                     .render_plan(Chroma::Full)
             ),
-            Some(MotionEncode { quality: 60, adaptive: None, chroma: Chroma::Subsampled })
+            Some(MotionEncode {
+                quality: 60,
+                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                chroma: Chroma::Subsampled
+            })
         );
     }
 
@@ -4078,7 +4170,7 @@ mod tests {
         .expect("motion is independent of the VNC subtype");
         assert_eq!(
             motion_of(cfg.targets[0].render_plan(Chroma::Full)),
-            Some(MotionEncode { quality: 10, adaptive: None, chroma: Chroma::Subsampled })
+            Some(MotionEncode { quality: 10, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled })
         );
     }
 
@@ -4940,39 +5032,69 @@ mod tests {
         assert_eq!(plan.describe(), "motion · base webp q70, moving stream q60 · adaptive ≥35");
     }
 
-    /// A target that never asked stays exactly on its dial: no floor in the plan.
+    /// A target that turned the walk off stays exactly on its dial: no floor in the
+    /// plan, and the pressure-only walk the streams had before the key existed.
     #[test]
-    fn without_render_adaptive_the_plan_has_no_floor() {
-        let cfg = parse_target("render_type = \"video\"\nvideo_quality = 80").expect("plain video");
+    fn render_adaptive_false_leaves_the_plan_without_a_floor() {
+        let cfg = parse_target("render_type = \"video\"\nvideo_quality = 80\nrender_adaptive = false")
+            .expect("video with the walk off");
         assert_eq!(
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Video { quality: 80, adaptive: None, chroma: Chroma::Subsampled }
         );
+        assert_eq!(cfg.targets[0].render_plan(Chroma::Full).describe(), "video q80");
+    }
+
+    /// And a target that said nothing gets the walk anyway: it is on, at its own
+    /// floor, under the quality the operator did not have to write either.
+    #[test]
+    fn the_walk_and_its_dial_are_a_streaming_targets_default() {
+        let cfg = parse_target("render_type = \"video\"").expect("bare video");
+        let plan = cfg.targets[0].render_plan(Chroma::Full);
+        assert_eq!(
+            plan,
+            RenderPlan::Video {
+                quality: DEFAULT_VIDEO_QUALITY,
+                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                chroma: Chroma::Subsampled
+            }
+        );
+        assert_eq!(plan.describe(), "video q90 · adaptive ≥20");
     }
 
     /// The walk is a stream's. A target that sends only tiles has none, whether
     /// its tiles are lossless or lossy: a still is sent once, and one the link
-    /// coarsened would have nothing coming back for it.
+    /// coarsened would have nothing coming back for it. Both ways of writing the
+    /// key are refused there — turning off a walk that never runs says as little
+    /// as turning it on, and the walk being the default is not a reason to let a
+    /// tiles target opt out of it.
     #[test]
     fn render_adaptive_is_refused_where_nothing_streams() {
         for body in [
             "render_adaptive = true",
+            "render_adaptive = false",
             "render_subtype = \"webp\"\nimage_quality = 70\nrender_adaptive = true",
-            "render_subtype = \"classify\"\nimage_quality = 70\nrender_adaptive = true",
+            "render_subtype = \"classify\"\nimage_quality = 70\nrender_adaptive = false",
         ] {
             let err = parse_target(body).unwrap_err();
             let rendered = format!("{err:#}");
             assert!(rendered.contains("render_adaptive"), "{body}: {rendered}");
             assert!(rendered.contains("sends none"), "{body}: {rendered}");
         }
+        // And so is the floor, which the switch is no longer needed to reach.
+        let err = parse_target("render_adaptive_min = 30").unwrap_err();
+        assert!(format!("{err:#}").contains("no stream to walk"), "{err:#}");
     }
 
-    /// The floor belongs to the walk; without the walk nothing reads it.
+    /// The floor belongs to the walk; beside a walk that was turned off nothing
+    /// reads it.
     #[test]
-    fn render_adaptive_min_without_the_walk_is_refused() {
-        let err =
-            parse_target("render_type = \"video\"\nvideo_quality = 80\nrender_adaptive_min = 30")
-                .unwrap_err();
+    fn render_adaptive_min_beside_a_walk_turned_off_is_refused() {
+        let err = parse_target(
+            "render_type = \"video\"\nvideo_quality = 80\n\
+             render_adaptive = false\nrender_adaptive_min = 30",
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("render_adaptive_min"));
     }
 
