@@ -227,7 +227,7 @@ export type ControlMsg =
       // Whether this target redirects the browser's microphone to the remote. The
       // camera's twin: enabled afresh each session by opening /ws/mic.
       microphone: boolean;
-      // The render dial this session resolved to, in one line — `tiles · jpeg q60`,
+      // The render dial this session resolved to, in one line — `tiles · webp q60`,
       // `motion · base png, moving stream q40`, `video q60`. The *resolved plan*
       // rather than the config keys, which the reader may not have and which take a
       // pairing matrix to collapse into what the encoder is actually doing.
@@ -329,10 +329,9 @@ export interface TileMsg {
   data: Uint8Array;
   // What `data` is, as a MIME type handed to createImageBitmap as a Blob: the
   // gateway sends lossless PNG by default, and a target on a lossy render
-  // dial sends one of the two lossy stills, JPEG or WebP, instead. Every one of
-  // them is a self-contained picture;
+  // dial sends WebP instead. Both are a self-contained picture;
   // a frame that only means something in sequence is a VideoMsg, not a tile.
-  codec: "image/png" | "image/jpeg" | "image/webp";
+  codec: "image/png" | "image/webp";
 }
 
 // "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
@@ -418,14 +417,13 @@ const COPY_LEN = 13;
 // Any other bit means a gateway newer than this client, and the record is dropped rather
 // than guessed at — the same strictness the batch's own flags byte gets.
 const VIDEO_KEYFRAME = 0x01;
-// The format byte, as what the payload is: `Tile::FORMAT_PNG`, `Tile::FORMAT_JPEG`,
+// The format byte, as what the payload is: `Tile::FORMAT_PNG`,
 // `Tile::FORMAT_WEBP`. A byte outside this map (a stale gateway's, or a corrupt
 // frame) yields `undefined`, and `decodeTile` drops the record rather than handing
 // unknown bytes to a decoder.
 const CODEC_BY_FORMAT: Record<number, TileMsg["codec"] | undefined> = {
   1: "image/png",
-  2: "image/jpeg",
-  3: "image/webp",
+  2: "image/webp",
 };
 export const NO_SLOT = 0xffff;
 // How many video streams one session may run at once. Part of the wire contract

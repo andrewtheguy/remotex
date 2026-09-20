@@ -325,7 +325,7 @@ pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
         "a video stream will not encode a {}x{} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
-         target render_type = \"tiles\" (with render_subtype = \"jpeg\" for a lossy \
+         target render_type = \"tiles\" (with render_subtype = \"webp\" for a lossy \
          picture), or a remote that can be asked for a smaller desktop: with \
          resize = true the gateway holds every size it asks for under this ceiling",
         rect.w(),
@@ -775,7 +775,7 @@ mod tests {
         let message = format!("{refused:#}");
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
-        assert!(message.contains("jpeg"), "the message does not say what to do instead");
+        assert!(message.contains("webp"), "the message does not say what to do instead");
         // Both 4K panels are pictures: the 16:9 one and the 16:10 one a 1920×1200 laptop
         // is at 2x.
         assert!(coded_rect(rect(0, 0, 3840, 2160), (3840, 2160)).is_ok(), "16:9 4K was refused");

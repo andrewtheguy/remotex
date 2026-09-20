@@ -16,7 +16,7 @@
 //! below are about this gateway's decisions and hold for any of them.
 //!
 //! What is asserted is the system's decisions, not the device's content: every
-//! tile names PNG or the session's lossy still in its format byte, every payload
+//! tile names PNG or WebP in its format byte, every payload
 //! begins with the magic of the format it names, and a full repaint of the
 //! announced desktop arrives tile by tile. Whether any given tile went lossy
 //! depends on what the remote screen happens to show, so the split is *reported*
@@ -24,7 +24,7 @@
 //! regions, so a classify session that produced no PNG at all is a classifier
 //! that has stopped saying no.
 //!
-//! Ignored by default, and one test rather than three: the cases share a device,
+//! Ignored by default, and one test rather than two: the cases share a device,
 //! so they run in sequence inside it. It needs the named device reachable:
 //!
 //! ```sh
@@ -38,7 +38,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, ClassifyLossy, RenderSubtype, RenderType, TargetConfig};
+use remotex::config::{AppConfig, RenderSubtype, RenderType, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -46,8 +46,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// The wire's format bytes, spelled out rather than imported: this test is a
 /// stand-in for a client, and a client only has the numbers.
 const TILE_FORMAT_PNG: u8 = 1;
-const TILE_FORMAT_JPEG: u8 = 2;
-const TILE_FORMAT_WEBP: u8 = 3;
+const TILE_FORMAT_WEBP: u8 = 2;
 
 /// The quality the classifier's lossy side runs at here. Any legal value would
 /// do — the assertions are about formats, not fidelity.
@@ -73,9 +72,9 @@ fn target_name() -> String {
     })
 }
 
-/// Put that target on a classify-base tiles dial, with the named lossy still
-/// under the classifier, and with or without the motion discount on top of it.
-fn uat_target(name: &str, lossy: ClassifyLossy, motion: bool) -> TargetConfig {
+/// Put that target on a classify-base tiles dial, with or without the motion
+/// discount on top of it.
+fn uat_target(name: &str, motion: bool) -> TargetConfig {
     let mut target = common::uat_target(name);
     // Whatever the operator has this target set to. A target already on
     // `render_type = "video"` resolves to a whole-desktop VP9 plan and never
@@ -84,7 +83,6 @@ fn uat_target(name: &str, lossy: ClassifyLossy, motion: bool) -> TargetConfig {
     target.render_type = RenderType::Tiles;
     target.render_subtype = Some(RenderSubtype::Classify);
     target.render_subtype_quality = Some(QUALITY);
-    target.render_classify_lossy = Some(lossy);
     target.render_motion = motion;
     target.render_stream_quality = motion.then_some(MOTION_QUALITY);
     target.render_motion_debug = false;
@@ -126,10 +124,10 @@ struct Tally {
 /// Connect to the operator's target on the classify dial and read tiles until the
 /// announced desktop is fully painted. Every tile's format byte and payload magic
 /// are checked on the way past; the lossless/lossy split comes back for reporting.
-async fn paint_a_whole_desktop(lossy: ClassifyLossy, motion: bool) -> Tally {
+async fn paint_a_whole_desktop(motion: bool) -> Tally {
     common::init_logging();
     let name = &target_name();
-    let addr = spawn_app(uat_target(name, lossy, motion)).await;
+    let addr = spawn_app(uat_target(name, motion)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
@@ -163,7 +161,7 @@ async fn paint_a_whole_desktop(lossy: ClassifyLossy, motion: bool) -> Tally {
                     let coverage = coverage.as_mut().expect("tile arrived before resize");
                     for painted in stream.paint(&frame) {
                         if let common::Painted::Tile(tile) = &painted {
-                            check_tile(tile, lossy, &mut tally);
+                            check_tile(tile, &mut tally);
                         }
                         // A copy paints pixels the client already checked when
                         // they first arrived; only its geometry counts here.
@@ -192,12 +190,7 @@ async fn paint_a_whole_desktop(lossy: ClassifyLossy, motion: bool) -> Tally {
     .await
     .expect("timed out before the desktop was fully painted");
 
-    println!(
-        "{name}: {} png tile(s), {} {} tile(s)",
-        tally.png,
-        tally.lossy,
-        lossy.name()
-    );
+    println!("{name}: {} png tile(s), {} webp tile(s)", tally.png, tally.lossy);
     assert!(
         tally.png > 0,
         "{name}: a real desktop was painted whole without one PNG tile — the classifier \
@@ -207,17 +200,11 @@ async fn paint_a_whole_desktop(lossy: ClassifyLossy, motion: bool) -> Tally {
 }
 
 /// One tile's wire claims, checked against each other: the format byte must be
-/// PNG or the one lossy still this session configured — a third format would be
-/// an encoder the operator did not ask for — and the payload must begin with that
-/// format's magic, a JPEG in PNG clothing decoding as neither.
-fn check_tile(tile: &common::BatchTile, lossy: ClassifyLossy, tally: &mut Tally) {
+/// PNG or WebP — a third format would be an encoder the operator did not ask for
+/// — and the payload must begin with that format's magic, a WebP in PNG clothing
+/// decoding as neither.
+fn check_tile(tile: &common::BatchTile, tally: &mut Tally) {
     assert!(tile.w > 0 && tile.h > 0, "empty tile {}x{}", tile.w, tile.h);
-    let (format, magic): (u8, &[u8]) = match lossy {
-        ClassifyLossy::Jpeg => (TILE_FORMAT_JPEG, &[0xFF, 0xD8, 0xFF]),
-        // The RIFF container's form type sits at byte 8, past the four length
-        // bytes, so the magic is checked in two pieces below.
-        ClassifyLossy::Webp => (TILE_FORMAT_WEBP, b"RIFF"),
-    };
     if tile.format == TILE_FORMAT_PNG {
         assert!(
             tile.payload.len() >= 8 && tile.payload[..8] == *b"\x89PNG\r\n\x1a\n",
@@ -227,48 +214,38 @@ fn check_tile(tile: &common::BatchTile, lossy: ClassifyLossy, tally: &mut Tally)
         return;
     }
     assert_eq!(
-        tile.format,
-        format,
-        "a classify session on {} sent a tile in another format",
-        lossy.name()
+        tile.format, TILE_FORMAT_WEBP,
+        "a classify session sent a tile in another format"
     );
+    // The RIFF container's form type sits at byte 8, past the four length bytes.
     assert!(
-        tile.payload.len() > magic.len() && tile.payload[..magic.len()] == *magic,
-        "a tile marked {} does not carry one",
-        lossy.name()
+        tile.payload.len() >= 12
+            && tile.payload[..4] == *b"RIFF"
+            && tile.payload[8..12] == *b"WEBP",
+        "a tile marked WebP does not carry a WebP stream"
     );
-    if lossy == ClassifyLossy::Webp {
-        assert!(
-            tile.payload.len() >= 12 && tile.payload[8..12] == *b"WEBP",
-            "a tile marked WebP carries a RIFF container that is not WebP"
-        );
-    }
     tally.lossy += 1;
 }
 
-/// The classifier against a real desktop, three sessions deep. Run it once per
+/// The classifier against a real desktop, two sessions deep. Run it once per
 /// device worth covering — an RDP host, a VNC host, a Mac in High Performance
 /// mode — by pointing [`TARGET_ENV`] at each in turn.
 ///
-/// **One test rather than three, because the three share a device.** Rust runs
-/// the tests of a binary concurrently, so three of these would open three
+/// **One test rather than two, because the two share a device.** Rust runs
+/// the tests of a binary concurrently, so both of these would open two
 /// sessions to the same desktop at once — which an RDP host or a Mac answers by
 /// evicting or refusing, and the loser fails for a reason that is about the test
 /// harness and nothing about the classifier. Sequential here is not a
 /// simplification of parallel; it is the only shape that matches one device.
 ///
-/// The three cases in order:
+/// The two cases in order:
 ///
-/// - the encoder the classifier was measured against;
-/// - the same desktop with the classifier's other encoder underneath it — the
-///   verdicts are the classifier's either way, and what this adds is that the
-///   tiles it sends lossy arrive as WebP a browser can decode;
+/// - the classifier as the whole of the base;
 /// - the classifier as the base of a motion plan, where a settled cell is
 ///   classified while whatever is moving takes the stream instead.
 #[tokio::test]
 #[ignore = "needs the real device REMOTEX_UAT_TARGET names in tmp/test_uat.toml"]
 async fn classify_paints_a_real_desktop() {
-    paint_a_whole_desktop(ClassifyLossy::Jpeg, false).await;
-    paint_a_whole_desktop(ClassifyLossy::Webp, false).await;
-    paint_a_whole_desktop(ClassifyLossy::Jpeg, true).await;
+    paint_a_whole_desktop(false).await;
+    paint_a_whole_desktop(true).await;
 }

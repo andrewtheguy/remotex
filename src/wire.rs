@@ -731,24 +731,24 @@ mod tests {
     }
 
     // The format byte is the codec, and the wire relays it untouched: the tile
-    // encoder may send PNG or JPEG, and neither batching nor the cache may
+    // encoder may send PNG or WebP, and neither batching nor the cache may
     // drop or rewrite it.
     #[test]
     fn the_tile_format_byte_survives_encoding() {
         let mut wire = Wire::default();
-        let jpeg = ServerMsg::Tile(Tile {
-            format: Tile::FORMAT_JPEG,
+        let webp = ServerMsg::Tile(Tile {
+            format: Tile::FORMAT_WEBP,
             x: 0,
             y: 64, // clear of tile(0, ..) so neither supersedes the other
             w: 320,
             h: 64,
             data: vec![0xFFu8; 900],
         });
-        let frames = wire.encode(vec![tile(0, 900), jpeg]).unwrap();
+        let frames = wire.encode(vec![tile(0, 900), webp]).unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].7, Tile::FORMAT_PNG, "the PNG tile keeps its codec");
-        assert_eq!(records[1].7, Tile::FORMAT_JPEG, "the JPEG tile keeps its codec");
+        assert_eq!(records[1].7, Tile::FORMAT_WEBP, "the WebP tile keeps its codec");
     }
 
     // Ordering across the two frame types is load-bearing: a resize reallocates

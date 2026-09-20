@@ -1518,7 +1518,7 @@ mod tests {
             "[branding]\ntext = \"work laptop\"\n\n\
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
              username = \"andrew\"\npassword = \"hunter2\"\nresize = true\n\
-             render_type = \"tiles\"\nrender_subtype = \"jpeg\"\nrender_subtype_quality = 70\n\n\
+             render_type = \"tiles\"\nrender_subtype = \"webp\"\nrender_subtype_quality = 70\n\n\
              [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"192.168.1.21\"\n\
              audio = true\n",
         )
@@ -1533,7 +1533,7 @@ mod tests {
         assert!(page.contains("account password set"), "{page}");
         assert!(!page.contains("hunter2"), "a password does not reach the screen: {page}");
         assert!(page.contains("opus at 96 kbit/s"), "an unset dial is named at its default: {page}");
-        assert!(page.contains("jpeg q70"), "the render plan describes itself: {page}");
+        assert!(page.contains("webp q70"), "the render plan describes itself: {page}");
 
         // A config the gateway would refuse says so, instead of a page of
         // defaults for a start that will not happen.

@@ -17,8 +17,7 @@ const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
 const OP_COPY = 0x04;
 const FORMAT_PNG = 1;
-const FORMAT_JPEG = 2;
-const FORMAT_WEBP = 3;
+const FORMAT_WEBP = 2;
 
 type Record =
   | {
@@ -366,20 +365,12 @@ test("each tile format reaches the decoder as its own MIME type", async () => {
         slot: NO_SLOT,
         x: 0,
         y: 0,
-        format: FORMAT_JPEG,
-        payload: [2],
-      },
-      {
-        op: "tile",
-        slot: NO_SLOT,
-        x: 0,
-        y: 0,
         format: FORMAT_WEBP,
-        payload: [3],
+        payload: [2],
       },
     ]),
   );
-  assert.deepEqual(decodedAs, ["image/png", "image/jpeg", "image/webp"]);
+  assert.deepEqual(decodedAs, ["image/png", "image/webp"]);
 });
 
 test("a tile in a format this client has no decoder name for is dropped", async () => {

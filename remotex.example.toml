@@ -431,23 +431,17 @@ password = "change-me"
 # tiles a target already sends. So it is a switch on "tiles" — render_motion, its
 # own block below.
 #
-# render_subtype is the codec of the base tiles, and any of the four pairs with
+# render_subtype is the codec of the base tiles, and any of the three pairs with
 # "tiles" ("video" sends no tiles and refuses the key):
 #
 #   "png"      (the default) — lossless: exact pixels, and the right answer on
-#              a LAN. The only lossless codec there is; the choice below is all
-#              on the lossy side.
-#   "jpeg"     — every tile at one fixed quality, for a link that cannot afford
+#              a LAN. The only lossless codec there is.
+#   "webp"     — every tile at one fixed quality, for a link that cannot afford
 #              exact pixels. Text softens along with everything else; that is
 #              the trade of the single knob.
-#   "webp"     — the same trade in the other lossy codec: fewer bytes at the same
-#              quality, and more gateway CPU to produce them. Worth it on a link
-#              narrower than this gateway is busy; not worth it the other way
-#              round. Nobody can decide that for you, which is why both are here
-#              and neither is the default.
 #   "classify" — per tile, whichever fits: a picture classifier reads
 #              each tile's own pixels, and only what looks photographic — a
-#              photo, a thumbnail, a gradient — goes to the lossy codec at
+#              photo, a thumbnail, a gradient — goes to WebP at
 #              render_subtype_quality;
 #              flat UI and text stay lossless PNG, which for them is smaller
 #              *and* sharp. PNG is also the verdict for every small or ambiguous
@@ -456,13 +450,10 @@ password = "change-me"
 #              costs is a little gateway CPU per tile, on the encode workers.
 #
 # render_subtype_quality is 1-100 and is *required* whenever the subtype is lossy
-# ("jpeg", "webp", "classify"), refused when it is "png" — there is no default,
-# because a
+# ("webp", "classify"), refused when it is "png" — there is no default, because a
 # quality nobody chose is not a quality. Higher is larger and closer to exact. It is
 # the base codec's dial and nothing else's: render_stream_quality, below, is the dial
 # of whatever VP9 stream a target has, and is refused on one that streams nothing.
-# One key for both lossy codecs, because it is one dial: which codec spends it is
-# render_subtype's business, not a second number's.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
@@ -470,26 +461,12 @@ password = "change-me"
 #render_subtype = "png"
 #
 # A fixed lossy encode instead — naming "tiles" is optional, it is the default:
-#render_subtype = "jpeg"
-#render_subtype_quality = 75
-#
-# The same, in the other lossy codec:
 #render_subtype = "webp"
 #render_subtype_quality = 75
 #
 # Or the classifier deciding per tile:
 #render_subtype = "classify"
 #render_subtype_quality = 75
-#
-# Which lossy codec the classifier hands its photographic tiles to; "jpeg" unless
-# set. It moves nothing about the classifier itself — the same pixels get the same
-# verdict, and everything flat still goes out as lossless PNG — only which encoder
-# carries the photographic verdict out. Valid only with render_subtype = "classify":
-# "jpeg" and "webp" have already named their encoder, and "png" has no lossy side
-# for it to describe.
-#render_subtype = "classify"
-#render_subtype_quality = 75
-#render_classify_lossy = "webp"
 #
 # QA aid for "classify", off unless asked for: outline every tile the classifier
 # sent lossy in yellow, in the pixels themselves, so which regions it reads as
@@ -541,7 +518,7 @@ password = "change-me"
 # render_motion does not replace the base keys, it builds on them: render_subtype and
 # render_subtype_quality mean exactly what they mean without it, they just describe
 # the settled cells only. So render_subtype_quality is still refused over a "png" base
-# — there is nothing to turn down — and still required over "jpeg" or "classify".
+# — there is nothing to turn down — and still required over "webp" or "classify".
 #
 # render_stream_quality is the streams' own dial, required by render_motion — the
 # switch has no quality of its own and none is invented for it. It is a *ceiling*: on
@@ -569,12 +546,12 @@ password = "change-me"
 #render_stream_quality = 30
 #
 # A lossy base, for a link that cannot afford PNG for the settled cells either:
-#render_subtype = "jpeg"
+#render_subtype = "webp"
 #render_subtype_quality = 60
 #render_motion = true
 #render_stream_quality = 30
 #
-# The classifier as the base: settled photos JPEG at 60, settled text lossless,
+# The classifier as the base: settled photos WebP at 60, settled text lossless,
 # and whatever is moving in a stream until it stops:
 #render_subtype = "classify"
 #render_subtype_quality = 60
@@ -646,7 +623,7 @@ password = "change-me"
 #render_chroma = "420"
 
 # Let every lossy quality in this target's render plan track measured client
-# queueing. The configured qualities remain ceilings. JPEG tiles lower their
+# queueing. The configured qualities remain ceilings. WebP tiles lower their
 # quality per encode; video streams add the client's paint lag to their existing
 # send-pressure signal. Refused on lossless PNG tiles — the one plan with no
 # lossy dial to move — that is a "png" base with no render_motion.

@@ -15,7 +15,7 @@
 //! Set `REMOTEX_MOTION_TAPE=<path>` on `remotex serve` to record one; the file is
 //! written from the moment the session's encoder starts until it finishes. Only a
 //! `render_motion = true` target with the PNG base records anything: the replay
-//! weighs every tile as PNG, and a tape of a JPEG or classified target would be
+//! weighs every tile as PNG, and a tape of a WebP or classified target would be
 //! weighed wrong.
 //!
 //! ## Format
@@ -128,7 +128,7 @@ impl Tape {
     /// Start recording to the file [`ENV`] names, or `None` when it is unset. A file
     /// that cannot be opened is a warning and no tape — a measurement aid must not
     /// end a session. So is a `base` other than PNG: the replay weighs every tile
-    /// as the PNG it re-encodes, and a tape whose session sent JPEG would come back
+    /// as the PNG it re-encodes, and a tape whose session sent WebP would come back
     /// with tile columns that describe neither.
     pub fn from_env(header: Header, base: TileCodec) -> Option<Self> {
         let path = std::env::var_os(ENV)?;

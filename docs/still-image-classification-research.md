@@ -12,9 +12,11 @@ RemoteX has exactly one video codec: VP9. This applies both to the full-desktop
 H.264, HEVC or AV1 video path, codec probe, alternative or fallback to add.
 
 PNG, JPEG, WebP and AVIF in this note are independent still-image encodings for
-base tiles. Considering one of them does not make it a video codec or change the
-VP9-only motion path. Video facilities found in the reviewed projects are out of
-scope regardless of their performance.
+base tiles. RemoteX ships two of them — PNG and WebP; JPEG appears here as prior
+art in the reviewed projects and as the encoder several of the measurements below
+were taken against. Considering any of them does not make one a video codec or
+change the VP9-only motion path. Video facilities found in the reviewed projects
+are out of scope regardless of their performance.
 
 See [The render dial](architecture.md#the-render-dial) and
 [The codec](architecture.md#the-codec) for the shipped boundary.
@@ -44,14 +46,14 @@ licenses and reimplement ideas rather than copying source.
 looks photographic goes to the lossy still, while flat UI, text, small input and
 uncertain input stay in PNG. A false negative costs bytes; a false positive can
 leave text soft until the rectangle changes, so PNG is deliberately the
-conservative answer. Which lossy still receives the photographic verdict is
-`render_classify_lossy`, JPEG or WebP; it does not enter into the classifier's
-decision, and every measurement below about the decision holds under either.
+conservative answer. The lossy still is WebP and only WebP, so the classifier has
+no encoder question to answer: it answers what the pixels are and nothing else.
 
 The implementation in [`src/classify.rs`](../src/classify.rs) currently uses:
 
-- a 1,024-pixel minimum for JPEG candidates;
-- a palette gate that rejects tiles with at most 256 distinct colours;
+- a palette gate that rejects tiles with at most 256 distinct colours, which is
+  the size gate as well: a tile holds at most one colour per pixel, so nothing at
+  or under 256 pixels can be a lossy candidate whatever it looks like;
 - counts of nonzero soft and hard transitions; and
 - a requirement for more than four soft transitions per hard transition.
 
@@ -61,12 +63,15 @@ rotation even though its encoding character has not changed. That is a property 
 the code, not a measured production failure: no recorded real-device measurement
 has shown that the current direction changes a useful verdict.
 
-The classifier tests cover synthetic content and the measured size floor. The
+The classifier tests cover synthetic content, and two ignored instruments weigh
+the encoders rather than the verdict: `weigh_the_size_ladder` over synthetic
+content at each size the grid produces, and `weigh_a_tape_by_tile_size` over the
+tiles of a recorded desktop ([`src/tape.rs`](../src/tape.rs)). The
 ignored device tests in
 [`tests/classify_render_e2e.rs`](../tests/classify_render_e2e.rs) exercise the real
 classifier path against whichever QA machine `REMOTEX_UAT_TARGET` names — the
-suite names no device itself, so it does not go stale as a lab changes — under a
-JPEG lossy arm, a WebP lossy arm and a motion base. They report the lossless/lossy
+suite names no device itself, so it does not go stale as a lab changes — as a
+plain classify base and as a classify base under motion. They report the lossless/lossy
 split and verify complete, correctly labelled and decodable wire output. Their screens are mutable, so they deliberately
 do not assert a fixed split or measure visual regret against the codec not selected.
 
@@ -81,11 +86,14 @@ and paint cost is also part of a codec decision.
 Classification was measured shortly before this review; it was not chosen only
 from the synthetic unit cases. Commit `16e938b9b297e5d4862d25fabe718b71c1d1a52b`
 records the real wlshare measurement that cut `MIN_PHOTO_PIXELS` from 4,096 to
-1,024, and the current constant's comment preserves the important observations.
+1,024. That constant no longer exists — the damage-tape measurement below removed
+it — but the observations that lowered it are why, and the palette gate's comment
+preserves them.
 
 - A controlled 60×24-point gradient chip repainting on its own was refused by the
   old 4,096-pixel floor 117 times out of 117 at 1×, producing 378 KB of PNG. At 2×
-  it cleared the pixel floor 118 times out of 118 and produced 145 KB of JPEG. The
+  it cleared the pixel floor 118 times out of 118 and produced 145 KB of JPEG, the
+  lossy still of the time. The
   density-dependent difference showed that the old pixel floor was not a sound
   proxy for small screen furniture.
 - After lowering the floor, the same 45-second chip session at 1× encoded 1.50 MB
@@ -94,24 +102,45 @@ records the real wlshare measurement that cut `MIN_PHOTO_PIXELS` from 4,096 to
 - Three real 2× sessions included scrolled photographs, terminal glyphs and chrome
   with streams and cleanup active. No classifier-admitted tile fell below a
   point-scaled version of the old floor because real damage rectangles were wide.
-- The ignored `weigh_the_size_floor` instrument carries admitted synthetic content
-  through PNG, JPEG and WebP at a size ladder. JPEG is about one third of PNG at
-  32×32, about half at 24×24, and loses at 16×16 because of roughly 640 bytes of
-  JPEG tables. A real 9×10 caret was 261 bytes as PNG and 683 bytes as JPEG. WebP
-  at the same quality dial is around a tenth of the PNG at every size on that
-  ladder, 16×16 included — it has no table cost to amortize, so the shared size
-  floor is set by JPEG and is well clear of where WebP breaks even. That is a byte
-  comparison at a matched dial number, not a matched visual quality, and it says
-  nothing about the encode time measured below.
+- The ignored `weigh_the_size_ladder` instrument carries admitted synthetic content
+  through the still encoders at a size ladder. When it still carried JPEG, JPEG was
+  about one third of PNG at 32×32, about half at 24×24, and lost at 16×16 because
+  of roughly 640 bytes of JPEG tables; a real 9×10 caret was 261 bytes as PNG and
+  683 bytes as JPEG. WebP at the same quality dial is around a tenth of the PNG at
+  every size on that ladder, 16×16 included — it has no table cost to amortize. So
+  `MIN_PHOTO_PIXELS` had been set where JPEG turned over, which is nowhere near
+  where WebP does. That is a byte comparison at a matched dial number, not a
+  matched visual quality, and it says nothing about the encode time measured below.
+- The pixel floor was then weighed against WebP alone and removed. Two ten-second
+  Windows RDP sessions at 1×, driven by `tests/ws_probe.py --page` through a page of
+  photographs, were recorded as damage tapes and replayed through
+  `weigh_a_tape_by_tile_size`, which cuts every damage report the way the tile path
+  cuts it and asks the palette gate and the transition test about each piece with
+  the floor taken off. Under 256 pixels nothing was admitted in either session —
+  187 and 244 band pieces, 11,513 and 14,436 single cells, none of them past the
+  palette gate — so a floor below that is inert by arithmetic. Between 256 pixels
+  and the old floor of 1,024 the first session admitted 34 bands whose 49 KB of PNG
+  was 4.8 KB of WebP at quality 70, and, read as single cells, 265 pieces whose
+  393 KB was 37 KB; the second session admitted 78 and 170 of them at the same
+  ratio. Across every bucket of both sessions and both cuts — 110,000 admitted
+  pieces out of 183,000, and 150 to 200 MB of admitted PNG in each reading — not one
+  admitted piece came back larger as WebP. The floor was refusing
+  tiles worth about a tenth of their PNG and refusing nothing worth refusing. Those
+  bytes are a rounding error on a session's wire, well under 1% of it; the floor was
+  removed because its justification was JPEG's tables and nothing replaced it, not
+  because the traffic demanded it. 1× because a floor in pixels bites hardest at the
+  density where tiles are smallest, and because this host renders at 1×: it did not
+  take a 200% request. The band and cell readings are two cuts of one session and
+  must not be added together.
 - The real-device end-to-end tests paint a complete desktop over Windows RDP,
   TigerVNC and Apple High Performance, plus a classify base under motion. They
-  validate the operational classifier path and report its actual PNG/JPEG verdict
+  validate the operational classifier path and report its actual PNG/lossy verdict
   counts without pretending that a mutable desktop has a deterministic content
   split.
 
-Those results directly support the current size floor and show that the classifier
-runs usefully on real desktops. They do not compare proposed two-dimensional or
-run-based signals or JPEG chroma choices. They also do not preserve one fixed set
+Those results removed the size floor and show that the classifier runs usefully on
+real desktops. They do not compare proposed two-dimensional or
+run-based signals. They also do not preserve one fixed set
 of real pixels against which every alternative can be replayed. WebP has separate
 real-screen measurements recorded below. The measurement work proposed here
 extends the existing evidence for new classifier questions; it does not restart or
@@ -135,7 +164,7 @@ Useful for RemoteX:
 - retain the principle that lossy provenance must survive copies if a later
   correctness mechanism depends on knowing it.
 
-A blanket lossless refresh is not suitable for classified JPEG base tiles: it
+A blanket lossless refresh is not suitable for classified lossy base tiles: it
 would erase the intended bandwidth saving for a static photograph. RemoteX already
 repaints settled VP9 motion regions with their base encoding.
 
@@ -169,9 +198,9 @@ time until the next frame and estimated encode cost.
 
 RemoteX already adapts quality from receiver feedback and deliberately separates
 still content type from motion. It should therefore not copy Guacamole's frame-rate
-gate for still JPEG: a static photograph can still benefit from JPEG. The useful
-lesson is that a small predictor is preferable when its errors and costs are
-measured.
+gate for still tiles: a static photograph can still benefit from a lossy encode.
+The useful lesson is that a small predictor is preferable when its errors and costs
+are measured.
 
 ### KasmVNC: budget expensive still encoders
 
@@ -182,11 +211,11 @@ rectangle counts and bytes. The published baseline shows materially better WebP
 compression accompanied by much slower encoding in that implementation:
 [KasmVNC performance testing](https://github.com/kasmtech/KasmVNC/wiki/Performance-Testing).
 
-This independently agrees with RemoteX's own reason for deprioritizing WebP. If
-WebP is revisited later, KasmVNC's encoder-time budget is a useful improvement to
-test: admit WebP only while that budget permits and retain JPEG/PNG when it does
-not. It is not a reason to move WebP ahead of the current classifier work.
-KasmVNC's video codecs, scaling modes and fit-to-window policies are not applicable.
+RemoteX reached the opposite arrangement — WebP is the one lossy still and PNG the
+one lossless — so the transferable part is not KasmVNC's codec ladder but its
+accounting: it is worth knowing what a frame's WebP encodes cost before proposing
+any budget that would send a tile lossless instead. KasmVNC's video codecs, scaling
+modes and fit-to-window policies are not applicable.
 
 ### TurboVNC: chroma subsampling is part of text quality
 
@@ -195,27 +224,17 @@ TurboVNC's
 documents the trade between JPEG 4:4:4 and chroma-subsampled JPEG. Photographs tend
 to tolerate subsampling, while sharp coloured boundaries can blur.
 
-The `jpeg-encoder` version currently used by RemoteX defaults to 4:2:0 below quality
-90 and 4:4:4 at quality 90 or above. The useful distinction is the render subtype,
-not classifier confidence:
-
-- `render_subtype = "classify"` only hands content positively classified as
-  photographic to JPEG. The current JPEG sampling policy is the better fit for
-  that path; uncertain, sharp and text-like tiles have already stayed in PNG.
-- `render_subtype = "jpeg"` hands every tile to JPEG, including text and coloured
-  UI. Explicit 4:4:4 below quality 90 is worth measuring there because it preserves
-  chroma at sharp boundaries that this subtype cannot route to PNG.
-
-That policy would keep the existing JPEG wire image type and browser decode path;
-JPEG carries its sampling factors in the image. It must be an internal still-codec
-choice, not an extension or reuse of `render_chroma`, which belongs only to VP9
-streams. Under adaptive quality, an explicit 4:4:4 all-JPEG path should keep its
-sampling while the quantization quality walks down rather than silently changing
-to 4:2:0 at the encoder's quality-90 boundary.
+This no longer has a dial in RemoteX to turn. Lossy WebP is 4:2:0 and has no other
+mode, so there is nothing to pin and nothing for the adaptive walk to change by
+accident — the walk moves quantization and only quantization. The observation
+survives as a caution about `render_subtype = "webp"`, which hands text and
+coloured UI to a 4:2:0 encoder that cannot route them to PNG; `classify` is the
+answer for a screen where that matters. It is emphatically not a reason to extend
+or reuse `render_chroma`, which belongs only to VP9 streams.
 
 TurboVNC also tracks lossy rectangles and supports lossless refresh after
 inactivity. As with TigerVNC, that mechanism should not be copied wholesale onto
-classified base JPEG.
+classified base tiles.
 
 ### Xpra: broad selection with content and congestion inputs
 
@@ -248,19 +267,7 @@ encoding is hot-path work. A corpus should compare `Sub`, `Up`, a cheap sampled
 filter choice and a full adaptive choice. A smaller PNG is not an improvement if
 the filter search costs more CPU or delays later rectangles.
 
-### JPEG
-
-JPEG remains the low-risk photographic codec because it is fast, is already on the
-wire and decodes natively in the browser. Benchmark these changes independently:
-
-- explicit 4:4:4 below quality 90 for the all-JPEG subtype, using mixed desktop
-  content with text and coloured edges;
-- the current sampling behavior for classifier-approved photographs;
-- optimized Huffman tables, including the extra encode cost; and
-- a native libjpeg-turbo path only if its measured gain justifies another native
-  dependency and the packaging obligations that follow.
-
-### WebP: measured, and offered as the operator's choice
+### WebP: the one lossy still
 
 RemoteX has already implemented and measured WebP rather than relying on general
 web-image claims. Commit `2e62a0bbc2c243d5b7ffdf6c6b69c631f93c11f3`
@@ -285,30 +292,29 @@ lossy WebP took 2.5× JPEG's encode time on the deployment host. Commits
 It was later revisited as an optional fixed-quality subtype in
 `f38e6992aa301d3b9cf2f8d1b0127acc6b9bd868`, then removed again in
 `05aa6d94ed17f6deabdd0ec15d745e79e97399c6` while JPEG remained the sole lossy
-still codec.
+still codec, then restored beside JPEG as an operator's choice — and JPEG was
+finally removed, leaving WebP as the one lossy still.
 
 Those measurements say the same thing twice: WebP saves bytes and spends encoder
-time to do it. What they do not say is which of the two a given deployment would
-rather spend, and that is not a question a measurement of this gateway can answer —
-it depends on the link and on how busy the host running the gateway is.
-
-So WebP is back on the dial as a choice rather than as a policy. `render_subtype =
-"webp"` sends every tile that way, `render_classify_lossy = "webp"` sends only the
-tiles the classifier reads as photographic, and JPEG remains the default under
-both. Nothing decides between them at run time: there is no probe, no budget and no
-fallback, and an operator who does not name WebP never encodes one.
+time to do it. Offering both encoders made that trade the operator's to weigh per
+target, and the weighing never happened. The choice cost a config key, a second
+enum threaded through the whole encode path and a second answer to every question
+about a tile — and what it bought back was JPEG, faster to encode and larger on the
+wire, on a gateway whose whole reason for compressing at all is the wire. So JPEG
+is gone. `render_subtype = "webp"` sends every tile through WebP and `classify`
+sends only the tiles the classifier reads as photographic; nothing decides at run
+time, because there is nothing left to decide between.
 
 Lossless is untouched by this. PNG is the only lossless tile encoder, on the
 evidence above — lossless WebP saved 15% of the bytes at an affordable setting and
 was still many times slower than PNG `Compression::Fast` — so `render_subtype` has
-no lossless choice to make and the classifier's lossless verdict is PNG under
-either value of `render_classify_lossy`.
+no lossless choice to make and the classifier's lossless verdict is always PNG.
 
 What the measurements still leave open is an encoder-time budget of the kind
-KasmVNC uses: admit WebP only while a per-frame or rolling budget permits and fall
-back to JPEG when it does not. That would be a run-time policy on top of the
-operator's choice, and it should not be built until the corpus below can show what
-it would buy.
+KasmVNC uses: admit a lossy encode only while a per-frame or rolling budget permits
+and send PNG when it does not. That would be a run-time policy on top of the
+classifier's verdict, and it should not be built until the corpus below can show
+what it would buy.
 
 Google's general corpus reports smaller WebP output than comparable PNG and JPEG,
 but those figures do not override RemoteX's hot-path measurements:
@@ -316,26 +322,29 @@ but those figures do not override RemoteX's hot-path measurements:
 also 4:2:0, which matters around coloured glyphs and sharp edges:
 [WebP FAQ](https://developers.google.com/speed/webp/faq).
 
-It remains a still-image codec: the format byte tells a WebP tile from a JPEG one,
+It remains a still-image codec: the format byte tells a WebP tile from a PNG one,
 the browser maps it to `image/webp` for `createImageBitmap`, and the VP9 video path
 is unaffected in either direction.
 
 ### AVIF and QOI
 
-AVIF should remain behind the deferred WebP revisit unless materially different
-evidence gives it a credible hot-path advantage. QOI is unattractive for this
+AVIF should not be added unless materially different evidence gives it a credible
+hot-path advantage over WebP. QOI is unattractive for this
 design because the browser has no native `createImageBitmap()` QOI decoder and its
 larger WAN payload trades away the central benefit sought here.
 
 ## Extending the existing measurement
 
-The controlled wlshare sessions and real-device end-to-end runs answer the current
-size-floor and operational questions. Proposed classifier signals need a replayable
+The controlled wlshare sessions, the damage-tape weighings that removed the size
+floor, and the real-device end-to-end runs answer the size and operational
+questions asked so far. Proposed classifier signals need a replayable
 comparison because they must see exactly the same input pixels. An opt-in capture
 can record representative damage tiles or frames under `tmp/` and replay them
 through every candidate. Desktop captures may contain passwords, personal messages
 or other private material, so capture must never be enabled by default or
-committed. The same corpus can be reused when the deferred WebP work is revisited.
+committed — which is what the damage tape already is, an opt-in capture written
+under `tmp/` only when `REMOTEX_MOTION_TAPE` names a file, and the corpus proposed
+here is its content curated rather than a second mechanism.
 
 The corpus should contain:
 
@@ -372,14 +381,15 @@ only spends bandwidth.
 3. Measure horizontal-only evidence against bounded right/down/diagonal sampling
    on rotations and transposes. Replace it only if the comparison demonstrates a
    useful reduction in regret.
-4. Add a repetition/run signal as a conservative JPEG rejector for colourful UI.
-5. Benchmark explicit JPEG 4:4:4 for `render_subtype = "jpeg"`, where text and UI
-   cannot escape to PNG. Keep classifier-approved photographs on the current JPEG
-   sampling policy.
-6. WebP is on the dial as an operator's choice, JPEG remaining the default. Do not
-   add a run-time policy that picks between them until the corpus above can weigh
-   an encoder-time budget against the bytes it would give back.
-7. Keep AVIF behind that measurement unless new evidence justifies moving it ahead.
+4. Add a repetition/run signal as a conservative lossy rejector for colourful UI.
+5. Done: the pixel floor was re-weighed against WebP alone and removed, the palette
+   gate being the size gate that remains. What would put a floor back is a measured
+   size at which WebP loses to PNG on admitted content — the `webp loses` column of
+   `weigh_a_tape_by_tile_size`, which has been zero on every session recorded so far.
+6. WebP is the one lossy still. Do not add a second one, and do not add a run-time
+   policy that falls back to PNG on encoder time until the corpus above can weigh
+   that budget against the bytes it would give back.
+7. Keep AVIF out unless new evidence justifies moving it ahead of WebP.
 
 The likely policy shape is intentionally conservative:
 
@@ -387,7 +397,7 @@ The likely policy shape is intentionally conservative:
 | --- | --- |
 | Clear UI or text | PNG |
 | Ambiguous | PNG |
-| Clear photograph | The target's lossy still: JPEG, or WebP if asked for |
+| Clear photograph | WebP at `render_subtype_quality` |
 | Motion region | VP9 video stream, followed by the existing base-tile cleanup |
 
 ## Explicit exclusions
@@ -400,5 +410,5 @@ The likely policy shape is intentionally conservative:
 - No application/window metadata assumption for a composed framebuffer.
 - No blanket lossless refresh that cancels the intended static-photo savings.
 - No codec choice justified solely by generic web-image compression claims.
-- No run-time switching between JPEG and WebP: the operator names one.
+- No second lossy still codec beside WebP, and no run-time switching to one.
 - No lossless codec beside PNG.

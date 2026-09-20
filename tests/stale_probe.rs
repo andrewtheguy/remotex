@@ -16,7 +16,7 @@ use std::os::raw::c_int;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, ChromaChoice, ClassifyLossy, RenderSubtype, RenderType, TargetConfig};
+use remotex::config::{AppConfig, ChromaChoice, RenderSubtype, RenderType, TargetConfig};
 use remotex::protocol::batch;
 use remotex::server;
 use tokio::net::TcpListener;
@@ -38,10 +38,8 @@ fn uat_target(name: &str) -> TargetConfig {
     target.render_type = RenderType::Tiles;
     if std::env::var(BASE_ENV).as_deref() == Ok("png") {
         target.render_subtype = Some(RenderSubtype::Png);
-        target.render_classify_lossy = None;
     } else {
         target.render_subtype = Some(RenderSubtype::Classify);
-        target.render_classify_lossy = Some(ClassifyLossy::Webp);
     }
     target.render_subtype_quality = Some(60);
     target.render_motion = !matches!(std::env::var(MOTION_ENV).as_deref(), Ok("0") | Ok("false"));
@@ -257,7 +255,7 @@ impl Model {
                 buf.truncate(info.buffer_size());
                 Some((info.width as usize, info.height as usize, buf, bpp))
             }
-            3 => {
+            2 => {
                 let image = webp::Decoder::new(payload).decode()?;
                 let bpp = if image.is_alpha() { 4 } else { 3 };
                 Some((image.width() as usize, image.height() as usize, image.to_vec(), bpp))
@@ -475,7 +473,7 @@ fn report_stale(
     }
     let name = |f: Option<u8>| match f {
         Some(1) => "png".to_string(),
-        Some(3) => "webp".to_string(),
+        Some(2) => "webp".to_string(),
         Some(other) => format!("format {other}"),
         None => "never sent as a still".to_string(),
     };
@@ -495,7 +493,7 @@ fn report_stale(
         recoded,
         swaps
             .iter()
-            .filter(|((from, to), _)| *from == Some(3) && *to == Some(1))
+            .filter(|((from, to), _)| *from == Some(2) && *to == Some(1))
             .map(|(_, count)| *count)
             .sum::<usize>(),
         settled.len(),
