@@ -91,6 +91,16 @@ const MAC_KEY_HELP: readonly { situation: string; effect: string }[] = [
   { situation: "A Mac remote", effect: "n/a — ⌘ is sent as ⌘" },
 ];
 
+// What this keyboard's modifiers become on a Mac remote, mirroring
+// altAsCommand.ts. The mirror of the table above in every sense: it is shown
+// only on a host with no Command key of its own, and only against a Mac.
+const ALT_AS_COMMAND_HELP: readonly { situation: string; effect: string }[] = [
+  { situation: "Left Alt", effect: "Arrives as ⌘, so Alt+C copies" },
+  { situation: "Windows key", effect: "Arrives as ⌘" },
+  { situation: "Right Alt", effect: "Arrives as ⌥" },
+  { situation: "Left ⌥", effect: "Not on this keyboard — use the right Alt" },
+];
+
 // The touch gesture cheat-sheet, mirroring touchGestures.ts.
 const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
   { gesture: "Tap", action: "Left-click" },
@@ -842,6 +852,42 @@ function TouchscreenSection({
   );
 }
 
+// Whichever of the two modifier tables this pairing has, and neither when a PC
+// keyboard drives a PC: the translation is always one direction or the other,
+// never both, so one heading stands for the whole of what the keys do.
+function KeyboardHelp({
+  isMacHost,
+  remoteIsMac,
+}: {
+  isMacHost: boolean;
+  remoteIsMac: boolean;
+}) {
+  let heading = "";
+  let rows: readonly { situation: string; effect: string }[] = [];
+  if (isMacHost) {
+    heading = "Mac key override";
+    rows = MAC_KEY_HELP;
+  } else if (remoteIsMac) {
+    heading = "Mac remote keys";
+    rows = ALT_AS_COMMAND_HELP;
+  } else {
+    return null;
+  }
+  return (
+    <>
+      <h3>{heading}</h3>
+      <dl className="help-list">
+        {rows.map((row) => (
+          <div key={row.situation} className="help-item">
+            <dt>{row.situation}</dt>
+            <dd>{row.effect}</dd>
+          </div>
+        ))}
+      </dl>
+    </>
+  );
+}
+
 export default function FloatingMenu({
   onLogout,
   onUnauthorized,
@@ -1489,19 +1535,7 @@ export default function FloatingMenu({
             <ImmersiveHelpRows />
             <AppWindowHelpRow />
           </dl>
-          {isMacHost && (
-            <>
-              <h3>Mac key override</h3>
-              <dl className="help-list">
-                {MAC_KEY_HELP.map((row) => (
-                  <div key={row.situation} className="help-item">
-                    <dt>{row.situation}</dt>
-                    <dd>{row.effect}</dd>
-                  </div>
-                ))}
-              </dl>
-            </>
-          )}
+          <KeyboardHelp isMacHost={isMacHost} remoteIsMac={remoteIsMac} />
           <h3>Touch gestures</h3>
           {touchActive ? (
             <p className="help-note">
