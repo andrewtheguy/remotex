@@ -71,10 +71,10 @@ updates in source order even when individual tile encodes finish concurrently.
 
 How a target's pixels reach a client is a per-target choice on two flat axes, plus a
 quality: `render_type` is the *transport* — what kind of thing goes on the wire —
-and `render_subtype` the codec of the base tiles, with `render_subtype_quality` (1–100)
-the fixed quality of that codec's lossy side. Two axes rather
-than one flat mode list because transport and codec vary independently: the tiles
-transport takes every base codec. The legal
+and `render_subtype` the codec of the base tiles, with `image_quality` (1–100) the
+fixed quality of that codec's lossy side. Two axes rather than one flat mode list
+because transport and codec vary independently: the tiles transport takes every
+base codec. The legal
 pairings are validated at config-load time in `ConfigFile::parse_with`:
 
 `render_type`, the transport:
@@ -82,15 +82,15 @@ pairings are validated at config-load time in `ConfigFile::parse_with`:
 - `tiles` — every changed region as an independent still image at the base codec.
   The default; with the default subtype and no `render_motion` it is byte-identical
   to the PNG-only gateway that preceded the dial.
-- `video` — the whole desktop as one video stream at `render_stream_quality`.
+- `video` — the whole desktop as one video stream at `video_quality`.
 
 `render_subtype`, the base codec — any of the three under `tiles`:
 
 - `png` — lossless, no quality key. The default, and the only lossless answer
   there is: the choice this axis offers is how much of the screen goes lossy.
-- `webp` — every base tile WebP at `render_subtype_quality`.
+- `webp` — every base tile WebP at `image_quality`.
 - `classify` — per tile, what its own pixels are: photographic content WebP at
-  `render_subtype_quality`, flat UI and text lossless PNG.
+  `image_quality`, flat UI and text lossless PNG.
 
 Lossy is WebP and only WebP: it is fewer bytes than the alternatives at a matched
 quality, every client this gateway has decodes it natively, and one encoder is one
@@ -103,9 +103,9 @@ sends no tiles at all — one fixed region, the whole desktop, for the whole ses
 — so there is no per-tile codec left to name.
 
 `render_motion = true` is a switch on `tiles`, not a third transport: it adds a
-video stream per coalesced region of the cells changing fast
-(`render_stream_quality`, which it requires), and re-sends each cell at the base
-encode once it settles. It changes nothing about what a tile is or how one travels
+video stream per coalesced region of the cells changing fast (`video_quality`,
+which it requires), and re-sends each cell at the base encode once it settles. It
+changes nothing about what a tile is or how one travels
 — the base codec is still the base codec, because the base encode is still a still
 image; only what is moving becomes a stream. It is refused under `video`, which
 streams the whole desktop already and has no settled cells left to discount.
@@ -138,13 +138,15 @@ Three more keys sit across the whole dial rather than on either axis.
 [the codec](#the-codec) for why it, and not the quality, is where a desktop stream's
 picture goes, and [choosing a chroma](#choosing-a-chroma) for which of the three to
 write down.
-`render_adaptive = true` lets every lossy quality the target configures track the
-measured link between `render_adaptive_min` (default 20) and its configured value,
-which stays the ceiling — see [what the link will bear](#the-codec) for the signal
-and the walks. It is refused on lossless PNG tiles, the one plan with no quality to
-move — a `png` base with no `render_motion`. The floor is
-one number for the whole plan: whichever dials exist — `render_subtype_quality`,
-`render_stream_quality` — all stop at it.
+`render_adaptive = true` lets `video_quality` track the measured link between
+`render_adaptive_min` (default 20) and its configured value, which stays the ceiling
+— see [what the link will bear](#the-codec) for the signal and the walk. It is a
+stream's key, refused on a target that streams nothing, and `image_quality` never
+moves, lossy base or not. A stream that fell below its dial is sharpened by its own
+next frame, and a region that stops is owed a cleanup whatever quality it ran at. A
+still is sent once: one the link coarsened would keep that picture until its pixels
+next changed, and coming back for it means encoding again something that was never
+going to be sent twice.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
 gateway's tile lattice, dashed, over the desktop. It is refused on
@@ -170,16 +172,17 @@ them through `createImageBitmap` from a MIME type. What streams costs one: a
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug, adaptive }` and
+one arm per transport — `Tiles { base, motion, debug }` and
 `Video { quality, adaptive, chroma }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. The plan's `motion` is an
 `Option<MotionEncode>`, and the `Option` is the switch that keeps the whole motion
-path off: a target that does not ask for it does not pay for it.
+path off: a target that does not ask for it does not pay for it. The adaptive floor
+sits beside each stream's quality — on `Video` and on `MotionEncode` — so a plan
+with no stream has nowhere to put one.
 
 ```text
-render_type / render_subtype / render_subtype_quality /
-render_stream_quality / render_motion*
+render_type / render_subtype / image_quality / video_quality / render_motion*
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_webp
@@ -187,7 +190,7 @@ render_stream_quality / render_motion*
 
 `TileCodec` is the resolved answer — `Png`, `Webp { quality }` or
 `Classify { quality, debug }` — so which tiles reach a lossy encode stays the
-classifier's question and the quality stays one number the adaptive walk moves.
+classifier's question and the quality stays the one number the operator wrote.
 
 Because `TileSink` is shared, RDP and VNC get every codec from one implementation,
 and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
@@ -200,17 +203,17 @@ the baseline CPU floor packaging/README.md requires.
 `render_motion` is not a second way to encode every tile, which is why it is a
 switch on `tiles` rather than a `render_type` of its own. It builds on the base
 encode a target already has and changes nothing about it — the base is read from
-`render_subtype` and `render_subtype_quality`, exactly as it is without the switch —
-and hands the cells currently changing fast to a video stream per coalesced moving
+`render_subtype` and `image_quality`, exactly as it is without the switch — and
+hands the cells currently changing fast to a video stream per coalesced moving
 region instead. A lossless base is the configuration a fixed quality cannot express
 at all, and the interesting one: text and flat UI stay perfect and are never
 re-encoded, and only what moves goes to a stream.
 
 ```toml
 [[targets]]
-render_subtype        = "png"    # base: what a settled cell gets
-render_motion         = true
-render_stream_quality = 10       # moving regions: as cheap as it takes
+render_subtype = "png"    # base: what a settled cell gets
+render_motion  = true
+video_quality  = 10       # moving regions: as cheap as it takes
 ```
 
 The moving encode has its own quality because it is not a cheaper version of the
@@ -285,7 +288,11 @@ their damage through:
   age, so a paused screen sharpens on its own, a whole stripe per tick, without a
   client repaint. The timer has to be its own, because the case it
   exists for is a remote that has stopped sending frames — which is also the only
-  thing that will ever notice a stream has gone quiet.
+  thing that will ever notice a stream has gone quiet. On a `render_adaptive` target
+  a client that is behind holds the cleanups back, since a tickful of stills into a
+  link the streams are being coarsened to fit costs the live motion its quality —
+  but only for `CLEANUP_HELD` (5 s): the streams beside a stopped cell may never
+  stop, and a cell left at a stream's quality for good is the worse failure.
 - **Resets.** Motion state is cleared on resize, where the keys no longer name the
   same pixels, and on reattach, where the repaint re-sends every pixel at the base
   encode anyway.
@@ -427,8 +434,8 @@ six times the bytes to save CPU is not a trade a desktop link wants, and a still
 per cell has no way to spend that CPU on anything else.
 
 Both dials that stream share `Congestion`, one verdict for one link: the quality dial
-walks down when a round's push blocks and back up to `render_stream_quality`, never
-past it. Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
+walks down when a round's push blocks and back up to `video_quality`, never past it.
+Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
 because the same queue carries its still tiles — so `coarsened` in the totals is a
 less sharp signal, which is worth knowing when reading it.
 
@@ -483,7 +490,7 @@ for the region streams above too, which is why they run the same code:
   client crops — reporting the padded size would push a paint past the framebuffer,
   which the renderer drops outright rather than clamps.
 
-`render_stream_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
+`video_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
 0–63 (the floor is where screen content goes visually lossless — mapping past it
 would give a dial whose top third did nothing but spend bandwidth). The quantizer
 never leaves the codec module —
@@ -594,13 +601,11 @@ both make the same subtraction. Sixty milliseconds of queueing lag counts as
 a behind frame even when nothing local blocked, which is exactly the case the
 paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
 flight while every queue stayed shallow. The walk's floor moves from 1 to
-`render_adaptive_min`, and the same key puts a *per-encode* quality on the lossy
-tile paths: Guacamole's curve — one quality point per millisecond of lag past
-20 ms, clamped at the floor — applied at `Shared::adapted` wherever a lossy
-tile is about to be encoded, cleanups included. PNG passes through
-untouched; which cells deserve losslessness was the operator's call, not the
-link's. Without the key, nothing changes: pressure-only walk for streams, fixed
-quality for tiles.
+`render_adaptive_min`. Without the key the walk is pressure-only. With or without
+it a tile's quality is fixed: Guacamole scales a still's quality with the same lag,
+but a still sent coarse has nothing coming back for it, and on a motion plan a
+quiet band also discharges what its cells were owed — a debt a coarse copy has not
+paid.
 
 The walk only runs when a round is taken, and under `video` a round is only
 taken when something changed, so a desktop that stops moving right after the link
@@ -796,8 +801,8 @@ completion from a dead attachment cannot acknowledge a new one. This is the
 measurement contract for application-level backpressure, and the gateway acts on
 it twice: the paint window in `ws.rs` holds the next batch when too many are owed
 or the oldest is owed too long, and on a `render_adaptive` target the same
-measurement — published through `LinkFeedback` — moves quality before the window
-ever parks. Nothing is dropped either way; an access unit's dependency order is
+measurement — published through `LinkFeedback` — moves a stream's quality before
+the window ever parks. Nothing is dropped either way; an access unit's dependency order is
 untouched.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache

@@ -41,9 +41,9 @@ fn uat_target(name: &str) -> TargetConfig {
     } else {
         target.render_subtype = Some(RenderSubtype::Classify);
     }
-    target.render_subtype_quality = Some(60);
+    target.image_quality = Some(60);
     target.render_motion = !matches!(std::env::var(MOTION_ENV).as_deref(), Ok("0") | Ok("false"));
-    target.render_stream_quality = Some(60);
+    target.video_quality = Some(60);
     target.render_chroma = Some(ChromaChoice::Full);
     target.render_motion_debug = false;
     target.render_classify_debug = false;

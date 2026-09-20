@@ -82,9 +82,9 @@ fn uat_target(name: &str, motion: bool) -> TargetConfig {
     // ignored — no tiles, and a timeout blaming the device.
     target.render_type = RenderType::Tiles;
     target.render_subtype = Some(RenderSubtype::Classify);
-    target.render_subtype_quality = Some(QUALITY);
+    target.image_quality = Some(QUALITY);
     target.render_motion = motion;
-    target.render_stream_quality = motion.then_some(MOTION_QUALITY);
+    target.video_quality = motion.then_some(MOTION_QUALITY);
     target.render_motion_debug = false;
     // The outlines are for eyes on a browser; on the wire they would only
     // perturb the payloads this test checks the magic of.

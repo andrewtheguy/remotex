@@ -225,8 +225,8 @@ documents the trade between JPEG 4:4:4 and chroma-subsampled JPEG. Photographs t
 to tolerate subsampling, while sharp coloured boundaries can blur.
 
 This no longer has a dial in RemoteX to turn. Lossy WebP is 4:2:0 and has no other
-mode, so there is nothing to pin and nothing for the adaptive walk to change by
-accident — the walk moves quantization and only quantization. The observation
+mode, so there is nothing to pin, and nothing moves a still's encode after the
+operator has chosen it — the adaptive walk is the streams' alone. The observation
 survives as a caution about `render_subtype = "webp"`, which hands text and
 coloured UI to a 4:2:0 encoder that cannot route them to PNG; `classify` is the
 answer for a screen where that matters. It is emphatically not a reason to extend
@@ -397,7 +397,7 @@ The likely policy shape is intentionally conservative:
 | --- | --- |
 | Clear UI or text | PNG |
 | Ambiguous | PNG |
-| Clear photograph | WebP at `render_subtype_quality` |
+| Clear photograph | WebP at `image_quality` |
 | Motion region | VP9 video stream, followed by the existing base-tile cleanup |
 
 ## Explicit exclusions

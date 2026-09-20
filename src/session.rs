@@ -1657,8 +1657,8 @@ mod tests {
             microphone: meta.microphone,
             render_type: crate::config::RenderType::Tiles,
             render_subtype: None,
-            render_stream_quality: None,
-            render_subtype_quality: None,
+            image_quality: None,
+            video_quality: None,
             render_motion: false,
             render_motion_debug: false,
             render_chroma: None,
@@ -1676,7 +1676,7 @@ mod tests {
     fn video_target(name: &str) -> TargetConfig {
         TargetConfig {
             render_type: crate::config::RenderType::Video,
-            render_stream_quality: Some(60),
+            video_quality: Some(60),
             ..fake_target(name)
         }
     }
