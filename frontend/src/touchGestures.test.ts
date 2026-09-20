@@ -96,6 +96,17 @@ test("fingers moving in parallel scroll, in the natural direction", () => {
   assert.equal(view.zoom, 1, "a scroll never zooms");
 });
 
+test("a swipe delivered as one move scrolls by all of it", () => {
+  // The browser is free to coalesce a fast swipe into a single touchmove: the
+  // travel that classifies the gesture has to count, or a flick scrolls nothing.
+  twoFingerDrag([{ dx: 0, dy: 100 }]);
+  assert.deepEqual(wheels(), [
+    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
+    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
+    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
+  ]);
+});
+
 test("a sideways drag scrolls sideways", () => {
   twoFingerDrag([
     { dx: 12, dy: 0 },

@@ -55,8 +55,8 @@ const TWO_FINGER_TAP_MAX_DURATION_MS = 260;
 // scrolling. Both measurements are taken at that moment and the larger one
 // decides: how much the distance between the fingers changed, against how far
 // their midpoint travelled. Until then nothing moves, which is also what holds
-// a two-finger tap still. That same travel names the scroll axis, so a scroll
-// ticks from the moment it is recognised rather than after a second threshold.
+// a two-finger tap still. That same travel names the scroll axis and counts as
+// the scroll's own first movement, so recognising a scroll costs it nothing.
 const TWO_FINGER_CLASSIFY_PX = 12;
 const SCROLL_STEP_PX = 32;
 
@@ -145,8 +145,9 @@ interface TwoFingerGesture {
   // The zoom and finger distance a pinch scales from, and the remote point
   // under the midpoint, which is held there. Null until the pinch starts.
   pinch: PinchAnchor | null;
-  // The axis a scroll locked onto, where it left the midpoint, and what it
-  // owes the wire. Null until the scroll starts.
+  // The axis a scroll locked onto (null until it does), the midpoint it has
+  // spent — where the gesture began, until the scroll moves it on — and what it
+  // still owes the wire.
   axis: ScrollAxis | null;
   lastMidX: number;
   lastMidY: number;
@@ -644,15 +645,15 @@ export function attachTouchGestures(
     gesture.mode = "scroll";
     // The travel that bought the decision also says which way it was going, and
     // that axis holds for the rest of the gesture — a diagonal drag never sends
-    // a stray tick sideways. It does not count as movement to scroll: the
-    // midpoint starts over here.
+    // a stray tick sideways. The midpoint is left where the gesture began, so
+    // that travel is also the scroll's first movement: a swipe the browser
+    // delivers as one coalesced move scrolls by all of it, not by what is left
+    // after the threshold.
     gesture.axis =
       Math.abs(midpoint.x - gesture.startMidX) >=
       Math.abs(midpoint.y - gesture.startMidY)
         ? "x"
         : "y";
-    gesture.lastMidX = midpoint.x;
-    gesture.lastMidY = midpoint.y;
   }
 
   // Anchor the pinch on the fingers as they are now, so committing to it — or
