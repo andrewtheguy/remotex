@@ -132,12 +132,14 @@ The classifier's cross-project source review and measurement candidates live in
 [Still-image classification in remote desktop implementations](still-image-classification-research.md).
 
 Three more keys sit across the whole dial rather than on either axis.
-`render_chroma` (`"420"`, the default, `"444"`, or `"auto"`) is how much colour a
+`render_chroma` (`"auto"`, the default, or `"420"` / `"444"`) is how much colour a
 *stream* carries per pixel — every stream the target has, `video` and a
-`render_motion` region alike — and is refused on a target that streams nothing; see
-[the codec](#the-codec) for why it, and not the quality, is where a desktop stream's
-picture goes, and [choosing a chroma](#choosing-a-chroma) for which of the three to
-write down.
+`render_motion` region alike — and is refused on a target that streams nothing. A
+target that writes nothing resolves it per browser; the two fixed answers are
+selections no decoder can overrule. See [the codec](#the-codec) for why it, and not
+the quality, is where a desktop stream's picture goes, and
+[choosing a chroma](#choosing-a-chroma) for when to take the decision away from the
+browser.
 `video_quality` (default 90) is the ceiling every stream holds to, and
 `render_adaptive` lets it track the measured link down to `render_adaptive_min`
 (default 20) — see [what the link will bear](#the-codec) for the signal and the walk.
@@ -530,12 +532,13 @@ trip that pins the difference, through the archive's own decoder.
 
 ### Choosing a chroma
 
-The key takes three answers, and two of them are decisions the browser cannot
-overrule.
+The key takes three answers: the default resolves per browser, and the other two
+are decisions no browser can overrule.
 
 **`"auto"` — 4:4:4 where the decoder takes profile 1, 4:2:0 where it does not.**
-The one to reach for on a target watched from more than one kind of browser, and
-the reason a target need not be written down twice under two names. The page asks
+The default, and what a target that writes no chroma gets: every browser is sent
+the most colour its own decoder takes, and no target is written down twice under
+two names to serve a desktop and an iPad. The page asks
 its own `VideoDecoder` once, at load, about the profile 1 configuration the gateway
 would announce (`frontend/src/videoChroma.ts`), and states the answer as
 `chroma=444|420` on every session socket it opens. `render_plan` resolves the key
@@ -566,13 +569,14 @@ GPU-process decoder is the one that goes quiet under stream churn, and software
 libvpx is what answers every chunk (`frontend/src/videoDecoder.ts`). What it costs
 is CPU on the client, roughly twice the samples per frame.
 
-**`"420"` — profile 0 for every browser.** The default, and what every stream was
-before the key existed. Right for a fleet that must stay on a hardware decoder, or
-where the target is photographic rather than text and the chroma buys nothing.
+**`"420"` — profile 0 for every browser.** What every stream was before this key
+existed, and a selection now rather than a default: a decoder that would have taken
+profile 1 is sent the subsampled stream anyway. Right for a fleet that must stay on
+a hardware decoder, or where the target is photographic rather than text and the
+chroma buys nothing.
 
-Set nothing and the target streams 4:2:0, exactly as before. `"auto"` is the
-setting to write down when the picture matters and the fleet is mixed; the two
-fixed answers are for when the bitstream, not the picture, is the thing being held
+Set nothing and every browser gets what it can decode. The two fixed answers are
+for when the bitstream, not the picture, is the thing being held
 still.
 
 The keyframe header also *says* the conversion is BT.601 studio swing

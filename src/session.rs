@@ -2023,7 +2023,7 @@ mod tests {
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                assert_eq!(render, "video q60 · adaptive ≥20")
+                assert_eq!(render, "video q60 4:4:4 · adaptive ≥20")
             }
             other => panic!("expected connected, got {other:?}"),
         }
@@ -2037,7 +2037,7 @@ mod tests {
     async fn an_auto_chroma_target_streams_what_the_attached_browser_takes() {
         for (answer, want, card) in [
             (Chroma::Full, Chroma::Full, "video q60 4:4:4 · adaptive ≥20"),
-            (Chroma::Subsampled, Chroma::Subsampled, "video q60 · adaptive ≥20"),
+            (Chroma::Subsampled, Chroma::Subsampled, "video q60 4:2:0 · adaptive ≥20"),
         ] {
             let (hook_tx, hook_rx) = std_mpsc::channel();
             let spawner: EngineSpawner = Box::new(
