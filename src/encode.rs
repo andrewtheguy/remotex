@@ -83,6 +83,14 @@ const CHURN_MOVING: u32 = 4;
 /// the eye is still on it.
 const CLEANUP_IDLE: Duration = Duration::from_millis(500);
 
+/// How long a cleanup may be held back for a client that is behind, on a
+/// `render_adaptive` target — see [`flush_cleanups`]. Five seconds is the walk
+/// from a motion stream's usual dial down to its floor ([`QUALITY_STEP_DOWN`] a
+/// second): a link still behind after that is not one the streams can make room
+/// on, and a cell left at a stream's quality for good is the worse of the two
+/// failures.
+const CLEANUP_HELD: Duration = Duration::from_secs(5);
+
 /// How often the order task wakes to look for settled cells. It has to be its own
 /// timer rather than something the next frame does, because a screen that stops
 /// changing produces no next frame — which is exactly the case a cleanup is for.
@@ -173,11 +181,6 @@ const LAG_BEHIND: Duration = Duration::from_millis(60);
 /// between this and [`LAG_BEHIND`] is hysteresis: a link hovering between the
 /// two earns neither a coarser picture nor its quality back.
 const LAG_CLEAR: Duration = Duration::from_millis(30);
-
-/// Queueing lag a tile's quality rides free before the curve starts, and the
-/// curve is one quality point per millisecond past it — Guacamole's
-/// `90 − (lag − 20)` on this gateway's own baseline-corrected signal.
-const TILE_LAG_FREE: Duration = Duration::from_millis(20);
 
 /// The quality a plan that produces no access units is given.
 ///
@@ -545,14 +548,11 @@ struct Shared {
     /// cells by. Packed `w << 16 | h` so a band cut on the tile path costs no lock.
     grid: AtomicU32,
     /// The link as the attached browser's paint window measures it — see
-    /// [`crate::feedback`]. Read at two kinds of moment: [`TileSink::adjust`]
-    /// hands its lag to the congestion walk beside the push-blocked signal, and
-    /// [`Shared::adapted`] scales a lossy tile's quality with it per encode.
+    /// [`crate::feedback`]. Read by an adaptive plan alone, and only about its
+    /// streams: [`TileSink::adjust`] hands its lag to the congestion walk beside
+    /// the push-blocked signal, and the cleanup tick asks it whether the client
+    /// has room for what it is about to send. A tile's quality never reads it.
     feedback: Arc<LinkFeedback>,
-    /// The floor a lossy *tile*'s quality may be walked down to, when the plan is
-    /// adaptive; `None` keeps every tile at its configured quality. The streams'
-    /// floor lives in [`Congestion`] — same config key, two mechanisms.
-    tile_floor: Option<u8>,
     /// The damage tape a `render_motion` session records when
     /// [`crate::tape::ENV`] is set — see [`crate::tape`]. `None` otherwise, and on
     /// every other plan.
@@ -611,7 +611,7 @@ impl Shared {
                 (Policy::Whole, quality, chroma, None, adaptive)
             }
             RenderPlan::Tiles {
-                motion: Some(MotionEncode { quality, chroma }), debug, adaptive, ..
+                motion: Some(MotionEncode { quality, adaptive, chroma }), debug, ..
             } => (
                 Policy::Moving,
                 quality,
@@ -624,13 +624,6 @@ impl Shared {
             RenderPlan::Tiles { .. } => {
                 (Policy::Whole, NO_STREAM_QUALITY, Chroma::Subsampled, None, None)
             }
-        };
-        // The tiles' half of the same key. On a motion plan this and `adaptive`
-        // are both live: the regions walk with the congestion loop, the base and
-        // cleanup tiles ride the per-encode curve.
-        let tile_floor = match plan {
-            RenderPlan::Tiles { adaptive, .. } => adaptive,
-            RenderPlan::Video { .. } => None,
         };
         let tape = match plan {
             RenderPlan::Tiles { base, motion: Some(_), .. } => {
@@ -646,7 +639,6 @@ impl Shared {
             keyframe_owed: AtomicBool::new(false),
             grid: AtomicU32::new(pack_grid(TileGrid::ONE)),
             feedback,
-            tile_floor,
             tape,
             tiles: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
@@ -665,38 +657,6 @@ impl Shared {
         }
     }
 
-    /// The codec a tile should be encoded with *right now*: the configured one,
-    /// its quality walked down [`TILE_LAG_FREE`]'s curve when the plan is
-    /// adaptive and the client is behind.
-    ///
-    /// Per encode rather than per session — Guacamole's shape — because tiles
-    /// have no walk to hold state in: each one is independent, so each one asks.
-    /// PNG passes through untouched; lossless has no quality to give up, and
-    /// which cells deserve losslessness was the operator's call, not the link's.
-    ///
-    /// Quality recovers the moment the lag does, but pixels already sent coarse
-    /// stay coarse until they next change — the same bargain the motion encode's
-    /// stash cap already makes, and the reason the floor is worth configuring.
-    fn adapted(&self, codec: TileCodec, now: tokio::time::Instant) -> TileCodec {
-        let Some(floor) = self.tile_floor else {
-            return codec;
-        };
-        let quality = match codec {
-            TileCodec::Png => return codec,
-            TileCodec::Webp { quality } | TileCodec::Classify { quality, .. } => quality,
-        };
-        let lag = self.feedback.lag(now);
-        let cut = lag.saturating_sub(TILE_LAG_FREE).as_millis().min(u128::from(u8::MAX)) as u8;
-        // The default floor over a lower dial clamps, same as `Congestion::new`.
-        let adapted = quality.saturating_sub(cut).max(floor.min(quality));
-        match codec {
-            TileCodec::Png => unreachable!("returned above"),
-            TileCodec::Webp { .. } => TileCodec::Webp { quality: adapted },
-            // Only the lossy arm walks: the tiles the classifier keeps
-            // lossless were never spending the bytes the lag is about.
-            TileCodec::Classify { debug, .. } => TileCodec::Classify { quality: adapted, debug },
-        }
-    }
 }
 
 /// The engine's handle on the encoder.
@@ -1213,7 +1173,6 @@ impl TileSink {
         rgb: Arc<Vec<u8>>,
         codec: TileCodec,
     ) -> anyhow::Result<()> {
-        let codec = self.shared.adapted(codec, tokio::time::Instant::now());
         let handle = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
             let tile = encode_tile(rect, &rgb, codec)?;
@@ -1368,7 +1327,6 @@ async fn flush_cleanups(
     // One reading of the clock, and so one reading of the lag, for the whole tickful:
     // these all go out together and are one moment's answer, not several.
     let now = tokio::time::Instant::now();
-    let adapted = shared.adapted(base, now);
     {
         // One critical section for the whole tickful: `due` and the crops have to
         // agree about the mirror, and holding the lock across the encodes below would
@@ -1379,17 +1337,23 @@ async fn flush_cleanups(
         // stream that never ends is a region that never comes due.
         video.regions.expire(now);
         ended = video.regions.drain_ended();
-        // `due` takes the debt with it, and a cell that has stopped changing has
-        // nothing else coming for it — so paying one while the lag has `render_adaptive`
-        // below its ceiling would settle it at the floor for good. The debts stand
-        // until they can be paid at the quality the target asked for. The two rarely
-        // fight: a cell comes due after `CLEANUP_IDLE` of quiet, and quiet is what
-        // drains the lag.
-        let rects = if adapted == base {
-            video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK)
-        } else {
-            Vec::new()
-        };
+        // A cleanup is always the base encode — the link moves a stream's quality
+        // and never a still's — so what a `render_adaptive` target gives up while its
+        // client is behind is *when* one is paid, not what it is paid with. A tickful
+        // of stills is the heaviest thing this path sends for pixels that are already
+        // right, and the link it would go into is one the streams are being coarsened
+        // to fit: the live motion would pay for the room with more of its quality. The
+        // debts stand meanwhile; nothing is taken that is not sent.
+        //
+        // Held, not abandoned. Unlike a whole-desktop stream's settle, which waits on
+        // a link that has gone idle and so always drains, these wait beside streams
+        // that may never stop — and a link hovering behind for as long as a video
+        // plays would leave everything that stopped moving next to it at the stream's
+        // quality for just as long. So a debt [`CLEANUP_HELD`] old is paid whatever
+        // the lag says.
+        let behind = video.congestion.lag_aware && shared.feedback.lag(now) >= LAG_BEHIND;
+        let idle = if behind { CLEANUP_HELD } else { CLEANUP_IDLE };
+        let rects = video.regions.due(now, idle, MAX_CLEANUPS_PER_TICK);
         // Cut at `BAND_ROWS` like every other payload. A cleanup run is whole grid
         // cells, and a cell is 128 pixels tall on a 2x framebuffer — twice what a
         // record is allowed to be measured in bytes, which is the one thing the band
@@ -1424,7 +1388,7 @@ async fn flush_cleanups(
         .map(|(rect, keep_lossy, rgb)| {
             let rgb = Arc::new(rgb);
             let rgb = if debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
-            (rect, keep_lossy, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, adapted)))
+            (rect, keep_lossy, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)))
         })
         .collect();
 
@@ -1453,12 +1417,10 @@ async fn flush_cleanups(
         // would send — so nothing goes out. A stream's cell is not offered the
         // choice: any still beats an inter-coded frame.
         //
-        // "Already the encode this would send" holds only while the dial stands
-        // still. Under `render_adaptive` the piece may have gone out at the lag's
-        // floor and the lag since cleared, leaving the client holding a coarser copy
-        // than the one encoded here — and a cell that has stopped changing is a cell
-        // nothing else will come back for. An adaptive plan therefore sends it.
-        if !keep_lossy && tile.format != Tile::FORMAT_PNG && shared.tile_floor.is_none() {
+        // "Already the encode this would send" is exact: a still's quality is the
+        // configured one on every plan, so the piece went out at the same dial this
+        // cell was just encoded at.
+        if !keep_lossy && tile.format != Tile::FORMAT_PNG {
             shared.settled.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -1493,8 +1455,11 @@ enum Settling {
 /// way a returning round wakes it, encodes it as one inter frame, which sharpens
 /// every block and costs no keyframe.
 ///
-/// The lag gate is the same bargain [`flush_cleanups`] makes: settling while the
-/// link is still behind would only be walked back down again.
+/// The lag gate is [`flush_cleanups`]'s bargain, struck harder: settling while the
+/// link is still behind would only be walked back down again, so this waits for
+/// [`LAG_CLEAR`] and not merely for the lag to stop counting as behind. It can
+/// afford to wait without a deadline, which the cleanups cannot — a stream that
+/// has gone quiet is a link with nothing on it, so the lag this waits on drains.
 async fn settle_stream(engine: &'static str, shared: &Shared) {
     let now = tokio::time::Instant::now();
     let mut video = shared.video.lock().await;
@@ -1867,7 +1832,7 @@ mod tests {
     use crate::protocol::{UNSCALED, VideoUnit};
 
     fn plan(base: TileCodec) -> RenderPlan {
-        RenderPlan::Tiles { base, motion: None, debug: false, adaptive: None }
+        RenderPlan::Tiles { base, motion: None, debug: false }
     }
 
     /// The lossy base at a quality.
@@ -1987,9 +1952,8 @@ mod tests {
             frame_tx,
             RenderPlan::Tiles {
                 base: TileCodec::Classify { quality: 60, debug: false },
-                motion: Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled }),
+                motion: Some(MotionEncode { quality: 10, adaptive: None, chroma: Chroma::Subsampled }),
                 debug: false,
-                adaptive: None,
             },
             feedback(),
         );
@@ -2679,9 +2643,8 @@ mod tests {
         assert!(!units[0].keyframe, "a settle is an inter frame, not a keyframe");
     }
 
-    /// Under `render_adaptive`, the settle waits for the client's lag to clear — the
-    /// same bargain the motion path's cleanups make — rather than sharpening onto a
-    /// link that would walk it straight back down.
+    /// Under `render_adaptive`, the settle waits for the client's lag to clear rather
+    /// than sharpening onto a link that would walk it straight back down.
     #[tokio::test(start_paused = true)]
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
@@ -2782,8 +2745,7 @@ mod tests {
 
     const MOTION_STREAM: RenderPlan = RenderPlan::Tiles {
         base: TileCodec::Png,
-        motion: Some(MotionEncode { quality: 60, chroma: Chroma::Subsampled }),
-        adaptive: None,
+        motion: Some(MotionEncode { quality: 60, adaptive: None, chroma: Chroma::Subsampled }),
         debug: false,
     };
 
@@ -3297,87 +3259,129 @@ mod tests {
         assert_eq!(congestion.quality, 20, "a hovering link earned quality back");
     }
 
-    /// The tile half of the same key: a lossy tile's quality follows the lag
-    /// curve down to the floor, PNG passes through, and a plan that never asked
-    /// stays exactly on its dial.
-    #[test]
-    fn a_lossy_tile_rides_the_lag_curve_between_dial_and_floor() {
-        let feedback = feedback();
-        let adaptive = Shared::new(
-            RenderPlan::Tiles {
-                base: webp(60),
-                motion: None,
-                debug: false,
-                adaptive: Some(25),
-            },
-            Arc::clone(&feedback),
-        );
-        // Touch the feedback once so its lazily-initialized epoch is not newer
-        // than `sent` — an instant before the epoch measures short.
-        feedback.owed_since(Some(tokio::time::Instant::now()));
-        let sent = tokio::time::Instant::now();
-        feedback.baseline(0);
-        feedback.owed_since(Some(sent));
-
-        // No lag beyond the free allowance: the dial's own quality.
-        assert_eq!(
-            adaptive.adapted(webp(60), sent + TILE_LAG_FREE),
-            webp(60)
-        );
-        // 30 ms past the allowance: one point per millisecond.
-        assert_eq!(
-            adaptive.adapted(webp(60), sent + TILE_LAG_FREE + Duration::from_millis(30)),
-            webp(30),
-        );
-        // Far past it: the floor holds.
-        assert_eq!(
-            adaptive.adapted(webp(60), sent + Duration::from_secs(2)),
-            webp(25)
-        );
-        // Lossless has no quality to give up.
-        assert_eq!(
-            adaptive.adapted(TileCodec::Png, sent + Duration::from_secs(2)),
-            TileCodec::Png
-        );
-
-        // The classified base walks the same curve, and its `debug` flag rides
-        // through untouched: only the lossy arm's quality is the link's business.
-        let classified = TileCodec::Classify { quality: 95, debug: true };
-        assert_eq!(
-            adaptive.adapted(classified, sent + TILE_LAG_FREE + Duration::from_millis(30)),
-            TileCodec::Classify { quality: 65, debug: true }
-        );
-
-        // The same lag through a non-adaptive plan moves nothing.
-        let fixed = Shared::new(
-            RenderPlan::Tiles { base: webp(60), motion: None, debug: false, adaptive: None },
-            Arc::clone(&feedback),
-        );
-        assert_eq!(
-            fixed.adapted(webp(60), sent + Duration::from_secs(2)),
-            webp(60)
-        );
+    /// An adaptive motion plan over `base` — with a lossy one, the plan where a
+    /// still and a walk sit side by side.
+    fn adaptive_motion(base: TileCodec) -> RenderPlan {
+        let motion = MotionEncode { quality: 60, adaptive: Some(25), chroma: Chroma::Subsampled };
+        RenderPlan::Tiles { base, motion: Some(motion), debug: false }
     }
 
-    /// A motion-stream plan's floor reaches both halves of the sink: the regions'
-    /// walk becomes lag-aware and bottoms out on the operator's floor, and the
-    /// base and cleanup tiles ride the per-encode curve to the same floor.
+    /// A client far enough behind that every lag threshold here has been crossed.
+    /// `sent` is an instant already in the past, so the lag is there at once rather
+    /// than something the test has to wait to accrue.
+    fn behind(link: &LinkFeedback, sent: tokio::time::Instant) {
+        link.baseline(0);
+        link.owed_since(Some(sent));
+    }
+
+    /// A motion-stream plan's floor is its streams': the regions' walk becomes
+    /// lag-aware and bottoms out on the operator's floor.
     #[test]
-    fn a_motion_stream_plan_carries_its_floor_into_both_halves() {
-        let shared = Shared::new(
-            RenderPlan::Tiles {
-                base: webp(70),
-                motion: Some(MotionEncode { quality: 60, chroma: Chroma::Subsampled }),
-                debug: false,
-                adaptive: Some(25),
-            },
-            feedback(),
-        );
+    fn a_motion_stream_plan_carries_its_floor_into_the_walk() {
+        let shared = Shared::new(adaptive_motion(webp(70)), feedback());
         let video = shared.video.try_lock().expect("nothing else holds the streams");
         assert!(video.congestion.lag_aware, "the regions' walk ignores lag");
         assert_eq!(video.congestion.floor, 25);
         assert_eq!(video.congestion.quality, 60, "the walk starts on the motion dial");
-        assert_eq!(shared.tile_floor, Some(25));
+    }
+
+    /// The link moves a stream's quality and never a still's. A tile is sent once,
+    /// so one sent coarse would stay coarse until its pixels next changed — and a
+    /// quiet band on a motion plan also *discharges* whatever its cells were owed,
+    /// which a coarse copy has not paid.
+    #[tokio::test(start_paused = true)]
+    async fn a_tile_keeps_its_quality_however_far_behind_the_client_is() {
+        let link = feedback();
+        // Touch the feedback once so its lazily-initialized epoch is not newer
+        // than `sent` — an instant before the epoch measures short.
+        link.owed_since(Some(tokio::time::Instant::now()));
+        let sent = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        behind(&link, sent);
+        assert!(link.lag(tokio::time::Instant::now()) >= LAG_BEHIND * 4);
+
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let plan = adaptive_motion(webp(70));
+        let sink = TileSink::new("test", frame_tx, plan, Arc::clone(&link));
+        sink.msg(ServerMsg::Resize { w: 320, h: 64, scale: UNSCALED }).await.unwrap();
+        let band = rect(0, 0, 320, 64);
+        let photo = rgb(320, 64, 3);
+        sink.damage(&all_of(band), |_| photo.clone()).await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 2).await;
+        let ServerMsg::Tile(tile) = &out[1] else {
+            panic!("expected the band as a tile, got {:?}", out[1]);
+        };
+        let configured = Tile::from_rgb_webp(0, 0, 320, 64, &photo, 70).unwrap();
+        let floor = Tile::from_rgb_webp(0, 0, 320, 64, &photo, 25).unwrap();
+        assert_ne!(configured.data, floor.data, "these pixels cannot tell the two apart");
+        assert_eq!(tile.data, configured.data, "the lag moved a still's quality");
+    }
+
+    /// A cleanup is the heaviest thing the motion path sends for pixels that are
+    /// already right, so an adaptive plan holds it back while the client is behind —
+    /// and pays it anyway once it has been held [`CLEANUP_HELD`], because the streams
+    /// beside it may never stop and a cell left at a stream's quality for good is
+    /// the worse failure.
+    #[tokio::test(start_paused = true)]
+    async fn an_adaptive_cleanup_is_held_for_a_client_behind_but_not_for_good() {
+        let link = feedback();
+        link.owed_since(Some(tokio::time::Instant::now()));
+        let sent = tokio::time::Instant::now();
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let plan = adaptive_motion(TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan, Arc::clone(&link));
+        sink.msg(ServerMsg::Resize { w: 640, h: 128, scale: UNSCALED }).await.unwrap();
+        let moving = rect(0, 0, 320, 64);
+        until_streamed(&sink, moving, 40).await;
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        // The region stops, and the client is behind from that moment on.
+        behind(&link, sent);
+        let stopped = tokio::time::Instant::now();
+        let mut restored = None;
+        while restored.is_none() {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+            sink.flush().await;
+            while let Ok(msg) = frame_rx.try_recv() {
+                if matches!(msg, ServerMsg::Tile(_)) {
+                    restored = Some(tokio::time::Instant::now());
+                }
+            }
+            assert!(
+                stopped.elapsed() < CLEANUP_HELD * 3,
+                "a cell a stream left behind was never restored"
+            );
+        }
+        let waited = restored.unwrap().saturating_duration_since(stopped);
+        assert!(waited >= CLEANUP_HELD, "a cleanup went out to a client {waited:?} behind");
+    }
+
+    /// The same region on the same plan with a client that is keeping up: nothing is
+    /// held, and the cleanup comes as soon as the cell has been quiet.
+    #[tokio::test(start_paused = true)]
+    async fn an_adaptive_cleanup_is_prompt_for_a_client_keeping_up() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let plan = adaptive_motion(TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan, feedback());
+        sink.msg(ServerMsg::Resize { w: 640, h: 128, scale: UNSCALED }).await.unwrap();
+        until_streamed(&sink, rect(0, 0, 320, 64), 40).await;
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+        let mut tiles = 0;
+        while let Ok(msg) = frame_rx.try_recv() {
+            tiles += usize::from(matches!(msg, ServerMsg::Tile(_)));
+        }
+        assert!(tiles > 0, "a client keeping up was made to wait for its cleanup");
     }
 
     /// Replay a damage tape ([`crate::tape`]) through the motion detector, the

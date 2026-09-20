@@ -621,15 +621,16 @@ password = "change-me"
 #   nothing worth the bytes.
 #render_chroma = "420"
 
-# Let every lossy quality in this target's render plan track measured client
-# queueing. The configured qualities remain ceilings. WebP tiles lower their
-# quality per encode; video streams add the client's paint lag to their existing
-# send-pressure signal. Refused on lossless PNG tiles — the one plan with no
-# lossy dial to move — that is a "png" base with no render_motion.
+# Let `video_quality` track measured client queueing. The configured quality
+# remains the ceiling; the stream adds the client's paint lag to its existing
+# send-pressure signal. A stream's key: refused on a target that streams nothing
+# (no render_motion, and not render_type = "video"). `image_quality` never moves —
+# a tile is sent once, so one the link coarsened would stay coarse until its
+# pixels next changed.
 #render_adaptive = false
 
 # Floor for that adaptive walk, 1–100 and defaulting to 20. Valid only with
-# `render_adaptive = true`, and it may not exceed any configured render quality.
+# `render_adaptive = true`, and it may not exceed `video_quality`.
 #render_adaptive_min = 20
 
 # QA aid for render_motion, off unless asked for: outline every piece the motion

@@ -138,12 +138,15 @@ Three more keys sit across the whole dial rather than on either axis.
 [the codec](#the-codec) for why it, and not the quality, is where a desktop stream's
 picture goes, and [choosing a chroma](#choosing-a-chroma) for which of the three to
 write down.
-`render_adaptive = true` lets every lossy quality the target configures track the
-measured link between `render_adaptive_min` (default 20) and its configured value,
-which stays the ceiling — see [what the link will bear](#the-codec) for the signal
-and the walks. It is refused on lossless PNG tiles, the one plan with no quality to
-move — a `png` base with no `render_motion`. The floor is one number for the whole
-plan: whichever dials exist — `image_quality`, `video_quality` — all stop at it.
+`render_adaptive = true` lets `video_quality` track the measured link between
+`render_adaptive_min` (default 20) and its configured value, which stays the ceiling
+— see [what the link will bear](#the-codec) for the signal and the walk. It is a
+stream's key, refused on a target that streams nothing, and `image_quality` never
+moves, lossy base or not. A stream that fell below its dial is sharpened by its own
+next frame, and a region that stops is owed a cleanup whatever quality it ran at. A
+still is sent once: one the link coarsened would keep that picture until its pixels
+next changed, and coming back for it means encoding again something that was never
+going to be sent twice.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
 gateway's tile lattice, dashed, over the desktop. It is refused on
@@ -169,12 +172,14 @@ them through `createImageBitmap` from a MIME type. What streams costs one: a
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug, adaptive }` and
+one arm per transport — `Tiles { base, motion, debug }` and
 `Video { quality, adaptive, chroma }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. The plan's `motion` is an
 `Option<MotionEncode>`, and the `Option` is the switch that keeps the whole motion
-path off: a target that does not ask for it does not pay for it.
+path off: a target that does not ask for it does not pay for it. The adaptive floor
+sits beside each stream's quality — on `Video` and on `MotionEncode` — so a plan
+with no stream has nowhere to put one.
 
 ```text
 render_type / render_subtype / image_quality / video_quality / render_motion*
@@ -185,7 +190,7 @@ render_type / render_subtype / image_quality / video_quality / render_motion*
 
 `TileCodec` is the resolved answer — `Png`, `Webp { quality }` or
 `Classify { quality, debug }` — so which tiles reach a lossy encode stays the
-classifier's question and the quality stays one number the adaptive walk moves.
+classifier's question and the quality stays the one number the operator wrote.
 
 Because `TileSink` is shared, RDP and VNC get every codec from one implementation,
 and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
@@ -283,7 +288,11 @@ their damage through:
   age, so a paused screen sharpens on its own, a whole stripe per tick, without a
   client repaint. The timer has to be its own, because the case it
   exists for is a remote that has stopped sending frames — which is also the only
-  thing that will ever notice a stream has gone quiet.
+  thing that will ever notice a stream has gone quiet. On a `render_adaptive` target
+  a client that is behind holds the cleanups back, since a tickful of stills into a
+  link the streams are being coarsened to fit costs the live motion its quality —
+  but only for `CLEANUP_HELD` (5 s): the streams beside a stopped cell may never
+  stop, and a cell left at a stream's quality for good is the worse failure.
 - **Resets.** Motion state is cleared on resize, where the keys no longer name the
   same pixels, and on reattach, where the repaint re-sends every pixel at the base
   encode anyway.
@@ -592,13 +601,11 @@ both make the same subtraction. Sixty milliseconds of queueing lag counts as
 a behind frame even when nothing local blocked, which is exactly the case the
 paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
 flight while every queue stayed shallow. The walk's floor moves from 1 to
-`render_adaptive_min`, and the same key puts a *per-encode* quality on the lossy
-tile paths: Guacamole's curve — one quality point per millisecond of lag past
-20 ms, clamped at the floor — applied at `Shared::adapted` wherever a lossy
-tile is about to be encoded, cleanups included. PNG passes through
-untouched; which cells deserve losslessness was the operator's call, not the
-link's. Without the key, nothing changes: pressure-only walk for streams, fixed
-quality for tiles.
+`render_adaptive_min`. Without the key the walk is pressure-only. With or without
+it a tile's quality is fixed: Guacamole scales a still's quality with the same lag,
+but a still sent coarse has nothing coming back for it, and on a motion plan a
+quiet band also discharges what its cells were owed — a debt a coarse copy has not
+paid.
 
 The walk only runs when a round is taken, and under `video` a round is only
 taken when something changed, so a desktop that stops moving right after the link
@@ -794,8 +801,8 @@ completion from a dead attachment cannot acknowledge a new one. This is the
 measurement contract for application-level backpressure, and the gateway acts on
 it twice: the paint window in `ws.rs` holds the next batch when too many are owed
 or the oldest is owed too long, and on a `render_adaptive` target the same
-measurement — published through `LinkFeedback` — moves quality before the window
-ever parks. Nothing is dropped either way; an access unit's dependency order is
+measurement — published through `LinkFeedback` — moves a stream's quality before
+the window ever parks. Nothing is dropped either way; an access unit's dependency order is
 untouched.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache

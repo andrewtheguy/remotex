@@ -6628,7 +6628,6 @@ mod tests {
             base: crate::config::TileCodec::Png,
             motion: None,
             debug: false,
-            adaptive: None,
         };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         (TileSink::new("vnc", frame_tx, plan, feedback), frame_rx)
@@ -8063,10 +8062,10 @@ mod tests {
                 base: crate::config::TileCodec::Png,
                 motion: Some(crate::config::MotionEncode {
                     quality: 60,
+                    adaptive: None,
                     chroma: crate::config::Chroma::Subsampled,
                 }),
                 debug: false,
-                adaptive: None,
             },
             Arc::new(crate::feedback::LinkFeedback::new()),
         );

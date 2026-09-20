@@ -246,7 +246,6 @@ mod tests {
             base: crate::config::TileCodec::Png,
             motion: None,
             debug: false,
-            adaptive: None,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         (TileSink::new("test", frame_tx, plan, feedback), frame_rx)
