@@ -51,8 +51,9 @@ no encoder question to answer: it answers what the pixels are and nothing else.
 
 The implementation in [`src/classify.rs`](../src/classify.rs) currently uses:
 
-- a 1,024-pixel minimum for lossy candidates;
-- a palette gate that rejects tiles with at most 256 distinct colours;
+- a palette gate that rejects tiles with at most 256 distinct colours, which is
+  the size gate as well: a tile holds at most one colour per pixel, so nothing at
+  or under 256 pixels can be a lossy candidate whatever it looks like;
 - counts of nonzero soft and hard transitions; and
 - a requirement for more than four soft transitions per hard transition.
 
@@ -62,7 +63,10 @@ rotation even though its encoding character has not changed. That is a property 
 the code, not a measured production failure: no recorded real-device measurement
 has shown that the current direction changes a useful verdict.
 
-The classifier tests cover synthetic content and the measured size floor. The
+The classifier tests cover synthetic content, and two ignored instruments weigh
+the encoders rather than the verdict: `weigh_the_size_ladder` over synthetic
+content at each size the grid produces, and `weigh_a_tape_by_tile_size` over the
+tiles of a recorded desktop ([`src/tape.rs`](../src/tape.rs)). The
 ignored device tests in
 [`tests/classify_render_e2e.rs`](../tests/classify_render_e2e.rs) exercise the real
 classifier path against whichever QA machine `REMOTEX_UAT_TARGET` names — the
@@ -82,7 +86,9 @@ and paint cost is also part of a codec decision.
 Classification was measured shortly before this review; it was not chosen only
 from the synthetic unit cases. Commit `16e938b9b297e5d4862d25fabe718b71c1d1a52b`
 records the real wlshare measurement that cut `MIN_PHOTO_PIXELS` from 4,096 to
-1,024, and the current constant's comment preserves the important observations.
+1,024. That constant no longer exists — the damage-tape measurement below removed
+it — but the observations that lowered it are why, and the palette gate's comment
+preserves them.
 
 - A controlled 60×24-point gradient chip repainting on its own was refused by the
   old 4,096-pixel floor 117 times out of 117 at 1×, producing 378 KB of PNG. At 2×
@@ -96,25 +102,44 @@ records the real wlshare measurement that cut `MIN_PHOTO_PIXELS` from 4,096 to
 - Three real 2× sessions included scrolled photographs, terminal glyphs and chrome
   with streams and cleanup active. No classifier-admitted tile fell below a
   point-scaled version of the old floor because real damage rectangles were wide.
-- The ignored `weigh_the_size_floor` instrument carries admitted synthetic content
+- The ignored `weigh_the_size_ladder` instrument carries admitted synthetic content
   through the still encoders at a size ladder. When it still carried JPEG, JPEG was
   about one third of PNG at 32×32, about half at 24×24, and lost at 16×16 because
   of roughly 640 bytes of JPEG tables; a real 9×10 caret was 261 bytes as PNG and
   683 bytes as JPEG. WebP at the same quality dial is around a tenth of the PNG at
   every size on that ladder, 16×16 included — it has no table cost to amortize. So
-  `MIN_PHOTO_PIXELS` was set where JPEG turned over and is well clear of where WebP
-  does; with JPEG gone the floor is conservative rather than load-bearing, and
-  lowering it is an open question the corpus below should settle. That is a byte
-  comparison at a matched dial number, not a matched visual quality, and it says
-  nothing about the encode time measured below.
+  `MIN_PHOTO_PIXELS` had been set where JPEG turned over, which is nowhere near
+  where WebP does. That is a byte comparison at a matched dial number, not a
+  matched visual quality, and it says nothing about the encode time measured below.
+- The pixel floor was then weighed against WebP alone and removed. Two ten-second
+  Windows RDP sessions at 1×, driven by `tests/ws_probe.py --page` through a page of
+  photographs, were recorded as damage tapes and replayed through
+  `weigh_a_tape_by_tile_size`, which cuts every damage report the way the tile path
+  cuts it and asks the palette gate and the transition test about each piece with
+  the floor taken off. Under 256 pixels nothing was admitted in either session —
+  187 and 244 band pieces, 11,513 and 14,436 single cells, none of them past the
+  palette gate — so a floor below that is inert by arithmetic. Between 256 pixels
+  and the old floor of 1,024 the first session admitted 34 bands whose 49 KB of PNG
+  was 4.8 KB of WebP at quality 70, and, read as single cells, 265 pieces whose
+  393 KB was 37 KB; the second session admitted 78 and 170 of them at the same
+  ratio. Across every bucket of both sessions and both cuts — 110,000 admitted
+  pieces out of 183,000, and 150 to 200 MB of admitted PNG in each reading — not one
+  admitted piece came back larger as WebP. The floor was refusing
+  tiles worth about a tenth of their PNG and refusing nothing worth refusing. Those
+  bytes are a rounding error on a session's wire, well under 1% of it; the floor was
+  removed because its justification was JPEG's tables and nothing replaced it, not
+  because the traffic demanded it. 1× because a floor in pixels bites hardest at the
+  density where tiles are smallest, and because this host renders at 1×: it did not
+  take a 200% request. The band and cell readings are two cuts of one session and
+  must not be added together.
 - The real-device end-to-end tests paint a complete desktop over Windows RDP,
   TigerVNC and Apple High Performance, plus a classify base under motion. They
   validate the operational classifier path and report its actual PNG/lossy verdict
   counts without pretending that a mutable desktop has a deterministic content
   split.
 
-Those results directly support the current size floor and show that the classifier
-runs usefully on real desktops. They do not compare proposed two-dimensional or
+Those results removed the size floor and show that the classifier runs usefully on
+real desktops. They do not compare proposed two-dimensional or
 run-based signals. They also do not preserve one fixed set
 of real pixels against which every alternative can be replayed. WebP has separate
 real-screen measurements recorded below. The measurement work proposed here
@@ -310,14 +335,16 @@ larger WAN payload trades away the central benefit sought here.
 
 ## Extending the existing measurement
 
-The controlled wlshare sessions and real-device end-to-end runs answer the current
-size-floor and operational questions. Proposed classifier signals need a replayable
+The controlled wlshare sessions, the damage-tape weighings that removed the size
+floor, and the real-device end-to-end runs answer the size and operational
+questions asked so far. Proposed classifier signals need a replayable
 comparison because they must see exactly the same input pixels. An opt-in capture
 can record representative damage tiles or frames under `tmp/` and replay them
 through every candidate. Desktop captures may contain passwords, personal messages
 or other private material, so capture must never be enabled by default or
-committed. The same corpus can settle whether `MIN_PHOTO_PIXELS` still needs to sit
-where JPEG's tables put it.
+committed — which is what the damage tape already is, an opt-in capture written
+under `tmp/` only when `REMOTEX_MOTION_TAPE` names a file, and the corpus proposed
+here is its content curated rather than a second mechanism.
 
 The corpus should contain:
 
@@ -355,9 +382,10 @@ only spends bandwidth.
    on rotations and transposes. Replace it only if the comparison demonstrates a
    useful reduction in regret.
 4. Add a repetition/run signal as a conservative lossy rejector for colourful UI.
-5. Re-weigh `MIN_PHOTO_PIXELS` against WebP alone. It was measured where JPEG's
-   tables broke even, and WebP has none; the floor may be costing small
-   photographic tiles for nothing.
+5. Done: the pixel floor was re-weighed against WebP alone and removed, the palette
+   gate being the size gate that remains. What would put a floor back is a measured
+   size at which WebP loses to PNG on admitted content — the `webp loses` column of
+   `weigh_a_tape_by_tile_size`, which has been zero on every session recorded so far.
 6. WebP is the one lossy still. Do not add a second one, and do not add a run-time
    policy that falls back to PNG on encoder time until the corpus above can weigh
    that budget against the bytes it would give back.

@@ -2,10 +2,15 @@
 //! this photographic content that WebP compresses well, or flat UI and
 //! text that PNG keeps small *and* sharp?
 //!
-//! It answers what the pixels are, not what they cost: the thresholds below
-//! were measured when JPEG was the lossy still beside WebP, and JPEG is the
-//! harder of the two to break even on, so every one of them is a conservative
-//! reading for the encoder that remains.
+//! It answers what the pixels are, not what they cost: the two thresholds
+//! below were measured when JPEG was the lossy still beside WebP, and JPEG is
+//! the harder of the two to break even on, so both are a conservative reading
+//! for the encoder that remains. A third stood in front of them — a minimum
+//! tile size, placed where JPEG's tables broke even — and does not survive the
+//! same question. WebP has no tables, and on two recorded Windows sessions
+//! ([`tests::weigh_a_tape_by_tile_size`]) every tile the floor alone refused was
+//! one WebP would have sent for a tenth of its PNG. It is gone, and the palette
+//! gate is the size gate: a tile cannot hold more colours than it has pixels.
 //!
 //! The question is answered from the pixels alone, per tile, on the encode
 //! worker — nothing upstream carries state for it, so two tiles of one frame
@@ -31,39 +36,15 @@
 //!    tile whose soft transitions outnumber hard ones [`SOFT_PER_HARD`]-fold
 //!    reads as photographic.
 
-/// Pixels below which a tile is never offered to the lossy encode: a break-even
-/// weighed rather than assumed. It was measured when JPEG was the other lossy
-/// still, and JPEG is the one with a break-even to find — on the same ladder
-/// WebP's container costs so little that it is a tenth of the PNG at every size,
-/// 16×16 included, so the floor kept here is well clear of where WebP turns over
-/// and costs it only the smallest tiles.
-///
-/// [`tests::weigh_the_size_floor`] carries both encodings across the size ladder. A
-/// tile this classifier admits costs a third of its PNG at 32×32 and half at 24×24;
-/// below 257 pixels the palette gate could not admit anything anyway, wanting more
-/// colours than the tile has pixels, so a floor under that would be inert.
-///
-/// Pixels rather than points, because table bytes are bytes and do not care how much
-/// screen a pixel covers. A floor in pixels therefore lapses as density rises, and
-/// the value here is what that lapse taught. It was 4096 while it doubled as a guard
-/// against sending small sharp furniture lossy — but measured on a wlshare desktop
-/// driven beside the gateway, a 60×24-point gradient chip repainting on its own was
-/// refused 117 times out of 117 at 1×, for 378 KB of PNG, and admitted 118 out of
-/// 118 at 2×, for 145 KB of lossy still. The guard was doing nothing at the density where
-/// furniture is largest and charging for it at the density where it is smallest. The
-/// sharp content it was meant to catch is refused by the transition test, which is
-/// the measurement that actually looks for edges. That chip had to be built to raise
-/// the question at all: across three 2× sessions of scrolled photographs, terminal
-/// glyphs and chrome, streams and cleanups live, no admitted tile fell under a
-/// point-scaled floor, real damage boxes being wide.
-///
-/// Nothing here follows `CELL_POINTS`. That the old value equalled a 64×64 cell
-/// exactly was a coincidence of two unrelated choices; this one sits where the bytes
-/// turn over.
-const MIN_PHOTO_PIXELS: usize = 1024;
-
 /// Distinct colours at or below which a tile reads as flat UI outright.
 /// One byte's worth: the palette a Tight encoder would have indexed.
+///
+/// It is the size gate as well, and the only one. A tile holds at most one
+/// colour per pixel, so nothing at or under this many pixels can pass here
+/// however photographic it looks — a 16×16 cell is refused on arithmetic. A
+/// separate pixel floor stood in front of this for as long as JPEG's tables
+/// gave it a break-even to sit at; with WebP alone it refused tiles worth
+/// sending and nothing worth refusing, and it is gone.
 const FLAT_COLORS: usize = 256;
 
 /// Per-channel neighbour delta at or below which a transition is a gradient
@@ -83,12 +64,17 @@ const SOFT_PER_HARD: u64 = 4;
 /// wrong, only bigger.
 pub fn photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
     let (w, h) = (usize::from(w), usize::from(h));
-    if w * h < MIN_PHOTO_PIXELS || rgb.len() != w * h * 3 {
+    if rgb.len() != w * h * 3 {
         return false;
     }
-    if !colorful(rgb) {
-        return false;
-    }
+    colorful(rgb) && gradientish(w, rgb)
+}
+
+/// Whether horizontal neighbour deltas are dominated by gradient-sized steps —
+/// the transition test, apart from the palette gate and the size floor that
+/// [`photographic`] applies first. Its own function so a measurement can ask what
+/// the floor is actually refusing; nothing else calls it alone.
+fn gradientish(w: usize, rgb: &[u8]) -> bool {
     let (mut soft, mut hard) = (0u64, 0u64);
     for row in rgb.chunks_exact(w * 3) {
         for pair in row.windows(6).step_by(3) {
@@ -130,7 +116,7 @@ fn colorful(rgb: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// A tile comfortably over [`MIN_PHOTO_PIXELS`].
+    /// A tile with room for either kind of content's palette.
     const W: u16 = 128;
     const H: u16 = 64;
 
@@ -191,19 +177,24 @@ mod tests {
         assert!(!photographic(W, H, &rgb));
     }
 
-    /// Below the size floor nothing is photographic, however smooth — and below it
-    /// the palette gate could not pass a tile either, wanting more colours than
-    /// this one has pixels.
+    /// A tile smaller than the palette it would need is refused on arithmetic,
+    /// however smooth it is: 256 pixels cannot carry more than [`FLAT_COLORS`]
+    /// colours, and this is why no separate size floor is needed. One row more of
+    /// the same gradient and the same content is admitted — the smallest tile that
+    /// can be, and measurably smaller as WebP.
     #[test]
     fn a_small_tile_is_never_photographic() {
         let (w, h) = (16u16, 16u16);
-        let mut rgb = Vec::new();
-        for y in 0..usize::from(h) {
-            for x in 0..usize::from(w) {
-                rgb.extend_from_slice(&[(x * 8) as u8, (y * 8) as u8, ((x + y) * 4) as u8]);
-            }
-        }
+        let row = |y: usize| -> Vec<u8> {
+            (0..usize::from(w))
+                .flat_map(|x| [(x * 8) as u8, (y * 8) as u8, ((x + y) * 4) as u8])
+                .collect()
+        };
+        let mut rgb: Vec<u8> = (0..usize::from(h)).flat_map(row).collect();
         assert!(!photographic(w, h, &rgb));
+
+        rgb.extend(row(usize::from(h)));
+        assert!(photographic(w, h + 1, &rgb));
     }
 
     /// A malformed payload takes the safe verdict rather than a guess.
@@ -212,13 +203,14 @@ mod tests {
         assert!(!photographic(W, H, &[0u8; 17]));
     }
 
-    /// What the floor is protecting, weighed: for content the classifier admits,
-    /// how the lossy still compares with the PNG it replaces at each size the grid
-    /// hands the encoder. Run with
-    ///   cargo test --release --lib classify::tests::weigh_the_size_floor -- --ignored --nocapture
+    /// For content the classifier admits, how WebP compares with the PNG it
+    /// replaces at each size the grid hands the encoder — synthetic content on a
+    /// size ladder, where [`weigh_a_tape_by_tile_size`] asks the same question of a
+    /// recorded desktop. Run with
+    ///   cargo test --release --lib classify::tests::weigh_the_size_ladder -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn weigh_the_size_floor() {
+    fn weigh_the_size_ladder() {
         use crate::protocol::Tile;
 
         // Smooth and detailed: the photograph the lossy arm exists for.
@@ -281,6 +273,152 @@ mod tests {
         println!(
             "\n  [refused] is the classifier's own verdict, floor included: a row without it \
              is a tile that would go out as WebP today.\n"
+        );
+    }
+
+    /// What the classifier admits on a recorded desktop, by tile size, weighed as
+    /// PNG against WebP: every piece a real session put on the wire, cut the way the
+    /// tile path cuts it.
+    ///
+    /// This is the instrument that removed the pixel floor. That floor was the one
+    /// threshold whose justification was a byte count rather than a picture, and the
+    /// count had been taken against JPEG's tables; WebP has none to amortise. Two
+    /// ten-second Windows RDP sessions at 1×, paging through a page of photographs,
+    /// answered it. Nothing at all was admitted under 256 pixels — the palette gate
+    /// cannot pass a tile with fewer colours than that, so a floor under it would be
+    /// inert. Between 256 and the old floor of 1,024 it admitted 34 bands of 49 KB
+    /// of PNG, 4.8 KB of them as WebP at quality 70, and — the same session read as
+    /// single cells — 265 pieces of 393 KB, 37 KB as WebP; the second session found
+    /// 78 and 170. Not one admitted piece, at any size in either session, came back
+    /// larger as WebP. 1× because that is where a floor in pixels bites hardest and
+    /// what this host renders at; it would not take 200%.
+    ///
+    /// Reads a damage tape ([`crate::tape`]), recorded by a `render_motion` session
+    /// with the PNG base:
+    ///
+    /// ```text
+    /// REMOTEX_MOTION_TAPE=tmp/floor.tape target/release/remotex serve -c tmp/test_uat.toml
+    /// REMOTEX_MOTION_TAPE=tmp/floor.tape \
+    ///   cargo test --release --lib classify::tests::weigh_a_tape_by_tile_size \
+    ///   -- --ignored --nocapture
+    /// ```
+    ///
+    /// Two populations, because the cut depends on what else is happening. **Bands**
+    /// are what a still target sends: [`Rect::bands`] of the damage box, wide by
+    /// construction. **Cells** are the smallest piece the motion path can send — one
+    /// changed cell, alone between two live streams — and so the population the floor
+    /// can actually reach. Both come out of the same records; they are two readings of
+    /// one session, not two sessions, and their bytes must not be added together.
+    #[test]
+    #[ignore = "manual: weighs a damage tape's tiles by size, PNG against WebP"]
+    fn weigh_a_tape_by_tile_size() {
+        use crate::protocol::{Tile, TileGrid};
+        use crate::tape::Record;
+        use crate::tiles::Rect;
+
+        let path =
+            std::env::var_os(crate::tape::ENV).expect("REMOTEX_MOTION_TAPE names the tape to weigh");
+        let (_, records) = crate::tape::read(&path).expect("a readable tape");
+
+        /// Pixel counts a bucket ends at, the last one being everything above.
+        /// 256 is where the palette gate can first answer at all and 1,024 is where
+        /// the removed floor stood, so the second row is what it used to refuse.
+        const BUCKETS: [usize; 4] = [256, 1024, 4096, usize::MAX];
+
+        #[derive(Default, Clone, Copy)]
+        struct Bucket {
+            pieces: u64,
+            admitted: u64,
+            png: u64,
+            webp70: u64,
+            webp90: u64,
+            /// Admitted pieces WebP at 70 did not shrink. The floor's whole case.
+            webp_lost: u64,
+        }
+
+        let mut tally = [[Bucket::default(); BUCKETS.len()]; 2];
+        let mut grid = TileGrid::ONE;
+        let mut cut = false;
+        for record in &records {
+            match record {
+                Record::Resize { scale, .. } => grid = TileGrid::at(*scale),
+                Record::Cut { .. } => cut = true,
+                Record::Frame { .. } => {}
+                Record::Damage { rect, cells, rgb, .. } => {
+                    let stride = usize::from(rect.w()) * 3;
+                    let crop = |piece: Rect| -> Vec<u8> {
+                        let x0 = usize::from(piece.left - rect.left) * 3;
+                        let width = usize::from(piece.w()) * 3;
+                        (piece.top..=piece.bottom)
+                            .flat_map(|y| {
+                                let row = usize::from(y - rect.top) * stride;
+                                rgb[row + x0..row + x0 + width].iter().copied()
+                            })
+                            .collect()
+                    };
+                    let mut weigh = |population: usize, piece: Rect| {
+                        let (w, h) = (piece.w(), piece.h());
+                        let pixels = usize::from(w) * usize::from(h);
+                        let bucket = BUCKETS.iter().position(|end| pixels < *end).unwrap_or(0);
+                        let b = &mut tally[population][bucket];
+                        b.pieces += 1;
+                        let rgb = crop(piece);
+                        if !(colorful(&rgb) && gradientish(usize::from(w), &rgb)) {
+                            return;
+                        }
+                        let len = |tile: anyhow::Result<Tile>| tile.expect("an encode of a piece").data.len() as u64;
+                        let png = len(Tile::from_rgb(0, 0, w, h, &rgb));
+                        let webp70 = len(Tile::from_rgb_webp(0, 0, w, h, &rgb, 70));
+                        b.admitted += 1;
+                        b.png += png;
+                        b.webp70 += webp70;
+                        b.webp90 += len(Tile::from_rgb_webp(0, 0, w, h, &rgb, 90));
+                        b.webp_lost += u64::from(webp70 >= png);
+                    };
+                    for band in rect.bands() {
+                        weigh(0, band);
+                        for cell in band.cells(grid) {
+                            if cells.contains(&cell.cell_key(grid)) {
+                                weigh(1, cell);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if cut {
+            println!("\n  ** the recorder fell behind and cut the tape: this is its head, not the session. **");
+        }
+        if cfg!(debug_assertions) {
+            println!("\n  ** debug build: re-run with --release before believing the bytes. **");
+        }
+        for (population, name) in [(0, "bands (a still target's cut)"), (1, "cells (the motion path's smallest)")] {
+            println!(
+                "\n  {name}\n  {:>13} | {:>7} | {:>9} | {:>9} | {:>19} | {:>19} | {:>10}",
+                "pixels", "pieces", "admitted", "png B", "webp 70 B (of png)", "webp 90 B (of png)", "webp loses"
+            );
+            let mut from = 0;
+            for (bucket, end) in BUCKETS.iter().enumerate() {
+                let b = tally[population][bucket];
+                let pct = |v: u64| if b.png == 0 { 0.0 } else { 100.0 * v as f64 / b.png as f64 };
+                let range = if *end == usize::MAX {
+                    format!("{from}+")
+                } else {
+                    format!("{from}..{end}")
+                };
+                println!(
+                    "  {:>13} | {:>7} | {:>9} | {:>9} | {:>9} ({:>5.0}%) | {:>9} ({:>5.0}%) | {:>10}{}",
+                    range, b.pieces, b.admitted, b.png, b.webp70, pct(b.webp70), b.webp90, pct(b.webp90), b.webp_lost,
+                    if *end <= 1024 { "  [the removed floor refused these]" } else { "" },
+                );
+                from = *end;
+            }
+        }
+        println!(
+            "\n  \"admitted\" is the palette gate and the transition test — every gate there is. \
+             \"webp loses\" counts the admitted pieces WebP at 70 did not shrink, and a row of it \
+             is the measurement that would put a size floor back.\n"
         );
     }
 }

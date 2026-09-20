@@ -119,7 +119,7 @@ honest trade of a single fixed knob. `classify` is that trade removed for a litt
 CPU: a picture classifier (`src/classify.rs`) reads each tile on the encode worker
 — a palette gate, then the shape of neighbour-to-neighbour deltas — and only what
 reads as photographic takes the lossy encode; PNG is the verdict for everything flat,
-sharp, small or ambiguous, because a photo sent lossless only costs bytes while
+sharp, too small to hold a palette, or ambiguous, because a photo sent lossless only costs bytes while
 text sent lossy costs legibility until that region next changes. The decision is
 per tile and stateless, so the same window answers differently as content scrolls
 through it. Under `render_motion` it composes: a settled cell is classified, a
