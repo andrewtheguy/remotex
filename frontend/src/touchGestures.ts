@@ -10,10 +10,12 @@
 //   double-tap-and-hold   hold the left button (drag mode); a second finger
 //                         then moves the cursor while the first keeps holding
 //   two-finger tap        right-click at the cursor
-//   two-finger pinch      zoom (1x-8x, anchored at the finger midpoint)
-//   two-finger drag       pan the zoomed view (when not in drag mode)
-//   three-finger swipe    scroll, axis-locked (vertical or horizontal wheel),
-//                         natural direction: content follows the fingers
+//   two-finger drag       one gesture, classified by what the fingers do:
+//                         changing the distance between them pinches (zoom
+//                         1x-8x, anchored at the midpoint, which pans the
+//                         zoomed view with it), moving in parallel scrolls,
+//                         axis-locked (vertical or horizontal wheel) in the
+//                         natural direction, where content follows the fingers
 //
 // The state machine keeps its thresholds local to this file. The output layer
 // sends remotex ClientMsg JSON (a scroll tick is one wheel message carrying the
@@ -49,8 +51,14 @@ const FORCE_TAP_THRESHOLD = 0.15;
 const DOUBLE_TAP_WINDOW_MS = 300;
 const TWO_FINGER_TAP_MAX_MOVE_PX = 12;
 const TWO_FINGER_TAP_MAX_DURATION_MS = 260;
-const THREE_FINGER_SCROLL_AXIS_LOCK_PX = 10;
-const THREE_FINGER_SCROLL_STEP_PX = 32;
+// How far two fingers must work before their gesture commits to pinching or
+// scrolling. Both measurements are taken at that moment and the larger one
+// decides: how much the distance between the fingers changed, against how far
+// their midpoint travelled. Until then nothing moves, which is also what holds
+// a two-finger tap still. That same travel names the scroll axis, so a scroll
+// ticks from the moment it is recognised rather than after a second threshold.
+const TWO_FINGER_CLASSIFY_PX = 12;
+const SCROLL_STEP_PX = 32;
 
 export interface Point {
   x: number;
@@ -113,29 +121,42 @@ interface DragAssistGesture {
   lastClientY: number;
 }
 
-interface TwoFingerTapGesture {
-  startTime: number;
+// The single two-finger gesture, tracked on the pair of fingers it started
+// with. It begins undecided — a right-click candidate while the fingers stay
+// put — and once it commits to a pinch or a scroll it stays that for life, so
+// the drift of a scroll never creeps into the zoom and back.
+interface TwoFingerGesture {
   firstId: number;
   secondId: number;
+  startTime: number;
   firstStartX: number;
   firstStartY: number;
   secondStartX: number;
   secondStartY: number;
-  valid: boolean;
-}
-
-interface ThreeFingerScrollGesture {
-  touchIds: [number, number, number];
+  // What the classification measures against. The midpoint is re-based when a
+  // scroll starts, so the axis lock measures from there rather than from the
+  // travel that bought the decision.
+  startDistance: number;
   startMidX: number;
   startMidY: number;
+  mode: "undecided" | "pinch" | "scroll";
+  // Still a right-click, if every finger lifts soon enough.
+  tapCandidate: boolean;
+  // The zoom and finger distance a pinch scales from, and the remote point
+  // under the midpoint, which is held there. Null until the pinch starts.
+  pinch: PinchAnchor | null;
+  // The axis a scroll locked onto, where it left the midpoint, and what it
+  // owes the wire. Null until the scroll starts.
+  axis: ScrollAxis | null;
   lastMidX: number;
   lastMidY: number;
-  axis: "x" | "y" | null;
   carryX: number;
   carryY: number;
 }
 
-interface PinchGesture {
+type ScrollAxis = "x" | "y";
+
+interface PinchAnchor {
   initialDistance: number;
   initialZoom: number;
   anchorX: number;
@@ -162,37 +183,14 @@ function getTouchById(touches: TouchList, touchId: number): Touch | null {
   return null;
 }
 
-// Only midpoint deltas matter for the scroll gesture, so raw client
-// coordinates are fine here.
-function getThreeTouchMidpoint(
-  first: Touch,
-  second: Touch,
-  third: Touch,
-): Point {
-  return {
-    x: (first.clientX + second.clientX + third.clientX) / 3,
-    y: (first.clientY + second.clientY + third.clientY) / 3,
-  };
-}
-
-function getScrollTouchSet(
-  touches: TouchList,
-  ids: [number, number, number],
-): [Touch, Touch, Touch] | null {
-  const first = getTouchById(touches, ids[0]);
-  const second = getTouchById(touches, ids[1]);
-  const third = getTouchById(touches, ids[2]);
-  return first && second && third ? [first, second, third] : null;
-}
-
 // Drain accumulated finger travel into wheel ticks, one per 32px step, and
 // return the leftover carry.
 function drainScrollCarry(carry: number, tick: (dir: 1 | -1) => void): number {
   let rest = carry;
-  while (Math.abs(rest) >= THREE_FINGER_SCROLL_STEP_PX) {
+  while (Math.abs(rest) >= SCROLL_STEP_PX) {
     const dir = rest > 0 ? 1 : -1;
     tick(dir);
-    rest -= dir * THREE_FINGER_SCROLL_STEP_PX;
+    rest -= dir * SCROLL_STEP_PX;
   }
   return rest;
 }
@@ -206,12 +204,10 @@ export function attachTouchGestures(
   el: HTMLElement,
   deps: GestureDeps,
 ): TouchGestures {
-  let pinchGesture: PinchGesture | null = null;
   let mouseGesture: MouseGesture | null = null;
   let dragAssist: DragAssistGesture | null = null;
-  let twoFingerTap: TwoFingerTapGesture | null = null;
-  let threeFingerScroll: ThreeFingerScrollGesture | null = null;
-  // A gesture that broke down (e.g. a finger of a three-finger swipe lifted)
+  let twoFinger: TwoFingerGesture | null = null;
+  // A gesture that broke down (e.g. a finger of a two-finger swipe lifted)
   // swallows the leftover touches so they can't turn into stray clicks.
   let ignoreSingleTouch = false;
   let lastTapTime = 0;
@@ -401,7 +397,7 @@ export function attachTouchGestures(
       moved: false,
     };
     dragAssist = null;
-    threeFingerScroll = null;
+    twoFinger = null;
 
     if (isSecondTap) {
       cancelPendingTap();
@@ -553,54 +549,119 @@ export function attachTouchGestures(
     moveCursorWithPan(stepX, stepY, true, currentCursor());
   }
 
-  function beginTwoFingerTapGesture(first: Touch, second: Touch): void {
-    twoFingerTap = {
-      startTime: Date.now(),
+  // The pair the gesture started on, or null once either finger has left.
+  function trackedPair(
+    gesture: TwoFingerGesture,
+    touches: TouchList,
+  ): [Touch, Touch] | null {
+    const first = getTouchById(touches, gesture.firstId);
+    const second = getTouchById(touches, gesture.secondId);
+    return first && second ? [first, second] : null;
+  }
+
+  function beginTwoFingerGesture(
+    first: Touch,
+    second: Touch,
+    tapCandidate: boolean,
+  ): void {
+    const midpoint = getTouchMidpoint(first, second);
+    twoFinger = {
       firstId: first.identifier,
       secondId: second.identifier,
+      startTime: Date.now(),
       firstStartX: first.clientX,
       firstStartY: first.clientY,
       secondStartX: second.clientX,
       secondStartY: second.clientY,
-      valid: true,
+      startDistance: getTouchDistance(first, second),
+      startMidX: midpoint.x,
+      startMidY: midpoint.y,
+      mode: "undecided",
+      tapCandidate,
+      pinch: null,
+      axis: null,
+      lastMidX: midpoint.x,
+      lastMidY: midpoint.y,
+      carryX: 0,
+      carryY: 0,
     };
   }
 
-  // Still a right-click candidate? Any lifted/swapped finger or real movement
-  // invalidates it for good.
-  function updateTwoFingerTapGesture(touches: TouchList): boolean {
-    if (!twoFingerTap || !twoFingerTap.valid) {
-      return false;
-    }
-    if (touches.length !== 2) {
-      twoFingerTap.valid = false;
-      return false;
-    }
-    const first = getTouchById(touches, twoFingerTap.firstId);
-    const second = getTouchById(touches, twoFingerTap.secondId);
-    if (!first || !second) {
-      twoFingerTap.valid = false;
-      return false;
+  // A right-click candidate survives only while both fingers stay where they
+  // landed — including a rotation, which moves neither the midpoint nor the
+  // distance and so would otherwise never be classified out of the running.
+  function updateTapCandidate(
+    gesture: TwoFingerGesture,
+    first: Touch,
+    second: Touch,
+  ): void {
+    if (!gesture.tapCandidate) {
+      return;
     }
     const firstMoved = Math.hypot(
-      first.clientX - twoFingerTap.firstStartX,
-      first.clientY - twoFingerTap.firstStartY,
+      first.clientX - gesture.firstStartX,
+      first.clientY - gesture.firstStartY,
     );
     const secondMoved = Math.hypot(
-      second.clientX - twoFingerTap.secondStartX,
-      second.clientY - twoFingerTap.secondStartY,
+      second.clientX - gesture.secondStartX,
+      second.clientY - gesture.secondStartY,
     );
     if (
       firstMoved > TWO_FINGER_TAP_MAX_MOVE_PX ||
       secondMoved > TWO_FINGER_TAP_MAX_MOVE_PX
     ) {
-      twoFingerTap.valid = false;
-      return false;
+      gesture.tapCandidate = false;
     }
-    return true;
   }
 
-  function startPinchGesture(first: Touch, second: Touch): void {
+  // Which of the two things two fingers do is this? Distance between them
+  // changing is a pinch; the pair travelling while that distance holds is a
+  // scroll. Nothing happens until one of the measurements is worth a decision,
+  // and the decision is final: a scroll that lets the fingers drift apart is
+  // still a scroll, and a pinch that slides is still a pinch.
+  function classifyTwoFingerGesture(
+    gesture: TwoFingerGesture,
+    first: Touch,
+    second: Touch,
+  ): void {
+    const spread = Math.abs(
+      getTouchDistance(first, second) - gesture.startDistance,
+    );
+    const midpoint = getTouchMidpoint(first, second);
+    const travel = Math.hypot(
+      midpoint.x - gesture.startMidX,
+      midpoint.y - gesture.startMidY,
+    );
+    if (Math.max(spread, travel) < TWO_FINGER_CLASSIFY_PX) {
+      return;
+    }
+    gesture.tapCandidate = false;
+    if (spread >= travel) {
+      gesture.mode = "pinch";
+      startPinch(gesture, first, second);
+      return;
+    }
+    gesture.mode = "scroll";
+    // The travel that bought the decision also says which way it was going, and
+    // that axis holds for the rest of the gesture — a diagonal drag never sends
+    // a stray tick sideways. It does not count as movement to scroll: the
+    // midpoint starts over here.
+    gesture.axis =
+      Math.abs(midpoint.x - gesture.startMidX) >=
+      Math.abs(midpoint.y - gesture.startMidY)
+        ? "x"
+        : "y";
+    gesture.lastMidX = midpoint.x;
+    gesture.lastMidY = midpoint.y;
+  }
+
+  // Anchor the pinch on the fingers as they are now, so committing to it — or
+  // carrying it over to a new pair of fingers — never jumps the zoom.
+  function startPinch(
+    gesture: TwoFingerGesture,
+    first: Touch,
+    second: Touch,
+  ): void {
     const initialDistance = getTouchDistance(first, second);
     if (initialDistance <= 0) {
       return;
@@ -608,7 +669,7 @@ export function attachTouchGestures(
     const midpoint = getTouchMidpoint(first, second);
     const view = deps.view();
     const scale = Math.max(0.0001, view.fit * view.zoom);
-    pinchGesture = {
+    gesture.pinch = {
       initialDistance,
       initialZoom: view.zoom,
       // The remote point under the finger midpoint, kept there while zooming.
@@ -617,10 +678,16 @@ export function attachTouchGestures(
     };
   }
 
-  // One pinch/pan frame: zoom from the distance ratio, pan from the midpoint
-  // drift (so a constant-distance two-finger drag is a pure pan).
-  function applyPinchMove(first: Touch, second: Touch): void {
-    if (!pinchGesture) {
+  // One pinch frame: zoom from the distance ratio, pan from the midpoint drift
+  // (so the zoomed view follows the fingers as they spread).
+  function applyPinchMove(
+    gesture: TwoFingerGesture,
+    first: Touch,
+    second: Touch,
+  ): void {
+    const pinch = gesture.pinch;
+    if (!pinch) {
+      startPinch(gesture, first, second);
       return;
     }
     const distance = getTouchDistance(first, second);
@@ -629,113 +696,42 @@ export function attachTouchGestures(
     }
     const midpoint = getTouchMidpoint(first, second);
     const nextZoom = clampValue(
-      pinchGesture.initialZoom * (distance / pinchGesture.initialDistance),
+      pinch.initialZoom * (distance / pinch.initialDistance),
       MIN_ZOOM,
       MAX_ZOOM,
     );
     const scale = deps.view().fit * nextZoom;
     deps.applyView(nextZoom, {
-      x: midpoint.x - pinchGesture.anchorX * scale,
-      y: midpoint.y - pinchGesture.anchorY * scale,
+      x: midpoint.x - pinch.anchorX * scale,
+      y: midpoint.y - pinch.anchorY * scale,
     });
   }
 
-  function startThreeFingerScrollGesture(touches: TouchList): void {
-    if (touches.length < 3) {
-      return;
-    }
-    const midpoint = getThreeTouchMidpoint(touches[0], touches[1], touches[2]);
-    threeFingerScroll = {
-      touchIds: [
-        touches[0].identifier,
-        touches[1].identifier,
-        touches[2].identifier,
-      ],
-      startMidX: midpoint.x,
-      startMidY: midpoint.y,
-      lastMidX: midpoint.x,
-      lastMidY: midpoint.y,
-      axis: null,
-      carryX: 0,
-      carryY: 0,
-    };
-  }
-
-  // Feed a movement of the three-finger midpoint into the scroll: the axis
-  // locks after 10px of total travel, then every 32px of movement drains
-  // into one wheel tick. Returns false when the touch set fell apart.
-  function handleThreeFingerScrollMove(touches: TouchList): boolean {
-    const scroll = threeFingerScroll;
-    if (!scroll || touches.length < 3) {
-      return false;
-    }
-    const touchSet = getScrollTouchSet(touches, scroll.touchIds);
-    if (!touchSet) {
-      threeFingerScroll = null;
-      return false;
-    }
-
-    const midpoint = getThreeTouchMidpoint(...touchSet);
-    const stepX = midpoint.x - scroll.lastMidX;
-    const stepY = midpoint.y - scroll.lastMidY;
-    scroll.lastMidX = midpoint.x;
-    scroll.lastMidY = midpoint.y;
-
-    if (!scroll.axis && !lockScrollAxis(scroll, midpoint)) {
-      return true;
-    }
+  // One scroll frame: every 32px the midpoint travels along the locked axis
+  // drains into one wheel tick.
+  function applyScrollMove(
+    gesture: TwoFingerGesture,
+    axis: ScrollAxis,
+    first: Touch,
+    second: Touch,
+  ): void {
+    const midpoint = getTouchMidpoint(first, second);
+    const stepX = midpoint.x - gesture.lastMidX;
+    const stepY = midpoint.y - gesture.lastMidY;
+    gesture.lastMidX = midpoint.x;
+    gesture.lastMidY = midpoint.y;
 
     // Negated: natural (touch) direction, where content follows the fingers —
     // swiping up scrolls the content up, i.e. a wheel-down tick.
-    if (scroll.axis === "x") {
-      scroll.carryX = drainScrollCarry(scroll.carryX + stepX, (dir) =>
-        sendScrollTick(-dir * THREE_FINGER_SCROLL_STEP_PX, 0),
+    if (axis === "x") {
+      gesture.carryX = drainScrollCarry(gesture.carryX + stepX, (dir) =>
+        sendScrollTick(-dir * SCROLL_STEP_PX, 0),
       );
     } else {
-      scroll.carryY = drainScrollCarry(scroll.carryY + stepY, (dir) =>
-        sendScrollTick(0, -dir * THREE_FINGER_SCROLL_STEP_PX),
+      gesture.carryY = drainScrollCarry(gesture.carryY + stepY, (dir) =>
+        sendScrollTick(0, -dir * SCROLL_STEP_PX),
       );
     }
-    return true;
-  }
-
-  // Pick the scroll axis once the midpoint traveled far enough from its
-  // start; returns false while still within the lock threshold.
-  function lockScrollAxis(
-    scroll: ThreeFingerScrollGesture,
-    midpoint: Point,
-  ): boolean {
-    const totalX = midpoint.x - scroll.startMidX;
-    const totalY = midpoint.y - scroll.startMidY;
-    if (
-      Math.abs(totalX) < THREE_FINGER_SCROLL_AXIS_LOCK_PX &&
-      Math.abs(totalY) < THREE_FINGER_SCROLL_AXIS_LOCK_PX
-    ) {
-      return false;
-    }
-    scroll.axis = Math.abs(totalX) >= Math.abs(totalY) ? "x" : "y";
-    return true;
-  }
-
-  // Shared prologue for all touch events: while a three-finger scroll is
-  // active it owns every touch; once its touch set breaks, the leftover
-  // fingers are swallowed until fully released. Returns true when the event
-  // was consumed here.
-  function continueThreeFingerScroll(e: TouchEvent): boolean {
-    if (!threeFingerScroll) {
-      return false;
-    }
-    if (e.touches.length === 3 && handleThreeFingerScrollMove(e.touches)) {
-      consumeTouchEvent(e);
-      return true;
-    }
-    threeFingerScroll = null;
-    dragAssist = null;
-    twoFingerTap = null;
-    pinchGesture = null;
-    ignoreSingleTouch = e.touches.length > 0;
-    consumeTouchEvent(e);
-    return true;
   }
 
   function finalizeMouseFromTouches(e: TouchEvent, suppressTap: boolean): void {
@@ -747,40 +743,18 @@ export function attachTouchGestures(
     finalizeMouseGesture(active, suppressTap);
   }
 
-  // A third finger landed (or was noticed mid-move) outside a hold-drag: end
-  // any mouse gesture without a click and start scrolling.
-  function beginThreeFingerScroll(e: TouchEvent): void {
-    finalizeMouseFromTouches(e, true);
-    dragAssist = null;
-    twoFingerTap = null;
-    pinchGesture = null;
-    startThreeFingerScrollGesture(e.touches);
-    ignoreSingleTouch = true;
-    consumeTouchEvent(e);
-  }
-
   function handleTouchStart(e: TouchEvent): void {
     cancelPendingTap();
-    if (continueThreeFingerScroll(e)) {
-      return;
-    }
-
-    if (e.touches.length === 3 && mouseGesture?.mode !== "drag") {
-      beginThreeFingerScroll(e);
-      return;
-    }
-
     if (e.touches.length >= 2) {
       handleMultiTouchStart(e);
       return;
     }
 
-    twoFingerTap = null;
+    twoFinger = null;
     if (ignoreSingleTouch) {
       consumeTouchEvent(e);
       return;
     }
-    pinchGesture = null;
     beginMouseGesture(e.touches[0]);
     consumeTouchEvent(e);
   }
@@ -790,9 +764,7 @@ export function attachTouchGestures(
       // Extra fingers during a hold-drag assist the cursor, they never
       // zoom/scroll.
       ignoreSingleTouch = false;
-      twoFingerTap = null;
-      pinchGesture = null;
-      threeFingerScroll = null;
+      twoFinger = null;
       const assist = getDragAssistTouch(e.touches);
       if (assist) {
         handleDragAssistMove(assist);
@@ -802,36 +774,39 @@ export function attachTouchGestures(
     }
     finalizeMouseFromTouches(e, true);
     ignoreSingleTouch = true;
-    if (e.touches.length === 2) {
-      beginTwoFingerTapGesture(e.touches[0], e.touches[1]);
-      startPinchGesture(e.touches[0], e.touches[1]);
+    if (twoFinger && trackedPair(twoFinger, e.touches)) {
+      // A further finger joined a gesture already under way: it keeps running
+      // on the pair it started with, but it is no longer a two-finger tap.
+      twoFinger.tapCandidate = false;
     } else {
-      twoFingerTap = null;
-      pinchGesture = null;
+      beginTwoFingerGesture(e.touches[0], e.touches[1], e.touches.length === 2);
     }
     consumeTouchEvent(e);
   }
 
-  // Two-finger move outside a hold-drag: keep the right-click candidate alive
-  // while the fingers stay put, otherwise pinch/pan.
+  // Two-finger move outside a hold-drag: classify the gesture once the fingers
+  // have worked far enough, then pinch or scroll for the rest of its life.
   function handleTwoFingerMove(e: TouchEvent): void {
     finalizeMouseFromTouches(e, true);
     ignoreSingleTouch = true;
-    if (e.touches.length !== 2) {
-      twoFingerTap = null;
-    } else {
-      if (updateTwoFingerTapGesture(e.touches)) {
-        consumeTouchEvent(e);
-        return;
-      }
-      twoFingerTap = null;
+    const gesture = twoFinger;
+    const pair = gesture ? trackedPair(gesture, e.touches) : null;
+    if (!gesture || !pair) {
+      // The pair it started on is gone while fingers are still down: what is
+      // left starts a gesture of its own, never a right-click.
+      beginTwoFingerGesture(e.touches[0], e.touches[1], false);
+      consumeTouchEvent(e);
+      return;
     }
-    const first = e.touches[0];
-    const second = e.touches[1];
-    if (!pinchGesture) {
-      startPinchGesture(first, second);
-    } else {
-      applyPinchMove(first, second);
+    const [first, second] = pair;
+    updateTapCandidate(gesture, first, second);
+    if (gesture.mode === "undecided") {
+      classifyTwoFingerGesture(gesture, first, second);
+    }
+    if (gesture.mode === "pinch") {
+      applyPinchMove(gesture, first, second);
+    } else if (gesture.mode === "scroll" && gesture.axis) {
+      applyScrollMove(gesture, gesture.axis, first, second);
     }
     consumeTouchEvent(e);
   }
@@ -848,8 +823,7 @@ export function attachTouchGestures(
         getTouchById(e.changedTouches, gesture.touchId) || null,
         false,
       );
-      twoFingerTap = null;
-      pinchGesture = null;
+      twoFinger = null;
       ignoreSingleTouch = true;
       consumeTouchEvent(e);
       return;
@@ -862,23 +836,12 @@ export function attachTouchGestures(
     } else {
       dragAssist = null;
     }
-    twoFingerTap = null;
-    pinchGesture = null;
-    threeFingerScroll = null;
+    twoFinger = null;
     ignoreSingleTouch = false;
     consumeTouchEvent(e);
   }
 
   function handleTouchMove(e: TouchEvent): void {
-    if (continueThreeFingerScroll(e)) {
-      return;
-    }
-
-    if (e.touches.length === 3 && mouseGesture?.mode !== "drag") {
-      beginThreeFingerScroll(e);
-      return;
-    }
-
     if (e.touches.length >= 2) {
       if (mouseGesture?.mode === "drag") {
         handleDragMultiTouchMove(e, mouseGesture);
@@ -917,15 +880,14 @@ export function attachTouchGestures(
       );
     }
     dragAssist = null;
-    threeFingerScroll = null;
+    const gesture = twoFinger;
+    twoFinger = null;
     if (
-      twoFingerTap?.valid &&
-      Date.now() - twoFingerTap.startTime <= TWO_FINGER_TAP_MAX_DURATION_MS
+      gesture?.tapCandidate &&
+      Date.now() - gesture.startTime <= TWO_FINGER_TAP_MAX_DURATION_MS
     ) {
       sendRightClick();
     }
-    twoFingerTap = null;
-    pinchGesture = null;
     ignoreSingleTouch = false;
     consumeTouchEvent(e);
   }
@@ -953,17 +915,11 @@ export function attachTouchGestures(
         : null;
       ignoreSingleTouch = false;
     }
-    twoFingerTap = null;
-    pinchGesture = null;
-    threeFingerScroll = null;
+    twoFinger = null;
     consumeTouchEvent(e);
   }
 
   function handleTouchEnd(e: TouchEvent): void {
-    if (continueThreeFingerScroll(e)) {
-      return;
-    }
-
     if (e.touches.length === 0) {
       handleAllTouchesEnded(e);
       return;
@@ -991,12 +947,10 @@ export function attachTouchGestures(
       finalizeMouseGesture(released, true);
     }
     ignoreSingleTouch = true;
-    if (e.touches.length === 2) {
-      updateTwoFingerTapGesture(e.touches);
-      startPinchGesture(e.touches[0], e.touches[1]);
-    } else {
-      twoFingerTap = null;
-      pinchGesture = null;
+    if (!twoFinger || !trackedPair(twoFinger, e.touches)) {
+      // A finger of the pair left while others are still down: the remaining
+      // fingers carry on as a fresh gesture, which the next move classifies.
+      beginTwoFingerGesture(e.touches[0], e.touches[1], false);
     }
     consumeTouchEvent(e);
   }
@@ -1013,8 +967,7 @@ export function attachTouchGestures(
         null;
       finalizeMouseGesture(released, false);
     }
-    updateTwoFingerTapGesture(e.touches);
-    pinchGesture = null;
+    twoFinger = null;
     consumeTouchEvent(e);
   }
 
@@ -1022,9 +975,7 @@ export function attachTouchGestures(
     cancelPendingTap();
     mouseGesture = null;
     dragAssist = null;
-    twoFingerTap = null;
-    pinchGesture = null;
-    threeFingerScroll = null;
+    twoFinger = null;
     ignoreSingleTouch = false;
     if (leftHeld) {
       leftHeld = false;

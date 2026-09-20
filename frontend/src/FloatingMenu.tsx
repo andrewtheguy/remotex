@@ -108,7 +108,7 @@ const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
   { gesture: "One-finger drag", action: "Move cursor + pan" },
   { gesture: "Two-finger tap", action: "Right-click" },
   { gesture: "Two-finger pinch", action: "Zoom" },
-  { gesture: "Three-finger swipe", action: "Scroll" },
+  { gesture: "Two-finger swipe", action: "Scroll" },
 ];
 
 interface Position {
