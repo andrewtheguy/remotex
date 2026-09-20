@@ -811,10 +811,11 @@ pub struct TargetConfig {
     /// motion is a temporary discount on what is too busy to notice.
     ///
     /// What a moving region gets instead is a video stream per coalesced region
-    /// ([`MotionEncode`]), at [`Self::video_quality`] — which this key requires,
-    /// having no default — and [`Self::render_chroma`]. Refused with
-    /// [`RenderType::Video`], which streams the whole desktop and has nothing left
-    /// to discount.
+    /// ([`MotionEncode`]), at [`Self::video_quality`] — which this key gives a
+    /// meaning to rather than demanding: unset, the stream runs at
+    /// [`DEFAULT_VIDEO_QUALITY`] like any other — and [`Self::render_chroma`].
+    /// Refused with [`RenderType::Video`], which streams the whole desktop and has
+    /// nothing left to discount.
     #[serde(default)]
     pub render_motion: bool,
     /// Outline every piece the motion path emits, in the pixels themselves, so
@@ -3743,8 +3744,8 @@ mod tests {
     /// to put them — its stream has no cells to find in motion. Both of them are
     /// asserted here because `video` is the newest transport and the one most likely
     /// to be tried with them. The quality is deliberately absent: since the two
-    /// stream dials merged it is `video_quality`, which `video` requires, and
-    /// `video_quality_is_refused_where_nothing_streams` owns its rule.
+    /// stream dials merged it is `video_quality`, which `video` reads for its own
+    /// stream, and `video_quality_is_refused_where_nothing_streams` owns its rule.
     #[test]
     fn video_refuses_the_motion_keys() {
         let err = parse_target("render_type = \"video\"\nvideo_quality = 60\nrender_motion = true")
