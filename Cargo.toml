@@ -74,7 +74,7 @@ toml = "1"
 # session's hot path.
 png = "0.18"
 # WebP, the lossy still codec on the render dial: `render_subtype = "webp"`
-# encodes every tile at a fixed `render_subtype_quality` instead of lossless PNG
+# encodes every tile at a fixed `image_quality` instead of lossless PNG
 # (`Tile::from_rgb_webp` in src/protocol.rs), and `render_subtype = "classify"`
 # encodes the tiles its picture classifier reads as photographic
 # (src/classify.rs) the same way. The format byte already distinguishes PNG from

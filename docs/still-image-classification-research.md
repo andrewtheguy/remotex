@@ -397,7 +397,7 @@ The likely policy shape is intentionally conservative:
 | --- | --- |
 | Clear UI or text | PNG |
 | Ambiguous | PNG |
-| Clear photograph | WebP at `render_subtype_quality` |
+| Clear photograph | WebP at `image_quality` |
 | Motion region | VP9 video stream, followed by the existing base-tile cleanup |
 
 ## Explicit exclusions

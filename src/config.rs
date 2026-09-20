@@ -117,8 +117,8 @@ impl Protocol {
 
 /// How a target's pixels travel — the *transport*, the first of the two render
 /// axes. The second, [`RenderSubtype`], is the codec of the base tiles, and a
-/// lossy base also reads [`TargetConfig::render_subtype_quality`]. Two flat sibling
-/// keys rather than a nested table, matching the rest of the target schema.
+/// lossy base also reads [`TargetConfig::image_quality`]. Two flat sibling keys
+/// rather than a nested table, matching the rest of the target schema.
 ///
 /// The two axes are orthogonal on purpose: this one says *what kind of thing
 /// goes on the wire* (independent still tiles, or one video stream), the subtype
@@ -144,7 +144,7 @@ pub enum RenderType {
     #[default]
     Tiles,
     /// The whole desktop as one video stream, at a fixed quality
-    /// ([`TargetConfig::render_stream_quality`]).
+    /// ([`TargetConfig::video_quality`]).
     ///
     /// Not a codec on the [`RenderSubtype`] axis, and deliberately not: those are
     /// all *per-tile* codecs, where every tile is independent, reorderable,
@@ -336,14 +336,14 @@ pub enum RenderSubtype {
     /// Lossless PNG. The default.
     #[default]
     Png,
-    /// WebP at [`TargetConfig::render_subtype_quality`]. Every tile goes to WebP
-    /// — there is no content classifier — so flat UI and text soften along with
+    /// WebP at [`TargetConfig::image_quality`]. Every tile goes to WebP — there
+    /// is no content classifier — so flat UI and text soften along with
     /// photographic content. That is the trade the fixed dial makes.
     Webp,
     /// Per tile, whichever fits: a picture classifier ([`crate::classify`]) reads
     /// each tile's pixels and sends photographic content as WebP at
-    /// [`TargetConfig::render_subtype_quality`] and everything else —
-    /// flat UI, text — as lossless PNG. The classifier has no dial of its own;
+    /// [`TargetConfig::image_quality`] and everything else — flat UI, text — as
+    /// lossless PNG. The classifier has no dial of its own;
     /// under [`TargetConfig::render_motion`] it is the base, so a settled cell is
     /// classified and a moving one takes the motion encode as usual.
     Classify,
@@ -385,7 +385,7 @@ pub enum TileCodec {
 }
 
 /// What [`TargetConfig::render_motion`] does with what it finds moving, resolved
-/// from [`TargetConfig::render_stream_quality`] and [`TargetConfig::render_chroma`].
+/// from [`TargetConfig::video_quality`] and [`TargetConfig::render_chroma`].
 ///
 /// A video stream per coalesced moving region — the one thing a moving region can
 /// be, and not a codec choice: a still per cell is re-encoded from scratch every
@@ -740,7 +740,7 @@ pub struct TargetConfig {
     /// Render *transport* for this target. Defaults to [`RenderType::Tiles`],
     /// which with the default subtype (lossless PNG) and no [`Self::render_motion`]
     /// is byte-identical to before the dial existed. Validated against
-    /// [`Self::render_subtype`] and [`Self::render_subtype_quality`] in
+    /// [`Self::render_subtype`] and [`Self::image_quality`] in
     /// [`ConfigFile::parse_with`]. Works for both RDP and VNC.
     #[serde(default)]
     pub render_type: RenderType,
@@ -753,6 +753,18 @@ pub struct TargetConfig {
     /// rather than accepted and left inert.
     #[serde(default)]
     pub render_subtype: Option<RenderSubtype>,
+    /// The quality (1–100) of every lossy still image this target sends: what
+    /// [`RenderSubtype::Webp`] encodes every tile at, and what
+    /// [`RenderSubtype::Classify`] encodes its photographic tiles at.
+    /// Required exactly when the subtype is one of those two and refused for
+    /// [`RenderSubtype::Png`], which is lossless and has no dial. `None`
+    /// (unset) is the default.
+    ///
+    /// Under [`Self::render_motion`] this is the *base* quality — what a settled
+    /// cell gets — and it is omitted when the base is lossless PNG. What is moving
+    /// has the other dial, [`Self::video_quality`].
+    #[serde(default)]
+    pub image_quality: Option<u8>,
     /// The quality (1–100) a VP9 stream holds on a link that can carry it — the
     /// whole desktop under [`RenderType::Video`], or one coalesced moving region
     /// under [`Self::render_motion`]. Required by each of those and refused
@@ -768,38 +780,21 @@ pub struct TargetConfig {
     /// it can, and one with room to spare never earns better. Under
     /// [`Self::render_motion`] it can go very low — motion hides the artifacts and
     /// a region that stops moving is re-sent at the base encode anyway.
-    ///
-    /// Distinct from [`Self::render_subtype_quality`], which is the *tiles'* dial:
-    /// each names the axis it belongs to, so neither can be read as the target's
-    /// quality in general.
     #[serde(default)]
-    pub render_stream_quality: Option<u8>,
-    /// The quality (1–100) of the base codec's lossy side: what
-    /// [`RenderSubtype::Webp`] encodes every tile at, and what
-    /// [`RenderSubtype::Classify`] encodes its photographic tiles at.
-    /// Required exactly when the subtype is one of those two and refused for
-    /// [`RenderSubtype::Png`], which is lossless and has no dial. `None`
-    /// (unset) is the default.
-    ///
-    /// Under [`Self::render_motion`] this is the *base* quality — what a settled
-    /// cell gets — and it is omitted when the base is lossless PNG. Named for the
-    /// axis it belongs to so it cannot be read as the moving streams' dial, which
-    /// is [`Self::render_stream_quality`].
-    #[serde(default)]
-    pub render_subtype_quality: Option<u8>,
+    pub video_quality: Option<u8>,
     /// Hand the cells changing fastest right now to a second and much cheaper
     /// encode, on top of the base tiles this target already sends.
     ///
     /// A switch on [`RenderType::Tiles`] rather than a transport of its own,
     /// because it *builds on* the base rather than replacing it: a settled cell is
-    /// still sent as [`Self::render_subtype`] at [`Self::render_subtype_quality`],
-    /// and a cell that stops changing is re-sent once at that base encode, so a
-    /// paused screen returns to full quality on its own. The base is the truth;
+    /// still sent as [`Self::render_subtype`] at [`Self::image_quality`], and a
+    /// cell that stops changing is re-sent once at that base encode, so a paused
+    /// screen returns to full quality on its own. The base is the truth;
     /// motion is a temporary discount on what is too busy to notice.
     ///
     /// What a moving region gets instead is a video stream per coalesced region
-    /// ([`MotionEncode`]), at [`Self::render_stream_quality`] — which this key
-    /// requires, having no default — and [`Self::render_chroma`]. Refused with
+    /// ([`MotionEncode`]), at [`Self::video_quality`] — which this key requires,
+    /// having no default — and [`Self::render_chroma`]. Refused with
     /// [`RenderType::Video`], which streams the whole desktop and has nothing left
     /// to discount.
     #[serde(default)]
@@ -968,17 +963,17 @@ impl TargetConfig {
             ChromaChoice::Full => Chroma::Full,
             ChromaChoice::Auto => decoder,
         };
-        if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_stream_quality) {
+        if let (RenderType::Video, Some(quality)) = (self.render_type, self.video_quality) {
             return RenderPlan::Video { quality, adaptive, chroma };
         }
-        let base = match (self.render_subtype(), self.render_subtype_quality) {
+        let base = match (self.render_subtype(), self.image_quality) {
             (RenderSubtype::Webp, Some(quality)) => TileCodec::Webp { quality },
             (RenderSubtype::Classify, Some(quality)) => {
                 TileCodec::Classify { quality, debug: self.render_classify_debug }
             }
             _ => TileCodec::Png,
         };
-        let motion = match (self.render_motion, self.render_stream_quality) {
+        let motion = match (self.render_motion, self.video_quality) {
             (true, Some(quality)) => Some(MotionEncode { quality, chroma }),
             _ => None,
         };
@@ -1780,7 +1775,7 @@ impl ConfigFile {
                 target.name
             );
             // The overlay is the one key left that is motion's alone — the quality
-            // it used to own is now `render_stream_quality`, demanded below off
+            // it used to own is now `video_quality`, demanded below off
             // `streams_video`. A config that draws the outlines without the switch
             // has misunderstood which dial it is turning, more likely a
             // `render_motion` that was never written than a deliberate choice, so it
@@ -1792,34 +1787,34 @@ impl ConfigFile {
                  there is no such decision to draw",
                 target.name
             );
-            // Two quality keys, one per kind of thing on the wire:
-            // `render_stream_quality` is the VP9 stream's dial and belongs to the
-            // two ways a target can have one, `render_subtype_quality` is the base
-            // codec's and belongs to the transport that has a base. A quality under
-            // the other name is the dial of something this target does not send —
-            // most likely a config written for a render dial it no longer has.
+            // Two quality keys, one per kind of thing on the wire: `video_quality`
+            // is the VP9 stream's dial and belongs to the two ways a target can have
+            // one, `image_quality` is the base codec's and belongs to the transport
+            // that has a base. A quality under the other name is the dial of
+            // something this target does not send — most likely a config written for
+            // a render dial it no longer has.
             if target.render_type == RenderType::Video {
                 anyhow::ensure!(
-                    target.render_subtype_quality.is_none(),
-                    "target {:?} is render_type \"video\" and sets render_subtype_quality, \
-                     which is the quality of the base tiles' codec — and \"video\" sends no \
-                     tiles. render_stream_quality is the stream's dial",
+                    target.image_quality.is_none(),
+                    "target {:?} is render_type \"video\" and sets image_quality, which \
+                     is the quality of the base tiles' codec — and \"video\" sends no \
+                     tiles. video_quality is the stream's dial",
                     target.name
                 );
             }
-            // The render dial has two axes and they are validated together,
-            // because only some pairings mean anything and `render_subtype_quality`
-            // belongs to exactly one of them. The match is exhaustive so a future
-            // variant cannot be added without deciding what it pairs with here.
+            // The render dial has two axes and they are validated together, because
+            // only some pairings mean anything and `image_quality` belongs to exactly
+            // one of them. The match is exhaustive so a future variant cannot be
+            // added without deciding what it pairs with here.
             match (target.render_type, target.render_subtype) {
                 (RenderType::Tiles, None | Some(RenderSubtype::Png)) => {
                     anyhow::ensure!(
-                        target.render_subtype_quality.is_none(),
-                        "target {:?} sets render_subtype_quality, which the lossless \"png\" \
-                         base has no use for. Set render_subtype = \"webp\" for a fixed \
-                         lossy quality, or \"classify\" to spend it only on \
-                         photographic tiles — or, under render_motion, render_stream_quality \
-                         is the dial for the cells in motion",
+                        target.image_quality.is_none(),
+                        "target {:?} sets image_quality, which the lossless \"png\" base \
+                         has no use for. Set render_subtype = \"webp\" for a fixed lossy \
+                         quality, or \"classify\" to spend it only on photographic tiles \
+                         — or, under render_motion, video_quality is the dial for the \
+                         cells in motion",
                         target.name
                     );
                 }
@@ -1835,14 +1830,14 @@ impl ConfigFile {
                 // lossless base with a lossy discount, where text and flat UI stay
                 // perfect and only what moves gets ugly.
                 (RenderType::Tiles, Some(RenderSubtype::Webp | RenderSubtype::Classify)) => {
-                    let q = target.render_subtype_quality.with_context(|| format!(
-                        "target {:?} sets a lossy render_subtype but no render_subtype_quality — \
-                         it needs one, an integer 1–100",
+                    let q = target.image_quality.with_context(|| format!(
+                        "target {:?} sets a lossy render_subtype but no image_quality — it \
+                         needs one, an integer 1–100",
                         target.name
                     ))?;
                     anyhow::ensure!(
                         (1..=100).contains(&q),
-                        "target {:?} sets render_subtype_quality = {q}, which is out of range — it \
+                        "target {:?} sets image_quality = {q}, which is out of range — it \
                          must be 1–100",
                         target.name
                     );
@@ -1853,8 +1848,8 @@ impl ConfigFile {
                 // stateful video stream carrying the whole framebuffer, so there is
                 // no per-tile codec left to name.
                 // Nothing to pair: the subtype axis is empty here by definition, and
-                // this transport's quality is `render_stream_quality`, demanded below
-                // with the other way of carrying a stream.
+                // this transport's quality is `video_quality`, demanded below with
+                // the other way of carrying a stream.
                 (RenderType::Video, None) => {}
                 // Every value is refused here, `png` included: it is the default the
                 // key would otherwise read as, but a key that was written names an
@@ -1899,9 +1894,9 @@ impl ConfigFile {
             // for the key to describe. Asking `streams_video` rather than matching
             // the two shapes is what keeps that one rule one rule.
             if target.streams_video() {
-                let q = target.render_stream_quality.with_context(|| format!(
-                    "target {:?} streams video but sets no render_stream_quality — it needs \
-                     one, an integer 1–100. It is the quality the stream holds on a link that \
+                let q = target.video_quality.with_context(|| format!(
+                    "target {:?} streams video but sets no video_quality — it needs one, \
+                     an integer 1–100. It is the quality the stream holds on a link that \
                      can carry it, and a link that cannot will fall below it. Under \
                      render_motion it can go very low: motion hides the artifacts, and a \
                      region that stops moving is re-sent at the base encode",
@@ -1909,23 +1904,23 @@ impl ConfigFile {
                 ))?;
                 anyhow::ensure!(
                     (1..=100).contains(&q),
-                    "target {:?} sets render_stream_quality = {q}, which is out of range — \
-                     it must be 1–100",
+                    "target {:?} sets video_quality = {q}, which is out of range — it \
+                     must be 1–100",
                     target.name
                 );
             } else {
                 anyhow::ensure!(
-                    target.render_stream_quality.is_none(),
-                    "target {:?} sets render_stream_quality, which is the dial of a VP9 \
-                     stream, and this target sends none — its tiles' codec has its own, \
-                     render_subtype_quality. Set render_motion to stream the cells in \
-                     motion, or render_type = \"video\" to stream the whole desktop",
+                    target.video_quality.is_none(),
+                    "target {:?} sets video_quality, which is the dial of a VP9 stream, \
+                     and this target sends none — its tiles' codec has its own, \
+                     image_quality. Set render_motion to stream the cells in motion, or \
+                     render_type = \"video\" to stream the whole desktop",
                     target.name
                 );
             }
             // The adaptive switch needs a dial to move. The one plan without one
             // is lossless tiles with no motion: anything that streams carries
-            // `render_stream_quality`, and a lossy base carries its own.
+            // `video_quality`, and a lossy base carries its own.
             anyhow::ensure!(
                 !target.render_adaptive
                     || target.render_type != RenderType::Tiles
@@ -1951,8 +1946,8 @@ impl ConfigFile {
                 );
                 // A floor above a ceiling is a contradiction, and every configured
                 // quality is a ceiling the walk must fit under.
-                let ceiling = target.render_stream_quality.into_iter()
-                    .chain(target.render_subtype_quality)
+                let ceiling = target.video_quality.into_iter()
+                    .chain(target.image_quality)
                     .min();
                 if let Some(ceiling) = ceiling {
                     anyhow::ensure!(
@@ -3024,8 +3019,8 @@ mod tests {
         assert_eq!(t.render_type, RenderType::Tiles);
         assert_eq!(t.render_subtype, None, "an unset base reads as png without being one");
         assert_eq!(t.render_subtype(), RenderSubtype::Png);
-        assert_eq!(t.render_stream_quality, None);
-        assert_eq!(t.render_subtype_quality, None);
+        assert_eq!(t.video_quality, None);
+        assert_eq!(t.image_quality, None);
         assert_eq!(
             t.render_plan(Chroma::Full),
             RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false, adaptive: None }
@@ -3045,7 +3040,7 @@ mod tests {
             host = "h"
             render_type = "tiles"
             render_subtype = "webp"
-            render_subtype_quality = 60
+            image_quality = 60
             "#,
         )
         .unwrap();
@@ -3076,7 +3071,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_subtype_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("image_quality"), "{err:#}");
     }
 
     /// The subtype is the codec axis, so a lossy one needs no particular
@@ -3092,7 +3087,7 @@ mod tests {
             password = "p"
             host = "h"
             render_subtype = "webp"
-            render_subtype_quality = 60
+            image_quality = 60
             "#,
         )
         .unwrap();
@@ -3119,7 +3114,7 @@ mod tests {
             host = "h"
             render_type = "tiles"
             render_subtype = "classify"
-            render_subtype_quality = 60
+            image_quality = 60
             "#,
         )
         .unwrap();
@@ -3153,7 +3148,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_subtype_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("image_quality"), "{err:#}");
     }
 
     /// The classifier as a motion base: a settled cell is classified
@@ -3170,8 +3165,8 @@ mod tests {
             host = "h"
             render_motion = true
             render_subtype = "classify"
-            render_subtype_quality = 60
-            render_stream_quality = 30
+            image_quality = 60
+            video_quality = 30
             "#,
         )
         .unwrap();
@@ -3205,7 +3200,7 @@ mod tests {
                 password = "p"
                 host = "h"
                 render_type = "video"
-                render_stream_quality = 100
+                video_quality = 100
                 {extra}
                 "#
             ))
@@ -3234,7 +3229,7 @@ mod tests {
             password = "p"
             host = "h"
             render_motion = true
-            render_stream_quality = 30
+            video_quality = 30
             render_chroma = "444"
             "#,
         )
@@ -3257,7 +3252,7 @@ mod tests {
     fn render_chroma_without_a_stream_is_refused() {
         for keys in [
             "",
-            "render_subtype = \"webp\"\nrender_subtype_quality = 60",
+            "render_subtype = \"webp\"\nimage_quality = 60",
         ] {
             let err = ConfigFile::parse(&format!(
                 r#"
@@ -3285,7 +3280,7 @@ mod tests {
             password = "p"
             host = "h"
             render_type = "video"
-            render_stream_quality = 100
+            video_quality = 100
             render_chroma = "422"
             "#,
         )
@@ -3317,7 +3312,7 @@ mod tests {
             .remove(0)
         };
 
-        let video = target("render_type = \"video\"\nrender_stream_quality = 100");
+        let video = target("render_type = \"video\"\nvideo_quality = 100");
         assert_eq!(video.render_chroma, Some(ChromaChoice::Auto));
         assert_eq!(
             video.render_plan(Chroma::Full),
@@ -3328,7 +3323,7 @@ mod tests {
             RenderPlan::Video { quality: 100, adaptive: None, chroma: Chroma::Subsampled }
         );
 
-        let motion = target("render_motion = true\nrender_stream_quality = 30");
+        let motion = target("render_motion = true\nvideo_quality = 30");
         let plan = |decoder| match motion.render_plan(decoder) {
             RenderPlan::Tiles { motion: Some(MotionEncode { chroma, .. }), .. } => chroma,
             other => panic!("a motion target must resolve to a motion plan: {other:?}"),
@@ -3368,7 +3363,7 @@ mod tests {
                 password = "p"
                 host = "h"
                 render_type = "video"
-                render_stream_quality = 60
+                video_quality = 60
                 {extra}
                 "#
             ))
@@ -3403,8 +3398,7 @@ mod tests {
     /// transport that cuts damage into tiles, and it leaves the render plan alone.
     #[test]
     fn the_tile_grid_overlay_is_opt_in_and_refused_by_video() {
-        for render in ["render_type = \"tiles\"", "render_motion = true\nrender_stream_quality = 30"]
-        {
+        for render in ["render_type = \"tiles\"", "render_motion = true\nvideo_quality = 30"] {
             let cfg = ConfigFile::parse(&format!(
                 r#"
                 [[targets]]
@@ -3451,7 +3445,7 @@ mod tests {
             password = "p"
             host = "h"
             render_type = "video"
-            render_stream_quality = 60
+            video_quality = 60
             render_grid_debug = true
             "#,
         )
@@ -3474,7 +3468,7 @@ mod tests {
             password = "p"
             host = "h"
             render_subtype = "classify"
-            render_subtype_quality = 60
+            image_quality = 60
             render_classify_debug = true
             "#,
         )
@@ -3501,7 +3495,7 @@ mod tests {
             password = "p"
             host = "h"
             render_subtype = "webp"
-            render_subtype_quality = 60
+            image_quality = 60
             render_classify_debug = true
             "#,
         )
@@ -3523,11 +3517,11 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_subtype_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("image_quality"), "{err:#}");
     }
 
     #[test]
-    fn a_render_subtype_quality_out_of_range_is_rejected() {
+    fn an_image_quality_out_of_range_is_rejected() {
         for q in ["0", "101"] {
             let toml = format!(
                 r#"
@@ -3538,7 +3532,7 @@ mod tests {
                 password = "p"
                 host = "h"
                 render_subtype = "webp"
-                render_subtype_quality = {q}
+                image_quality = {q}
                 "#
             );
             let err = ConfigFile::parse(&toml).unwrap_err();
@@ -3557,7 +3551,7 @@ mod tests {
             password = "p"
             host = "h"
             render_type = "video"
-            render_stream_quality = 60
+            video_quality = 60
             "#,
         )
         .expect("video with a quality");
@@ -3578,7 +3572,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_stream_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("video_quality"), "{err:#}");
     }
 
     #[test]
@@ -3593,7 +3587,7 @@ mod tests {
                 password = "p"
                 host = "h"
                 render_type = "video"
-                render_stream_quality = {q}
+                video_quality = {q}
                 "#
             );
             let err = ConfigFile::parse(&toml).unwrap_err();
@@ -3621,7 +3615,7 @@ mod tests {
                 host = "h"
                 render_type = "video"
                 render_subtype = "{subtype}"
-                render_stream_quality = 60
+                video_quality = 60
                 "#
             ))
             .unwrap_err();
@@ -3642,7 +3636,7 @@ mod tests {
     fn an_explicit_png_base_is_the_default_under_tiles_and_motion() {
         for keys in [
             "render_type = \"tiles\"",
-            "render_motion = true\nrender_stream_quality = 30",
+            "render_motion = true\nvideo_quality = 30",
         ] {
             let explicit = format!(
                 "[[targets]]\nname = \"a\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{keys}\n\
@@ -3667,23 +3661,21 @@ mod tests {
     /// to put them — its stream has no cells to find in motion. Both of them are
     /// asserted here because `video` is the newest transport and the one most likely
     /// to be tried with them. The quality is deliberately absent: since the two
-    /// stream dials merged it is `render_stream_quality`, which `video` requires,
-    /// and `render_stream_quality_is_refused_where_nothing_streams` owns its rule.
+    /// stream dials merged it is `video_quality`, which `video` requires, and
+    /// `video_quality_is_refused_where_nothing_streams` owns its rule.
     #[test]
     fn video_refuses_the_motion_keys() {
-        let err =
-            parse_target("render_type = \"video\"\nrender_stream_quality = 60\nrender_motion = true")
-                .unwrap_err();
+        let err = parse_target("render_type = \"video\"\nvideo_quality = 60\nrender_motion = true")
+            .unwrap_err();
         assert!(format!("{err:#}").contains("render_motion with render_type"), "{err:#}");
-        let err = parse_target(
-            "render_type = \"video\"\nrender_stream_quality = 60\nrender_motion_debug = true",
-        )
-        .unwrap_err();
+        let err =
+            parse_target("render_type = \"video\"\nvideo_quality = 60\nrender_motion_debug = true")
+                .unwrap_err();
         assert!(format!("{err:#}").contains("without render_motion"), "{err:#}");
     }
 
     #[test]
-    fn render_subtype_quality_on_lossless_png_is_rejected() {
+    fn image_quality_on_lossless_png_is_rejected() {
         // render_type/subtype default to tiles/png, so a stray quality has
         // nothing to apply to — with or without the defaults written out.
         for keys in ["", "render_type = \"tiles\"\nrender_subtype = \"png\"\n"] {
@@ -3695,7 +3687,7 @@ mod tests {
                 username = "u"
                 password = "p"
                 host = "h"
-                {keys}render_subtype_quality = 50
+                {keys}image_quality = 50
                 "#
             );
             let err = ConfigFile::parse(&toml).unwrap_err();
@@ -3737,7 +3729,7 @@ mod tests {
             password = "p"
             host = "h"
             render_motion = true
-            render_stream_quality = 10
+            video_quality = 10
             "#,
         )
         .unwrap();
@@ -3756,8 +3748,8 @@ mod tests {
         );
     }
 
-    /// A lossy base keeps its own meaning — `render_subtype` and `render_subtype_quality`
-    /// are what a settled cell gets — while the moving regions stream at their own
+    /// A lossy base keeps its own meaning — `render_subtype` and `image_quality` are
+    /// what a settled cell gets — while the moving regions stream at their own
     /// quality. What a settled cell gets is a still picture; what is moving is not
     /// one at all, which is why the two qualities are separate keys.
     #[test]
@@ -3772,8 +3764,8 @@ mod tests {
             host = "h"
             render_motion = true
             render_subtype = "webp"
-            render_subtype_quality = 60
-            render_stream_quality = 10
+            image_quality = 60
+            video_quality = 10
             "#,
         )
         .unwrap();
@@ -3803,52 +3795,52 @@ mod tests {
             ("tiles over lossless png, the default", "render_type = \"tiles\"", "tiles · lossless png"),
             (
                 "tiles over fixed-quality webp",
-                "render_subtype = \"webp\"\nrender_subtype_quality = 60",
+                "render_subtype = \"webp\"\nimage_quality = 60",
                 "tiles · webp q60",
             ),
             (
                 "tiles behind the classifier",
-                "render_subtype = \"classify\"\nrender_subtype_quality = 60",
+                "render_subtype = \"classify\"\nimage_quality = 60",
                 "tiles · classified png / webp q60",
             ),
             (
                 "the classifier's debug outlines, a different session to be looking at",
-                "render_subtype = \"classify\"\nrender_subtype_quality = 60\nrender_classify_debug = true",
+                "render_subtype = \"classify\"\nimage_quality = 60\nrender_classify_debug = true",
                 "tiles · classified png / webp q60 (debug outlines)",
             ),
             (
                 "motion over a classify base",
-                "render_motion = true\nrender_subtype = \"classify\"\nrender_subtype_quality = 60\nrender_stream_quality = 15",
+                "render_motion = true\nrender_subtype = \"classify\"\nimage_quality = 60\nvideo_quality = 15",
                 "motion · base classified png / webp q60, moving stream q15",
             ),
             (
                 "motion over a lossless base",
-                "render_motion = true\nrender_stream_quality = 30",
+                "render_motion = true\nvideo_quality = 30",
                 "motion · base lossless png, moving stream q30",
             ),
             (
                 "motion over a lossy base",
-                "render_motion = true\nrender_subtype = \"webp\"\nrender_subtype_quality = 70\nrender_stream_quality = 40",
+                "render_motion = true\nrender_subtype = \"webp\"\nimage_quality = 70\nvideo_quality = 40",
                 "motion · base webp q70, moving stream q40",
             ),
             (
                 "the debug outlines, which are a different session to be looking at",
-                "render_motion = true\nrender_stream_quality = 30\nrender_motion_debug = true",
+                "render_motion = true\nvideo_quality = 30\nrender_motion_debug = true",
                 "motion · base lossless png, moving stream q30 (debug outlines)",
             ),
             (
                 "the whole desktop as one stream",
-                "render_type = \"video\"\nrender_stream_quality = 60",
+                "render_type = \"video\"\nvideo_quality = 60",
                 "video q60",
             ),
             (
                 "the whole desktop as one stream with every pixel's colour",
-                "render_type = \"video\"\nrender_stream_quality = 60\nrender_chroma = \"444\"",
+                "render_type = \"video\"\nvideo_quality = 60\nrender_chroma = \"444\"",
                 "video q60 4:4:4",
             ),
             (
                 "a stream per region with every pixel's colour",
-                "render_motion = true\nrender_stream_quality = 40\nrender_chroma = \"444\"",
+                "render_motion = true\nvideo_quality = 40\nrender_chroma = \"444\"",
                 "motion · base lossless png, moving stream q40 4:4:4",
             ),
         ];
@@ -3893,7 +3885,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_stream_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("video_quality"), "{err:#}");
     }
 
     #[test]
@@ -3908,12 +3900,12 @@ mod tests {
                 password = "p"
                 host = "h"
                 render_motion = true
-                render_stream_quality = {q}
+                video_quality = {q}
                 "#
             );
             let err = ConfigFile::parse(&toml).unwrap_err();
             let msg = format!("{err:#}");
-            assert!(msg.contains("render_stream_quality"), "q={q}: {msg}");
+            assert!(msg.contains("video_quality"), "q={q}: {msg}");
             assert!(msg.contains("1–100"), "q={q}: {msg}");
         }
     }
@@ -3932,11 +3924,11 @@ mod tests {
             host = "h"
             render_motion = true
             render_subtype = "webp"
-            render_stream_quality = 10
+            video_quality = 10
             "#,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("render_subtype_quality"), "{err:#}");
+        assert!(format!("{err:#}").contains("image_quality"), "{err:#}");
     }
 
     /// The QA overlay rides on the motion path and is off unless asked for, so
@@ -3952,7 +3944,7 @@ mod tests {
             password = "p"
             host = "h"
             render_motion = true
-            render_stream_quality = 10
+            video_quality = 10
             render_motion_debug = true
             "#,
         )
@@ -3993,7 +3985,7 @@ mod tests {
     /// A lossless base takes no quality, and `render_motion` does not change that:
     /// the discount has its own dial and the base still has none.
     #[test]
-    fn render_subtype_quality_on_a_lossless_motion_base_is_rejected() {
+    fn image_quality_on_a_lossless_motion_base_is_rejected() {
         let err = ConfigFile::parse(
             r#"
             [[targets]]
@@ -4003,29 +3995,29 @@ mod tests {
             password = "p"
             host = "h"
             render_motion = true
-            render_subtype_quality = 60
-            render_stream_quality = 10
+            image_quality = 60
+            video_quality = 10
             "#,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("lossless \"png\" base"), "{err:#}");
     }
 
-    /// `render_stream_quality` is a stream's dial and nothing else's, so a target
+    /// `video_quality` is a stream's dial and nothing else's, so a target
     /// that sends no stream has nothing for it to describe — most likely a config
     /// that lost its `render_motion` or its `render_type`. The tiles' own quality
-    /// is `render_subtype_quality`, and the error says so.
+    /// is `image_quality`, and the error says so.
     #[test]
-    fn render_stream_quality_is_refused_where_nothing_streams() {
+    fn video_quality_is_refused_where_nothing_streams() {
         for keys in [
-            "render_stream_quality = 60",
-            "render_type = \"tiles\"\nrender_stream_quality = 60",
-            "render_subtype = \"webp\"\nrender_subtype_quality = 70\nrender_stream_quality = 60",
+            "video_quality = 60",
+            "render_type = \"tiles\"\nvideo_quality = 60",
+            "render_subtype = \"webp\"\nimage_quality = 70\nvideo_quality = 60",
         ] {
             let err = parse_target(keys).unwrap_err();
             let msg = format!("{err:#}");
             assert!(msg.contains("sends none"), "{keys}: {msg}");
-            assert!(msg.contains("render_subtype_quality"), "{keys}: {msg}");
+            assert!(msg.contains("image_quality"), "{keys}: {msg}");
         }
     }
 
@@ -4036,13 +4028,13 @@ mod tests {
         for keys in ["render_type = \"video\"", "render_motion = true"] {
             let err = parse_target(keys).unwrap_err();
             let msg = format!("{err:#}");
-            assert!(msg.contains("no render_stream_quality"), "{keys}: {msg}");
-            let err = parse_target(&format!("{keys}\nrender_stream_quality = 0")).unwrap_err();
+            assert!(msg.contains("no video_quality"), "{keys}: {msg}");
+            let err = parse_target(&format!("{keys}\nvideo_quality = 0")).unwrap_err();
             assert!(format!("{err:#}").contains("out of range"), "{keys}");
         }
         // And both resolve it into the plan, at the same name.
         assert_eq!(
-            parse_target("render_type = \"video\"\nrender_stream_quality = 60")
+            parse_target("render_type = \"video\"\nvideo_quality = 60")
                 .unwrap()
                 .targets[0]
                 .render_plan(Chroma::Full),
@@ -4050,7 +4042,7 @@ mod tests {
         );
         assert_eq!(
             motion_of(
-                parse_target("render_motion = true\nrender_stream_quality = 60")
+                parse_target("render_motion = true\nvideo_quality = 60")
                     .unwrap()
                     .targets[0]
                     .render_plan(Chroma::Full)
@@ -4061,24 +4053,22 @@ mod tests {
 
     /// And the other way round: `video` has no base tiles, so no base quality.
     #[test]
-    fn render_subtype_quality_is_refused_under_video() {
-        let err = parse_target(
-            "render_type = \"video\"\nrender_stream_quality = 60\nrender_subtype_quality = 60",
-        )
-        .unwrap_err();
+    fn image_quality_is_refused_under_video() {
+        let err =
+            parse_target("render_type = \"video\"\nvideo_quality = 60\nimage_quality = 60")
+                .unwrap_err();
         assert!(format!("{err:#}").contains("sends no tiles"), "{err:#}");
     }
 
     /// More likely a `render_motion` that was never written than a deliberate
     /// choice, so it is worth saying so rather than ignoring the key. The quality
     /// is not tested here: it is no longer motion's own, and
-    /// `render_stream_quality_is_refused_where_nothing_streams` is its rule.
+    /// `video_quality_is_refused_where_nothing_streams` is its rule.
     #[test]
     fn the_motion_overlay_is_refused_without_the_switch() {
-        let err = parse_target(
-            "render_subtype = \"webp\"\nrender_subtype_quality = 60\nrender_motion_debug = true",
-        )
-        .unwrap_err();
+        let err =
+            parse_target("render_subtype = \"webp\"\nimage_quality = 60\nrender_motion_debug = true")
+                .unwrap_err();
         assert!(format!("{err:#}").contains("without render_motion"), "{err:#}");
     }
 
@@ -4098,7 +4088,7 @@ mod tests {
             password = "p"
             resize = true
             render_motion = true
-            render_stream_quality = 10
+            video_quality = 10
             "#,
         )
         .expect("motion is independent of the VNC subtype");
@@ -4130,7 +4120,7 @@ mod tests {
             host = "h"
             render_type = "tiles"
             render_subtype = "webp"
-            render_subtype_quality = 60
+            image_quality = 60
             "#,
         )
         .unwrap();
@@ -4385,20 +4375,20 @@ mod tests {
     fn a_pinned_size_over_the_video_ceiling_is_refused_only_where_it_streams() {
         let pin = "width = 5120\nheight = 2880\n";
         let err = ConfigFile::parse(&rdp_toml(&format!(
-            "{pin}render_type = \"video\"\nrender_stream_quality = 60"
+            "{pin}render_type = \"video\"\nvideo_quality = 60"
         )))
         .expect_err("a 5K pin on a video stream parsed");
         assert!(format!("{err:#}").contains("3840"), "{err:#}");
         assert!(format!("{err:#}").contains("tiles"), "{err:#}");
         ConfigFile::parse(&rdp_toml(&format!(
-            "{pin}render_motion = true\nrender_subtype = \"webp\"\nrender_subtype_quality = 60\n\
-             render_stream_quality = 60"
+            "{pin}render_motion = true\nrender_subtype = \"webp\"\nimage_quality = 60\n\
+             video_quality = 60"
         )))
         .expect_err("a 5K pin on a region stream parsed");
         ConfigFile::parse(&rdp_toml(&format!("{pin}render_type = \"tiles\"")))
             .expect("a 5K pin on a tiles target is an oversized desktop that scrolls");
         for pin in ["width = 3840\nheight = 2400", "width = 2400\nheight = 3840"] {
-            ConfigFile::parse(&rdp_toml(&format!("{pin}\nrender_type = \"video\"\nrender_stream_quality = 60")))
+            ConfigFile::parse(&rdp_toml(&format!("{pin}\nrender_type = \"video\"\nvideo_quality = 60")))
                 .expect("a 4K pin, either way up, is a picture the stream takes");
         }
     }
@@ -4934,10 +4924,8 @@ mod tests {
     /// plan with a dial — and the plan says so.
     #[test]
     fn render_adaptive_resolves_a_floor_into_the_plan() {
-        let cfg = parse_target(
-            "render_type = \"video\"\nrender_stream_quality = 80\nrender_adaptive = true",
-        )
-        .expect("adaptive video");
+        let cfg = parse_target("render_type = \"video\"\nvideo_quality = 80\nrender_adaptive = true")
+            .expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Chroma::Full);
         assert_eq!(
             plan,
@@ -4947,7 +4935,7 @@ mod tests {
 
         let cfg = parse_target(
             "render_subtype = \"webp\"\n\
-             render_subtype_quality = 70\nrender_adaptive = true\nrender_adaptive_min = 35",
+             image_quality = 70\nrender_adaptive = true\nrender_adaptive_min = 35",
         )
         .expect("adaptive tiles");
         let plan = cfg.targets[0].render_plan(Chroma::Full);
@@ -4962,10 +4950,8 @@ mod tests {
         );
         assert_eq!(plan.describe(), "tiles · webp q70 · adaptive ≥35");
 
-        let cfg = parse_target(
-            "render_motion = true\nrender_stream_quality = 60\nrender_adaptive = true",
-        )
-        .expect("adaptive motion stream");
+        let cfg = parse_target("render_motion = true\nvideo_quality = 60\nrender_adaptive = true")
+            .expect("adaptive motion stream");
         assert_eq!(
             cfg.targets[0].render_plan(Chroma::Full).describe(),
             "motion · base lossless png, moving stream q60 · adaptive ≥20"
@@ -4975,8 +4961,7 @@ mod tests {
     /// A target that never asked stays exactly on its dial: no floor in the plan.
     #[test]
     fn without_render_adaptive_the_plan_has_no_floor() {
-        let cfg = parse_target("render_type = \"video\"\nrender_stream_quality = 80")
-            .expect("plain video");
+        let cfg = parse_target("render_type = \"video\"\nvideo_quality = 80").expect("plain video");
         assert_eq!(
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Video { quality: 80, adaptive: None, chroma: Chroma::Subsampled }
@@ -4995,10 +4980,9 @@ mod tests {
     /// The floor belongs to the walk; without the walk nothing reads it.
     #[test]
     fn render_adaptive_min_without_the_walk_is_refused() {
-        let err = parse_target(
-            "render_type = \"video\"\nrender_stream_quality = 80\nrender_adaptive_min = 30",
-        )
-        .unwrap_err();
+        let err =
+            parse_target("render_type = \"video\"\nvideo_quality = 80\nrender_adaptive_min = 30")
+                .unwrap_err();
         assert!(format!("{err:#}").contains("render_adaptive_min"));
     }
 
@@ -5007,7 +4991,7 @@ mod tests {
     #[test]
     fn a_floor_above_a_ceiling_is_refused() {
         let err = parse_target(
-            "render_type = \"video\"\nrender_stream_quality = 50\n\
+            "render_type = \"video\"\nvideo_quality = 50\n\
              render_adaptive = true\nrender_adaptive_min = 60",
         )
         .unwrap_err();
@@ -5015,7 +4999,7 @@ mod tests {
 
         let err = parse_target(
             "render_motion = true\n\
-             render_stream_quality = 10\nrender_adaptive = true\nrender_adaptive_min = 30",
+             video_quality = 10\nrender_adaptive = true\nrender_adaptive_min = 30",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("nowhere to go"));
@@ -5025,7 +5009,7 @@ mod tests {
         // dial (`Congestion::new`) instead.
         parse_target(
             "render_motion = true\n\
-             render_stream_quality = 10\nrender_adaptive = true",
+             video_quality = 10\nrender_adaptive = true",
         )
         .expect("a default floor clamps instead of refusing");
     }

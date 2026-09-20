@@ -1518,7 +1518,7 @@ mod tests {
             "[branding]\ntext = \"work laptop\"\n\n\
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
              username = \"andrew\"\npassword = \"hunter2\"\nresize = true\n\
-             render_type = \"tiles\"\nrender_subtype = \"webp\"\nrender_subtype_quality = 70\n\n\
+             render_type = \"tiles\"\nrender_subtype = \"webp\"\nimage_quality = 70\n\n\
              [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"192.168.1.21\"\n\
              audio = true\n",
         )
