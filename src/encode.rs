@@ -247,11 +247,11 @@ struct Congestion {
 
 impl Congestion {
     fn new(dial: u8, adaptive: Option<u8>) -> Self {
-        // The floor cannot sit above the ceiling. Reached only by the *default*
-        // floor over a lower dial — an explicit render_adaptive_min above a
-        // configured quality is refused at parse time — and clamping is the right
-        // reading of that: the operator asked for adaptivity, and the walk they
-        // get is the widest one their dial admits.
+        // The floor cannot sit above the ceiling. A configured plan arrives with
+        // that already settled — `TargetConfig::render_plan` clamps the floor to the
+        // dial, so the card states the floor the walk really holds to — and this
+        // keeps the invariant for a plan built by hand: the walk a dial admits is
+        // the widest one under it.
         let floor = adaptive.map_or(video::QUALITY_MIN, |floor| floor.min(dial));
         Self {
             dial,
@@ -3235,7 +3235,8 @@ mod tests {
         }
         assert_eq!(congestion.quality, 40);
 
-        // The default floor of 20 over a dial of 10: the walk's floor is the dial.
+        // A floor of 20 over a dial of 10, which config never resolves but a plan
+        // written by hand can hold: the walk's floor is the dial.
         let clamped = Congestion::new(10, Some(20));
         assert_eq!(clamped.floor, 10);
     }

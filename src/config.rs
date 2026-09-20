@@ -895,7 +895,9 @@ pub struct TargetConfig {
     #[serde(default)]
     pub render_adaptive: Option<bool>,
     /// Floor (1–100) for [`Self::render_adaptive`]; `None` reads as
-    /// [`DEFAULT_RENDER_ADAPTIVE_MIN`]. Must not exceed [`Self::video_quality`] —
+    /// [`DEFAULT_RENDER_ADAPTIVE_MIN`], or as [`Self::video_quality`] where the dial
+    /// sits below it — a default floor never narrows a stream's walk to nothing.
+    /// Must not exceed [`Self::video_quality`] when written —
     /// a floor above the ceiling is a contradiction better refused than resolved.
     /// Refused beside `render_adaptive = false`, and on a target that streams
     /// nothing.
@@ -996,16 +998,25 @@ impl TargetConfig {
     /// decision no browser can overrule, and a target that streams nothing reads it
     /// not at all.
     pub fn render_plan(&self, decoder: Chroma) -> RenderPlan {
-        let adaptive = self
-            .render_adaptive()
-            .then(|| self.render_adaptive_min.unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN));
+        let quality = self.video_quality();
+        // The floor the walk will hold to, which is never above the ceiling it walks
+        // under. Only the *default* floor can sit there — an explicit
+        // `render_adaptive_min` over a configured `video_quality` is refused at parse —
+        // and a target that asked for a walk gets the widest one its dial admits. Held
+        // here rather than left to the encoder so that a card cannot state a floor the
+        // stream never walks down to.
+        let adaptive = self.render_adaptive().then(|| {
+            self.render_adaptive_min
+                .unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN)
+                .min(quality)
+        });
         let chroma = match self.render_chroma.unwrap_or_default() {
             ChromaChoice::Subsampled => Chroma::Subsampled,
             ChromaChoice::Full => Chroma::Full,
             ChromaChoice::Auto => decoder,
         };
         if self.render_type == RenderType::Video {
-            return RenderPlan::Video { quality: self.video_quality(), adaptive, chroma };
+            return RenderPlan::Video { quality, adaptive, chroma };
         }
         let base = match (self.render_subtype(), self.image_quality) {
             (RenderSubtype::Webp, Some(quality)) => TileCodec::Webp { quality },
@@ -1014,9 +1025,7 @@ impl TargetConfig {
             }
             _ => TileCodec::Png,
         };
-        let motion = self
-            .render_motion
-            .then(|| MotionEncode { quality: self.video_quality(), adaptive, chroma });
+        let motion = self.render_motion.then_some(MotionEncode { quality, adaptive, chroma });
         RenderPlan::Tiles { base, motion, debug: self.render_motion_debug }
     }
 
@@ -3814,7 +3823,7 @@ mod tests {
             t.render_plan(Chroma::Subsampled),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
-                motion: Some(MotionEncode { quality: 10, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }),
+                motion: Some(MotionEncode { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled }),
                 debug: false,
             }
         );
@@ -3845,7 +3854,7 @@ mod tests {
             cfg.targets[0].render_plan(Chroma::Subsampled),
             RenderPlan::Tiles {
                 base: TileCodec::Webp { quality: 60 },
-                motion: Some(MotionEncode { quality: 10, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled }),
+                motion: Some(MotionEncode { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled }),
                 debug: false,
             }
         );
@@ -3886,7 +3895,7 @@ mod tests {
             (
                 "motion over a classify base",
                 "render_motion = true\nrender_subtype = \"classify\"\nimage_quality = 60\nvideo_quality = 15",
-                "motion · base classified png / webp q60, moving stream q15 4:2:0 · adaptive ≥20",
+                "motion · base classified png / webp q60, moving stream q15 4:2:0 · adaptive ≥15",
             ),
             (
                 "motion over a lossless base",
@@ -4191,7 +4200,7 @@ mod tests {
         .expect("motion is independent of the VNC subtype");
         assert_eq!(
             motion_of(cfg.targets[0].render_plan(Chroma::Subsampled)),
-            Some(MotionEncode { quality: 10, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled })
+            Some(MotionEncode { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled })
         );
     }
 
@@ -5056,6 +5065,30 @@ mod tests {
         );
     }
 
+    /// A dial below the default floor takes the floor down with it, on both shapes
+    /// of stream. The walk is the operator's, and the widest one a dial of 10 admits
+    /// runs from 10 to 10 — not from 20, which is a quality that stream never sends.
+    /// The card has to say the same, or it promises a floor nothing walks down to.
+    ///
+    /// Only the default reaches here: a written `render_adaptive_min` above the dial
+    /// is refused at parse ([`a_floor_above_a_ceiling_is_refused`]).
+    #[test]
+    fn a_dial_below_the_default_floor_is_the_floor() {
+        let cfg = parse_target("render_type = \"video\"\nvideo_quality = 10").expect("a low dial");
+        let plan = cfg.targets[0].render_plan(Chroma::Subsampled);
+        assert_eq!(
+            plan,
+            RenderPlan::Video { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled }
+        );
+        assert_eq!(plan.describe(), "video q10 4:2:0 · adaptive ≥10");
+
+        let cfg = parse_target("render_motion = true\nvideo_quality = 10").expect("a low dial");
+        assert_eq!(
+            motion_of(cfg.targets[0].render_plan(Chroma::Subsampled)),
+            Some(MotionEncode { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled })
+        );
+    }
+
     /// A target that turned the walk off stays exactly on its dial: no floor in the
     /// plan, and the pressure-only walk the streams had before the key existed.
     #[test]
@@ -5142,8 +5175,9 @@ mod tests {
         assert!(format!("{err:#}").contains("nowhere to go"));
 
         // The *default* floor over the same low dial is no contradiction — the
-        // operator never wrote it. It parses, and the walk clamps it to the
-        // dial (`Congestion::new`) instead.
+        // operator never wrote it. It parses, and [`TargetConfig::render_plan`]
+        // resolves the floor to the dial instead
+        // ([`a_dial_below_the_default_floor_is_the_floor`]).
         parse_target(
             "render_motion = true\n\
              video_quality = 10\nrender_adaptive = true",

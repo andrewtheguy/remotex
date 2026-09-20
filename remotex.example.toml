@@ -638,7 +638,9 @@ password = "change-me"
 #render_adaptive = true
 
 # Floor for that adaptive walk, 1–100 and defaulting to 20. Refused beside
-# `render_adaptive = false`, and it may not exceed `video_quality`.
+# `render_adaptive = false`, and it may not exceed `video_quality`. A target whose
+# dial sits below the default floor walks down to that dial instead — the default
+# never asks a stream for a quality it does not send.
 #render_adaptive_min = 20
 
 # QA aid for render_motion, off unless asked for: outline every piece the motion

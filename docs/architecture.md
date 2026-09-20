@@ -142,7 +142,7 @@ the quality, is where a desktop stream's picture goes, and
 browser.
 `video_quality` (default 90) is the ceiling every stream holds to, and
 `render_adaptive` lets it track the measured link down to `render_adaptive_min`
-(default 20) — see [what the link will bear](#the-codec) for the signal and the walk.
+(default 20, or the dial itself where that is lower) — see [what the link will bear](#the-codec) for the signal and the walk.
 The walk is on unless a target writes `render_adaptive = false`, which leaves the
 pressure-only walk floored at 1 that the streams had before the key existed. All
 three are a stream's keys, refused on a target that streams nothing whichever way
