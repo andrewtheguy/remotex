@@ -70,10 +70,9 @@ pub fn photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
     colorful(rgb) && gradientish(w, rgb)
 }
 
-/// Whether horizontal neighbour deltas are dominated by gradient-sized steps —
-/// the transition test, apart from the palette gate and the size floor that
-/// [`photographic`] applies first. Its own function so a measurement can ask what
-/// the floor is actually refusing; nothing else calls it alone.
+/// Whether horizontal neighbour deltas are dominated by gradient-sized steps: the
+/// second of this module's two measurements, and a function of its own so
+/// [`photographic`] reads as the pair of them.
 fn gradientish(w: usize, rgb: &[u8]) -> bool {
     let (mut soft, mut hard) = (0u64, 0u64);
     for row in rgb.chunks_exact(w * 3) {
@@ -271,8 +270,9 @@ mod tests {
             }
         }
         println!(
-            "\n  [refused] is the classifier's own verdict, floor included: a row without it \
-             is a tile that would go out as WebP today.\n"
+            "\n  [refused] is the classifier's own verdict — at 16×16 the palette gate, which \
+             cannot pass a tile holding fewer colours than it has pixels. A row without it is a \
+             tile that would go out as WebP today.\n"
         );
     }
 
@@ -306,8 +306,8 @@ mod tests {
     /// Two populations, because the cut depends on what else is happening. **Bands**
     /// are what a still target sends: [`Rect::bands`] of the damage box, wide by
     /// construction. **Cells** are the smallest piece the motion path can send — one
-    /// changed cell, alone between two live streams — and so the population the floor
-    /// can actually reach. Both come out of the same records; they are two readings of
+    /// changed cell, alone between two live streams — and so the population a size
+    /// threshold would reach. Both come out of the same records; they are two readings of
     /// one session, not two sessions, and their bytes must not be added together.
     #[test]
     #[ignore = "manual: weighs a damage tape's tiles by size, PNG against WebP"]
@@ -332,7 +332,8 @@ mod tests {
             png: u64,
             webp70: u64,
             webp90: u64,
-            /// Admitted pieces WebP at 70 did not shrink. The floor's whole case.
+            /// Admitted pieces WebP at 70 did not shrink: the case a size floor
+            /// would need, and zero on every session recorded so far.
             webp_lost: u64,
         }
 
@@ -363,7 +364,7 @@ mod tests {
                         let b = &mut tally[population][bucket];
                         b.pieces += 1;
                         let rgb = crop(piece);
-                        if !(colorful(&rgb) && gradientish(usize::from(w), &rgb)) {
+                        if !photographic(w, h, &rgb) {
                             return;
                         }
                         let len = |tile: anyhow::Result<Tile>| tile.expect("an encode of a piece").data.len() as u64;
