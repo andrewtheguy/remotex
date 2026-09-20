@@ -205,16 +205,16 @@ Linux builds both `.deb` and `.rpm`; macOS builds `.pkg`. See
 
 The Mac's system audio on an `ard-high-performance` target is behind a Cargo
 feature that no release binary, package or container image includes: the stream is
-AAC-ELD, and the portable decoders for it are Fraunhofer's fdk-aac and its Rust port,
-whose licence is not OSI-approved. To have it, build the gateway from source with the feature:
+AAC-ELD, and the portable decoder for it is Fraunhofer's own, whose licence is not
+OSI-approved. To have it, build the gateway from source with the feature:
 
 ```sh
 bun install --cwd frontend
 cargo build --release --features apple-hp-audio
 ```
 
-The build downloads a prebuilt static fdk-aac archive the same way it already
-downloads libopus and libvpx — no C++ toolchain is needed. Then set
+The decoder is the pure-Rust port of fdk-aac that AOSP ships, so the feature adds
+one ordinary Cargo dependency and no C toolchain, archive or system library. Then set
 `audio = true` on the target. A gateway built without the feature refuses that
 key at startup and says so. The Mac sends its audio by UDP to the gateway's
 address on a port it chooses (the VNC port's number, as measured), so the gateway

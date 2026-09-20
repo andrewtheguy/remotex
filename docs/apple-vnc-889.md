@@ -562,51 +562,68 @@ configure:` log and from the decrypted packets):
 One correction to the probe, found when its RTCP check was ported: it masked the
 second byte to seven bits before testing for 200–207, so the Mac's once-a-second
 RTCP packets (type 200/201, read as RTP payload type 72/73) were decrypted and
-written out as frames — the two "concealed" units fdk-aac reports on the captured
-file are those. RTCP is told apart by the whole byte.
+written out as frames — the two "concealed" units the decoder reports on the
+captured file are those. RTCP is told apart by the whole byte.
 
 **Decoding AAC-ELD is the catch, and it is forced — the transmitter's codec is
 decoupled from the negotiation.** AAC-ELD (MPEG-4 object type 39) is decodable by
 neither FFmpeg's native `aac` decoder nor any browser's WebCodecs `AudioDecoder`, so
-the stream cannot pass through and the gateway must decode. The gateway uses
-Fraunhofer **fdk-aac** (licence not OSI-approved); Apple's own **AudioToolbox**
-(`aac_at`) decodes it too, but only when the gateway runs on macOS, and Fraunhofer's
-pure-Rust port of the same decoder is a potential replacement (below). The
-AudioSpecificConfig fdk-aac wants is `F8 E6 50 00` — object type 39, 48 kHz,
+the stream cannot pass through and the gateway must decode. Apple's own
+**AudioToolbox** (`aac_at`) decodes it, but only when the gateway runs on macOS, so
+the portable answer is Fraunhofer's own decoder (licence not OSI-approved). The
+AudioSpecificConfig it wants is `F8 E6 50 00` — object type 39, 48 kHz,
 stereo, 480-sample frames, no SBR, no resilience tools — which decoded 375 of the
 377 captured units cleanly (the other two were RTCP, above); 512-sample frames
 concealed most of the stream and every other flag combination was refused.
 
-**A potential alternative to fdk-aac: Fraunhofer's Rust decoder.** Android 17 ships
-"FDK2 AAC", a pure-Rust port of the fdk-aac decoder, in AOSP at
+**The decoder is Fraunhofer's Rust one, not its C one.** Android 17 ships "FDK2
+AAC", a pure-Rust port of the fdk-aac decoder, in AOSP at
 [`platform/external/aac`, `rust/`](https://android.googlesource.com/platform/external/aac/+/refs/tags/android-17.0.0_r1/rust)
-(tag `android-17.0.0_r1`). It is a Cargo crate named `aac` with no C code and no
-native build, only ordinary crates.io dependencies, and it builds and runs on Linux
-as well as Android. It decodes AAC-ELD, and takes the stream in the same shape:
+(tag `android-17.0.0_r1`, the newest that repository carries at the time 0.0.241
+is built). It is a Cargo crate named `aac` with no C code and no native build,
+only ordinary crates.io dependencies, and it builds and runs on Linux as well as
+Android. It is
+decoder-only upstream — there is no encoder in it to leave unused. It takes the
+stream in the shape this wire delivers:
 `AacDecoderInstance::new(TransportType::Mp4Raw)`, `config_raw(F8 E6 50 00)`, then
-`fill` and `decode` per access unit, returning interleaved `f32` rather than `i16`.
+`fill` and `decode` per access unit, returning interleaved `f32` normalised to ±1
+rather than `i16`, so `src/aac_eld.rs` multiplies by 32768 on the way out.
 Symphonia is not an option: its AAC decoder, 0.6.1 included, decodes AAC-LC only
 and refuses any other object type.
+
+Two properties of it shape the code around it. Its `fill` reports the bytes it did
+*not* take, where fdk-aac's reported the bytes it did, so the "whole unit consumed"
+check reads `== 0`. And a decode *error* in the 0x4000 range is the concealment
+case — output buffer valid, frame synthesised — which is the `is_decode_error()`
+branch in `EldDecoder::decode`, not a failure.
 
 It was measured against genuine Apple AAC-ELD without a Screen Sharing session.
 `afconvert` on the Mac encodes through AudioToolbox:
 `afconvert -f m4af -d "aace@48000#480" -b 320000 src.wav out.m4a` writes AAC-ELD
 whose AudioSpecificConfig is the stream's `F8 E6 50 00`, with 480-frame packets and
 240 samples of priming. On 10 s of stereo tones (1001 packets, macOS 26.6.2), both
-decoders decoded every packet without error. They agreed with each other at 85 dB
+decoders decoded every packet without error. They agreed with each other at 86 dB
 SNR (within 3 LSB, because the Rust port is floating-point and fdk-aac is
 fixed-point), and each reproduced the source at 40 dB SNR once aligned by the
-240-sample priming. The Rust decoder took about 30 µs per 10 ms frame in a release
-build, and returned errors instead of panicking on garbage input, recovering on the
-next valid unit. The same `afconvert` file is not the transmitter's exact bitstream
-— the ASC matches, but the agent's bitrate mode and tool choices are not proven
-identical — so a live High Performance session remains the final check.
+240-sample priming. The Rust decoder took about 31 µs per 10 ms frame in a release
+build. Fed 200 000 rubbish units — real ones with bits flipped, and pure noise —
+in a build with overflow and debug assertions on, it never panicked: it concealed,
+refused, and recovered on the next valid unit. That matters more here than it
+looks, because the gateway builds with `panic = "abort"`, so a panic inside the
+decoder would end the process rather than the stream.
 
-It would replace fdk-aac, not sit beside it, and it would not change why the
-feature is gated: its licence is the same "Fraunhofer FDK AAC Codec Library for
-Android" text, not OSI-approved and with no patent grant. What it would remove is
-the C side — the prebuilt static archive and its `-sys` crate. It is not on
-crates.io, so it would be a git dependency on AOSP or a mirror.
+Its instance holds `Rc`s, so it is not `Send` and cannot live in the future
+`tokio::spawn` takes. `src/vnc_apple_audio.rs` gives it a thread of its own behind
+a bounded channel: the socket task decrypts and sends one access unit per message,
+the thread decodes and hands finished waves to the bridge, and dropping the sender
+— which aborting the socket task does — ends it.
+
+Choosing it did not change why the feature is gated: its licence is the same
+"Fraunhofer FDK AAC Codec Library for Android" text, not OSI-approved and with no
+patent grant. What it removed is the C side — the prebuilt static archive and its
+`-sys` crate. It is not on crates.io, so it is a git dependency on
+[a verbatim mirror](https://github.com/andrewtheguy/fdk-aac-rust) of that AOSP
+subtree.
 
 That the codec cannot be moved off AAC-ELD is now **proven, not assumed.** Offering
 a codec set that excludes AAC-ELD does not change the stream. Building a
@@ -627,8 +644,8 @@ maps that group to codec type `16`, AAC-ELD 48 kHz, unconditionally — there is
 Opus branch in it). The viewer's offer is a client-side input; the encoder is a
 server-side setting it does not reach. **Opus is in AVConference's library (both
 `_RegisterOpusEncoder` and `_RegisterOpusDecoder` exist) but not in this agent's
-transmit path, and no offer can put it there.** The fdk-aac (or macOS AudioToolbox)
-dependency is therefore a proven necessity, not a worst case.
+transmit path, and no offer can put it there.** The AAC-ELD decoder dependency is
+therefore a proven necessity, not a worst case.
 
 The server-side path was traced to the source in `ScreensharingAgent`
 (`SSUDPSender`, the process that actually runs the sender). Its

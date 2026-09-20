@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.240"
+version = "0.0.241"
 
 [package]
 name = "remotex"
@@ -31,11 +31,11 @@ default = ["embedded-gateway"]
 embedded-gateway = ["dep:crossterm", "dep:libc"]
 # Apple High Performance system audio (src/vnc_apple_audio.rs, src/aac_eld.rs).
 # Off by default and never in a release artifact: the Mac streams AAC-ELD, which
-# only Fraunhofer's fdk-aac decodes portably, and its licence is not OSI-approved.
+# only Fraunhofer's own decoder takes portably, and its licence is not OSI-approved.
 # An operator who wants a Mac's sound builds the gateway with
 # `cargo build --release --features apple-hp-audio`; a config that asks for
 # `audio = true` on an `ard-high-performance` target is refused by any other build.
-apple-hp-audio = ["dep:fdk-aac"]
+apple-hp-audio = ["dep:aac"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -117,11 +117,14 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260906161304-8dd83e8" }
 # AAC-ELD, for Apple High Performance system audio, behind the `apple-hp-audio`
-# feature above. The same prebuilt bargain as `opus` and `vpx-sys`: a static
-# archive the sys crate downloads from that repository's latest release, no C++
-# toolchain, no cmake. The tag pins the crate; the archives are the release's.
-# `fdk_aac` is the lib name, so `use fdk_aac::dec::…` is what src/aac_eld.rs writes.
-fdk-aac = { package = "fdk-aac-prebuilt", git = "https://github.com/andrewtheguy/fdk-aac-prebuilt", tag = "v2.0.3-20260906161257-b191431", optional = true }
+# feature above. Fraunhofer's decoder, but the Rust one: AOSP ships a pure-Rust
+# port of it as `platform/external/aac`, `rust/`, and that crate is mirrored
+# verbatim at the tag below because it is not published on crates.io. It is the
+# odd one out among the media dependencies for needing nothing prebuilt — no
+# static archive, no sys crate, no C++ toolchain — and it is decoder-only
+# upstream, so there is no encoder here to leave unused. The licence is unchanged
+# by the rewrite and still not OSI-approved, which is what keeps the feature off.
+aac = { git = "https://github.com/andrewtheguy/fdk-aac-rust", tag = "android-17.0.0_r1", optional = true }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing

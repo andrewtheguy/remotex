@@ -760,13 +760,85 @@ impl Drop for MediaStream {
 #[cfg(feature = "apple-hp-audio")]
 const UNITS_PER_WAVE: usize = 2;
 
+/// Undecoded access units the decoder thread may be behind by. Decoding one 10 ms
+/// unit costs tens of microseconds, so this is never approached in practice; it is
+/// a ceiling on the queue rather than a working depth, and reaching it drops the
+/// oldest thing a live stream can afford to lose — the newest unit.
+#[cfg(feature = "apple-hp-audio")]
+const DECODE_QUEUE: usize = 64;
+
 /// How long without a single packet before saying so. The Mac starts streaming
 /// within a second of naming the port; a firewall between it and this gateway's
 /// UDP port is what silence past this looks like.
 #[cfg(feature = "apple-hp-audio")]
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The receiver: RTCP out once a second, SRTP in, AAC-ELD to PCM, PCM to the bridge.
+/// The decoder thread: access units in, PCM waves out to the bridge.
+///
+/// Fraunhofer's Rust decoder is single-threaded by construction — its instance
+/// holds `Rc`s — so it is not `Send` and cannot sit in the future `tokio::spawn`
+/// wants. A thread of its own is the whole accommodation: the socket task below
+/// decrypts and hands over one access unit per message, this decodes and batches
+/// them into the waves the bridge takes. The handle it returns is the sender; the
+/// thread ends when that is dropped, which is what aborting the socket task does.
+///
+/// The oneshot reports whether the decoder opened at all, because the caller must
+/// not announce an audio format for a stream that will never produce one.
+#[cfg(feature = "apple-hp-audio")]
+fn spawn_decoder(
+    bridge: Arc<AudioBridge>,
+) -> (
+    std::sync::mpsc::SyncSender<Vec<u8>>,
+    tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
+) {
+    use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
+
+    let (units, inbox) = std::sync::mpsc::sync_channel::<Vec<u8>>(DECODE_QUEUE);
+    let (opened, ready) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut decoder = match EldDecoder::new() {
+            Ok(decoder) => {
+                let _ = opened.send(Ok(()));
+                decoder
+            }
+            Err(e) => {
+                let _ = opened.send(Err(e));
+                return;
+            }
+        };
+        let wave_bytes = UNITS_PER_WAVE * FRAME_SAMPLES * CHANNELS * 2;
+        let mut pending: Vec<u8> = Vec::with_capacity(wave_bytes);
+        let mut decoded: u64 = 0;
+        let mut concealed: u64 = 0;
+        let mut undecodable: u64 = 0;
+        while let Ok(unit) = inbox.recv() {
+            decoded += 1;
+            match decoder.decode(&unit, &mut pending) {
+                Ok(false) => {}
+                Ok(true) => concealed += 1,
+                Err(e) => {
+                    undecodable += 1;
+                    if undecodable <= 3 {
+                        warn!("vnc: dropped an audio unit: {e:#}");
+                    }
+                }
+            }
+            if pending.len() >= wave_bytes {
+                bridge.wave(std::mem::take(&mut pending));
+                pending.reserve(wave_bytes);
+            }
+            if decoded.is_multiple_of(1000) {
+                debug!(
+                    "vnc: {decoded} audio units decoded, {concealed} concealed, {undecodable} \
+                     undecodable"
+                );
+            }
+        }
+    });
+    (units, ready)
+}
+
+/// The receiver: RTCP out once a second, SRTP in, access units to the decoder thread.
 #[cfg(feature = "apple-hp-audio")]
 async fn receive(
     socket: tokio::net::UdpSocket,
@@ -775,26 +847,26 @@ async fn receive(
     bridge: Arc<AudioBridge>,
     viewer_ssrc: u32,
 ) {
-    use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
-
-    let mut decoder = match EldDecoder::new() {
-        Ok(decoder) => decoder,
-        Err(e) => {
+    let (units, ready) = spawn_decoder(Arc::clone(&bridge));
+    match ready.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             warn!("vnc: no AAC-ELD decoder, so no Mac audio: {e:#}");
             return;
         }
-    };
+        Err(_) => {
+            warn!("vnc: the AAC-ELD decoder thread died before it opened; no Mac audio");
+            return;
+        }
+    }
     bridge.publish_format(SOURCE_FORMAT);
 
-    let wave_bytes = UNITS_PER_WAVE * FRAME_SAMPLES * CHANNELS * 2;
-    let mut pending: Vec<u8> = Vec::with_capacity(wave_bytes);
     let mut datagram = vec![0u8; 2048];
     let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
     let started = tokio::time::Instant::now();
     let report = rtcp_receiver_report(viewer_ssrc);
     let mut packets: u64 = 0;
-    let mut concealed: u64 = 0;
-    let mut undecodable: u64 = 0;
+    let mut overrun: u64 = 0;
     let mut warned_silent = false;
     let mut last_sequence: Option<u16> = None;
     loop {
@@ -854,26 +926,28 @@ async fn receive(
                     );
                 }
                 last_sequence = Some(header.sequence);
-                match decoder.decode(unit, &mut pending) {
-                    Ok(false) => {}
-                    Ok(true) => concealed += 1,
-                    Err(e) => {
-                        undecodable += 1;
-                        if undecodable <= 3 {
-                            warn!("vnc: dropped an audio unit: {e:#}");
+                match units.try_send(unit.to_vec()) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        overrun += 1;
+                        if overrun <= 3 {
+                            warn!(
+                                "vnc: the AAC-ELD decoder is more than {DECODE_QUEUE} units \
+                                 behind; dropping this one"
+                            );
                         }
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        warn!("vnc: the AAC-ELD decoder thread is gone, ending the Mac's audio");
+                        break;
                     }
                 }
                 if packets.is_multiple_of(1000) {
                     debug!(
-                        "vnc: {packets} audio packets, {concealed} concealed, {undecodable} \
-                         undecodable, in {} ms",
+                        "vnc: {packets} audio packets, {overrun} dropped on a full decode queue, \
+                         in {} ms",
                         started.elapsed().as_millis()
                     );
-                }
-                if pending.len() >= wave_bytes {
-                    bridge.wave(std::mem::take(&mut pending));
-                    pending.reserve(wave_bytes);
                 }
             }
         }
