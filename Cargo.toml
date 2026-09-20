@@ -73,19 +73,13 @@ toml = "1"
 # PNG. `encode_png` in src/protocol.rs is shared by both. Fast compression on the
 # session's hot path.
 png = "0.18"
-# JPEG for the lossy tile path: a target with `render_subtype = "jpeg"` encodes
-# every tile at a fixed `render_subtype_quality` instead of lossless PNG
-# (`Tile::from_rgb_jpeg` in src/protocol.rs), and `render_subtype = "classify"`
+# WebP, the lossy still codec on the render dial: `render_subtype = "webp"`
+# encodes every tile at a fixed `render_subtype_quality` instead of lossless PNG
+# (`Tile::from_rgb_webp` in src/protocol.rs), and `render_subtype = "classify"`
 # encodes the tiles its picture classifier reads as photographic
-# (src/classify.rs) the same way. The format byte
-# already distinguishes PNG from JPEG on the wire and the client decodes either,
-# so this is a gateway-only encoder. `simd` because it runs on the session hot path.
-jpeg-encoder = { version = "0.7", features = ["simd"] }
-# WebP, the other lossy still codec on the render dial: `render_subtype = "webp"`
-# for every tile, or `render_classify_lossy = "webp"` for the tiles the classifier
-# reads as photographic. Fewer bytes than JPEG at a matched quality and slower to
-# produce them (docs/still-image-classification-research.md holds the
-# measurements), which is why the operator picks and neither one is a default.
+# (src/classify.rs) the same way. The format byte already distinguishes PNG from
+# WebP on the wire and the client decodes either, so this is a gateway-only
+# encoder (docs/still-image-classification-research.md holds the measurements).
 # `default-features = false` drops the crate's `image` bridge: tiles arrive here as
 # packed RGB888 and `Encoder::from_rgb` takes them as they are. Its sys crate
 # compiles libwebp with `cc` — no cmake, no system library, and libwebp selects its

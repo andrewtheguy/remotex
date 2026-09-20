@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 
-use crate::config::{Chroma, LossyStill, MotionEncode, RenderPlan, TileCodec};
+use crate::config::{Chroma, MotionEncode, RenderPlan, TileCodec};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ServerMsg, Tile, TileGrid};
 use crate::regions::{Policy, Produced, Regions, Round};
@@ -99,7 +99,7 @@ const MAX_CLEANUPS_PER_TICK: usize = 40;
 
 /// Colour of a `render_motion_debug` outline on a piece sent at the motion encode.
 ///
-/// Magenta, cyan and green rather than anything subtler: these survive a JPEG at
+/// Magenta, cyan and green rather than anything subtler: these survive a WebP at
 /// quality 10, which is the encode whose extent they are drawn to show, and none of
 /// them is a colour a desktop produces in a straight line by accident.
 const MARK_MOTION: [u8; 3] = [255, 0, 255];
@@ -681,21 +681,20 @@ impl Shared {
         let Some(floor) = self.tile_floor else {
             return codec;
         };
-        let lossy = match codec {
+        let quality = match codec {
             TileCodec::Png => return codec,
-            TileCodec::Lossy(lossy) | TileCodec::Classify { lossy, .. } => lossy,
+            TileCodec::Webp { quality } | TileCodec::Classify { quality, .. } => quality,
         };
         let lag = self.feedback.lag(now);
         let cut = lag.saturating_sub(TILE_LAG_FREE).as_millis().min(u128::from(u8::MAX)) as u8;
         // The default floor over a lower dial clamps, same as `Congestion::new`.
-        let quality = lossy.quality();
-        let adapted = lossy.with_quality(quality.saturating_sub(cut).max(floor.min(quality)));
+        let adapted = quality.saturating_sub(cut).max(floor.min(quality));
         match codec {
             TileCodec::Png => unreachable!("returned above"),
-            TileCodec::Lossy(_) => TileCodec::Lossy(adapted),
+            TileCodec::Webp { .. } => TileCodec::Webp { quality: adapted },
             // Only the lossy arm walks: the tiles the classifier keeps
             // lossless were never spending the bytes the lag is about.
-            TileCodec::Classify { debug, .. } => TileCodec::Classify { lossy: adapted, debug },
+            TileCodec::Classify { debug, .. } => TileCodec::Classify { quality: adapted, debug },
         }
     }
 }
@@ -1094,7 +1093,7 @@ impl TileSink {
     /// encoded from, so there is nothing on the client to copy from that the next
     /// access unit will not overwrite anyway.
     ///
-    /// A lossy `base` codec is not an objection: the canvas has always been JPEG's
+    /// A lossy `base` codec is not an objection: the canvas has always been WebP's
     /// reading of the shadow there, and moving those pixels is no further
     /// from the truth than drawing them was.
     pub fn copies(&self) -> bool {
@@ -1319,8 +1318,8 @@ impl TileSink {
 /// Encode one rectangle of packed RGB888 with the given codec.
 ///
 /// [`TileCodec::Classify`] decides here, on the encode worker, from the pixels
-/// themselves ([`crate::classify::photographic`]): the target's lossy still for
-/// photographic content, PNG for everything else. Under its `debug` flag the
+/// themselves ([`crate::classify::photographic`]): WebP for photographic
+/// content, PNG for everything else. Under its `debug` flag the
 /// lossy tiles are outlined — on a copy, because `rgb` is what the shadow has
 /// recorded as delivered, and a mark painted into it would be compared against on
 /// the next update and suppressed as already sent.
@@ -1328,38 +1327,19 @@ fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile>
     let (x, y, w, h) = (rect.left, rect.top, rect.w(), rect.h());
     match codec {
         TileCodec::Png => Tile::from_rgb(x, y, w, h, rgb),
-        TileCodec::Lossy(lossy) => encode_lossy(x, y, w, h, rgb, lossy),
-        TileCodec::Classify { lossy, debug } => {
+        TileCodec::Webp { quality } => Tile::from_rgb_webp(x, y, w, h, rgb, quality),
+        TileCodec::Classify { quality, debug } => {
             if !crate::classify::photographic(w, h, rgb) {
                 return Tile::from_rgb(x, y, w, h, rgb);
             }
             if debug {
                 let mut copy = rgb.to_vec();
                 outline(&mut copy, usize::from(w), usize::from(h), MARK_LOSSY);
-                encode_lossy(x, y, w, h, &copy, lossy)
+                Tile::from_rgb_webp(x, y, w, h, &copy, quality)
             } else {
-                encode_lossy(x, y, w, h, rgb, lossy)
+                Tile::from_rgb_webp(x, y, w, h, rgb, quality)
             }
         }
-    }
-}
-
-/// Encode one rectangle through whichever lossy still the dial resolved to. The
-/// only place the two are told apart, so every caller above asks for "the lossy
-/// encode" and none of them names an encoder.
-fn encode_lossy(
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    rgb: &[u8],
-    lossy: LossyStill,
-) -> anyhow::Result<Tile> {
-    match lossy {
-        LossyStill::Jpeg { quality, sampling } => {
-            Tile::from_rgb_jpeg(x, y, w, h, rgb, quality, sampling)
-        }
-        LossyStill::Webp { quality } => Tile::from_rgb_webp(x, y, w, h, rgb, quality),
     }
 }
 
@@ -1884,15 +1864,15 @@ impl fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{JpegSampling, UNSCALED, VideoUnit};
+    use crate::protocol::{UNSCALED, VideoUnit};
 
     fn plan(base: TileCodec) -> RenderPlan {
         RenderPlan::Tiles { base, motion: None, debug: false, adaptive: None }
     }
 
-    /// A JPEG dial below 90, sampled as the dial would be.
-    fn jpeg(quality: u8) -> TileCodec {
-        TileCodec::Lossy(LossyStill::Jpeg { quality, sampling: JpegSampling::Subsampled })
+    /// The lossy base at a quality.
+    fn webp(quality: u8) -> TileCodec {
+        TileCodec::Webp { quality }
     }
 
     /// A fresh, never-written link measurement: what every sink here runs on, so
@@ -1944,13 +1924,13 @@ mod tests {
         }
     }
 
-    /// A sink built with a JPEG quality encodes its tiles as JPEG; the default
+    /// A sink built with a lossy quality encodes its tiles as WebP; the default
     /// (`None`, asserted above) stays PNG. The one bit the render dial threads
     /// all the way to the wire.
     #[tokio::test]
-    async fn a_jpeg_quality_makes_tiles_jpeg() {
+    async fn a_lossy_quality_makes_tiles_webp() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, plan(jpeg(60)), feedback());
+        let sink = TileSink::new("test", frame_tx, plan(webp(60)), feedback());
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
         sink.flush().await;
@@ -1958,52 +1938,41 @@ mod tests {
         let ServerMsg::Tile(tile) = &drain(&mut frame_rx, 1).await[0] else {
             panic!("expected a tile");
         };
-        assert_eq!(tile.format, Tile::FORMAT_JPEG);
+        assert_eq!(tile.format, Tile::FORMAT_WEBP);
     }
 
     /// A classify base sends each tile as what its own pixels are: flat content
     /// stays lossless PNG, photographic content takes the lossy encode — one
-    /// sink, one plan, two answers. Run for both lossy stills, because
-    /// `render_classify_lossy` moves only which encoder the photographic verdict
-    /// reaches: the verdict itself, and the PNG the other one gets, are the same
-    /// either way.
+    /// sink, one plan, two answers.
     #[tokio::test]
     async fn a_classify_base_picks_the_codec_per_tile() {
-        for (lossy, expected) in [
-            (
-                LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
-                Tile::FORMAT_JPEG,
-            ),
-            (LossyStill::Webp { quality: 60 }, Tile::FORMAT_WEBP),
-        ] {
-            let (frame_tx, mut frame_rx) = mpsc::channel(64);
-            let sink = TileSink::new(
-                "test",
-                frame_tx,
-                plan(TileCodec::Classify { lossy, debug: false }),
-                feedback(),
-            );
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = TileSink::new(
+            "test",
+            frame_tx,
+            plan(TileCodec::Classify { quality: 60, debug: false }),
+            feedback(),
+        );
 
-            let (w, h) = (320u16, 64u16);
-            let flat = vec![200u8; usize::from(w) * usize::from(h) * 3];
-            let photo: Vec<u8> = (0..usize::from(w) * usize::from(h))
-                .flat_map(|i| {
-                    let (x, y) = (i % usize::from(w), i / usize::from(w));
-                    [(x * 2) as u8, (y * 4) as u8, ((x + y) * 2) as u8]
-                })
-                .collect();
-            sink.tile(0, 0, w, h, flat).await.unwrap();
-            sink.tile(0, 64, w, h, photo).await.unwrap();
-            sink.flush().await;
+        let (w, h) = (320u16, 64u16);
+        let flat = vec![200u8; usize::from(w) * usize::from(h) * 3];
+        let photo: Vec<u8> = (0..usize::from(w) * usize::from(h))
+            .flat_map(|i| {
+                let (x, y) = (i % usize::from(w), i / usize::from(w));
+                [(x * 2) as u8, (y * 4) as u8, ((x + y) * 2) as u8]
+            })
+            .collect();
+        sink.tile(0, 0, w, h, flat).await.unwrap();
+        sink.tile(0, 64, w, h, photo).await.unwrap();
+        sink.flush().await;
 
-            let out = drain(&mut frame_rx, 2).await;
-            let format = |i: usize| match &out[i] {
-                ServerMsg::Tile(tile) => tile.format,
-                other => panic!("expected a tile at {i}, got {other:?}"),
-            };
-            assert_eq!(format(0), Tile::FORMAT_PNG, "flat content stayed lossless under {lossy:?}");
-            assert_eq!(format(1), expected, "photographic content took the lossy encode");
-        }
+        let out = drain(&mut frame_rx, 2).await;
+        let format = |i: usize| match &out[i] {
+            ServerMsg::Tile(tile) => tile.format,
+            other => panic!("expected a tile at {i}, got {other:?}"),
+        };
+        assert_eq!(format(0), Tile::FORMAT_PNG, "flat content stayed lossless");
+        assert_eq!(format(1), Tile::FORMAT_WEBP, "photographic content took the lossy encode");
     }
 
     /// The same classifier as the base of a motion plan: a quiet cell is
@@ -2017,10 +1986,7 @@ mod tests {
             "test",
             frame_tx,
             RenderPlan::Tiles {
-                base: TileCodec::Classify {
-                    lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
-                    debug: false,
-                },
+                base: TileCodec::Classify { quality: 60, debug: false },
                 motion: Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None,
@@ -2045,7 +2011,7 @@ mod tests {
             other => panic!("expected a tile at {i}, got {other:?}"),
         };
         assert_eq!(format(0), Tile::FORMAT_PNG);
-        assert_eq!(format(1), Tile::FORMAT_JPEG);
+        assert_eq!(format(1), Tile::FORMAT_WEBP);
     }
 
     /// The hazard a side channel for control messages would create: the client
@@ -3339,7 +3305,7 @@ mod tests {
         let feedback = feedback();
         let adaptive = Shared::new(
             RenderPlan::Tiles {
-                base: jpeg(60),
+                base: webp(60),
                 motion: None,
                 debug: false,
                 adaptive: Some(25),
@@ -3355,18 +3321,18 @@ mod tests {
 
         // No lag beyond the free allowance: the dial's own quality.
         assert_eq!(
-            adaptive.adapted(jpeg(60), sent + TILE_LAG_FREE),
-            jpeg(60)
+            adaptive.adapted(webp(60), sent + TILE_LAG_FREE),
+            webp(60)
         );
         // 30 ms past the allowance: one point per millisecond.
         assert_eq!(
-            adaptive.adapted(jpeg(60), sent + TILE_LAG_FREE + Duration::from_millis(30)),
-            jpeg(30),
+            adaptive.adapted(webp(60), sent + TILE_LAG_FREE + Duration::from_millis(30)),
+            webp(30),
         );
         // Far past it: the floor holds.
         assert_eq!(
-            adaptive.adapted(jpeg(60), sent + Duration::from_secs(2)),
-            jpeg(25)
+            adaptive.adapted(webp(60), sent + Duration::from_secs(2)),
+            webp(25)
         );
         // Lossless has no quality to give up.
         assert_eq!(
@@ -3374,34 +3340,22 @@ mod tests {
             TileCodec::Png
         );
 
-        // A dial at or above 90 keeps full colour on the way down: the walk
-        // moves quantization and nothing else, so the colour of a tile sent
-        // under lag matches the colour of its neighbours sent before it.
-        let full = TileCodec::Lossy(LossyStill::Jpeg { quality: 95, sampling: JpegSampling::Full });
-        assert_eq!(
-            adaptive.adapted(full, sent + TILE_LAG_FREE + Duration::from_millis(30)),
-            TileCodec::Lossy(LossyStill::Jpeg { quality: 65, sampling: JpegSampling::Full })
-        );
-        let classified = TileCodec::Classify {
-            lossy: LossyStill::Jpeg { quality: 95, sampling: JpegSampling::Full },
-            debug: false,
-        };
+        // The classified base walks the same curve, and its `debug` flag rides
+        // through untouched: only the lossy arm's quality is the link's business.
+        let classified = TileCodec::Classify { quality: 95, debug: true };
         assert_eq!(
             adaptive.adapted(classified, sent + TILE_LAG_FREE + Duration::from_millis(30)),
-            TileCodec::Classify {
-                lossy: LossyStill::Jpeg { quality: 65, sampling: JpegSampling::Full },
-                debug: false,
-            }
+            TileCodec::Classify { quality: 65, debug: true }
         );
 
         // The same lag through a non-adaptive plan moves nothing.
         let fixed = Shared::new(
-            RenderPlan::Tiles { base: jpeg(60), motion: None, debug: false, adaptive: None },
+            RenderPlan::Tiles { base: webp(60), motion: None, debug: false, adaptive: None },
             Arc::clone(&feedback),
         );
         assert_eq!(
-            fixed.adapted(jpeg(60), sent + Duration::from_secs(2)),
-            jpeg(60)
+            fixed.adapted(webp(60), sent + Duration::from_secs(2)),
+            webp(60)
         );
     }
 
@@ -3412,7 +3366,7 @@ mod tests {
     fn a_motion_stream_plan_carries_its_floor_into_both_halves() {
         let shared = Shared::new(
             RenderPlan::Tiles {
-                base: jpeg(70),
+                base: webp(70),
                 motion: Some(MotionEncode { quality: 60, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: Some(25),

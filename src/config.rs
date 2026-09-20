@@ -17,7 +17,7 @@ use crate::audio::PcmFormat;
 #[cfg(all(feature = "embedded-gateway", unix))]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
-use crate::protocol::{HostDisplay, JpegSampling};
+use crate::protocol::HostDisplay;
 use crate::throughput::MeterConfig;
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
@@ -122,7 +122,7 @@ impl Protocol {
 ///
 /// The two axes are orthogonal on purpose: this one says *what kind of thing
 /// goes on the wire* (independent still tiles, or one video stream), the subtype
-/// says *what a base tile is encoded as* (lossless PNG, a fixed-quality JPEG, or
+/// says *what a base tile is encoded as* (lossless PNG, a fixed-quality WebP, or
 /// the classifier's per-tile choice between the two). The tiles transport takes
 /// every subtype; the stream takes none.
 ///
@@ -327,29 +327,22 @@ impl Default for AudioPlan {
 /// sends no tiles and refuses the axis. All implemented codecs are
 /// variants; serde refuses anything else.
 ///
-/// Lossless is PNG and only PNG. The choice this axis offers is on the lossy
-/// side: [`Self::Jpeg`] or [`Self::Webp`] for every tile, or [`Self::Classify`]
-/// to spend either of them only where a picture wants it.
+/// Lossless is PNG and only PNG, and lossy is WebP and only WebP. The choice this
+/// axis offers is how much of the screen each carries: [`Self::Webp`] for every
+/// tile, or [`Self::Classify`] to spend it only where a picture wants it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderSubtype {
     /// Lossless PNG. The default.
     #[default]
     Png,
-    /// Baseline JPEG at [`TargetConfig::render_subtype_quality`]. Every tile goes to JPEG
+    /// WebP at [`TargetConfig::render_subtype_quality`]. Every tile goes to WebP
     /// — there is no content classifier — so flat UI and text soften along with
     /// photographic content. That is the trade the fixed dial makes.
-    Jpeg,
-    /// The same fixed trade as [`Self::Jpeg`], in the other lossy still: every
-    /// tile WebP at [`TargetConfig::render_subtype_quality`]. Fewer bytes for the
-    /// same dial and more encoder time to produce them, so it is the choice for a
-    /// link narrower than the gateway's CPU is busy — the operator's judgement,
-    /// which is why both are offered and neither is the default.
     Webp,
     /// Per tile, whichever fits: a picture classifier ([`crate::classify`]) reads
-    /// each tile's pixels and sends photographic content lossy at
-    /// [`TargetConfig::render_subtype_quality`] — as JPEG, or as WebP if
-    /// [`TargetConfig::render_classify_lossy`] says so — and everything else —
+    /// each tile's pixels and sends photographic content as WebP at
+    /// [`TargetConfig::render_subtype_quality`] and everything else —
     /// flat UI, text — as lossless PNG. The classifier has no dial of its own;
     /// under [`TargetConfig::render_motion`] it is the base, so a settled cell is
     /// classified and a moving one takes the motion encode as usual.
@@ -361,101 +354,8 @@ impl RenderSubtype {
     pub fn name(self) -> &'static str {
         match self {
             Self::Png => "png",
-            Self::Jpeg => "jpeg",
             Self::Webp => "webp",
             Self::Classify => "classify",
-        }
-    }
-}
-
-/// Which lossy still the classifier hands its photographic tiles to —
-/// [`TargetConfig::render_classify_lossy`], and the only thing about
-/// [`RenderSubtype::Classify`] an operator can turn. Its lossless answer is not
-/// on this axis: that is PNG, the one lossless tile encoder this gateway has.
-///
-/// A key of its own rather than a fourth and fifth subtype (`classify-jpeg`,
-/// `classify-webp`), because it does not change what the classifier decides —
-/// only which encoder receives the tiles it decided about.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ClassifyLossy {
-    /// Baseline JPEG, as [`RenderSubtype::Jpeg`] sends every tile. The default:
-    /// it is the encoder the classifier was measured and tuned against.
-    #[default]
-    Jpeg,
-    /// WebP, as [`RenderSubtype::Webp`] sends every tile.
-    Webp,
-}
-
-impl ClassifyLossy {
-    /// How the config key spells it, for messages and the session card.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Jpeg => "jpeg",
-            Self::Webp => "webp",
-        }
-    }
-
-    /// This choice at a resolved quality — the encoder the classifier's
-    /// photographic arm calls.
-    fn at(self, quality: u8) -> LossyStill {
-        match self {
-            Self::Jpeg => LossyStill::jpeg(quality),
-            Self::Webp => LossyStill::Webp { quality },
-        }
-    }
-}
-
-/// One of the two lossy still encoders, resolved with the quality it was
-/// configured at. What a tile becomes when it is not going out lossless — under
-/// [`TileCodec::Lossy`] that is every tile, under [`TileCodec::Classify`] the
-/// photographic ones.
-///
-/// The pair is a type rather than two arms repeated on [`TileCodec`], because the
-/// choice between them is orthogonal to *which* tiles reach it: every place that
-/// picks an encoder takes one of these, and the adaptive walk moves the quality
-/// inside it without knowing which one it holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LossyStill {
-    /// Baseline JPEG at the given quality (1–100), with the chroma sampling
-    /// decided from the dial's quality once ([`JpegSampling::for_quality`]) and
-    /// carried along so the adaptive walk cannot change it.
-    Jpeg { quality: u8, sampling: JpegSampling },
-    /// WebP at the given quality (1–100). No sampling beside it: lossy WebP is
-    /// 4:2:0 and has no other mode to pin.
-    Webp { quality: u8 },
-}
-
-impl LossyStill {
-    /// JPEG at `quality`, with the sampling that quality decides
-    /// ([`JpegSampling::for_quality`]) — the one place the two are tied together.
-    pub fn jpeg(quality: u8) -> Self {
-        Self::Jpeg { quality, sampling: JpegSampling::for_quality(quality) }
-    }
-
-    /// The quality this encoder is set to, whichever encoder it is.
-    pub fn quality(self) -> u8 {
-        match self {
-            Self::Jpeg { quality, .. } | Self::Webp { quality } => quality,
-        }
-    }
-
-    /// The same encoder at a walked-down `quality`. JPEG keeps its sampling: it
-    /// was decided from the dial, and a walk that moved it would leave every tile
-    /// sent under lag with coarser colour and not just coarser quantization
-    /// (see [`JpegSampling`]).
-    pub fn with_quality(self, quality: u8) -> Self {
-        match self {
-            Self::Jpeg { sampling, .. } => Self::Jpeg { quality, sampling },
-            Self::Webp { .. } => Self::Webp { quality },
-        }
-    }
-
-    /// How the config spells this encoder, for the session card.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Jpeg { .. } => "jpeg",
-            Self::Webp { .. } => "webp",
         }
     }
 }
@@ -468,14 +368,14 @@ impl LossyStill {
 pub enum TileCodec {
     /// Lossless PNG — the default path, and the only lossless one there is.
     Png,
-    /// Every tile through one lossy still, at the dial's quality.
-    Lossy(LossyStill),
+    /// Every tile through WebP, at the dial's quality (1–100).
+    Webp { quality: u8 },
     /// Per tile, whichever [`crate::classify`] says fits: photographic content
-    /// through the lossy still, everything else PNG. The decision runs on the
+    /// through WebP at `quality`, everything else PNG. The decision runs on the
     /// encode worker, from the tile's own pixels, so it costs the read loops
     /// nothing.
     Classify {
-        lossy: LossyStill,
+        quality: u8,
         /// Outline the tiles the classifier sent lossy, in the pixels
         /// themselves, so QA reads the decision off the screen
         /// ([`TargetConfig::render_classify_debug`]). Carried here because the
@@ -575,10 +475,10 @@ impl RenderPlan {
         fn tile(codec: TileCodec) -> String {
             match codec {
                 TileCodec::Png => "lossless png".to_owned(),
-                TileCodec::Lossy(lossy) => format!("{} q{}", lossy.name(), lossy.quality()),
-                TileCodec::Classify { lossy, debug } => {
+                TileCodec::Webp { quality } => format!("webp q{quality}"),
+                TileCodec::Classify { quality, debug } => {
                     let debug = if debug { " (debug outlines)" } else { "" };
-                    format!("classified png / {} q{}{debug}", lossy.name(), lossy.quality())
+                    format!("classified png / webp q{quality}{debug}")
                 }
             }
         }
@@ -875,15 +775,11 @@ pub struct TargetConfig {
     #[serde(default)]
     pub render_stream_quality: Option<u8>,
     /// The quality (1–100) of the base codec's lossy side: what
-    /// [`RenderSubtype::Jpeg`] and [`RenderSubtype::Webp`] encode every tile at,
-    /// and what [`RenderSubtype::Classify`] encodes its photographic tiles at.
-    /// Required exactly when the subtype is one of those three and refused for
+    /// [`RenderSubtype::Webp`] encodes every tile at, and what
+    /// [`RenderSubtype::Classify`] encodes its photographic tiles at.
+    /// Required exactly when the subtype is one of those two and refused for
     /// [`RenderSubtype::Png`], which is lossless and has no dial. `None`
     /// (unset) is the default.
-    ///
-    /// One key for both lossy encoders because it is one dial: a quality is what
-    /// the operator is trading away, and which encoder spends it is
-    /// [`Self::render_subtype`]'s business, not a second number's.
     ///
     /// Under [`Self::render_motion`] this is the *base* quality — what a settled
     /// cell gets — and it is omitted when the base is lossless PNG. Named for the
@@ -937,16 +833,6 @@ pub struct TargetConfig {
     /// the same rule as `audio_codec` without `audio`.
     #[serde(default)]
     pub render_chroma: Option<ChromaChoice>,
-    /// Which lossy still the classifier's photographic tiles go to; `None` reads
-    /// as [`ClassifyLossy::Jpeg`]. A key for [`RenderSubtype::Classify`] and
-    /// refused for any other subtype — the fixed subtypes name their encoder on
-    /// the subtype axis, and PNG has no lossy arm for this to describe.
-    ///
-    /// It moves nothing about the classifier itself: the same pixels get the same
-    /// verdict, and this says only which encoder the photographic verdict is
-    /// carried out by. The lossless verdict is PNG under either value.
-    #[serde(default)]
-    pub render_classify_lossy: Option<ClassifyLossy>,
     /// Outline every tile the classifier sends lossy, in the pixels
     /// themselves, so which regions it reads as photographic is visible on the
     /// screen instead of inferred from how soft something looks. A QA aid for
@@ -985,7 +871,7 @@ pub struct TargetConfig {
     ///   adds the client's own lag — how long the oldest unacknowledged paint
     ///   batch has been owed, beyond the link's measured floor — as a second
     ///   reason to, and moves the walk's floor up from 1.
-    /// - A lossy base tile codec (JPEG) gets a quality per *encode* instead of
+    /// - A lossy base tile codec (WebP) gets a quality per *encode* instead of
     ///   per session, scaled down linearly with that same lag — Guacamole's
     ///   curve, on this gateway's own signal.
     ///
@@ -1086,14 +972,10 @@ impl TargetConfig {
             return RenderPlan::Video { quality, adaptive, chroma };
         }
         let base = match (self.render_subtype(), self.render_subtype_quality) {
-            (RenderSubtype::Jpeg, Some(quality)) => TileCodec::Lossy(LossyStill::jpeg(quality)),
-            (RenderSubtype::Webp, Some(quality)) => {
-                TileCodec::Lossy(LossyStill::Webp { quality })
+            (RenderSubtype::Webp, Some(quality)) => TileCodec::Webp { quality },
+            (RenderSubtype::Classify, Some(quality)) => {
+                TileCodec::Classify { quality, debug: self.render_classify_debug }
             }
-            (RenderSubtype::Classify, Some(quality)) => TileCodec::Classify {
-                lossy: self.render_classify_lossy.unwrap_or_default().at(quality),
-                debug: self.render_classify_debug,
-            },
             _ => TileCodec::Png,
         };
         let motion = match (self.render_motion, self.render_stream_quality) {
@@ -1934,19 +1816,17 @@ impl ConfigFile {
                     anyhow::ensure!(
                         target.render_subtype_quality.is_none(),
                         "target {:?} sets render_subtype_quality, which the lossless \"png\" \
-                         base has no use for. Set render_subtype = \"jpeg\" or \"webp\" for \
-                         a fixed lossy quality, or \"classify\" to spend it only on \
+                         base has no use for. Set render_subtype = \"webp\" for a fixed \
+                         lossy quality, or \"classify\" to spend it only on \
                          photographic tiles — or, under render_motion, render_stream_quality \
                          is the dial for the cells in motion",
                         target.name
                     );
                 }
-                // Every lossy base makes the same demand for the same reason:
-                // `jpeg` and `webp` spend the quality on every tile, `classify`
-                // only on the ones its classifier reads as photographic, and none
-                // has a default — a quality nobody chose is not a quality. Which
-                // of the two encoders spends it changes nothing here: it is one
-                // dial with one range whichever reads it.
+                // Both lossy bases make the same demand for the same reason:
+                // `webp` spends the quality on every tile, `classify` only on the
+                // ones its classifier reads as photographic, and neither has a
+                // default — a quality nobody chose is not a quality.
                 //
                 // `render_motion` does not enter into it, and that is the point of
                 // it being a switch rather than a transport: the base is the base
@@ -1954,10 +1834,7 @@ impl ConfigFile {
                 // interesting configuration falls out of that on its own — a
                 // lossless base with a lossy discount, where text and flat UI stay
                 // perfect and only what moves gets ugly.
-                (
-                    RenderType::Tiles,
-                    Some(RenderSubtype::Jpeg | RenderSubtype::Webp | RenderSubtype::Classify),
-                ) => {
+                (RenderType::Tiles, Some(RenderSubtype::Webp | RenderSubtype::Classify)) => {
                     let q = target.render_subtype_quality.with_context(|| format!(
                         "target {:?} sets a lossy render_subtype but no render_subtype_quality — \
                          it needs one, an integer 1–100",
@@ -2004,24 +1881,6 @@ impl ConfigFile {
                  and no other subtype makes that decision",
                 target.name
             );
-            // So does the choice of lossy encoder underneath it. On `jpeg` or
-            // `webp` the subtype axis has already named the encoder and this would
-            // be a second, quieter answer to the same question; on `png` there is
-            // no lossy arm to send anything to.
-            if let Some(lossy) = target.render_classify_lossy {
-                anyhow::ensure!(
-                    target.render_subtype() == RenderSubtype::Classify,
-                    "target {:?} sets render_classify_lossy = {:?} with render_subtype = \
-                     {:?} — that key names the encoder the classifier hands its \
-                     photographic tiles to, and this subtype has no such decision. Set \
-                     render_subtype = \"classify\" to keep it, or render_subtype = {:?} \
-                     to send every tile that way",
-                    target.name,
-                    lossy.name(),
-                    target.render_subtype().name(),
-                    lossy.name(),
-                );
-            }
             // The lattice is the grid damage is cut at, so it means something under
             // the transport that cuts damage — and nothing under the one that does
             // not cut it at all.
@@ -2073,9 +1932,8 @@ impl ConfigFile {
                     || target.render_motion
                     || target.render_subtype() != RenderSubtype::Png,
                 "target {:?} sets render_adaptive on lossless PNG tiles, which have no \
-                 quality for the link to move. Pick a plan with a lossy dial — a \"jpeg\", \
-                 \"webp\" or \"classify\" subtype, render_motion, or render_type = \
-                 \"video\"",
+                 quality for the link to move. Pick a plan with a lossy dial — a \"webp\" \
+                 or \"classify\" subtype, render_motion, or render_type = \"video\"",
                 target.name
             );
             anyhow::ensure!(
@@ -3174,42 +3032,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tiles_with_a_jpeg_base_is_accepted() {
-        let cfg = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "rdp"
-            username = "u"
-            password = "p"
-            host = "h"
-            render_type = "tiles"
-            render_subtype = "jpeg"
-            render_subtype_quality = 60
-            "#,
-        )
-        .unwrap();
-        let t = &cfg.targets[0];
-        assert_eq!(t.render_type, RenderType::Tiles);
-        assert_eq!(t.render_subtype(), RenderSubtype::Jpeg);
-        assert_eq!(t.render_subtype_quality, Some(60));
-        assert_eq!(
-            t.render_plan(Chroma::Full),
-            RenderPlan::Tiles {
-                base: TileCodec::Lossy(LossyStill::Jpeg {
-                    quality: 60,
-                    sampling: JpegSampling::Subsampled,
-                }),
-                motion: None,
-                debug: false,
-                adaptive: None,
-            }
-        );
-    }
-
-    /// The other fixed lossy base: the same axis, the same one quality key, a
-    /// different encoder — and no sampling beside it, WebP having only 4:2:0.
+    /// The fixed lossy base: every tile through WebP at the one quality key.
     #[test]
     fn tiles_with_a_webp_base_is_accepted() {
         let cfg = ConfigFile::parse(
@@ -3231,7 +3054,7 @@ mod tests {
         assert_eq!(
             t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
-                base: TileCodec::Lossy(LossyStill::Webp { quality: 60 }),
+                base: TileCodec::Webp { quality: 60 },
                 motion: None,
                 debug: false,
                 adaptive: None,
@@ -3256,116 +3079,6 @@ mod tests {
         assert!(format!("{err:#}").contains("render_subtype_quality"), "{err:#}");
     }
 
-    /// The classifier's one dial: the same verdicts, carried out by the other
-    /// encoder. The lossless arm is PNG under either value — there is nothing
-    /// else it could be.
-    #[test]
-    fn the_classifier_hands_its_photographs_to_the_named_lossy_codec() {
-        let plan = |keys: &str| {
-            ConfigFile::parse(&format!(
-                r#"
-                [[targets]]
-                name = "a"
-                protocol = "rdp"
-                username = "u"
-                password = "p"
-                host = "h"
-                render_subtype = "classify"
-                render_subtype_quality = 60
-                {keys}
-                "#
-            ))
-            .unwrap()
-            .targets[0]
-                .render_plan(Chroma::Full)
-        };
-        let base = |plan: RenderPlan| match plan {
-            RenderPlan::Tiles { base, .. } => base,
-            RenderPlan::Video { .. } => panic!("classify is a tiles plan"),
-        };
-        let jpeg = LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled };
-        assert_eq!(
-            base(plan("")),
-            TileCodec::Classify { lossy: jpeg, debug: false },
-            "an unset key reads as jpeg, what the classifier was measured against"
-        );
-        assert_eq!(
-            base(plan("render_classify_lossy = \"jpeg\"")),
-            TileCodec::Classify { lossy: jpeg, debug: false },
-            "naming the default changes nothing"
-        );
-        assert_eq!(
-            base(plan("render_classify_lossy = \"webp\"")),
-            TileCodec::Classify { lossy: LossyStill::Webp { quality: 60 }, debug: false },
-        );
-    }
-
-    /// The key belongs to the subtype that has the decision. Everywhere else it
-    /// would be a second answer to a question the subtype axis already answered,
-    /// or a dial on a base that has no lossy arm at all.
-    #[test]
-    fn the_classify_lossy_key_is_refused_off_the_classifier() {
-        for keys in [
-            "render_classify_lossy = \"webp\"",
-            "render_subtype = \"jpeg\"\nrender_subtype_quality = 60\n\
-             render_classify_lossy = \"webp\"",
-            "render_subtype = \"webp\"\nrender_subtype_quality = 60\n\
-             render_classify_lossy = \"jpeg\"",
-        ] {
-            let err = ConfigFile::parse(&format!(
-                r#"
-                [[targets]]
-                name = "a"
-                protocol = "rdp"
-                username = "u"
-                password = "p"
-                host = "h"
-                {keys}
-                "#
-            ))
-            .unwrap_err();
-            assert!(
-                format!("{err:#}").contains("render_classify_lossy"),
-                "{keys} should be refused by name: {err:#}"
-            );
-        }
-    }
-
-    /// The dial's quality decides the chroma sampling once, for every subtype that
-    /// reaches JPEG, at the encoder's own threshold — so the plan carries it and the
-    /// per-encode quality walk has nothing left to decide about colour.
-    #[test]
-    fn a_lossy_dial_at_ninety_pins_full_chroma() {
-        for subtype in ["jpeg", "classify"] {
-            let cfg = ConfigFile::parse(&format!(
-                r#"
-                [[targets]]
-                name = "a"
-                protocol = "rdp"
-                username = "u"
-                password = "p"
-                host = "h"
-                render_subtype = "{subtype}"
-                render_subtype_quality = 90
-                render_adaptive = true
-                "#
-            ))
-            .unwrap();
-            let RenderPlan::Tiles { base, .. } = cfg.targets[0].render_plan(Chroma::Full) else {
-                panic!("a lossy subtype is a tiles plan");
-            };
-            let lossy = match base {
-                TileCodec::Lossy(lossy) | TileCodec::Classify { lossy, .. } => lossy,
-                TileCodec::Png => panic!("{subtype} resolved to PNG"),
-            };
-            assert_eq!(
-                lossy,
-                LossyStill::Jpeg { quality: 90, sampling: JpegSampling::Full },
-                "{subtype} at quality 90"
-            );
-        }
-    }
-
     /// The subtype is the codec axis, so a lossy one needs no particular
     /// render_type: `tiles` is the default, and naming it changes nothing.
     #[test]
@@ -3378,7 +3091,7 @@ mod tests {
             username = "u"
             password = "p"
             host = "h"
-            render_subtype = "jpeg"
+            render_subtype = "webp"
             render_subtype_quality = 60
             "#,
         )
@@ -3386,10 +3099,7 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
-                base: TileCodec::Lossy(LossyStill::Jpeg {
-                    quality: 60,
-                    sampling: JpegSampling::Subsampled,
-                }),
+                base: TileCodec::Webp { quality: 60 },
                 motion: None,
                 debug: false,
                 adaptive: None,
@@ -3419,7 +3129,7 @@ mod tests {
             t.render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Classify {
-                    lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
+                    quality: 60,
                     debug: false,
                 },
                 motion: None,
@@ -3447,7 +3157,7 @@ mod tests {
     }
 
     /// The classifier as a motion base: a settled cell is classified
-    /// (photographic JPEG, text lossless) while the moving regions become video.
+    /// (photographic WebP, text lossless) while the moving regions become video.
     #[test]
     fn motion_streams_over_a_classify_base() {
         let cfg = ConfigFile::parse(
@@ -3469,7 +3179,7 @@ mod tests {
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Classify {
-                    lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
+                    quality: 60,
                     debug: false,
                 },
                 motion: Some(MotionEncode { quality: 30, chroma: Chroma::Subsampled }),
@@ -3547,7 +3257,7 @@ mod tests {
     fn render_chroma_without_a_stream_is_refused() {
         for keys in [
             "",
-            "render_subtype = \"jpeg\"\nrender_subtype_quality = 60",
+            "render_subtype = \"webp\"\nrender_subtype_quality = 60",
         ] {
             let err = ConfigFile::parse(&format!(
                 r#"
@@ -3773,7 +3483,7 @@ mod tests {
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
                 base: TileCodec::Classify {
-                    lossy: LossyStill::Jpeg { quality: 60, sampling: JpegSampling::Subsampled },
+                    quality: 60,
                     debug: true,
                 },
                 motion: None,
@@ -3790,7 +3500,7 @@ mod tests {
             username = "u"
             password = "p"
             host = "h"
-            render_subtype = "jpeg"
+            render_subtype = "webp"
             render_subtype_quality = 60
             render_classify_debug = true
             "#,
@@ -3809,7 +3519,7 @@ mod tests {
             username = "u"
             password = "p"
             host = "h"
-            render_subtype = "jpeg"
+            render_subtype = "webp"
             "#,
         )
         .unwrap_err();
@@ -3827,7 +3537,7 @@ mod tests {
                 username = "u"
                 password = "p"
                 host = "h"
-                render_subtype = "jpeg"
+                render_subtype = "webp"
                 render_subtype_quality = {q}
                 "#
             );
@@ -3900,7 +3610,7 @@ mod tests {
     /// written names an expectation `video` cannot meet, whatever it says.
     #[test]
     fn video_refuses_a_render_subtype() {
-        for subtype in ["png", "jpeg", "classify"] {
+        for subtype in ["png", "webp", "classify"] {
             let err = ConfigFile::parse(&format!(
                 r#"
                 [[targets]]
@@ -4061,7 +3771,7 @@ mod tests {
             password = "p"
             host = "h"
             render_motion = true
-            render_subtype = "jpeg"
+            render_subtype = "webp"
             render_subtype_quality = 60
             render_stream_quality = 10
             "#,
@@ -4070,10 +3780,7 @@ mod tests {
         assert_eq!(
             cfg.targets[0].render_plan(Chroma::Full),
             RenderPlan::Tiles {
-                base: TileCodec::Lossy(LossyStill::Jpeg {
-                    quality: 60,
-                    sampling: JpegSampling::Subsampled,
-                }),
+                base: TileCodec::Webp { quality: 60 },
                 motion: Some(MotionEncode { quality: 10, chroma: Chroma::Subsampled }),
                 debug: false,
                 adaptive: None
@@ -4095,11 +3802,6 @@ mod tests {
         let cases = [
             ("tiles over lossless png, the default", "render_type = \"tiles\"", "tiles · lossless png"),
             (
-                "tiles over fixed-quality jpeg",
-                "render_subtype = \"jpeg\"\nrender_subtype_quality = 60",
-                "tiles · jpeg q60",
-            ),
-            (
                 "tiles over fixed-quality webp",
                 "render_subtype = \"webp\"\nrender_subtype_quality = 60",
                 "tiles · webp q60",
@@ -4107,23 +3809,17 @@ mod tests {
             (
                 "tiles behind the classifier",
                 "render_subtype = \"classify\"\nrender_subtype_quality = 60",
-                "tiles · classified png / jpeg q60",
-            ),
-            (
-                "the classifier spending its quality on webp instead",
-                "render_subtype = \"classify\"\nrender_subtype_quality = 60\n\
-                 render_classify_lossy = \"webp\"",
                 "tiles · classified png / webp q60",
             ),
             (
                 "the classifier's debug outlines, a different session to be looking at",
                 "render_subtype = \"classify\"\nrender_subtype_quality = 60\nrender_classify_debug = true",
-                "tiles · classified png / jpeg q60 (debug outlines)",
+                "tiles · classified png / webp q60 (debug outlines)",
             ),
             (
                 "motion over a classify base",
                 "render_motion = true\nrender_subtype = \"classify\"\nrender_subtype_quality = 60\nrender_stream_quality = 15",
-                "motion · base classified png / jpeg q60, moving stream q15",
+                "motion · base classified png / webp q60, moving stream q15",
             ),
             (
                 "motion over a lossless base",
@@ -4132,8 +3828,8 @@ mod tests {
             ),
             (
                 "motion over a lossy base",
-                "render_motion = true\nrender_subtype = \"jpeg\"\nrender_subtype_quality = 70\nrender_stream_quality = 40",
-                "motion · base jpeg q70, moving stream q40",
+                "render_motion = true\nrender_subtype = \"webp\"\nrender_subtype_quality = 70\nrender_stream_quality = 40",
+                "motion · base webp q70, moving stream q40",
             ),
             (
                 "the debug outlines, which are a different session to be looking at",
@@ -4235,7 +3931,7 @@ mod tests {
             password = "p"
             host = "h"
             render_motion = true
-            render_subtype = "jpeg"
+            render_subtype = "webp"
             render_stream_quality = 10
             "#,
         )
@@ -4324,7 +4020,7 @@ mod tests {
         for keys in [
             "render_stream_quality = 60",
             "render_type = \"tiles\"\nrender_stream_quality = 60",
-            "render_subtype = \"jpeg\"\nrender_subtype_quality = 70\nrender_stream_quality = 60",
+            "render_subtype = \"webp\"\nrender_subtype_quality = 70\nrender_stream_quality = 60",
         ] {
             let err = parse_target(keys).unwrap_err();
             let msg = format!("{err:#}");
@@ -4380,7 +4076,7 @@ mod tests {
     #[test]
     fn the_motion_overlay_is_refused_without_the_switch() {
         let err = parse_target(
-            "render_subtype = \"jpeg\"\nrender_subtype_quality = 60\nrender_motion_debug = true",
+            "render_subtype = \"webp\"\nrender_subtype_quality = 60\nrender_motion_debug = true",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("without render_motion"), "{err:#}");
@@ -4433,7 +4129,7 @@ mod tests {
             password = "p"
             host = "h"
             render_type = "tiles"
-            render_subtype = "jpeg"
+            render_subtype = "webp"
             render_subtype_quality = 60
             "#,
         )
@@ -4695,7 +4391,7 @@ mod tests {
         assert!(format!("{err:#}").contains("3840"), "{err:#}");
         assert!(format!("{err:#}").contains("tiles"), "{err:#}");
         ConfigFile::parse(&rdp_toml(&format!(
-            "{pin}render_motion = true\nrender_subtype = \"jpeg\"\nrender_subtype_quality = 60\n\
+            "{pin}render_motion = true\nrender_subtype = \"webp\"\nrender_subtype_quality = 60\n\
              render_stream_quality = 60"
         )))
         .expect_err("a 5K pin on a region stream parsed");
@@ -5250,7 +4946,7 @@ mod tests {
         assert_eq!(plan.describe(), "video q80 · adaptive ≥20");
 
         let cfg = parse_target(
-            "render_subtype = \"jpeg\"\n\
+            "render_subtype = \"webp\"\n\
              render_subtype_quality = 70\nrender_adaptive = true\nrender_adaptive_min = 35",
         )
         .expect("adaptive tiles");
@@ -5258,16 +4954,13 @@ mod tests {
         assert_eq!(
             plan,
             RenderPlan::Tiles {
-                base: TileCodec::Lossy(LossyStill::Jpeg {
-                    quality: 70,
-                    sampling: JpegSampling::Subsampled,
-                }),
+                base: TileCodec::Webp { quality: 70 },
                 motion: None,
                 debug: false,
                 adaptive: Some(35)
             }
         );
-        assert_eq!(plan.describe(), "tiles · jpeg q70 · adaptive ≥35");
+        assert_eq!(plan.describe(), "tiles · webp q70 · adaptive ≥35");
 
         let cfg = parse_target(
             "render_motion = true\nrender_stream_quality = 60\nrender_adaptive = true",
