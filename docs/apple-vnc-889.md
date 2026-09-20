@@ -30,6 +30,35 @@ system audio below is **experimental** and stays behind the non-default
 | Fractional ratios | A virtual display mode whose backing/scaled ratio is not 1 or 2 is not rounded by the Mac. Measured August 23, 2026 on macOS 26.6.2: 2561×1440 backing over 1707×960 scaled (1.5x) created 1707×960 points at 2x, 2880×1800 over 1920×1200 (1.5x) created 960×600 points at 2x, and 2560×1440 over 2048×1152 (1.25x) created 960×540 points at 2x — a desktop whose text looks zoomed while the Dock, shrunk to fit the width, does not. Remotex therefore asks only for 1x or 2x (`protocol::render_density`). |
 | Lingering display | The virtual display outlives its session: a reconnect within a few seconds found it still there (the new session's ServerInit reported the previous mode and the display kept its id), and one after 45 s found the Mac back on its 800×600 physical display with a fresh id. The new session's own layout arrives either way, including when the requested mode equals the lingering one. |
 | Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
+| Authentication | Remote Management's default "All users" setting rejects valid account credentials with the same error as an incorrect password. Add the account to the per-user access list with Observe and Control before treating the failure as a protocol fault. |
+
+## Remote Management access
+
+Rule out the Mac's Remote Management permissions before treating an
+authentication failure as a protocol fault. When the account lacks permission,
+the type-30 exchange completes and the wrap key is derived before the Mac sends
+a failing `SecurityResult`, just as it does for an incorrect password. Both
+Apple subtypes report `VNC authentication failed: <the Mac's reason>`, which
+does not distinguish between the two causes.
+
+Remote Management's default **All users** setting rejects valid account
+credentials. Add the account to the per-user access list and grant at least
+**Observe** and **Control**. The Mac records this selection as
+`ARD_AllLocalUsers = 0` in
+`/Library/Preferences/com.apple.RemoteManagement`.
+
+Configure these permissions under System Settings → General → Sharing → Remote
+Management (ⓘ) → the account. Over SSH, this command enables the account and
+grants all Remote Management privileges:
+
+```sh
+sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+  -configure -access -on -users <account> -privs -all -restart -agent
+```
+
+The **VNC viewers may control screen with password** setting is for clients that
+use RFB security type 2. Remotex authenticates with type 30 and the account's
+own password, so this legacy option does not need to be enabled.
 
 ## Confirmed display modes
 

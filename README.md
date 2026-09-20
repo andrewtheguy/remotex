@@ -166,6 +166,11 @@ account's username and password; that selects Apple Remote Desktop authenticatio
 so the connection lands at the user's own screen rather than a login-window
 session.
 
+The Mac must grant that account Observe and Control in Remote Management's
+per-user access list. The default "All users" setting rejects the connection
+with the same authentication error as incorrect credentials. See
+[Remote Management access](docs/apple-vnc-889.md#remote-management-access).
+
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 at full fidelity, and supports the native Apple pasteboard. After the initial
