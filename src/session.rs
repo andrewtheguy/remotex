@@ -1551,6 +1551,7 @@ mod tests {
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
+    use crate::config::DEFAULT_RENDER_ADAPTIVE_MIN;
 
     use super::*;
     use crate::config::ChromaChoice;
@@ -1664,7 +1665,7 @@ mod tests {
             render_chroma: None,
             render_classify_debug: false,
             render_grid_debug: false,
-            render_adaptive: false,
+            render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,
             audio_adaptive: false,
@@ -2022,7 +2023,7 @@ mod tests {
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                assert_eq!(render, "video q60")
+                assert_eq!(render, "video q60 4:4:4 · adaptive ≥20")
             }
             other => panic!("expected connected, got {other:?}"),
         }
@@ -2035,8 +2036,8 @@ mod tests {
     #[tokio::test]
     async fn an_auto_chroma_target_streams_what_the_attached_browser_takes() {
         for (answer, want, card) in [
-            (Chroma::Full, Chroma::Full, "video q60 4:4:4"),
-            (Chroma::Subsampled, Chroma::Subsampled, "video q60"),
+            (Chroma::Full, Chroma::Full, "video q60 4:4:4 · adaptive ≥20"),
+            (Chroma::Subsampled, Chroma::Subsampled, "video q60 4:2:0 · adaptive ≥20"),
         ] {
             let (hook_tx, hook_rx) = std_mpsc::channel();
             let spawner: EngineSpawner = Box::new(
@@ -2065,7 +2066,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan::Video { quality: 60, adaptive: None, chroma: want },
+                RenderPlan::Video { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: want },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2121,7 +2122,7 @@ mod tests {
         let mut taken = mgr.attach(&second, None, Chroma::Subsampled).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("the takeover reconnects the selected target"),
-            RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled },
+            RenderPlan::Video { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled },
             "the reconnect must follow the browser that took over"
         );
         expect_connected(&mut taken.events, "video-auto").await;
@@ -2175,7 +2176,7 @@ mod tests {
         let mut changed = mgr.attach(&token, None, Chroma::Subsampled).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan::Video { quality: 60, adaptive: None, chroma: Chroma::Subsampled },
+            RenderPlan::Video { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled },
             "the rebuilt stream must follow the browser that came back"
         );
         expect_connected(&mut changed.events, "video-auto").await;

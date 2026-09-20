@@ -103,8 +103,8 @@ sends no tiles at all — one fixed region, the whole desktop, for the whole ses
 — so there is no per-tile codec left to name.
 
 `render_motion = true` is a switch on `tiles`, not a third transport: it adds a
-video stream per coalesced region of the cells changing fast (`video_quality`,
-which it requires), and re-sends each cell at the base encode once it settles. It
+video stream per coalesced region of the cells changing fast (`video_quality`), and
+re-sends each cell at the base encode once it settles. It
 changes nothing about what a tile is or how one travels
 — the base codec is still the base codec, because the base encode is still a still
 image; only what is moving becomes a stream. It is refused under `video`, which
@@ -132,21 +132,25 @@ The classifier's cross-project source review and measurement candidates live in
 [Still-image classification in remote desktop implementations](still-image-classification-research.md).
 
 Three more keys sit across the whole dial rather than on either axis.
-`render_chroma` (`"420"`, the default, `"444"`, or `"auto"`) is how much colour a
+`render_chroma` (`"auto"`, the default, or `"420"` / `"444"`) is how much colour a
 *stream* carries per pixel — every stream the target has, `video` and a
-`render_motion` region alike — and is refused on a target that streams nothing; see
-[the codec](#the-codec) for why it, and not the quality, is where a desktop stream's
-picture goes, and [choosing a chroma](#choosing-a-chroma) for which of the three to
-write down.
-`render_adaptive = true` lets `video_quality` track the measured link between
-`render_adaptive_min` (default 20) and its configured value, which stays the ceiling
-— see [what the link will bear](#the-codec) for the signal and the walk. It is a
-stream's key, refused on a target that streams nothing, and `image_quality` never
-moves, lossy base or not. A stream that fell below its dial is sharpened by its own
-next frame, and a region that stops is owed a cleanup whatever quality it ran at. A
-still is sent once: one the link coarsened would keep that picture until its pixels
-next changed, and coming back for it means encoding again something that was never
-going to be sent twice.
+`render_motion` region alike — and is refused on a target that streams nothing. A
+target that writes nothing resolves it per browser; the two fixed answers are
+selections no decoder can overrule. See [the codec](#the-codec) for why it, and not
+the quality, is where a desktop stream's picture goes, and
+[choosing a chroma](#choosing-a-chroma) for when to take the decision away from the
+browser.
+`video_quality` (default 90) is the ceiling every stream holds to, and
+`render_adaptive` lets it track the measured link down to `render_adaptive_min`
+(default 20, or the dial itself where that is lower) — see [what the link will bear](#the-codec) for the signal and the walk.
+The walk is on unless a target writes `render_adaptive = false`, which leaves the
+pressure-only walk floored at 1 that the streams had before the key existed. All
+three are a stream's keys, refused on a target that streams nothing whichever way
+they are set, and `image_quality` never moves, lossy base or not. A stream that fell
+below its dial is sharpened by its own next frame, and a region that stops is owed a
+cleanup whatever quality it ran at. A still is sent once: one the link coarsened
+would keep that picture until its pixels next changed, and coming back for it means
+encoding again something that was never going to be sent twice.
 
 `render_grid_debug = true` is the third QA aid and the one the *client* draws: the
 gateway's tile lattice, dashed, over the desktop. It is refused on
@@ -528,12 +532,13 @@ trip that pins the difference, through the archive's own decoder.
 
 ### Choosing a chroma
 
-The key takes three answers, and two of them are decisions the browser cannot
-overrule.
+The key takes three answers: the default resolves per browser, and the other two
+are decisions no browser can overrule.
 
 **`"auto"` — 4:4:4 where the decoder takes profile 1, 4:2:0 where it does not.**
-The one to reach for on a target watched from more than one kind of browser, and
-the reason a target need not be written down twice under two names. The page asks
+The default, and what a target that writes no chroma gets: every browser is sent
+the most colour its own decoder takes, and no target is written down twice under
+two names to serve a desktop and an iPad. The page asks
 its own `VideoDecoder` once, at load, about the profile 1 configuration the gateway
 would announce (`frontend/src/videoChroma.ts`), and states the answer as
 `chroma=444|420` on every session socket it opens. `render_plan` resolves the key
@@ -564,13 +569,14 @@ GPU-process decoder is the one that goes quiet under stream churn, and software
 libvpx is what answers every chunk (`frontend/src/videoDecoder.ts`). What it costs
 is CPU on the client, roughly twice the samples per frame.
 
-**`"420"` — profile 0 for every browser.** The default, and what every stream was
-before the key existed. Right for a fleet that must stay on a hardware decoder, or
-where the target is photographic rather than text and the chroma buys nothing.
+**`"420"` — profile 0 for every browser.** What every stream was before this key
+existed, and a selection now rather than a default: a decoder that would have taken
+profile 1 is sent the subsampled stream anyway. Right for a fleet that must stay on
+a hardware decoder, or where the target is photographic rather than text and the
+chroma buys nothing.
 
-Set nothing and the target streams 4:2:0, exactly as before. `"auto"` is the
-setting to write down when the picture matters and the fleet is mixed; the two
-fixed answers are for when the bitstream, not the picture, is the thing being held
+Set nothing and every browser gets what it can decode. The two fixed answers are
+for when the bitstream, not the picture, is the thing being held
 still.
 
 The keyframe header also *says* the conversion is BT.601 studio swing
@@ -592,8 +598,8 @@ answers it. Quality moves through `Stream::set_quality`, which re-tunes the runn
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
-`render_adaptive = true` gives the same walk a second signal and an operator's
-floor. The signal is the client's own lag: the paint window already tracks how
+`render_adaptive` gives the same walk a second signal and an operator's
+floor, on every streaming target that has not turned it off. The signal is the client's own lag: the paint window already tracks how
 long the oldest unacknowledged batch has been owed, and `LinkFeedback`
 (`src/feedback.rs`) publishes that age minus a baseline — the smallest recent
 end-to-end time, so distance never reads as queueing; RustDesk and Guacamole
@@ -601,9 +607,9 @@ both make the same subtraction. Sixty milliseconds of queueing lag counts as
 a behind frame even when nothing local blocked, which is exactly the case the
 paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
 flight while every queue stayed shallow. The walk's floor moves from 1 to
-`render_adaptive_min`. Without the key the walk is pressure-only. With or without
-it a tile's quality is fixed: Guacamole scales a still's quality with the same lag,
-but a still sent coarse has nothing coming back for it, and on a motion plan a
+`render_adaptive_min`. Under `render_adaptive = false` the walk is pressure-only.
+With or without it a tile's quality is fixed: Guacamole scales a still's quality
+with the same lag, but a still sent coarse has nothing coming back for it, and on a motion plan a
 quiet band also discharges what its cells were owed — a debt a coarse copy has not
 paid.
 

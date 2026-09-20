@@ -48,7 +48,7 @@ fn uat_target(name: &str) -> TargetConfig {
     target.render_motion_debug = false;
     target.render_classify_debug = false;
     target.render_grid_debug = false;
-    target.render_adaptive = false;
+    target.render_adaptive = Some(false);
     target.render_adaptive_min = None;
     target
 }

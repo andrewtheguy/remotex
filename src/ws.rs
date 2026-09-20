@@ -1583,7 +1583,7 @@ mod tests {
             render_chroma: None,
             render_classify_debug: false,
             render_grid_debug: false,
-            render_adaptive: false,
+            render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,
             audio_adaptive: false,

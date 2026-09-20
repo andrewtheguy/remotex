@@ -89,7 +89,9 @@ fn uat_target(name: &str, motion: bool) -> TargetConfig {
     // The outlines are for eyes on a browser; on the wire they would only
     // perturb the payloads this test checks the magic of.
     target.render_classify_debug = false;
-    target.render_adaptive = false;
+    // The walk is on by default; this test wants the one quality it configured,
+    // and off is only a key a streaming target may write.
+    target.render_adaptive = motion.then_some(false);
     target.render_adaptive_min = None;
     target
 }

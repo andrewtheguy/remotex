@@ -449,10 +449,11 @@ password = "change-me"
 #              costs is a little gateway CPU per tile, on the encode workers.
 #
 # image_quality is 1-100 and is *required* whenever the subtype is lossy ("webp",
-# "classify"), refused when it is "png" — there is no default, because a quality
-# nobody chose is not a quality. Higher is larger and closer to exact. It is the base
-# codec's dial and nothing else's: video_quality, below, is the dial of whatever VP9
-# stream a target has, and is refused on one that streams nothing.
+# "classify"), refused when it is "png" — there is no default, because a still is sent
+# once and a quality nobody chose would be the one it keeps. Higher is larger and closer
+# to exact. It is the base codec's dial and nothing else's: video_quality, below, is the
+# dial of whatever VP9 stream a target has, defaults to 90, and is refused on a target
+# that streams nothing.
 #
 # The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
 # refused rather than ignored.
@@ -519,13 +520,13 @@ password = "change-me"
 # cells only. So image_quality is still refused over a "png" base — there is nothing
 # to turn down — and still required over "webp" or "classify".
 #
-# video_quality is the streams' own dial, required by render_motion — the switch has
-# no quality of its own and none is invented for it. It is a *ceiling*: on a link that
-# can carry it you get that quality, and a link that cannot makes the picture coarser
-# until it can. Nothing goes finer than what is set here. It can be very low — motion
-# hides it, and it does not last. There is no codec key beside it: a moving region is
-# VP9, the same as render_type = "video", and render_chroma below is the only choice
-# inside it.
+# video_quality is the streams' own dial, and defaults to 90 here as everywhere a
+# stream is sent. It is a *ceiling*: on a link that can carry it you get that quality,
+# and a link that cannot makes the picture coarser until it can — down to
+# render_adaptive_min, which is the walk below. Nothing goes finer than what is set
+# here. It can be set very low — motion hides it, and it does not last. There is no
+# codec key beside it: a moving region is VP9, the same as render_type = "video", and
+# render_chroma below is the only choice inside it — and it too has a default.
 #
 # It is the same key render_type = "video" uses below, and deliberately: both are the
 # quality of a VP9 stream, they reach the same encoder through the same congestion
@@ -568,9 +569,10 @@ password = "change-me"
 # not the framing.)
 #
 # video_quality is the dial — the same key render_motion uses above, since both name
-# the quality of a VP9 stream. 1-100 as everywhere else, and a *ceiling*: on a link
-# that can carry it you get exactly that quality, and a link that cannot makes the
-# picture coarser until it can. Nothing ever goes finer than what is set here.
+# the quality of a VP9 stream. 1-100 as everywhere else, defaulting to 90, and a
+# *ceiling*: on a link that can carry it you get exactly that quality, and a link that
+# cannot makes the picture coarser until it can, down to render_adaptive_min. Nothing
+# ever goes finer than what is set here.
 #
 # One thing to know before choosing it:
 #
@@ -587,10 +589,12 @@ password = "change-me"
 
 # How much colour a video stream carries per pixel — every stream this target has,
 # render_type = "video" and render_motion = true alike. Refused on a target that
-# streams nothing.
+# streams nothing. Left out, it is "auto": the browser's own decoder decides. The
+# other two answers take that decision away from it, for every browser alike.
 #
-#   "420"  — one colour sample per 2×2 pixels (VP9 profile 0). The default, and the one
-#            every decoder takes, hardware ones included.
+#   "420"  — one colour sample per 2×2 pixels (VP9 profile 0). The one every decoder
+#            takes, hardware ones included, sent even to a decoder that would have
+#            taken the colour.
 #   "444"  — a colour sample per pixel (VP9 profile 1). This, not video_quality, is
 #            where a desktop stream's visible loss is: a one-pixel coloured glyph stem
 #            on a dark terminal shares its one 4:2:0 colour sample with three pixels of
@@ -601,14 +605,14 @@ password = "change-me"
 #            does; iOS and iPadOS have no software VP9 at all and refuse it by name,
 #            and this setting sends it to them anyway.
 #   "auto" — 4:4:4 where the browser's decoder takes profile 1, 4:2:0 where it says it
-#            does not. The page asks its own VideoDecoder once, at load, and states the
-#            answer on its session socket.
+#            does not. The default. The page asks its own VideoDecoder once, at load,
+#            and states the answer on its session socket.
 #
 # Which to write down:
 #
-#   Watched from more than one kind of browser — a desktop and an iPad, say — use
-#   "auto". It is the whole reason this target need not be duplicated under two names,
-#   and every browser gets the best picture it can actually decode.
+#   Watched from more than one kind of browser — a desktop and an iPad, say — leave
+#   the key out. "auto" is the whole reason this target need not be duplicated under
+#   two names, and every browser gets the best picture it can actually decode.
 #
 #   Set "444" only to hold a fleet to one bitstream or to pin one side of a measurement:
 #   it asks nobody, so any iOS or iPadOS client sees the decoder's refusal instead of a
@@ -616,21 +620,27 @@ password = "change-me"
 #   samples per frame, and no hardware path — which in this system's experience is the
 #   safer decoder anyway: the GPU-process one is what goes quiet under stream churn.
 #
-#   Set "420" (or leave the key out) for a fleet that must stay on a hardware decoder,
-#   or where the target is photographic rather than text and the extra colour buys
-#   nothing worth the bytes.
-#render_chroma = "420"
+#   Set "420" for a fleet that must stay on a hardware decoder, or where the target is
+#   photographic rather than text and the extra colour buys nothing worth the bytes.
+#   It is a selection like "444", not the quiet answer it used to be.
+#render_chroma = "auto"
 
-# Let `video_quality` track measured client queueing. The configured quality
-# remains the ceiling; the stream adds the client's paint lag to its existing
-# send-pressure signal. A stream's key: refused on a target that streams nothing
-# (no render_motion, and not render_type = "video"). `image_quality` never moves —
-# a tile is sent once, so one the link coarsened would stay coarse until its
-# pixels next changed.
-#render_adaptive = false
+# `video_quality` tracks measured client queueing — on unless this turns it off. The
+# configured quality remains the ceiling; the stream adds the client's paint lag to its
+# existing send-pressure signal, and never goes below render_adaptive_min. A stream's
+# key, and refused on a target that streams nothing (no render_motion, and not
+# render_type = "video") whichever way it is set. `image_quality` never moves — a tile
+# is sent once, so one the link coarsened would stay coarse until its pixels next
+# changed.
+#
+# Turning it off leaves the walk the streams had before this key existed: pressure only,
+# floored at 1, which is worth having only to pin one side of a measurement.
+#render_adaptive = true
 
-# Floor for that adaptive walk, 1–100 and defaulting to 20. Valid only with
-# `render_adaptive = true`, and it may not exceed `video_quality`.
+# Floor for that adaptive walk, 1–100 and defaulting to 20. Refused beside
+# `render_adaptive = false`, and it may not exceed `video_quality`. A target whose
+# dial sits below the default floor walks down to that dial instead — the default
+# never asks a stream for a quality it does not send.
 #render_adaptive_min = 20
 
 # QA aid for render_motion, off unless asked for: outline every piece the motion
