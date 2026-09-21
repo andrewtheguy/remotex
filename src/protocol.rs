@@ -655,6 +655,24 @@ impl Held {
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
     }
 
+    /// How much of the budget this holds.
+    pub fn bytes(&self) -> usize {
+        self.share.as_ref().map_or(0, |share| share.bytes as usize)
+    }
+
+    /// Carve `bytes` of this share off for one payload, or whatever is left of it:
+    /// how a reservation taken for several payloads at once is handed to each.
+    pub fn split(&mut self, bytes: usize) -> Self {
+        let Some(share) = &mut self.share else {
+            return Self::default();
+        };
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(share.bytes);
+        share.bytes -= bytes;
+        Self {
+            share: Some(Share { budget: std::sync::Arc::clone(&share.budget), bytes, limit: share.limit }),
+        }
+    }
+
     /// Correct an estimated share to the payload's real size. What was taken in
     /// excess goes back at once; what is missing is taken only if it is there,
     /// because the task that settles is the one everything queued behind it waits

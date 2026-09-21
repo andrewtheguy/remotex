@@ -640,6 +640,10 @@ struct Shared {
     /// What recent tiles compressed to, in 1024ths of their pixels: the estimate a
     /// tile's share is taken at before its encode says what it really is.
     encoded_per_raw: AtomicU32,
+    /// The same for cleanups, which are their own population: whatever a stream was
+    /// carrying, encoded as a still. Starts at the pixels themselves, so the first
+    /// tickful is the one that cannot outrun its share.
+    cleanup_per_raw: AtomicU32,
     /// What the last round of access units came to, which the next is taken at.
     round_bytes: AtomicU64,
     /// How long the engine has waited on the budget since the last round was
@@ -715,6 +719,7 @@ impl Shared {
             stalled_micros: AtomicU64::new(0),
             budget: Arc::new(Semaphore::new(QUEUE_BUDGET as usize)),
             encoded_per_raw: AtomicU32::new(ENCODED_PER_RAW),
+            cleanup_per_raw: AtomicU32::new(1024),
             round_bytes: AtomicU64::new(0),
             held_micros: AtomicU64::new(0),
         }
@@ -1408,6 +1413,8 @@ async fn flush_cleanups(
 ) -> bool {
     let mut due: Vec<(Rect, bool, Vec<u8>)> = Vec::new();
     let ended: Vec<u8>;
+    // This tickful's share of the queue budget, carved up among its tiles below.
+    let mut room: Held;
     // One reading of the clock, and so one reading of the lag, for the whole tickful:
     // these all go out together and are one moment's answer, not several.
     let now = tokio::time::Instant::now();
@@ -1437,7 +1444,22 @@ async fn flush_cleanups(
         // the lag says.
         let behind = video.congestion.lag_aware && shared.feedback.lag(now) >= LAG_BEHIND;
         let idle = if behind { CLEANUP_HELD } else { CLEANUP_IDLE };
-        let rects = video.regions.due(now, idle, MAX_CLEANUPS_PER_TICK);
+        // Not whatever the queue budget says, though. The lag is a reason to prefer
+        // the streams; the budget is the bound on what is queued towards the browser
+        // at all, and stills sent past it are the seconds of stale picture it exists
+        // to prevent. So the room is taken first and only as many cells as it covers
+        // are taken after it — a debt is removed by being taken, and nothing is taken
+        // that is not sent. Taken without waiting, because this is the order task and
+        // what it would wait on is queued behind it. A budget the engine keeps full
+        // leaves these debts standing until the link lets go of some of it.
+        let grid = shared.grid();
+        let per_raw = shared.cleanup_per_raw.load(Ordering::Relaxed) as usize;
+        let per_cell = (usize::from(grid.w) * usize::from(grid.h) * 3).saturating_mul(per_raw) / 1024;
+        let affordable =
+            (shared.budget.available_permits() / per_cell.max(1)).min(MAX_CLEANUPS_PER_TICK);
+        room = Held::take_now(&shared.budget, affordable * per_cell, QUEUE_BUDGET);
+        let cells = if room.bytes() == 0 { 0 } else { affordable };
+        let rects = video.regions.due(now, idle, cells);
         // Cut at `BAND_ROWS` like every other payload. A cleanup run is whole grid
         // cells, and a cell is 128 pixels tall on a 2x framebuffer — twice what a
         // record is allowed to be measured in bytes, which is the one thing the band
@@ -1513,9 +1535,14 @@ async fn flush_cleanups(
         shared.cleanups.fetch_add(1, Ordering::Relaxed);
         shared.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
         shared.cleanup_bytes.fetch_add(bytes, Ordering::Relaxed);
-        // Whatever room there is and no waiting for more: this is the order task,
-        // and a debt this old is paid whatever the link says — see `CLEANUP_HELD`.
-        tile.held = Held::take_now(&shared.budget, tile.data.len(), QUEUE_BUDGET);
+        let raw = usize::from(rect.w()) * usize::from(rect.h()) * 3;
+        let per_raw =
+            u32::try_from(tile.data.len().saturating_mul(1024) / raw.max(1)).unwrap_or(u32::MAX);
+        let _ = shared.cleanup_per_raw.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+            Some((old.saturating_mul(3).saturating_add(per_raw)) / 4)
+        });
+        tile.held = room.split(tile.data.len());
+        tile.held.settle(tile.data.len());
         if frame_tx.send(ServerMsg::Tile(tile)).await.is_err() {
             return false;
         }
@@ -3566,6 +3593,52 @@ mod tests {
             tiles += usize::from(matches!(msg, ServerMsg::Tile(_)));
         }
         assert!(tiles > 0, "a client keeping up was made to wait for its cleanup");
+    }
+
+    /// A cleanup is queued towards the browser like any other payload, so it is paid
+    /// for out of the same budget — and because the order task cannot wait for room,
+    /// a tick that finds none sends nothing and leaves the debt standing for the
+    /// tick that does.
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_waits_for_room_in_the_queue_budget() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let plan = adaptive_motion(TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan, feedback());
+        sink.msg(ServerMsg::Resize { w: 640, h: 128, scale: UNSCALED }).await.unwrap();
+        until_streamed(&sink, rect(0, 0, 320, 64), 40).await;
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        // Everything the link has not let go of, as a slow one holds it.
+        let budget = Arc::clone(&sink.shared.budget);
+        let queued = Held::take_now(&budget, budget.available_permits(), QUEUE_BUDGET);
+        assert_eq!(budget.available_permits(), 0);
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+        while let Ok(msg) = frame_rx.try_recv() {
+            assert!(!matches!(msg, ServerMsg::Tile(_)), "a cleanup was queued past the budget");
+        }
+
+        drop(queued);
+        let mut held = 0;
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+        let mut tiles = Vec::new();
+        while let Ok(msg) = frame_rx.try_recv() {
+            if let ServerMsg::Tile(tile) = msg {
+                held += tile.held.bytes();
+                assert_eq!(tile.held.bytes(), tile.data.len(), "a cleanup went out unaccounted");
+                tiles.push(tile);
+            }
+        }
+        assert!(!tiles.is_empty(), "the debt did not survive the ticks that could not pay it");
+        assert_eq!(budget.available_permits(), QUEUE_BUDGET as usize - held);
     }
 
     /// Replay a damage tape ([`crate::tape`]) through the motion detector, the
