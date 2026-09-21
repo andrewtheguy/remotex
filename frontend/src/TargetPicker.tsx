@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AppVersion } from "./AppVersion.tsx";
 import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
@@ -167,7 +168,7 @@ export default function TargetPicker({
         >
           Log out
         </button>
-        <div className="app-version">v{__APP_VERSION__}</div>
+        <AppVersion className="app-version" />
       </div>
     </div>
   );

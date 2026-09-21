@@ -8,6 +8,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { AppVersion } from "./AppVersion.tsx";
 import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
@@ -1495,7 +1496,7 @@ export default function FloatingMenu({
             </button>
           </div>
 
-          <div className="app-version">v{__APP_VERSION__}</div>
+          <AppVersion className="app-version" />
         </div>
       )}
 
@@ -1559,7 +1560,7 @@ export default function FloatingMenu({
               Close
             </button>
           </div>
-          <div className="app-version">v{__APP_VERSION__}</div>
+          <AppVersion className="app-version" />
         </ModalOverlay>
       )}
 

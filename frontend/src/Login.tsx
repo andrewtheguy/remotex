@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from "react";
+import { AppVersion } from "./AppVersion.tsx";
 import { gatewayFetch } from "./gateway.ts";
 
 // The web-login gate: one user, POST /api/auth/login sets the
@@ -86,7 +87,7 @@ export default function Login({
           </button>
         </form>
       )}
-      <div className="login-version">v{__APP_VERSION__}</div>
+      <AppVersion className="login-version" />
     </div>
   );
 }
