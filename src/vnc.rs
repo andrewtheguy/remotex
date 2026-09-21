@@ -273,11 +273,66 @@ impl AsyncRead for Downlink {
 /// would read the first and discard the second — which is why
 /// [`translate_input`] returns a list rather than a buffer.
 struct Uplink {
-    /// Boxed rather than a type parameter: this is written once per input event,
-    /// so a vtable hop costs nothing measurable, and it keeps [`Shared`] and every
-    /// rect handler free of a `W`.
-    sock: Box<dyn AsyncWrite + Send + Unpin>,
+    out: Out,
     framing: Framing,
+}
+
+/// Where a framed message goes.
+enum Out {
+    /// The handshake's: written before [`Uplink::send`] returns, because every
+    /// step of it waits on the server's answer to the last.
+    ///
+    /// Boxed rather than a type parameter: a vtable hop costs nothing measurable,
+    /// and it keeps [`Shared`] and every rect handler free of a `W`.
+    Socket(Box<dyn AsyncWrite + Send + Unpin>),
+    /// The running session's: handed to [`write_queued`], so that nothing which
+    /// sends ever waits on the socket — see [`Uplink::queued`].
+    Queue(mpsc::UnboundedSender<Vec<u8>>, Arc<Backlog>),
+}
+
+/// What [`write_queued`] has been handed and has not yet written.
+#[derive(Default)]
+struct Backlog {
+    bytes: std::sync::atomic::AtomicUsize,
+    /// Notified after every write, which is the only time the count falls.
+    written: tokio::sync::Notify,
+}
+
+impl Backlog {
+    /// The most that may be waiting before the browser's camera and microphone
+    /// stop being fed to it. Their queues upstream are bounded and shed what a
+    /// stalled server cannot take; input and the read loop's own messages are
+    /// small, owed to the server whatever its pace, and never held to this.
+    const MEDIA_LIMIT: usize = 256 * 1024;
+
+    /// Wait until the socket has caught up enough to be worth a media sample.
+    async fn room_for_media(&self) {
+        loop {
+            // Registered before the check, so a write landing in between is a
+            // wakeup this still sees.
+            let written = self.written.notified();
+            if self.bytes.load(std::sync::atomic::Ordering::Relaxed) < Self::MEDIA_LIMIT {
+                return;
+            }
+            written.await;
+        }
+    }
+}
+
+/// The running session's only writer: everything [`Uplink::send`] queued, in
+/// order, until the queue closes with the session or the socket fails.
+async fn write_queued(
+    mut sock: Box<dyn AsyncWrite + Send + Unpin>,
+    mut queue: mpsc::UnboundedReceiver<Vec<u8>>,
+    backlog: Arc<Backlog>,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    while let Some(bytes) = queue.recv().await {
+        sock.write_all(&bytes).await.context("write to the VNC server")?;
+        backlog.bytes.fetch_sub(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        backlog.written.notify_waiters();
+    }
+    Ok(())
 }
 
 /// What wraps a message on its way out.
@@ -295,31 +350,67 @@ enum Framing {
 impl Uplink {
     fn plain(sock: impl AsyncWrite + Send + Unpin + 'static) -> Self {
         Self {
-            sock: Box::new(sock),
+            out: Out::Socket(Box::new(sock)),
             framing: Framing::Plain,
         }
     }
 
     fn records(sock: impl AsyncWrite + Send + Unpin + 'static, keys: Keys) -> Self {
         Self {
-            sock: Box::new(sock),
+            out: Out::Socket(Box::new(sock)),
             framing: Framing::Records(Box::new(RecordWriter::new(keys))),
         }
     }
 
     fn frames(sock: impl AsyncWrite + Send + Unpin + 'static, sealer: Sealer) -> Self {
         Self {
-            sock: Box::new(sock),
+            out: Out::Socket(Box::new(sock)),
             framing: Framing::Frames(sealer),
         }
     }
 
+    /// Hand the socket to a writer of its own, for the running session.
+    ///
+    /// A server that is busy writing pixels reads slowly, and a Mac that cannot
+    /// write does not read at all. A send that waited on the socket therefore
+    /// waited, with the uplink held, on a server that was itself waiting for this
+    /// end to read — and the read loop, queued behind that send for its next
+    /// update request, was not reading. Nothing in that circle times out. Framing
+    /// still happens here, under the uplink's lock, so the wire's order is still
+    /// the order of the sends; only the write moves, to the future this returns,
+    /// and with it the one wait that could close the circle.
+    ///
+    /// Returns the uplink to share, what is queued behind it, and the writer to run
+    /// for as long as the session does.
+    fn queued(self) -> (Self, Arc<Backlog>, impl Future<Output = anyhow::Result<()>> + Send + 'static) {
+        let Self { out, framing } = self;
+        let Out::Socket(sock) = out else {
+            unreachable!("an uplink is handed to its writer once, by the session that built it");
+        };
+        let (tx, queue) = mpsc::unbounded_channel();
+        let backlog = Arc::new(Backlog::default());
+        let writer = write_queued(sock, queue, Arc::clone(&backlog));
+        (Self { out: Out::Queue(tx, Arc::clone(&backlog)), framing }, backlog, writer)
+    }
+
     async fn send(&mut self, msg: &[u8]) -> anyhow::Result<()> {
-        let Self { sock, framing } = self;
-        match framing {
-            Framing::Plain => sock.write_all(msg).await?,
-            Framing::Records(records) => sock.write_all(records.frame(msg)?).await?,
-            Framing::Frames(sealer) => sock.write_all(&sealer.frame(msg)).await?,
+        let Self { out, framing } = self;
+        let framed = match framing {
+            Framing::Plain => std::borrow::Cow::Borrowed(msg),
+            Framing::Records(records) => std::borrow::Cow::Borrowed(records.frame(msg)?),
+            Framing::Frames(sealer) => std::borrow::Cow::Owned(sealer.frame(msg)),
+        };
+        match out {
+            Out::Socket(sock) => sock.write_all(&framed).await?,
+            Out::Queue(queue, backlog) => {
+                let framed = framed.into_owned();
+                backlog.bytes.fetch_add(framed.len(), std::sync::atomic::Ordering::Relaxed);
+                // Closed only once the writer has returned, and its error is the
+                // one the session reports.
+                queue
+                    .send(framed)
+                    .map_err(|_| anyhow::anyhow!("the VNC server's connection is closed for writing"))?;
+            }
         }
         Ok(())
     }
@@ -685,10 +776,13 @@ async fn send_microphone_decided(
 }
 
 /// The mic socket's next command for the loop to send; never, on a session without a
-/// microphone.
-async fn microphone_input(queues: &mut Option<vnc_mic::Queues>) -> vnc_mic::Input {
+/// microphone. Held while the uplink is behind, like [`camera_input`].
+async fn microphone_input(queues: &mut Option<vnc_mic::Queues>, backlog: &Backlog) -> vnc_mic::Input {
     let next = match queues {
-        Some(queues) => queues.next().await,
+        Some(queues) => {
+            backlog.room_for_media().await;
+            queues.next().await
+        }
         None => None,
     };
     match next {
@@ -700,10 +794,15 @@ async fn microphone_input(queues: &mut Option<vnc_mic::Queues>) -> vnc_mic::Inpu
 }
 
 /// The camera socket's next command for the loop to send; never, on a session
-/// without a camera.
-async fn camera_input(queues: &mut Option<vnc_camera::Queues>) -> vnc_camera::Input {
+/// without a camera. Held while the uplink is behind: a send no longer waits on the
+/// socket, so this is where a server that is not reading stops being fed samples,
+/// and the socket's own queue sheds what it cannot take.
+async fn camera_input(queues: &mut Option<vnc_camera::Queues>, backlog: &Backlog) -> vnc_camera::Input {
     let next = match queues {
-        Some(queues) => queues.next().await,
+        Some(queues) => {
+            backlog.room_for_media().await;
+            queues.next().await
+        }
         None => None,
     };
     match next {
@@ -1643,7 +1742,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         poll,
     } = flags;
     // The uplink is shared: the read loop answers the server (update requests,
-    // re-arming), the input side sends pointer/key/display messages.
+    // re-arming), the input side sends pointer/key/display messages. Neither
+    // writes to the socket itself from here on — see [`Uplink::queued`].
+    let (uplink, backlog, writer) = uplink.queued();
+    let mut write_task = tokio::spawn(writer);
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
@@ -1733,11 +1835,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let result = loop {
         tokio::select! {
             res = &mut read_task => {
+                write_task.abort();
                 return res.map_err(|e| anyhow::anyhow!("read task failed: {e}"))?;
+            }
+            // Only ever an error: the queue it drains outlives this loop.
+            res = &mut write_task => {
+                break res.map_err(|e| anyhow::anyhow!("write task failed: {e}")).and_then(|r| r);
             }
             // The camera socket's plug, unplug and samples, written in the order the
             // browser sent them; what reaches the wire is the device's decision.
-            input = camera_input(&mut camera_queues) => {
+            input = camera_input(&mut camera_queues, &backlog) => {
                 if let Some(link) = &camera {
                     let sent = send_camera_decided(&uplink, link, |device| match input {
                         vnc_camera::Input::Plug(format) => device.plug(format),
@@ -1751,7 +1858,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 }
             }
             // The mic socket's plug, unplug and PCM, the same way.
-            input = microphone_input(&mut microphone_queues) => {
+            input = microphone_input(&mut microphone_queues, &backlog) => {
                 if let Some(link) = &microphone {
                     let sent = send_microphone_decided(&uplink, link, |device| match input {
                         vnc_mic::Input::Plug => device.plug(),
@@ -2020,6 +2127,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         }
     };
     read_task.abort();
+    write_task.abort();
     result
 }
 
@@ -8489,6 +8597,62 @@ mod tests {
                 if poll { "" } else { " not" }
             );
         }
+    }
+
+    /// The circle a busy Mac closed, with the server's half of it held still: input
+    /// the server has not read fills its socket, and the loop must go on reading
+    /// pixels anyway — asking for the next update behind that input rather than
+    /// waiting, with the uplink held, for a server that reads nothing until it has
+    /// been read from.
+    #[tokio::test]
+    async fn a_server_that_is_not_reading_is_still_read_from() {
+        // Sixteen bytes of socket, and nobody reading the other end of it.
+        let (sock, mut unread) = tokio::io::duplex(16);
+        let (uplink, backlog, writer) = Uplink::plain(sock).queued();
+        let writer = tokio::spawn(writer);
+        let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
+
+        // The input side, well past what that socket takes.
+        let flood = vec![vec![0u8; 64]; 64];
+        tokio::time::timeout(Duration::from_secs(5), send_all(&uplink, &flood))
+            .await
+            .expect("a send waited on a socket nobody is reading")
+            .unwrap();
+
+        // Every update earns a request for the next, which is a send of its own.
+        let updates: Vec<u8> = (0..32).flat_map(|shade| raw_rect_update(0, 0, 2, 2, shade)).collect();
+        let (sink, mut frames) = test_sink();
+        tokio::spawn(async move { while frames.recv().await.is_some() {} });
+        let shared = test_shared(
+            Arc::clone(&uplink),
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_loop(
+                std::io::Cursor::new(updates),
+                shared,
+                ReadFlags { clipboard: false, poll: true },
+                None,
+                sink,
+            ),
+        )
+        .await
+        .expect("the read loop stopped reading behind a send")
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
+
+        // Nothing was dropped to get there, and the requests went out behind the
+        // input they were queued behind.
+        let mut sent = vec![0u8; 64 * 64 + 1];
+        unread.read_exact(&mut sent).await.unwrap();
+        assert!(sent[..64 * 64].iter().all(|&b| b == 0));
+        assert_eq!(sent[64 * 64], 3, "a FramebufferUpdateRequest follows the input");
+        let mut rest = vec![0u8; 32 * 10 - 1];
+        unread.read_exact(&mut rest).await.unwrap();
+        backlog.room_for_media().await;
+        assert!(!writer.is_finished(), "the writer outlives everything queued so far");
     }
 
     // MARK: continuous updates and fences
