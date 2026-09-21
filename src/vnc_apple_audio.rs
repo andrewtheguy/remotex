@@ -799,11 +799,18 @@ const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 /// them into the waves the bridge takes. The handle it returns is the sender; the
 /// thread ends when that is dropped, which is what aborting the socket task does.
 ///
+/// `stale` is how the thread is told that the stream it decodes for is gone. A
+/// dropped sender alone is not enough: `recv` hands out everything still queued
+/// before it reports the disconnect, so a restart's old decoder would keep
+/// publishing units of the torn-down stream into the bridge the replacement is
+/// already filling ([`StopOnDrop`]).
+///
 /// The oneshot reports whether the decoder opened at all, because the caller must
 /// not announce an audio format for a stream that will never produce one.
 #[cfg(feature = "apple-hp-audio")]
 fn spawn_decoder(
     bridge: Arc<AudioBridge>,
+    stale: Arc<std::sync::atomic::AtomicBool>,
 ) -> (
     std::sync::mpsc::SyncSender<Vec<u8>>,
     tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
@@ -829,6 +836,9 @@ fn spawn_decoder(
         let mut concealed: u64 = 0;
         let mut undecodable: u64 = 0;
         while let Ok(unit) = inbox.recv() {
+            if stale.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             decoded += 1;
             match decoder.decode(&unit, &mut pending) {
                 Ok(false) => {}
@@ -855,6 +865,19 @@ fn spawn_decoder(
     (units, ready)
 }
 
+/// Marks the decoder thread's queue stale when the receive task ends, however it
+/// ends: an abort drops the task's future where no line of [`receive`] runs. Held
+/// ahead of the sender so the flag is set before the disconnect wakes the thread.
+#[cfg(feature = "apple-hp-audio")]
+struct StopOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(feature = "apple-hp-audio")]
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The receiver: RTCP out once a second, SRTP in, access units to the decoder thread.
 #[cfg(feature = "apple-hp-audio")]
 async fn receive(
@@ -864,7 +887,11 @@ async fn receive(
     bridge: Arc<AudioBridge>,
     viewer_ssrc: u32,
 ) {
-    let (units, ready) = spawn_decoder(Arc::clone(&bridge));
+    let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Declared before the sender, so it drops before it: the decoder must see the
+    // flag by the time the disconnect wakes it.
+    let _stop = StopOnDrop(Arc::clone(&stale));
+    let (units, ready) = spawn_decoder(Arc::clone(&bridge), stale);
     match ready.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
