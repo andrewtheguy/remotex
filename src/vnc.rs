@@ -1745,11 +1745,17 @@ async fn apple_preface(
 /// Read cleartext server messages until the rekey arrives, and return the key and
 /// IV it carried.
 ///
-/// Nothing legitimate can precede it: no pixel format, no encodings and no update
-/// request have been sent, so the server has nothing else to say. Anything that
-/// does turn up is named in the error rather than skipped — the metadata burst
-/// that follows a rekey is already inside the record layer, so a rectangle here is
-/// not a burst arriving early, it is a stream that has gone somewhere unexpected.
+/// Nothing the client *asked* for can precede it: no pixel format, no encodings and
+/// no update request have been sent, so the server has nothing to answer. What the
+/// Mac does send unbidden in this window is a short list of notifications — Bell,
+/// `MiscStatus` (`0x14`), `ServerAck` (`0x04`) and `NOP` (`0x07`), the pasteboard
+/// status among them after a server restart — and those are stepped over by their
+/// own framing, which is the only way to stay in step with the bytes after them.
+///
+/// Anything outside that list is named in the error rather than skipped. The
+/// metadata burst that follows a rekey is already inside the record layer, so a
+/// rectangle here is not a burst arriving early, it is a stream that has gone
+/// somewhere unexpected.
 async fn await_rekey<R: AsyncRead + Unpin>(
     reader: &mut R,
     wrap_key: &[u8; 16],
