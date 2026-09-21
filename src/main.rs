@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
             // environment but no argv to edit. Everything else comes from the
             // TOML file, credentials included (see src/config.rs for why). Every
             // target is served; the browser picks one after login.
-            info!("remotex {}", env!("CARGO_PKG_VERSION"));
+            info!("remotex {}, features: {}", env!("CARGO_PKG_VERSION"), remotex::cli::features_line());
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
             let config = file.resolve_with(listen.as_deref(), &remotex::config::state_dir(&path))?;

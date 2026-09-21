@@ -11,8 +11,30 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// The optional cargo features this binary was built with, for `--help`, the log
+/// of a starting gateway and the page's version line: which of them a binary
+/// carries decides what it accepts — `tui`, or `audio` on an ard-high-performance
+/// target — and nothing else about it says. Not in `--version`, which packaging
+/// compares to the release's.
+pub const FEATURES: &[&str] = &[
+    #[cfg(feature = "embedded-gateway")]
+    "embedded-gateway",
+    #[cfg(feature = "apple-hp-audio")]
+    "apple-hp-audio",
+];
+
+/// [`FEATURES`] as a terminal and the log spell them.
+pub fn features_line() -> String {
+    if FEATURES.is_empty() { "none".to_owned() } else { FEATURES.join(", ") }
+}
+
 #[derive(Parser)]
-#[command(name = "remotex", version, about = "Browser-based RDP client")]
+#[command(
+    name = "remotex",
+    version,
+    about = "Browser-based RDP client",
+    after_help = format!("Features: {}", features_line())
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -97,9 +119,22 @@ pub enum Commands {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Commands};
+    use super::{features_line, Cli, Commands, FEATURES};
+
+    #[test]
+    fn help_names_the_features_and_version_does_not() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(help.trim_end().ends_with(&format!("Features: {}", features_line())), "{help}");
+        assert_eq!(FEATURES.contains(&"embedded-gateway"), cfg!(feature = "embedded-gateway"));
+        assert_eq!(FEATURES.contains(&"apple-hp-audio"), cfg!(feature = "apple-hp-audio"));
+        assert_eq!(
+            command.render_version(),
+            format!("remotex {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     #[test]
     fn serve_parses_config() {

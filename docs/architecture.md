@@ -749,7 +749,9 @@ logins.
 `src/protocol.rs` and `frontend/src/protocol.ts` define the client contract.
 `GET /api/config` publishes the deployment branding before authentication —
 the display name, and whether `GET /api/logo` (equally public) serves an icon
-the page then sets as its favicon. There
+the page then sets as its favicon — and the optional cargo features the gateway
+was built with, which the page prints after its own version wherever it shows
+one. There
 is no client/server version negotiation: the gateway serves the matching SPA from
 the same build, and no second client is supported.
 
