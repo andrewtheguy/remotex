@@ -6,7 +6,7 @@
 //! `docs/apple-vnc-889.md` — and neither a browser's WebCodecs nor FFmpeg's native
 //! decoder will take it, so the gateway has to turn it into PCM itself. The decoder
 //! is Fraunhofer's own, in Rust: the port AOSP ships as `platform/external/aac`,
-//! `rust/`, mirrored for Cargo. Its licence is the same non-OSI-approved
+//! `rust/`, cut down to AAC-ELD for Cargo. Its licence is the same non-OSI-approved
 //! "Fraunhofer FDK AAC Codec Library for Android" text, which is why the default
 //! build never links it.
 //!
@@ -18,7 +18,7 @@
 //! frames, the resilience flags, SBR — either refused the configuration or concealed
 //! most of the stream.
 
-use aac::aac_dec::{AacDecoderInstance, TransportType};
+use aac::aac_dec::AacDecoderInstance;
 use anyhow::Context as _;
 
 /// AudioSpecificConfig for what the Mac sends, bit by bit:
@@ -57,7 +57,7 @@ pub struct EldDecoder {
 
 impl EldDecoder {
     pub fn new() -> anyhow::Result<Self> {
-        let mut decoder = AacDecoderInstance::new(TransportType::Mp4Raw);
+        let mut decoder = AacDecoderInstance::new();
         decoder
             .config_raw(&AUDIO_SPECIFIC_CONFIG)
             .map_err(|e| anyhow::anyhow!("{e:?}"))
@@ -93,9 +93,8 @@ impl EldDecoder {
             Err((e, info)) if e.is_decode_error() => (info, true),
             Err((e, _)) => anyhow::bail!("decode an AAC-ELD access unit: {e:?}"),
         };
-        let produced = (usize::from(info.output_info.frame_size)
-            * usize::from(info.output_info.num_channels))
-        .min(self.pcm.len());
+        let produced =
+            (usize::from(info.frame_size) * usize::from(info.num_channels)).min(self.pcm.len());
         out.reserve(produced * 2);
         for sample in &self.pcm[..produced] {
             let scaled = (sample * FULL_SCALE).round().clamp(-FULL_SCALE, FULL_SCALE - 1.0);

@@ -4,15 +4,14 @@ version = 4
 
 [[package]]
 name = "aac"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-rust?tag=android-17.0.0_r1#93bbcd4811d205468b9d7db8d2a8920d99251a6c"
+version = "0.2.0"
+source = "git+https://github.com/andrewtheguy/fdk-aac-rust?rev=86f7dd3b5f7acd55c383a1e74e268c600fe58e64#86f7dd3b5f7acd55c383a1e74e268c600fe58e64"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
  "itertools",
  "num-complex",
  "paste",
- "rustversion",
  "zerocopy",
 ]
 

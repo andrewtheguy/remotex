@@ -585,7 +585,7 @@ only ordinary crates.io dependencies, and it builds and runs on Linux as well as
 Android. It is
 decoder-only upstream — there is no encoder in it to leave unused. It takes the
 stream in the shape this wire delivers:
-`AacDecoderInstance::new(TransportType::Mp4Raw)`, `config_raw(F8 E6 50 00)`, then
+`AacDecoderInstance::new()`, `config_raw(F8 E6 50 00)`, then
 `fill` and `decode` per access unit, returning interleaved `f32` normalised to ±1
 rather than `i16`, so `src/aac_eld.rs` multiplies by 32768 on the way out.
 Symphonia is not an option: its AAC decoder, 0.6.1 included, decodes AAC-LC only
@@ -622,8 +622,14 @@ Choosing it did not change why the feature is gated: its licence is the same
 "Fraunhofer FDK AAC Codec Library for Android" text, not OSI-approved and with no
 patent grant. What it removed is the C side — the prebuilt static archive and its
 `-sys` crate. It is not on crates.io, so it is a git dependency on
-[a verbatim mirror](https://github.com/andrewtheguy/fdk-aac-rust) of that AOSP
-subtree.
+[a copy of that AOSP subtree](https://github.com/andrewtheguy/fdk-aac-rust) cut
+down to what this stream needs: ER AAC ELD in mono or stereo without SBR, from raw
+access units, and nothing else — every other object type, transport and
+post-processing stage is gone, and the copy refuses a config that asks for one.
+What is left decodes to the same samples as the unmodified decoder, which that
+repository's tests pin, and being modified it has to call itself a "Third-Party
+Modified Version of the Fraunhofer FDK AAC Codec Library for Android", which it
+does.
 
 That the codec cannot be moved off AAC-ELD is now **proven, not assumed.** Offering
 a codec set that excludes AAC-ELD does not change the stream. Building a
