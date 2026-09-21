@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 # Build the container-only gateway binary. Containers expose only the deployed
 # `serve` shape; the process-local managed-instance surface is a native concern.
+#
+# REMOTEX_SOURCE_DIR is the tree to build when it is not the one this script sits
+# in: build-sideload-image.sh builds a release tag's worktree with this checkout's
+# script, since a tag holds whatever script it was cut with.
+#
+# REMOTEX_CONTAINER_FEATURES names the non-default features an operator's own
+# image adds (`apple-hp-audio`); release CI leaves it unset. Whatever it names, the
+# checks below still refuse a binary that carries the managed-instance surface.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+output="$(realpath -m "${1:-tmp/container-bin/remotex}")"
+cd "${REMOTEX_SOURCE_DIR:-$repo_root}"
+features="${REMOTEX_CONTAINER_FEATURES:-}"
 
-output="${1:-tmp/container-bin/remotex}"
+echo ">> building container gateway without default features${features:+, with $features}"
+cargo build --release --no-default-features ${features:+--features "$features"}
 
-echo ">> building container gateway without default features"
-cargo build --release --no-default-features
-
-binary="target/release/remotex"
+binary="${CARGO_TARGET_DIR:-target}/release/remotex"
 case "$("$binary" --help)" in
   *"  tui "*)
     echo "container gateway unexpectedly exposes tui" >&2
