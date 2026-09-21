@@ -73,7 +73,7 @@ use crate::{
     config::Chroma,
     feedback::LinkFeedback,
     mic::MicSignal,
-    protocol::{self, ClientMsg, ServerMsg, WireFrame},
+    protocol::{self, ClientMsg, Held, ServerMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
     throughput::{Socket, ThroughputMeters},
@@ -169,18 +169,56 @@ const PAINT_WINDOW: usize = 24;
 /// that has every frame in order needs no keyframe to recover.
 const PAINT_LAG_LIMIT: Duration = Duration::from_millis(150);
 
-/// How long a batch waits for the window before it is sent anyway.
+/// How long a client that *holds* everything it owes may stay silent before the
+/// next batch is sent anyway.
 ///
 /// The window is pacing, not a protocol requirement: a client that acknowledges
 /// nothing — a raw socket in an e2e test, a painter that died — must not be able
 /// to wedge the session by staying silent. Past this the batch goes out and the
 /// attachment is counted as having run past its window, which is the thing to
 /// look for in the totals line when a session felt slow.
+///
+/// It runs only from the moment the client is known to have *received* every
+/// batch it owes, which a pong says: every ping carries the sequence of the last
+/// batch written before it, the socket is ordered, and a browser answers a ping
+/// with its payload from the network stack. Silence before that is the link, not
+/// the painter, and it is waited out however long it lasts. A grace timed from
+/// when the batch parked cannot tell the two apart, and measured against a
+/// throttled link it chooses wrong in the way that costs most: a 256 KB batch
+/// takes two seconds to cross 1 Mbit/s, so every batch parked behind it runs out
+/// its half second and goes out anyway, two a second into a link carrying one
+/// every two. The kernel's send buffer takes the difference and the picture falls
+/// tens of seconds behind its desktop.
 const PAINT_WINDOW_GRACE: Duration = Duration::from_millis(500);
+
+/// How much queueing a client may show and still count as keeping up, for
+/// [`PaintTracker::sent`]'s decision about a batch's queue budget.
+///
+/// Queueing, not distance: how long the oldest batch has been owed or the last
+/// one took, whichever is longer, less the fastest acknowledgment this socket has
+/// ever returned. The last one's time matters because a client far enough behind
+/// is sent to in lock-step, and then owes nothing at the moment of every write. Measured at 100 ms of round trip
+/// with no bandwidth limit, holding every batch's budget until its receipt capped
+/// an attachment at 22 Mbit/s that carried 65 without it — the budget divided by
+/// the round trip — while at 1 Mbit/s the same holding is what took the picture
+/// from 12 s behind its desktop to 4. Both links are slow to acknowledge; only one
+/// of them is queueing.
+const KEEPING_UP: Duration = Duration::from_millis(100);
+
+/// A ping's payload: the sequence of the last screen batch written before it.
+fn ping(paint: &Mutex<PaintTracker>) -> Message {
+    let sequence = paint.lock().unwrap().last_sent;
+    Message::Ping(sequence.to_le_bytes().to_vec().into())
+}
 
 struct PendingPaint {
     sequence: u32,
     sent: Instant,
+    /// The queue budget of every payload in the batch ([`Held`]), kept while the
+    /// batch may still be anywhere short of the client — in the kernel's send
+    /// buffer or on the link — and so given back by the two things that say it is
+    /// not: its acknowledgment, or a pong for a ping written after it.
+    held: Vec<Held>,
 }
 
 /// What waiting for the window cost one batch — reported by
@@ -195,7 +233,8 @@ enum Admission {
     Immediate,
     /// Parked until an acknowledgment opened the window.
     Waited,
-    /// Parked until [`PAINT_WINDOW_GRACE`] gave up on one arriving.
+    /// Parked until a client holding everything it owed had said nothing for
+    /// [`PAINT_WINDOW_GRACE`].
     PastWindow,
 }
 
@@ -217,6 +256,22 @@ struct PaintTracker {
     /// End-to-end times (ms) of the last [`BASELINE_WINDOW`] acknowledgments,
     /// whose minimum is the published baseline.
     recent_end_to_end: VecDeque<u32>,
+    /// The sequence of the last batch written, which every ping carries.
+    last_sent: u32,
+    /// The newest batch a pong has proved the client received, and when it did.
+    received: Option<(u32, Instant)>,
+    /// The batch the last parked wait sent a ping behind, so one wait asks once.
+    probed: u32,
+    /// When an acknowledgment last completed anything: a painter making progress
+    /// is not a silent one, however much it still owes.
+    progressed: Option<Instant>,
+    /// The fastest acknowledgment this socket has returned: its distance, which
+    /// [`KEEPING_UP`] takes out of how far behind it is. Never forgotten, unlike
+    /// the baseline published to the encoders, because a minute of a slow link is
+    /// exactly when this must not come to read that link's delay as distance.
+    fastest: Option<Duration>,
+    /// How long the most recently completed batch took to be acknowledged.
+    last_round_trip: Duration,
     sent: u64,
     acknowledgments: u64,
     completed: u64,
@@ -273,7 +328,65 @@ impl PaintTracker {
         self.in_flight() < PAINT_WINDOW && self.behind() <= PAINT_LAG_LIMIT
     }
 
-    fn sent(&mut self, sequence: u32) {
+    /// A pong came back carrying `sequence`: everything written up to that batch
+    /// has reached the client, because the socket is ordered.
+    fn received_through(&mut self, sequence: u32) {
+        if self.received.is_none_or(|(newest, _)| sequence > newest) {
+            self.received = Some((sequence, Instant::now()));
+        }
+        // Those bytes have left every queue, whatever the painter does next.
+        for paint in self.pending.iter_mut().take_while(|paint| paint.sequence <= sequence) {
+            paint.held.clear();
+        }
+    }
+
+    /// Whether the client is known to hold every batch it owes.
+    fn holds_what_it_owes(&self) -> Option<Instant> {
+        let newest = self.pending.back()?.sequence;
+        self.received.filter(|(through, _)| *through >= newest).map(|(_, at)| at)
+    }
+
+    /// When a wait that began at `parked` stops waiting for this client, or `None`
+    /// while what it owes may still be crossing the link — see
+    /// [`PAINT_WINDOW_GRACE`].
+    fn overdue_at(&self, parked: Instant) -> Option<Instant> {
+        let held_since = self.holds_what_it_owes()?;
+        let quiet_since = self.progressed.map_or(held_since, |at| at.max(held_since));
+        Some(quiet_since.max(parked) + PAINT_WINDOW_GRACE)
+    }
+
+    /// The sequence a parked wait should send a ping behind, once per newest batch:
+    /// the heartbeat's own pings are seconds apart, and a client that is only
+    /// silent should cost the grace, not the grace and a heartbeat interval.
+    fn probe(&mut self) -> Option<u32> {
+        let newest = self.pending.back()?.sequence;
+        if self.holds_what_it_owes().is_some() || self.probed >= newest {
+            return None;
+        }
+        self.probed = newest;
+        Some(newest)
+    }
+
+    /// Whether this client's acknowledgments are arriving about as fast as its
+    /// distance allows — see [`KEEPING_UP`].
+    fn keeping_up(&self) -> bool {
+        let slowest = self.behind().max(self.last_round_trip);
+        slowest.saturating_sub(self.fastest.unwrap_or_default()) <= KEEPING_UP
+    }
+
+    /// Record a batch about to be written, and return the queue budget to give
+    /// back once it has been: all of it for a client that is keeping up, whose
+    /// flight is the paint window's to bound, and none for one that is behind,
+    /// where written is not delivered and the batch is as much backlog in the
+    /// kernel's send buffer as it was in a queue. That budget is kept with the
+    /// batch until its receipt — see [`PendingPaint::held`].
+    fn sent(&mut self, sequence: u32, held: Vec<Held>) -> Vec<Held> {
+        let (held, released) = if self.keeping_up() {
+            (Vec::new(), held)
+        } else {
+            (held, Vec::new())
+        };
+        self.last_sent = sequence;
         if self.pending.len() == MAX_TRACKED_PAINTS {
             self.pending.pop_front();
             self.forgotten += 1;
@@ -281,10 +394,12 @@ impl PaintTracker {
         self.pending.push_back(PendingPaint {
             sequence,
             sent: Instant::now(),
+            held,
         });
         self.sent += 1;
         self.max_in_flight = self.max_in_flight.max(self.pending.len() as u64);
         self.publish_owed();
+        released
     }
 
     /// Record what a batch's admission cost, once that batch is on the socket.
@@ -317,8 +432,10 @@ impl PaintTracker {
             self.stale += 1;
             return;
         };
-        let elapsed = self.pending[position].sent.elapsed().as_millis();
-        let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
+        let round_trip = self.pending[position].sent.elapsed();
+        self.fastest = Some(self.fastest.map_or(round_trip, |fastest| fastest.min(round_trip)));
+        self.last_round_trip = round_trip;
+        let elapsed = u64::try_from(round_trip.as_millis()).unwrap_or(u64::MAX);
         // The worker is strictly ordered, so completing this sequence also
         // proves every older retained batch completed. Treat the ack as
         // cumulative so a later coalescing change needs no protocol change.
@@ -327,6 +444,7 @@ impl PaintTracker {
             self.completed += 1;
         }
         self.acknowledgments += 1;
+        self.progressed = Some(Instant::now());
         self.queued_ms = self.queued_ms.saturating_add(u64::from(queued_ms));
         self.max_queued_ms = self.max_queued_ms.max(queued_ms);
         self.draw_ms = self.draw_ms.saturating_add(u64::from(draw_ms));
@@ -375,12 +493,12 @@ impl std::fmt::Display for PaintTracker {
 }
 
 /// Hold a batch until the painter admits another one — under [`PAINT_WINDOW`]
-/// owed and no older than [`PAINT_LAG_LIMIT`] behind — or until
-/// [`PAINT_WINDOW_GRACE`] passes without an acknowledgment arriving.
+/// owed and no older than [`PAINT_LAG_LIMIT`] behind — or until a client that
+/// holds everything it owes has said nothing for [`PAINT_WINDOW_GRACE`].
 ///
-/// Only an acknowledgment can open either rule, so acknowledgments are the only
-/// wakeup this waits for. Nothing here polls the lag: it shrinks when a batch is
-/// completed and at no other time.
+/// Only an acknowledgment can open either rule, and only a pong can start the
+/// grace, so those are the wakeups this waits for. Nothing here polls the lag: it
+/// shrinks when a batch is completed and at no other time.
 ///
 /// Reports what the wait cost rather than recording it: the totals are about
 /// batches that reached the browser, and whether this one does is not known until
@@ -405,24 +523,38 @@ async fn wait_for_paint_window<S>(
 where
     S: futures_util::Sink<Message> + Unpin,
 {
-    let deadline = Instant::now() + PAINT_WINDOW_GRACE;
+    let parked = Instant::now();
     let mut waited = false;
     loop {
-        // Registered before the check, so an acknowledgment landing in between
-        // is a wakeup this loop still sees rather than one it slept through.
+        // Registered before the check, so an acknowledgment or a pong landing in
+        // between is a wakeup this loop still sees rather than one it slept through.
         let room = room.notified();
-        if paint.lock().unwrap().admits_a_batch() {
-            return Ok(if waited {
-                Admission::Waited
-            } else {
-                Admission::Immediate
-            });
-        }
+        let (overdue_at, probe) = {
+            let mut paint = paint.lock().unwrap();
+            if paint.admits_a_batch() {
+                return Ok(if waited {
+                    Admission::Waited
+                } else {
+                    Admission::Immediate
+                });
+            }
+            (paint.overdue_at(parked), paint.probe())
+        };
         waited = true;
+        if let Some(sequence) = probe {
+            // Behind everything owed, so its pong is the client saying it has it all.
+            ws_tx.send(Message::Ping(sequence.to_le_bytes().to_vec().into())).await?;
+        }
+        let overdue = async {
+            match overdue_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             () = room => {}
-            _ = heartbeat.tick() => ws_tx.send(Message::Ping(Vec::new().into())).await?,
-            () = tokio::time::sleep_until(deadline) => return Ok(Admission::PastWindow),
+            _ = heartbeat.tick() => ws_tx.send(ping(paint)).await?,
+            () = overdue => return Ok(Admission::PastWindow),
         }
     }
 }
@@ -437,16 +569,18 @@ async fn send_batch<S>(
     ws_tx: &mut S,
     sequence: u32,
     batch: Message,
+    held: Vec<Held>,
     admission: Admission,
 ) -> Result<(), S::Error>
 where
     S: futures_util::Sink<Message> + Unpin,
 {
-    paint.lock().unwrap().sent(sequence);
+    let released = paint.lock().unwrap().sent(sequence, held);
     if let Err(e) = ws_tx.send(batch).await {
         paint.lock().unwrap().unsent(sequence);
         return Err(e);
     }
+    drop(released);
     paint.lock().unwrap().admitted(admission);
     Ok(())
 }
@@ -1026,7 +1160,7 @@ async fn session(
                     event
                 }
                 _ = heartbeat.tick() => {
-                    if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    if ws_tx.send(ping(&outbound_paint)).await.is_err() {
                         break;
                     }
                     continue;
@@ -1101,6 +1235,7 @@ async fn session(
                             &mut ws_tx,
                             sequence,
                             Message::Binary(bytes.into()),
+                            held,
                             admission,
                         )
                         .await
@@ -1108,9 +1243,6 @@ async fn session(
                         {
                             break 'outbound; // browser gone
                         }
-                        // On the socket: what is owed from here is the paint
-                        // window's to bound, and the queue behind may refill.
-                        drop(held);
                     }
                     WireFrame::Text(json) => {
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
@@ -1168,6 +1300,14 @@ async fn session(
                 continue;
             }
         };
+        // Any frame at all is the browser being there, not a pong alone. A pong is
+        // the one thing a slow link delays most — its ping queues behind every
+        // batch already written — so a link carrying a steady trickle of picture,
+        // and returning an acknowledgment for each batch of it, can go a minute
+        // without one while visibly alive.
+        if matches!(msg, Some(Ok(_))) {
+            last_heartbeat = Instant::now();
+        }
         match msg {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
                 // Session-control messages act on the slot, not an engine: pick a
@@ -1211,8 +1351,14 @@ async fn session(
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },
             Some(Ok(Message::Close(_))) | None => break,
-            Some(Ok(Message::Pong(_))) => {
-                last_heartbeat = Instant::now();
+            Some(Ok(Message::Pong(payload))) => {
+                // The ping this answers named the last batch written before it, so
+                // the client has everything up to there — which is what lets a
+                // parked batch tell a silent painter from a slow link.
+                if let Ok(sequence) = <[u8; 4]>::try_from(payload.as_ref()) {
+                    paint.lock().unwrap().received_through(u32::from_le_bytes(sequence));
+                    room.notify_one();
+                }
             }
             Some(Ok(_)) => {} // Binary/Ping: nothing to do
             Some(Err(e)) => {
@@ -1289,9 +1435,9 @@ mod tests {
     #[test]
     fn paint_acknowledgments_are_ordered_and_cumulative() {
         let mut paint = PaintTracker::default();
-        paint.sent(1);
-        paint.sent(2);
-        paint.sent(3);
+        paint.sent(1, Vec::new());
+        paint.sent(2, Vec::new());
+        paint.sent(3, Vec::new());
 
         paint.acknowledge(2, 7, 11);
         assert_eq!(paint.sent, 3);
@@ -1326,13 +1472,13 @@ mod tests {
 
         // A batch owed but never acknowledged: still none — with no baseline,
         // queueing cannot be told from distance, and the safe answer is clear.
-        paint.sent(1);
+        paint.sent(1, Vec::new());
         assert_eq!(feedback.lag(later(500)), Duration::ZERO);
 
         // The first acknowledgment measures the floor; the age of the next owed
         // batch beyond that floor is lag.
         paint.acknowledge(1, 0, 0);
-        paint.sent(2);
+        paint.sent(2, Vec::new());
         let lag = feedback.lag(later(500));
         assert!(lag > Duration::from_millis(400), "expected ~500ms of lag, got {lag:?}");
 
@@ -1345,7 +1491,7 @@ mod tests {
     fn paint_tracking_is_bounded_and_a_failed_write_is_not_counted() {
         let mut paint = PaintTracker::default();
         for sequence in 1..=u32::try_from(MAX_TRACKED_PAINTS + 1).unwrap() {
-            paint.sent(sequence);
+            paint.sent(sequence, Vec::new());
         }
         assert_eq!(paint.pending.len(), MAX_TRACKED_PAINTS);
         assert_eq!(paint.forgotten, 1);
@@ -1363,7 +1509,7 @@ mod tests {
     fn full_window() -> Arc<Mutex<PaintTracker>> {
         let mut paint = PaintTracker::default();
         for sequence in 1..=u32::try_from(PAINT_WINDOW).unwrap() {
-            paint.sent(sequence);
+            paint.sent(sequence, Vec::new());
         }
         Arc::new(Mutex::new(paint))
     }
@@ -1413,6 +1559,10 @@ mod tests {
         let paint = full_window();
         let room = Arc::new(tokio::sync::Notify::new());
         let mut heartbeat = window_heartbeat();
+        // It answered the ping behind the last batch, so it holds all of them —
+        // and says nothing about any: a raw socket, or a painter that died.
+        let newest = u32::try_from(PAINT_WINDOW).unwrap();
+        paint.lock().unwrap().received_through(newest);
         let started = Instant::now();
         // Nothing acknowledges anything: with the clock paused this returns only
         // by the grace deadline, which is the point — a silent client costs the
@@ -1432,13 +1582,150 @@ mod tests {
         assert_eq!(paint.in_flight(), PAINT_WINDOW, "nothing was acknowledged");
     }
 
+    /// A batch still crossing a slow link has not been answered for, and no length
+    /// of silence sends another one after it.
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_still_crossing_the_link_is_waited_for_not_piled_onto() {
+        let paint = full_window();
+        let room = Arc::new(tokio::sync::Notify::new());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut pings = Box::pin(futures_util::sink::unfold((), {
+            let sent = Arc::clone(&sent);
+            move |(), msg: Message| {
+                sent.lock().unwrap().push(msg);
+                std::future::ready(Ok::<_, std::convert::Infallible>(()))
+            }
+        }));
+        let newest = u32::try_from(PAINT_WINDOW).unwrap();
+        {
+            let mut heartbeat = window_heartbeat();
+            let wait = wait_for_paint_window(&paint, &room, &mut heartbeat, &mut pings);
+            assert!(
+                tokio::time::timeout(PAINT_WINDOW_GRACE * 120, wait).await.is_err(),
+                "a batch went out past the window to a client still receiving the last"
+            );
+        }
+        // Asked at once, behind the newest batch owed, rather than at the next
+        // heartbeat: the pong is what the grace waits on.
+        let Some(Message::Ping(first)) = sent.lock().unwrap().first().cloned() else {
+            panic!("the parked wait sent no ping");
+        };
+        assert_eq!(first.as_ref(), newest.to_le_bytes().as_slice());
+
+        // The link delivered after all, and the painter painted.
+        paint.lock().unwrap().received_through(newest);
+        paint.lock().unwrap().acknowledge(newest, 0, 0);
+        let mut heartbeat = window_heartbeat();
+        let admission = wait_for_paint_window(&paint, &room, &mut heartbeat, &mut pings)
+            .await
+            .unwrap();
+        assert_eq!(admission, Admission::Immediate);
+    }
+
+    /// The queue budget a batch carried is the engine's room to send more, so it
+    /// goes back the moment the batch is known to be at the client and not before:
+    /// written is not delivered, and a slow link is exactly where they differ.
+    #[tokio::test(start_paused = true)]
+    async fn a_batchs_queue_budget_returns_when_the_client_has_the_batch() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(1000));
+        let held = |bytes| vec![Held::take_now(&budget, bytes, 1000)];
+        let mut paint = PaintTracker::default();
+        // Keeping up: nothing is owed, so the first batch's budget is handed back
+        // to be released at the write.
+        assert_eq!(paint.sent(1, held(100)).len(), 1);
+        assert_eq!(budget.available_permits(), 1000);
+        // Behind from here on: the oldest batch has been owed for longer than any
+        // distance this socket has shown.
+        tokio::time::advance(KEEPING_UP + Duration::from_millis(1)).await;
+        assert!(paint.sent(2, held(200)).is_empty());
+        assert!(paint.sent(3, held(300)).is_empty());
+        assert_eq!(budget.available_permits(), 500, "written, and still owed");
+
+        // A pong for a ping written after batch 2: received, whether or not the
+        // painter ever gets to it.
+        paint.received_through(2);
+        assert_eq!(budget.available_permits(), 700);
+        assert_eq!(paint.in_flight(), 3, "receipt is not an acknowledgment");
+
+        paint.acknowledge(3, 0, 0);
+        assert_eq!(budget.available_permits(), 1000, "painted");
+
+        // A write the socket refused never left.
+        paint.sent(4, held(50));
+        paint.sent(5, held(50));
+        paint.unsent(5);
+        assert_eq!(budget.available_permits(), 1000);
+
+        drop(paint);
+        assert_eq!(budget.available_permits(), 1000, "a closed socket owes nothing");
+    }
+
+    /// A client far behind is sent to in lock-step, so it owes nothing at the
+    /// moment of each write — which must not read as keeping up, or the budget of
+    /// every batch would be back in the engine's hands the moment it was written
+    /// into a link that takes seconds to carry it.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_in_lock_step_is_still_behind() {
+        let mut paint = PaintTracker::default();
+        // The socket's distance: a batch acknowledged in 20 ms.
+        paint.sent(1, Vec::new());
+        tokio::time::advance(Duration::from_millis(20)).await;
+        paint.acknowledge(1, 0, 0);
+        assert!(paint.keeping_up());
+
+        // Then one that took two seconds to cross.
+        paint.sent(2, Vec::new());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        paint.acknowledge(2, 0, 0);
+        assert_eq!(paint.in_flight(), 0);
+        assert!(!paint.keeping_up(), "owing nothing was read as keeping up");
+
+        // And back: the link recovered, and the next batch says so.
+        paint.sent(3, Vec::new());
+        tokio::time::advance(Duration::from_millis(25)).await;
+        paint.acknowledge(3, 0, 0);
+        assert!(paint.keeping_up());
+    }
+
+    /// A socket a hundred milliseconds away is slow to acknowledge and not behind.
+    #[tokio::test(start_paused = true)]
+    async fn distance_is_not_being_behind() {
+        let mut paint = PaintTracker::default();
+        for sequence in 1..=3 {
+            paint.sent(sequence, Vec::new());
+            tokio::time::advance(Duration::from_millis(100 + u64::from(sequence) * 10)).await;
+            paint.acknowledge(sequence, 0, 0);
+        }
+        paint.sent(4, Vec::new());
+        tokio::time::advance(Duration::from_millis(120)).await;
+        assert!(paint.keeping_up());
+    }
+
+    #[test]
+    fn a_pong_proves_receipt_only_of_what_was_written_before_its_ping() {
+        let mut paint = PaintTracker::default();
+        paint.sent(1, Vec::new());
+        paint.sent(2, Vec::new());
+        let parked = Instant::now();
+        assert_eq!(paint.overdue_at(parked), None, "nothing has been answered for");
+
+        paint.received_through(1);
+        assert_eq!(paint.overdue_at(parked), None, "batch 2 may still be on the link");
+
+        paint.received_through(2);
+        assert!(paint.overdue_at(parked).is_some());
+        // An older pong arriving late takes nothing back.
+        paint.received_through(1);
+        assert!(paint.overdue_at(parked).is_some());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_painter_that_is_behind_holds_a_batch_the_depth_window_would_admit() {
         let paint = Arc::new(Mutex::new(PaintTracker::default()));
         let room = Arc::new(tokio::sync::Notify::new());
         // One batch owed — nowhere near the depth window, which is the whole
         // point: this is the shape a video attachment falls behind in.
-        paint.lock().unwrap().sent(1);
+        paint.lock().unwrap().sent(1, Vec::new());
         tokio::time::advance(PAINT_LAG_LIMIT + Duration::from_millis(1)).await;
         assert!(paint.lock().unwrap().in_flight() < PAINT_WINDOW);
         assert!(!paint.lock().unwrap().admits_a_batch());
@@ -1514,6 +1801,7 @@ mod tests {
             &mut DeadSocket,
             1,
             Message::Binary(Vec::new().into()),
+            Vec::new(),
             // The admission that used to be recorded before the write, so a
             // failed write reported a batch as having run past the window while
             // the same batch was rolled out of `sent`.
@@ -1545,6 +1833,7 @@ mod tests {
             &mut futures_util::sink::drain(),
             1,
             Message::Binary(Vec::new().into()),
+            Vec::new(),
             Admission::PastWindow,
         )
         .await
@@ -1767,6 +2056,70 @@ mod tests {
     /// two endpoints: an audio socket that stops answering reaps *itself* and nothing
     /// else. The session socket is the authority on whether the browser is alive, so a
     /// desktop has to survive its sound dying.
+    /// A browser whose pongs are minutes late — each ping queued behind a slow
+    /// link's backlog — is still there for as long as anything at all arrives
+    /// from it, and an acknowledgment for every batch does.
+    #[tokio::test]
+    async fn a_browser_that_sends_anything_is_not_expired_for_want_of_a_pong() {
+        let target = fake_target(false);
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let sessions = Arc::new(SessionManager::with_test_spawner(
+            vec![target],
+            move |_target, input_rx, frame_tx, _audio, _camera| {
+                engine_tx.send((input_rx, frame_tx)).unwrap();
+            },
+        ));
+        let token = sessions.claim(false, None).unwrap();
+        // Wide apart on purpose: the assertion below survives a test machine that
+        // stalls for a second, and fails a gateway that counts only pongs.
+        let timings = HeartbeatTimings {
+            interval: Duration::from_millis(100),
+            timeout: Duration::from_millis(1500),
+        };
+        let app = Router::new().route(
+            "/ws",
+            any(move |ws: WebSocketUpgrade| {
+                let sessions = Arc::clone(&sessions);
+                let token = token.clone();
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        session(socket, sessions, Some(token), None, Chroma::Full, timings, Arc::default())
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+        client
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .await
+            .unwrap();
+        let (input_rx, _frame_tx) = engine_rx.recv().await.unwrap();
+
+        // Never polled, so it never reads a ping and never answers one; it only
+        // sends, for well over the timeout.
+        for sequence in 0..30 {
+            client
+                .send(ClientFrame::text(format!(
+                    r#"{{"type":"paintAck","sequence":{sequence},"queuedMs":0,"drawMs":0}}"#
+                )))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!input_rx.is_closed(), "a browser still sending was expired for its missing pongs");
+
+        drop(client);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn unanswered_audio_pings_close_the_audio_socket_and_leave_the_engine_alone() {
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();

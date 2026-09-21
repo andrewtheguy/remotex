@@ -825,11 +825,36 @@ forwarding it to the remote engine, and logs those measurements with the
 attachment totals. A socket generation travels through the worker so a late
 completion from a dead attachment cannot acknowledge a new one. This is the
 measurement contract for application-level backpressure, and the gateway acts on
-it twice: the paint window in `ws.rs` holds the next batch when too many are owed
-or the oldest is owed too long, and on a `render_adaptive` target the same
+it three times: the paint window in `ws.rs` holds the next batch when too many are
+owed or the oldest is owed too long, on a `render_adaptive` target the same
 measurement — published through `LinkFeedback` — moves a stream's quality before
-the window ever parks. Nothing is dropped either way; an access unit's dependency order is
-untouched.
+the window ever parks, and it decides when a batch's share of `QUEUE_BUDGET` (under
+[`video`](#video-a-different-transport-not-a-fourth-codec), where the queues are
+sized) goes back to the engine.
+Nothing is dropped in any of them; an access unit's dependency order is untouched.
+
+The window is pacing and must not be a way to wedge a session, so a batch parked
+behind a client that stays silent is eventually sent anyway — but only a client
+that *holds* what it owes can be called silent. Every ping carries the sequence of
+the last batch written before it, the socket is ordered, and a browser echoes a
+ping's payload from its network stack, so a pong is proof of receipt up to that
+batch. The half-second grace runs from that proof, and a parked wait sends one ping
+of its own rather than waiting out a heartbeat interval for it. Until the proof
+arrives the silence is the link's, and it is waited out however long it lasts: a
+grace timed from when the batch parked sends two batches a second into a link
+carrying one every two, and the kernel's send buffer becomes the backlog the window
+exists to prevent.
+
+The same distinction settles the budget. A client whose acknowledgments arrive
+about as fast as its distance allows — the oldest batch owed or the last round
+trip, less the fastest round trip the socket has shown, within 100 ms — gets a
+batch's share back at the write, and its flight is the window's to bound: holding
+it to receipt instead capped an unthrottled attachment 100 ms away at 22 Mbit/s
+that otherwise carried 65. A client that is behind keeps the share with the batch
+until its acknowledgment or a pong says it arrived, because there a written batch
+has only moved from a queue into the send buffer. Measured with an incompressible
+12 Mbit/s of damage, that holds the picture 0.6 s behind at 4 Mbit/s and 4 s at
+1 Mbit/s (23 s without), and the link's return to full speed is immediate.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache
 slot. `TILE_REF` redraws the encoded payload already stored in that slot.
@@ -1240,9 +1265,14 @@ unfocused tab, may prevent automatic access.
 ### Liveness
 
 The gateway sends a WebSocket ping every five seconds. Browsers answer at the
-protocol layer, independent of application timers. About 60
-seconds without a pong ends the engine; an orderly close starts a fresh
-60-second reattach window.
+protocol layer, independent of application timers. About 60 seconds with nothing
+at all from the browser ends the engine; an orderly close starts a fresh 60-second
+reattach window. Any frame counts, not a pong alone: a ping queues behind every
+batch already written, so on a slow link the pong is the last thing to come back,
+while the acknowledgment for each batch that did arrive says the same thing sooner.
+On the session socket a ping's payload is the sequence of the last screen batch
+written before it, which is what makes its pong a receipt (see
+[Image batches](#image-batches)).
 
 All remote sockets use `TCP_NODELAY`, a 20-second connect budget, a 30-second
 handshake budget, and TCP keepalive. Linux also uses `TCP_USER_TIMEOUT` to bound

@@ -57,8 +57,11 @@ const ENCODE_DEPTH: usize = 16;
 /// throws the queues away.
 ///
 /// So a payload's size comes out of this budget before it is encoded, and the
-/// share rides inside the payload ([`Held`]) until its batch is written to the
-/// socket or the payload is dropped anywhere on the way. With the budget spent
+/// share rides inside the payload ([`Held`]) until the payload is dropped anywhere
+/// on the way or its batch leaves: written to the socket, for a client that is
+/// keeping up, and *received* by it, for one that is behind — where a written
+/// batch is only backlog that has moved into the kernel's send buffer (`ws.rs`
+/// decides which, and says why both). With the budget spent
 /// the *engine* waits, in [`TileSink::encode`] and [`TileSink::frame`], and stops
 /// reading its remote — the backpressure the counts were meant to be, arriving
 /// while the backlog is still short. The order task never waits on it: everything
@@ -73,7 +76,10 @@ const ENCODE_DEPTH: usize = 16;
 ///
 /// Two full batches ([`crate::wire`] caps one at 256 KiB): one being written and
 /// one ready behind it, so a fast link never waits on the encoder for want of
-/// room, and a slow one is never more than this far behind.
+/// room, and a slow one is never more than this far behind. Against the same
+/// throttled link and an incompressible 12 Mbit/s of damage, the picture ran 4 s
+/// behind at 1 Mbit/s where the message counts alone left it 23 s, and 0.6 s
+/// behind at 4 Mbit/s; an unthrottled link 100 ms away carried what it did before.
 const QUEUE_BUDGET: u32 = 512 * 1024;
 
 /// What a tile is assumed to compress to before any has: an eighth of its pixels,
