@@ -29,6 +29,7 @@ system audio below is **experimental** and stays behind the non-default
 | Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours. |
 | Fractional ratios | A virtual display mode whose backing/scaled ratio is not 1 or 2 is not rounded by the Mac. Measured August 23, 2026 on macOS 26.6.2: 2561×1440 backing over 1707×960 scaled (1.5x) created 1707×960 points at 2x, 2880×1800 over 1920×1200 (1.5x) created 960×600 points at 2x, and 2560×1440 over 2048×1152 (1.25x) created 960×540 points at 2x — a desktop whose text looks zoomed while the Dock, shrunk to fit the width, does not. Remotex therefore asks only for 1x or 2x (`protocol::render_density`). |
 | Lingering display | The virtual display outlives its session: a reconnect within a few seconds found it still there (the new session's ServerInit reported the previous mode and the display kept its id), and one after 45 s found the Mac back on its 800×600 physical display with a fresh id. The new session's own layout arrives either way, including when the requested mode equals the lingering one. |
+| Pre-rekey messages | `MiscStatus` (`0x14`), `ServerAck` (`0x04`), and `NOP` (`0x07`) can arrive in the cleartext window between `SetEncryption` and the rekey, especially after a server restart when the Mac has stale clipboard state. The client must tolerate these during `await_rekey`. |
 | Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
 | Authentication | Remote Management's default "All users" setting rejects valid account credentials with the same error as an incorrect password. Add the account to the per-user access list with Observe and Control before treating the failure as a protocol fault. |
 
@@ -164,8 +165,13 @@ work but the Mac does not emit the `MiscStatus(cmd=2)` change notification.
 With `clipboard = true`, the High Performance subtype uses the same native Apple
 pasteboard messages in both directions. It sends the native cleartext `ViewerInfo`,
 `SetMode(control)`, and `AutoPasteboard(start)` prelude before encryption setup. The
+Mac can respond to `AutoPasteboard(start)` with a `MiscStatus(cmd=2)` in the
+cleartext window before the rekey arrives — particularly after a server restart,
+when stale clipboard state from the previous session triggers an immediate
+notification. The client must tolerate this and other Apple messages (`ServerAck`,
+`NOP`) during `await_rekey` rather than treating them as protocol errors. The
 gateway repeats the idempotent `AutoPasteboard(start)` after the virtual display's
-answering layout. The Mac reports changes with `MiscStatus(cmd=2)`;
+answering layout. The Mac reports further changes with `MiscStatus(cmd=2)`;
 `ClipboardFetch` and the zlib-compressed `ClipboardSend` archive carry the contents.
 Each complete post-rekey client message is carried in an encrypted 003.889 record;
 archive and session-id handling are shared with Standard mode.
@@ -458,7 +464,10 @@ section as having no capture behind it.
 **The rekey.** Delivered as a single-rectangle FramebufferUpdate with `x=y=w=h=0`
 and encoding `0x44f`; body `u32 generation || 16B wrapped key || 16B wrapped iv`,
 each half AES-128-ECB-decrypted independently under the wrap key. `generation` is 1.
-Only ever one per session, so multi-rekey remains unexercised.
+Only ever one per session, so multi-rekey remains unexercised. The Mac may send
+`MiscStatus` (`0x14`), `ServerAck` (`0x04`), or `NOP` (`0x07`) in the cleartext
+window between `SetEncryption` and the rekey; the client must step over these
+rather than bailing on them.
 
 **zlib (`0x06`).** `u32 length` then a chunk of **one deflate stream for the life of
 the connection**, inflating to exactly `w × h × 4`. Confirmed with an independent
