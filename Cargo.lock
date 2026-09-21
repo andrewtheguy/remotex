@@ -5,14 +5,13 @@ version = 4
 [[package]]
 name = "aac"
 version = "0.2.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-rust?rev=86f7dd3b5f7acd55c383a1e74e268c600fe58e64#86f7dd3b5f7acd55c383a1e74e268c600fe58e64"
+source = "git+https://github.com/andrewtheguy/fdk-aac-rust?rev=348a555ea19d434596dfcf0a8e684792b5ff23aa#348a555ea19d434596dfcf0a8e684792b5ff23aa"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
  "itertools",
  "num-complex",
  "paste",
- "zerocopy",
 ]
 
 [[package]]

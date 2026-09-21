@@ -125,7 +125,7 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # the media dependencies for needing nothing prebuilt — no static archive, no sys
 # crate, no C++ toolchain. The licence is unchanged by the rewrite and by the
 # cutting down, and still not OSI-approved, which is what keeps the feature off.
-aac = { git = "https://github.com/andrewtheguy/fdk-aac-rust", rev = "86f7dd3b5f7acd55c383a1e74e268c600fe58e64", optional = true }
+aac = { git = "https://github.com/andrewtheguy/fdk-aac-rust", rev = "348a555ea19d434596dfcf0a8e684792b5ff23aa", optional = true }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
