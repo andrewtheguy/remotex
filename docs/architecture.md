@@ -640,13 +640,28 @@ the path is bounded in bytes as well. `QUEUE_BUDGET` in `src/encode.rs` (512 KiB
 two full batches) is taken by the *engine* before a tile or a round is encoded, at
 an estimate the order task settles once the size is known, and the share travels
 inside the payload (`Held` in `src/protocol.rs`) so that every way out of the
-queues returns it: superseded in a batch, dropped while nobody is attached, left in
-a channel an ended engine took with it — or delivered. With the budget spent the
+queues returns it: superseded in a batch, sent as a seven-byte cache reference
+instead of a payload, dropped while nobody is attached, left in a channel an ended
+engine took with it — or delivered. With the budget spent the
 engine waits and stops reading its remote, which is the backpressure the message
 counts were meant to be. The order task never waits on it, because everything
 queued behind the order task holds a share only the order task can move. The wait
 also counts towards the walk's blocked time, which is where a link that is behind
 holds the engine instead of at a full queue.
+
+Two things beside the engine touch the budget. The cleanup tick runs on the order
+task, so it takes its tickful's room without waiting and *before* it takes the
+debts — at what recent cleanups compressed to — and takes only as many cells as
+that room covers: a debt is removed by being taken, and a still queued past the
+budget is the stale picture the budget exists to prevent. A budget the engine keeps
+full leaves those debts standing until the link lets go of some of it. And a socket
+replaced by its own browser's next attach gives everything back at once. Such a
+socket is usually one parked on a link that stopped, the engine lives on into the
+replacement, and eviction queued behind the socket's events would leave the shares
+— and the pump, waiting on that full channel — held until its heartbeat ran out. So
+that signal travels beside the events (`Attachment::superseded`) and the outbound
+task races it: the queue is dropped, the shares of batches in flight are let go,
+and the close goes out last.
 
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `tilePainter.ts` — the shared batch

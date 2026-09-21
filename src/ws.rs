@@ -340,6 +340,14 @@ impl PaintTracker {
         }
     }
 
+    /// Give back every share still held for a batch in flight: this socket has been
+    /// replaced, and what it never confirmed is no longer the engine's to wait on.
+    fn let_go(&mut self) {
+        for paint in &mut self.pending {
+            paint.held.clear();
+        }
+    }
+
     /// Whether the client is known to hold every batch it owes.
     fn holds_what_it_owes(&self) -> Option<Instant> {
         let newest = self.pending.back()?.sequence;
@@ -1128,6 +1136,7 @@ async fn session(
 
     let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Session);
     let (attach_id, mut events) = (attachment.id, attachment.events);
+    let superseded = attachment.superseded;
 
     // How many times the client has said it lost its tile cache. The inbound half
     // bumps it; the outbound half, which owns the cache, notices before its next
@@ -1151,17 +1160,19 @@ async fn session(
         let mut seen_epoch = 0u64;
         let mut heartbeat = interval(heartbeat_timings.interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // Whether the loop ended on an eviction, which is owed a close frame.
+        let sending = async {
         'outbound: loop {
             let event = tokio::select! {
                 event = events.recv() => {
                     let Some(event) = event else {
-                        break;
+                        break false;
                     };
                     event
                 }
                 _ = heartbeat.tick() => {
                     if ws_tx.send(ping(&outbound_paint)).await.is_err() {
-                        break;
+                        break false;
                     }
                     continue;
                 }
@@ -1209,7 +1220,7 @@ async fn session(
                             reason: e.to_string().into(),
                         })))
                         .await;
-                    break 'outbound;
+                    break 'outbound false;
                 }
             };
             for frame in frames {
@@ -1228,7 +1239,7 @@ async fn session(
                         )
                         .await
                         else {
-                            break 'outbound; // browser gone
+                            break 'outbound false; // browser gone
                         };
                         if send_batch(
                             &outbound_paint,
@@ -1241,12 +1252,12 @@ async fn session(
                         .await
                         .is_err()
                         {
-                            break 'outbound; // browser gone
+                            break 'outbound false; // browser gone
                         }
                     }
                     WireFrame::Text(json) => {
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                            break 'outbound; // browser gone
+                            break 'outbound false; // browser gone
                         }
                     }
                     WireFrame::Audio(_) => {
@@ -1257,14 +1268,31 @@ async fn session(
 
             if evicted {
                 info!("ws: evicted by a session takeover");
-                let _ = ws_tx
-                    .send(Message::Close(Some(CloseFrame {
-                        code: CLOSE_EVICTED,
-                        reason: "session taken over".into(),
-                    })))
-                    .await;
-                break;
+                break true;
             }
+        }
+        };
+        // Raced, not queued behind the events like a takeover's eviction: the engine
+        // lives on into the replacement, and a socket worth replacing is one parked
+        // on a link that stopped — which would keep the engine's queue budget, and
+        // the pump waiting on this channel, until its heartbeat ran out. So nothing
+        // more is owed here: the queue goes, and with it every share it held.
+        let evicted = tokio::select! {
+            evicted = sending => evicted,
+            () = superseded.notified() => {
+                info!("ws: superseded by this browser's next socket");
+                drop(events);
+                outbound_paint.lock().unwrap().let_go();
+                true
+            }
+        };
+        if evicted {
+            let _ = ws_tx
+                .send(Message::Close(Some(CloseFrame {
+                    code: CLOSE_EVICTED,
+                    reason: "session taken over".into(),
+                })))
+                .await;
         }
         info!("ws: outbound totals: {}", wire.totals);
     });
@@ -1965,6 +1993,106 @@ mod tests {
             records.iter().any(|record| record.target.as_deref() == Some("fake") && record.sent_bytes > 0),
             "the connect status went out under the target it selected: {records:?}"
         );
+
+        drop(client);
+        server.abort();
+    }
+
+    /// A browser reconnects on its token because its socket stopped moving, and the
+    /// engine it resumes is the one that socket's queue holds up: payloads parked
+    /// behind a client that proves nothing keep their shares of the queue budget. The
+    /// replacement must not wait for the stale socket's heartbeat to get them back.
+    #[tokio::test]
+    async fn a_superseded_socket_lets_go_of_the_engines_queue_at_once() {
+        let target = fake_target(false);
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let sessions = Arc::new(SessionManager::with_test_spawner(
+            vec![target],
+            move |_target, input_rx, frame_tx, _audio, _camera| {
+                engine_tx.send((input_rx, frame_tx)).unwrap();
+            },
+        ));
+        let token = sessions.claim(false, None).unwrap();
+        let reattaching = Arc::clone(&sessions);
+        let bridged = token.clone();
+        let timings =
+            HeartbeatTimings { interval: Duration::from_secs(1), timeout: Duration::from_secs(60) };
+        let app = Router::new().route(
+            "/ws",
+            any(move |ws: WebSocketUpgrade| {
+                let sessions = Arc::clone(&sessions);
+                let token = bridged.clone();
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        session(socket, sessions, Some(token), None, Chroma::Full, timings, Arc::default())
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+        client
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .await
+            .unwrap();
+        let (_input_rx, frame_tx) = engine_rx.recv().await.unwrap();
+        loop {
+            if let ClientFrame::Text(text) = client.next().await.unwrap().unwrap()
+                && text.as_str().contains(r#""type":"connected""#)
+            {
+                break;
+            }
+        }
+
+        // From here the client is never polled: it acknowledges nothing and answers
+        // no ping, which is all the gateway can see of a link that has stopped.
+        let budget = Arc::new(tokio::sync::Semaphore::new(100_000));
+        let tile = |seed: u8| {
+            ServerMsg::Tile(crate::protocol::Tile {
+                format: crate::protocol::Tile::FORMAT_PNG,
+                // Each somewhere else, so none supersedes another inside a batch.
+                x: u16::from(seed) * 64,
+                y: 0,
+                w: 64,
+                h: 64,
+                data: vec![seed; 10_000],
+                held: Held::take_now(&budget, 10_000, 100_000),
+            })
+        };
+        frame_tx.send(tile(1)).await.unwrap();
+        // Long enough unacknowledged that the next batch parks behind it.
+        tokio::time::sleep(PAINT_LAG_LIMIT * 2).await;
+        for seed in 2..6 {
+            frame_tx.send(tile(seed)).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(budget.available_permits() <= 60_000, "nothing was parked behind the silent client");
+
+        let mut replacement = reattaching.attach(&token, None, Chroma::Full).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while budget.available_permits() < 100_000 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the superseded socket kept the engine's queue budget");
+
+        assert!(matches!(
+            replacement.events.recv().await,
+            Some(AttachEvent::Msg(ServerMsg::Connected { .. }))
+        ));
+        frame_tx.send(tile(6)).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), replacement.events.recv()).await,
+            Ok(Some(AttachEvent::Msg(ServerMsg::Tile(_))))
+        ));
 
         drop(client);
         server.abort();
