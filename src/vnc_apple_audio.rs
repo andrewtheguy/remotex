@@ -689,16 +689,26 @@ impl MediaStream {
     /// Act on an encoding-1010 rectangle: start receiving on the port it names, or
     /// record the error it reports. Neither ends the desktop session — sound is an
     /// extra on it.
+    ///
+    /// The Mac re-sends this message after every display layout change (resize,
+    /// display switch). When it does, `screensharingd` tears down the old RTP
+    /// stream and starts a new one — even though the port number is the same.
+    /// The existing receiver is stuck on the dead stream, so it must be
+    /// restarted.
     pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<()> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
-                info!(
-                    "vnc: the Mac opened its media streams: audio at UDP {audio_port}, \
-                     screen video at {video_port} (unused)"
-                );
-                if self.receiver.is_some() {
-                    debug!("vnc: media streams already running; ignoring a second port message");
-                    return Ok(());
+                if let Some(receiver) = self.receiver.take() {
+                    info!(
+                        "vnc: the Mac restarted its media streams: audio at UDP {audio_port}, \
+                         screen video at {video_port} (unused) — restarting the receiver"
+                    );
+                    receiver.abort();
+                } else {
+                    info!(
+                        "vnc: the Mac opened its media streams: audio at UDP {audio_port}, \
+                         screen video at {video_port} (unused)"
+                    );
                 }
                 self.start(audio_port)
             }
@@ -721,8 +731,19 @@ impl MediaStream {
     fn start(&mut self, port: u16) -> anyhow::Result<()> {
         let bind = SocketAddr::new(self.local, port);
         let remote = SocketAddr::new(self.peer, port);
-        let socket = std::net::UdpSocket::bind(bind)
-            .map_err(|e| anyhow::anyhow!("bind UDP {bind} for the Mac's audio: {e}"))?;
+        // When restarting after the Mac tore down its old stream, the previous
+        // socket may not have been dropped yet (abort marks the task for
+        // cancellation but the drop happens at the next poll).  One retry after
+        // a short sleep covers the gap.
+        let socket = match std::net::UdpSocket::bind(bind) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("vnc: first UDP bind for audio failed ({e}), retrying after a short wait");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::net::UdpSocket::bind(bind)
+                    .map_err(|e| anyhow::anyhow!("bind UDP {bind} for the Mac's audio: {e}"))?
+            }
+        };
         socket.set_nonblocking(true)?;
         let socket = tokio::net::UdpSocket::from_std(socket)?;
         let srtp = SrtpSession::new(&self.audio_keys.1);

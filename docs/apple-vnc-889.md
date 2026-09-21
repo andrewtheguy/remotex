@@ -529,6 +529,15 @@ UDP port` — audio at that port, video1 at port+1, video2 at port+2; **type 3 i
 media-stream error** with `u32 errorType, u32 subCode`), and encoding **1011**
 carries message 2, the AVC answer with the same three offer lengths at `+0x0a`.
 
+**The Mac re-sends encoding 1010 (message 1) after every display layout change.**
+A resize, a display switch, or any call to `SetDesktopConfiguration` causes
+`screensharingd` to tear down its old RTP stream and start a new one — even
+though the port number stays the same. The existing receiver is stuck on the
+dead stream and must be restarted. The port is reused, so the new receiver
+binds to the same address; the SRTP keys are unchanged. `on_reply` in
+`src/vnc_apple_audio.rs` handles this by aborting the old receiver task and
+starting a new one.
+
 **The offer is a binary plist wrapping a protobuf**, produced by
 `AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):
 `{ avcMediaStreamNegotiatorMode, avcMediaStreamOptionCallID (UUID string),
