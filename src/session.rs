@@ -161,6 +161,12 @@ pub struct Attachment {
     /// encoders. The slot's one handle, freshly [`LinkFeedback::reset`]; the ws
     /// bridge writes through it for as long as the attachment lives.
     pub feedback: Arc<LinkFeedback>,
+    /// Signalled when this browser attaches again on the same token. Beside the
+    /// events and not among them: a socket worth replacing is one whose events have
+    /// stopped moving, and the engine it would hold up behind them — its queued
+    /// payloads keep their [`crate::protocol::Held`] shares, and the pump waits on
+    /// its full channel — is the one the replacement is resuming.
+    pub superseded: Arc<tokio::sync::Notify>,
 }
 
 /// One audio WebSocket's live handle on the session, returned by
@@ -282,6 +288,8 @@ struct EngineSlot {
 struct ClientSlot {
     attach_id: u64,
     event_tx: mpsc::Sender<AttachEvent>,
+    /// See [`Attachment::superseded`].
+    superseded: Arc<tokio::sync::Notify>,
     /// The most colour this browser's `VideoDecoder` said it takes, from the
     /// session socket's query string ([`crate::ws`]).
     ///
@@ -668,7 +676,7 @@ impl SessionManager {
         // The same boundary rule as `connect`: a degenerate screen report is no
         // report, not a request to open a 0×N desktop.
         let display = display.and_then(HostDisplay::checked);
-        let (id, events, reconnect) = {
+        let (id, events, superseded, reconnect) = {
         let mut st = self.state.lock().unwrap();
         if st.claim.as_deref() != Some(token) {
             return Err(InvalidToken);
@@ -677,7 +685,8 @@ impl SessionManager {
         // browser reconnected before its stale socket timed out).
         if let Some(old) = st.client.take() {
             info!("session: superseding the previous attachment");
-            let _ = old.event_tx.try_send(AttachEvent::Evicted);
+            // A stored permit, so it is seen whenever the old socket next looks.
+            old.superseded.notify_one();
         }
         // Audio is deliberately *not* touched here. It belongs to the claim, not to
         // this socket, so a browser that dropped and came back is still listening —
@@ -751,13 +760,15 @@ impl SessionManager {
             let _ = event_tx.try_send(AttachEvent::Msg(status));
         }
 
-        st.client = Some(ClientSlot { attach_id: id, event_tx, chroma });
+        let superseded = Arc::new(tokio::sync::Notify::new());
+        st.client =
+            Some(ClientSlot { attach_id: id, event_tx, superseded: Arc::clone(&superseded), chroma });
         // A fresh browser starts unmeasured: whatever the last one's link looked
         // like, this one has not shown its own yet.
         self.feedback.reset();
-        (id, events, reconnect)
+        (id, events, superseded, reconnect)
         };
-        let attachment = Attachment { id, events, feedback: Arc::clone(&self.feedback) };
+        let attachment = Attachment { id, events, feedback: Arc::clone(&self.feedback), superseded };
         if !reconnect {
             return Ok(attachment);
         }
@@ -765,8 +776,8 @@ impl SessionManager {
         let started = {
             let mut st = self.state.lock().unwrap();
             // The wait released the lock. Superseded or logged out meanwhile: this
-            // attachment's channel already carries its eviction, and the slot is
-            // somebody else's to start an engine for.
+            // attachment has already been told, and the slot is somebody else's to
+            // start an engine for.
             if st.client.as_ref().map(|c| c.attach_id) != Some(id) {
                 false
             } else if let Some(target) = st.selected.clone().filter(|_| st.engine.is_none()) {

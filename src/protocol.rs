@@ -608,6 +608,104 @@ impl TileGrid {
 /// PNG ([`Tile::from_rgb`], the default) or, for a target on a lossy render dial,
 /// WebP ([`Tile::from_rgb_webp`]). The format travels with the tile instead of
 /// being a constant.
+/// A payload's share of its engine's queue budget, given back when this drops.
+///
+/// Taken in [`crate::encode`] before a tile or a round of access units is encoded,
+/// settled to the payload's real size once that is known, and carried inside the
+/// payload so that every way out of the queues towards the browser returns the
+/// share — written to the socket, superseded in a batch, dropped while nobody is
+/// attached, or left in a channel that an ended engine or a closed socket took
+/// with it. There is no release to forget.
+///
+/// A clone holds nothing: the share belongs to the one payload that is queued,
+/// and a copy kept anywhere else must not be able to keep the queue closed.
+#[derive(Debug, Default)]
+pub struct Held {
+    share: Option<Share>,
+}
+
+#[derive(Debug)]
+struct Share {
+    budget: std::sync::Arc<tokio::sync::Semaphore>,
+    bytes: u32,
+    /// The whole budget: no share is ever larger, so a payload bigger than the
+    /// budget goes through alone instead of never.
+    limit: u32,
+}
+
+impl Held {
+    /// Take `bytes` of `budget`, waiting for room.
+    pub async fn take(budget: &std::sync::Arc<tokio::sync::Semaphore>, bytes: usize, limit: u32) -> Self {
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(limit);
+        match budget.acquire_many(bytes).await {
+            Ok(permit) => permit.forget(),
+            // Only a closed semaphore refuses, and nothing closes this one.
+            Err(_) => return Self::default(),
+        }
+        Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
+    }
+
+    /// Take `bytes` of `budget` if it has them now, and nothing otherwise.
+    pub fn take_now(budget: &std::sync::Arc<tokio::sync::Semaphore>, bytes: usize, limit: u32) -> Self {
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(limit);
+        match budget.try_acquire_many(bytes) {
+            Ok(permit) => permit.forget(),
+            Err(_) => return Self::default(),
+        }
+        Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
+    }
+
+    /// How much of the budget this holds.
+    pub fn bytes(&self) -> usize {
+        self.share.as_ref().map_or(0, |share| share.bytes as usize)
+    }
+
+    /// Carve `bytes` of this share off for one payload, or whatever is left of it:
+    /// how a reservation taken for several payloads at once is handed to each.
+    pub fn split(&mut self, bytes: usize) -> Self {
+        let Some(share) = &mut self.share else {
+            return Self::default();
+        };
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(share.bytes);
+        share.bytes -= bytes;
+        Self {
+            share: Some(Share { budget: std::sync::Arc::clone(&share.budget), bytes, limit: share.limit }),
+        }
+    }
+
+    /// Correct an estimated share to the payload's real size. What was taken in
+    /// excess goes back at once; what is missing is taken only if it is there,
+    /// because the task that settles is the one everything queued behind it waits
+    /// on, and those hold shares of their own.
+    pub fn settle(&mut self, bytes: usize) {
+        let Some(share) = &mut self.share else {
+            return;
+        };
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(share.limit);
+        if bytes < share.bytes {
+            share.budget.add_permits((share.bytes - bytes) as usize);
+            share.bytes = bytes;
+        } else if let Ok(permit) = share.budget.try_acquire_many(bytes - share.bytes) {
+            permit.forget();
+            share.bytes = bytes;
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(share) = self.share.take() {
+            share.budget.add_permits(share.bytes as usize);
+        }
+    }
+}
+
+impl Clone for Held {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Tile {
     /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_WEBP`]. Both
@@ -620,6 +718,8 @@ pub struct Tile {
     pub h: u16,
     /// The encoded image stream, in `format`.
     pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
 }
 
 impl Tile {
@@ -642,6 +742,7 @@ impl Tile {
             w,
             h,
             data,
+            held: Held::default(),
         })
     }
 
@@ -679,6 +780,7 @@ impl Tile {
             w,
             h,
             data,
+            held: Held::default(),
         })
     }
 
@@ -820,6 +922,8 @@ pub struct VideoUnit {
     pub keyframe: bool,
     /// The access unit, in whatever codec [`ServerMsg::VideoFormat`] announced.
     pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
 }
 
 impl VideoUnit {
@@ -1251,7 +1355,11 @@ pub enum WireFrame {
     /// One ordered screen batch. The sequence is repeated in the batch header
     /// for the browser and held here so the socket can timestamp it without
     /// reparsing bytes it just encoded.
-    Batch { sequence: u32, bytes: Vec<u8> },
+    ///
+    /// `held` is the queue budget of every payload the batch carries: a batch
+    /// encoded and still waiting on the paint window is as much backlog as one not
+    /// yet encoded, and the socket decides when it has stopped being any.
+    Batch { sequence: u32, bytes: Vec<u8>, held: Vec<Held> },
     /// One audio frame. Audio has its own socket and no paint acknowledgment.
     Audio(Vec<u8>),
 }
@@ -2128,6 +2236,7 @@ mod tests {
             w: 2,
             h: 1,
             data: vec![10, 20, 30, 40, 50, 60],
+            held: Held::default(),
         };
         let mut out = Vec::new();
         tile.write_record(batch::NO_SLOT, &mut out);

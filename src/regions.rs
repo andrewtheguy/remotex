@@ -44,7 +44,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::config::Chroma;
-use crate::protocol::{TileGrid, VideoUnit, batch};
+use crate::protocol::{Held, TileGrid, VideoUnit, batch};
 use crate::tiles::Rect;
 use crate::video::{AccessUnit, Mark, Mirror};
 use crate::vp9::Stream;
@@ -1569,6 +1569,7 @@ impl Round {
                 h: live.rect.h(),
                 keyframe: unit.keyframe,
                 data: unit.data,
+                held: Held::default(),
             });
         }
         match failed {
