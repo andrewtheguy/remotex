@@ -4350,7 +4350,6 @@ impl Wheel {
         }
     }
 
-    /// Whole pulses to send for one wheel event, as (horizontal, vertical).
     /// A delta in the pixels it stands for, whatever unit it was reported in.
     fn pixels(delta: f32, unit: WheelUnit) -> f32 {
         match unit {
@@ -4360,6 +4359,7 @@ impl Wheel {
         }
     }
 
+    /// Whole pulses to send for one wheel event, as (horizontal, vertical).
     fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
         let px = |delta: f32| Self::pixels(delta, unit);
         match self {
