@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "aac"
 version = "0.2.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-rust?rev=3348cc2a01e578ab44c9978e4799f39af87f0f8e#3348cc2a01e578ab44c9978e4799f39af87f0f8e"
+source = "git+https://github.com/andrewtheguy/fdk-aac-rust?tag=v0.2.0#848480085cf3c173402a7b59d685cc24ceed575b"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
