@@ -3570,7 +3570,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
             reader.read_exact(&mut body).await?;
             match apple.as_mut().and_then(|a| a.media.as_mut()) {
                 Some(media) => {
-                    if let Err(e) = media.on_reply(&body) {
+                    if let Err(e) = media.on_reply(&body).await {
                         warn!("vnc: the Mac's audio could not be started: {e:#}");
                     }
                 }

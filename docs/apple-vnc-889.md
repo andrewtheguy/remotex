@@ -568,7 +568,8 @@ though the port number stays the same. The existing receiver is stuck on the
 dead stream and must be restarted. The port is reused, so the new receiver
 binds to the same address; the SRTP keys are unchanged. `on_reply` in
 `src/vnc_apple_audio.rs` handles this by aborting the old receiver task and
-starting a new one.
+awaiting its end — the port is not free until that task has been dropped —
+before starting a new one.
 
 **The offer is a binary plist wrapping a protobuf**, produced by
 `AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):

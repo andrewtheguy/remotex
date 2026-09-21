@@ -696,7 +696,7 @@ impl MediaStream {
     /// stream and starts a new one — even though the port number is the same.
     /// The existing receiver is stuck on the dead stream, so it must be
     /// restarted.
-    pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<()> {
+    pub async fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<()> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
                 if let Some(receiver) = self.receiver.take() {
@@ -704,7 +704,11 @@ impl MediaStream {
                         "vnc: the Mac restarted its media streams: audio at UDP {audio_port}, \
                          screen video at {video_port} (unused) — restarting the receiver"
                     );
+                    // Awaited, not just aborted: the handle resolves only once the
+                    // task has been dropped, and until it is, the old socket still
+                    // holds the port the replacement binds.
                     receiver.abort();
+                    let _ = receiver.await;
                 } else {
                     info!(
                         "vnc: the Mac opened its media streams: audio at UDP {audio_port}, \
@@ -732,19 +736,10 @@ impl MediaStream {
     fn start(&mut self, port: u16) -> anyhow::Result<()> {
         let bind = SocketAddr::new(self.local, port);
         let remote = SocketAddr::new(self.peer, port);
-        // When restarting after the Mac tore down its old stream, the previous
-        // socket may not have been dropped yet (abort marks the task for
-        // cancellation but the drop happens at the next poll).  One retry after
-        // a short sleep covers the gap.
-        let socket = match std::net::UdpSocket::bind(bind) {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("vnc: first UDP bind for audio failed ({e}), retrying after a short wait");
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                std::net::UdpSocket::bind(bind)
-                    .map_err(|e| anyhow::anyhow!("bind UDP {bind} for the Mac's audio: {e}"))?
-            }
-        };
+        // A restart binds the port the previous receiver held; `on_reply` has
+        // awaited that task's end, so the socket is closed by the time this runs.
+        let socket = std::net::UdpSocket::bind(bind)
+            .map_err(|e| anyhow::anyhow!("bind UDP {bind} for the Mac's audio: {e}"))?;
         socket.set_nonblocking(true)?;
         let socket = tokio::net::UdpSocket::from_std(socket)?;
         let srtp = SrtpSession::new(&self.audio_keys.1);
@@ -1196,8 +1191,8 @@ mod tests {
     }
 
     /// An error reply is logged and leaves the session running.
-    #[test]
-    fn an_error_reply_is_not_fatal() {
+    #[tokio::test]
+    async fn an_error_reply_is_not_fatal() {
         let bridge = Arc::new(AudioBridge::new());
         let peer: SocketAddr = "10.0.0.2:5900".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:50000".parse().unwrap();
@@ -1205,7 +1200,7 @@ mod tests {
         let mut error = vec![0, 3, 0, 1, 0, 0, 0, 0];
         error.extend_from_slice(&2u32.to_be_bytes());
         error.extend_from_slice(&0u32.to_be_bytes());
-        media.on_reply(&error).unwrap();
+        media.on_reply(&error).await.unwrap();
         assert!(media.receiver.is_none());
         assert_eq!(bridge.negotiated_format(), None);
     }
