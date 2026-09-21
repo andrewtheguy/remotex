@@ -355,6 +355,10 @@ impl Wire {
                 Placed::Ref(slot) => {
                     self.totals.tile_ref(tile.record_len());
                     protocol::write_tile_ref(slot, tile.x, tile.y, &mut frame);
+                    // The payload stays here and seven bytes go out in its place,
+                    // so its share goes back now instead of riding a batch that
+                    // does not carry it.
+                    continue;
                 }
                 Placed::Store(slot) => {
                     self.totals.tile(tile.record_len());
@@ -1033,6 +1037,28 @@ mod tests {
             batch::HEADER_LEN + batch::TILE_REF_LEN
         );
         assert!(binary(&first)[0].len() > 20_000, "the first one paid in full");
+    }
+
+    // The queue budget counts bytes queued towards the browser, and a reference
+    // queues seven: the payload it replaces must not go on closing the engine's
+    // queue from inside a batch that does not carry it.
+    #[test]
+    fn a_reference_gives_its_payloads_queue_share_back() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(40_000));
+        let mut wire = Wire::default();
+        let mut paid = |x| {
+            let ServerMsg::Tile(mut tile) = repeat(x, 0, 20_000) else { unreachable!() };
+            tile.held = Held::take_now(&budget, 20_000, 40_000);
+            wire.encode(vec![ServerMsg::Tile(tile)]).unwrap()
+        };
+        let first = paid(0);
+        let second = paid(320);
+
+        assert_eq!(binary(&second)[0].len(), batch::HEADER_LEN + batch::TILE_REF_LEN);
+        assert_eq!(budget.available_permits(), 20_000, "only the payload still queued is held");
+        drop(first);
+        assert_eq!(budget.available_permits(), 40_000);
+        drop(second);
     }
 
     // Content that differs at all is different content, however similar.
