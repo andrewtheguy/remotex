@@ -4,16 +4,14 @@ version = 4
 
 [[package]]
 name = "aac"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-rust?tag=android-17.0.0_r1#93bbcd4811d205468b9d7db8d2a8920d99251a6c"
+version = "0.2.0"
+source = "git+https://github.com/andrewtheguy/fdk-aac-rust?tag=v0.2.0#848480085cf3c173402a7b59d685cc24ceed575b"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
  "itertools",
  "num-complex",
  "paste",
- "rustversion",
- "zerocopy",
 ]
 
 [[package]]
@@ -2356,7 +2354,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.243"
+version = "0.0.244"
 dependencies = [
  "aac",
  "aes",

@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.243"
+version = "0.0.244"
 
 [package]
 name = "remotex"
@@ -118,13 +118,14 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260906161304-8dd83e8" }
 # AAC-ELD, for Apple High Performance system audio, behind the `apple-hp-audio`
 # feature above. Fraunhofer's decoder, but the Rust one: AOSP ships a pure-Rust
-# port of it as `platform/external/aac`, `rust/`, and that crate is mirrored
-# verbatim at the tag below because it is not published on crates.io. It is the
-# odd one out among the media dependencies for needing nothing prebuilt — no
-# static archive, no sys crate, no C++ toolchain — and it is decoder-only
-# upstream, so there is no encoder here to leave unused. The licence is unchanged
-# by the rewrite and still not OSI-approved, which is what keeps the feature off.
-aac = { git = "https://github.com/andrewtheguy/fdk-aac-rust", tag = "android-17.0.0_r1", optional = true }
+# port of it as `platform/external/aac`, `rust/`, which is not published on
+# crates.io. The repository below is that crate cut down to the one thing asked
+# of it here — ER AAC ELD, mono or stereo, no SBR, raw access units — and checked
+# sample for sample against the unmodified decoder. It is the odd one out among
+# the media dependencies for needing nothing prebuilt — no static archive, no sys
+# crate, no C++ toolchain. The licence is unchanged by the rewrite and by the
+# cutting down, and still not OSI-approved, which is what keeps the feature off.
+aac = { git = "https://github.com/andrewtheguy/fdk-aac-rust", tag = "v0.2.0", optional = true }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing

@@ -132,8 +132,8 @@ will not start on the 16K and 64K kernels arm64 boards ship, so the linux-arm64
 release sets `JEMALLOC_SYS_WITH_LG_PAGE=16`. Windows keeps the system heap.
 
 The optional `apple-hp-audio` feature needs no archive at all: its AAC-ELD
-decoder is Fraunhofer's own Rust port, pure Rust and sourced as a mirrored git
-crate, so it adds nothing to a builder's prerequisites. Its non-OSI-approved
+decoder is Fraunhofer's own Rust port, pure Rust and sourced as a git crate, so
+it adds nothing to a builder's prerequisites. Its non-OSI-approved
 license is what keeps it out of every release artifact. See [Audio frames](../docs/architecture.md#audio-frames) for the media
 design and [Installing remotex](../docs/install.md#apple-high-performance-audio-build-it-yourself)
 for a manual feature build.
