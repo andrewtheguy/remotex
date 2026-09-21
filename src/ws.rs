@@ -1080,7 +1080,7 @@ async fn session(
             };
             for frame in frames {
                 match frame {
-                    WireFrame::Batch { sequence, bytes } => {
+                    WireFrame::Batch { sequence, bytes, held } => {
                         // The one hop with no backpressure of its own. Waiting
                         // here — before the write, after the encode — is what
                         // makes the browser's paint queue as bounded as every
@@ -1108,6 +1108,9 @@ async fn session(
                         {
                             break 'outbound; // browser gone
                         }
+                        // On the socket: what is owed from here is the paint
+                        // window's to bound, and the queue behind may refill.
+                        drop(held);
                     }
                     WireFrame::Text(json) => {
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {

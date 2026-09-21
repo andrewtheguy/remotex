@@ -630,6 +630,24 @@ for tiles — a 1080p repaint is ~17 bands — but under `video` one message is 
 frame, and 64 of them in each of two queues in series is seconds of buffered
 picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 
+Shallow in messages is not shallow in time, and time is what a person at the
+keyboard feels: a message is whatever a tile compressed to, so on a link that
+slows down the counts bound nothing. Against a throttled link and a busy desktop
+the queues held 30 MB, which at 4 Mbit/s is a picture 63 s behind its desktop —
+input reaches the remote and its effect arrives a minute later, which reads as a
+session that stopped responding until a fresh engine throws the queues away. So
+the path is bounded in bytes as well. `QUEUE_BUDGET` in `src/encode.rs` (512 KiB,
+two full batches) is taken by the *engine* before a tile or a round is encoded, at
+an estimate the order task settles once the size is known, and the share travels
+inside the payload (`Held` in `src/protocol.rs`) so that every way out of the
+queues returns it: superseded in a batch, dropped while nobody is attached, left in
+a channel an ended engine took with it — or delivered. With the budget spent the
+engine waits and stops reading its remote, which is the backpressure the message
+counts were meant to be. The order task never waits on it, because everything
+queued behind the order task holds a share only the order task can move. The wait
+also counts towards the walk's blocked time, which is where a link that is behind
+holds the engine instead of at a full queue.
+
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `tilePainter.ts` — the shared batch
 loop, which keys a decoder per `stream` id and replaces one whose region has

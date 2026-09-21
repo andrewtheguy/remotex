@@ -332,11 +332,16 @@ impl Wire {
         frame.push(0); // flags
         frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
         frame.extend_from_slice(&sequence.to_le_bytes());
+        // Each payload's share of the queue budget moves to the batch, which is
+        // where its bytes are from here on. A tile superseded above never gets here, and
+        // gave its share back when it was dropped.
+        let mut held = Vec::with_capacity(self.pending.len());
         for record in self.pending.drain(..) {
             let tile = match record {
                 Record::Video(unit) => {
                     self.totals.video(unit.record_len());
                     unit.write_record(&mut frame);
+                    held.push(unit.held);
                     continue;
                 }
                 Record::Copy(copy) => {
@@ -360,11 +365,12 @@ impl Wire {
                     tile.write_record(batch::NO_SLOT, &mut frame);
                 }
             }
+            held.push(tile.held);
         }
         self.pending_bytes = 0;
         self.copy_barrier = 0;
         self.totals.frame(frame.len());
-        frames.push(WireFrame::Batch { sequence, bytes: frame });
+        frames.push(WireFrame::Batch { sequence, bytes: frame, held });
         Ok(())
     }
 
@@ -499,7 +505,7 @@ impl std::fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Tile, UNSCALED, VideoUnit};
+    use crate::protocol::{Held, Tile, UNSCALED, VideoUnit};
 
     fn tile(y: u16, bytes: usize) -> ServerMsg {
         rect(0, y, 320, 64, bytes)
@@ -518,6 +524,7 @@ mod tests {
             w,
             h,
             data,
+            held: Held::default(),
         })
     }
 
@@ -530,6 +537,7 @@ mod tests {
             w: 320,
             h: 64,
             data: vec![9u8; bytes],
+            held: Held::default(),
         })
     }
 
@@ -743,6 +751,7 @@ mod tests {
             w: 320,
             h: 64,
             data: vec![0xFFu8; 900],
+            held: Held::default(),
         });
         let frames = wire.encode(vec![tile(0, 900), webp]).unwrap();
         let records = records(binary(&frames)[0]);
@@ -1054,6 +1063,7 @@ mod tests {
                 w: 64,
                 h: 320,
                 data: vec![9u8; 900],
+                held: Held::default(),
             })])
             .unwrap();
         assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
@@ -1075,6 +1085,7 @@ mod tests {
             h,
             keyframe: false,
             data: vec![4u8; bytes],
+            held: Held::default(),
         })
     }
 
@@ -1088,6 +1099,7 @@ mod tests {
             h: 800,
             keyframe: true,
             data: vec![5u8; bytes],
+            held: Held::default(),
         })
     }
 
