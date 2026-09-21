@@ -305,17 +305,86 @@ impl Backlog {
     /// small, owed to the server whatever its pace, and never held to this.
     const MEDIA_LIMIT: usize = 256 * 1024;
 
-    /// Wait until the socket has caught up enough to be worth a media sample.
-    async fn room_for_media(&self) {
+    /// The most that may be waiting before pointer motion and scrolling are held
+    /// in [`HeldMotion`] instead of queued: about one capped wheel event on the
+    /// Apple wire, the largest thing a single input becomes. Anything queued past
+    /// it is motion the server acts out after the hand that made it has stopped.
+    const MOTION_LIMIT: usize = 16 * 1024;
+
+    fn behind(&self, limit: usize) -> bool {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed) >= limit
+    }
+
+    /// Wait until less than `limit` is waiting to be written.
+    async fn room(&self, limit: usize) {
         loop {
             // Registered before the check, so a write landing in between is a
             // wakeup this still sees.
             let written = self.written.notified();
-            if self.bytes.load(std::sync::atomic::Ordering::Relaxed) < Self::MEDIA_LIMIT {
+            if !self.behind(limit) {
                 return;
             }
             written.await;
         }
+    }
+
+    /// Wait until the socket has caught up enough to be worth a media sample.
+    async fn room_for_media(&self) {
+        self.room(Self::MEDIA_LIMIT).await;
+    }
+}
+
+/// Pointer motion and scrolling held back while the uplink is behind, in the one
+/// form in which each can wait: a position a newer one replaces, and a distance a
+/// later one adds to.
+///
+/// Both are worthless late. A server that reads slowly — a Mac reads hardly at all
+/// while it is pushing pixels — would otherwise be sent every position the pointer
+/// crossed and every pulse of a scroll (up to 512 messages an event, on the Apple
+/// wire) long after the hand had stopped, and would act all of it out. Held here,
+/// what goes out when the writer catches up is where the pointer is *now* and at
+/// most one event's worth of scroll; the rest is shed, which is what a scroll that
+/// outran the link can afford to lose. Nothing else is ever held: a click or a key
+/// is content, not motion, and goes out at once behind whatever was held, because
+/// it means what it means only where the pointer was.
+#[derive(Default)]
+struct HeldMotion {
+    pointer: Option<(i32, i32)>,
+    /// Pixels of scroll intent, whatever unit they were reported in.
+    wheel: (f32, f32),
+}
+
+impl HeldMotion {
+    fn is_empty(&self) -> bool {
+        self.pointer.is_none() && self.wheel == (0.0, 0.0)
+    }
+
+    /// Take `input` if it is motion, or hand it back.
+    fn hold(&mut self, input: ClientMsg) -> Option<ClientMsg> {
+        match input {
+            ClientMsg::MouseMove { x, y } => self.pointer = Some((x, y)),
+            ClientMsg::Wheel { dx, dy, unit } => {
+                // Held under the cap a single event is spent under, so what is
+                // shed is shed here rather than carried as a number that only grows.
+                let add = |held: f32, delta: f32| {
+                    let sum = held + Wheel::pixels(delta, unit);
+                    if sum.is_finite() { sum.clamp(-Wheel::MAX_PX, Wheel::MAX_PX) } else { held }
+                };
+                self.wheel = (add(self.wheel.0, dx), add(self.wheel.1, dy));
+            }
+            other => return Some(other),
+        }
+        None
+    }
+
+    /// What was held, as the inputs it stands for: the position first, because a
+    /// scroll lands where the pointer is.
+    fn take(&mut self) -> impl Iterator<Item = ClientMsg> + use<> {
+        let Self { pointer, wheel: (dx, dy) } = std::mem::take(self);
+        let pointer = pointer.map(|(x, y)| ClientMsg::MouseMove { x, y });
+        let wheel = ((dx, dy) != (0.0, 0.0))
+            .then_some(ClientMsg::Wheel { dx, dy, unit: WheelUnit::Pixel });
+        pointer.into_iter().chain(wheel)
     }
 }
 
@@ -1831,6 +1900,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
     let mut wheel = Wheel::new(apple);
     let buttons = Buttons::new(high_performance);
+    let mut held = HeldMotion::default();
 
     let result = loop {
         tokio::select! {
@@ -1871,11 +1941,48 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                 }
             }
+            // The writer has caught up: what was held goes out, as it now stands.
+            () = backlog.room(Backlog::MOTION_LIMIT), if !held.is_empty() => {
+                let msgs = held_messages(
+                    &mut held,
+                    &buttons,
+                    &mut button_mask,
+                    &mut last_pos,
+                    &mut pressed_keys,
+                    &mut wheel,
+                    macos,
+                );
+                if let Err(e) = send_all(&uplink, &msgs).await {
+                    break Err(e);
+                }
+            }
             input = input_rx.recv() => {
                 let Some(input) = input else {
                     info!("vnc: input channel closed; session shut down");
                     break Ok(());
                 };
+                // Motion waits while the uplink is behind — see [`HeldMotion`].
+                // Everything else goes out now, behind whatever was held.
+                let input = if backlog.behind(Backlog::MOTION_LIMIT) {
+                    match held.hold(input) {
+                        Some(input) => input,
+                        None => continue,
+                    }
+                } else {
+                    input
+                };
+                let msgs = held_messages(
+                    &mut held,
+                    &buttons,
+                    &mut button_mask,
+                    &mut last_pos,
+                    &mut pressed_keys,
+                    &mut wheel,
+                    macos,
+                );
+                if let Err(e) = send_all(&uplink, &msgs).await {
+                    break Err(e);
+                }
                 // Viewport reports drive dynamic resize, not an input event;
                 // `DefaultSize` is the same request with the size supplied from
                 // here instead of by the client — see [`ClientMsg::DefaultSize`]
@@ -2129,6 +2236,23 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     read_task.abort();
     write_task.abort();
     result
+}
+
+/// The wire messages for what [`HeldMotion`] held, which it no longer holds.
+fn held_messages(
+    held: &mut HeldMotion,
+    buttons: &Buttons,
+    button_mask: &mut u8,
+    last_pos: &mut (u16, u16),
+    pressed_keys: &mut HashMap<String, u32>,
+    wheel: &mut Wheel,
+    macos: bool,
+) -> Vec<Vec<u8>> {
+    held.take()
+        .flat_map(|motion| {
+            translate_input(motion, buttons, button_mask, last_pos, pressed_keys, wheel, macos)
+        })
+        .collect()
 }
 
 /// The unit a resize request states its size in. Everything resolves to logical
@@ -4227,12 +4351,17 @@ impl Wheel {
     }
 
     /// Whole pulses to send for one wheel event, as (horizontal, vertical).
-    fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
-        let px = |delta: f32| match unit {
+    /// A delta in the pixels it stands for, whatever unit it was reported in.
+    fn pixels(delta: f32, unit: WheelUnit) -> f32 {
+        match unit {
             WheelUnit::Pixel => delta,
             WheelUnit::Line => delta * Self::LINE_PX,
             WheelUnit::Page => delta * Self::PAGE_LINES * Self::LINE_PX,
-        };
+        }
+    }
+
+    fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
+        let px = |delta: f32| Self::pixels(delta, unit);
         match self {
             Self::Notch => (notch(dx), notch(dy)),
             Self::Apple { pending } => {
@@ -8653,6 +8782,72 @@ mod tests {
         unread.read_exact(&mut rest).await.unwrap();
         backlog.room_for_media().await;
         assert!(!writer.is_finished(), "the writer outlives everything queued so far");
+    }
+
+    /// What waits behind a slow uplink is where the pointer is and how far the
+    /// scroll got, not the history of either.
+    #[test]
+    fn held_motion_keeps_the_newest_position_and_the_sum_of_the_scroll() {
+        let mut held = HeldMotion::default();
+        assert!(held.is_empty());
+        for x in 0..100 {
+            assert!(held.hold(ClientMsg::MouseMove { x, y: 2 * x }).is_none());
+        }
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 30.0, unit: WheelUnit::Pixel }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 2.0, unit: WheelUnit::Line }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: -4.0, dy: -12.0, unit: WheelUnit::Pixel }).is_none());
+        assert!(!held.is_empty());
+
+        // The position first: the scroll lands where the pointer is.
+        let out: Vec<ClientMsg> = held.take().collect();
+        assert!(matches!(out[0], ClientMsg::MouseMove { x: 99, y: 198 }));
+        let line = Wheel::LINE_PX;
+        assert!(matches!(
+            out[1],
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Pixel } if dx == -4.0 && dy == 18.0 + 2.0 * line
+        ));
+        assert_eq!(out.len(), 2);
+        assert!(held.is_empty(), "taken is no longer held");
+    }
+
+    /// A scroll that outran the link is shed at one event's worth, and nothing that
+    /// is not motion is ever held.
+    #[test]
+    fn held_scroll_is_capped_and_only_motion_is_held() {
+        let mut held = HeldMotion::default();
+        for _ in 0..50 {
+            held.hold(ClientMsg::Wheel { dx: 0.0, dy: 400.0, unit: WheelUnit::Pixel });
+        }
+        held.hold(ClientMsg::Wheel { dx: f32::NAN, dy: 0.0, unit: WheelUnit::Pixel });
+        let out: Vec<ClientMsg> = held.take().collect();
+        assert!(matches!(
+            out[..],
+            [ClientMsg::Wheel { dx, dy, .. }] if dx == 0.0 && dy == Wheel::MAX_PX
+        ));
+
+        let key = ClientMsg::Key { code: "KeyA".into(), pressed: true, caps: false };
+        assert!(matches!(held.hold(key), Some(ClientMsg::Key { .. })));
+        let click = ClientMsg::MouseButton { button: MouseButton::Left, pressed: true, clicks: 1 };
+        assert!(matches!(held.hold(click), Some(ClientMsg::MouseButton { .. })));
+        assert!(held.is_empty());
+    }
+
+    /// Behind is a count of what the writer still holds, and room is its falling.
+    #[tokio::test]
+    async fn the_backlog_is_behind_until_the_writer_has_written() {
+        let (sock, mut server) = tokio::io::duplex(16);
+        let (mut uplink, backlog, writer) = Uplink::plain(sock).queued();
+        let writer = tokio::spawn(writer);
+        assert!(!backlog.behind(Backlog::MOTION_LIMIT));
+        uplink.send(&vec![0u8; Backlog::MOTION_LIMIT + 16]).await.unwrap();
+        assert!(backlog.behind(Backlog::MOTION_LIMIT));
+
+        let mut sent = vec![0u8; Backlog::MOTION_LIMIT + 16];
+        server.read_exact(&mut sent).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), backlog.room(Backlog::MOTION_LIMIT))
+            .await
+            .expect("room never came though everything was read");
+        assert!(!writer.is_finished());
     }
 
     // MARK: continuous updates and fences
