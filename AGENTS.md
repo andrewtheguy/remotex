@@ -105,7 +105,7 @@ documentation.
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
 - Apple High Performance system audio remains behind the non-default
   `apple-hp-audio` feature and absent from release artifacts. Do not add a second
-  decoder beside the feature-gated fdk-aac path.
+  decoder beside the feature-gated AAC-ELD path.
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and
