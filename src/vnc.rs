@@ -1778,6 +1778,20 @@ async fn await_rekey<R: AsyncRead + Unpin>(
             }
             // Bell. Nothing to ring, and no reason to end the session over it.
             2 => {}
+            // Apple's MiscStatus (0x14): the Mac can send a pasteboard status
+            // notification in the cleartext window after AutoPasteboard(start)
+            // but before the rekey arrives. This happens after a server restart
+            // when the Mac has stale clipboard state from the previous session.
+            // Read and discard the body (u8 padding + u16 len + body).
+            0x14 => {
+                reader.read_u8().await?; // padding
+                let len = reader.read_u16().await?;
+                discard(reader, u64::from(len)).await?;
+                debug!("vnc: skipped a MiscStatus before the record layer");
+            }
+            // ServerAck and NOP: zero-payload Apple messages that can arrive
+            // before the rekey. Stepped over silently.
+            0x04 | 0x07 => {}
             other => anyhow::bail!(
                 "the server sent message type {other} before the record layer was up"
             ),
