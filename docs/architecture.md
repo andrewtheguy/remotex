@@ -1462,20 +1462,20 @@ byte layouts and measured protocol corrections are in
 it is behind the `apple-hp-audio` Cargo feature — off by default,
 in no release artifact or container image, built by hand with
 `cargo build --release --features apple-hp-audio`. The Mac's sound does not ride
-RFB: after the first display layout the client advertises encoding 1010 in the
-second `SetEncodings` and sends message `0x1c`, `RFBMediaStreamServerConfiguration`,
-carrying a session UUID, an SRTP master key per direction per stream and an
-AVConference offer per stream; the Mac answers with a rectangle naming a UDP port
-(or an error) and streams AAC-ELD — 48 kHz stereo, one 480-sample access unit per
-RTP packet — over SRTP (AES-256 counter mode, RFC 3711 derivation, an
-HMAC-SHA1-80 tag the receiver strips) from its own address to the gateway's on
-that port, expecting RTCP once a second. The Mac re-sends encoding 1010 after
-every display layout change (resize, display switch), tearing down its old RTP
+RFB: after the first display layout the client advertises encoding 1010 (`0x3f2`) in
+the second `SetEncodings` and sends message `0x1c`,
+`RFBMediaStreamServerConfiguration`, carrying a session UUID, an SRTP master key per
+direction per stream and an AVConference offer per stream; the Mac answers with a
+rectangle naming a UDP port (or an error) and streams AAC-ELD — 48 kHz stereo, one
+480-sample access unit per RTP packet — over SRTP (AES-256 counter mode, RFC 3711
+derivation, an HMAC-SHA1-80 tag the receiver strips) from its own address to the
+gateway's on that port, expecting RTCP once a second. The Mac re-sends encoding 1010
+after every display layout change (resize, display switch), tearing down its old RTP
 stream and starting a new one on the same port; the receiver must be restarted.
-`src/vnc_apple_audio.rs` is the whole of
-that wire, always compiled and tested against captured bytes: the offers are
-Apple's own negotiator plists rebuilt field by field (a binary plist around a
-zlib'd protobuf) and checked byte-for-byte against what Apple's client produced.
+`src/vnc_apple_audio.rs` is the whole of that wire, always compiled and tested
+against captured bytes: the offers are Apple's own negotiator plists rebuilt field
+by field (a binary plist around a zlib'd protobuf) and checked byte-for-byte against
+what Apple's client produced.
 What the feature gates is `src/aac_eld.rs`, the decoder, and the receiver that
 needs it: AAC-ELD is decodable by no browser's WebCodecs and no native FFmpeg
 decoder, the Mac's transmitter emits it whatever codec the offer agrees (measured:

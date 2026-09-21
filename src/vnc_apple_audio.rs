@@ -66,12 +66,13 @@ use rand::Rng as _;
 use crate::audio::{AudioBridge, PcmFormat};
 use crate::vnc_apple;
 
-/// Encoding for the Mac's media-stream replies: message 1 (the UDP ports) and
-/// message 3 (an error). `kSSVideoEncoding_AVCMediaStream` in the client binary.
+/// Encoding 1010 (`0x3f2`) for the Mac's media-stream replies: message 1 (the UDP
+/// ports) and message 3 (an error). `kSSVideoEncoding_AVCMediaStream` in the client
+/// binary.
 pub const ENCODING_MEDIA_STREAM: i32 = 1010;
 
-/// Encoding for message 2, the AVConference answer. Never advertised — the Mac sends
-/// it beside 1010 — and stepped over when it arrives.
+/// Encoding 1011 (`0x3f3`) for message 2, the AVConference answer. Never advertised
+/// — the Mac sends it beside 1010 — and stepped over when it arrives.
 pub const ENCODING_MEDIA_STREAM_ANSWER: i32 = 1011;
 
 /// What the decoded stream is: AAC-ELD's 48 kHz stereo as 16-bit PCM. The

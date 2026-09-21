@@ -1506,6 +1506,15 @@ fn describe_desktop(field: &[u8]) -> String {
     format!("{name:?} (Apple flags {flags:#010x}: {})", named.join(", "))
 }
 
+/// Name an encoding in the log the way the documentation names it. Apple's own
+/// encodings are written in hex there (`0x451`) while the wire and RFB's registry
+/// count in decimal, so a positive number is given both ways; a pseudo-encoding is
+/// negative, is only ever written in decimal, and would read as two's complement in
+/// hex.
+fn encoding_label(encoding: i32) -> String {
+    if encoding > 0 { format!("{encoding} ({encoding:#x})") } else { encoding.to_string() }
+}
+
 /// The RFB 3.8 tail: force our pixel format and the encoding set.
 async fn rfb38_preface(
     downlink: Downlink,
@@ -1760,7 +1769,8 @@ async fn await_rekey<R: AsyncRead + Unpin>(
                 let encoding = reader.read_i32().await?;
                 anyhow::ensure!(
                     encoding == vnc_apple::ENCODING_REKEY,
-                    "the server sent encoding {encoding} before the record layer was up"
+                    "the server sent encoding {} before the record layer was up",
+                    encoding_label(encoding)
                 );
                 let mut body = [0u8; vnc_record::REKEY_LEN];
                 reader.read_exact(&mut body).await?;
@@ -1793,7 +1803,7 @@ async fn await_rekey<R: AsyncRead + Unpin>(
             // before the rekey. Stepped over silently.
             0x04 | 0x07 => {}
             other => anyhow::bail!(
-                "the server sent message type {other} before the record layer was up"
+                "the server sent message type {other:#04x} before the record layer was up"
             ),
         }
     }
@@ -3072,7 +3082,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 debug!("vnc: Apple message type {msg_type:#04x}, {len} bytes");
                 discard(&mut reader, u64::from(len)).await?;
             }
-            other => anyhow::bail!("unknown server message type {other}"),
+            other => anyhow::bail!("unknown server message type {other:#04x}"),
         }
     }
 }
@@ -3594,7 +3604,10 @@ async fn read_rect<R: AsyncRead + Unpin>(
         vnc_apple::ENCODING_REKEY if apple.is_some() => {
             anyhow::bail!("the server re-keyed mid-session, which this client does not implement")
         }
-        other => anyhow::bail!("server sent encoding {other}, which was not advertised"),
+        other => {
+            let label = encoding_label(other);
+            anyhow::bail!("server sent encoding {label}, which was not advertised")
+        }
     }
 
     let size = desktop.lock().unwrap().size;
@@ -3735,7 +3748,8 @@ async fn read_alpha_cursor<R: AsyncRead + Unpin>(
     let encoding = reader.read_i32().await?;
     anyhow::ensure!(
         encoding == ENCODING_RAW,
-        "a Cursor With Alpha rect in encoding {encoding}; only Raw is read"
+        "a Cursor With Alpha rect in encoding {}; only Raw is read",
+        encoding_label(encoding)
     );
     let pixels_len = usize::from(w) * usize::from(h) * BPP;
     let (state, msg) = if w == 0 || h == 0 {
@@ -8035,7 +8049,7 @@ mod tests {
         let err = await_rekey(&mut [1u8, 0, 0, 0, 0, 0].as_slice(), &wrap)
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("message type 1"), "{err:#}");
+        assert!(format!("{err:#}").contains("message type 0x01"), "{err:#}");
     }
 
     /// Frame a run of server messages into records, as the Mac would.
