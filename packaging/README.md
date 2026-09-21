@@ -60,7 +60,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with all default features disabled |
-| `build-sideload-image.sh` | build an operator's own linux/amd64 image of a release tag — by default with `apple-hp-audio` — from the source archive GitHub serves for it, as a docker-archive tar to import on a node |
+| `publish-full-image.sh` | build the operator's own linux/amd64 image of a release tag with `apple-hp-audio`, from the source archive GitHub serves for it, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 

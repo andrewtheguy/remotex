@@ -3,7 +3,7 @@
 # `serve` shape; the process-local managed-instance surface is a native concern.
 #
 # REMOTEX_SOURCE_DIR is the tree to build when it is not the one this script sits
-# in: build-sideload-image.sh builds a release tag's worktree with this checkout's
+# in: publish-full-image.sh builds a release tag's source with this checkout's
 # script, since a tag holds whatever script it was cut with.
 #
 # REMOTEX_CONTAINER_FEATURES names the non-default features an operator's own
