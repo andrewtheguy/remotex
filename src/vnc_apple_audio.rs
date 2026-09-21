@@ -66,12 +66,13 @@ use rand::Rng as _;
 use crate::audio::{AudioBridge, PcmFormat};
 use crate::vnc_apple;
 
-/// Encoding for the Mac's media-stream replies: message 1 (the UDP ports) and
-/// message 3 (an error). `kSSVideoEncoding_AVCMediaStream` in the client binary.
+/// Encoding 1010 (`0x3f2`) for the Mac's media-stream replies: message 1 (the UDP
+/// ports) and message 3 (an error). `kSSVideoEncoding_AVCMediaStream` in the client
+/// binary.
 pub const ENCODING_MEDIA_STREAM: i32 = 1010;
 
-/// Encoding for message 2, the AVConference answer. Never advertised — the Mac sends
-/// it beside 1010 — and stepped over when it arrives.
+/// Encoding 1011 (`0x3f3`) for message 2, the AVConference answer. Never advertised
+/// — the Mac sends it beside 1010 — and stepped over when it arrives.
 pub const ENCODING_MEDIA_STREAM_ANSWER: i32 = 1011;
 
 /// What the decoded stream is: AAC-ELD's 48 kHz stereo as 16-bit PCM. The
@@ -689,16 +690,30 @@ impl MediaStream {
     /// Act on an encoding-1010 rectangle: start receiving on the port it names, or
     /// record the error it reports. Neither ends the desktop session — sound is an
     /// extra on it.
-    pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<()> {
+    ///
+    /// The Mac re-sends this message after every display layout change (resize,
+    /// display switch). When it does, `screensharingd` tears down the old RTP
+    /// stream and starts a new one — even though the port number is the same.
+    /// The existing receiver is stuck on the dead stream, so it must be
+    /// restarted.
+    pub async fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<()> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
-                info!(
-                    "vnc: the Mac opened its media streams: audio at UDP {audio_port}, \
-                     screen video at {video_port} (unused)"
-                );
-                if self.receiver.is_some() {
-                    debug!("vnc: media streams already running; ignoring a second port message");
-                    return Ok(());
+                if let Some(receiver) = self.receiver.take() {
+                    info!(
+                        "vnc: the Mac restarted its media streams: audio at UDP {audio_port}, \
+                         screen video at {video_port} (unused) — restarting the receiver"
+                    );
+                    // Awaited, not just aborted: the handle resolves only once the
+                    // task has been dropped, and until it is, the old socket still
+                    // holds the port the replacement binds.
+                    receiver.abort();
+                    let _ = receiver.await;
+                } else {
+                    info!(
+                        "vnc: the Mac opened its media streams: audio at UDP {audio_port}, \
+                         screen video at {video_port} (unused)"
+                    );
                 }
                 self.start(audio_port)
             }
@@ -721,6 +736,8 @@ impl MediaStream {
     fn start(&mut self, port: u16) -> anyhow::Result<()> {
         let bind = SocketAddr::new(self.local, port);
         let remote = SocketAddr::new(self.peer, port);
+        // A restart binds the port the previous receiver held; `on_reply` has
+        // awaited that task's end, so the socket is closed by the time this runs.
         let socket = std::net::UdpSocket::bind(bind)
             .map_err(|e| anyhow::anyhow!("bind UDP {bind} for the Mac's audio: {e}"))?;
         socket.set_nonblocking(true)?;
@@ -782,11 +799,18 @@ const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 /// them into the waves the bridge takes. The handle it returns is the sender; the
 /// thread ends when that is dropped, which is what aborting the socket task does.
 ///
+/// `stale` is how the thread is told that the stream it decodes for is gone. A
+/// dropped sender alone is not enough: `recv` hands out everything still queued
+/// before it reports the disconnect, so a restart's old decoder would keep
+/// publishing units of the torn-down stream into the bridge the replacement is
+/// already filling ([`StopOnDrop`]).
+///
 /// The oneshot reports whether the decoder opened at all, because the caller must
 /// not announce an audio format for a stream that will never produce one.
 #[cfg(feature = "apple-hp-audio")]
 fn spawn_decoder(
     bridge: Arc<AudioBridge>,
+    stale: Arc<std::sync::atomic::AtomicBool>,
 ) -> (
     std::sync::mpsc::SyncSender<Vec<u8>>,
     tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
@@ -812,6 +836,9 @@ fn spawn_decoder(
         let mut concealed: u64 = 0;
         let mut undecodable: u64 = 0;
         while let Ok(unit) = inbox.recv() {
+            if stale.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             decoded += 1;
             match decoder.decode(&unit, &mut pending) {
                 Ok(false) => {}
@@ -838,6 +865,19 @@ fn spawn_decoder(
     (units, ready)
 }
 
+/// Marks the decoder thread's queue stale when the receive task ends, however it
+/// ends: an abort drops the task's future where no line of [`receive`] runs. Held
+/// ahead of the sender so the flag is set before the disconnect wakes the thread.
+#[cfg(feature = "apple-hp-audio")]
+struct StopOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(feature = "apple-hp-audio")]
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The receiver: RTCP out once a second, SRTP in, access units to the decoder thread.
 #[cfg(feature = "apple-hp-audio")]
 async fn receive(
@@ -847,7 +887,11 @@ async fn receive(
     bridge: Arc<AudioBridge>,
     viewer_ssrc: u32,
 ) {
-    let (units, ready) = spawn_decoder(Arc::clone(&bridge));
+    let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Declared before the sender, so it drops before it: the decoder must see the
+    // flag by the time the disconnect wakes it.
+    let _stop = StopOnDrop(Arc::clone(&stale));
+    let (units, ready) = spawn_decoder(Arc::clone(&bridge), stale);
     match ready.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -1174,8 +1218,8 @@ mod tests {
     }
 
     /// An error reply is logged and leaves the session running.
-    #[test]
-    fn an_error_reply_is_not_fatal() {
+    #[tokio::test]
+    async fn an_error_reply_is_not_fatal() {
         let bridge = Arc::new(AudioBridge::new());
         let peer: SocketAddr = "10.0.0.2:5900".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:50000".parse().unwrap();
@@ -1183,7 +1227,7 @@ mod tests {
         let mut error = vec![0, 3, 0, 1, 0, 0, 0, 0];
         error.extend_from_slice(&2u32.to_be_bytes());
         error.extend_from_slice(&0u32.to_be_bytes());
-        media.on_reply(&error).unwrap();
+        media.on_reply(&error).await.unwrap();
         assert!(media.receiver.is_none());
         assert_eq!(bridge.negotiated_format(), None);
     }
