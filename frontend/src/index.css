@@ -166,6 +166,22 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* A settling High Performance resize: the last frame dimmed and blurred under a
+   label, over the desktop but under the menu (z-index 900 and up), and
+   transparent to input like the status overlay. */
+.resize-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgb(13 17 23 / 55%);
+  backdrop-filter: blur(12px);
+  font-size: 0.95rem;
+}
+
 /* Deployment branding above the status readout on the interstitials. */
 .status-brand {
   margin-bottom: 0.25rem;

@@ -1219,6 +1219,18 @@ over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still reach the encoder's refusal because the gateway
 cannot ask it for a smaller desktop.
 
+High Performance paces what the window asks for. The Mac cannot serve
+overlapping `SetDisplayConfiguration`s — it answers some with its old layout —
+and every one it acts on reconfigures the virtual display and restarts the
+media stream. So a viewport or density report waits for a second of quiet, only
+one request is out at a time, and the newest size is the one that goes. From the
+first report until the answering layout has held still for half a second, the
+gateway sends `resizing` with `active: true`, and the page covers the desktop
+with a dimmed, blurred "Resizing…" as Apple's client does, instead of showing
+each intermediate mode. The cover takes no input and leaves the menu reachable,
+and a browser that reattaches mid-resize is told again. No other engine sends
+`resizing`.
+
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only with
 `resize`: RDP quantizes it to 1x or 2x at a midpoint, a High Performance virtual
