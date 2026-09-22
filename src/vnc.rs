@@ -2023,9 +2023,8 @@ async fn apple_preface(
 ///
 /// Nothing the client *asked* for can precede it: no pixel format, no encodings and
 /// no update request have been sent, so the server has nothing to answer. What the
-/// Mac does send unbidden in this window is a short list of notifications — Bell,
-/// `MiscStatus` (`0x14`), `ServerAck` (`0x04`) and `NOP` (`0x07`), the pasteboard
-/// status among them after a server restart — and those are stepped over by their
+/// Mac does send unbidden in this window is Bell and `MiscStatus` (`0x14`), the
+/// pasteboard status after a server restart, and those are stepped over by their
 /// own framing, which is the only way to stay in step with the bytes after them.
 ///
 /// Anything outside that list is named in the error rather than skipped. The
@@ -2081,9 +2080,6 @@ async fn await_rekey<R: AsyncRead + Unpin>(
                 discard(reader, u64::from(len)).await?;
                 debug!("vnc: skipped a MiscStatus before the record layer");
             }
-            // ServerAck and NOP: zero-payload Apple messages that can arrive
-            // before the rekey. Stepped over silently.
-            0x04 | 0x07 => {}
             other => anyhow::bail!(
                 "the server sent message type {other:#04x} before the record layer was up"
             ),
@@ -3453,22 +3449,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     }
                 }
             }
-            // Apple's own server messages, which arrive alongside the rectangles on
-            // the 003.889 wire and end the session if they are not stepped over.
-            //
-            // `0x04` ServerAck and `0x07` NOP carry no body at all. The metadata
-            // encodings each *also* come as a bare message whose type is the
-            // encoding's low byte — `0x451` as `0x51`, `0x453` as `0x53` — with the
-            // same `u16` length prefix, and a live session sends both forms of the
-            // same content. Read for their length and dropped, exactly as the
-            // rectangle forms are: nothing here is acted on, but walking past by the
-            // wrong number of bytes would desync everything after it.
-            0x04 | 0x07 if apple.is_some() => {}
-            0x51 | 0x53 | 0x55 | 0x56 if apple.is_some() => {
-                let len = reader.read_u16().await?;
-                debug!("vnc: Apple message type {msg_type:#04x}, {len} bytes");
-                discard(&mut reader, u64::from(len)).await?;
-            }
             other => anyhow::bail!("unknown server message type {other:#04x}"),
         }
     }
@@ -4593,16 +4573,10 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, hp_wake, .. } = shared;
+    // The length counts the bytes after itself — see [`vnc_apple::parse_layout`].
     let declared = reader.read_u16().await?;
-    // Two fewer than declared, which is the count the Mac actually sends — see
-    // [`vnc_apple::parse_layout`], where the reason and the measurement are.
-    anyhow::ensure!(
-        declared >= 4,
-        "a display layout declared {declared} bytes, less than its own length prefix"
-    );
-    let mut payload = declared.to_be_bytes().to_vec();
-    payload.resize(usize::from(declared) - 2, 0);
-    reader.read_exact(&mut payload[2..]).await?;
+    let mut payload = vec![0u8; usize::from(declared)];
+    reader.read_exact(&mut payload).await?;
     let layout = if virtual_display {
         vnc_apple::parse_virtual_display_layout(&payload)?
     } else {
@@ -9780,10 +9754,10 @@ mod tests {
     }
 
     /// The layout payload builder, shared with `vnc_apple`'s own tests rather than
-    /// copied: it encodes the measured record offsets, and a second copy of those
+    /// copied: it encodes the record offsets, and a second copy of those
     /// would have to be kept in step with the parser by hand. `vnc_apple` is also
     /// where it is cross-checked against a captured payload.
-    use crate::vnc_apple::{TestScreen, test_layout as layout_payload};
+    use crate::vnc_apple::{TestScreen, test_layout_wire as layout_payload};
 
     /// A layout does three things, and the third is the one that is easy to miss:
     /// it resizes, it reports the screens, and it re-arms the server. Without the

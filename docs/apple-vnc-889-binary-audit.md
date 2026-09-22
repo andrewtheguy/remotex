@@ -34,40 +34,6 @@ the repository.
 
 Ordered by effect on a session.
 
-### The display layout is read four bytes short
-
-`ScreensharingAgent` `FUN_1000266f1` [EncodeDisplayInfo2ForDaemon] builds the
-`0x451` layout as a standalone one-rectangle `FramebufferUpdate` and sends exactly
-`count × 0x38 + 0x26` bytes of it. The rectangle's `u16` prefix is
-`count × 0x38 + 0x14` and counts the bytes **after** itself:
-
-| Payload offset (after the prefix) | Field |
-|---|---|
-| `+0x00` | `u16` version, 5 |
-| `+0x02` | `u16 × 2` logical size of the union of screens |
-| `+0x06` | `u16 × 2` backing size of the framebuffer |
-| `+0x0a` | `u32` current display id, `0xffffffff` for combined |
-| `+0x0e` | `u32` session state (see [the header word](#the-layouts-session-state-word)) |
-| `+0x12` | `u16` display count |
-| `+0x14` | records, `0x38` bytes each |
-
-Apple's viewer (`HandleFramebufferUpdate`, case `0x451`, `0x7ffa0ad2e9b5` →
-`0x7ffa0ad2f7b2`) reads the `u16`, `malloc(size)`, reads `size` bytes, takes the
-count from `+0x12` and requires it to be 1–25 and `size ≥ 0x14 + count × 0x38`.
-
-remotex reads `declared − 4` bytes after the prefix and starts records two bytes
-early. Every record field therefore looked two bytes late (the doc's "+2" rule), and
-the four bytes never read — the last record's blue-shift byte and three pad bytes,
-all zero — were parsed as an empty `FramebufferUpdate`. That phantom update follows
-every layout: it spends a full-repaint request, and in High Performance it is a false
-update boundary at which a queued `SetDisplayConfiguration` can go out while the
-layout's full-size request is still outstanding.
-
-The last `0x38`-byte record is `+0x00 f64` scale, `+0x08 f64` viewer scale (the
-daemon's server-side scaling factor), `+0x10 u32` id, `+0x14` logical rect and
-`+0x1c` backing rect as `(top, left, bottom, right)`, `+0x24 u32` flags, then the
-display's 16-byte pixel format.
-
 ### Scrolling while a button is held clicks
 
 `screensharingd` `HandleViewerCommand` (`0x10003a47c`), PointerEvent, after the
@@ -134,19 +100,51 @@ records; Apple's viewer reads 10 bytes and the count from bytes 8–9. remotex r
 the count from the flags word. The daemon sends it only when `0x451` is not
 advertised, so it is unreachable today.
 
-### Display records remotex refuses and Apple keeps
+### A display record remotex refuses and Apple keeps
 
-- The agent (`FUN_100027c2d`) sets record flag bit 1 whenever
-  `CGDisplayIsInMirrorSet` is true, which is every member of a mirror set, the
-  primary included; `CGGetActiveDisplayList` lists only the primary under hardware
-  mirroring. remotex drops every bit-1 record, so a mirrored Mac can yield no
-  usable display. Apple's viewer builds a screen for every record. Not observed on a
-  live Mac.
 - The agent's `hidpi_ScaleFactor` (`FUN_100045a47`) returns 0.0 on "bad mode ref";
   remotex drops a record outside 1–4, which for the single High Performance record
   ends the session.
 
 ## Corrections to the measured document
+
+### The display layout
+
+`ScreensharingAgent` `FUN_1000266f1` [EncodeDisplayInfo2ForDaemon] builds the
+`0x451` layout as a standalone one-rectangle `FramebufferUpdate` and sends exactly
+`count × 0x38 + 0x26` bytes of it. The rectangle's `u16` prefix is
+`count × 0x38 + 0x14` and counts the bytes **after** itself:
+
+| Payload offset (after the prefix) | Field |
+|---|---|
+| `+0x00` | `u16` version, 5 |
+| `+0x02` | `u16 × 2` logical size of the union of screens |
+| `+0x06` | `u16 × 2` backing size of the framebuffer |
+| `+0x0a` | `u32` current display id, `0xffffffff` for combined |
+| `+0x0e` | `u32` session state (see [the header word](#the-layouts-session-state-word)) |
+| `+0x12` | `u16` display count |
+| `+0x14` | records, `0x38` bytes each |
+
+Apple's viewer (`HandleFramebufferUpdate`, case `0x451`, `0x7ffa0ad2e9b5` →
+`0x7ffa0ad2f7b2`) reads the `u16`, `malloc(size)`, reads `size` bytes, takes the
+count from `+0x12` and requires it to be 1–25 and `size ≥ 0x14 + count × 0x38`.
+
+A record is `+0x00 f64` scale, `+0x08 f64` viewer scale (the daemon's server-side
+scaling factor), `+0x10 u32` id, `+0x14` logical rect and `+0x1c` backing rect as
+`(top, left, bottom, right)`, `+0x24 u32` flags, then the display's 16-byte pixel
+format, whose last four bytes (blue shift and padding) are always zero.
+
+The measured document's "two bytes shorter" and "fields two bytes later" were one
+error: a reader that counted the prefix in its own length started the records two
+bytes early and left those four zero bytes on the stream, where they parsed as an
+empty `FramebufferUpdate` after every layout. In High Performance that phantom
+update was a false boundary at which a queued `SetDisplayConfiguration` could go out
+while the layout's full-size request was still outstanding.
+
+The agent (`FUN_100027c2d`) sets record flag bit 1 whenever
+`CGDisplayIsInMirrorSet` is true, which is every member of a mirror set, the one the
+others copy included; `CGGetActiveDisplayList` lists only that one under hardware
+mirroring. Apple's viewer builds a screen for every record.
 
 ### ServerInit's flags
 

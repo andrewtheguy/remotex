@@ -51,10 +51,10 @@
 //! ## Reading the offsets in here
 //!
 //! The reference document is reverse-engineered and says so; several offsets in it
-//! disagree with the bytes a live Mac sends — a display record's fields are
-//! uniformly two bytes later than it claims — and where they do the comments name
-//! which reading is implemented and what measurement settled it. Payload hex is
-//! logged at `debug` on first receipt for exactly that reason.
+//! disagree with the bytes a live Mac sends — a layout has a display count the
+//! reference lacks — and where they do the comments name which reading is
+//! implemented and what settled it: a measurement, or the binaries in
+//! docs/apple-vnc-889-binary-audit.md.
 
 use std::collections::HashMap;
 
@@ -183,13 +183,11 @@ const DYNAMIC_MAX_WIDTH: u32 = 3840;
 const DYNAMIC_MAX_HEIGHT: u32 = 2160;
 /// Bytes of one display record in a layout payload.
 const LAYOUT_RECORD: usize = 0x38;
-/// Bytes of a display record this parser actually reads. The rest is a pixel format
-/// it has no use for, and is where the final record's missing two bytes come from —
-/// see [`parse_layout`].
-const LAYOUT_FIELDS: usize = 0x2a;
-/// Bytes of a layout payload before its first record, *including* the `u16`
-/// length prefix — see [`parse_layout`] for why that is the reading used.
+/// Bytes of a layout payload before its first record, counted after the `u16`
+/// length prefix. The display count is the header's last field.
 const LAYOUT_HEAD: usize = 0x14;
+/// The most displays Apple's viewer accepts in one layout.
+const LAYOUT_MAX_DISPLAYS: usize = 25;
 /// Identify this client to Screen Sharing before enabling its optional control
 /// messages. The 62-byte body is the native numeric-version form measured on
 /// macOS 26; there are no counted strings in it.
@@ -457,34 +455,17 @@ impl Layout {
     }
 }
 
-/// Parse an `AppleDisplayLayout` payload.
+/// Parse an `AppleDisplayLayout` payload: the bytes after the rectangle's `u16`
+/// length, which counts everything after itself.
 ///
-/// ## The offsets are two bytes later than the reference says
-///
-/// Every field of a display record sits at the reference's offset **plus two**.
-/// That is not a guess: the tell is the `f64` `3ff0000000000000` (1.0), which the
-/// reference puts at `+0x00` and `+0x08` and a live Mac puts at `+0x02` and
-/// `+0x0a`. Reading the reference's offsets yields `display_id = 0` for every
-/// screen and denormal garbage for the scales. The shifted offsets reproduce the
-/// measured VM exactly — ids 1 and 4, a 1280x800 at (0,0) and a 1600x900 at
-/// (1280,0), main on the first — so they are implemented. See
-/// docs/apple-vnc-889.md.
-///
-/// Both rects are `(top, left, bottom, right)`, not the `(x, y, w, h)` the
-/// reference models; a size is a difference of edges here.
-///
-/// ## The length rule, which is off by two
-///
-/// The `u16` prefix counts the whole payload including itself — `0x14 + displays ×
-/// 0x38`, the encoder's own arithmetic, and 132 for two screens or 76 for one — but
-/// **two fewer bytes than that are actually sent**: the final display record stops
-/// after its last field and omits its two trailing pad bytes. So a reader consumes
-/// `declared - 2`, and consuming `declared` swallows the first two bytes of the
-/// message behind it. That desync is unrecoverable and does not look like a length
-/// bug: the next thing read is a framebuffer update whose rectangle count is really
-/// a screen width, and the session dies several messages later complaining about an
-/// encoding nobody sent. Measured against macOS 26 twice over, once for a
-/// two-screen layout and once for a one-screen one.
+/// The header is a `u16` version, the logical size of the union of screens, the
+/// framebuffer's backing size, the current display id (`0xffffffff` for the
+/// combined view), a session-state word and a `u16` display count. Records follow
+/// at `0x38` bytes each: an `f64` scale, an `f64` viewer scale, the display id, the
+/// logical and backing rects as `(top, left, bottom, right)`, a flags word and the
+/// display's pixel format. The layout is `ScreensharingAgent`'s
+/// `EncodeDisplayInfo2ForDaemon`, read by Apple's viewer the same way — see
+/// docs/apple-vnc-889-binary-audit.md.
 pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
     parse_layout_kind(payload, false)
 }
@@ -502,51 +483,42 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         "a display layout carried {} bytes, too few for a header",
         payload.len()
     );
-    let declared = usize::from(be16(payload, 0));
+    let version = be16(payload, 0);
+    let count = usize::from(be16(payload, 0x12));
+    // Apple's viewer takes 1–25 displays and tolerates bytes past the last record.
     anyhow::ensure!(
-        declared == payload.len() + 2,
-        "a display layout says {declared} bytes and carried {}, which is not the {} expected",
-        payload.len(),
-        declared.saturating_sub(2)
+        (1..=LAYOUT_MAX_DISPLAYS).contains(&count),
+        "a display layout lists {count} displays"
     );
-    let version = be16(payload, 2);
-    // Plus the two the last record does not send, so the grid divides.
-    let records = payload.len() - LAYOUT_HEAD + 2;
     anyhow::ensure!(
-        records.is_multiple_of(LAYOUT_RECORD),
-        "a display layout has {records} bytes of records, not a multiple of {LAYOUT_RECORD}"
+        payload.len() >= LAYOUT_HEAD + count * LAYOUT_RECORD,
+        "a display layout lists {count} displays in {} bytes",
+        payload.len()
     );
     // `0xffffffff` means the combined view of every screen. Any other value is a
     // screen id, and it is how a selection is confirmed — the gateway believes it
     // acted only when this comes back changed.
-    let current = match be32(payload, 0x0c) {
+    let current = match be32(payload, 0x0a) {
         u32::MAX => None,
         id => Some(id),
     };
-    // Logged whole, because the word at `+0x10` is still unidentified — it read 4
-    // on every layout of every measured session, selected or combined — and this is
-    // the only way anyone will identify it.
     debug!(
-        "vnc: display layout version {version}, {} display(s), current {current:?}, header {:02x?}",
-        records / LAYOUT_RECORD,
-        &payload[..LAYOUT_HEAD]
+        "vnc: display layout version {version}, {count} display(s), current {current:?}, \
+         session state {:#x}",
+        be32(payload, 0x0e)
     );
 
     let mut displays = Vec::new();
-    // `chunks`, not `chunks_exact`: the last record is two bytes short. Every field
-    // read below ends at 0x2a, so a short final chunk still holds all of them —
-    // asserted rather than assumed, since a future build that truncates further
-    // would otherwise read a neighbouring record's bytes as this one's flags.
-    for (index, record) in payload[LAYOUT_HEAD..].chunks(LAYOUT_RECORD).enumerate() {
-        anyhow::ensure!(
-            record.len() >= LAYOUT_FIELDS,
-            "a display layout's record {index} carried {} bytes, too few for its fields",
-            record.len()
-        );
-        let flags = be32(record, 0x26);
-        // A mirrored screen shows another screen's pixels. Offering it would be
-        // offering the same picture twice under two names.
-        if flags & 0x02 != 0 {
+    let mut origins = Vec::new();
+    let (records, _) = payload[LAYOUT_HEAD..].as_chunks::<LAYOUT_RECORD>();
+    for (index, record) in records[..count].iter().enumerate() {
+        let flags = be32(record, 0x24);
+        // Bit 1 is `CGDisplayIsInMirrorSet`, which is true of every member of a
+        // mirror set, the one the others copy included. Members share an origin, so
+        // the first of them is offered and the rest, the same picture under another
+        // name, are not.
+        let origin = (be16(record, 0x14), be16(record, 0x16));
+        if flags & 0x02 != 0 && origins.contains(&origin) {
             continue;
         }
         let edges = |at: usize| {
@@ -558,9 +530,9 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             );
             (right.saturating_sub(left), bottom.saturating_sub(top))
         };
-        let logical = edges(0x16);
-        let backing = edges(0x1e);
-        // An unusable screen is dropped, the way a mirrored one is, rather than
+        let logical = edges(0x14);
+        let backing = edges(0x1c);
+        // An unusable screen is dropped, the way a mirror copy is, rather than
         // taking the whole layout with it. One odd record among good ones would
         // otherwise cost the entire display list *and* the resize — and a layout
         // arrives at every login and lock, so that is a session-long outage over one
@@ -578,7 +550,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         // build that disagrees with itself says so, instead of quietly halving a
         // desktop.
         let stated = f64::from_be_bytes(
-            record[0x02..0x0a].try_into().expect("eight bytes inside a 0x38-byte record"),
+            record[0x00..0x08].try_into().expect("eight bytes inside a 0x38-byte record"),
         );
         if !stated.is_finite() || !(1.0..=4.0).contains(&stated) {
             warn!(
@@ -593,7 +565,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             warn!(
                 "vnc: display {} states scale {density} but its rects give {ratio}; \
                  using the stated one",
-                be32(record, 0x12)
+                be32(record, 0x10)
             );
         }
         // "1600×900 at 2x" — the points a window occupies, which is the size a
@@ -608,9 +580,10 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         } else {
             String::new()
         };
+        origins.push(origin);
         displays.push(Display {
             info: DisplayInfo {
-                id: be32(record, 0x12),
+                id: be32(record, 0x10),
                 label: if virtual_display {
                     "Virtual display".to_owned()
                 } else {
@@ -626,7 +599,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
     }
 
     anyhow::ensure!(!displays.is_empty(), "a display layout listed no usable display");
-    let backing = (be16(payload, 0x08), be16(payload, 0x0a));
+    let backing = (be16(payload, 0x06), be16(payload, 0x08));
     anyhow::ensure!(
         backing.0 > 0 && backing.1 > 0,
         "a display layout gives a {}x{} framebuffer",
@@ -722,9 +695,8 @@ impl CursorCache {
 #[cfg(test)]
 pub(crate) type TestScreen = (u32, (u16, u16), (u16, u16), u32);
 
-/// Build a layout payload at the *measured* offsets, for the cases the captured
-/// bytes in this module's tests cannot cover — a mirrored screen, a selection, a
-/// malformed length.
+/// Build a layout payload, for the cases the captured bytes in this module's tests
+/// cannot cover — a mirrored screen, a selection, a malformed count.
 ///
 /// Lives outside `mod tests` because [`crate::vnc`]'s tests need it too, and two
 /// copies of this bit-twiddling would have to be kept in step with the parser by
@@ -734,9 +706,7 @@ pub(crate) type TestScreen = (u32, (u16, u16), (u16, u16), u32);
 #[cfg(test)]
 pub(crate) fn test_layout(current: Option<u32>, displays: &[TestScreen]) -> Vec<u8> {
     let mut payload = vec![0u8; LAYOUT_HEAD];
-    let total = LAYOUT_HEAD + displays.len() * LAYOUT_RECORD;
-    payload[..2].copy_from_slice(&u16::try_from(total).unwrap().to_be_bytes());
-    payload[2..4].copy_from_slice(&5u16.to_be_bytes());
+    payload[0..2].copy_from_slice(&5u16.to_be_bytes());
     let first = displays.first().expect("at least one display");
     // The header's logical geometry spans every screen and does not move.
     let span: u16 = displays.iter().map(|d| d.1.0).sum();
@@ -754,19 +724,20 @@ pub(crate) fn test_layout(current: Option<u32>, displays: &[TestScreen]) -> Vec<
             },
             |d| d.2,
         );
-    payload[4..6].copy_from_slice(&span.to_be_bytes());
-    payload[6..8].copy_from_slice(&first.1.1.to_be_bytes());
-    payload[8..10].copy_from_slice(&framebuffer.0.to_be_bytes());
-    payload[10..12].copy_from_slice(&framebuffer.1.to_be_bytes());
-    payload[12..16].copy_from_slice(&current.unwrap_or(u32::MAX).to_be_bytes());
-    payload[16..20].copy_from_slice(&4u32.to_be_bytes());
+    payload[2..4].copy_from_slice(&span.to_be_bytes());
+    payload[4..6].copy_from_slice(&first.1.1.to_be_bytes());
+    payload[6..8].copy_from_slice(&framebuffer.0.to_be_bytes());
+    payload[8..10].copy_from_slice(&framebuffer.1.to_be_bytes());
+    payload[10..14].copy_from_slice(&current.unwrap_or(u32::MAX).to_be_bytes());
+    payload[14..18].copy_from_slice(&4u32.to_be_bytes()); // on console
+    payload[18..20].copy_from_slice(&u16::try_from(displays.len()).unwrap().to_be_bytes());
     let mut left = 0u16;
     for (id, logical, backing, flags) in displays {
         let mut r = vec![0u8; LAYOUT_RECORD];
         let density = f64::from(backing.0) / f64::from(logical.0.max(1));
-        r[0x02..0x0a].copy_from_slice(&density.to_be_bytes());
-        r[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes());
-        r[0x12..0x16].copy_from_slice(&id.to_be_bytes());
+        r[0x00..0x08].copy_from_slice(&density.to_be_bytes());
+        r[0x08..0x10].copy_from_slice(&1.0f64.to_be_bytes());
+        r[0x10..0x14].copy_from_slice(&id.to_be_bytes());
         // (top, left, bottom, right), laid out left to right.
         let edges = |at: usize, r: &mut [u8], w: u16, h: u16, x: u16| {
             r[at..at + 2].copy_from_slice(&0u16.to_be_bytes());
@@ -774,17 +745,22 @@ pub(crate) fn test_layout(current: Option<u32>, displays: &[TestScreen]) -> Vec<
             r[at + 4..at + 6].copy_from_slice(&h.to_be_bytes());
             r[at + 6..at + 8].copy_from_slice(&(x + w).to_be_bytes());
         };
-        edges(0x16, &mut r, logical.0, logical.1, left);
-        edges(0x1e, &mut r, backing.0, backing.1, left);
-        r[0x26..0x2a].copy_from_slice(&flags.to_be_bytes());
+        edges(0x14, &mut r, logical.0, logical.1, left);
+        edges(0x1c, &mut r, backing.0, backing.1, left);
+        r[0x24..0x28].copy_from_slice(&flags.to_be_bytes());
         payload.extend_from_slice(&r);
         left += logical.0;
     }
-    // The Mac stops two bytes short of the last record, and `declared` counts them
-    // anyway. A builder that did not do this would let the parser's length rule drift
-    // without a single test noticing.
-    payload.truncate(payload.len() - 2);
     payload
+}
+
+/// [`test_layout`] as it arrives in the rectangle, behind its `u16` length.
+#[cfg(test)]
+pub(crate) fn test_layout_wire(current: Option<u32>, displays: &[TestScreen]) -> Vec<u8> {
+    let payload = test_layout(current, displays);
+    let mut wire = u16::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
+    wire.extend_from_slice(&payload);
+    wire
 }
 
 fn be16(bytes: &[u8], at: usize) -> u16 {
@@ -945,32 +921,32 @@ mod tests {
         );
     }
 
-    /// The `AppleDisplayLayout` a macOS 26 VM sent for its two real screens, byte
-    /// for byte off the wire (see docs/apple-vnc-889.md).
+    /// The `AppleDisplayLayout` a macOS 26 VM sent for its two real screens, off
+    /// the wire after the rectangle's `u16` length of 132 (see
+    /// docs/apple-vnc-889.md). The capture was taken by a reader that stopped four
+    /// bytes short; those four — the last record's blue shift and three pad bytes —
+    /// are zero in every layout `ScreensharingAgent` builds, and are restored here.
     ///
     /// Captured rather than constructed, because a payload this parser built for
-    /// itself would agree with whichever offsets it happened to use — which is
-    /// exactly how the offsets came to be two bytes out. The ground truth these
-    /// bytes have to reproduce was measured separately, over SSH: display ids 1 and
+    /// itself would agree with whichever offsets it happened to use. The ground
+    /// truth these bytes have to reproduce was measured separately, over SSH: display ids 1 and
     /// 4, a 1280x800 at (0,0) and a 1600x900 at (1280,0), the first one main, and
     /// the second one Retina.
     const TWO_REAL_SCREENS: &[u8] = &[
-        // header: len 132, version 5, logical 2880x900, backing 4480x1800,
-        // current_display 0xffffffff (the combined view), then the unidentified word.
-        0x00, 0x84, 0x00, 0x05, 0x0b, 0x40, 0x03, 0x84, 0x11, 0x80, 0x07, 0x08, 0xff, 0xff, 0xff,
-        0xff, 0x00, 0x00, 0x00, 0x04, //
+        // header: version 5, logical 2880x900, backing 4480x1800, current display
+        // 0xffffffff (the combined view), session state 4 (on console), 2 displays.
+        0x00, 0x05, 0x0b, 0x40, 0x03, 0x84, 0x11, 0x80, 0x07, 0x08, 0xff, 0xff, 0xff, 0xff, 0x00,
+        0x00, 0x00, 0x04, 0x00, 0x02, //
         // display id 1: scale 1.0, viewer scale 1.0, both rects (0,0,800,1280), main.
-        0x00, 0x02, 0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xf0, 0x00, 0x00, 0x00,
+        0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xf0, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x20, 0x05, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x03, 0x20, 0x05, 0x00, 0x00, 0x00, 0x00, 0x01, 0x20, 0x20, 0x00,
-        0x01, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0x10, 0x08, 0x00, 0x00, //
+        0x01, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0x10, 0x08, 0x00, 0x00, 0x00, 0x00, //
         // display id 4: scale 2.0, logical (0,1280,900,2880), backing (0,1280,1800,4480).
-        0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xf0, 0x00, 0x00, 0x00,
+        0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xf0, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x05, 0x00, 0x03, 0x84, 0x0b, 0x40,
         0x00, 0x00, 0x05, 0x00, 0x07, 0x08, 0x11, 0x80, 0x00, 0x00, 0x00, 0x00, 0x20, 0x20, 0x00,
-        0x01, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0x10, 0x08,
-        // …and here it stops. The last record's two trailing pad bytes are not on
-        // the wire, which is why the prefix above reads 132 for 130 bytes.
+        0x01, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0x10, 0x08, 0x00, 0x00, 0x00, 0x00,
     ];
 
     #[test]
@@ -1014,24 +990,24 @@ mod tests {
         // matters. Both edits are what the Mac actually answered a `0x0d` with: the
         // framebuffer narrows to that screen and its id lands in `current_display`.
         let mut payload = TWO_REAL_SCREENS.to_vec();
-        payload[0x08..0x0a].copy_from_slice(&3200u16.to_be_bytes());
-        payload[0x0c..0x10].copy_from_slice(&4u32.to_be_bytes());
+        payload[0x06..0x08].copy_from_slice(&3200u16.to_be_bytes());
+        payload[0x0a..0x0e].copy_from_slice(&4u32.to_be_bytes());
         let retina = parse_layout(&payload).unwrap();
         assert_eq!(retina.current, Some(4));
         assert_eq!(retina.backing, (3200, 1800));
         assert_eq!(retina.scale(), 2.0);
         assert_eq!(retina.repaint_pixels(), 3200 * 1800);
 
-        payload[0x08..0x0a].copy_from_slice(&1280u16.to_be_bytes());
-        payload[0x0a..0x0c].copy_from_slice(&800u16.to_be_bytes());
-        payload[0x0c..0x10].copy_from_slice(&1u32.to_be_bytes());
+        payload[0x06..0x08].copy_from_slice(&1280u16.to_be_bytes());
+        payload[0x08..0x0a].copy_from_slice(&800u16.to_be_bytes());
+        payload[0x0a..0x0e].copy_from_slice(&1u32.to_be_bytes());
         let plain = parse_layout(&payload).unwrap();
         assert_eq!(plain.scale(), 1.0);
         assert_eq!(plain.backing, (1280, 800));
 
         // A screen that is gone by the time the id is looked up leaves the desktop
         // at its pixel size rather than guessing at another screen's density.
-        payload[0x0c..0x10].copy_from_slice(&99u32.to_be_bytes());
+        payload[0x0a..0x0e].copy_from_slice(&99u32.to_be_bytes());
         assert_eq!(parse_layout(&payload).unwrap().scale(), crate::protocol::UNSCALED);
     }
 
@@ -1045,9 +1021,9 @@ mod tests {
             None,
             &[(1, (1280, 800), (1280, 800), 0x01), (4, (1600, 900), (3200, 1800), 0x00)],
         );
-        // Not byte-equal: the capture carries a leading `u16` per record and a
-        // pixel-format tail that nothing here reads. Equal in every field the parser
-        // does read, which is the claim that matters.
+        // Not byte-equal: the capture carries a pixel format per record that nothing
+        // here reads. Equal in every field the parser does read, which is the claim
+        // that matters.
         assert_eq!(parse_layout(&built).unwrap(), parse_layout(TWO_REAL_SCREENS).unwrap());
     }
 
@@ -1078,15 +1054,22 @@ mod tests {
 
     #[test]
     fn a_mirrored_screen_is_not_offered_twice() {
-        let parsed = parse_layout(&layout(
-            None,
-            &[(11, (1920, 1080), (1920, 1080), 0x01), (22, (1920, 1080), (1920, 1080), 0x02)],
-        ))
-        .unwrap();
+        // Every member of a mirror set carries bit 1, the one the others copy
+        // included, and they share an origin.
+        let mut payload =
+            layout(None, &[(11, (1920, 1080), (1920, 1080), 0x03), (22, (1920, 1080), (1920, 1080), 0x02)]);
+        let second = LAYOUT_HEAD + LAYOUT_RECORD;
+        payload.copy_within(LAYOUT_HEAD + 0x14..LAYOUT_HEAD + 0x24, second + 0x14);
+        let parsed = parse_layout(&payload).unwrap();
         assert_eq!(parsed.displays.len(), 1);
         assert_eq!(parsed.displays[0].info.id, 11);
         // One entry is what makes the client hide the picker, which is right:
         // there is nothing to choose.
+
+        // A mirror set's only listed member, which is what hardware mirroring
+        // reports, is a screen like any other.
+        let alone = parse_layout(&layout(None, &[(11, (1920, 1080), (1920, 1080), 0x03)])).unwrap();
+        assert_eq!(alone.displays.len(), 1);
     }
 
     #[test]
@@ -1094,36 +1077,34 @@ mod tests {
         let one = |flags| layout(None, &[(11, (800, 600), (800, 600), flags)]);
 
         // Short of a header.
-        assert!(parse_layout(&[0, 4, 0, 5]).is_err());
+        assert!(parse_layout(&[0, 5, 0, 0]).is_err());
 
-        // A payload as long as its own prefix claims is shorter than the Mac sends.
-        // Accepting it would silently desync the session.
+        // No displays, and more displays than Apple's viewer takes.
+        for count in [0u16, 26] {
+            let mut payload = one(0x01);
+            payload[0x12..0x14].copy_from_slice(&count.to_be_bytes());
+            let err = parse_layout(&payload).unwrap_err();
+            assert!(format!("{err:#}").contains("displays"), "{err:#}");
+        }
+
+        // A count the bytes do not hold.
         let mut payload = one(0x01);
-        let exact = payload.len();
-        payload[..2].copy_from_slice(&u16::try_from(exact).unwrap().to_be_bytes());
+        payload[0x12..0x14].copy_from_slice(&2u16.to_be_bytes());
         let err = parse_layout(&payload).unwrap_err();
-        assert!(format!("{err:#}").contains("and carried"), "{err:#}");
+        assert!(format!("{err:#}").contains("in 76 bytes"), "{err:#}");
 
-        // A trailing partial record: eight bytes more than any whole number of them.
+        // Bytes past the last record are tolerated, as Apple's viewer tolerates them.
         let mut payload = one(0x01);
         payload.extend_from_slice(&[0u8; 8]);
-        let declared = payload.len() + 2;
-        payload[..2].copy_from_slice(&u16::try_from(declared).unwrap().to_be_bytes());
-        let err = parse_layout(&payload).unwrap_err();
-        assert!(format!("{err:#}").contains("not a multiple of"), "{err:#}");
+        assert_eq!(parse_layout(&payload).unwrap(), parse_layout(&one(0x01)).unwrap());
 
-        // Every screen mirrored leaves nothing to render.
-        let err = parse_layout(&one(0x02)).unwrap_err();
-        assert!(format!("{err:#}").contains("no usable display"), "{err:#}");
-
-        // A scale factor read out of the wrong offset, which is what the reference's
-        // own field model produces: the bytes there are a denormal, not a density.
-        // The record is dropped rather than the layout refused, so with only one
-        // screen in it what is left is nothing to render — and a *wrong set of
-        // offsets* fails exactly here, because it would drop every record.
+        // A scale factor read out of the wrong offset: the bytes there are a
+        // denormal, not a density. The record is dropped rather than the layout
+        // refused, so with only one screen in it what is left is nothing to render —
+        // and a *wrong set of offsets* fails exactly here, because it would drop
+        // every record.
         let mut payload = one(0x01);
-        payload[LAYOUT_HEAD + 0x02..LAYOUT_HEAD + 0x0a]
-            .copy_from_slice(&[0, 0, 0x3f, 0xf0, 0, 0, 0, 0]);
+        payload[LAYOUT_HEAD..LAYOUT_HEAD + 0x08].copy_from_slice(&[0, 0, 0x3f, 0xf0, 0, 0, 0, 0]);
         let err = parse_layout(&payload).unwrap_err();
         assert!(format!("{err:#}").contains("no usable display"), "{err:#}");
     }
@@ -1144,7 +1125,7 @@ mod tests {
 
         // A scale factor no screen has.
         let mut payload = layout(None, &screens);
-        payload[LAYOUT_HEAD + 0x02..LAYOUT_HEAD + 0x0a].copy_from_slice(&99.0f64.to_be_bytes());
+        payload[LAYOUT_HEAD..LAYOUT_HEAD + 0x08].copy_from_slice(&99.0f64.to_be_bytes());
         let parsed = parse_layout(&payload).unwrap();
         assert_eq!(parsed.displays.len(), 2, "the other two are still offered");
         assert_eq!(parsed.displays[0].info.id, 22);
@@ -1153,7 +1134,7 @@ mod tests {
         // A screen of no size, which would otherwise be offered as "0×0".
         let mut payload = layout(None, &screens);
         let second = LAYOUT_HEAD + LAYOUT_RECORD;
-        payload[second + 0x16..second + 0x1e].copy_from_slice(&[0u8; 8]);
+        payload[second + 0x14..second + 0x1c].copy_from_slice(&[0u8; 8]);
         let parsed = parse_layout(&payload).unwrap();
         assert_eq!(parsed.displays.len(), 2);
         assert!(parsed.displays.iter().all(|d| d.info.id != 22));

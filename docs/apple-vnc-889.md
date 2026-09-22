@@ -26,10 +26,10 @@ system audio below is **experimental** and stays behind the non-default
 | | |
 |---|---|
 | Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
-| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours. |
+| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A layout's length prefix counts only what follows it, and a `u16` display count precedes the records. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours. |
 | Fractional ratios | A virtual display mode whose backing/scaled ratio is not 1 or 2 is not rounded by the Mac. Measured August 23, 2026 on macOS 26.6.2: 2561×1440 backing over 1707×960 scaled (1.5x) created 1707×960 points at 2x, 2880×1800 over 1920×1200 (1.5x) created 960×600 points at 2x, and 2560×1440 over 2048×1152 (1.25x) created 960×540 points at 2x — a desktop whose text looks zoomed while the Dock, shrunk to fit the width, does not. Remotex therefore asks only for 1x or 2x (`protocol::render_density`). |
 | Lingering display | The virtual display outlives its session: a reconnect within a few seconds found it still there (the new session's ServerInit reported the previous mode and the display kept its id), and one after 45 s found the Mac back on its 800×600 physical display with a fresh id. The new session's own layout arrives either way, including when the requested mode equals the lingering one. |
-| Pre-rekey messages | `MiscStatus` (`0x14`), `ServerAck` (`0x04`), and `NOP` (`0x07`) can arrive in the cleartext window between `SetEncryption` and the rekey, especially after a server restart when the Mac has stale clipboard state. The client must tolerate these during `await_rekey`. |
+| Pre-rekey messages | `MiscStatus` (`0x14`) can arrive in the cleartext window between `SetEncryption` and the rekey, especially after a server restart when the Mac has stale clipboard state. The client must tolerate it during `await_rekey`. |
 | Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
 | Authentication | Remote Management's default "All users" setting rejects valid account credentials with the same error as an incorrect password. Add the account to the per-user access list with Observe and Control before treating the failure as a protocol fault. |
 
@@ -168,8 +168,8 @@ pasteboard messages in both directions. It sends the native cleartext `ViewerInf
 Mac can respond to `AutoPasteboard(start)` with a `MiscStatus(cmd=2)` in the
 cleartext window before the rekey arrives — particularly after a server restart,
 when stale clipboard state from the previous session triggers an immediate
-notification. The client must tolerate this and other Apple messages (`ServerAck`,
-`NOP`) during `await_rekey` rather than treating them as protocol errors. The
+notification. The client must tolerate it during `await_rekey` rather than
+treating it as a protocol error. The
 gateway repeats the idempotent `AutoPasteboard(start)` after the virtual display's
 answering layout. The Mac reports further changes with `MiscStatus(cmd=2)`;
 `ClipboardFetch` and the zlib-compressed `ClipboardSend` archive carry the contents.
@@ -259,55 +259,56 @@ shipped list produced layouts twice through the gateway, so "any single removal
 fails" has one known exception and the required subset remains unknown. Leave the
 shipped order and contents unchanged.
 
-### A layout payload is two bytes shorter than it declares
+### A layout's length counts what follows it
 
-The `u16` prefix counts the whole payload including itself — `0x14 + displays ×
-0x38`, which is 132 for two screens and 76 for one — but **two fewer bytes are
-sent**. The final display record stops after its last field and omits its two
-trailing pad bytes.
+The `u16` prefix counts the bytes **after** itself — `0x14 + displays × 0x38`,
+which is 132 for two screens and 76 for one — and that many are sent. Between the
+header and the records sits a `u16` display count, which §8.4 does not have.
 
-Consuming the declared count steals two bytes from the next message. The following
-framebuffer update then reads width `0x0c80` (3200) as its rectangle count and later
-reports pixel bytes `0xdaffdada` as an encoding. This appears on the second layout,
-so reproduction requires a display switch. Both the independent probe and gateway
-reproduced it.
+An earlier reading counted the prefix in its own length and started the records two
+bytes early. Every field then looked two bytes late, the last four bytes of the
+last record — zero, always — were left on the stream, and a reader that took them
+as an empty framebuffer update came through intact. Consuming the declared count
+under that reading stole two bytes from the next message instead, and the session
+died a few messages later on a rectangle count that was really a screen width.
+`ScreensharingAgent`'s encoder and Apple's own viewer settle the framing — see
+[the binary audit](apple-vnc-889-binary-audit.md#the-display-layout).
 
-### A display record's fields are two bytes later than documented
-
-The `f64` `3ff0000000000000` (1.0) appears at `+0x02` and `+0x0a`, not the
-offsets `+0x00` and `+0x08` documented in §8.4. Those offsets yield
-`display_id = 0` for every screen and invalid scales.
+### A display record, as sent
 
 Both bounds rects are **`(top, left, bottom, right)`**, not the `(x, y, w, h)` the
-document models; a size is a difference of edges. The measured record:
+document models; a size is a difference of edges. The record, `0x38` bytes:
 
 ```text
-+0x00 u16      unidentified (0x0002 on the main screen, 0x0000 on the other)
-+0x02 f64 BE   this screen's scale factor    -- 1.0 or 2.0
-+0x0a f64 BE   viewer scale factor           -- always 1.0
-+0x12 u32 BE   display_id (CGDirectDisplayID)
-+0x16 rect     logical bounds  (u16 top, left, bottom, right)
-+0x1e rect     backing bounds  (u16 top, left, bottom, right)
-+0x26 u32 BE   flags: bit0 = main, bit1 = in mirror set
-+0x2a          pixel format (bpp, depth, big-endian, true-colour, maxes, shifts)
++0x00 f64 BE   this screen's scale factor    -- 1.0 or 2.0
++0x08 f64 BE   viewer scale factor           -- the daemon's own scaling, 1.0
++0x10 u32 BE   display_id (CGDirectDisplayID)
++0x14 rect     logical bounds  (u16 top, left, bottom, right)
++0x1c rect     backing bounds  (u16 top, left, bottom, right)
++0x24 u32 BE   flags: bit0 = main, bit1 = in a mirror set, bit2 = dynamic virtual display
++0x28 16B      pixel format (bpp, depth, big-endian, true-colour, maxes, shifts, pad)
 ```
 
-And the header, which is 0x14 bytes including the length prefix:
+And the header, which is 0x14 bytes after the length prefix:
 
 ```text
-+0x00 u16  payload length, two more than is sent
-+0x02 u16  version = 5
-+0x04 u16  logical width  -- the whole desktop, in points; does not change on a selection
-+0x06 u16  logical height
-+0x08 u16  backing width   -- THE FRAMEBUFFER, and what does change on a selection
-+0x0a u16  backing height
-+0x0c u32  current_display, 0xffffffff for the combined view
-+0x10 u32  unidentified; read 4 on every layout of every session, selected or not
++0x00 u16  version = 5
++0x02 u16  logical width  -- the whole desktop, in points; does not change on a selection
++0x04 u16  logical height
++0x06 u16  backing width   -- THE FRAMEBUFFER, and what does change on a selection
++0x08 u16  backing height
++0x0a u32  current_display, 0xffffffff for the combined view
++0x0e u32  session state: 0x04 on console, 0x01 obscured, 0x02 locked, 0x10 login pending
++0x12 u16  display count
 ```
 
 Ground truth these offsets reproduce, measured separately over SSH: ids 1 and 4,
 1280×800 at (0,0) and 1600×900 at (1280,0), the first one main, the second Retina.
-`src/vnc_apple.rs` pins a captured payload byte for byte against exactly that.
+`src/vnc_apple.rs` pins a captured payload against exactly that.
+
+`CGDisplayIsInMirrorSet` is true of every member of a mirror set, the one the others
+copy included, so bit 1 marks the original as well as its copies. Members share an
+origin; the gateway offers the first of them.
 
 ### ServerInit's name field is not a name
 
@@ -423,15 +424,15 @@ probe that sent `AutoPasteboard(start)` in the cleartext native prelude emitted
 the record layer did not. The gateway therefore enables it before encryption and
 repeats it after the answering virtual-display layout.
 
-### The metadata encodings also arrive as bare messages
+### The metadata encodings arrive only as rectangles
 
-`0x451` also comes as message type `0x51`, `0x453` as `0x53`, and so on: the message
-type is the encoding's low byte, with the same `u16`-length framing. A live session
-sends both forms of the same content. There are also two zero-payload message types,
-`0x04` (ServerAck) and `0x07` (NOP).
-
-A client that does not tolerate these ends the session on the first bare message,
-typically `0x04` a few seconds after connection.
+Every metadata item — the layout, vendor keysyms, keyboard source, `DeviceInfo` —
+is a one-rectangle framebuffer update. `screensharingd` has no other way to send
+one, and Apple's viewer closes the connection on a server message type outside 0–3,
+`0x14`, `0x15`, `0x1e`, `0x1f`, `0x20`, `0x22`, `0x23` and `0x51` (which is
+`SystemInfoData`, with a `u32` length). The bare `0x51`/`0x53`/`0x55`/`0x56`,
+`ServerAck` `0x04` and `NOP` `0x07` once recorded here were a reader two bytes out
+of step inside those rectangles.
 
 ### The numbers, in both forms
 
@@ -448,10 +449,10 @@ written in decimal.
 | `UserInfo` | `0x44e` | 1102 | not advertised, decoded anyway |
 | rekey | `0x44f` | 1103 | |
 | cursor cache | `0x450` | 1104 | |
-| `AppleDisplayLayout` | `0x451` | 1105 | also message type `0x51` (81) |
-| vendor keysyms | `0x453` | 1107 | also message type `0x53` (83) |
-| keyboard source | `0x455` | 1109 | also message type `0x55` (85) |
-| `DeviceInfo` | `0x456` | 1110 | also message type `0x56` (86) |
+| `AppleDisplayLayout` | `0x451` | 1105 | |
+| vendor keysyms | `0x453` | 1107 | |
+| keyboard source | `0x455` | 1109 | |
+| `DeviceInfo` | `0x456` | 1110 | |
 | `kSSVideoEncoding_AVCMediaStream` | `0x3f2` | 1010 | all media-stream replies |
 | zlib | `0x06` | 6 | standard RFB |
 | Raw | `0x00` | 0 | standard RFB |
@@ -459,7 +460,7 @@ written in decimal.
 | `LastRect` | — | -224 | pseudo-encoding |
 
 The message types this client steps over or sends: `MiscStatus` `0x14` (20),
-`ServerAck` `0x04` (4), `NOP` `0x07` (7), `RFBMediaStreamServerConfiguration`
+`RFBMediaStreamServerConfiguration`
 `0x1c` (28), `AutoFrameBufferUpdate` `0x09` (9), `ViewerInfo` `0x21` (33).
 
 ## Confirmed
@@ -494,9 +495,8 @@ section as having no capture behind it.
 and encoding `0x44f`; body `u32 generation || 16B wrapped key || 16B wrapped iv`,
 each half AES-128-ECB-decrypted independently under the wrap key. `generation` is 1.
 Only ever one per session, so multi-rekey remains unexercised. The Mac may send
-`MiscStatus` (`0x14`), `ServerAck` (`0x04`), or `NOP` (`0x07`) in the cleartext
-window between `SetEncryption` and the rekey; the client must step over these
-rather than bailing on them.
+`MiscStatus` (`0x14`) in the cleartext window between `SetEncryption` and the
+rekey; the client must step over it rather than bailing on it.
 
 **zlib (`0x06`).** `u32 length` then a chunk of **one deflate stream for the life of
 the connection**, inflating to exactly `w × h × 4`. Confirmed with an independent

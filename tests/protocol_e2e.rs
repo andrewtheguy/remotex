@@ -495,13 +495,13 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
     Ok(key)
 }
 
-/// The `AppleDisplayLayout` payload for the configured virtual display.
+/// The `AppleDisplayLayout` payload for the configured virtual display, with the
+/// `u16` length that counts the bytes after itself.
 ///
 /// Built here from the wire format rather than by calling the gateway, which only
-/// parses this, so the offsets are asserted from both ends. They are the *measured*
-/// offsets: every record field two bytes later than the reference document says, a
-/// scale factor as a big-endian `f64`, and both bounds rects as
-/// `(top, left, bottom, right)` rather than `(x, y, w, h)`.
+/// parses this, so the offsets are asserted from both ends: the layout
+/// `ScreensharingAgent` builds, a scale factor as a big-endian `f64`, and both
+/// bounds rects as `(top, left, bottom, right)` rather than `(x, y, w, h)`.
 fn fake_mac_layout((w, h): (u16, u16), density: u16) -> Vec<u8> {
     const RECORD: usize = 0x38;
     const HEAD: usize = 0x14;
@@ -509,7 +509,7 @@ fn fake_mac_layout((w, h): (u16, u16), density: u16) -> Vec<u8> {
     // ratio to the logical one — and the gateway cross-checks the two.
     let (bw, bh) = (w * density, h * density);
 
-    let mut p = vec![0u8; HEAD];
+    let mut p = vec![0u8; 2 + HEAD];
     p[..2].copy_from_slice(&((HEAD + RECORD) as u16).to_be_bytes());
     p[2..4].copy_from_slice(&5u16.to_be_bytes()); // version
     p[4..6].copy_from_slice(&w.to_be_bytes());
@@ -517,20 +517,19 @@ fn fake_mac_layout((w, h): (u16, u16), density: u16) -> Vec<u8> {
     p[8..10].copy_from_slice(&bw.to_be_bytes());
     p[10..12].copy_from_slice(&bh.to_be_bytes());
     p[12..16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
+    p[16..20].copy_from_slice(&4u32.to_be_bytes()); // on console
+    p[20..22].copy_from_slice(&1u16.to_be_bytes()); // one display
 
     let mut record = vec![0u8; RECORD];
-    record[0x02..0x0a].copy_from_slice(&f64::from(density).to_be_bytes());
-    record[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes());
-    record[0x12..0x16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
-    record[0x1a..0x1c].copy_from_slice(&h.to_be_bytes()); // logical rect
-    record[0x1c..0x1e].copy_from_slice(&w.to_be_bytes());
-    record[0x22..0x24].copy_from_slice(&bh.to_be_bytes()); // backing rect
-    record[0x24..0x26].copy_from_slice(&bw.to_be_bytes());
-    record[0x26..0x2a].copy_from_slice(&1u32.to_be_bytes()); // main
+    record[0x00..0x08].copy_from_slice(&f64::from(density).to_be_bytes());
+    record[0x08..0x10].copy_from_slice(&1.0f64.to_be_bytes());
+    record[0x10..0x14].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
+    record[0x18..0x1a].copy_from_slice(&h.to_be_bytes()); // logical rect
+    record[0x1a..0x1c].copy_from_slice(&w.to_be_bytes());
+    record[0x20..0x22].copy_from_slice(&bh.to_be_bytes()); // backing rect
+    record[0x22..0x24].copy_from_slice(&bw.to_be_bytes());
+    record[0x24..0x28].copy_from_slice(&1u32.to_be_bytes()); // main
     p.extend_from_slice(&record);
-    // A live Mac omits the final record's two trailing padding bytes while counting
-    // them in the declared length.
-    p.truncate(p.len() - 2);
     p
 }
 
