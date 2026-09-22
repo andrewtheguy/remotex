@@ -734,6 +734,12 @@ impl MediaStream {
                     "vnc: the Mac refused the media stream (error type {kind}, sub-code \
                      {sub_code}); the session continues without sound"
                 );
+                // A refused re-offer leaves the stream the last one opened on a
+                // socket nothing will send to again.
+                if let Some(receiver) = self.receiver.take() {
+                    receiver.abort();
+                    let _ = receiver.await;
+                }
                 self.bridge.clear_format();
             }
             MediaReply::Other(kind) => debug!("vnc: ignoring media-stream message type {kind}"),
