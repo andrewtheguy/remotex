@@ -402,7 +402,8 @@ byte[32] capability bitmap        ([0]=0xb0 [2]=0x0c [3]=0x03 [4]=0x90 [10]=0x40
 
 2 + 4 + 12 + 12 + 32 = 62 exactly, and that bitmap decodes MSB-first to the
 `{0, 2, 3, 20, 30, 31, 32, 35, 81}` the document observed — so its bitmap was right
-and only the framing was wrong.
+and only the framing was wrong. remotex reports macOS 26.6.2 in the OS triple: the
+daemon treats a viewer reporting less than 10.15 as an old one when it posts keys.
 
 The first revision of this document recorded "ViewerInfo must not be sent", because
 a body built from the string description is mis-sized: macOS reads more bytes for

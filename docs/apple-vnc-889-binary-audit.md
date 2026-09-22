@@ -163,7 +163,9 @@ generates its own and treats a zero reply as an unrequested one.
 The daemon (case `0x21`) consumes `max(66, 4 + body_len)` bytes. Bytes 4–5 are the
 message version and must be 1. The OS version triple is read: `FUN_1000451f0`
 [ProcessKey] branches on major < 11 and minor < 15, so a viewer reporting 0.0.0 — or
-sending no `ViewerInfo` — is handled as older than 10.15. The bitmap is the set of
+sending no `ViewerInfo` — is handled as older than 10.15. The branch decides whether a
+flag from Apple's own key-event messages reaches the agent; plain RFB `KeyEvent`s do
+not carry it. remotex, which sent 0.0.0, reports 26.6.2. The bitmap is the set of
 server message types the viewer claims to handle; the daemon consults it for `0x14`
 and `0x15` only.
 

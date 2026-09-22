@@ -179,7 +179,12 @@ pub fn viewer_info() -> [u8; 66] {
     msg[6..10].copy_from_slice(&2u32.to_be_bytes()); // Screen Sharing
     msg[10..14].copy_from_slice(&6u32.to_be_bytes());
     msg[14..18].copy_from_slice(&1u32.to_be_bytes());
-    // App patch, then OS major/minor/patch. Zero is an honest unknown OS here.
+    // App patch, then OS major/minor/patch. The daemon handles keys from a viewer
+    // it believes older than 10.15 the old way, so this claims the macOS the
+    // native values above were measured on, 26.6.2.
+    for (at, part) in [(22, 26u32), (26, 6), (30, 2)] {
+        msg[at..at + 4].copy_from_slice(&part.to_be_bytes());
+    }
     // The final 32 bytes are the command-support bitmap native sends.
     msg[34] = 0xb0;
     msg[36] = 0x0c;
@@ -764,7 +769,7 @@ mod tests {
         let info = viewer_info();
         assert_eq!(&info[..10], &[0x21, 0, 0, 62, 0, 1, 0, 0, 0, 2]);
         assert_eq!(&info[10..22], &[0, 0, 0, 6, 0, 0, 0, 1, 0, 0, 0, 0]);
-        assert_eq!(&info[22..34], &[0; 12]);
+        assert_eq!(&info[22..34], &[0, 0, 0, 26, 0, 0, 0, 6, 0, 0, 0, 2]);
         let mut bitmap = [0u8; 32];
         bitmap[0] = 0xb0;
         bitmap[2] = 0x0c;

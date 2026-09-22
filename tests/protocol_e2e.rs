@@ -714,6 +714,10 @@ async fn serve_fake_mac(
     expected_viewer[6..10].copy_from_slice(&2u32.to_be_bytes());
     expected_viewer[10..14].copy_from_slice(&6u32.to_be_bytes());
     expected_viewer[14..18].copy_from_slice(&1u32.to_be_bytes());
+    // macOS 26.6.2.
+    expected_viewer[22..26].copy_from_slice(&26u32.to_be_bytes());
+    expected_viewer[26..30].copy_from_slice(&6u32.to_be_bytes());
+    expected_viewer[30..34].copy_from_slice(&2u32.to_be_bytes());
     expected_viewer[34] = 0xb0;
     expected_viewer[36] = 0x0c;
     expected_viewer[37] = 0x03;
