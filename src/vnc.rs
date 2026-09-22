@@ -220,15 +220,17 @@ impl Dialect {
         }
     }
 
-    /// The ClientInit byte. Nominally RFB's shared-session flag; Apple's server
-    /// wants a particular value there and the bits above the low one are what tell
-    /// it a viewer speaking its own revision is on the other end.
+    /// The ClientInit byte. Nominally RFB's shared-session flag. On Apple's
+    /// revision `0x80` asks for the enhanced ServerInit, as Apple's viewer always
+    /// does; `0x40`, which it sets only with a session picker to offer, would ask a
+    /// Mac whose console user is not the one authenticated to choose a login session
+    /// first — an exchange this client does not implement.
     fn client_init(self) -> u8 {
         match self {
             // Share the session: don't kick other clients. The single-session
             // policy lives in this program, not on the VNC server.
             Dialect::Rfb38 => 1,
-            Dialect::Apple889 => 0xc1,
+            Dialect::Apple889 => 0x81,
         }
     }
 }
@@ -1753,12 +1755,11 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
 
 /// Describe ServerInit's name field, which on Apple's revision is not a name.
 ///
-/// A Mac prefixes it with 22 bytes: a zero marker, a `u32` of session flags, and a
+/// A Mac prefixes it with 22 bytes: a `u16` zero, a `u32` of session flags, and a
 /// 16-byte capability bitmap, with the UTF-8 name after all of it. Printing the lot
 /// as a string gave a log line of mojibake with the real name buried in it, and
-/// hid the flags — of which one, `0x04`, would mean a whole negotiation follows
-/// ServerInit that this client does not implement. Saying so is the point of
-/// reading them; nothing here is acted on.
+/// hid the flags. Bits 5 and up are the most virtual displays the Mac will create.
+/// See docs/apple-vnc-889-binary-audit.md.
 ///
 /// Anything that is not shaped like that is a name, which is what every other
 /// server sends.
@@ -1768,18 +1769,21 @@ fn describe_desktop(field: &[u8]) -> String {
     }
     let flags = u32::from_be_bytes(field[2..6].try_into().expect("four bytes of flags"));
     let name = String::from_utf8_lossy(&field[22..]);
-    let mut named: Vec<&str> = [(0x01, "observe"), (0x02, "may-control"), (0x08, "no-virtual-display")]
-        .into_iter()
-        .filter(|(bit, _)| flags & bit != 0)
-        .map(|(_, name)| name)
-        .collect();
-    // Called out rather than listed with the rest: a server that offers it expects
-    // a SessionInfo/SessionCommand/SessionResult exchange before anything else, and
-    // the symptom of not answering is a session that stops here in silence.
-    if flags & 0x04 != 0 {
-        named.push("SESSION-SELECT, which this client does not implement");
-    }
-    format!("{name:?} (Apple flags {flags:#010x}: {})", named.join(", "))
+    let named: Vec<&str> = [
+        (0x01, "observe-only"),
+        (0x02, "may-control"),
+        (0x04, "session-select"),
+        (0x08, "no-screen-capture"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| flags & bit != 0)
+    .map(|(_, name)| name)
+    .collect();
+    format!(
+        "{name:?} (Apple flags {flags:#010x}: {}, up to {} virtual displays)",
+        named.join(", "),
+        flags >> 5
+    )
 }
 
 /// Name an encoding in the log the way the documentation names it. Apple's own
@@ -5615,7 +5619,7 @@ mod tests {
         assert_eq!(Dialect::Rfb38.banner(), b"RFB 003.008\n");
         assert_eq!(Dialect::Apple889.banner(), b"RFB 003.889\n");
         assert_eq!(Dialect::Rfb38.client_init(), 1);
-        assert_eq!(Dialect::Apple889.client_init(), 0xc1);
+        assert_eq!(Dialect::Apple889.client_init(), 0x81);
     }
 
     #[test]

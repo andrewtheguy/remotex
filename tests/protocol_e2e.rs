@@ -691,7 +691,9 @@ async fn serve_fake_mac(
 
     let mut client_init = [0u8; 1];
     stream.read_exact(&mut client_init).await?;
-    assert_eq!(client_init[0], 0xc1, "Apple's ClientInit byte is 0xC1");
+    // Enhanced ServerInit, and no session select: Apple's viewer sets 0x40 only
+    // with a session picker to offer.
+    assert_eq!(client_init[0], 0x81, "Apple's ClientInit byte is 0x81");
 
     let mut server_init = Vec::new();
     server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());

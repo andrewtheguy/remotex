@@ -34,19 +34,6 @@ the repository.
 
 Ordered by effect on a session.
 
-### ClientInit asks for session selection
-
-`ScreenSharing.framework` `_RFBAuthenticateCore` (`0x7ffa0ad1aca0`) builds the
-ClientInit byte as `shared | 0x80` and adds `0x40` only when its caller supplies a
-session-select handler. `screensharingd` `FUN_100038248` [HandleViewerInitialization]
-answers `0x80` from an 888/889 viewer with the enhanced ServerInit, and `0x40` —
-unless the `VNCSelectSession` preference is false — with a session-select exchange
-whenever `FUN_10006592d` [SessionSelect_Needed] finds the authenticated user is not
-the console user. ServerInit then carries flag `0x04` and a `0x4c`-byte block the
-name length does not count. remotex sends `0xc1` and implements no session select,
-so a High Performance connection as a user other than the one at the console reads
-that block as a framebuffer update and fails before the record layer is up.
-
 ### The pasteboard is capped far below Apple's limit
 
 The agent's pack (`FUN_10002e4c5`, CopyPackedScrapData) writes every saved flavor of
@@ -131,6 +118,17 @@ whole word), a `u32` flag word, a 16-byte capability bitmap and the name:
 | bits 5+ | `maximumVirtualDisplays` (`FUN_10005338f`, default 2). |
 
 The measured `0x52` is `0x10 | 0x02 | 2 << 5`.
+
+`ScreenSharing.framework` `_RFBAuthenticateCore` (`0x7ffa0ad1aca0`) builds the
+ClientInit byte as `shared | 0x80` and adds `0x40` only when its caller supplies a
+session-select handler. `screensharingd` `FUN_100038248` [HandleViewerInitialization]
+answers `0x80` from an 888/889 viewer with the enhanced ServerInit, and `0x40` —
+unless the `VNCSelectSession` preference is false — with a session-select exchange
+whenever `FUN_10006592d` [SessionSelect_Needed] finds the authenticated user is not
+the console user. ServerInit then carries flag `0x04` and a `0x4c`-byte block the
+name length does not count. A viewer that sets `0x40` without implementing the
+exchange reads that block as a framebuffer update when it connects as anyone but the
+console user.
 
 ### `SetEncodings` is not order-sensitive for displays
 
@@ -301,4 +299,5 @@ the viewer's minimums are 5 for any message, `0x23` for message 1, `0x11` for 2 
 - What Apple's viewer puts in its descriptor (name, modes, rotations = 7): that is
   built in ScreenSharingUI, also not extracted.
 - ClientInit `0x81` against a non-console user, a mirrored Mac, and whether the
-  `AutoFrameBufferUpdate` push path ever fires, all need a live Mac.
+  `AutoFrameBufferUpdate` push path ever fires, all need a live Mac; the test Mac
+  has a single account.

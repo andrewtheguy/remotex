@@ -312,28 +312,26 @@ origin; the gateway offers the first of them.
 
 ### ServerInit's name field is not a name
 
-It is 22 bytes of structure and then the name, which noVNC-ARD
-(`tmp/programs_for_reference/noVNC-ARD/ard/ard-patch.js:300-327`) decodes as:
+It is 22 bytes of structure and then the name:
 
 ```text
-+0x00  u8    zero marker (only byte 0 is checked)
-+0x01  u8    unread
++0x00  u16   zero
 +0x02  u32   server flags
 +0x06  16B   capability bitmap
 +0x16  ...   the UTF-8 name
 ```
 
-Flags: `0x01` observe, `0x02` may-control, `0x04` **session-select**, `0x08`
-no-virtual-display. The test VM reads `0x00000052` — may-control, plus unidentified
-`0x10` and `0x40` — and its name comes out as `"Andrew's Virtual Machine"`, which
+Flags: `0x01` observe only, `0x02` may-control, `0x04` session-select, `0x08` screen
+capture not permitted, `0x10` always set, and bits 5 and up the most virtual
+displays the Mac will create. The test VM reads `0x00000052` — may-control and two
+virtual displays — and its name comes out as `"Andrew's Virtual Machine"`, which
 printing the whole field as latin-1 turned into mojibake.
 
-`0x04` is worth reading even though nothing acts on it: a server that sets it
-expects a `SessionInfo` → `SessionCommand` → `SessionResult` exchange *before*
-anything else, where command 1 is "connect to the console" and command 2 is "connect
-to a virtual display". No Mac measured here offers it, so it is unimplemented — and
-`describe_desktop` in `src/vnc.rs` says so in the log rather than leaving a session
-that stops in silence.
+`0x04` follows from the ClientInit byte: `0x80` asks for this enhanced ServerInit,
+and `0x40` asks a Mac whose console user is not the one authenticated to have the
+viewer choose a login session first, in an exchange that follows ServerInit. Apple's
+viewer sets `0x40` only when it has a session picker to offer; remotex has none and
+sends `0x81`. See [the binary audit](apple-vnc-889-binary-audit.md#serverinits-flags).
 
 ### High Performance reads the pointer mask as CGMouseButton numbers
 
@@ -822,13 +820,11 @@ of no help in escaping the AAC-ELD decoder.
 
 ## Still unknown
 
-- **What `screensharingd` does with the first `SetEncodings`**, such that adding,
-  removing or reordering one entry costs the whole display layout. The open
-  question, and the one place this implementation depends on a constant nobody
-  understands.
-- The word at `+0x10` of a layout header (reads 4, always) and the `u16` at `+0x00`
-  of each display record (2 on the main screen, 0 elsewhere).
-- Whether the session-select exchange works, no Mac here having offered it.
+- **Why reordering the first `SetEncodings` cost the display layout.**
+  `screensharingd`'s handler is order-insensitive for displays (see
+  [the binary audit](apple-vnc-889-binary-audit.md#setencodings-is-not-order-sensitive-for-displays)),
+  and those measurements were taken with a layout reader four bytes out of step.
+  They have not been repeated since.
 - Apple's still-image codecs `0x3ea` and `0x3f3`; the document leaves the first's
   rectangle body and the second's command-code table unresolved, and neither was
   advertised here, so nothing was learned.
