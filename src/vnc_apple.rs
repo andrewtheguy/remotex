@@ -358,9 +358,9 @@ fn message(kind: u8, body: &[u8]) -> Vec<u8> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Display {
     pub info: DisplayInfo,
-    /// Pixels per point on *this* screen, as the Mac states it: the `f64` at
-    /// `+0x02`. 1.0 or 2.0 on every Mac measured, and cross-checked against the
-    /// screen's own two bounds rects, which must agree.
+    /// Pixels per point on *this* screen, as the Mac states it: the record's
+    /// leading `f64`, or the ratio of its two rects when that is 0.0. 1.0 or 2.0
+    /// on every Mac measured.
     pub density: f32,
     /// This screen's backing-pixel size. The full repaint after a combined
     /// layout consists of one such region per non-mirrored display; gaps in the
@@ -532,6 +532,11 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         let stated = f64::from_be_bytes(
             record[0x00..0x08].try_into().expect("eight bytes inside a 0x38-byte record"),
         );
+        let ratio = f32::from(backing.0) / f32::from(logical.0);
+        // The agent writes 0.0 when it cannot look the screen's mode up ("bad mode
+        // ref") and takes the backing rect from the pixel bounds regardless, so the
+        // rects are then the Mac's only statement of the density.
+        let stated = if stated == 0.0 { f64::from(ratio) } else { stated };
         if !stated.is_finite() || !(1.0..=4.0).contains(&stated) {
             warn!(
                 "vnc: display layout record {index} states a scale factor of {stated}, \
@@ -540,7 +545,6 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             continue;
         }
         let density = stated as f32;
-        let ratio = f32::from(backing.0) / f32::from(logical.0);
         if (ratio - density).abs() > 0.01 {
             warn!(
                 "vnc: display {} states scale {density} but its rects give {ratio}; \
@@ -1105,6 +1109,15 @@ mod tests {
         assert_eq!(parsed.displays.len(), 2, "the other two are still offered");
         assert_eq!(parsed.displays[0].info.id, 22);
         assert_eq!(parsed.displays[1].info.id, 33);
+
+        // No scale at all, which the agent writes when it cannot look the mode up:
+        // the rects still say 2x.
+        let mut payload = layout(None, &screens);
+        let second = LAYOUT_HEAD + LAYOUT_RECORD;
+        payload[second..second + 0x08].copy_from_slice(&0.0f64.to_be_bytes());
+        let parsed = parse_layout(&payload).unwrap();
+        assert_eq!(parsed.displays.len(), 3);
+        assert_eq!(parsed.displays[1].density, 2.0);
 
         // A screen of no size, which would otherwise be offered as "0×0".
         let mut payload = layout(None, &screens);

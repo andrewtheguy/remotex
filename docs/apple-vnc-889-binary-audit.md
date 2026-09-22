@@ -30,16 +30,6 @@ coordinator re-checked the findings that change code against the disassembly and
 the gateway's own session logs. The binaries and decompiles are archived outside
 the repository.
 
-## Where remotex departs from Apple
-
-Ordered by effect on a session.
-
-### A display record remotex refuses and Apple keeps
-
-- The agent's `hidpi_ScaleFactor` (`FUN_100045a47`) returns 0.0 on "bad mode ref";
-  remotex drops a record outside 1–4, which for the single High Performance record
-  ends the session.
-
 ## Corrections to the measured document
 
 ### The display layout
@@ -66,7 +56,12 @@ count from `+0x12` and requires it to be 1–25 and `size ≥ 0x14 + count × 0x
 A record is `+0x00 f64` scale, `+0x08 f64` viewer scale (the daemon's server-side
 scaling factor), `+0x10 u32` id, `+0x14` logical rect and `+0x1c` backing rect as
 `(top, left, bottom, right)`, `+0x24 u32` flags, then the display's 16-byte pixel
-format, whose last four bytes (blue shift and padding) are always zero.
+format, whose last four bytes (blue shift and padding) are always zero. The scale
+is 0.0 when the agent's `hidpi_ScaleFactor` (`FUN_100045a47`) cannot look the
+screen's mode up ("bad mode ref"); the backing rect comes from the pixel bounds
+regardless, so remotex then takes the density from the ratio of the two rects
+instead of dropping the screen, which for the single High Performance record ended
+the session.
 
 The measured document's "two bytes shorter" and "fields two bytes later" were one
 error: a reader that counted the prefix in its own length started the records two

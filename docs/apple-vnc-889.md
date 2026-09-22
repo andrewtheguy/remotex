@@ -268,7 +268,7 @@ Both bounds rects are **`(top, left, bottom, right)`**, not the `(x, y, w, h)` t
 document models; a size is a difference of edges. The record, `0x38` bytes:
 
 ```text
-+0x00 f64 BE   this screen's scale factor    -- 1.0 or 2.0
++0x00 f64 BE   this screen's scale factor    -- 1.0 or 2.0; 0.0 if the mode lookup failed
 +0x08 f64 BE   viewer scale factor           -- the daemon's own scaling, 1.0
 +0x10 u32 BE   display_id (CGDirectDisplayID)
 +0x14 rect     logical bounds  (u16 top, left, bottom, right)
