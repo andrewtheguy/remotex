@@ -452,8 +452,7 @@ written in decimal.
 | vendor keysyms | `0x453` | 1107 | also message type `0x53` (83) |
 | keyboard source | `0x455` | 1109 | also message type `0x55` (85) |
 | `DeviceInfo` | `0x456` | 1110 | also message type `0x56` (86) |
-| `kSSVideoEncoding_AVCMediaStream` | `0x3f2` | 1010 | the media-stream offer and reply |
-| its AVC answer | `0x3f3` | 1011 | |
+| `kSSVideoEncoding_AVCMediaStream` | `0x3f2` | 1010 | all media-stream replies |
 | zlib | `0x06` | 6 | standard RFB |
 | Raw | `0x00` | 0 | standard RFB |
 | `DesktopSize` | — | -223 | pseudo-encoding |
@@ -532,7 +531,7 @@ whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
 decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
 the mechanism below is documented by Apple.
 
-**The negotiation is one client message and two server rectangles.** After the
+**The negotiation is one client message and three server messages.** After the
 first display layout, the client advertises encoding **1010** (`0x3f2`,
 `kSSVideoEncoding_AVCMediaStream`) in a second `SetEncodings` and sends message
 type **`0x1c`** (`RFBMediaStreamServerConfiguration`, version 3) inside the record
@@ -554,22 +553,28 @@ layer:
            (video2 likewise, when present)
 ```
 
-The server answers with framebuffer rectangles, not record-layer messages:
-encoding **1010** (`0x3f2`) carries message 1 (`u16 type, u16 version, u32 flags,
-u16 audio UDP port` — audio at that port, video1 at port+1, video2 at port+2;
-**type 3 is a media-stream error** with `u32 errorType, u32 subCode`), and encoding
-**1011** (`0x3f3`) carries message 2, the AVC answer with the same three offer
-lengths at `+0x0a`.
+The server answers with framebuffer rectangles, not record-layer messages, all
+using encoding **1010** (`0x3f2`). Message 1 is `u16 type, u16 version, u32
+flags, u16 audio UDP port` — audio at that port, video1 at port+1, video2 at
+port+2. Message 2 is the AVC answer with the same three offer lengths at `+0x0a`.
+Message 3 is a media-stream error with `u32 errorType, u32 subCode`.
 
-**The Mac re-sends encoding 1010 (`0x3f2`, message 1) after every display layout
-change.** A resize, a display switch, or any call to `SetDesktopConfiguration` causes
-`screensharingd` to tear down its old RTP stream and start a new one — even
-though the port number stays the same. The existing receiver is stuck on the
-dead stream and must be restarted. The port is reused, so the new receiver
-binds to the same address; the SRTP keys are unchanged. `on_reply` in
-`src/vnc_apple_audio.rs` handles this by aborting the old receiver task and
-awaiting its end — the port is not free until that task has been dropped —
-before starting a new one.
+**The native viewer configures the media stream once, then enables dynamic
+resolution only after media setup completes.** In the x86_64 Screen Sharing
+framework, `RFBMediaStreamServerConfiguration` is called from
+`-[SSSession stConfigureServerMediaStream]`; no resize or display-layout path
+calls it again. `-[SSSessionView ssSessionReady:]` explicitly defers switching
+to dynamic resolution until `avcMediaSessionReady` when AVC setup is pending.
+That callback starts the video and audio streams before it switches dynamic
+resolution on. Remotex follows the same initial ordering: its first `0x1c` goes
+out after the first layout, and viewport requests wait for media-stream message 2.
+
+**`screensharingd` tears down the RTP sender on every display change.** The
+native viewer's AVConference keeps the transport alive internally, so it never
+re-sends `0x1c`. Remotex has no AVConference — it decrypts raw SRTP — so it
+re-sends the offer (same keys, updated video size) and restarts the receiver
+after each layout change. The Mac answers with message 1 (same ports), message 2
+(accepted), and a fresh SSRC.
 
 **The offer is a binary plist wrapping a protobuf**, produced by
 `AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):

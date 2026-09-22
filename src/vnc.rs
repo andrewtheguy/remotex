@@ -584,6 +584,13 @@ struct DesktopState {
     /// by the full update a resize's rect earns, or by the one requested in a
     /// resize's place — see [`read_output_scale`].
     repaint_owed: bool,
+    /// The initial High Performance media negotiation is not complete. Apple's
+    /// viewer does not enable dynamic resolution until `avcMediaSessionReady`;
+    /// this is the corresponding gate for a session that asked for system audio.
+    hp_media_pending: bool,
+    /// The newest viewport reported while [`hp_media_pending`] was set. It goes
+    /// out when media-stream message 2 completes the negotiation.
+    hp_media_deferred: Option<(u16, u16)>,
 }
 
 /// The wlshare density extension's state on one connection — see
@@ -1846,6 +1853,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let (uplink, backlog, writer) = uplink.queued();
     let mut write_task = tokio::spawn(writer);
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
+    let hp_media_pending = media.is_some();
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
@@ -1863,6 +1871,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         following: false,
         declared: None,
         repaint_owed: false,
+        hp_media_pending,
+        hp_media_deferred: None,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -2334,9 +2344,16 @@ async fn request_resize(
         };
         let msg = if high_performance {
             let mode = vnc_apple::virtual_display_mode(want, d.host_density);
-            // A no-op needs the density to agree too: a 3840×2160 desktop moving
-            // from 1x to 2x keeps every pixel and still needs the new mode sent.
             if mode.pixels == d.size && (d.scale - d.host_density).abs() < 0.005 {
+                return Ok(());
+            }
+            if d.hp_media_pending {
+                debug!(
+                    "vnc: deferring Apple virtual-display resize to {}x{} points until the \
+                     media stream is ready",
+                    want.0, want.1,
+                );
+                d.hp_media_deferred = Some(want);
                 return Ok(());
             }
             vnc_apple::set_display_configuration(mode)
@@ -2357,6 +2374,35 @@ async fn request_resize(
         msg
     };
     up.send(&msg).await
+}
+
+/// Enable High Performance resizing after the initial media negotiation, as the
+/// native viewer does from `avcMediaSessionReady`. Media-stream message 2 is this
+/// implementation's final setup event: by then message 1 has named the UDP ports
+/// and [`MediaStream::on_reply`] has bound the receiver.
+async fn complete_hp_media_setup(shared: &Shared) -> anyhow::Result<()> {
+    let mut uplink = shared.uplink.lock().await;
+    let msg = {
+        let mut d = shared.desktop.lock().unwrap();
+        if !d.hp_media_pending {
+            return Ok(());
+        }
+        d.hp_media_pending = false;
+        let Some(want) = d.hp_media_deferred.take() else {
+            return Ok(());
+        };
+        let mode = vnc_apple::virtual_display_mode(want, d.host_density);
+        if mode.pixels == d.size && (d.scale - d.host_density).abs() < 0.005 {
+            return Ok(());
+        }
+        debug!(
+            "vnc: media stream ready; requesting deferred Apple virtual-display resize to \
+             {}x{} points at {}x",
+            want.0, want.1, d.host_density,
+        );
+        vnc_apple::set_display_configuration(mode)
+    };
+    uplink.send(&msg).await
 }
 
 /// A generic resize request held under the video stream's picture ceiling, in
@@ -3564,32 +3610,38 @@ async fn read_rect<R: AsyncRead + Unpin>(
             discard(reader, image).await?;
             return Ok(RectEffect::NOTHING);
         }
-        // The Mac's answer to the media-stream offer ([`vnc_apple_audio`]): message
-        // 1 names the UDP port its audio will arrive at, message 3 says why it will
-        // not. Only advertised on a target that asked for audio, so a reply on any
-        // other session is stepped over — the body is framed by its own `u16` size
-        // either way, and a failure to *act* on it must not end the desktop: sound
-        // is an extra on the session, not the session.
+        // The Mac's replies to the media-stream offer ([`vnc_apple_audio`]):
+        // message 1 names the UDP port its audio will arrive at, message 2 accepts
+        // the AVConference offer, and message 3 says why it will not. Only
+        // advertised on a target that asked for audio, so a reply on any other
+        // session is stepped over — the body is framed by its own `u16` size either
+        // way, and a failure to *act* on it must not end the desktop: sound is an
+        // extra on the session, not the session.
         vnc_apple_audio::ENCODING_MEDIA_STREAM if apple.is_some() => {
             let len = reader.read_u16().await?;
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
-            match apple.as_mut().and_then(|a| a.media.as_mut()) {
+            let media_settled = match apple.as_mut().and_then(|a| a.media.as_mut()) {
                 Some(media) => {
-                    if let Err(e) = media.on_reply(&body).await {
-                        warn!("vnc: the Mac's audio could not be started: {e:#}");
+                    match media.on_reply(&body).await {
+                        Ok(failed) => failed,
+                        Err(e) => {
+                            warn!("vnc: the Mac's audio could not be started: {e:#}");
+                            true
+                        }
                     }
                 }
-                None => debug!("vnc: ignoring a media-stream reply; this session asked for none"),
+                None => {
+                    debug!("vnc: ignoring a media-stream reply; this session asked for none");
+                    false
+                }
+            };
+            if media_settled {
+                // Message 2 is the successful terminal reply. A refusal is
+                // terminal too: audio is an extra on the desktop and must not
+                // leave dynamic resolution disabled for the rest of the session.
+                complete_hp_media_setup(shared).await?;
             }
-            return Ok(RectEffect::NOTHING);
-        }
-        // Message 2, the AVConference answer: the codec list the Mac agreed to,
-        // which the transmitter then ignores (see the module doc). Read past it.
-        vnc_apple_audio::ENCODING_MEDIA_STREAM_ANSWER if apple.is_some() => {
-            let len = reader.read_u16().await?;
-            discard(reader, u64::from(len)).await?;
-            debug!("vnc: the Mac answered the media-stream offer ({len} bytes)");
             return Ok(RectEffect::NOTHING);
         }
         // wlshare's audio announcement: an empty rectangle of the
@@ -4283,14 +4335,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 
     let size = desktop.lock().unwrap().size;
     let mut uplink = uplink.lock().await;
-    // Now that the Mac has said what it has, ask for compression. This has to wait
-    // for a layout: zlib in the *first* `SetEncodings` costs the layout entirely, and
-    // asking again here keeps the display state and merely changes encoder. Sent
-    // before the re-arm so the update that follows is the compressed one. Both
-    // subtypes reach here — a layout is what the upgrade waits on, not a dialect.
     if ask_for_zlib {
-        // With audio wanted, the same list also advertises the media-stream
-        // encoding the Mac answers the offer below through (see [`vnc_apple_audio`]).
         if media.is_some() {
             debug!("vnc: display layout received, asking for zlib and the media stream");
             uplink
@@ -4301,26 +4346,14 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
         }
     }
-    // The initial virtual-display layout can arrive after the cleartext enable.
-    // Repeat it here, after the Mac has answered that setup, and on later layouts
-    // just as cursor arming is repeated. The command is idempotent.
     if rearm_pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
-    // Re-arm, on every layout and not only on a change of geometry.
-    //
-    // Logged with the geometry it arms for: this is the one message that tells the
-    // Mac what to stream, so an arming that disagrees with the desktop the gateway
-    // just adopted is what a resize going wrong looks like from here.
     debug!(
         "vnc: arming auto framebuffer updates for {}x{}",
         size.0, size.1
     );
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
-    // And, once, the request for the Mac's system audio. After the first layout
-    // because that is when the probe sent it and the Mac answered; sized to this
-    // layout because the screen-video offer that has to ride beside the audio
-    // names a display size, and this is the virtual display's.
     if let Some(offer) = media.and_then(|media| media.offer(size)) {
         uplink.send(&offer).await?;
     }
@@ -6858,6 +6891,8 @@ mod tests {
             following: false,
             declared: None,
             repaint_owed: false,
+            hp_media_pending: false,
+            hp_media_deferred: None,
         }))
     }
 
@@ -7296,6 +7331,37 @@ mod tests {
         desktop.lock().unwrap().scale = UNSCALED;
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
         assert_eq!(written(&wire), [expected.clone(), expected].concat());
+    }
+
+    #[tokio::test]
+    async fn hp_audio_defers_resize_until_media_setup_completes() {
+        let (uplink, wire) = test_uplink();
+        let desktop = shared_desktop((1440, 900), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.hp_media_pending = true;
+            d.host_density = 1.0;
+        }
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1280, 800)), true).await.unwrap();
+        assert!(written(&wire).is_empty(), "no resize precedes media readiness");
+        assert_eq!(desktop.lock().unwrap().hp_media_deferred, Some((1280, 800)));
+
+        let shared = test_shared(
+            Arc::clone(&uplink),
+            Arc::clone(&desktop),
+            test_shadow((1440, 900)),
+        );
+        complete_hp_media_setup(&shared).await.unwrap();
+        assert_eq!(
+            written(&wire),
+            vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(
+                (1280, 800),
+                1.0,
+            ))
+        );
+        assert!(!desktop.lock().unwrap().hp_media_pending);
+        assert_eq!(desktop.lock().unwrap().hp_media_deferred, None);
     }
 
     /// The body of an OutputScale report for `size` at `scale`.
