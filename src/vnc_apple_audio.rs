@@ -632,7 +632,8 @@ pub struct MediaStream {
     /// This side's SSRC in the audio offer, and the one its RTCP reports carry.
     viewer_ssrc: u32,
     video_ssrc: u32,
-    offered: Option<(u16, u16)>,
+    /// The layout the last offer went out for.
+    offered: Option<vnc_apple::Layout>,
     receiver: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -662,21 +663,22 @@ impl MediaStream {
         }
     }
 
-    /// The `0x1c` message for a virtual display of `size` backing pixels.
+    /// The `0x1c` message for `layout`, a virtual display of `size` backing pixels.
     ///
     /// Apple's native viewer sends this once and keeps the streams through later
     /// layouts because AVConference manages the transport. This gateway has no
     /// AVConference — it decrypts raw SRTP — so it re-sends after each layout
     /// change: `screensharingd` tears down the RTP sender on a display change and
-    /// only restarts it on a fresh offer. `None` when the size is unchanged — the
-    /// Mac sends duplicate layouts, and a redundant offer causes a needless stream
-    /// restart.
-    pub fn offer(&mut self, size: (u16, u16)) -> Option<Vec<u8>> {
-        if self.offered == Some(size) {
+    /// only restarts it on a fresh offer. `None` when the layout is identical to
+    /// the last one offered for — the Mac sends duplicate layouts, and a redundant
+    /// offer causes a needless stream restart — but a same-sized display switch or
+    /// density change is a new layout and re-offers.
+    pub fn offer(&mut self, layout: &vnc_apple::Layout, size: (u16, u16)) -> Option<Vec<u8>> {
+        if self.offered.as_ref() == Some(layout) {
             return None;
         }
         let first = self.offered.is_none();
-        self.offered = Some(size);
+        self.offered = Some(layout.clone());
         let audio = audio_offer(self.viewer_ssrc, &self.call_id);
         let video = video_offer(self.video_ssrc, size, &self.call_id);
         if first {
@@ -1220,20 +1222,50 @@ mod tests {
         assert!(!vnc_apple::ENCODINGS.contains(&ENCODING_MEDIA_STREAM));
     }
 
-    /// The offer carries the keys the stream decrypts with, re-sends on a size
-    /// change, and skips duplicate sizes.
+    /// A single-display layout of `size` backing pixels at `density`.
+    fn layout(id: u32, size: (u16, u16), density: f32) -> vnc_apple::Layout {
+        vnc_apple::Layout {
+            backing: size,
+            current: None,
+            displays: vec![vnc_apple::Display {
+                info: crate::protocol::DisplayInfo {
+                    id,
+                    label: "Virtual display".into(),
+                    detail: String::new(),
+                    main: true,
+                    virtual_display: true,
+                },
+                density,
+                backing: size,
+            }],
+        }
+    }
+
+    /// The offer carries the keys the stream decrypts with, re-sends on a layout
+    /// change — a same-sized one included — and skips duplicate layouts.
     #[test]
-    fn a_media_stream_offers_on_each_new_size() {
+    fn a_media_stream_offers_on_each_new_layout() {
         let bridge = Arc::new(AudioBridge::new());
         let peer: SocketAddr = "10.0.0.2:5900".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:50000".parse().unwrap();
         let mut media = MediaStream::new(bridge, peer, local);
-        let msg = media.offer((1600, 1000)).expect("the first layout gets an offer");
+        let first = layout(5, (1600, 1000), 1.0);
+        let msg = media.offer(&first, (1600, 1000)).expect("the first layout gets an offer");
         assert_eq!(msg[0], 0x1c);
         assert_eq!(&msg[0x24..0x52], &media.audio_keys.0);
         assert_eq!(&msg[0x52..0x80], &media.audio_keys.1);
-        assert!(media.offer((1600, 1000)).is_none(), "a duplicate layout does not re-offer");
-        let msg2 = media.offer((1920, 1080)).expect("a new size re-offers");
+        assert!(media.offer(&first, (1600, 1000)).is_none(), "a duplicate layout does not re-offer");
+        assert!(
+            media.offer(&layout(6, (1600, 1000), 1.0), (1600, 1000)).is_some(),
+            "a same-sized display switch re-offers"
+        );
+        assert!(
+            media.offer(&layout(6, (1600, 1000), 2.0), (1600, 1000)).is_some(),
+            "a same-sized density change re-offers"
+        );
+        let msg2 = media
+            .offer(&layout(6, (1920, 1080), 2.0), (1920, 1080))
+            .expect("a new size re-offers");
         assert_eq!(&msg2[0x24..0x52], &media.audio_keys.0, "re-offer keeps the same keys");
         assert_eq!(media.call_id.len(), 36);
         assert!(media.call_id.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-'));

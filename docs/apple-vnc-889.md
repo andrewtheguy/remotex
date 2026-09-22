@@ -531,7 +531,9 @@ whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
 decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
 the mechanism below is documented by Apple.
 
-**The negotiation is one client message and three server messages.** After the
+**The negotiation is one client message and up to three server reply types.** A
+successful negotiation gets message 1 (the ports) and message 2 (the answer); message
+3 (an error) is the alternative terminal reply. After the
 first display layout, the client advertises encoding **1010** (`0x3f2`,
 `kSSVideoEncoding_AVCMediaStream`) in a second `SetEncodings` and sends message
 type **`0x1c`** (`RFBMediaStreamServerConfiguration`, version 3) inside the record

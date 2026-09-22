@@ -2343,10 +2343,8 @@ async fn request_resize(
             }
         };
         let msg = if high_performance {
-            let mode = vnc_apple::virtual_display_mode(want, d.host_density);
-            if mode.pixels == d.size && (d.scale - d.host_density).abs() < 0.005 {
-                return Ok(());
-            }
+            // Before the no-op check, so a return to the current size replaces an
+            // earlier deferral; [`complete_hp_media_setup`] drops it as a no-op then.
             if d.hp_media_pending {
                 debug!(
                     "vnc: deferring Apple virtual-display resize to {}x{} points until the \
@@ -2354,6 +2352,10 @@ async fn request_resize(
                     want.0, want.1,
                 );
                 d.hp_media_deferred = Some(want);
+                return Ok(());
+            }
+            let mode = vnc_apple::virtual_display_mode(want, d.host_density);
+            if mode.pixels == d.size && (d.scale - d.host_density).abs() < 0.005 {
                 return Ok(());
             }
             vnc_apple::set_display_configuration(mode)
@@ -4354,7 +4356,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         size.0, size.1
     );
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
-    if let Some(offer) = media.and_then(|media| media.offer(size)) {
+    if let Some(offer) = media.and_then(|media| media.offer(&layout, size)) {
         uplink.send(&offer).await?;
     }
     Ok(resized)
@@ -7362,6 +7364,31 @@ mod tests {
         );
         assert!(!desktop.lock().unwrap().hp_media_pending);
         assert_eq!(desktop.lock().unwrap().hp_media_deferred, None);
+    }
+
+    /// A viewport that returns to the current size while media is pending
+    /// replaces the earlier deferral, so no stale resize goes out afterwards.
+    #[tokio::test]
+    async fn hp_audio_return_to_current_size_drops_the_deferred_resize() {
+        let (uplink, wire) = test_uplink();
+        let desktop = shared_desktop((1440, 900), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.hp_media_pending = true;
+            d.host_density = 1.0;
+        }
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1280, 800)), true).await.unwrap();
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1440, 900)), true).await.unwrap();
+
+        let shared = test_shared(
+            Arc::clone(&uplink),
+            Arc::clone(&desktop),
+            test_shadow((1440, 900)),
+        );
+        complete_hp_media_setup(&shared).await.unwrap();
+        assert!(written(&wire).is_empty(), "the stale 1280x800 request is not sent");
+        assert!(!desktop.lock().unwrap().hp_media_pending);
     }
 
     /// The body of an OutputScale report for `size` at `scale`.

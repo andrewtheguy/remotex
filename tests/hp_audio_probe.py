@@ -430,6 +430,7 @@ def main():
     fb_w, fb_h = w, h
     zlib_d = zlib.decompressobj()
     screenshot_pending = False
+    painted = 0  # pixels of Raw/zlib painted since the layout that armed the screenshot
     layouts = 0
     media_sent = False
     base_port = None
@@ -471,6 +472,7 @@ def main():
                 if enc == ENC_RAW:
                     pixels = rec.read(rw * rh * 4)
                     if args.screenshots:
+                        painted += rw * rh
                         for row in range(rh):
                             src = row * rw * 4
                             dst = ((y + row) * fb_w + x) * 4
@@ -481,6 +483,7 @@ def main():
                     compressed = rec.read(clen)
                     if args.screenshots:
                         pixels = zlib_d.decompress(compressed)
+                        painted += rw * rh
                         for row in range(rh):
                             src = row * rw * 4
                             dst = ((y + row) * fb_w + x) * 4
@@ -507,6 +510,7 @@ def main():
                         fb = bytearray(bw * bh * 4)
                         fb_w, fb_h = bw, bh
                         screenshot_pending = True
+                        painted = 0
                     rec.send(auto_framebuffer_update(bw, bh))
                     if layouts == 1:
                         encs = list(ENCODINGS) + [ENC_ZLIB]
@@ -524,6 +528,10 @@ def main():
                             media_sent = True
                         if not media_sent:
                             deadline = time.time() + args.seconds
+                    elif args.screenshots:
+                        # The screenshot waits for this full repaint, not the
+                        # zeroed framebuffer the layout just left.
+                        rec.send(update_request(False, bw, bh))
                 elif enc == ENC_REKEY:
                     raise SystemExit("second rekey")
                 elif enc == ENC_MEDIA:
@@ -557,7 +565,7 @@ def main():
                         listener.start()
                 else:
                     raise SystemExit(f"unknown encoding {enc} ({enc:#x}) rect {rw}x{rh}+{x}+{y}")
-            if args.screenshots and screenshot_pending:
+            if args.screenshots and screenshot_pending and painted >= fb_w * fb_h:
                 screenshot_pending = False
                 path = os.path.join(args.screenshots, f"layout_{layouts}_{fb_w}x{fb_h}.png")
                 img = Image.frombuffer("RGB", (fb_w, fb_h), bytes(fb), "raw", "BGRX", 0, 1)
