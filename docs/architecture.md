@@ -1596,8 +1596,12 @@ shortcut, swallows the `keyup` without ever taking focus — so `heldModifiers.t
 follows the physical modifiers and checks them against the modifier state every later
 key, mouse and wheel event carries. One the event reports as up is released before
 that event is forwarded, through the Command translator like the `keyup` it stands in
-for. The soft keyboard's sticky modifiers are outside it: the page holds those, and
-no event's flags know them.
+for. The translator reads the same flags for itself, because it can hold keys for a
+Command the page never saw go down — ⌘-Tab into the window, then ⌘V with Command still
+held — and so one `heldModifiers.ts` cannot lapse: any event reporting Command up
+ends what the translator held under it, the synthetic Control of a mapped chord
+included, without the bare tap a seen release would send. The soft keyboard's sticky
+modifiers are outside it: the page holds those, and no event's flags know them.
 
 The canvas is presented at the remote's point size, derived from framebuffer
 pixels and remote scale. Desktop clients scroll when necessary. Touch clients
