@@ -1966,6 +1966,11 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .unwrap();
     assert_eq!(
         next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((1, 1)),
+        "the armed region was not narrowed ahead of the display change"
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
         MacRequest::Configuration((24, 18), 1)
     );
     assert_eq!(

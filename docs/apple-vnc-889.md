@@ -568,8 +568,11 @@ framework, `RFBMediaStreamServerConfiguration` is called from
 calls it again. `-[SSSessionView ssSessionReady:]` explicitly defers switching
 to dynamic resolution until `avcMediaSessionReady` when AVC setup is pending.
 That callback starts the video and audio streams before it switches dynamic
-resolution on. Remotex follows the same initial ordering: its first `0x1c` goes
-out after the first layout, and viewport requests wait for media-stream message 2.
+resolution on. Remotex does not follow that ordering, because the stream it would
+start is stopped again by the first resize, from the full-screen display a session
+opens on to the window's size. It sends the window's size once the first layout
+has arrived, and its first `0x1c` once that resize has settled. The Mac accepts a
+`SetDisplayConfiguration` before any media stream is configured.
 
 **`screensharingd` tears down the RTP sender on every display change.** The
 native viewer's AVConference keeps the transport alive internally, so it never
@@ -598,10 +601,17 @@ gateway resized its virtual display:
   crash report on the test Mac has the same stack. `screensharingd` logs the
   failed RPC as `(ipc/mig) server died`, relaunches the agent on the physical
   1280×800 display, and the session loses its virtual display, sound and, when a
-  second request is in flight, its connection. So the gateway sends a change only
-  at the end of an update, when no full-size pixel request is outstanding. Until
-  the answering layout it polls with an incremental request for the one pixel at
-  the origin, which every mode has, and it never has two changes out. Polling that
+  second request is in flight, its connection. The region read is not only a
+  pixel request's. The one `AutoFrameBufferUpdate` (`0x09`) armed is served on
+  every captured frame, and the change produces one. A layout re-arms it at the
+  full size, so every change after the first met a full-size armed region. A
+  2x→1x change of the same points, a quarter of the pixels, crashed the agent in
+  each of three tries, and smaller shrinks survived by chance. So the gateway sends
+  a change only at the end of an update, when no full-size pixel request is
+  outstanding. It re-arms `0x09` for the one pixel at the origin, which every mode
+  has, just ahead of the change, and until the answering layout it polls with an
+  incremental request for that pixel. It never has two changes out. With the
+  re-arm, 2x→1x changes and shrinks went through without a crash. Polling that
   pixel with *full* requests every 200 ms crashed the agent again, because each one
   is a read.
 - **The Mac can take a long time to read a change.** From the gateway's send to

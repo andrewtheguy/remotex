@@ -600,21 +600,24 @@ const HP_RESIZE_SETTLE: Duration = Duration::from_secs(1);
 const HP_LAYOUT_QUIET: Duration = Duration::from_millis(500);
 
 /// How long a resize may go unanswered before it is given up on. Not a pacing
-/// timeout: the Mac has been measured taking 20 seconds to reach a request queued
-/// behind the frames it is sending, and a second request overlapping the first is
-/// what crashes its agent. This only keeps a lost answer from pinning the cover
-/// and every later resize for the rest of the session.
+/// timeout: the Mac has been measured leaving a request unread for up to 50
+/// seconds after answering a media-stream offer, and a second request overlapping
+/// the first is what crashes its agent. This only keeps a lost answer from pinning
+/// the cover and every later resize for the rest of the session.
 const HP_RESIZE_STUCK: Duration = Duration::from_secs(30);
 
-/// The pixel request a High Performance session polls with while its display is
+/// The pixel region a High Performance session asks for while its display is
 /// being reconfigured: one pixel at the origin, which every mode has.
 ///
-/// The Mac's agent reads the screen for a request out of the capture surface
-/// without checking it against the new, smaller one — a request for the old
-/// size served just after a shrinking change is a `memcpy` past the end of the
-/// surface in `SSAgent_ReadScreenDataIntoSharedMemory_rpc`, and the agent dies
-/// with the session's display, audio and input. Polling still has to go on, since
-/// the answering layout arrives inside an update.
+/// The Mac's agent reads the screen for a region out of the capture surface
+/// without checking it against the new, smaller one. A region of the old size
+/// served just after a shrinking change is a `memcpy` past the end of the surface
+/// in `SSAgent_ReadScreenDataIntoSharedMemory_rpc`, and the agent dies with the
+/// session's display, audio and input. Two regions are live: a pixel request's,
+/// and the one `AutoFrameBufferUpdate` armed, which the Mac serves on every
+/// captured frame and so also on the first after the change. Both are narrowed to
+/// this before a change goes out, and polling holds to it until the answering
+/// layout, which arrives inside an update.
 const HP_HOLD_REQUEST: (u16, u16) = (1, 1);
 
 
@@ -643,16 +646,14 @@ enum HpPhase {
 /// pixel polling held to [`HP_HOLD_REQUEST`] until the answering layout. From the
 /// first report until [`HP_LAYOUT_QUIET`] after that layout, the browser is told a
 /// resize is in progress ([`ServerMsg::Resizing`]) and covers the desktop, as
-/// Apple's client does; the media stream is offered again only after that.
+/// Apple's client does; the media stream is offered again only after that. A
+/// session opens covered, and its first offer waits for the resize from the
+/// Mac's opening display to the window's to settle too.
 ///
 /// Pure state with the clock passed in; [`hp_resize_step`] and the read loop act
 /// on it, and the input loop wakes at [`HpResize::deadline`].
 #[derive(Debug, Default)]
 struct HpResize {
-    /// The initial media negotiation is not complete. Apple's viewer does not
-    /// enable dynamic resolution until `avcMediaSessionReady`; this is the
-    /// corresponding gate for a session that asked for system audio.
-    media_pending: bool,
     /// The newest window size, in points, not yet asked for.
     want: Option<(u16, u16)>,
     /// When [`Self::want`] may go out: [`HP_RESIZE_SETTLE`] after its report.
@@ -664,6 +665,16 @@ struct HpResize {
     quiet_until: Option<tokio::time::Instant>,
     /// The browser has been told a resize is in progress.
     shown: bool,
+    /// The session's first layout has not arrived. A resizing session opens
+    /// covered ([`Self::opening`]): the display it connects to is the Mac's own,
+    /// not the window's, and the virtual display replacing it is still to come.
+    awaiting_layout: bool,
+    /// The media-stream offer for the newest layout, held until the resize it
+    /// arrived in has settled — see [`MediaStream::offer`]. The Mac stops its
+    /// audio when a display change begins and starts it again only on an offer;
+    /// one made mid-resize holds the agent's media lock against the next change
+    /// and is torn down by it anyway.
+    offer: Option<Vec<u8>>,
 }
 
 /// What [`HpResize::step`] says to do next.
@@ -674,11 +685,18 @@ enum HpStep {
     /// A size is due: prompt the Mac for an update, at whose end the read loop
     /// sends it.
     Drain,
-    /// Tell the browser the resize has settled.
-    Hide,
+    /// Tell the browser the resize has settled, and offer the media stream for
+    /// the layout it settled on.
+    Hide(Option<Vec<u8>>),
 }
 
 impl HpResize {
+    /// A resizing session's state at connect: covered until its first layout and
+    /// whatever resize the window asks of it have settled.
+    fn opening() -> Self {
+        Self { awaiting_layout: true, shown: true, ..Self::default() }
+    }
+
     /// The window reported `want` points. `noop` is whether that is the desktop
     /// already showing: with nothing in flight it cancels any earlier report, and
     /// with a request out it still goes, since the answer may be some other size.
@@ -692,9 +710,12 @@ impl HpResize {
         }
     }
 
-    /// The Mac sent a layout: whatever was out is answered.
-    fn layout(&mut self, now: tokio::time::Instant) {
-        if self.phase == HpPhase::InFlight {
+    /// The Mac sent a layout. One that `changed` the desktop answers whatever was
+    /// out; the Mac also repeats a layout unchanged — its opening one arrives twice,
+    /// the second after a request may already have gone — and that answers nothing.
+    fn layout(&mut self, changed: bool, now: tokio::time::Instant) {
+        self.awaiting_layout = false;
+        if changed && self.phase == HpPhase::InFlight {
             self.phase = HpPhase::Idle;
             self.since = None;
         }
@@ -748,8 +769,12 @@ impl HpResize {
             self.phase = HpPhase::Idle;
             self.since = None;
         }
+        // The opening configuration is itself unanswered until then.
+        if self.awaiting_layout {
+            return None;
+        }
         if let Some(want) = self.want {
-            if self.media_pending || self.send_at.is_some_and(|at| now < at) {
+            if self.send_at.is_some_and(|at| now < at) {
                 return None;
             }
             self.want = None;
@@ -761,7 +786,7 @@ impl HpResize {
         if self.shown && self.quiet_until.is_none_or(|at| now >= at) {
             self.shown = false;
             self.quiet_until = None;
-            return Some(HpStep::Hide);
+            return Some(HpStep::Hide(self.offer.take()));
         }
         None
     }
@@ -774,8 +799,11 @@ impl HpResize {
         if self.phase != HpPhase::Idle {
             return self.since.map(|since| since + HP_RESIZE_STUCK);
         }
+        if self.awaiting_layout {
+            return None;
+        }
         if self.want.is_some() {
-            return if self.media_pending { None } else { self.send_at };
+            return self.send_at;
         }
         self.shown.then(|| self.quiet_until.unwrap_or(now))
     }
@@ -2073,7 +2101,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let (uplink, backlog, writer) = uplink.queued();
     let mut write_task = tokio::spawn(writer);
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
-    let hp = HpResize { media_pending: media.is_some(), ..HpResize::default() };
+    let hp = if high_performance && resize { HpResize::opening() } else { HpResize::default() };
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
@@ -2133,6 +2161,11 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         camera: camera.clone(),
         microphone: microphone.clone(),
     };
+
+    // A resizing High Performance session opens covered — see [`HpResize::opening`].
+    if desktop.lock().unwrap().hp.shown {
+        sink.msg(ServerMsg::Resizing { active: true }).await?;
+    }
 
     // Kick off the update cycle with one full (non-incremental) request. On the
     // 003.889 wire this is also the second half of the arming pair the preface
@@ -2609,7 +2642,14 @@ async fn hp_resize_step(
         match step {
             None => return Ok(()),
             Some(HpStep::Show) => sink.msg(ServerMsg::Resizing { active: true }).await?,
-            Some(HpStep::Hide) => sink.msg(ServerMsg::Resizing { active: false }).await?,
+            // Sound comes back with the picture: the offer goes from here rather
+            // than the read loop, which can be inside a large update for seconds.
+            Some(HpStep::Hide(offer)) => {
+                if let Some(offer) = offer {
+                    send(uplink, &offer).await?;
+                }
+                sink.msg(ServerMsg::Resizing { active: false }).await?;
+            }
             // A full request answers at once even on a still desktop, so the
             // boundary the read loop waits for comes now rather than at the next
             // change on screen; the one pixel it asks for is in every mode.
@@ -2636,19 +2676,6 @@ async fn hp_resize_due(desktop: &SharedDesktop, wake: &tokio::sync::Notify) {
             () = due => return,
             () = wake.notified() => {}
         }
-    }
-}
-
-/// Enable High Performance resizing after the initial media negotiation, as the
-/// native viewer does from `avcMediaSessionReady`. Media-stream message 2 is this
-/// implementation's final setup event: by then message 1 has named the UDP ports
-/// and [`MediaStream::on_reply`] has bound the receiver.
-fn complete_hp_media_setup(shared: &Shared) {
-    let mut d = shared.desktop.lock().unwrap();
-    if d.hp.media_pending {
-        d.hp.media_pending = false;
-        debug!("vnc: media stream ready; virtual-display resizes may go out");
-        shared.hp_wake.notify_one();
     }
 }
 
@@ -2906,28 +2933,21 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // A High Performance resize goes out here, at the end of an update,
                 // because this is where no full-size pixel request is outstanding;
                 // polling then holds to one pixel until the answering layout — see
-                // [`HP_HOLD_REQUEST`]. And once the resize has settled, the media
-                // stream it stopped is offered again.
+                // [`HP_HOLD_REQUEST`].
                 let hp_holding = if apple.as_ref().is_some_and(|a| a.virtual_display) {
-                    let (request, draining, holding, settled) = {
+                    let (request, drained, holding) = {
                         let mut d = desktop.lock().unwrap();
                         let draining = matches!(d.hp.phase, HpPhase::Draining(_));
                         let request = d.hp_take_request(tokio::time::Instant::now());
-                        (request, draining, d.hp.holds_pixels(), d.hp.settled())
+                        let drained = draining && !matches!(d.hp.phase, HpPhase::Draining(_));
+                        (request, drained, d.hp.holds_pixels())
                     };
                     if let Some(msg) = request {
-                        send(uplink, &msg).await?;
+                        send_all(uplink, &[vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST), msg])
+                            .await?;
                     }
-                    if draining {
+                    if drained {
                         hp_wake.notify_one();
-                    }
-                    let deferred = apple
-                        .as_mut()
-                        .and_then(|a| a.media.as_mut())
-                        .filter(|_| settled)
-                        .and_then(MediaStream::deferred_offer);
-                    if let Some(offer) = deferred {
-                        send(uplink, &offer).await?;
                     }
                     holding
                 } else {
@@ -3905,26 +3925,13 @@ async fn read_rect<R: AsyncRead + Unpin>(
             let len = reader.read_u16().await?;
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
-            let media_settled = match apple.as_mut().and_then(|a| a.media.as_mut()) {
+            match apple.as_mut().and_then(|a| a.media.as_mut()) {
                 Some(media) => {
-                    match media.on_reply(&body).await {
-                        Ok(failed) => failed,
-                        Err(e) => {
-                            warn!("vnc: the Mac's audio could not be started: {e:#}");
-                            true
-                        }
+                    if let Err(e) = media.on_reply(&body).await {
+                        warn!("vnc: the Mac's audio could not be started: {e:#}");
                     }
                 }
-                None => {
-                    debug!("vnc: ignoring a media-stream reply; this session asked for none");
-                    false
-                }
-            };
-            if media_settled {
-                // Message 2 is the successful terminal reply. A refusal is
-                // terminal too: audio is an extra on the desktop and must not
-                // leave dynamic resolution disabled for the rest of the session.
-                complete_hp_media_setup(shared);
+                None => debug!("vnc: ignoring a media-stream reply; this session asked for none"),
             }
             return Ok(RectEffect::NOTHING);
         }
@@ -4573,7 +4580,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
-        desktop.lock().unwrap().hp.layout(tokio::time::Instant::now());
+        desktop.lock().unwrap().hp.layout(resized, tokio::time::Instant::now());
         hp_wake.notify_one();
     }
 
@@ -4642,15 +4649,18 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         size.0, size.1
     );
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
-    // A layout mid-resize is offered for once the resize has settled — see
-    // [`HpResize::settled`]; the first, at connect, goes out now.
-    let settled = desktop.lock().unwrap().hp.settled();
-    if let Some(media) = media {
-        if media.has_offered() && !settled {
-            media.defer(&layout, size);
-        } else if let Some(offer) = media.offer(&layout, size) {
-            uplink.send(&offer).await?;
+    // A layout mid-resize, the session's opening one included, is offered for
+    // once the resize has settled — see [`HpResize::offer`].
+    let offer = media.and_then(|media| media.offer(&layout, size)).and_then(|offer| {
+        let mut d = desktop.lock().unwrap();
+        if d.hp.settled() {
+            return Some(offer);
         }
+        d.hp.offer = Some(offer);
+        None
+    });
+    if let Some(offer) = offer {
+        uplink.send(&offer).await?;
     }
     Ok(resized)
 }
@@ -7659,7 +7669,7 @@ mod tests {
         desktop.lock().unwrap().scale = UNSCALED;
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
         assert_eq!(hp_settle(&uplink, &desktop, &sink).await, None, "one request in flight at a time");
-        desktop.lock().unwrap().hp.layout(tokio::time::Instant::now());
+        desktop.lock().unwrap().hp.layout(true, tokio::time::Instant::now());
         hp_resize_step(&uplink, &desktop, &sink).await.unwrap();
         assert_eq!(
             desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()),
@@ -7667,61 +7677,48 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn hp_audio_defers_resize_until_media_setup_completes() {
-        let (uplink, _wire) = test_uplink();
-        let (sink, _rx) = test_sink();
-        let desktop = shared_desktop((1440, 900), None, None);
-        {
-            let mut d = desktop.lock().unwrap();
-            d.hp.media_pending = true;
-            d.host_density = 1.0;
-        }
+    /// A resizing session opens covered. Nothing is asked of the Mac until its
+    /// opening display has arrived, and the cover stays through the resize to
+    /// the window's size, with the media stream offered only once that settles.
+    #[test]
+    fn hp_opens_covered_until_the_first_resize_settles() {
+        let t0 = tokio::time::Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut hp = HpResize::opening();
+        assert!(hp.shown, "covered from the start");
 
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1280, 800)), true).await.unwrap();
-        assert_eq!(hp_settle(&uplink, &desktop, &sink).await, None, "no resize precedes media readiness");
-        assert_eq!(desktop.lock().unwrap().hp.want, Some((1280, 800)));
+        hp.report((1728, 902), false, t0);
+        assert_eq!(hp.step(ms(5_000)), None, "the opening configuration is still unanswered");
+        assert_eq!(hp.deadline(ms(5_000)), None);
 
-        let shared = test_shared(
-            Arc::clone(&uplink),
-            Arc::clone(&desktop),
-            test_shadow((1440, 900)),
-        );
-        complete_hp_media_setup(&shared);
-        hp_resize_step(&uplink, &desktop, &sink).await.unwrap();
-        assert_eq!(
-            desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()),
-            Some(hp_config((1280, 800), 1.0))
-        );
-        assert!(!desktop.lock().unwrap().hp.media_pending);
-        assert_eq!(desktop.lock().unwrap().hp.want, None);
+        // The opening display, then the same layout again after the request
+        // for the window's size has gone: the repeat answers nothing.
+        hp.layout(true, ms(6_000));
+        assert_eq!(hp.step(ms(6_000)), Some(HpStep::Drain));
+        assert_eq!(hp.take_due(ms(6_100)), Some((1728, 902)));
+        hp.layout(false, ms(6_200));
+        assert!(hp.holds_pixels(), "a repeated layout is not the answer");
+        hp.offer = Some(vec![0x1c]);
+        assert!(!hp.settled());
+
+        hp.layout(true, ms(8_000));
+        assert_eq!(hp.step(ms(8_000)), None, "the cover waits out the quiet");
+        assert_eq!(hp.step(ms(8_000) + HP_LAYOUT_QUIET), Some(HpStep::Hide(Some(vec![0x1c]))));
+        assert!(hp.settled());
+        assert_eq!(hp.offer, None, "offered once");
     }
 
-    /// A viewport that returns to the current size while media is pending
-    /// replaces the earlier deferral, so no stale resize goes out afterwards.
-    #[tokio::test(start_paused = true)]
-    async fn hp_audio_return_to_current_size_drops_the_deferred_resize() {
-        let (uplink, wire) = test_uplink();
-        let (sink, _rx) = test_sink();
-        let desktop = shared_desktop((1440, 900), None, None);
-        {
-            let mut d = desktop.lock().unwrap();
-            d.hp.media_pending = true;
-            d.host_density = 1.0;
-        }
-
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1280, 800)), true).await.unwrap();
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1440, 900)), true).await.unwrap();
-
-        let shared = test_shared(
-            Arc::clone(&uplink),
-            Arc::clone(&desktop),
-            test_shadow((1440, 900)),
-        );
-        complete_hp_media_setup(&shared);
-        assert_eq!(hp_settle(&uplink, &desktop, &sink).await, None, "the stale 1280x800 request is not sent");
-        assert!(written(&wire).is_empty(), "not even a drain");
-        assert!(!desktop.lock().unwrap().hp.media_pending);
+    /// A window already the size of the opening display asks for nothing; the
+    /// cover comes down once that display has arrived.
+    #[test]
+    fn hp_opens_without_a_resize_when_the_window_fits() {
+        let t0 = tokio::time::Instant::now();
+        let mut hp = HpResize::opening();
+        hp.report((1728, 1080), false, t0);
+        hp.report((1728, 1080), true, t0);
+        hp.layout(true, t0);
+        assert_eq!(hp.step(t0 + HP_LAYOUT_QUIET), Some(HpStep::Hide(None)));
+        assert!(!hp.holds_pixels());
     }
 
     /// A drag's stream of sizes is one request, for the size it came to rest at,
@@ -7751,18 +7748,20 @@ mod tests {
         hp.report((1300, 700), false, ms(1900));
         assert_eq!(hp.step(ms(20_000)), None, "one request in flight at a time");
         assert!(!hp.settled());
-        hp.layout(ms(20_100));
+        hp.layout(false, ms(10_000));
+        assert!(hp.holds_pixels(), "a layout that changes nothing answers nothing");
+        hp.layout(true, ms(20_100));
         assert!(!hp.holds_pixels(), "the answer releases polling");
         assert_eq!(hp.step(ms(20_100)), Some(HpStep::Drain));
         assert_eq!(hp.take_due(ms(20_100)), Some((1300, 700)));
 
         // Its answer, then a duplicate layout: the cover waits out the quiet.
-        hp.layout(ms(20_300));
-        hp.layout(ms(20_500));
+        hp.layout(true, ms(20_300));
+        hp.layout(false, ms(20_500));
         assert_eq!(hp.step(ms(20_900)), None);
         assert_eq!(hp.deadline(ms(20_900)), Some(ms(20_500) + HP_LAYOUT_QUIET));
         assert!(!hp.settled(), "the media stream waits for the cover");
-        assert_eq!(hp.step(ms(21_000)), Some(HpStep::Hide));
+        assert_eq!(hp.step(ms(21_000)), Some(HpStep::Hide(None)));
         assert!(hp.settled());
         assert_eq!(hp.deadline(ms(21_000)), None, "nothing more is due");
     }
@@ -7779,7 +7778,7 @@ mod tests {
         assert_eq!(hp.take_due(due), Some((1000, 700)));
         let expiry = due + HP_RESIZE_STUCK;
         assert_eq!(hp.deadline(expiry), Some(expiry));
-        assert_eq!(hp.step(expiry), Some(HpStep::Hide));
+        assert_eq!(hp.step(expiry), Some(HpStep::Hide(None)));
         assert!(!hp.holds_pixels());
     }
 
