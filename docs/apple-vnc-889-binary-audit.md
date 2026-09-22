@@ -34,21 +34,6 @@ the repository.
 
 Ordered by effect on a session.
 
-### The pasteboard is capped far below Apple's limit
-
-The agent's pack (`FUN_10002e4c5`, CopyPackedScrapData) writes every saved flavor of
-every item — RTF, HTML, web archive, TIFF, PDF — and both Apple ends cap an archive at
-`0x6400000` (100 MB). remotex refuses an archive over `MAX_CLIPBOARD_BYTES × 4 +
-64 KiB`, about 2.1 MB, whole, so a short text selection copied from Safari, Pages
-or Preview arrives as oversized or unreadable. Its parser also treats the first
-`u32` as an item count capped at 32 when it is the first item's flavor count, and
-Office copies carry more.
-
-An empty text sent from the browser becomes a promise on the Mac: the agent's
-unpacker (`FUN_10002ed5d`) treats a flavor with `data_len 0` as "create promise" and
-calls `PasteboardPutItemFlavor` with no data. A later paste asks the viewer for it
-(MiscStatus command 3), and remotex answers with the same empty archive.
-
 ### The old display list is skipped with the wrong size
 
 The agent's `FUN_10002802f` [EncodeDisplayInfoForDaemon] writes `DisplayInfo`
@@ -158,6 +143,27 @@ the layout reader produced. A genuine bare `0x51` is `HandleServerSystemInfoData
 the viewer's `ViewerInfo` bitmap includes `0x14`, except `EncodeUserSessionChanged`
 (`FUN_100022ac9`, command `0x11`), which is ungated. Command 2 is "server pasteboard
 changed" and 3 "server pasteboard needs data".
+
+### The pasteboard archive
+
+The agent's pack (`FUN_10002e4c5`, CopyPackedScrapData) writes every saved flavor of
+every item — RTF, HTML, web archive, TIFF, PDF — as a run of items, each a `u32`
+flavor count and then per flavor a counted name, a reserved `u32`, a `u32` count of
+counted key/value tags (OSType, NSPboardType, extension, MIME) and the counted data.
+There is no item count; items follow one another to the end. Both Apple ends cap an
+archive at `0x6400000` (100 MB), so a short text selection can arrive inside
+megabytes of other flavors, and an Office copy carries dozens of them; remotex
+streams the archive and keeps only the text. The agent skips `dyn.*` flavors, the
+pasteboard-peeker types, `NSFilePromiseID` and flavors flagged system-translated or
+not-saved (`FUN_10004e187`), so a source that publishes text only as UTF-16 has no
+`public.utf8-plain-text` flavor to read.
+
+The agent's unpacker (`FUN_10002ed5d`) treats a flavor with no data as "create
+promise" and calls `PasteboardPutItemFlavor` with no data; a later paste on the Mac
+then asks the viewer for it with `MiscStatus` command 3. Empty text therefore goes as
+an item with no flavors, which clears the pasteboard. The daemon echoes a fetch's
+session id in its reply and ignores the id on a viewer's send; Apple's viewer
+generates its own and treats a zero reply as an unrequested one.
 
 ### `ViewerInfo`
 

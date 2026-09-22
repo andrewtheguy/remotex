@@ -1298,8 +1298,9 @@ struct ClipboardState {
     /// `None` until caps arrive, which is also how "the server does not speak
     /// the extension, use latin-1" is spelled — see [`crate::vnc_clipboard`].
     server: Option<vnc_clipboard::Caps>,
-    /// Opaque value echoed by Apple's pasteboard messages. Zero until the Mac
-    /// supplies one, which is also the value its first fetch uses.
+    /// The id Apple's pasteboard messages carry. The Mac echoes a fetch's id in
+    /// its reply and ignores the one on a send, so this stays at the zero the
+    /// first fetch uses; Apple's viewer treats a zero reply as an unrequested one.
     apple_session_id: u32,
     /// Browser reads waiting for the next native Apple pasteboard response.
     /// The panel issues only one at a time, but count them so the wire remains
@@ -3359,7 +3360,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let header = vnc_apple_clipboard::header(&raw);
                 clipboard.lock().unwrap().apple_session_id = header.session_id;
                 let compressed = u64::from(header.compressed);
-                if compressed > vnc_apple_clipboard::MAX_COMPRESSED_BYTES {
+                let receiver = match vnc_apple_clipboard::Receiver::new(header) {
+                    Ok(receiver) => Some(receiver),
+                    Err(e) => {
+                        warn!("vnc: {e:#}");
+                        None
+                    }
+                };
+                let Some(mut receiver) = receiver else {
                     discard(&mut reader, compressed).await?;
                     if !clipboard_enabled {
                         continue;
@@ -3385,9 +3393,21 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         return Ok(());
                     }
                     continue;
+                };
+                // Streamed rather than held: the archive can be megabytes of other
+                // flavors around a short text. A fault stops the inflating, never
+                // the reading, which the stream's framing depends on.
+                let mut received = Ok(());
+                let mut left = compressed;
+                let mut chunk = vec![0u8; 64 * 1024];
+                while left > 0 {
+                    let n = left.min(chunk.len() as u64) as usize;
+                    reader.read_exact(&mut chunk[..n]).await?;
+                    left -= n as u64;
+                    if clipboard_enabled && received.is_ok() {
+                        received = receiver.feed(&chunk[..n]);
+                    }
                 }
-                let mut bytes = vec![0u8; compressed as usize];
-                reader.read_exact(&mut bytes).await?;
                 if !clipboard_enabled {
                     continue;
                 }
@@ -3399,7 +3419,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     &mut apple_poll_deadline,
                 )
                 .await?;
-                match vnc_apple_clipboard::parse(header, &bytes) {
+                match received.and_then(|()| receiver.finish()) {
                     Ok(vnc_apple_clipboard::Incoming::Text(text)) => {
                         debug!("vnc: remote Apple clipboard updated, {} bytes", text.len());
                         let snapshot = {
@@ -9281,13 +9301,12 @@ mod tests {
     #[tokio::test]
     async fn disabled_apple_pasteboards_do_not_consume_browser_requests() {
         let ordinary = vnc_apple_clipboard::send(7, "ignored").unwrap();
-        let oversized_len =
-            u32::try_from(vnc_apple_clipboard::MAX_COMPRESSED_BYTES + 1).unwrap();
+        // Declared past Apple's own limit, and so never inflated.
         let mut oversized = vec![0x1f, 0, 0, 0];
         oversized.extend_from_slice(&9u32.to_be_bytes());
-        oversized.extend_from_slice(&oversized_len.to_be_bytes());
-        oversized.extend_from_slice(&oversized_len.to_be_bytes());
-        oversized.extend(std::iter::repeat_n(0, oversized_len as usize));
+        oversized.extend_from_slice(&(vnc_apple_clipboard::MAX_ARCHIVE_BYTES + 1).to_be_bytes());
+        oversized.extend_from_slice(&4u32.to_be_bytes());
+        oversized.extend_from_slice(&[0; 4]);
 
         for (wire, session_id) in [(ordinary, 7), (oversized, 9)] {
             let (uplink, _sent) = test_uplink();
