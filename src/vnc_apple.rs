@@ -53,8 +53,8 @@
 //! The reference document is reverse-engineered and says so; several offsets in it
 //! disagree with the bytes a live Mac sends — a layout has a display count the
 //! reference lacks — and where they do the comments name which reading is
-//! implemented and what settled it: a measurement, or the binaries in
-//! docs/apple-vnc-889-binary-audit.md.
+//! implemented and what settled it: a measurement, or Apple's binaries — see
+//! docs/apple-vnc-889.md.
 
 use std::collections::HashMap;
 
@@ -100,7 +100,7 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// neither no display information at all. Order matters for one thing only, the
 /// preferred codec, which is the first of zlib, ZRLE and Apple's own codecs listed.
 /// Measured on macOS 26.6 and read from the daemon — see
-/// docs/apple-vnc-889-binary-audit.md. zlib is therefore asked for from the start,
+/// docs/apple-vnc-889.md, "Which encodings make the Mac report its displays". zlib is therefore asked for from the start,
 /// in both subtypes: measured at 398 KB for a 3200x1800 frame against 23 MB of raw
 /// pixels.
 ///
@@ -427,7 +427,7 @@ impl Layout {
 /// logical and backing rects as `(top, left, bottom, right)`, a flags word and the
 /// display's pixel format. The layout is `ScreensharingAgent`'s
 /// `EncodeDisplayInfo2ForDaemon`, read by Apple's viewer the same way — see
-/// docs/apple-vnc-889-binary-audit.md.
+/// docs/apple-vnc-889.md, "A layout's length counts what follows it".
 pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
     parse_layout_kind(payload, false)
 }

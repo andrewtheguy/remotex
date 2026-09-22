@@ -1749,7 +1749,7 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
 /// 16-byte capability bitmap, with the UTF-8 name after all of it. Printing the lot
 /// as a string gave a log line of mojibake with the real name buried in it, and
 /// hid the flags. Bits 5 and up are the most virtual displays the Mac will create.
-/// See docs/apple-vnc-889-binary-audit.md.
+/// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
 ///
 /// Anything that is not shaped like that is a name, which is what every other
 /// server sends.
@@ -4883,7 +4883,7 @@ fn translate_input(
             // posts any other mask as buttons by bit position, so a pulse there goes
             // without the held buttons — which the release restores — and the
             // horizontal bits, clicks on buttons 5 and 6, are not sent at all. See
-            // docs/apple-vnc-889-binary-audit.md.
+            // docs/apple-vnc-889.md, "A Mac scrolls only on a lone wheel bit".
             let (axes, held): (&[_], u8) = match wheel {
                 Wheel::Apple { .. } => (&[(py, 0x08, 0x10)], 0),
                 Wheel::Notch => (&[(py, 0x08, 0x10), (px, 0x20, 0x40)], *button_mask),
