@@ -634,6 +634,9 @@ pub struct MediaStream {
     video_ssrc: u32,
     /// The layout the last offer went out for.
     offered: Option<vnc_apple::Layout>,
+    /// A layout that arrived mid-resize, offered for once it settles — see
+    /// [`Self::defer`].
+    deferred: Option<(vnc_apple::Layout, (u16, u16))>,
     receiver: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -659,6 +662,7 @@ impl MediaStream {
             viewer_ssrc: rand::random(),
             video_ssrc: rand::random(),
             offered: None,
+            deferred: None,
             receiver: None,
         }
     }
@@ -700,6 +704,28 @@ impl MediaStream {
             &video,
             (&self.video_keys.0, &self.video_keys.1),
         ))
+    }
+
+    /// Whether the first offer has gone out.
+    pub fn has_offered(&self) -> bool {
+        self.offered.is_some()
+    }
+
+    /// Hold the offer for `layout` until the resize it belongs to has settled.
+    ///
+    /// The Mac stops the audio stream when a display change begins and starts it
+    /// again only on an offer. An offer made mid-resize takes the agent's media
+    /// lock that the next `SetDisplayConfiguration` waits on — measured at up to
+    /// five seconds — and is torn down by it anyway, so, as with Apple's own
+    /// client, sound comes back once the display has settled.
+    pub fn defer(&mut self, layout: &vnc_apple::Layout, size: (u16, u16)) {
+        self.deferred = Some((layout.clone(), size));
+    }
+
+    /// The offer held by [`Self::defer`], if one is and its layout is new.
+    pub fn deferred_offer(&mut self) -> Option<Vec<u8>> {
+        let (layout, size) = self.deferred.take()?;
+        self.offer(&layout, size)
     }
 
     /// Act on an encoding-1010 rectangle: start receiving on the port it names, or
@@ -1269,6 +1295,29 @@ mod tests {
         assert_eq!(&msg2[0x24..0x52], &media.audio_keys.0, "re-offer keeps the same keys");
         assert_eq!(media.call_id.len(), 36);
         assert!(media.call_id.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-'));
+    }
+
+    /// A layout held mid-resize is offered for once, when asked for; one the
+    /// last offer already covered is not.
+    #[test]
+    fn a_deferred_layout_is_offered_once() {
+        let bridge = Arc::new(AudioBridge::new());
+        let peer: SocketAddr = "10.0.0.2:5900".parse().unwrap();
+        let local: SocketAddr = "10.0.0.1:50000".parse().unwrap();
+        let mut media = MediaStream::new(bridge, peer, local);
+        assert!(!media.has_offered());
+        let first = layout(5, (1600, 1000), 1.0);
+        media.offer(&first, (1600, 1000)).unwrap();
+        assert!(media.has_offered());
+        assert!(media.deferred_offer().is_none(), "nothing held");
+
+        let later = layout(5, (1200, 700), 1.0);
+        media.defer(&later, (1200, 700));
+        assert!(media.deferred_offer().is_some());
+        assert!(media.deferred_offer().is_none(), "offered once");
+
+        media.defer(&later, (1200, 700));
+        assert!(media.deferred_offer().is_none(), "the same layout is not offered again");
     }
 
     /// An error reply is logged and leaves the session running.

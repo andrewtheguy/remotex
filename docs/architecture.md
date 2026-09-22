@@ -1219,17 +1219,21 @@ over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still reach the encoder's refusal because the gateway
 cannot ask it for a smaller desktop.
 
-High Performance paces what the window asks for. The Mac cannot serve
-overlapping `SetDisplayConfiguration`s — it answers some with its old layout —
-and every one it acts on reconfigures the virtual display and restarts the
-media stream. So a viewport or density report waits for a second of quiet, only
-one request is out at a time, and the newest size is the one that goes. From the
-first report until the answering layout has held still for half a second, the
-gateway sends `resizing` with `active: true`, and the page covers the desktop
-with a dimmed, blurred "Resizing…" as Apple's client does, instead of showing
-each intermediate mode. The cover takes no input and leaves the menu reachable,
-and a browser that reattaches mid-resize is told again. No other engine sends
-`resizing`.
+High Performance paces what the window asks for. A second
+`SetDisplayConfiguration` overlapping the first, or a pixel request for the old
+size served just after a change shrinks the display, crashes the Mac's agent.
+Every change it acts on also stops the media stream. So a viewport or density
+report waits for a second of quiet, and the newest size is the one that goes.
+Only one change is out at a time, with no timeout short of 30 seconds. It is sent
+at the end of an update, and pixel polling holds to one pixel until the answering
+layout; the media stream is offered again only once the resize has settled. From
+the first report until that layout has held still for half a second, the gateway
+sends `resizing` with `active: true`, and the page covers the desktop with a
+dimmed, blurred "Resizing…" as Apple's client does, instead of showing each
+intermediate mode. The cover takes no input and leaves the menu reachable, and a
+browser that reattaches mid-resize is told again. No other engine sends
+`resizing`. The measurements are in
+[Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only with

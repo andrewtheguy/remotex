@@ -578,6 +578,41 @@ re-sends the offer (same keys, updated video size) and restarts the receiver
 after each layout change. The Mac answers with message 1 (same ports), message 2
 (accepted), and a fresh SSRC.
 
+### Resizing a High Performance display, as measured
+
+Measured September 22, 2026 on macOS 26.6.2 from the Mac's unified log while the
+gateway resized its virtual display:
+
+- **A display change stops the audio.** `SetDisplayConfiguration` takes the
+  agent's `udpSenderCR` lock — the one `SetServerStreamConfiguration` (`0x1c`)
+  holds while it builds a stream — then calls `AVCAudioStream stop` before the
+  mode changes. The Mac sends message 1 by itself once the change finishes, but
+  starts no stream until it gets an offer. An offer made mid-resize holds that lock
+  against the next change: 2.8 s and 5 s waits were logged. Remotex offers once the
+  resize has settled, as Apple's client appears to.
+- **Overlapping and oversized reads crash the agent.** `ScreensharingAgent` died
+  with `EXC_BAD_ACCESS` in `_platform_memmove` under
+  `agent_SSAgent_ReadScreenDataIntoSharedMemory_rpc` — the `memcpy` from the
+  capture `IOSurface` — within a second of a change that shrank the display, while
+  a pixel request sized for the old display was being served. Every earlier agent
+  crash report on the test Mac has the same stack. `screensharingd` logs the
+  failed RPC as `(ipc/mig) server died`, relaunches the agent on the physical
+  1280×800 display, and the session loses its virtual display, sound and, when a
+  second request is in flight, its connection. So the gateway sends a change only
+  at the end of an update, when no full-size pixel request is outstanding. Until
+  the answering layout it polls with an incremental request for the one pixel at
+  the origin, which every mode has, and it never has two changes out. Polling that
+  pixel with *full* requests every 200 ms crashed the agent again, because each one
+  is a read.
+- **The Mac can take a long time to read a change.** From the gateway's send to
+  `HandleSetDisplayConfiguration` took 1 s to 22 s. In the slow cases
+  `screensharingd`'s connection thread went silent right after serving the
+  forced full update a new layout earns, and resumed only on an internal `release
+  timer`. The gateway had nothing outstanding and received nothing in that gap.
+  The likeliest reading is a wait for the first frame of the capture restarted by
+  the change, which a still screen does not produce. This is unexplained. The
+  browser stays covered until the answer arrives, however long it takes.
+
 **The offer is a binary plist wrapping a protobuf**, produced by
 `AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):
 `{ avcMediaStreamNegotiatorMode, avcMediaStreamOptionCallID (UUID string),
