@@ -1219,6 +1219,27 @@ over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still reach the encoder's refusal because the gateway
 cannot ask it for a smaller desktop.
 
+High Performance paces what the window asks for. A second
+`SetDisplayConfiguration` overlapping the first, or a region of the old size
+served just after a change shrinks the display, crashes the Mac's agent. Every
+change it acts on also stops the media stream. So a viewport or density report
+waits for a second of quiet, and the newest size is the one that goes. Only one
+change is out at a time, with no timeout short of 30 seconds. It is sent at the
+end of an update, just after the automatic-update region is re-armed to one pixel,
+and pixel polling holds to that pixel until the answering layout. A layout that
+changes nothing, such as the Mac's repeat of its opening one, is not an answer.
+The media stream is offered again only once the resize has settled, and the input
+loop sends that offer as the cover comes down. From the first report until the
+answering layout has held still for half a second, the gateway sends `resizing`
+with `active: true`, and the page covers the desktop with a dimmed, blurred
+"Resizing…" as Apple's client does, instead of showing each intermediate mode. A
+session opens covered. The display it connects to is the Mac's own, and the
+virtual display and then the window's size follow; the first media offer waits
+for them too. The cover takes no input and leaves the menu reachable, and a
+browser that reattaches mid-resize is told again. No other engine sends
+`resizing`. The measurements are in
+[Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
+
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only with
 `resize`: RDP quantizes it to 1x or 2x at a midpoint, a High Performance virtual

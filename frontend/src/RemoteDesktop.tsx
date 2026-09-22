@@ -75,6 +75,7 @@ export default function RemoteDesktop({
     touchEnabled,
     touchActive,
     setTouchEnabled,
+    remoteResizing,
     viewOnly,
     setViewOnly,
     onLocalShortcut,
@@ -242,6 +243,16 @@ export default function RemoteDesktop({
         <div className="video-banner" role="alert">
           {videoError}
         </div>
+      )}
+
+      {/* A High Performance resize that has not settled: the Mac's intermediate
+          modes and repaints stay behind this, as they do behind Apple's own
+          client's. It takes no input and sits below the menu, so the menu stays
+          reachable; the gateway says when it comes down. */}
+      {remoteResizing && mode === "desktop" && !showStatus && (
+        <output className="resize-overlay">
+          <span className="status">Resizing…</span>
+        </output>
       )}
 
       {showStatus && (

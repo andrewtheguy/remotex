@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["cryptography>=42"]
+# dependencies = ["cryptography>=42", "Pillow>=10"]
 # ///
 """Probe: does a High Performance (RFB 003.889) session hand us the Mac's audio?
 
@@ -30,13 +30,14 @@ import time
 import zlib
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from PIL import Image
 
 ENC_RAW, ENC_ZLIB = 0, 6
 ENC_DESKTOP_SIZE, ENC_LAST_RECT = -223, -224
 ENC_CURSOR_POS, ENC_DISPLAY_INFO, ENC_USER_INFO, ENC_REKEY = 0x44C, 0x44D, 0x44E, 0x44F
 ENC_CURSOR_IMAGE, ENC_DISPLAY_LAYOUT = 0x450, 0x451
 ENC_VENDOR_KEYSYMS, ENC_KEYBOARD_SOURCE, ENC_DEVICE_INFO = 0x453, 0x455, 0x456
-ENC_MEDIA1, ENC_MEDIA2 = 1010, 1011
+ENC_MEDIA = 1010
 ENCODINGS = [ENC_RAW, ENC_CURSOR_POS, ENC_DISPLAY_INFO, ENC_REKEY, ENC_CURSOR_IMAGE,
              ENC_DISPLAY_LAYOUT, ENC_VENDOR_KEYSYMS, ENC_KEYBOARD_SOURCE,
              ENC_DESKTOP_SIZE, ENC_LAST_RECT]
@@ -357,15 +358,23 @@ def main():
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--encodings-order", choices=["first", "last", "none"], default="last")
     ap.add_argument("--no-rtcp", action="store_true")
+    ap.add_argument("--no-media", action="store_true", help="skip the audio/video media offer (display-only mode)")
     ap.add_argument("--out", default="tmp/hp_audio_rtp.bin")
+    ap.add_argument("--screenshots", default=None, help="directory to save framebuffer screenshots after each resize")
     args = ap.parse_args()
     args.rtcp = not args.no_rtcp
+    if args.screenshots:
+        os.makedirs(args.screenshots, exist_ok=True)
 
-    audio_offer = open(args.audio_offer, "rb").read()
-    video_offer = open(args.video_offer, "rb").read()
-    blob = zlib.decompress(plistlib.loads(audio_offer)["avcMediaStreamNegotiatorMediaBlob"])
-    log(f"audio offer {len(audio_offer)}B, video offer {len(video_offer)}B")
-    log("audio offer media blob:\n" + "\n".join(pbdump(blob)))
+    if not args.no_media:
+        audio_offer = open(args.audio_offer, "rb").read()
+        video_offer = open(args.video_offer, "rb").read()
+        blob = zlib.decompress(plistlib.loads(audio_offer)["avcMediaStreamNegotiatorMediaBlob"])
+        log(f"audio offer {len(audio_offer)}B, video offer {len(video_offer)}B")
+        log("audio offer media blob:\n" + "\n".join(pbdump(blob)))
+    else:
+        audio_offer = video_offer = blob = None
+        log("no-media mode: skipping audio/video offer")
 
     tcp = socket.create_connection((args.host, args.port), timeout=10)
     tcp.settimeout(30)
@@ -417,6 +426,11 @@ def main():
     rec.send(auto_framebuffer_update(w, h))
 
     size = [w, h]
+    fb = bytearray(w * h * 4)
+    fb_w, fb_h = w, h
+    zlib_d = zlib.decompressobj()
+    screenshot_pending = False
+    painted = 0  # pixels of Raw/zlib painted since the layout that armed the screenshot
     layouts = 0
     media_sent = False
     base_port = None
@@ -427,11 +441,11 @@ def main():
     vkeys = (os.urandom(46), os.urandom(46))   # video1 key pair (unused for decode)
     session_uuid = os.urandom(16)
     viewer_ssrc = 0
-    # The viewer SSRC is f3.f1 of the audio offer blob; used in our RTCP report.
-    import re
-    m = re.search(r"f3 bytes\[\d+\]\n\s+f1 = (\d+)", "\n".join(pbdump(blob)))
-    viewer_ssrc = int(m.group(1)) if m else 0
-    log(f"viewer SSRC {viewer_ssrc}")
+    if blob is not None:
+        import re
+        m = re.search(r"f3 bytes\[\d+\]\n\s+f1 = (\d+)", "\n".join(pbdump(blob)))
+        viewer_ssrc = int(m.group(1)) if m else 0
+        log(f"viewer SSRC {viewer_ssrc}")
 
     def skip(n):
         rec.read(n)
@@ -456,9 +470,25 @@ def main():
                 i += 1
                 x, y, rw, rh = struct.unpack(">HHHH", rec.read(8)); enc = rec.i32()
                 if enc == ENC_RAW:
-                    skip(rw * rh * 4)
+                    pixels = rec.read(rw * rh * 4)
+                    if args.screenshots:
+                        painted += rw * rh
+                        for row in range(rh):
+                            src = row * rw * 4
+                            dst = ((y + row) * fb_w + x) * 4
+                            if dst + rw * 4 <= len(fb):
+                                fb[dst:dst + rw * 4] = pixels[src:src + rw * 4]
                 elif enc == ENC_ZLIB:
-                    skip(rec.u32())
+                    clen = rec.u32()
+                    compressed = rec.read(clen)
+                    if args.screenshots:
+                        pixels = zlib_d.decompress(compressed)
+                        painted += rw * rh
+                        for row in range(rh):
+                            src = row * rw * 4
+                            dst = ((y + row) * fb_w + x) * 4
+                            if dst + rw * 4 <= len(fb):
+                                fb[dst:dst + rw * 4] = pixels[src:src + rw * 4]
                 elif enc == ENC_LAST_RECT:
                     break
                 elif enc in (ENC_DESKTOP_SIZE, ENC_CURSOR_POS):
@@ -476,30 +506,53 @@ def main():
                     bw, bh = struct.unpack(">HH", payload[6:10])
                     size[:] = [bw, bh]; layouts += 1
                     log(f"layout #{layouts}: backing {bw}x{bh}, declared {declared}")
+                    if args.screenshots:
+                        fb = bytearray(bw * bh * 4)
+                        fb_w, fb_h = bw, bh
+                        screenshot_pending = True
+                        painted = 0
                     rec.send(auto_framebuffer_update(bw, bh))
                     if layouts == 1:
                         encs = list(ENCODINGS) + [ENC_ZLIB]
-                        if args.encodings_order == "first":
-                            encs = [ENC_MEDIA1] + encs
-                        elif args.encodings_order == "last":
-                            encs = encs + [ENC_MEDIA1]
+                        if not args.no_media:
+                            if args.encodings_order == "first":
+                                encs = [ENC_MEDIA] + encs
+                            elif args.encodings_order == "last":
+                                encs = encs + [ENC_MEDIA]
                         rec.send(set_encodings(encs))
                         rec.send(update_request(False, bw, bh))
-                        if not media_sent:
+                        if not args.no_media and not media_sent:
                             msg = media_stream_config(session_uuid, audio_offer, akeys, video_offer, vkeys)
                             log(f"sending RFBMediaStreamServerConfiguration ({len(msg)} bytes): {msg[:0x24].hex()}")
                             rec.send(msg)
                             media_sent = True
+                        if not media_sent:
                             deadline = time.time() + args.seconds
+                    elif args.screenshots:
+                        # The screenshot waits for this full repaint, not the
+                        # zeroed framebuffer the layout just left.
+                        rec.send(update_request(False, bw, bh))
                 elif enc == ENC_REKEY:
                     raise SystemExit("second rekey")
-                elif enc == ENC_MEDIA1:
+                elif enc == ENC_MEDIA:
                     sz = rec.u16(); body = rec.read(sz)
                     mtype, ver, mflags = struct.unpack(">HHI", body[:8])
                     log(f"MEDIA (enc 1010) size {sz} type {mtype} version {ver} flags {mflags:#x}: {body.hex()}")
                     if mtype == 3:
                         etype, esub = struct.unpack(">II", body[8:16])
                         log(f"  MEDIA STREAM ERROR from server: errorType {etype} subCode {esub}")
+                        continue
+                    if mtype == 2:
+                        al, v1l, v2l = struct.unpack(">HHH", body[8:14])
+                        log(f"  message 2: answer lens audio={al} v1={v1l} v2={v2l}")
+                        idx = body.find(b"bplist00")
+                        if idx >= 0:
+                            ans = plistlib.loads(body[idx:idx + al])
+                            log("  answer plist:", {k: (v if not isinstance(v, bytes) else f"<{len(v)}B>") for k, v in ans.items()})
+                            if "avcMediaStreamNegotiatorMediaBlob" in ans:
+                                log("  answer blob:\n" + "\n".join(pbdump(zlib.decompress(ans["avcMediaStreamNegotiatorMediaBlob"]))))
+                        else:
+                            log("  no plist found; raw:", body.hex())
                         continue
                     if mtype != 1:
                         log("  unexpected type; skipping")
@@ -510,26 +563,14 @@ def main():
                         listener = threading.Thread(target=udp_listener, args=(
                             args.host, base_port, Srtp(akeys[1]), Srtp(akeys[0]), stop, args.out, args.rtcp, viewer_ssrc), daemon=True)
                         listener.start()
-                elif enc == ENC_MEDIA2:
-                    sz = rec.u16(); body = rec.read(sz)
-                    log(f"MEDIA MESSAGE 2 (enc 1011) size {sz}: head {body[:0x14].hex()}")
-                    ver, mtype = struct.unpack(">HH", body[:4])
-                    al, v1l, v2l = struct.unpack(">HHH", body[8:14])
-                    log(f"  version {ver} type {mtype} answer lens audio={al} v1={v1l} v2={v2l}")
-                    if mtype == 3:
-                        log("  ERROR message body:", body.hex())
-                    else:
-                        # find plist start
-                        idx = body.find(b"bplist00")
-                        if idx >= 0:
-                            ans = plistlib.loads(body[idx:idx + al])
-                            log("  answer plist:", {k: (v if not isinstance(v, bytes) else f"<{len(v)}B>") for k, v in ans.items()})
-                            if "avcMediaStreamNegotiatorMediaBlob" in ans:
-                                log("  answer blob:\n" + "\n".join(pbdump(zlib.decompress(ans["avcMediaStreamNegotiatorMediaBlob"]))))
-                        else:
-                            log("  no plist found; raw:", body.hex())
                 else:
                     raise SystemExit(f"unknown encoding {enc} ({enc:#x}) rect {rw}x{rh}+{x}+{y}")
+            if args.screenshots and screenshot_pending and painted >= fb_w * fb_h:
+                screenshot_pending = False
+                path = os.path.join(args.screenshots, f"layout_{layouts}_{fb_w}x{fb_h}.png")
+                img = Image.frombuffer("RGB", (fb_w, fb_h), bytes(fb), "raw", "BGRX", 0, 1)
+                img.save(path)
+                log(f"screenshot saved: {path}")
             # keep polling
             rec.send(update_request(True, *size))
         elif t in (0x04, 0x07):

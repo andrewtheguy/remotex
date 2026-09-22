@@ -87,6 +87,11 @@ async def main() -> int:
     )
     parser.add_argument("--seconds", type=float, default=25.0)
     parser.add_argument(
+        "--audio",
+        action="store_true",
+        help="open the session's audio socket and count format and binary frames",
+    )
+    parser.add_argument(
         "--reconnect-target",
         default=None,
         help="after --reconnect-after seconds, send a second connect to this target "
@@ -130,6 +135,12 @@ async def main() -> int:
         action="append",
         default=[],
         help="viewport WIDTHxHEIGHT in points to request after the display list arrives (repeatable)",
+    )
+    parser.add_argument(
+        "--viewport-delay",
+        type=duration,
+        default=0.0,
+        help="seconds to wait after the display list before the first viewport request",
     )
     parser.add_argument(
         "--key",
@@ -224,6 +235,45 @@ async def main() -> int:
         mouse_sent = False
         clipboard_sent = False
         tiles = 0
+        audio_format = None
+        audio_frames = 0
+        audio_error = None
+
+        async def listen_audio() -> None:
+            nonlocal audio_error, audio_format, audio_frames
+            audio_url = f"ws://127.0.0.1:{args.port}/ws/audio?session={token}"
+            try:
+                async with websockets.connect(
+                    audio_url,
+                    additional_headers={"Cookie": f"remotex_session={cookie}"},
+                ) as audio_socket:
+                    async for message in audio_socket:
+                        if isinstance(message, bytes):
+                            if message and message[0] == 0x03:
+                                audio_frames += 1
+                            continue
+                        data = json.loads(message)
+                        if data.get("type") == "audioFormat":
+                            audio_format = data
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # This is a diagnostic probe: report the socket failure.
+                audio_error = str(error)
+
+        async def send_first_viewport_after_delay() -> None:
+            nonlocal awaiting_viewport
+            await asyncio.sleep(args.viewport_delay)
+            awaiting_viewport = viewports.pop(0)
+            print(f"  -> viewport {awaiting_viewport[0]}x{awaiting_viewport[1]}")
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "viewport",
+                        "w": awaiting_viewport[0],
+                        "h": awaiting_viewport[1],
+                    }
+                )
+            )
 
         # The second connect runs on its own clock, beside the receive loop: a
         # quiet desktop sends nothing for seconds, and the deadline must not wait
@@ -323,6 +373,8 @@ async def main() -> int:
         chords_task = None
         sweep_task = None
         page_task = None
+        audio_task = None
+        viewport_task = None
         try:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
@@ -363,11 +415,12 @@ async def main() -> int:
                             round(data["w"] / data["scale"]),
                             round(data["h"] / data["scale"]),
                         )
+                        audio_count = f"  audio={audio_frames}" if args.audio else ""
                         print(
                             f"  resize  {data['w']}x{data['h']}  scale={data['scale']}"
                             f"  tileGrid={data['tileGrid']['w']}x{data['tileGrid']['h']}"
                             f"   -> {data['w'] / data['scale']:g}x"
-                            f"{data['h'] / data['scale']:g} CSS px"
+                            f"{data['h'] / data['scale']:g} CSS px{audio_count}"
                         )
                         if (
                             args.viewport_after_resize
@@ -451,20 +504,13 @@ async def main() -> int:
                                 )
                             awaiting_viewport = viewports[-1]
                             viewports.clear()
-                        elif viewports and awaiting_viewport is None:
-                            awaiting_viewport = viewports.pop(0)
-                            print(
-                                f"  -> viewport {awaiting_viewport[0]}x"
-                                f"{awaiting_viewport[1]}"
-                            )
-                            await socket.send(
-                                json.dumps(
-                                    {
-                                        "type": "viewport",
-                                        "w": awaiting_viewport[0],
-                                        "h": awaiting_viewport[1],
-                                    }
-                                )
+                        elif (
+                            viewports
+                            and awaiting_viewport is None
+                            and viewport_task is None
+                        ):
+                            viewport_task = asyncio.create_task(
+                                send_first_viewport_after_delay()
                             )
                     elif kind == "error":
                         print(f"  !! error: {data['message']}")
@@ -485,6 +531,8 @@ async def main() -> int:
                             f"  connected  {data['name']}  resize={data['resize']}"
                             f"  clipboard={data['clipboard']}"
                         )
+                        if args.audio and audio_task is None:
+                            audio_task = asyncio.create_task(listen_audio())
                         if args.clipboard is not None and not clipboard_sent:
                             clipboard_sent = True
                             # The fetch first, so what the remote already held is
@@ -510,9 +558,21 @@ async def main() -> int:
                 sweep_task.cancel()
             if page_task is not None and not page_task.done():
                 page_task.cancel()
+            if audio_task is not None and not audio_task.done():
+                audio_task.cancel()
+                try:
+                    await audio_task
+                except asyncio.CancelledError:
+                    pass
+            if viewport_task is not None and not viewport_task.done():
+                viewport_task.cancel()
         print(f"\n  {tiles} tile frames")
+        if args.audio:
+            print(f"  {audio_frames} audio frames; format={audio_format}")
+            if audio_error is not None:
+                print(f"  !! audio socket: {audio_error}")
         await socket.send(json.dumps({"type": "disconnect"}))
-    return 0
+    return 1 if args.audio and (audio_error is not None or audio_format is None or audio_frames == 0) else 0
 
 
 if __name__ == "__main__":

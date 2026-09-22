@@ -288,6 +288,13 @@ export type ControlMsg =
   // is what hides the Touchscreen toggle there. Not part of `connected`: the
   // capability is the host's answer, not the target's profile.
   | { type: "touchReady" }
+  // A High Performance Mac is being resized and the picture is not the
+  // window's yet: true from the window's new size until the Mac's answering
+  // layout has held still. The page covers the desktop meanwhile, as Apple's
+  // client does, so a settling resize's intermediate modes are not shown.
+  // Pushed by the gateway, which alone knows when the Mac has settled; the
+  // page never infers it.
+  | { type: "resizing"; active: boolean }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
   // follows `active`, so a selection the remote refused leaves the panel

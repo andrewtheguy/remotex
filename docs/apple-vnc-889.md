@@ -452,8 +452,7 @@ written in decimal.
 | vendor keysyms | `0x453` | 1107 | also message type `0x53` (83) |
 | keyboard source | `0x455` | 1109 | also message type `0x55` (85) |
 | `DeviceInfo` | `0x456` | 1110 | also message type `0x56` (86) |
-| `kSSVideoEncoding_AVCMediaStream` | `0x3f2` | 1010 | the media-stream offer and reply |
-| its AVC answer | `0x3f3` | 1011 | |
+| `kSSVideoEncoding_AVCMediaStream` | `0x3f2` | 1010 | all media-stream replies |
 | zlib | `0x06` | 6 | standard RFB |
 | Raw | `0x00` | 0 | standard RFB |
 | `DesktopSize` | — | -223 | pseudo-encoding |
@@ -532,7 +531,9 @@ whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
 decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
 the mechanism below is documented by Apple.
 
-**The negotiation is one client message and two server rectangles.** After the
+**The negotiation is one client message and up to three server reply types.** A
+successful negotiation gets message 1 (the ports) and message 2 (the answer); message
+3 (an error) is the alternative terminal reply. After the
 first display layout, the client advertises encoding **1010** (`0x3f2`,
 `kSSVideoEncoding_AVCMediaStream`) in a second `SetEncodings` and sends message
 type **`0x1c`** (`RFBMediaStreamServerConfiguration`, version 3) inside the record
@@ -554,22 +555,78 @@ layer:
            (video2 likewise, when present)
 ```
 
-The server answers with framebuffer rectangles, not record-layer messages:
-encoding **1010** (`0x3f2`) carries message 1 (`u16 type, u16 version, u32 flags,
-u16 audio UDP port` — audio at that port, video1 at port+1, video2 at port+2;
-**type 3 is a media-stream error** with `u32 errorType, u32 subCode`), and encoding
-**1011** (`0x3f3`) carries message 2, the AVC answer with the same three offer
-lengths at `+0x0a`.
+The server answers with framebuffer rectangles, not record-layer messages, all
+using encoding **1010** (`0x3f2`). Message 1 is `u16 type, u16 version, u32
+flags, u16 audio UDP port` — audio at that port, video1 at port+1, video2 at
+port+2. Message 2 is the AVC answer with the same three offer lengths at `+0x0a`.
+Message 3 is a media-stream error with `u32 errorType, u32 subCode`.
 
-**The Mac re-sends encoding 1010 (`0x3f2`, message 1) after every display layout
-change.** A resize, a display switch, or any call to `SetDesktopConfiguration` causes
-`screensharingd` to tear down its old RTP stream and start a new one — even
-though the port number stays the same. The existing receiver is stuck on the
-dead stream and must be restarted. The port is reused, so the new receiver
-binds to the same address; the SRTP keys are unchanged. `on_reply` in
-`src/vnc_apple_audio.rs` handles this by aborting the old receiver task and
-awaiting its end — the port is not free until that task has been dropped —
-before starting a new one.
+**The native viewer configures the media stream once, then enables dynamic
+resolution only after media setup completes.** In the x86_64 Screen Sharing
+framework, `RFBMediaStreamServerConfiguration` is called from
+`-[SSSession stConfigureServerMediaStream]`; no resize or display-layout path
+calls it again. `-[SSSessionView ssSessionReady:]` explicitly defers switching
+to dynamic resolution until `avcMediaSessionReady` when AVC setup is pending.
+That callback starts the video and audio streams before it switches dynamic
+resolution on. Remotex does not follow that ordering, because the stream it would
+start is stopped again by the first resize, from the full-screen display a session
+opens on to the window's size. It sends the window's size once the first layout
+has arrived, and its first `0x1c` once that resize has settled. The Mac accepts a
+`SetDisplayConfiguration` before any media stream is configured.
+
+**`screensharingd` tears down the RTP sender on every display change.** The
+native viewer's AVConference keeps the transport alive internally, so it never
+re-sends `0x1c`. Remotex has no AVConference — it decrypts raw SRTP — so it
+re-sends the offer (same keys, updated video size) and restarts the receiver
+after each layout change. The Mac answers with message 1 (same ports), message 2
+(accepted), and a fresh SSRC.
+
+### Resizing a High Performance display, as measured
+
+Measured September 22, 2026 on macOS 26.6.2 from the Mac's unified log while the
+gateway resized its virtual display:
+
+- **A display change stops the audio.** `SetDisplayConfiguration` takes the
+  agent's `udpSenderCR` lock — the one `SetServerStreamConfiguration` (`0x1c`)
+  holds while it builds a stream — then calls `AVCAudioStream stop` before the
+  mode changes. The Mac sends message 1 by itself once the change finishes, but
+  starts no stream until it gets an offer. An offer made mid-resize holds that lock
+  against the next change: 2.8 s and 5 s waits were logged. Remotex offers once the
+  resize has settled, as Apple's client appears to.
+- **Overlapping and oversized reads crash the agent.** `ScreensharingAgent` died
+  with `EXC_BAD_ACCESS` in `_platform_memmove` under
+  `agent_SSAgent_ReadScreenDataIntoSharedMemory_rpc` — the `memcpy` from the
+  capture `IOSurface` — within a second of a change that shrank the display, while
+  a pixel request sized for the old display was being served. Every earlier agent
+  crash report on the test Mac has the same stack. `screensharingd` logs the
+  failed RPC as `(ipc/mig) server died`, relaunches the agent on the physical
+  1280×800 display, and the session loses its virtual display, sound and, when a
+  second request is in flight, its connection. The region read is not only a
+  pixel request's. The one `AutoFrameBufferUpdate` (`0x09`) armed is served on
+  every captured frame, and the change produces one. A layout re-arms it at the
+  full size, so every change after the first met a full-size armed region. A
+  2x→1x change of the same points, a quarter of the pixels, crashed the agent in
+  each of three tries, and smaller shrinks survived by chance. So the gateway sends
+  a change only at the end of an update, when no full-size pixel request is
+  outstanding. It re-arms `0x09` for the one pixel at the origin, which every mode
+  has, just ahead of the change, and until the answering layout it polls with an
+  incremental request for that pixel. It never has two changes out. With the
+  re-arm, 2x→1x changes and shrinks went through without a crash. Polling that
+  pixel with *full* requests every 200 ms crashed the agent again, because each one
+  is a read.
+- **The Mac reads nothing while it is writing an update.** `screensharingd`'s
+  update sender holds the viewer's lock while it deflates a rectangle and waits
+  for the socket to take it, and the connection thread needs the same lock to read
+  the next client message. A forced full update of a 2x display is several
+  megabytes of zlib, so a client that drains the socket slowly leaves every message
+  it sends unread until that update is through. A debug-build gateway reads about
+  2 MB/s: a `SetDisplayConfiguration` sent right after a change to 2x sat
+  acknowledged by the Mac's kernel but unread for 20 to 30 seconds, until the Mac
+  had finished pushing the repaint. A release build drains the same traffic in
+  well under a second, and every change, 2x to 1x included, is answered in about
+  2.5 seconds. A sample of `screensharingd` in the stall shows the connection
+  thread and the main thread's timer blocked on one mutex, and the thread holding
+  it in `deflate` and `kevent`.
 
 **The offer is a binary plist wrapping a protobuf**, produced by
 `AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):

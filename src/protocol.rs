@@ -1246,6 +1246,14 @@ pub enum ServerMsg {
     /// mode: the capability is the host's, not the target's, so it is not in
     /// [`ServerMsg::Connected`].
     TouchReady,
+    /// A High Performance Mac is being resized, and the picture is not the
+    /// window's yet: `active` goes true when the window reports a new size and
+    /// false once the Mac's answering layout has held still. The browser covers
+    /// the desktop while it is true, as Apple's own client does, so the
+    /// intermediate modes and repaints of a settling resize are not presented.
+    /// Sent only by the Apple High Performance engine, and again on reattach
+    /// while a resize is in progress.
+    Resizing { active: bool },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
     /// `requested` distinguishes those paths so an explicit panel read does
@@ -1403,6 +1411,7 @@ enum ControlMsg<'a> {
     },
     RemoteOs { macos: bool },
     TouchReady,
+    Resizing { active: bool },
     Clipboard {
         text: &'a str,
         #[serde(rename = "changedAtMs")]
@@ -1543,6 +1552,7 @@ impl ServerMsg {
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
+            ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
             ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
@@ -2049,6 +2059,15 @@ mod tests {
         match ServerMsg::TouchReady.text_frame() {
             Some(json) => assert_eq!(json, r#"{"type":"touchReady"}"#),
             None => panic!("touchReady must be a text frame"),
+        }
+        for active in [false, true] {
+            match (ServerMsg::Resizing { active }).text_frame() {
+                Some(json) => assert_eq!(
+                    json,
+                    format!(r#"{{"type":"resizing","active":{active}}}"#)
+                ),
+                None => panic!("resizing must be a text frame"),
+            }
         }
         match (ServerMsg::Clipboard {
             text: "hi \"there\"".to_owned(),

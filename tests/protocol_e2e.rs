@@ -405,6 +405,9 @@ enum MacRequest {
     AutoPasteboard(bool),
     AutoFramebuffer((u16, u16)),
     IncrementalFramebuffer,
+    /// An incremental request for the single pixel at the origin: polling held
+    /// while a display change is out.
+    HeldFramebuffer,
     Fence { flags: u32, payload: Vec<u8> },
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
@@ -858,7 +861,13 @@ async fn serve_fake_mac_records(
                 let mut req = [0u8; 9];
                 records.read_exact(&mut req).await?;
                 if req[0] != 0 {
-                    let _ = requests.send(MacRequest::IncrementalFramebuffer);
+                    let rect = [&req[1..3], &req[3..5], &req[5..7], &req[7..9]]
+                        .map(|field| u16::from_be_bytes([field[0], field[1]]));
+                    let _ = requests.send(if rect == [0, 0, 1, 1] {
+                        MacRequest::HeldFramebuffer
+                    } else {
+                        MacRequest::IncrementalFramebuffer
+                    });
                     continue;
                 }
                 let (points, density) = configurations
@@ -1957,7 +1966,17 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .unwrap();
     assert_eq!(
         next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((1, 1)),
+        "the armed region was not narrowed ahead of the display change"
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
         MacRequest::Configuration((24, 18), 1)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::HeldFramebuffer,
+        "polling did not hold to one pixel while the display change was out"
     );
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], 24, "{resize}");

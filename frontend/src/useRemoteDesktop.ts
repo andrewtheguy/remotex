@@ -544,6 +544,9 @@ export function useRemoteDesktop(
   // every connect and disconnect, like `remoteIsMac`: the answer belongs to the
   // host that gave it.
   const [canTouch, setCanTouch] = useState(false);
+  // A High Performance resize is settling — the gateway's `resizing`. Reset on
+  // every connect and disconnect: a reattach mid-resize is told again.
+  const [remoteResizing, setRemoteResizing] = useState(false);
   const [touchEnabled, setTouchEnabled] = useState(() =>
     readOnByKey(TOUCHSCREEN_KEY),
   );
@@ -1426,6 +1429,7 @@ export function useRemoteDesktop(
       setMode("desktop");
       setCanClipboard(msg.clipboard);
       setCanTouch(false);
+      setRemoteResizing(false);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
       // Nothing here turns a camera on: unlike sound there is no "by default"
@@ -1616,6 +1620,9 @@ export function useRemoteDesktop(
         case "touchReady":
           setCanTouch(true);
           break;
+        case "resizing":
+          setRemoteResizing(msg.active);
+          break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -1657,6 +1664,7 @@ export function useRemoteDesktop(
           // would silently stop translating Command for a Windows guest.
           setRemoteIsMac(false);
           setCanTouch(false);
+          setRemoteResizing(false);
           setDisplays([]);
           setActiveDisplayId(null);
           sharedDisplay = null;
@@ -2550,6 +2558,8 @@ export function useRemoteDesktop(
     touchEnabled,
     touchActive,
     setTouchEnabled,
+    // The cover over a settling High Performance resize.
+    remoteResizing,
     viewOnly,
     setViewOnly,
     onLocalShortcut,

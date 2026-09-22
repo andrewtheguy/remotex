@@ -24,11 +24,11 @@
 //! ([`ENCODING_MEDIA_STREAM`]) in the second `SetEncodings` — the one that also asks
 //! for zlib — and sends message **`0x1c`** (`RFBMediaStreamServerConfiguration`,
 //! [`media_stream_configuration`]): a session UUID, an SRTP master key per direction
-//! per stream, and an AVConference *offer* per stream. The Mac answers with two
-//! rectangles: encoding 1010 carries message 1, the UDP port, or message 3, an error
-//! ([`MediaReply`]); encoding 1011 carries message 2, the AVConference answer, which
-//! nothing here needs. Audio arrives at the named port from the Mac, encrypted with
-//! the server-to-viewer key the client itself chose ([`SrtpSession`]).
+//! per stream, and an AVConference *offer* per stream. The Mac answers through
+//! encoding 1010: message 1 names the UDP ports, message 2 is the AVConference
+//! answer, and message 3 is an error ([`MediaReply`]). Audio arrives at the named
+//! port from the Mac, encrypted with the server-to-viewer key the client itself
+//! chose ([`SrtpSession`]).
 //!
 //! **The Mac refuses audio alone.** A configuration whose video offer is empty
 //! negotiates the audio and then tears the whole stream down (`unable to create
@@ -67,13 +67,9 @@ use crate::audio::{AudioBridge, PcmFormat};
 use crate::vnc_apple;
 
 /// Encoding 1010 (`0x3f2`) for the Mac's media-stream replies: message 1 (the UDP
-/// ports) and message 3 (an error). `kSSVideoEncoding_AVCMediaStream` in the client
-/// binary.
+/// ports), message 2 (the AVConference answer), and message 3 (an error).
+/// `kSSVideoEncoding_AVCMediaStream` in the client binary.
 pub const ENCODING_MEDIA_STREAM: i32 = 1010;
-
-/// Encoding 1011 (`0x3f3`) for message 2, the AVConference answer. Never advertised
-/// — the Mac sends it beside 1010 — and stepped over when it arrives.
-pub const ENCODING_MEDIA_STREAM_ANSWER: i32 = 1011;
 
 /// What the decoded stream is: AAC-ELD's 48 kHz stereo as 16-bit PCM. The
 /// counterpart of [`crate::audio::PCM_CD_QUALITY`] for this source, and the format
@@ -432,6 +428,8 @@ pub enum MediaReply {
     /// Message 1: the streams are up, and audio arrives at (and RTCP goes to)
     /// `audio_port`; `video_port` is the screen video's, which nothing opens.
     Ports { audio_port: u16, video_port: u16 },
+    /// Message 2: AVConference accepted the offer and media setup is complete.
+    Answer,
     /// Message 3: the Mac could not start the streams. `kind` 2 with the video offer
     /// missing is the measured "unable to create video config".
     Error { kind: u32, sub_code: u32 },
@@ -456,6 +454,7 @@ pub fn parse_media_reply(body: &[u8]) -> anyhow::Result<MediaReply> {
                 video_port: u16::from_be_bytes([body[14], body[15]]),
             })
         }
+        2 => Ok(MediaReply::Answer),
         3 => {
             anyhow::ensure!(
                 body.len() >= 16,
@@ -633,7 +632,8 @@ pub struct MediaStream {
     /// This side's SSRC in the audio offer, and the one its RTCP reports carry.
     viewer_ssrc: u32,
     video_ssrc: u32,
-    offered: bool,
+    /// The layout the last offer went out for.
+    offered: Option<vnc_apple::Layout>,
     receiver: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -658,26 +658,41 @@ impl MediaStream {
             video_keys,
             viewer_ssrc: rand::random(),
             video_ssrc: rand::random(),
-            offered: false,
+            offered: None,
             receiver: None,
         }
     }
 
-    /// The `0x1c` message to send once the first display layout has arrived, for a
-    /// virtual display of `size` backing pixels. `None` after the first call: the
-    /// Mac is asked once per session.
-    pub fn offer(&mut self, size: (u16, u16)) -> Option<Vec<u8>> {
-        if self.offered {
+    /// The `0x1c` message for `layout`, a virtual display of `size` backing pixels.
+    ///
+    /// Apple's native viewer sends this once and keeps the streams through later
+    /// layouts because AVConference manages the transport. This gateway has no
+    /// AVConference — it decrypts raw SRTP — so it re-sends after each layout
+    /// change: `screensharingd` tears down the RTP sender on a display change and
+    /// only restarts it on a fresh offer. `None` when the layout is identical to
+    /// the last one offered for — the Mac sends duplicate layouts, and a redundant
+    /// offer causes a needless stream restart — but a same-sized display switch or
+    /// density change is a new layout and re-offers.
+    pub fn offer(&mut self, layout: &vnc_apple::Layout, size: (u16, u16)) -> Option<Vec<u8>> {
+        if self.offered.as_ref() == Some(layout) {
             return None;
         }
-        self.offered = true;
+        let first = self.offered.is_none();
+        self.offered = Some(layout.clone());
         let audio = audio_offer(self.viewer_ssrc, &self.call_id);
         let video = video_offer(self.video_ssrc, size, &self.call_id);
-        info!(
-            "vnc: asking the Mac for its system audio (offer {} + {} bytes)",
-            audio.len(),
-            video.len()
-        );
+        if first {
+            info!(
+                "vnc: asking the Mac for its system audio (offer {} + {} bytes)",
+                audio.len(),
+                video.len()
+            );
+        } else {
+            debug!(
+                "vnc: re-sending the media-stream offer for {}x{} (offer {} + {} bytes)",
+                size.0, size.1, audio.len(), video.len()
+            );
+        }
         Some(media_stream_configuration(
             &self.session_uuid,
             &audio,
@@ -691,22 +706,18 @@ impl MediaStream {
     /// record the error it reports. Neither ends the desktop session — sound is an
     /// extra on it.
     ///
-    /// The Mac re-sends this message after every display layout change (resize,
-    /// display switch). When it does, `screensharingd` tears down the old RTP
-    /// stream and starts a new one — even though the port number is the same.
-    /// The existing receiver is stuck on the dead stream, so it must be
-    /// restarted.
+    /// The native viewer's AVConference keeps an existing stream alive through a
+    /// re-announced message 1, but `screensharingd` tears down the RTP sender
+    /// and restarts it on the same port, so a raw SRTP receiver that stays on the
+    /// dead socket receives nothing. Restart it.
     pub async fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<()> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
                 if let Some(receiver) = self.receiver.take() {
-                    info!(
-                        "vnc: the Mac restarted its media streams: audio at UDP {audio_port}, \
-                         screen video at {video_port} (unused) — restarting the receiver"
+                    debug!(
+                        "vnc: the Mac re-announced its media streams (audio UDP {audio_port}, \
+                         video {video_port}); restarting the receiver"
                     );
-                    // Awaited, not just aborted: the handle resolves only once the
-                    // task has been dropped, and until it is, the old socket still
-                    // holds the port the replacement binds.
                     receiver.abort();
                     let _ = receiver.await;
                 } else {
@@ -715,29 +726,31 @@ impl MediaStream {
                          screen video at {video_port} (unused)"
                     );
                 }
-                self.start(audio_port)
+                self.start(audio_port)?;
             }
+            MediaReply::Answer => debug!("vnc: the Mac accepted the media-stream offer"),
             MediaReply::Error { kind, sub_code } => {
                 warn!(
                     "vnc: the Mac refused the media stream (error type {kind}, sub-code \
                      {sub_code}); the session continues without sound"
                 );
+                // A refused re-offer leaves the stream the last one opened on a
+                // socket nothing will send to again.
+                if let Some(receiver) = self.receiver.take() {
+                    receiver.abort();
+                    let _ = receiver.await;
+                }
                 self.bridge.clear_format();
-                Ok(())
             }
-            MediaReply::Other(kind) => {
-                debug!("vnc: ignoring media-stream message type {kind}");
-                Ok(())
-            }
+            MediaReply::Other(kind) => debug!("vnc: ignoring media-stream message type {kind}"),
         }
+        Ok(())
     }
 
     #[cfg(feature = "apple-hp-audio")]
     fn start(&mut self, port: u16) -> anyhow::Result<()> {
         let bind = SocketAddr::new(self.local, port);
         let remote = SocketAddr::new(self.peer, port);
-        // A restart binds the port the previous receiver held; `on_reply` has
-        // awaited that task's end, so the socket is closed by the time this runs.
         let socket = std::net::UdpSocket::bind(bind)
             .map_err(|e| anyhow::anyhow!("bind UDP {bind} for the Mac's audio: {e}"))?;
         socket.set_nonblocking(true)?;
@@ -1108,6 +1121,10 @@ mod tests {
             parse_media_reply(&ports).unwrap(),
             MediaReply::Ports { audio_port: 50_004, video_port: 50_005 }
         );
+        assert_eq!(
+            parse_media_reply(&[0, 2, 0, 1, 0, 0, 0, 0]).unwrap(),
+            MediaReply::Answer
+        );
         let mut error = vec![0, 3, 0, 1, 0, 0, 0, 0];
         error.extend_from_slice(&2u32.to_be_bytes());
         error.extend_from_slice(&7u32.to_be_bytes());
@@ -1200,19 +1217,51 @@ mod tests {
         assert!(!vnc_apple::ENCODINGS.contains(&ENCODING_MEDIA_STREAM));
     }
 
-    /// The offer is sent once per session, and the message it produces is the
-    /// configuration for the keys the stream will then decrypt with.
+    /// A single-display layout of `size` backing pixels at `density`.
+    fn layout(id: u32, size: (u16, u16), density: f32) -> vnc_apple::Layout {
+        vnc_apple::Layout {
+            backing: size,
+            current: None,
+            displays: vec![vnc_apple::Display {
+                info: crate::protocol::DisplayInfo {
+                    id,
+                    label: "Virtual display".into(),
+                    detail: String::new(),
+                    main: true,
+                    virtual_display: true,
+                },
+                density,
+                backing: size,
+            }],
+        }
+    }
+
+    /// The offer carries the keys the stream decrypts with, re-sends on a layout
+    /// change — a same-sized one included — and skips duplicate layouts.
     #[test]
-    fn a_media_stream_offers_once() {
+    fn a_media_stream_offers_on_each_new_layout() {
         let bridge = Arc::new(AudioBridge::new());
         let peer: SocketAddr = "10.0.0.2:5900".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:50000".parse().unwrap();
         let mut media = MediaStream::new(bridge, peer, local);
-        let msg = media.offer((1600, 1000)).expect("the first layout gets an offer");
+        let first = layout(5, (1600, 1000), 1.0);
+        let msg = media.offer(&first, (1600, 1000)).expect("the first layout gets an offer");
         assert_eq!(msg[0], 0x1c);
         assert_eq!(&msg[0x24..0x52], &media.audio_keys.0);
         assert_eq!(&msg[0x52..0x80], &media.audio_keys.1);
-        assert!(media.offer((1600, 1000)).is_none(), "a later layout does not re-offer");
+        assert!(media.offer(&first, (1600, 1000)).is_none(), "a duplicate layout does not re-offer");
+        assert!(
+            media.offer(&layout(6, (1600, 1000), 1.0), (1600, 1000)).is_some(),
+            "a same-sized display switch re-offers"
+        );
+        assert!(
+            media.offer(&layout(6, (1600, 1000), 2.0), (1600, 1000)).is_some(),
+            "a same-sized density change re-offers"
+        );
+        let msg2 = media
+            .offer(&layout(6, (1920, 1080), 2.0), (1920, 1080))
+            .expect("a new size re-offers");
+        assert_eq!(&msg2[0x24..0x52], &media.audio_keys.0, "re-offer keeps the same keys");
         assert_eq!(media.call_id.len(), 36);
         assert!(media.call_id.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-'));
     }
