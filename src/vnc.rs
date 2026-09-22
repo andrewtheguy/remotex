@@ -4892,11 +4892,20 @@ fn translate_input(
             // is the input to every constant above, and it varies by browser,
             // by pointing device and by platform.
             debug!("vnc: wheel dx={dx} dy={dy} {unit:?} -> {px} + {py} pulses");
+            // Screen Sharing scrolls only on a mask of exactly 0x08 or 0x10 and
+            // posts any other mask as buttons by bit position, so a pulse there goes
+            // without the held buttons — which the release restores — and the
+            // horizontal bits, clicks on buttons 5 and 6, are not sent at all. See
+            // docs/apple-vnc-889-binary-audit.md.
+            let (axes, held): (&[_], u8) = match wheel {
+                Wheel::Apple { .. } => (&[(py, 0x08, 0x10)], 0),
+                Wheel::Notch => (&[(py, 0x08, 0x10), (px, 0x20, 0x40)], *button_mask),
+            };
             let mut out = Vec::new();
-            for (pulses, negative_bit, positive_bit) in [(py, 0x08, 0x10), (px, 0x20, 0x40)] {
+            for &(pulses, negative_bit, positive_bit) in axes {
                 let bit = if pulses > 0 { positive_bit } else { negative_bit };
                 for _ in 0..pulses.abs() {
-                    out.push(pointer_event(*button_mask | bit, *last_pos).to_vec());
+                    out.push(pointer_event(held | bit, *last_pos).to_vec());
                     out.push(pointer_event(*button_mask, *last_pos).to_vec());
                 }
             }
@@ -4918,10 +4927,14 @@ fn translate_input(
                 // Resolve the symbol against the live modifier state so the
                 // shifted keysym (`A`, `!`) is sent, not the base one. CapsLock
                 // affects letters only, XORed with Shift.
-                let shift_down = pressed_keys.contains_key("ShiftLeft")
-                    || pressed_keys.contains_key("ShiftRight");
+                let held = |keys: [&str; 2]| keys.iter().any(|k| pressed_keys.contains_key(*k));
+                let shift_down = held(["ShiftLeft", "ShiftRight"]);
+                // A Mac adds Shift for an uppercase keysym, and Caps Lock leaves its
+                // shortcuts alone: Command-Z under Caps Lock is still Undo.
+                let shortcut =
+                    macos && (held(["MetaLeft", "MetaRight"]) || held(["ControlLeft", "ControlRight"]));
                 let is_letter = matches!(code.as_bytes(), [b'K', b'e', b'y', b'A'..=b'Z']);
-                let shift = if is_letter { shift_down ^ caps } else { shift_down };
+                let shift = if is_letter && !shortcut { shift_down ^ caps } else { shift_down };
                 match keysym(&code, shift) {
                     Some(sym) => {
                         pressed_keys.insert(code, sym);
@@ -7064,6 +7077,41 @@ mod tests {
         assert_eq!(scroll(&mut generic, 0.0, f32::NAN, WheelUnit::Pixel).1, 0);
     }
 
+    /// One wheel event with `held` buttons down, as the masks it sends.
+    fn wheel_masks(wheel: &mut Wheel, held: u8, dx: f32, dy: f32) -> Vec<u8> {
+        let (mut mask, mut pos) = (held, (5u16, 6u16));
+        translate_input(
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Line },
+            &Buttons::Rfb,
+            &mut mask,
+            &mut pos,
+            &mut HashMap::new(),
+            wheel,
+            true,
+        )
+        .iter()
+        .map(|event| event[1])
+        .collect()
+    }
+
+    /// A Mac scrolls only on a mask of exactly 0x08 or 0x10 and posts anything
+    /// else as buttons by bit position: a pulse sent with a held button would be
+    /// Back or Forward, and a horizontal one a click on button 5 or 6.
+    #[test]
+    fn a_mac_gets_each_scroll_pulse_alone() {
+        let mut apple = Wheel::new(true);
+        let down = wheel_masks(&mut apple, 0x01, 0.0, 1.0);
+        assert!(!down.is_empty());
+        for pair in down.chunks(2) {
+            assert_eq!(pair, [0x10, 0x01], "the pulse alone, then the held button again");
+        }
+        assert!(wheel_masks(&mut apple, 0x00, 3.0, 0.0).is_empty(), "no horizontal axis");
+
+        // Every other server reads the mask by the RFB convention, held buttons and all.
+        let mut generic = Wheel::new(false);
+        assert_eq!(wheel_masks(&mut generic, 0x01, 1.0, 1.0), [0x11, 0x01, 0x41, 0x01]);
+    }
+
     #[test]
     fn scroll_direction_picks_the_wheel_button() {
         // Up is negative in the DOM and button 4; down is button 5.
@@ -8501,6 +8549,24 @@ mod tests {
             key(&mut keys, "KeyA", true, true),
             key_event(true, 0x61).to_vec()
         ); // 'a'
+    }
+
+    /// Caps Lock leaves a Mac's shortcuts alone: Command-Z is Undo under it, not
+    /// the Command-Shift-Z the uppercase keysym would post. Other servers, and
+    /// letters typed without Command or Control, keep the case.
+    #[test]
+    fn caps_lock_does_not_shift_a_mac_shortcut() {
+        for modifier in ["MetaLeft", "ControlRight"] {
+            let mut keys = HashMap::new();
+            key_on(true, &mut keys, modifier, true, true);
+            assert_eq!(key_on(true, &mut keys, "KeyZ", true, true), key_event(true, 0x7a));
+        }
+        let mut keys = HashMap::new();
+        key_on(false, &mut keys, "ControlLeft", true, true);
+        assert_eq!(key_on(false, &mut keys, "KeyZ", true, true), key_event(true, 0x5a));
+        let mut keys = HashMap::new();
+        key_on(true, &mut keys, "AltLeft", true, true);
+        assert_eq!(key_on(true, &mut keys, "KeyZ", true, true), key_event(true, 0x5a));
     }
 
     // ── The Apple dialect (no sockets: framed records over a slice) ─────────

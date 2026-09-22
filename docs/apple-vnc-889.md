@@ -353,11 +353,15 @@ two bits for this subtype alone; after the swap, three fresh sessions opened a
 context menu on nine of nine right-clicks, confirmed against the Mac's own
 window list (a context menu is a window at the pop-up-menu layer, 101).
 
-The wheel bits (4–7) were not re-measured: proportional scrolling on them
-predates this correction and works, so whatever the agent reads them as agrees
-with RFB in effect. The native client's own input path is `0x10`
-EncryptedInputEvent, not the plain RFB PointerEvent — presumably why Apple never
-noticed the plain path's ordering.
+The mapping follows the protocol version, not the mode: `screensharingd` swaps
+mask bits 1 and 2 for every viewer except 3.888 and 3.889, and the agent always
+reads the mask positionally. A Mac scrolls only on a mask of exactly `0x08` or
+`0x10`; any other mask, a wheel bit with a held button or the horizontal `0x20` and
+`0x40` included, is posted as buttons by bit position. So remotex sends each
+vertical pulse alone and no horizontal ones — see
+[the binary audit](apple-vnc-889-binary-audit.md#the-pointer-mask). The native
+client's own input path is `0x10` EncryptedInputEvent, which carries all four
+wheel directions and a click count.
 
 ### Double-click is chained by the Mac, at a login-time threshold
 

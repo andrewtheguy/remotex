@@ -34,27 +34,6 @@ the repository.
 
 Ordered by effect on a session.
 
-### Scrolling while a button is held clicks
-
-`screensharingd` `HandleViewerCommand` (`0x10003a47c`), PointerEvent, after the
-button swap at `0x10003cdeb`:
-
-```
-10003ce12: cmpb $0x10, %al        ; exactly 0x10 → scroll down
-10003ce1d: cmpl $0x8,  %ecx       ; exactly 0x08 → scroll up
-10003ce20: jne  0x100042df7       ; anything else → PostMouseEvent
-```
-
-Only a mask of exactly `0x08` or `0x10` scrolls. The agent's
-`PostMouseEventIntoSession` (`FUN_100024444`) reads every other mask positionally:
-bit 0 left, bit 1 right, bits 2–7 `OtherMouseDown/Up` with the bit index as the
-button number. remotex sends each wheel pulse as `held_buttons | wheel_bit`, so a
-scroll during a drag posts button 3 or 4 — Back and Forward — and horizontal pulses
-(`0x20`/`0x40`) are always clicks on buttons 5 and 6, which also feed the agent's
-double-click chaining. The plain PointerEvent carries no horizontal scroll at all;
-only the native `0x10` event (`FUN_100046336`) tests the four wheel bits one by one.
-Each scroll pulse is `CGEventCreateScrollWheelEvent(NULL, pixel, 2, …)` of one unit.
-
 ### ClientInit asks for session selection
 
 `ScreenSharing.framework` `_RFBAuthenticateCore` (`0x7ffa0ad1aca0`) builds the
@@ -67,15 +46,6 @@ the console user. ServerInit then carries flag `0x04` and a `0x4c`-byte block th
 name length does not count. remotex sends `0xc1` and implements no session select,
 so a High Performance connection as a user other than the one at the console reads
 that block as a framebuffer update and fails before the record layer is up.
-
-### Caps Lock adds Shift to shortcuts
-
-The agent's modifier merge (`FUN_100038e3a`) is `current & 0x942019 | required`,
-where `required` is what the keyboard layout needs for the keysym. remotex sends
-the uppercase keysym for a letter while Caps Lock is on, and the layout requires
-Shift for it, so Cmd+Z arrives as Cmd+Shift+Z. On a Mac, Caps Lock does not change
-a shortcut. The same merge strips a held Shift from a lowercase keysym, which is why
-Caps Lock with Shift still types lowercase.
 
 ### The pasteboard is capped far below Apple's limit
 
@@ -215,13 +185,43 @@ The daemon swaps mask bits 1 and 2 for every viewer except protocol 3.888 and
 positionally. The High Performance reading follows the protocol version rather than
 the mode, and it is deliberate.
 
+`HandleViewerCommand` (`0x10003a47c`), PointerEvent, after the swap at
+`0x10003cdeb`:
+
+```
+10003ce12: cmpb $0x10, %al        ; exactly 0x10 → scroll down
+10003ce1d: cmpl $0x8,  %ecx       ; exactly 0x08 → scroll up
+10003ce20: jne  0x100042df7       ; anything else → PostMouseEvent
+```
+
+Only a mask of exactly `0x08` or `0x10` scrolls. The agent's
+`PostMouseEventIntoSession` (`FUN_100024444`) reads every other mask positionally:
+bit 0 left, bit 1 right, bits 2–7 `OtherMouseDown/Up` with the bit index as the
+button number, so a wheel bit sent with a held button posts button 3 or 4 — Back
+and Forward — and the horizontal `0x20`/`0x40` are clicks on buttons 5 and 6, which
+also feed the agent's double-click chaining. The plain PointerEvent carries no
+horizontal scroll at all; only the native `0x10` event (`FUN_100046336`) tests the
+four wheel bits one by one. Each scroll pulse is
+`CGEventCreateScrollWheelEvent(NULL, pixel, 2, …)` of one unit, and the release that
+follows it, equal to the last posted state, is dropped by the agent as a repeat.
+
+### Caps Lock
+
+The agent's modifier merge (`FUN_100038e3a`) is `current & 0x942019 | required`,
+where `required` is what the keyboard layout needs for the keysym: an uppercase
+letter brings Shift with it, and a held Shift is stripped from a lowercase one. A
+Command or Control shortcut under Caps Lock must therefore go out as the lowercase
+keysym, or Command-Z arrives as Command-Shift-Z.
+
 ### Double-click
 
 The agent chains clicks itself (`FUN_10002616a`): it resets the count when more time
 than the threshold has passed since the last event with a button down, or when the
 position differs at all, and increments it when more buttons are down than before.
 The threshold is `NSEvent.doubleClickInterval × 10⁶`, read once in the agent's
-`main()` (log line "doublick click time %u"), so a restarted agent reads it afresh.
+`main()` (log line "doublick click time %u"). The measured document found a restart
+did not change the live window, which puts the login-time caching in
+`NSEvent.doubleClickInterval` rather than in the agent.
 
 ### `AutoFrameBufferUpdate`
 
