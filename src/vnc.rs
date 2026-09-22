@@ -705,7 +705,13 @@ impl HpResize {
     /// The window reported `want` points. `noop` is whether that is the desktop
     /// already showing: with nothing in flight it cancels any earlier report, and
     /// with a request out it still goes, since the answer may be some other size.
+    /// A size due but not yet sent is replaced: it waits on an update boundary
+    /// that can be seconds away, and the window may have moved on since.
     fn report(&mut self, want: (u16, u16), noop: bool, now: tokio::time::Instant) {
+        if matches!(self.phase, HpPhase::Draining(_)) {
+            self.phase = HpPhase::Idle;
+            self.since = None;
+        }
         if noop && self.phase == HpPhase::Idle {
             self.want = None;
             self.send_at = None;
@@ -4653,7 +4659,13 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         sink.msg(msg).await?;
     }
 
-    let size = desktop.lock().unwrap().size;
+    // A layout that answered nothing leaves a High Performance change out, and
+    // the region stays narrowed until the one that answers it — see
+    // [`HP_HOLD_REQUEST`].
+    let (size, armed) = {
+        let d = desktop.lock().unwrap();
+        (d.size, d.poll_size())
+    };
     let mut uplink = uplink.lock().await;
     if ask_for_zlib {
         if media.is_some() {
@@ -4671,9 +4683,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     }
     debug!(
         "vnc: arming auto framebuffer updates for {}x{}",
-        size.0, size.1
+        armed.0, armed.1
     );
-    uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
+    uplink.send(&vnc_apple::auto_framebuffer_update(armed)).await?;
     // A layout mid-resize, the session's opening one included, is offered for
     // once the resize has settled — see [`HpResize::offer`].
     let offer = media.and_then(|media| media.offer(&layout, size)).and_then(|offer| {
@@ -7789,6 +7801,25 @@ mod tests {
         assert_eq!(hp.step(ms(21_000)), Some(HpStep::Hide(None)));
         assert!(hp.settled());
         assert_eq!(hp.deadline(ms(21_000)), None, "nothing more is due");
+    }
+
+    /// A report while a size waits for its update boundary replaces it, and one
+    /// back to the desktop showing cancels it.
+    #[test]
+    fn hp_resize_report_replaces_a_size_not_yet_sent() {
+        let t0 = tokio::time::Instant::now();
+        let mut hp = HpResize::default();
+        hp.report((1000, 700), false, t0);
+        assert_eq!(hp.step(t0), Some(HpStep::Show));
+        let due = t0 + HP_RESIZE_SETTLE;
+        assert_eq!(hp.step(due), Some(HpStep::Drain));
+        hp.report((1200, 800), false, due);
+        assert_eq!(hp.take_due(due), None, "the stale size never goes out");
+        let due = due + HP_RESIZE_SETTLE;
+        assert_eq!(hp.step(due), Some(HpStep::Drain));
+        hp.report((1728, 1080), true, due);
+        assert_eq!(hp.take_due(due), None);
+        assert_eq!(hp.newest_points(), None, "a return to the desktop showing cancels");
     }
 
     /// An answer that never comes does not leave the cover up for good.
