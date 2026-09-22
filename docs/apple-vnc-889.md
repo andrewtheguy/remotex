@@ -614,14 +614,19 @@ gateway resized its virtual display:
   re-arm, 2x→1x changes and shrinks went through without a crash. Polling that
   pixel with *full* requests every 200 ms crashed the agent again, because each one
   is a read.
-- **The Mac can take a long time to read a change.** From the gateway's send to
-  `HandleSetDisplayConfiguration` took 1 s to 22 s. In the slow cases
-  `screensharingd`'s connection thread went silent right after serving the
-  forced full update a new layout earns, and resumed only on an internal `release
-  timer`. The gateway had nothing outstanding and received nothing in that gap.
-  The likeliest reading is a wait for the first frame of the capture restarted by
-  the change, which a still screen does not produce. This is unexplained. The
-  browser stays covered until the answer arrives, however long it takes.
+- **The Mac reads nothing while it is writing an update.** `screensharingd`'s
+  update sender holds the viewer's lock while it deflates a rectangle and waits
+  for the socket to take it, and the connection thread needs the same lock to read
+  the next client message. A forced full update of a 2x display is several
+  megabytes of zlib, so a client that drains the socket slowly leaves every message
+  it sends unread until that update is through. A debug-build gateway reads about
+  2 MB/s: a `SetDisplayConfiguration` sent right after a change to 2x sat
+  acknowledged by the Mac's kernel but unread for 20 to 30 seconds, until the Mac
+  had finished pushing the repaint. A release build drains the same traffic in
+  well under a second, and every change, 2x to 1x included, is answered in about
+  2.5 seconds. A sample of `screensharingd` in the stall shows the connection
+  thread and the main thread's timer blocked on one mutex, and the thread holding
+  it in `deflate` and `kevent`.
 
 **The offer is a binary plist wrapping a protobuf**, produced by
 `AVCMediaStreamNegotiator` (`initWithMode:8` for audio, `7` for the screen video):

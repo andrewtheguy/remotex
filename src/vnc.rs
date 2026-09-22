@@ -600,9 +600,10 @@ const HP_RESIZE_SETTLE: Duration = Duration::from_secs(1);
 const HP_LAYOUT_QUIET: Duration = Duration::from_millis(500);
 
 /// How long a resize may go unanswered before it is given up on. Not a pacing
-/// timeout: the Mac has been measured leaving a request unread for up to 50
-/// seconds after answering a media-stream offer, and a second request overlapping
-/// the first is what crashes its agent. This only keeps a lost answer from pinning
+/// timeout: the Mac reads no client message while it is still writing an update,
+/// so a gateway that drains a 2x repaint slowly leaves a request unread for tens
+/// of seconds, and a second request overlapping the first is what crashes its
+/// agent. This only keeps a lost answer from pinning
 /// the cover and every later resize for the rest of the session.
 const HP_RESIZE_STUCK: Duration = Duration::from_secs(30);
 
