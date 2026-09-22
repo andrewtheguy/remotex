@@ -15,7 +15,7 @@ use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::mic::{MicBridge, MicSignal};
 use crate::config::{AudioPlan, Chroma, Protocol, RenderPlan, Subtype, TargetConfig};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{ClientMsg, HostDisplay, ServerMsg};
+use crate::protocol::{ClientMsg, HostDisplay, MouseButton, ServerMsg, TouchPhase};
 use crate::{rdp, vnc};
 
 /// Capacity of the engine→client frame channels. Bounded so a slow browser
@@ -283,6 +283,84 @@ struct EngineSlot {
     /// [`State::take_engine`] keeps it as [`State::ending`], so the next engine
     /// can wait for this one to be gone ([`ENGINE_EXIT_GRACE`]).
     ended: oneshot::Receiver<()>,
+    /// What the browser has told this engine is down and not yet let go of.
+    held: HeldInput,
+}
+
+impl EngineSlot {
+    /// Let go of everything the browser left held on this engine.
+    ///
+    /// A browser that goes away cannot release what it pressed: its keyups die
+    /// with its socket, and a page that comes back starts with nothing held of
+    /// its own, so a Control down when the socket dropped stayed down on the
+    /// remote under every keystroke after a reattach. Called wherever the
+    /// attached browser leaves while this engine lives on, and before an engine
+    /// ends, so a remote that outlives its connection is not left holding either.
+    fn release_held(&mut self) {
+        let releases = self.held.releases();
+        if !releases.is_empty() {
+            info!("session: releasing {} input(s) the browser left held", releases.len());
+        }
+        for msg in releases {
+            let _ = self.input_tx.send(msg);
+        }
+    }
+}
+
+/// Keys, buttons and touch contacts an engine has been told are down, as the
+/// inputs that would release them. Followed from the input as it is forwarded,
+/// so it is exactly what the remote was told, whichever browser told it.
+#[derive(Default)]
+struct HeldInput {
+    keys: std::collections::BTreeSet<String>,
+    buttons: Vec<MouseButton>,
+    /// Each contact's last position, since a cancel is a transition in a place.
+    touches: std::collections::BTreeMap<i32, (i32, i32)>,
+}
+
+impl HeldInput {
+    fn note(&mut self, msg: &ClientMsg) {
+        match msg {
+            ClientMsg::Key { code, pressed: true, .. } => {
+                self.keys.insert(code.clone());
+            }
+            ClientMsg::Key { code, pressed: false, .. } => {
+                self.keys.remove(code);
+            }
+            ClientMsg::MouseButton { button, pressed: true, .. } => {
+                if !self.buttons.contains(button) {
+                    self.buttons.push(*button);
+                }
+            }
+            ClientMsg::MouseButton { button, pressed: false, .. } => {
+                self.buttons.retain(|held| held != button);
+            }
+            ClientMsg::Touch { id, phase: TouchPhase::Down | TouchPhase::Move, x, y } => {
+                self.touches.insert(*id, (*x, *y));
+            }
+            ClientMsg::Touch { id, phase: TouchPhase::Up | TouchPhase::Cancel, .. } => {
+                self.touches.remove(id);
+            }
+            _ => {}
+        }
+    }
+
+    /// The releases for everything held, forgetting it. `caps` is irrelevant to a
+    /// release: the VNC engine lets go of the keysym it recorded at the press.
+    fn releases(&mut self) -> Vec<ClientMsg> {
+        let keys = std::mem::take(&mut self.keys).into_iter().map(|code| ClientMsg::Key {
+            code,
+            pressed: false,
+            caps: false,
+        });
+        let buttons = std::mem::take(&mut self.buttons).into_iter().map(|button| {
+            ClientMsg::MouseButton { button, pressed: false, clicks: 1 }
+        });
+        let touches = std::mem::take(&mut self.touches).into_iter().map(|(id, (x, y))| {
+            ClientMsg::Touch { id, phase: TouchPhase::Cancel, x, y }
+        });
+        keys.chain(buttons).chain(touches).collect()
+    }
 }
 
 struct ClientSlot {
@@ -409,7 +487,10 @@ impl State {
         self.evict_camera();
         self.evict_mic();
         match self.engine.take() {
-            Some(engine) => {
+            Some(mut engine) => {
+                // Queued ahead of the close, so the engine acts on them before it
+                // sees its input end.
+                engine.release_held();
                 // Dropping the slot closes the engine's input channel, which is
                 // what ends it; `ending` is how the next start knows it has.
                 self.ending = Some(engine.ended);
@@ -471,6 +552,14 @@ impl State {
             if let Some(bridge) = self.engine.as_ref().and_then(|e| e.microphone.as_ref()) {
                 bridge.unplug();
             }
+        }
+    }
+
+    /// The attached browser has gone, or is being replaced, while the engine
+    /// may live on — see [`EngineSlot::release_held`].
+    fn release_held(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            engine.release_held();
         }
     }
 
@@ -607,6 +696,9 @@ impl SessionManager {
                 }
             }
             let evicted = st.client.take();
+            if evicted.is_some() {
+                st.release_held();
+            }
             // The epoch bump covers both reasons to arm a grace timer: a socket was
             // evicted (as on any detach), or the takeover teardown above left a
             // reconnect standing that must lapse if the claimant never attaches.
@@ -687,6 +779,7 @@ impl SessionManager {
             info!("session: superseding the previous attachment");
             // A stored permit, so it is seen whenever the old socket next looks.
             old.superseded.notify_one();
+            st.release_held();
         }
         // Audio is deliberately *not* touched here. It belongs to the claim, not to
         // this socket, so a browser that dropped and came back is still listening —
@@ -1265,6 +1358,7 @@ impl SessionManager {
             camera: uplinks.camera.clone(),
             microphone: uplinks.microphone.clone(),
             ended,
+            held: HeldInput::default(),
         });
         (self.spawn_engine)(
             target.clone(),
@@ -1323,11 +1417,12 @@ impl SessionManager {
     /// messages ([`ClientMsg::Connect`] / [`ClientMsg::Disconnect`]) are handled
     /// by the ws bridge and never reach here.
     pub fn forward_input(&self, attach_id: u64, msg: ClientMsg) {
-        let st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap();
         if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
             return;
         }
-        if let Some(engine) = &st.engine {
+        if let Some(engine) = &mut st.engine {
+            engine.held.note(&msg);
             let _ = engine.input_tx.send(msg);
         }
     }
@@ -1342,6 +1437,7 @@ impl SessionManager {
                 return;
             }
             st.client = None;
+            st.release_held();
             st.bump_epoch_for_detach()
         };
         // No browser, no lag: an engine surviving the grace period must not spend
@@ -2332,6 +2428,96 @@ mod tests {
         let token = mgr.claim(false, Some(&token)).unwrap();
         let _att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
+    }
+
+    fn key(code: &str, pressed: bool) -> ClientMsg {
+        ClientMsg::Key { code: code.into(), pressed, caps: false }
+    }
+
+    /// Everything queued on an engine's input, as its keys and buttons.
+    fn drain(input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(msg) = input_rx.try_recv() {
+            seen.push(match msg {
+                ClientMsg::Key { code, pressed, .. } => format!("{code} {pressed}"),
+                ClientMsg::MouseButton { button, pressed, .. } => format!("{button:?} {pressed}"),
+                ClientMsg::Touch { id, phase, x, y } => format!("touch {id} {phase:?} {x},{y}"),
+                other => format!("{other:?}"),
+            });
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_detach_releases_what_the_browser_left_held() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake", None).await.unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+
+        mgr.forward_input(att.id, key("ControlLeft", true));
+        mgr.forward_input(att.id, key("KeyC", true));
+        mgr.forward_input(att.id, key("KeyC", false));
+        mgr.forward_input(att.id, ClientMsg::MouseButton { button: MouseButton::Left, pressed: true, clicks: 1 });
+        mgr.forward_input(att.id, ClientMsg::Touch { id: 0, phase: TouchPhase::Down, x: 1, y: 1 });
+        mgr.forward_input(att.id, ClientMsg::Touch { id: 0, phase: TouchPhase::Move, x: 5, y: 6 });
+        drain(&mut input_rx);
+
+        // The socket drops with Control, the button and a finger still down: the
+        // browser can no longer let go of them, so the gateway does.
+        mgr.detach(att.id);
+        assert_eq!(
+            drain(&mut input_rx),
+            ["ControlLeft false", "Left false", "touch 0 Cancel 5,6"],
+        );
+
+        // The reattach resumes the engine with nothing left to release.
+        let token = mgr.claim(false, Some(&token)).unwrap();
+        let _att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
+    }
+
+    #[tokio::test]
+    async fn a_superseded_attachment_releases_what_it_left_held() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake", None).await.unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+
+        mgr.forward_input(att.id, key("ShiftLeft", true));
+        drain(&mut input_rx);
+        // A reload attaches before the old socket is noticed gone.
+        let _new = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        assert_eq!(drain(&mut input_rx), ["ShiftLeft false", "Refresh"]);
+        // The old socket's late keyup is dropped, and there is nothing to repeat.
+        mgr.forward_input(att.id, key("ShiftLeft", false));
+        mgr.detach(att.id);
+        assert!(drain(&mut input_rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ending_engine_is_told_to_release_before_its_input_closes() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake", None).await.unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (mut input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+
+        mgr.forward_input(att.id, key("MetaLeft", true));
+        mgr.forward_input(att.id, key("AltLeft", true));
+        mgr.forward_input(att.id, key("AltLeft", false));
+        drain(&mut input_rx);
+        mgr.disconnect(att.id);
+        assert_eq!(drain(&mut input_rx), ["MetaLeft false"]);
+        assert!(input_rx.is_closed());
     }
 
     #[tokio::test]
