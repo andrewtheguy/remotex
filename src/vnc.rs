@@ -632,8 +632,9 @@ enum HpPhase {
     /// the one point at which no full-size pixel request is outstanding — to go
     /// out ([`HpResize::take_due`]).
     Draining((u16, u16)),
-    /// A `SetDisplayConfiguration` is out and its layout has not arrived.
-    InFlight,
+    /// A `SetDisplayConfiguration` for these points is out and its layout has
+    /// not arrived.
+    InFlight((u16, u16)),
 }
 
 /// A High Performance session's window-driven resizes: debounced, one at a time,
@@ -689,6 +690,9 @@ enum HpStep {
     /// Tell the browser the resize has settled, and offer the media stream for
     /// the layout it settled on.
     Hide(Option<Vec<u8>>),
+    /// The Mac never answered: re-arm the full `AutoFrameBufferUpdate` region
+    /// and ask for a full repaint, which the answering layout would have done.
+    GiveUp,
 }
 
 impl HpResize {
@@ -716,13 +720,22 @@ impl HpResize {
     /// the second after a request may already have gone — and that answers nothing.
     fn layout(&mut self, changed: bool, now: tokio::time::Instant) {
         self.awaiting_layout = false;
-        if changed && self.phase == HpPhase::InFlight {
+        if changed && matches!(self.phase, HpPhase::InFlight(_)) {
             self.phase = HpPhase::Idle;
             self.since = None;
         }
         if self.shown {
             self.quiet_until = Some(now + HP_LAYOUT_QUIET);
         }
+    }
+
+    /// The newest points this resize is headed for: a size still settling, else
+    /// the one due or out. `None` with nothing asked.
+    fn newest_points(&self) -> Option<(u16, u16)> {
+        self.want.or(match self.phase {
+            HpPhase::Draining(points) | HpPhase::InFlight(points) => Some(points),
+            HpPhase::Idle => None,
+        })
     }
 
     /// Whether pixel polling is held to [`HP_HOLD_REQUEST`].
@@ -742,7 +755,7 @@ impl HpResize {
         let HpPhase::Draining(want) = self.phase else {
             return None;
         };
-        self.phase = HpPhase::InFlight;
+        self.phase = HpPhase::InFlight(want);
         self.since = Some(now);
         Some(want)
     }
@@ -769,6 +782,7 @@ impl HpResize {
             );
             self.phase = HpPhase::Idle;
             self.since = None;
+            return Some(HpStep::GiveUp);
         }
         // The opening configuration is itself unanswered until then.
         if self.awaiting_layout {
@@ -2607,7 +2621,7 @@ async fn request_resize(
             // request that starts from pixels, and from this end's own. A size
             // still settling is the newer word on the points: a window dragged
             // to another screen reports both, and the density must not undo it.
-            ResizeAsk::Density => d.hp.want.unwrap_or_else(|| {
+            ResizeAsk::Density => d.hp.newest_points().unwrap_or_else(|| {
                 let point = |v: u16| (f32::from(v) / d.scale).round().max(1.0) as u16;
                 (point(d.size.0), point(d.size.1))
             }),
@@ -2657,6 +2671,16 @@ async fn hp_resize_step(
             Some(HpStep::Drain) => {
                 debug!("vnc: a virtual-display resize is due; prompting the update it goes out after");
                 send(uplink, &update_request(false, HP_HOLD_REQUEST)).await?;
+            }
+            // Polling holds to one pixel only while a request is out, but the
+            // armed region stays narrowed until a layout re-arms it.
+            Some(HpStep::GiveUp) => {
+                let size = desktop.lock().unwrap().size;
+                send_all(
+                    uplink,
+                    &[vnc_apple::auto_framebuffer_update(size), update_request(false, size).to_vec()],
+                )
+                .await?;
             }
         }
     }
@@ -7777,10 +7801,12 @@ mod tests {
         let due = t0 + HP_RESIZE_SETTLE;
         assert_eq!(hp.step(due), Some(HpStep::Drain));
         assert_eq!(hp.take_due(due), Some((1000, 700)));
+        assert_eq!(hp.newest_points(), Some((1000, 700)), "the points out are still the newest");
         let expiry = due + HP_RESIZE_STUCK;
         assert_eq!(hp.deadline(expiry), Some(expiry));
-        assert_eq!(hp.step(expiry), Some(HpStep::Hide(None)));
+        assert_eq!(hp.step(expiry), Some(HpStep::GiveUp));
         assert!(!hp.holds_pixels());
+        assert_eq!(hp.step(expiry), Some(HpStep::Hide(None)));
     }
 
     /// The body of an OutputScale report for `size` at `scale`.
