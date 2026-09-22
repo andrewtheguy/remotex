@@ -1223,10 +1223,9 @@ struct Apple {
     virtual_display: bool,
     /// Whether zlib has been asked for yet.
     ///
-    /// It cannot be in the first `SetEncodings` — see
-    /// [`vnc_apple::ENCODINGS_WITH_ZLIB`] — so it is asked for in a second one, once
-    /// the Mac has reported its displays and there is nothing left to lose by it.
-    /// Once, hence the flag: a layout arrives at every login and lock.
+    /// It is asked for in a second `SetEncodings`, once the Mac has reported its
+    /// displays — see [`vnc_apple::ENCODINGS_WITH_ZLIB`]. Once, hence the flag: a
+    /// layout arrives at every login and lock.
     ///
     /// Both subtypes do this. The upgrade rides on the display layout, which plain
     /// `ard` reports just as High Performance does, so gating it by subtype only cost
@@ -1840,10 +1839,9 @@ async fn rfb38_preface(
 fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
-        // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
-        // zlib here costs the layout, so both subtypes ask for it in the second
-        // `SetEncodings` a layout triggers — and note that the native pasteboard is
-        // negotiated by `AutoPasteboard`, not an RFB encoding.
+        // on its downgraded 3.8 wire. Both subtypes ask for zlib in the second
+        // `SetEncodings` a layout triggers, and the native pasteboard is negotiated
+        // by `AutoPasteboard`, not an RFB encoding.
         return vnc_apple::ENCODINGS.to_vec();
     }
 
@@ -3854,13 +3852,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         ENCODING_LAST_RECT => return Ok(RectEffect::LAST),
         // DesktopSize: the rect itself is the announcement; no payload.
         //
-        // Non-Apple RFB only, and the guard is not decoration: it carries no density,
-        // so applying one with Apple metadata would overwrite a scale learned from a
-        // display layout with `UNSCALED` and double the desktop's apparent size. It
-        // *is* advertised there — [`vnc_apple::ENCODINGS`] must contain it or no
-        // layout arrives at all — so this arm is reached in practice, and dropping
-        // the rect is right: the layout carries the same size and the density with
-        // it, and one arrives with every geometry change.
+        // Non-Apple RFB only. A Mac sends it only to a viewer that did not list
+        // `DisplayInfo`, which [`vnc_apple::ENCODINGS`] does, and it carries no
+        // density: applied with Apple metadata it would overwrite a scale learned
+        // from a display layout with `UNSCALED`. The layout carries the same size and
+        // the density with it, and one arrives with every geometry change.
         ENCODING_DESKTOP_SIZE => {
             if apple.is_some() {
                 debug!("vnc: ignoring a DesktopSize rect; the display layout is authoritative");
@@ -3875,7 +3871,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 .map(RectEffect::resized);
         }
         // Ungated, like [`ENCODING_RAW`]: every generic target is offered zlib too,
-        // and an Apple server cannot send what its own measured list omits.
+        // and an Apple server cannot send what its own list omits.
         ENCODING_ZLIB => payload = Payload::Zlib,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
@@ -3909,44 +3905,27 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // Advertised because the layout depends on the exact list, and ignored
         // because a client draws the pointer where it last put it.
         vnc_apple::ENCODING_CURSOR_POS if apple.is_some() => return Ok(RectEffect::NOTHING),
-        // The Mac's keyboard and its hardware, neither of which this gateway acts on.
-        // All three frame themselves the same way — a `u16` saying how much follows —
-        // so one rule steps over all of them, and reading that length is the whole
-        // point: the RFB stream above the record layer has no framing of its own, so
-        // walking past by the wrong number of bytes desyncs everything after it.
-        vnc_apple::ENCODING_VENDOR_KEYSYMS
-        | vnc_apple::ENCODING_KEYBOARD_SOURCE
-        | vnc_apple::ENCODING_DEVICE_INFO
+        // The Mac's keyboard, which this gateway does not act on. Both frame
+        // themselves the same way — a `u16` saying how much follows — and reading
+        // that length is the whole point: the RFB stream above the record layer has
+        // no framing of its own, so walking past by the wrong number of bytes desyncs
+        // everything after it.
+        vnc_apple::ENCODING_VENDOR_KEYSYMS | vnc_apple::ENCODING_KEYBOARD_SOURCE
             if apple.is_some() =>
         {
             let len = reader.read_u16().await?;
             discard(reader, u64::from(len)).await?;
             return Ok(RectEffect::NOTHING);
         }
-        // Two more that frame themselves differently, so they cannot share the rule
-        // above. `DisplayInfo` is in [`vnc_apple::ENCODINGS`] and so must be
-        // steppable — advertising an encoding is a promise to be able to; `UserInfo`
-        // is not advertised and is handled anyway, on the same grounds as
-        // `DeviceInfo`. Neither was ever seen on macOS 26.
-        //
-        // `DisplayInfo` is the older display list — a header of four `u16`s, then
-        // 0x1c bytes per screen — and carries no density, which is why the layout is
-        // used instead even if this does turn up.
+        // `DisplayInfo`, the older display list: `u16` width and height, a `u32` of
+        // flags, a `u16` count, then 0x1c bytes per screen. It carries no density,
+        // and a Mac sends it only to a viewer that did not list the layout, so it is
+        // advertised — the layout needs it listed — and stepped over.
         vnc_apple::ENCODING_DISPLAY_INFO if apple.is_some() => {
-            let mut head = [0u8; 8];
+            let mut head = [0u8; 10];
             reader.read_exact(&mut head).await?;
-            let count = u64::from(u16::from_be_bytes([head[4], head[5]]));
+            let count = u64::from(u16::from_be_bytes([head[8], head[9]]));
             discard(reader, count * 0x1c).await?;
-            return Ok(RectEffect::NOTHING);
-        }
-        // `UserInfo` is the logged-in account and its avatar: a counted name, then a
-        // counted (zlib'd PNG) image.
-        vnc_apple::ENCODING_USER_INFO if apple.is_some() => {
-            let name = u64::from(reader.read_u16().await?);
-            discard(reader, name).await?;
-            let image = u64::from(reader.read_u32().await?);
-            reader.read_u32().await?; // the image's encoding, which is not read
-            discard(reader, image).await?;
             return Ok(RectEffect::NOTHING);
         }
         // The Mac's replies to the media-stream offer ([`vnc_apple_audio`]):
@@ -6053,9 +6032,8 @@ mod tests {
         }
     }
 
-    /// The *first* `SetEncodings` only. zlib in this list costs the display layout,
-    /// which is why it is absent here and asked for again once a layout has arrived —
-    /// see [`both_apple_subtypes_start_out_wanting_zlib`].
+    /// The *first* `SetEncodings` only. zlib is asked for once a layout has arrived
+    /// — see [`both_apple_subtypes_start_out_wanting_zlib`].
     #[test]
     fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
         let encodings = rfb38_encoding_list(true, true, true, false, false);

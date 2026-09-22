@@ -84,43 +84,24 @@ pub const ENCODING_DISPLAY_LAYOUT: i32 = 0x451;
 pub const ENCODING_VENDOR_KEYSYMS: i32 = 0x453;
 /// The Mac's current keyboard input source. Parsed and dropped.
 pub const ENCODING_KEYBOARD_SOURCE: i32 = 0x455;
-/// The Mac's model and enclosure colour. Parsed and dropped. Not advertised — see
-/// [`ENCODINGS`] — but tolerated, because it arrives anyway on some builds.
-pub const ENCODING_DEVICE_INFO: i32 = 0x456;
 /// The pointer's position, in the rectangle header and with no payload. Advertised
 /// and ignored: a client draws the pointer where it last put it.
 pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// An older, simpler display list than [`ENCODING_DISPLAY_LAYOUT`], carrying no
-/// density. Advertised and stepped over; macOS 26 never sent one.
+/// density. Listing it is what makes the Mac report displays at all; with the layout
+/// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
-/// The logged-in user's name and avatar. Not advertised — see [`ENCODINGS`] — but
-/// decoded, because it arrives anyway on some builds and its framing is nothing like
-/// the other metadata encodings'.
-pub const ENCODING_USER_INFO: i32 = 0x44e;
 
-/// What this client advertises in `SetEncodings` **first**, before the Mac has said
+/// What this client advertises in the first `SetEncodings`, before the Mac has said
 /// anything about its displays.
 ///
-/// **Do not add to, remove from, or reorder this list.** It is not a preference
-/// order, it is the list that makes macOS 26 report a display layout, and it was
-/// arrived at by measurement rather than by reasoning. Every single-entry addition
-/// tried (zlib, `DeviceInfo`), every single-entry removal, and even reversing the
-/// order while keeping the set produced a session with **no
-/// [`ENCODING_DISPLAY_LAYOUT`] at all** — while this sequence produced one every
-/// time. Sixteen variants,
-/// one connection each, no exceptions. Why the daemon reads the list this way is
-/// unresolved; that it does is not. The same exact list was also measured to
-/// produce `AppleDisplayLayout` after downgrading the Mac to RFB 3.8.
-///
-/// One caveat, recorded because the alternative is a comment that reads stricter than
-/// the evidence: the bisected list also carried `ENCODING_USER_INFO`, which this one
-/// does not, and that particular removal was never among the variants tried. It was
-/// checked the other way instead — this exact list produced a layout, and Standard
-/// mode's physical-display selection was verified through the gateway. See
-/// docs/apple-vnc-889.md.
-///
-/// The order is noVNC-ARD's relative order, which is the only other client known to
-/// receive a layout from a real Mac.
+/// `screensharingd` resets its display flags on every `SetEncodings` and sets one for
+/// each of `DisplayInfo` and the layout it finds in the list, in any order: with both
+/// listed it sends the layout, with only `DisplayInfo` the older list, and with
+/// neither no display information at all. Order matters for one thing only, the
+/// preferred codec, which is the first of zlib, ZRLE and Apple's own codecs listed.
+/// Measured on macOS 26.6 and read from the daemon — see
+/// docs/apple-vnc-889-binary-audit.md.
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
@@ -143,12 +124,11 @@ pub const ENCODINGS: &[i32] = &[
 /// And what it advertises once a layout has arrived: the same list with zlib on the
 /// end.
 ///
-/// The list above cannot carry zlib — adding it anywhere costs the display layout —
-/// so compression is asked for in a second `SetEncodings` after the Mac has already
-/// reported a layout. It keeps that state and simply switches encoder: measured at
-/// 398 KB for a 3200x1800 frame against 23 MB of raw pixels. Sending only the first
-/// list would leave both Apple subtypes on raw pixels; sending only a list with
-/// zlib in it would lose the layout metadata.
+/// The Mac keeps its display state and switches encoder, measured at 398 KB for a
+/// 3200x1800 frame against 23 MB of raw pixels, and answers with another layout,
+/// since the list names the layout again. The Mac would take zlib in the first
+/// list just as well; the second `SetEncodings` is where the media stream's
+/// encoding is added on a target that asked for audio.
 ///
 /// Both subtypes use it. A layout is what the upgrade waits on, and plain `ard`
 /// reports one too, so it compresses on the same terms High Performance does.
@@ -890,14 +870,9 @@ mod tests {
     }
 
     /// The second `SetEncodings` is the first one with zlib appended, and nothing
-    /// else about it moved.
-    ///
-    /// The two lists are written out longhand rather than derived, because the first
-    /// is a measured constant and building the second from it would invite someone to
-    /// build the *first* from something too. That leaves them free to drift — an
-    /// entry dropped, or the order changed in one and not the other — and drift here
-    /// costs the display layout silently, with a session that still connects and
-    /// paints. This is the check that a reordering cannot pass.
+    /// else about it moved: dropping `DisplayInfo` or the layout from either list
+    /// costs the display information silently, with a session that still connects
+    /// and paints.
     #[test]
     fn the_zlib_list_is_the_first_list_plus_zlib() {
         assert_eq!(
@@ -908,7 +883,7 @@ mod tests {
         assert_eq!(
             &ENCODINGS_WITH_ZLIB[..ENCODINGS.len()],
             ENCODINGS,
-            "the same entries in the same order, which is the part that matters"
+            "the same entries"
         );
         assert_eq!(
             ENCODINGS_WITH_ZLIB.last(),
@@ -916,8 +891,8 @@ mod tests {
             "and zlib on the end"
         );
         assert!(
-            !ENCODINGS.contains(&ENCODING_ZLIB),
-            "zlib in the first list is what costs the display layout"
+            ENCODINGS.contains(&ENCODING_DISPLAY_INFO) && ENCODINGS.contains(&ENCODING_DISPLAY_LAYOUT),
+            "the two the Mac reports its displays for"
         );
     }
 

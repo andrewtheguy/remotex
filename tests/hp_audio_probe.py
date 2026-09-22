@@ -17,6 +17,7 @@ Usage:
   uv run tests/hp_audio_probe.py HOST USER PASS
          [--audio-offer PLIST] [--video-offer PLIST]
          [--seconds 20] [--encodings-order first|last] [--no-rtcp]
+         [--first-encodings 0,0x44c,...]
 """
 import argparse
 import hashlib
@@ -358,6 +359,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--encodings-order", choices=["first", "last", "none"], default="last")
     ap.add_argument("--no-rtcp", action="store_true")
+    ap.add_argument("--first-encodings", default=None,
+                    help="comma-separated list to send as the first SetEncodings instead of the measured one")
     ap.add_argument("--no-media", action="store_true", help="skip the audio/video media offer (display-only mode)")
     ap.add_argument("--out", default="tmp/hp_audio_rtp.bin")
     ap.add_argument("--screenshots", default=None, help="directory to save framebuffer screenshots after each resize")
@@ -392,7 +395,7 @@ def main():
     if res != 0:
         (l,) = struct.unpack(">I", sock.read(4)); raise SystemExit("auth failed: " + sock.read(l).decode())
     log("authenticated")
-    sock.write(bytes([0xC1]))
+    sock.write(bytes([0x81]))
     w, h = struct.unpack(">HH", sock.read(4)); sock.read(16)
     (nl,) = struct.unpack(">I", sock.read(4)); name = sock.read(nl)
     log(f"ServerInit {w}x{h}, name field {nl} bytes, flags {name[2:6].hex()}, name {name[22:]!r}")
@@ -422,7 +425,11 @@ def main():
     px = (1600, 1000)
     rec.send(set_display_configuration(px, px))
     rec.send(set_pixel_format())
-    rec.send(set_encodings(ENCODINGS))
+    first = ENCODINGS
+    if args.first_encodings:
+        first = [int(e, 0) for e in args.first_encodings.split(",")]
+    log("first SetEncodings", [hex(e) if e >= 0 else e for e in first])
+    rec.send(set_encodings(first))
     rec.send(auto_framebuffer_update(w, h))
 
     size = [w, h]
@@ -496,13 +503,13 @@ def main():
                 elif enc in (ENC_VENDOR_KEYSYMS, ENC_KEYBOARD_SOURCE, ENC_DEVICE_INFO):
                     skip(rec.u16())
                 elif enc == ENC_DISPLAY_INFO:
-                    head = rec.read(8); skip(struct.unpack(">H", head[4:6])[0] * 0x1C)
-                elif enc == ENC_USER_INFO:
-                    skip(rec.u16()); n = rec.u32(); rec.u32(); skip(n)
+                    head = rec.read(10); count = struct.unpack(">H", head[8:10])[0]
+                    log(f"DisplayInfo: {count} display(s)")
+                    skip(count * 0x1C)
                 elif enc == ENC_CURSOR_IMAGE:
                     rec.u32(); skip(rec.u32())
                 elif enc == ENC_DISPLAY_LAYOUT:
-                    declared = rec.u16(); payload = rec.read(declared - 4)
+                    declared = rec.u16(); payload = rec.read(declared)
                     bw, bh = struct.unpack(">HH", payload[6:10])
                     size[:] = [bw, bh]; layouts += 1
                     log(f"layout #{layouts}: backing {bw}x{bh}, declared {declared}")
@@ -573,10 +580,6 @@ def main():
                 log(f"screenshot saved: {path}")
             # keep polling
             rec.send(update_request(True, *size))
-        elif t in (0x04, 0x07):
-            pass
-        elif t in (0x51, 0x53, 0x55, 0x56):
-            skip(rec.u16())
         elif t == 2:
             pass
         elif t == 3:

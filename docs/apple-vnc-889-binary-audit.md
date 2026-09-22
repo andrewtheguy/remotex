@@ -34,14 +34,6 @@ the repository.
 
 Ordered by effect on a session.
 
-### The old display list is skipped with the wrong size
-
-The agent's `FUN_10002802f` [EncodeDisplayInfoForDaemon] writes `DisplayInfo`
-(`0x44d`) as `u16` width, `u16` height, `u32` flags, `u16` count, then `0x1c`-byte
-records; Apple's viewer reads 10 bytes and the count from bytes 8–9. remotex reads
-the count from the flags word. The daemon sends it only when `0x451` is not
-advertised, so it is unreachable today.
-
 ### A display record remotex refuses and Apple keeps
 
 - The agent's `hidpi_ScaleFactor` (`FUN_100045a47`) returns 0.0 on "bad mode ref";
@@ -125,7 +117,13 @@ and 1011 in the list. LastRect (−224) is recognised nowhere. `FUN_100026f0a`
 [SendResolutionChargeToViewer] sends display info only when `0x44d` was listed, and
 `DesktopSize` only when it was not and −223 was; `FUN_10001d351` [EncodeDisplayInfo]
 sends the layout when `0x451` was listed and `DisplayInfo` otherwise. Every
-`SetEncodings` carrying `0x44d` therefore produces another layout.
+`SetEncodings` carrying `0x44d` therefore produces another layout. A live macOS 26.6 agrees: zlib added, the list reversed, or a
+six-entry list all produce the layout; without `0x451` the Mac sends
+`DisplayInfo`, and without `0x44d` nothing about its displays.
+
+The agent's `FUN_10002802f` [EncodeDisplayInfoForDaemon] writes `DisplayInfo` as
+`u16` width, `u16` height, `u32` flags, `u16` count, then `0x1c`-byte records; Apple's
+viewer reads 10 bytes and the count from bytes 8–9.
 
 ### There are no bare metadata messages
 

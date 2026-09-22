@@ -216,48 +216,36 @@ returns `UNSCALED` for the combined view and the display's scale after selection
 
 ## The other corrections
 
-### The first `SetEncodings` decides whether displays are reported at all
+### Which encodings make the Mac report its displays
 
-The behavior is unexplained. The list in
-`vnc_apple::ENCODINGS` — Raw, `0x44c`, `0x44d`, `0x44f`, `0x450`, `0x451`, `0x453`,
-`0x455`, `DesktopSize`, `LastRect`, in that order — produces an
-`AppleDisplayLayout` on every connection. **Every** variant tried produces none at
-all:
+`screensharingd` resets its display flags on every `SetEncodings` and sets one for
+`DisplayInfo` (`0x44d`) and one for `AppleDisplayLayout` (`0x451`) wherever they
+appear in the list. Measured on macOS 26.6 with `tests/hp_audio_probe.py
+--first-encodings`:
 
-| variant | layouts in 7 s |
+| first `SetEncodings` | the Mac sends |
 |---|---|
-| the list above | 1–2, every run (6 runs) |
-| plus zlib (first or last) | 0 |
-| plus `DeviceInfo` (`0x456`) | 0 |
-| plus `UserInfo`, `CursorPos`, `DisplayInfo`, `DesktopSize` or `LastRect` (already present, appended again) | 0 |
-| minus any single entry (5 tried, one of them 5 times) | 0 |
-| the same set, reversed | 0 |
-| the same set, with Raw duplicated | 0 |
+| `vnc_apple::ENCODINGS` | the layout |
+| the same plus zlib | the layout |
+| the same, reversed | the layout |
+| zlib, Raw, rekey, cursor cache, `0x44d`, `0x451` | the layout |
+| without `0x451` | `DisplayInfo` |
+| without `0x44d` | nothing about its displays |
 
-Reversal and duplication failures rule out simple set-membership and capability
-tests. Sixteen variants used fresh connections, with no exceptions in either
-direction. The server's interpretation is a revision gap.
+Order matters only for the preferred codec, the first of zlib, ZRLE and Apple's
+own codecs listed; LastRect is recognised nowhere. Every `SetEncodings` that lists
+`0x44d` produces another layout. An earlier table here, which found that any
+change to the list cost the layout, was measured with a layout reader four bytes
+out of step.
 
-Two consequences for an implementer:
+`vnc_apple::ENCODINGS_WITH_ZLIB` is sent once a layout has arrived; the Mac keeps
+its display state and switches encoder, measured at 398 KB for a 3200×1800 frame
+against 23 MB raw.
 
-- **zlib cannot be in the first `SetEncodings`.** Send a second one, with zlib
-  appended, once a layout has arrived: the Mac keeps its display state and simply
-  changes encoder. Measured at 398 KB for a 3200×1800 frame against 23 MB raw. This
-  is what `ENCODINGS_WITH_ZLIB` and the `asked_for_zlib` flag in `src/vnc.rs` are for.
-- **Advertising is a promise.** Every entry in that list has to be decodable or at
-  least steppable, and two of them do not share the common length rule: `CursorPos`
-  (`0x44c`) has no payload at all, and `DisplayInfo` (`0x44d`) is four `u16`s then
-  `0x1c` bytes per screen. `LastRect` has to actually end the update, which means
-  handling the `0xffff` rectangle count that goes with it. (`UserInfo` (`0x44e`) — a
-  counted name then a counted image — is *not* advertised but is decoded anyway, on
-  the same grounds as `DeviceInfo`: tolerating an encoding that turns up unasked
-  costs nothing, and desyncing on it costs the session.)
-
-Qualification: the probe used eleven entries, while the shipped list has ten and
-omits `UserInfo`. That difference was not among the sixteen probe variants. The
-shipped list produced layouts twice through the gateway, so "any single removal
-fails" has one known exception and the required subset remains unknown. Leave the
-shipped order and contents unchanged.
+**Advertising is a promise.** Every entry in the list has to be decodable or at
+least steppable, and two of them do not share the common length rule: `CursorPos`
+(`0x44c`) has no payload at all, and `DisplayInfo` (`0x44d`) is a `u16` width and
+height, a `u32` of flags and a `u16` count, then `0x1c` bytes per screen.
 
 ### A layout's length counts what follows it
 
@@ -448,13 +436,13 @@ written in decimal.
 |---|---|---|---|
 | `CursorPos` | `0x44c` | 1100 | |
 | `DisplayInfo` | `0x44d` | 1101 | |
-| `UserInfo` | `0x44e` | 1102 | not advertised, decoded anyway |
+| `UserInfo` | `0x44e` | 1102 | not advertised |
 | rekey | `0x44f` | 1103 | |
 | cursor cache | `0x450` | 1104 | |
 | `AppleDisplayLayout` | `0x451` | 1105 | |
 | vendor keysyms | `0x453` | 1107 | |
 | keyboard source | `0x455` | 1109 | |
-| `DeviceInfo` | `0x456` | 1110 | |
+| `DeviceInfo` | `0x456` | 1110 | not advertised |
 | `kSSVideoEncoding_AVCMediaStream` | `0x3f2` | 1010 | all media-stream replies |
 | zlib | `0x06` | 6 | standard RFB |
 | Raw | `0x00` | 0 | standard RFB |
@@ -820,11 +808,6 @@ of no help in escaping the AAC-ELD decoder.
 
 ## Still unknown
 
-- **Why reordering the first `SetEncodings` cost the display layout.**
-  `screensharingd`'s handler is order-insensitive for displays (see
-  [the binary audit](apple-vnc-889-binary-audit.md#setencodings-is-not-order-sensitive-for-displays)),
-  and those measurements were taken with a layout reader four bytes out of step.
-  They have not been repeated since.
 - Apple's still-image codecs `0x3ea` and `0x3f3`; the document leaves the first's
   rectangle body and the second's command-code table unresolved, and neither was
   advertised here, so nothing was learned.
