@@ -80,11 +80,11 @@ pub const SOURCE_FORMAT: PcmFormat = PcmFormat {
     bits_per_sample: 16,
 };
 
-/// The second `SetEncodings` with the media-stream encoding appended: the same list
-/// that asks for zlib, then 1010. Measured order — the probe sent it last and the Mac
-/// answered.
+/// The second `SetEncodings`, sent once the first layout has arrived: the opening
+/// list with the media-stream encoding appended. Measured order — the probe sent it
+/// last and the Mac answered.
 pub fn encodings_with_media_stream() -> Vec<i32> {
-    let mut encodings = vnc_apple::ENCODINGS_WITH_ZLIB.to_vec();
+    let mut encodings = vnc_apple::ENCODINGS.to_vec();
     encodings.push(ENCODING_MEDIA_STREAM);
     encodings
 }
@@ -1210,10 +1210,10 @@ mod tests {
     }
 
     #[test]
-    fn the_media_encoding_rides_last_on_the_zlib_list() {
+    fn the_media_encoding_rides_last_on_the_opening_list() {
         let encodings = encodings_with_media_stream();
         assert_eq!(encodings.last(), Some(&ENCODING_MEDIA_STREAM));
-        assert_eq!(&encodings[..encodings.len() - 1], vnc_apple::ENCODINGS_WITH_ZLIB);
+        assert_eq!(&encodings[..encodings.len() - 1], vnc_apple::ENCODINGS);
         assert!(!vnc_apple::ENCODINGS.contains(&ENCODING_MEDIA_STREAM));
     }
 

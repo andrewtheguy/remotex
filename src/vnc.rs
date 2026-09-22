@@ -104,7 +104,7 @@ const ENCODING_ZRLE: i32 = 16;
 /// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
 /// shared by every rectangle on the connection. Not a vendor encoding and not
 /// Apple's alone, though Apple's High Performance mode is where it arrived here
-/// first — see [`vnc_apple::ENCODINGS_WITH_ZLIB`].
+/// first — see [`vnc_apple::ENCODINGS`].
 pub(crate) const ENCODING_ZLIB: i32 = 6;
 /// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
@@ -1221,18 +1221,11 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
-    /// Whether zlib has been asked for yet.
-    ///
-    /// It is asked for in a second `SetEncodings`, once the Mac has reported its
-    /// displays — see [`vnc_apple::ENCODINGS_WITH_ZLIB`]. Once, hence the flag: a
+    /// Whether the media stream has been asked for yet, in a second `SetEncodings`
+    /// once the Mac has reported its displays — see
+    /// [`vnc_apple_audio::encodings_with_media_stream`]. Once, hence the flag: a
     /// layout arrives at every login and lock.
-    ///
-    /// Both subtypes do this. The upgrade rides on the display layout, which plain
-    /// `ard` reports just as High Performance does, so gating it by subtype only cost
-    /// bandwidth — measured at 6.19 MB of raw against 3.38 MB of zlib for the same
-    /// 800x600 desktop, on a mode whose framebuffer is a physical screen and can be
-    /// far larger than that.
-    asked_for_zlib: bool,
+    asked_for_media: bool,
     /// The Mac's system audio, on a High Performance target that asked for it: the
     /// `0x1c` offer goes out with the first layout's `SetEncodings`, and the Mac's
     /// encoding-1010 reply starts the receiver. Dropped with the read loop, which
@@ -1241,11 +1234,8 @@ struct Apple {
 }
 
 impl Apple {
-    /// The read loop's starting state for either Apple subtype.
-    ///
-    /// `high_performance` settles one thing only — whether a virtual display was
-    /// asked for. It must not reach [`Apple::asked_for_zlib`]: presetting that flag
-    /// is how a subtype opts *out* of compression, and neither should.
+    /// The read loop's starting state for either Apple subtype. `high_performance`
+    /// settles one thing only — whether a virtual display was asked for.
     fn new(high_performance: bool, media: Option<MediaStream>) -> Self {
         Self { virtual_display: high_performance, media, ..Self::default() }
     }
@@ -1839,9 +1829,8 @@ async fn rfb38_preface(
 fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
-        // on its downgraded 3.8 wire. Both subtypes ask for zlib in the second
-        // `SetEncodings` a layout triggers, and the native pasteboard is negotiated
-        // by `AutoPasteboard`, not an RFB encoding.
+        // on its downgraded 3.8 wire, and the native pasteboard is negotiated by
+        // `AutoPasteboard`, not an RFB encoding.
         return vnc_apple::ENCODINGS.to_vec();
     }
 
@@ -3878,10 +3867,10 @@ async fn read_rect<R: AsyncRead + Unpin>(
             return Ok(RectEffect::NOTHING);
         }
         vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
-            let first = apple.as_ref().is_some_and(|a| !a.asked_for_zlib);
+            let first = apple.as_ref().is_some_and(|a| !a.asked_for_media);
             let virtual_display = apple.as_ref().is_some_and(|a| a.virtual_display);
             if let Some(a) = apple.as_mut() {
-                a.asked_for_zlib = true;
+                a.asked_for_media = true;
             }
             let media = apple.as_mut().and_then(|a| a.media.as_mut());
             read_display_layout(
@@ -4569,7 +4558,7 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
 async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
-    ask_for_zlib: bool,
+    ask_for_media: bool,
     virtual_display: bool,
     rearm_pasteboard: bool,
     media: Option<&mut MediaStream>,
@@ -4644,16 +4633,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         (d.size, d.poll_size())
     };
     let mut uplink = uplink.lock().await;
-    if ask_for_zlib {
-        if media.is_some() {
-            debug!("vnc: display layout received, asking for zlib and the media stream");
-            uplink
-                .send(&set_encodings(&vnc_apple_audio::encodings_with_media_stream()))
-                .await?;
-        } else {
-            debug!("vnc: display layout received, asking for zlib");
-            uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
-        }
+    if ask_for_media && media.is_some() {
+        debug!("vnc: display layout received, asking for the media stream");
+        uplink
+            .send(&set_encodings(&vnc_apple_audio::encodings_with_media_stream()))
+            .await?;
     }
     if rearm_pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
@@ -6015,31 +5999,12 @@ mod tests {
         }
     }
 
-    /// Compression is not a High Performance feature. The upgrade waits on a display
-    /// layout, and plain `ard` reports one, so the only thing the subtype settles is
-    /// the virtual display. Gating zlib by subtype cost 6.19 MB of raw where zlib
-    /// sent 3.38 MB of the same 800x600 desktop, and Standard mode's framebuffer is
-    /// a physical screen — 3200x1800 on the Mac this was measured against.
     #[test]
-    fn both_apple_subtypes_start_out_wanting_zlib() {
-        for high_performance in [false, true] {
-            let apple = Apple::new(high_performance, None);
-            assert!(
-                !apple.asked_for_zlib,
-                "high_performance={high_performance} skipped the zlib upgrade"
-            );
-            assert_eq!(apple.virtual_display, high_performance);
-        }
-    }
-
-    /// The *first* `SetEncodings` only. zlib is asked for once a layout has arrived
-    /// — see [`both_apple_subtypes_start_out_wanting_zlib`].
-    #[test]
-    fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
+    fn standard_ard_uses_the_apple_metadata_list_with_zlib() {
         let encodings = rfb38_encoding_list(true, true, true, false, false);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
-        assert!(!encodings.contains(&ENCODING_ZLIB));
+        assert!(encodings.contains(&ENCODING_ZLIB));
         assert!(!encodings.contains(&vnc_clipboard::ENCODING));
     }
 
@@ -9095,7 +9060,7 @@ mod tests {
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: true, poll: false },
-            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            Some(Apple::default()),
             sink.clone(),
         )
         .await;
@@ -9162,7 +9127,7 @@ mod tests {
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: true, poll: true },
-            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            Some(Apple::default()),
             sink,
         )
         .await;
@@ -9196,7 +9161,7 @@ mod tests {
                 reader,
                 shared,
                 ReadFlags { clipboard: true, poll: true },
-                Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+                Some(Apple::default()),
                 sink,
             ));
 
@@ -9259,7 +9224,7 @@ mod tests {
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: true, poll: false },
-            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            Some(Apple::default()),
             sink.clone(),
         )
         .await;
@@ -9768,7 +9733,7 @@ mod tests {
             shared_desktop((2, 2), None, None),
             test_shadow((2, 2)),
         );
-        let apple = Apple { asked_for_zlib: true, ..Apple::default() };
+        let apple = Apple::default();
 
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
@@ -9801,7 +9766,7 @@ mod tests {
             shared_desktop((2, 2), None, None),
             test_shadow((2, 2)),
         );
-        let apple = Apple { asked_for_zlib: true, ..Apple::default() };
+        let apple = Apple::default();
 
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
@@ -9872,19 +9837,11 @@ mod tests {
             other => panic!("expected a display list, got {other:?}"),
         }
 
-        // What went back, in order: the second `SetEncodings` — the one that finally
-        // asks for zlib, which cannot be in the first without costing this whole
-        // layout — and then the re-arm for the display the Mac confirmed. The
-        // enclosing update loop sends the paired full request after it has consumed
-        // every rectangle in this FramebufferUpdate.
-        let mut expected = set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB);
-        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
-        assert_eq!(written(&sent), expected);
-        assert!(
-            vnc_apple::ENCODINGS_WITH_ZLIB.contains(&ENCODING_ZLIB)
-                && !vnc_apple::ENCODINGS.contains(&ENCODING_ZLIB),
-            "the first list must not carry zlib and the second must"
-        );
+        // What went back: the re-arm for the display the Mac confirmed, and no
+        // second `SetEncodings` without a media stream to ask for. The enclosing
+        // update loop sends the paired full request after it has consumed every
+        // rectangle in this FramebufferUpdate.
+        assert_eq!(written(&sent), vnc_apple::auto_framebuffer_update((3840, 2160)));
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the

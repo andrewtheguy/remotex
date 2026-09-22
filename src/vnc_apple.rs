@@ -92,8 +92,7 @@ pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 
-/// What this client advertises in the first `SetEncodings`, before the Mac has said
-/// anything about its displays.
+/// What this client advertises to a Mac.
 ///
 /// `screensharingd` resets its display flags on every `SetEncodings` and sets one for
 /// each of `DisplayInfo` and the layout it finds in the list, in any order: with both
@@ -101,7 +100,9 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// neither no display information at all. Order matters for one thing only, the
 /// preferred codec, which is the first of zlib, ZRLE and Apple's own codecs listed.
 /// Measured on macOS 26.6 and read from the daemon — see
-/// docs/apple-vnc-889-binary-audit.md.
+/// docs/apple-vnc-889-binary-audit.md. zlib is therefore asked for from the start,
+/// in both subtypes: measured at 398 KB for a 3200x1800 frame against 23 MB of raw
+/// pixels.
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
@@ -109,30 +110,6 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// leaves their payload formats unresolved, so advertising them would ask for
 /// rectangles this client could only guess at.
 pub const ENCODINGS: &[i32] = &[
-    ENCODING_RAW,
-    ENCODING_CURSOR_POS,
-    ENCODING_DISPLAY_INFO,
-    ENCODING_REKEY,
-    ENCODING_CURSOR_IMAGE,
-    ENCODING_DISPLAY_LAYOUT,
-    ENCODING_VENDOR_KEYSYMS,
-    ENCODING_KEYBOARD_SOURCE,
-    ENCODING_DESKTOP_SIZE,
-    ENCODING_LAST_RECT,
-];
-
-/// And what it advertises once a layout has arrived: the same list with zlib on the
-/// end.
-///
-/// The Mac keeps its display state and switches encoder, measured at 398 KB for a
-/// 3200x1800 frame against 23 MB of raw pixels, and answers with another layout,
-/// since the list names the layout again. The Mac would take zlib in the first
-/// list just as well; the second `SetEncodings` is where the media stream's
-/// encoding is added on a target that asked for audio.
-///
-/// Both subtypes use it. A layout is what the upgrade waits on, and plain `ard`
-/// reports one too, so it compresses on the same terms High Performance does.
-pub const ENCODINGS_WITH_ZLIB: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
     ENCODING_DISPLAY_INFO,
@@ -878,31 +855,13 @@ mod tests {
         assert_eq!(all, vec![0x0d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 
-    /// The second `SetEncodings` is the first one with zlib appended, and nothing
-    /// else about it moved: dropping `DisplayInfo` or the layout from either list
-    /// costs the display information silently, with a session that still connects
-    /// and paints.
+    /// Dropping `DisplayInfo` or the layout from the list costs the display
+    /// information silently, with a session that still connects and paints.
     #[test]
-    fn the_zlib_list_is_the_first_list_plus_zlib() {
-        assert_eq!(
-            ENCODINGS_WITH_ZLIB.len(),
-            ENCODINGS.len() + 1,
-            "exactly one entry more"
-        );
-        assert_eq!(
-            &ENCODINGS_WITH_ZLIB[..ENCODINGS.len()],
-            ENCODINGS,
-            "the same entries"
-        );
-        assert_eq!(
-            ENCODINGS_WITH_ZLIB.last(),
-            Some(&ENCODING_ZLIB),
-            "and zlib on the end"
-        );
-        assert!(
-            ENCODINGS.contains(&ENCODING_DISPLAY_INFO) && ENCODINGS.contains(&ENCODING_DISPLAY_LAYOUT),
-            "the two the Mac reports its displays for"
-        );
+    fn the_list_asks_for_displays_and_zlib() {
+        for encoding in [ENCODING_DISPLAY_INFO, ENCODING_DISPLAY_LAYOUT, ENCODING_ZLIB] {
+            assert!(ENCODINGS.contains(&encoding), "{encoding:#x}");
+        }
     }
 
     /// The `AppleDisplayLayout` a macOS 26 VM sent for its two real screens, off

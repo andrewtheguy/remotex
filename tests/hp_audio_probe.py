@@ -41,7 +41,7 @@ ENC_VENDOR_KEYSYMS, ENC_KEYBOARD_SOURCE, ENC_DEVICE_INFO = 0x453, 0x455, 0x456
 ENC_MEDIA = 1010
 ENCODINGS = [ENC_RAW, ENC_CURSOR_POS, ENC_DISPLAY_INFO, ENC_REKEY, ENC_CURSOR_IMAGE,
              ENC_DISPLAY_LAYOUT, ENC_VENDOR_KEYSYMS, ENC_KEYBOARD_SOURCE,
-             ENC_DESKTOP_SIZE, ENC_LAST_RECT]
+             ENC_DESKTOP_SIZE, ENC_LAST_RECT, ENC_ZLIB]
 
 
 def log(*a):
@@ -520,13 +520,13 @@ def main():
                         painted = 0
                     rec.send(auto_framebuffer_update(bw, bh))
                     if layouts == 1:
-                        encs = list(ENCODINGS) + [ENC_ZLIB]
                         if not args.no_media:
+                            encs = list(ENCODINGS)
                             if args.encodings_order == "first":
                                 encs = [ENC_MEDIA] + encs
                             elif args.encodings_order == "last":
                                 encs = encs + [ENC_MEDIA]
-                        rec.send(set_encodings(encs))
+                            rec.send(set_encodings(encs))
                         rec.send(update_request(False, bw, bh))
                         if not args.no_media and not media_sent:
                             msg = media_stream_config(session_uuid, audio_offer, akeys, video_offer, vkeys)

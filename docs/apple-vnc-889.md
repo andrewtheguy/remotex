@@ -151,12 +151,9 @@ Standard mode was independently remeasured July 31, 2026. After Apple DH auth,
 layer.
 
 Standard mode compresses on the same terms as High Performance, remeasured
-August 1, 2026. The second `SetEncodings` a layout triggers is honoured on the
-plain 3.8 wire too: the Mac answered with another identical layout — so no display
-state is lost — and switched to zlib rectangles. Over one identical 800×600
-session it sent 3,380,550 bytes against 6,190,318 raw, with the decoded
-framebuffer pixel-identical to a full repaint. remotex asks for zlib in both
-subtypes; the gate that kept `ard` on raw pixels was removed.
+August 1, 2026. Over one identical 800×600 session zlib sent 3,380,550 bytes
+against 6,190,318 raw, with the decoded framebuffer pixel-identical to a full
+repaint. remotex asks for zlib in both subtypes.
 
 Standard native pasteboard monitoring requires `ViewerInfo`, `SetMode(control)`,
 then `AutoPasteboard(start)`. Without the first two, writes and explicit fetches
@@ -238,9 +235,10 @@ own codecs listed; LastRect is recognised nowhere. Every `SetEncodings` that lis
 change to the list cost the layout, was measured with a layout reader four bytes
 out of step.
 
-`vnc_apple::ENCODINGS_WITH_ZLIB` is sent once a layout has arrived; the Mac keeps
-its display state and switches encoder, measured at 398 KB for a 3200×1800 frame
-against 23 MB raw.
+`vnc_apple::ENCODINGS` therefore carries zlib from the first `SetEncodings`,
+measured at 398 KB for a 3200×1800 frame against 23 MB raw. A second
+`SetEncodings`, the same list plus the media stream, goes out after the first
+layout only on a target that asked for audio.
 
 **Advertising is a promise.** Every entry in the list has to be decodable or at
 least steppable, and two of them do not share the common length rule: `CursorPos`
