@@ -1,7 +1,8 @@
 //! One sender's RTSP conversation: OPTIONS with its Apple-Challenge, ANNOUNCE
 //! with the codec and the wrapped AES key, SETUP for the UDP ports, RECORD, then
 //! SET_PARAMETER and FLUSH until TEARDOWN — every request after the Digest
-//! challenge the password answers.
+//! challenge the password answers. A stream is set up only while an Apple audio
+//! session is running, and the connection is closed when that session ends.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,7 +12,8 @@ use base64::Engine as _;
 use log::{debug, info, warn};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::watch;
 
 use super::Shared;
 use super::crypto::{B64, REALM, apple_response, digest_matches, unwrap_aes_key};
@@ -70,6 +72,7 @@ pub(super) async fn serve(tcp: TcpStream, id: u64, shared: Arc<Shared>) {
         authorized: false,
         params: None,
         stream: None,
+        session: None,
     };
     if let Err(e) = conn.run(tcp).await {
         warn!("airplay #{id}: {e:#}");
@@ -87,6 +90,8 @@ struct Conn {
     authorized: bool,
     params: Option<Params>,
     stream: Option<Stream>,
+    /// The Apple audio session this connection's stream was set up under.
+    session: Option<u64>,
 }
 
 impl Conn {
@@ -97,35 +102,64 @@ impl Conn {
         let peer = tcp.peer_addr()?;
         let (reader, mut writer) = tcp.into_split();
         let mut reader = BufReader::new(reader);
-        while let Some(request) = read_request(&mut reader).await? {
-            debug!("airplay #{}: {} {}", self.id, request.method, request.uri);
-            let cseq = request.header("CSeq").unwrap_or("0").to_owned();
-            let closing = request.method == "TEARDOWN";
-            let mut response = if self.authorize(&request) {
-                self.handle(&request, local, peer).await.unwrap_or_else(|e| {
-                    warn!("airplay #{}: {} failed: {e:#}", self.id, request.method);
-                    Response::new(400)
-                })
-            } else {
-                Response::new(401).header(
-                    "WWW-Authenticate",
-                    format!(r#"Digest realm="{REALM}", nonce="{}""#, self.nonce),
-                )
-            };
-            // Answered on whatever it arrives with, a refusal included: a sender
-            // that cannot verify the speaker never gets as far as the password.
-            if let Some(challenge) = request.header("Apple-Challenge") {
-                match apple_response(challenge, local.ip().to_canonical(), self.shared.hw_addr) {
-                    Ok(answer) => response = response.header("Apple-Response", answer),
-                    Err(e) => warn!("airplay #{}: {e:#}", self.id),
+        let mut sessions = self.shared.session.subscribe();
+        loop {
+            // The whole turn, answer included, is raced against the session: one
+            // stuck writing to a sender that stopped reading would hold the stream
+            // and the claim. Biased, so a request already buffered cannot win over
+            // a session that has ended. Cancelling a turn is harmless: the
+            // connection ends here.
+            let session = self.session;
+            let more = tokio::select! {
+                biased;
+                () = session_ended(&mut sessions, session) => {
+                    info!("airplay #{}: the session ended; hanging up on the sender", self.id);
+                    break;
                 }
-            }
-            write_response(&mut writer, &cseq, response).await?;
-            if closing {
+                more = self.turn(&mut reader, &mut writer, local, peer) => more?,
+            };
+            if !more {
                 break;
             }
         }
         Ok(())
+    }
+
+    /// Read one request and answer it; `false` once the connection is done.
+    async fn turn(
+        &mut self,
+        reader: &mut BufReader<OwnedReadHalf>,
+        writer: &mut OwnedWriteHalf,
+        local: SocketAddr,
+        peer: SocketAddr,
+    ) -> anyhow::Result<bool> {
+        let Some(request) = read_request(reader).await? else {
+            return Ok(false);
+        };
+        debug!("airplay #{}: {} {}", self.id, request.method, request.uri);
+        let cseq = request.header("CSeq").unwrap_or("0").to_owned();
+        let closing = request.method == "TEARDOWN";
+        let mut response = if self.authorize(&request) {
+            self.handle(&request, local, peer).await.unwrap_or_else(|e| {
+                warn!("airplay #{}: {} failed: {e:#}", self.id, request.method);
+                Response::new(400)
+            })
+        } else {
+            Response::new(401).header(
+                "WWW-Authenticate",
+                format!(r#"Digest realm="{REALM}", nonce="{}""#, self.nonce),
+            )
+        };
+        // Answered on whatever it arrives with, a refusal included: a sender
+        // that cannot verify the speaker never gets as far as the password.
+        if let Some(challenge) = request.header("Apple-Challenge") {
+            match apple_response(challenge, local.ip().to_canonical(), self.shared.hw_addr) {
+                Ok(answer) => response = response.header("Apple-Response", answer),
+                Err(e) => warn!("airplay #{}: {e:#}", self.id),
+            }
+        }
+        write_response(writer, &cseq, response).await?;
+        Ok(!closing)
     }
 
     fn authorize(&mut self, request: &Request) -> bool {
@@ -156,6 +190,16 @@ impl Conn {
             }
             "SETUP" => {
                 let params = self.params.clone().context("SETUP before ANNOUNCE")?;
+                let Some(session) = *self.shared.session.borrow() else {
+                    warn!("airplay #{}: refused, no Apple audio session is running", self.id);
+                    return Ok(Response::new(453));
+                };
+                // A stream stays with the session it was set up under: one whose
+                // session was replaced is hung up on, not moved to the new one.
+                if self.session.is_some_and(|own| own != session) {
+                    warn!("airplay #{}: refused, its session has ended", self.id);
+                    return Ok(Response::new(453));
+                }
                 {
                     let mut streaming = self.shared.streaming.lock().unwrap();
                     match *streaming {
@@ -169,7 +213,7 @@ impl Conn {
                 let transport = request.header("Transport").unwrap_or_default();
                 let timing_port = transport_port(transport, "timing_port");
                 self.stream = None;
-                let stream = match Stream::start(local, peer, timing_port, params, Arc::clone(&self.shared)).await {
+                let stream = match Stream::start(local, peer, timing_port, params, Arc::clone(&self.shared), session).await {
                     Ok(stream) => stream,
                     // The claim goes with it, or the connection would hold the one
                     // stream with nothing playing it.
@@ -184,6 +228,7 @@ impl Conn {
                 );
                 info!("airplay #{}: streaming to UDP port {}", self.id, stream.audio_port);
                 self.stream = Some(stream);
+                self.session = Some(session);
                 Response::new(200).header("Transport", reply).header("Session", "1")
             }
             "RECORD" => Response::new(200).header("Audio-Latency", "11025"),
@@ -212,11 +257,22 @@ impl Conn {
 
     fn stop(&mut self) {
         self.stream = None;
+        self.session = None;
         let mut streaming = self.shared.streaming.lock().unwrap();
         if *streaming == Some(self.id) {
             *streaming = None;
         }
     }
+}
+
+/// Resolves once `session` is no longer the one running; never for a connection
+/// with no stream, which the speaker has no reason to hang up on.
+async fn session_ended(sessions: &mut watch::Receiver<Option<u64>>, session: Option<u64>) {
+    let Some(id) = session else {
+        return std::future::pending().await;
+    };
+    // The sender lives in `Shared`, which this connection holds.
+    let _ = sessions.wait_for(|running| *running != Some(id)).await;
 }
 
 fn transport_port(transport: &str, key: &str) -> Option<u16> {
@@ -389,6 +445,36 @@ mod tests {
 
         let request = read_request(&mut &b"\r\nOPTIONS * RTSP/1.0\r\nCSeq: 3\r\n\r\n"[..]).await.unwrap().unwrap();
         assert_eq!((request.method.as_str(), request.header("CSeq")), ("OPTIONS", Some("3")));
+    }
+
+    /// A connection whose session was replaced before it noticed is not moved to
+    /// the new one by another SETUP.
+    #[tokio::test]
+    async fn a_setup_does_not_rebind_a_stream_to_a_newer_session() {
+        let airplay = crate::airplay::AirPlay::start_unadvertised(&crate::config::AirPlayConfig {
+            name: "test".into(),
+            password: "sesame".into(),
+        })
+        .unwrap();
+        let bridge = Arc::new(crate::audio::AudioBridge::new());
+        let _newer = airplay.attach(&bridge);
+        let running = airplay.shared.session.borrow().unwrap();
+        let sdp = "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
+        let mut conn = Conn {
+            id: 1,
+            shared: Arc::clone(&airplay.shared),
+            nonce: String::new(),
+            authorized: true,
+            params: Some(parse_sdp(sdp).unwrap()),
+            stream: None,
+            session: Some(running - 1),
+        };
+        let setup = Request { method: "SETUP".into(), uri: String::new(), headers: Vec::new(), body: Vec::new() };
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let response = conn.handle(&setup, addr, addr).await.unwrap();
+        assert_eq!(response.status, 453);
+        assert_eq!(conn.session, Some(running - 1), "the stream was moved to the newer session");
+        assert!(conn.stream.is_none() && airplay.shared.streaming.lock().unwrap().is_none());
     }
 
     #[test]

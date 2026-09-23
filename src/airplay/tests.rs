@@ -108,6 +108,52 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {name} in {headers:?}"))
 }
 
+/// The SDP a Mac ANNOUNCEs: ALAC, with `aes_key` wrapped for the receiver.
+fn announcement(aes_key: [u8; 16], aes_iv: [u8; 16]) -> String {
+    let wrapped = public_key().encrypt(&mut rand::rng(), Oaep::<sha1::Sha1>::new(), &aes_key).unwrap();
+    format!(
+        "v=0\r\no=iTunes 1 0 IN IP4 127.0.0.1\r\ns=iTunes\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+         m=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless\r\n\
+         a=fmtp:96 {FRAMES} 0 16 40 10 14 2 255 0 0 44100\r\n\
+         a=rsaaeskey:{}\r\na=aesiv:{}\r\na=min-latency:11025\r\n",
+        B64.encode(wrapped),
+        B64.encode(aes_iv),
+    )
+}
+
+/// Send `samples` to the audio port as a Mac does: ALAC packets of [`FRAMES`],
+/// encrypted under `aes_key`, over RTP.
+async fn play(audio_port: u16, aes_key: [u8; 16], aes_iv: [u8; 16], samples: &[i16]) {
+    let input = FormatDescription::pcm::<i16>(44_100.0, 2);
+    let alac = FormatDescription::alac(44_100.0, FRAMES as u32, 2);
+    let mut encoder = AlacEncoder::new(&alac);
+    let mut packet = vec![0u8; alac.max_packet_size()];
+    let cipher = aes::Aes128::new(&aes_key.into());
+    let rtp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let to = SocketAddr::from((Ipv4Addr::LOCALHOST, audio_port));
+    for (seq, chunk) in samples.chunks(FRAMES * 2).enumerate() {
+        let pcm: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let len = encoder.encode(&input, &pcm, &mut packet);
+        let mut payload = packet[..len].to_vec();
+        let mut chain = aes_iv;
+        for block in payload.as_chunks_mut::<16>().0 {
+            for (b, c) in block.iter_mut().zip(chain) {
+                *b ^= c;
+            }
+            cipher.encrypt_block(block.into());
+            chain = *block;
+        }
+        let mut datagram = vec![0x80, if seq == 0 { 0xe0 } else { 0x60 }];
+        datagram.extend_from_slice(&(seq as u16).to_be_bytes());
+        datagram.extend_from_slice(&((seq * FRAMES) as u32).to_be_bytes());
+        datagram.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        datagram.extend_from_slice(&payload);
+        rtp.send_to(&datagram, to).await.unwrap();
+        // Loopback drops a burst; pace it the way a sender does, only faster.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 fn server_port(headers: &[(String, String)]) -> u16 {
     header(headers, "Transport")
         .split(';')
@@ -122,7 +168,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     let airplay = AirPlay::start_unadvertised(&config()).unwrap();
     let bridge = Arc::new(AudioBridge::new());
     let mut listener = bridge.take_listener();
-    airplay.attach(&bridge);
+    let _session = airplay.attach(&bridge);
 
     // The Apple-Challenge is answered even on a refusal, and signs 127.0.0.1 —
     // the IPv4 address, not the mapped IPv6 one — and the advertised address.
@@ -146,15 +192,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     // ANNOUNCE a session key only the receiver can unwrap.
     let aes_key = *b"remotex-airplay!";
     let aes_iv = *b"0123456789abcdef";
-    let wrapped = public_key().encrypt(&mut rand::rng(), Oaep::<sha1::Sha1>::new(), &aes_key).unwrap();
-    let sdp = format!(
-        "v=0\r\no=iTunes 1 0 IN IP4 127.0.0.1\r\ns=iTunes\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
-         m=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless\r\n\
-         a=fmtp:96 {FRAMES} 0 16 40 10 14 2 255 0 0 44100\r\n\
-         a=rsaaeskey:{}\r\na=aesiv:{}\r\na=min-latency:11025\r\n",
-        B64.encode(wrapped),
-        B64.encode(aes_iv),
-    );
+    let sdp = announcement(aes_key, aes_iv);
     assert_eq!(sender.request("ANNOUNCE", &[("Content-Type", "application/sdp")], &sdp).await.0, 200);
 
     let control = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -192,34 +230,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
             [left as i16, right as i16]
         })
         .collect();
-    let input = FormatDescription::pcm::<i16>(44_100.0, 2);
-    let alac = FormatDescription::alac(44_100.0, FRAMES as u32, 2);
-    let mut encoder = AlacEncoder::new(&alac);
-    let mut packet = vec![0u8; alac.max_packet_size()];
-    let cipher = aes::Aes128::new(&aes_key.into());
-    let rtp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let to = SocketAddr::from((Ipv4Addr::LOCALHOST, audio_port));
-    for (seq, chunk) in sent.chunks(FRAMES * 2).enumerate() {
-        let pcm: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let len = encoder.encode(&input, &pcm, &mut packet);
-        let mut payload = packet[..len].to_vec();
-        let mut chain = aes_iv;
-        for block in payload.as_chunks_mut::<16>().0 {
-            for (b, c) in block.iter_mut().zip(chain) {
-                *b ^= c;
-            }
-            cipher.encrypt_block(block.into());
-            chain = *block;
-        }
-        let mut datagram = vec![0x80, if seq == 0 { 0xe0 } else { 0x60 }];
-        datagram.extend_from_slice(&(seq as u16).to_be_bytes());
-        datagram.extend_from_slice(&((seq * FRAMES) as u32).to_be_bytes());
-        datagram.extend_from_slice(&0x1234_5678u32.to_be_bytes());
-        datagram.extend_from_slice(&payload);
-        rtp.send_to(&datagram, to).await.unwrap();
-        // Loopback drops a burst; pace it the way a sender does, only faster.
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    play(audio_port, aes_key, aes_iv, &sent).await;
 
     let want = sent.len() * 2;
     let mut received = Vec::new();
@@ -246,4 +257,96 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     })
     .await
     .expect("the format is cleared when the stream ends");
+}
+
+/// A stream belongs to the session it was set up under: none is set up while no
+/// session runs, and the session ending hangs up on the sender, so the Mac takes
+/// its sound back — while a newer session attached in between is left alone.
+#[tokio::test]
+async fn a_stream_is_refused_without_a_session_and_hung_up_on_when_it_ends() {
+    let airplay = AirPlay::start_unadvertised(&config()).unwrap();
+    let sdp = announcement(*b"remotex-airplay!", *b"0123456789abcdef");
+    let timing = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let transport = format!(
+        "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=9;timing_port={}",
+        timing.local_addr().unwrap().port()
+    );
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 453);
+
+    // Refused, not dropped: once a session starts, the same connection may stream.
+    let bridge = Arc::new(AudioBridge::new());
+    let first = airplay.attach(&bridge);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 200);
+    assert_eq!(sender.request("RECORD", &[], "").await.0, 200);
+
+    // A session that has already been replaced ends nothing when it is dropped.
+    let second = airplay.attach(&bridge);
+    drop(first);
+    assert!(airplay.attached().is_some(), "the newer session still has the speaker");
+    // The stream was set up under the first session, so its replacement ended it.
+    expect_hung_up(&mut sender).await;
+
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 200);
+    drop(second);
+    assert!(airplay.attached().is_none(), "the ended session is no longer fed");
+    expect_hung_up(&mut sender).await;
+
+    // The claim went with the connection, so the next session's sender streams.
+    let _third = airplay.attach(&bridge);
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 200);
+}
+
+/// The speaker closed the sender's connection without being asked.
+async fn expect_hung_up(sender: &mut Sender) {
+    let mut rest = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), sender.reader.read_line(&mut rest))
+        .await
+        .expect("the speaker hangs up");
+    assert_eq!(read.unwrap(), 0, "the connection closed with nothing more said: {rest:?}");
+}
+
+/// A stream plays into the session it was set up under and no other: what it
+/// still holds when that session hands over, a partial buffer included, never
+/// reaches the session that took over.
+#[tokio::test]
+async fn a_stream_never_plays_into_the_session_that_took_over() {
+    let airplay = AirPlay::start_unadvertised(&config()).unwrap();
+    let (aes_key, aes_iv) = (*b"remotex-airplay!", *b"0123456789abcdef");
+    let sdp = announcement(aes_key, aes_iv);
+    let timing = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let transport = format!(
+        "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=9;timing_port={}",
+        timing.local_addr().unwrap().port()
+    );
+    let first = Arc::new(AudioBridge::new());
+    let first_session = airplay.attach(&first);
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    let (code, setup) = sender.request("SETUP", &[("Transport", &transport)], "").await;
+    assert_eq!(code, 200);
+
+    // One packet: less than a wave buffer, so the stream is still holding it.
+    play(server_port(&setup), aes_key, aes_iv, &[1000i16; FRAMES * 2]).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(first.negotiated_format().is_none(), "a partial buffer was fed early");
+
+    // Handed over with nothing running in between, as a takeover does.
+    let second = Arc::new(AudioBridge::new());
+    let mut listener = second.take_listener();
+    drop(first_session);
+    let _second_session = airplay.attach(&second);
+    expect_hung_up(&mut sender).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(second.negotiated_format().is_none(), "the old stream announced itself to the new session");
+    assert!(listener.queued_wave().is_none(), "the old stream played into the new session");
 }

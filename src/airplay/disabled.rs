@@ -17,7 +17,11 @@ impl AirPlay {
         anyhow::bail!("this remotex was built without the airplay feature")
     }
 
-    pub fn attach(&self, _bridge: &Arc<AudioBridge>) {
+    pub fn attach(&self, _bridge: &Arc<AudioBridge>) -> Attached {
         match *self {}
     }
 }
+
+/// Never made, since there is no speaker to attach to: a struct, not an empty
+/// enum, so the session's code that stores one is not unreachable.
+pub struct Attached(());
