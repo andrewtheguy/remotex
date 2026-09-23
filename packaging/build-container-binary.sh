@@ -7,8 +7,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 output="$(realpath -m "${1:-tmp/container-bin/remotex}")"
 
-echo ">> building container gateway without default features"
-cargo build --release --no-default-features
+echo ">> building container gateway without default features, but with airplay"
+cargo build --release --no-default-features --features airplay
 
 binary="${CARGO_TARGET_DIR:-target}/release/remotex"
 case "$("$binary" --help)" in
@@ -24,6 +24,13 @@ esac
 case "$("$binary" check-config --help)" in
   *--embedded*)
     echo "container gateway unexpectedly exposes check-config --embedded" >&2
+    exit 1
+    ;;
+esac
+case "$("$binary" --help)" in
+  *"Features: "*airplay*) ;;
+  *)
+    echo "container gateway is missing the airplay feature" >&2
     exit 1
     ;;
 esac

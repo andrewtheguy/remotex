@@ -1568,6 +1568,20 @@ impl ConfigFile {
         // target with audio needs `[airplay]`, and `[airplay]` without one is a
         // speaker nothing would ever play through — refused rather than started.
         let apple_audio = config.targets.iter().find(|t| t.audio && t.receives_airplay());
+        if !cfg!(feature = "airplay") {
+            if let Some(target) = apple_audio {
+                anyhow::bail!(
+                    "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
+                     AirPlay speaker, and this remotex was built without the airplay feature",
+                    target.name,
+                    target.subtype.map_or("apple", Subtype::name)
+                );
+            }
+            anyhow::ensure!(
+                config.airplay.is_none(),
+                "[airplay] is set, and this remotex was built without the airplay feature"
+            );
+        }
         match (apple_audio, &config.airplay) {
             (Some(target), None) => anyhow::bail!(
                 "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
@@ -4850,6 +4864,7 @@ mod tests {
     /// A Mac's sound arrives over AirPlay on either subtype, so `audio` there
     /// needs the speaker's password, and the resolved config carries the speaker
     /// under the gateway's name.
+    #[cfg(feature = "airplay")]
     #[test]
     fn audio_on_either_apple_subtype_needs_the_airplay_password() {
         for subtype in ["ard", "ard-high-performance"] {
@@ -4894,6 +4909,7 @@ mod tests {
 
     /// A speaker nothing plays through is refused rather than started, and a
     /// config without Apple audio starts none.
+    #[cfg(feature = "airplay")]
     #[test]
     fn airplay_without_apple_audio_is_refused() {
         let mac = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
@@ -4910,6 +4926,22 @@ mod tests {
             .resolve()
             .unwrap();
         assert_eq!(config.airplay, None);
+    }
+
+    /// A build without the speaker says so, rather than asking for a table it
+    /// would then refuse.
+    #[cfg(not(feature = "airplay"))]
+    #[test]
+    fn a_build_without_airplay_refuses_a_macs_audio_and_the_table() {
+        let mac = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
+                   username = \"u\"\npassword = \"p\"\n";
+        for text in [
+            format!("[server]\n{}\n[airplay]\npassword = \"sesame\"\n{mac}audio = true\n", site_passwd_line()),
+            format!("[server]\n{}\n[airplay]\npassword = \"sesame\"\n{mac}", site_passwd_line()),
+        ] {
+            let err = ConfigFile::parse(&text).unwrap_err();
+            assert!(format!("{err:#}").contains("without the airplay feature"), "{err:#}");
+        }
     }
 
     /// The pre-negotiation format follows the engine: CD quality is what RDP is

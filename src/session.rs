@@ -2761,6 +2761,7 @@ mod tests {
     /// Mac with audio attaches the engine's bridge to it, and the engine ending is
     /// what detaches it: the speaker holds the bridge weakly, and nothing else is
     /// left holding it once the slot and the engine have let go.
+    #[cfg(feature = "airplay")]
     #[tokio::test]
     async fn a_mac_with_audio_is_fed_by_the_airplay_speaker_while_its_engine_runs() {
         let (hook_tx, hooks) = std_mpsc::channel();

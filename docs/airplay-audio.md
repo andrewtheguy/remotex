@@ -8,6 +8,11 @@ output menu, and what it plays reaches the browser like any other target's sound
 The speaker is `src/airplay/`. It began as a standalone proof of concept that was
 measured against a physical Mac before any of it was wired in.
 
+It is the `airplay` Cargo feature: on by default, and in every released
+artifact, the container included. A build with `--no-default-features` and
+without `--features airplay` has no speaker, and refuses both `[airplay]` and
+`audio` on a Mac.
+
 ## Configuration
 
 ```toml

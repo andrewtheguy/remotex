@@ -18,6 +18,8 @@ use clap::{Parser, Subcommand};
 pub const FEATURES: &[&str] = &[
     #[cfg(feature = "embedded-gateway")]
     "embedded-gateway",
+    #[cfg(feature = "airplay")]
+    "airplay",
 ];
 
 /// [`FEATURES`] as a terminal and the log spell them.
@@ -126,6 +128,7 @@ mod tests {
         let help = command.render_help().to_string();
         assert!(help.trim_end().ends_with(&format!("Features: {}", features_line())), "{help}");
         assert_eq!(FEATURES.contains(&"embedded-gateway"), cfg!(feature = "embedded-gateway"));
+        assert_eq!(FEATURES.contains(&"airplay"), cfg!(feature = "airplay"));
         assert_eq!(
             command.render_version(),
             format!("remotex {}\n", env!("CARGO_PKG_VERSION"))

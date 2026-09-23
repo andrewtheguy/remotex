@@ -135,7 +135,8 @@ documentation.
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the Unix-only `remotex tui` control
   plane and its hidden `serve-embedded` workers. Containers must be built through
-  `packaging/build-container-binary.sh`, with default features disabled, and must
+  `packaging/build-container-binary.sh`, with default features disabled except
+  `airplay`, and must
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
 - Windows ships only `serve`, `check-config`, and `gen-passwd` in the MSI. Build
   it with `packaging/build-windows-msi.ps1` on `windows-ci-build` through
