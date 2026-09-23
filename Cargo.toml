@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.247"
+version = "0.0.248"
 
 [package]
 name = "remotex"
@@ -154,8 +154,8 @@ rubato = "4"
 # — but it is 64-bit rather than 32, because a collision here means permanently
 # wrong pixels rather than a retry. xxh3 over blake2/sha2 because this runs on
 # every tile of every frame. Pure Rust, which is a nice property but not the
-# reason it was chosen: `ring` and `libz-sys` already compile C on every runner,
-# so a C dependency here would have cost nothing new either.
+# reason it was chosen: `ring` already compiles C on every runner, so a C
+# dependency here would have cost nothing new either.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cursor shapes ride the JSON control channel as base64 PNG (see
 # src/protocol.rs) — small and rare enough not to warrant a binary frame kind.
@@ -191,13 +191,12 @@ sha1 = "0.11"
 # (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no new
 # dependency.
 #
-# **The backend is not chosen here.** The RDP client's CredSSP dependency (`sspi`,
-# via `winscard`) turns on flate2's C zlib, so `libz-sys` is in the tree and every
-# flate2 user gets C zlib. The two backends differ in one way this repo has met: a
-# sync flush against an already-flushed stream emits an empty stored block on
-# miniz_oxide where the C zlib suppresses it, which once hung a test helper written
-# to loop until a flush produced nothing. See `deflate_chunk` in
-# src/vnc_encodings.rs; the production deflate loop is correct under either.
+# The backend is flate2's default, the pure-Rust miniz_oxide; nothing in the tree
+# turns on C zlib. A dependency that did would switch every flate2 user over, and
+# the two differ in one way this repo has met: a sync flush against an
+# already-flushed stream emits an empty stored block on miniz_oxide where C zlib
+# suppresses it. See `deflate_chunk` in src/vnc_encodings.rs; the production
+# deflate and inflate loops are correct under either.
 flate2 = "1"
 # Tuned TCP keepalive on every engine socket (src/engine.rs), so a remote host
 # that is switched off — no FIN, no RST, just silence — is noticed in seconds

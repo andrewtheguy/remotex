@@ -104,7 +104,7 @@ const ENCODING_ZRLE: i32 = 16;
 /// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
 /// shared by every rectangle on the connection. Not a vendor encoding and not
 /// Apple's alone, though Apple's High Performance mode is where it arrived here
-/// first — see [`vnc_apple::ENCODINGS_WITH_ZLIB`].
+/// first — see [`vnc_apple::ENCODINGS`].
 pub(crate) const ENCODING_ZLIB: i32 = 6;
 /// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
@@ -220,15 +220,17 @@ impl Dialect {
         }
     }
 
-    /// The ClientInit byte. Nominally RFB's shared-session flag; Apple's server
-    /// wants a particular value there and the bits above the low one are what tell
-    /// it a viewer speaking its own revision is on the other end.
+    /// The ClientInit byte. Nominally RFB's shared-session flag. On Apple's
+    /// revision `0x80` asks for the enhanced ServerInit, as Apple's viewer always
+    /// does; `0x40`, which it sets only with a session picker to offer, would ask a
+    /// Mac whose console user is not the one authenticated to choose a login session
+    /// first — an exchange this client does not implement.
     fn client_init(self) -> u8 {
         match self {
             // Share the session: don't kick other clients. The single-session
             // policy lives in this program, not on the VNC server.
             Dialect::Rfb38 => 1,
-            Dialect::Apple889 => 0xc1,
+            Dialect::Apple889 => 0x81,
         }
     }
 }
@@ -1219,19 +1221,11 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
-    /// Whether zlib has been asked for yet.
-    ///
-    /// It cannot be in the first `SetEncodings` — see
-    /// [`vnc_apple::ENCODINGS_WITH_ZLIB`] — so it is asked for in a second one, once
-    /// the Mac has reported its displays and there is nothing left to lose by it.
-    /// Once, hence the flag: a layout arrives at every login and lock.
-    ///
-    /// Both subtypes do this. The upgrade rides on the display layout, which plain
-    /// `ard` reports just as High Performance does, so gating it by subtype only cost
-    /// bandwidth — measured at 6.19 MB of raw against 3.38 MB of zlib for the same
-    /// 800x600 desktop, on a mode whose framebuffer is a physical screen and can be
-    /// far larger than that.
-    asked_for_zlib: bool,
+    /// Whether the media stream has been asked for yet, in a second `SetEncodings`
+    /// once the Mac has reported its displays — see
+    /// [`vnc_apple_audio::encodings_with_media_stream`]. Once, hence the flag: a
+    /// layout arrives at every login and lock.
+    asked_for_media: bool,
     /// The Mac's system audio, on a High Performance target that asked for it: the
     /// `0x1c` offer goes out with the first layout's `SetEncodings`, and the Mac's
     /// encoding-1010 reply starts the receiver. Dropped with the read loop, which
@@ -1240,11 +1234,8 @@ struct Apple {
 }
 
 impl Apple {
-    /// The read loop's starting state for either Apple subtype.
-    ///
-    /// `high_performance` settles one thing only — whether a virtual display was
-    /// asked for. It must not reach [`Apple::asked_for_zlib`]: presetting that flag
-    /// is how a subtype opts *out* of compression, and neither should.
+    /// The read loop's starting state for either Apple subtype. `high_performance`
+    /// settles one thing only — whether a virtual display was asked for.
     fn new(high_performance: bool, media: Option<MediaStream>) -> Self {
         Self { virtual_display: high_performance, media, ..Self::default() }
     }
@@ -1296,8 +1287,9 @@ struct ClipboardState {
     /// `None` until caps arrive, which is also how "the server does not speak
     /// the extension, use latin-1" is spelled — see [`crate::vnc_clipboard`].
     server: Option<vnc_clipboard::Caps>,
-    /// Opaque value echoed by Apple's pasteboard messages. Zero until the Mac
-    /// supplies one, which is also the value its first fetch uses.
+    /// The id Apple's pasteboard messages carry. The Mac echoes a fetch's id in
+    /// its reply and ignores the one on a send, so this stays at the zero the
+    /// first fetch uses; Apple's viewer treats a zero reply as an unrequested one.
     apple_session_id: u32,
     /// Browser reads waiting for the next native Apple pasteboard response.
     /// The panel issues only one at a time, but count them so the wire remains
@@ -1508,8 +1500,7 @@ struct Flags {
     /// subtypes negotiate them; only one uses the 003.889 record transport.
     apple: bool,
     /// Whether this is Apple's High Performance mode. It requests a virtual display
-    /// during setup and asks for zlib after the first layout; plain `ard` does
-    /// neither.
+    /// during setup; plain `ard` does not.
     high_performance: bool,
     /// The Mac's system audio, when the target asked for it: the negotiation the
     /// read loop sends after the first display layout, and the receiver it then
@@ -1753,12 +1744,11 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
 
 /// Describe ServerInit's name field, which on Apple's revision is not a name.
 ///
-/// A Mac prefixes it with 22 bytes: a zero marker, a `u32` of session flags, and a
+/// A Mac prefixes it with 22 bytes: a `u16` zero, a `u32` of session flags, and a
 /// 16-byte capability bitmap, with the UTF-8 name after all of it. Printing the lot
 /// as a string gave a log line of mojibake with the real name buried in it, and
-/// hid the flags — of which one, `0x04`, would mean a whole negotiation follows
-/// ServerInit that this client does not implement. Saying so is the point of
-/// reading them; nothing here is acted on.
+/// hid the flags. Bits 5 and up are the most virtual displays the Mac will create.
+/// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
 ///
 /// Anything that is not shaped like that is a name, which is what every other
 /// server sends.
@@ -1768,18 +1758,21 @@ fn describe_desktop(field: &[u8]) -> String {
     }
     let flags = u32::from_be_bytes(field[2..6].try_into().expect("four bytes of flags"));
     let name = String::from_utf8_lossy(&field[22..]);
-    let mut named: Vec<&str> = [(0x01, "observe"), (0x02, "may-control"), (0x08, "no-virtual-display")]
-        .into_iter()
-        .filter(|(bit, _)| flags & bit != 0)
-        .map(|(_, name)| name)
-        .collect();
-    // Called out rather than listed with the rest: a server that offers it expects
-    // a SessionInfo/SessionCommand/SessionResult exchange before anything else, and
-    // the symptom of not answering is a session that stops here in silence.
-    if flags & 0x04 != 0 {
-        named.push("SESSION-SELECT, which this client does not implement");
-    }
-    format!("{name:?} (Apple flags {flags:#010x}: {})", named.join(", "))
+    let named: Vec<&str> = [
+        (0x01, "observe-only"),
+        (0x02, "may-control"),
+        (0x04, "session-select"),
+        (0x08, "no-screen-capture"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| flags & bit != 0)
+    .map(|(_, name)| name)
+    .collect();
+    format!(
+        "{name:?} (Apple flags {flags:#010x}: {}, up to {} virtual displays)",
+        named.join(", "),
+        flags >> 5
+    )
 }
 
 /// Name an encoding in the log the way the documentation names it. Apple's own
@@ -1835,10 +1828,8 @@ async fn rfb38_preface(
 fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
-        // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
-        // zlib here costs the layout, so both subtypes ask for it in the second
-        // `SetEncodings` a layout triggers — and note that the native pasteboard is
-        // negotiated by `AutoPasteboard`, not an RFB encoding.
+        // on its downgraded 3.8 wire, and the native pasteboard is negotiated by
+        // `AutoPasteboard`, not an RFB encoding.
         return vnc_apple::ENCODINGS.to_vec();
     }
 
@@ -2023,9 +2014,8 @@ async fn apple_preface(
 ///
 /// Nothing the client *asked* for can precede it: no pixel format, no encodings and
 /// no update request have been sent, so the server has nothing to answer. What the
-/// Mac does send unbidden in this window is a short list of notifications — Bell,
-/// `MiscStatus` (`0x14`), `ServerAck` (`0x04`) and `NOP` (`0x07`), the pasteboard
-/// status among them after a server restart — and those are stepped over by their
+/// Mac does send unbidden in this window is Bell and `MiscStatus` (`0x14`), the
+/// pasteboard status after a server restart, and those are stepped over by their
 /// own framing, which is the only way to stay in step with the bytes after them.
 ///
 /// Anything outside that list is named in the error rather than skipped. The
@@ -2081,9 +2071,6 @@ async fn await_rekey<R: AsyncRead + Unpin>(
                 discard(reader, u64::from(len)).await?;
                 debug!("vnc: skipped a MiscStatus before the record layer");
             }
-            // ServerAck and NOP: zero-payload Apple messages that can arrive
-            // before the rekey. Stepped over silently.
-            0x04 | 0x07 => {}
             other => anyhow::bail!(
                 "the server sent message type {other:#04x} before the record layer was up"
             ),
@@ -3359,7 +3346,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let header = vnc_apple_clipboard::header(&raw);
                 clipboard.lock().unwrap().apple_session_id = header.session_id;
                 let compressed = u64::from(header.compressed);
-                if compressed > vnc_apple_clipboard::MAX_COMPRESSED_BYTES {
+                let receiver = match vnc_apple_clipboard::Receiver::new(header) {
+                    Ok(receiver) => Some(receiver),
+                    Err(e) => {
+                        warn!("vnc: {e:#}");
+                        None
+                    }
+                };
+                let Some(mut receiver) = receiver else {
                     discard(&mut reader, compressed).await?;
                     if !clipboard_enabled {
                         continue;
@@ -3385,9 +3379,21 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         return Ok(());
                     }
                     continue;
+                };
+                // Streamed rather than held: the archive can be megabytes of other
+                // flavors around a short text. A fault stops the inflating, never
+                // the reading, which the stream's framing depends on.
+                let mut received = Ok(());
+                let mut left = compressed;
+                let mut chunk = vec![0u8; 64 * 1024];
+                while left > 0 {
+                    let n = left.min(chunk.len() as u64) as usize;
+                    reader.read_exact(&mut chunk[..n]).await?;
+                    left -= n as u64;
+                    if clipboard_enabled && received.is_ok() {
+                        received = receiver.feed(&chunk[..n]);
+                    }
                 }
-                let mut bytes = vec![0u8; compressed as usize];
-                reader.read_exact(&mut bytes).await?;
                 if !clipboard_enabled {
                     continue;
                 }
@@ -3399,7 +3405,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     &mut apple_poll_deadline,
                 )
                 .await?;
-                match vnc_apple_clipboard::parse(header, &bytes) {
+                match received.and_then(|()| receiver.finish()) {
                     Ok(vnc_apple_clipboard::Incoming::Text(text)) => {
                         debug!("vnc: remote Apple clipboard updated, {} bytes", text.len());
                         let snapshot = {
@@ -3452,22 +3458,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         }
                     }
                 }
-            }
-            // Apple's own server messages, which arrive alongside the rectangles on
-            // the 003.889 wire and end the session if they are not stepped over.
-            //
-            // `0x04` ServerAck and `0x07` NOP carry no body at all. The metadata
-            // encodings each *also* come as a bare message whose type is the
-            // encoding's low byte — `0x451` as `0x51`, `0x453` as `0x53` — with the
-            // same `u16` length prefix, and a live session sends both forms of the
-            // same content. Read for their length and dropped, exactly as the
-            // rectangle forms are: nothing here is acted on, but walking past by the
-            // wrong number of bytes would desync everything after it.
-            0x04 | 0x07 if apple.is_some() => {}
-            0x51 | 0x53 | 0x55 | 0x56 if apple.is_some() => {
-                let len = reader.read_u16().await?;
-                debug!("vnc: Apple message type {msg_type:#04x}, {len} bytes");
-                discard(&mut reader, u64::from(len)).await?;
             }
             other => anyhow::bail!("unknown server message type {other:#04x}"),
         }
@@ -3850,13 +3840,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         ENCODING_LAST_RECT => return Ok(RectEffect::LAST),
         // DesktopSize: the rect itself is the announcement; no payload.
         //
-        // Non-Apple RFB only, and the guard is not decoration: it carries no density,
-        // so applying one with Apple metadata would overwrite a scale learned from a
-        // display layout with `UNSCALED` and double the desktop's apparent size. It
-        // *is* advertised there — [`vnc_apple::ENCODINGS`] must contain it or no
-        // layout arrives at all — so this arm is reached in practice, and dropping
-        // the rect is right: the layout carries the same size and the density with
-        // it, and one arrives with every geometry change.
+        // Non-Apple RFB only. A Mac sends it only to a viewer that did not list
+        // `DisplayInfo`, which [`vnc_apple::ENCODINGS`] does, and it carries no
+        // density: applied with Apple metadata it would overwrite a scale learned
+        // from a display layout with `UNSCALED`. The layout carries the same size and
+        // the density with it, and one arrives with every geometry change.
         ENCODING_DESKTOP_SIZE => {
             if apple.is_some() {
                 debug!("vnc: ignoring a DesktopSize rect; the display layout is authoritative");
@@ -3871,17 +3859,17 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 .map(RectEffect::resized);
         }
         // Ungated, like [`ENCODING_RAW`]: every generic target is offered zlib too,
-        // and an Apple server cannot send what its own measured list omits.
+        // and an Apple server cannot send what its own list omits.
         ENCODING_ZLIB => payload = Payload::Zlib,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
             return Ok(RectEffect::NOTHING);
         }
         vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
-            let first = apple.as_ref().is_some_and(|a| !a.asked_for_zlib);
+            let first = apple.as_ref().is_some_and(|a| !a.asked_for_media);
             let virtual_display = apple.as_ref().is_some_and(|a| a.virtual_display);
             if let Some(a) = apple.as_mut() {
-                a.asked_for_zlib = true;
+                a.asked_for_media = true;
             }
             let media = apple.as_mut().and_then(|a| a.media.as_mut());
             read_display_layout(
@@ -3902,47 +3890,30 @@ async fn read_rect<R: AsyncRead + Unpin>(
             return Ok(RectEffect::FULL_REPAINT);
         }
         // Where the pointer is, which the rect header carries and nothing else does.
-        // Advertised because the layout depends on the exact list, and ignored
-        // because a client draws the pointer where it last put it.
+        // Advertised, and ignored because a client draws the pointer where it last
+        // put it.
         vnc_apple::ENCODING_CURSOR_POS if apple.is_some() => return Ok(RectEffect::NOTHING),
-        // The Mac's keyboard and its hardware, neither of which this gateway acts on.
-        // All three frame themselves the same way — a `u16` saying how much follows —
-        // so one rule steps over all of them, and reading that length is the whole
-        // point: the RFB stream above the record layer has no framing of its own, so
-        // walking past by the wrong number of bytes desyncs everything after it.
-        vnc_apple::ENCODING_VENDOR_KEYSYMS
-        | vnc_apple::ENCODING_KEYBOARD_SOURCE
-        | vnc_apple::ENCODING_DEVICE_INFO
+        // The Mac's keyboard, which this gateway does not act on. Both frame
+        // themselves the same way — a `u16` saying how much follows — and reading
+        // that length is the whole point: the RFB stream above the record layer has
+        // no framing of its own, so walking past by the wrong number of bytes desyncs
+        // everything after it.
+        vnc_apple::ENCODING_VENDOR_KEYSYMS | vnc_apple::ENCODING_KEYBOARD_SOURCE
             if apple.is_some() =>
         {
             let len = reader.read_u16().await?;
             discard(reader, u64::from(len)).await?;
             return Ok(RectEffect::NOTHING);
         }
-        // Two more that frame themselves differently, so they cannot share the rule
-        // above. `DisplayInfo` is in [`vnc_apple::ENCODINGS`] and so must be
-        // steppable — advertising an encoding is a promise to be able to; `UserInfo`
-        // is not advertised and is handled anyway, on the same grounds as
-        // `DeviceInfo`. Neither was ever seen on macOS 26.
-        //
-        // `DisplayInfo` is the older display list — a header of four `u16`s, then
-        // 0x1c bytes per screen — and carries no density, which is why the layout is
-        // used instead even if this does turn up.
+        // `DisplayInfo`, the older display list: `u16` width and height, a `u32` of
+        // flags, a `u16` count, then 0x1c bytes per screen. It carries no density,
+        // and a Mac sends it only to a viewer that did not list the layout, so it is
+        // advertised — the layout needs it listed — and stepped over.
         vnc_apple::ENCODING_DISPLAY_INFO if apple.is_some() => {
-            let mut head = [0u8; 8];
+            let mut head = [0u8; 10];
             reader.read_exact(&mut head).await?;
-            let count = u64::from(u16::from_be_bytes([head[4], head[5]]));
+            let count = u64::from(u16::from_be_bytes([head[8], head[9]]));
             discard(reader, count * 0x1c).await?;
-            return Ok(RectEffect::NOTHING);
-        }
-        // `UserInfo` is the logged-in account and its avatar: a counted name, then a
-        // counted (zlib'd PNG) image.
-        vnc_apple::ENCODING_USER_INFO if apple.is_some() => {
-            let name = u64::from(reader.read_u16().await?);
-            discard(reader, name).await?;
-            let image = u64::from(reader.read_u32().await?);
-            reader.read_u32().await?; // the image's encoding, which is not read
-            discard(reader, image).await?;
             return Ok(RectEffect::NOTHING);
         }
         // The Mac's replies to the media-stream offer ([`vnc_apple_audio`]):
@@ -4586,23 +4557,17 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
 async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
-    ask_for_zlib: bool,
+    ask_for_media: bool,
     virtual_display: bool,
     rearm_pasteboard: bool,
     media: Option<&mut MediaStream>,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, hp_wake, .. } = shared;
+    // The length counts the bytes after itself — see [`vnc_apple::parse_layout`].
     let declared = reader.read_u16().await?;
-    // Two fewer than declared, which is the count the Mac actually sends — see
-    // [`vnc_apple::parse_layout`], where the reason and the measurement are.
-    anyhow::ensure!(
-        declared >= 4,
-        "a display layout declared {declared} bytes, less than its own length prefix"
-    );
-    let mut payload = declared.to_be_bytes().to_vec();
-    payload.resize(usize::from(declared) - 2, 0);
-    reader.read_exact(&mut payload[2..]).await?;
+    let mut payload = vec![0u8; usize::from(declared)];
+    reader.read_exact(&mut payload).await?;
     let layout = if virtual_display {
         vnc_apple::parse_virtual_display_layout(&payload)?
     } else {
@@ -4667,16 +4632,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         (d.size, d.poll_size())
     };
     let mut uplink = uplink.lock().await;
-    if ask_for_zlib {
-        if media.is_some() {
-            debug!("vnc: display layout received, asking for zlib and the media stream");
-            uplink
-                .send(&set_encodings(&vnc_apple_audio::encodings_with_media_stream()))
-                .await?;
-        } else {
-            debug!("vnc: display layout received, asking for zlib");
-            uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
-        }
+    if ask_for_media && media.is_some() {
+        debug!("vnc: display layout received, asking for the media stream");
+        uplink
+            .send(&set_encodings(&vnc_apple_audio::encodings_with_media_stream()))
+            .await?;
     }
     if rearm_pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
@@ -4918,11 +4878,20 @@ fn translate_input(
             // is the input to every constant above, and it varies by browser,
             // by pointing device and by platform.
             debug!("vnc: wheel dx={dx} dy={dy} {unit:?} -> {px} + {py} pulses");
+            // Screen Sharing scrolls only on a mask of exactly 0x08 or 0x10 and
+            // posts any other mask as buttons by bit position, so a pulse there goes
+            // without the held buttons — which the release restores — and the
+            // horizontal bits, clicks on buttons 5 and 6, are not sent at all. See
+            // docs/apple-vnc-889.md, "A Mac scrolls only on a lone wheel bit".
+            let (axes, held): (&[_], u8) = match wheel {
+                Wheel::Apple { .. } => (&[(py, 0x08, 0x10)], 0),
+                Wheel::Notch => (&[(py, 0x08, 0x10), (px, 0x20, 0x40)], *button_mask),
+            };
             let mut out = Vec::new();
-            for (pulses, negative_bit, positive_bit) in [(py, 0x08, 0x10), (px, 0x20, 0x40)] {
+            for &(pulses, negative_bit, positive_bit) in axes {
                 let bit = if pulses > 0 { positive_bit } else { negative_bit };
                 for _ in 0..pulses.abs() {
-                    out.push(pointer_event(*button_mask | bit, *last_pos).to_vec());
+                    out.push(pointer_event(held | bit, *last_pos).to_vec());
                     out.push(pointer_event(*button_mask, *last_pos).to_vec());
                 }
             }
@@ -4944,10 +4913,14 @@ fn translate_input(
                 // Resolve the symbol against the live modifier state so the
                 // shifted keysym (`A`, `!`) is sent, not the base one. CapsLock
                 // affects letters only, XORed with Shift.
-                let shift_down = pressed_keys.contains_key("ShiftLeft")
-                    || pressed_keys.contains_key("ShiftRight");
+                let held = |keys: [&str; 2]| keys.iter().any(|k| pressed_keys.contains_key(*k));
+                let shift_down = held(["ShiftLeft", "ShiftRight"]);
+                // A Mac adds Shift for an uppercase keysym, and Caps Lock leaves its
+                // shortcuts alone: Command-Z under Caps Lock is still Undo.
+                let shortcut =
+                    macos && (held(["MetaLeft", "MetaRight"]) || held(["ControlLeft", "ControlRight"]));
                 let is_letter = matches!(code.as_bytes(), [b'K', b'e', b'y', b'A'..=b'Z']);
-                let shift = if is_letter { shift_down ^ caps } else { shift_down };
+                let shift = if is_letter && !shortcut { shift_down ^ caps } else { shift_down };
                 match keysym(&code, shift) {
                     Some(sym) => {
                         pressed_keys.insert(code, sym);
@@ -5628,7 +5601,7 @@ mod tests {
         assert_eq!(Dialect::Rfb38.banner(), b"RFB 003.008\n");
         assert_eq!(Dialect::Apple889.banner(), b"RFB 003.889\n");
         assert_eq!(Dialect::Rfb38.client_init(), 1);
-        assert_eq!(Dialect::Apple889.client_init(), 0xc1);
+        assert_eq!(Dialect::Apple889.client_init(), 0x81);
     }
 
     #[test]
@@ -6025,32 +5998,12 @@ mod tests {
         }
     }
 
-    /// Compression is not a High Performance feature. The upgrade waits on a display
-    /// layout, and plain `ard` reports one, so the only thing the subtype settles is
-    /// the virtual display. Gating zlib by subtype cost 6.19 MB of raw where zlib
-    /// sent 3.38 MB of the same 800x600 desktop, and Standard mode's framebuffer is
-    /// a physical screen — 3200x1800 on the Mac this was measured against.
     #[test]
-    fn both_apple_subtypes_start_out_wanting_zlib() {
-        for high_performance in [false, true] {
-            let apple = Apple::new(high_performance, None);
-            assert!(
-                !apple.asked_for_zlib,
-                "high_performance={high_performance} skipped the zlib upgrade"
-            );
-            assert_eq!(apple.virtual_display, high_performance);
-        }
-    }
-
-    /// The *first* `SetEncodings` only. zlib in this list costs the display layout,
-    /// which is why it is absent here and asked for again once a layout has arrived —
-    /// see [`both_apple_subtypes_start_out_wanting_zlib`].
-    #[test]
-    fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
+    fn standard_ard_uses_the_apple_metadata_list_with_zlib() {
         let encodings = rfb38_encoding_list(true, true, true, false, false);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
-        assert!(!encodings.contains(&ENCODING_ZLIB));
+        assert!(encodings.contains(&ENCODING_ZLIB));
         assert!(!encodings.contains(&vnc_clipboard::ENCODING));
     }
 
@@ -7088,6 +7041,41 @@ mod tests {
         assert_eq!(scroll(&mut generic, 0.0, 4.0, WheelUnit::Pixel).1, 1);
         assert_eq!(scroll(&mut generic, 0.0, 0.0, WheelUnit::Pixel).1, 0);
         assert_eq!(scroll(&mut generic, 0.0, f32::NAN, WheelUnit::Pixel).1, 0);
+    }
+
+    /// One wheel event with `held` buttons down, as the masks it sends.
+    fn wheel_masks(wheel: &mut Wheel, held: u8, dx: f32, dy: f32) -> Vec<u8> {
+        let (mut mask, mut pos) = (held, (5u16, 6u16));
+        translate_input(
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Line },
+            &Buttons::Rfb,
+            &mut mask,
+            &mut pos,
+            &mut HashMap::new(),
+            wheel,
+            true,
+        )
+        .iter()
+        .map(|event| event[1])
+        .collect()
+    }
+
+    /// A Mac scrolls only on a mask of exactly 0x08 or 0x10 and posts anything
+    /// else as buttons by bit position: a pulse sent with a held button would be
+    /// Back or Forward, and a horizontal one a click on button 5 or 6.
+    #[test]
+    fn a_mac_gets_each_scroll_pulse_alone() {
+        let mut apple = Wheel::new(true);
+        let down = wheel_masks(&mut apple, 0x01, 0.0, 1.0);
+        assert!(!down.is_empty());
+        for pair in down.chunks(2) {
+            assert_eq!(pair, [0x10, 0x01], "the pulse alone, then the held button again");
+        }
+        assert!(wheel_masks(&mut apple, 0x00, 3.0, 0.0).is_empty(), "no horizontal axis");
+
+        // Every other server reads the mask by the RFB convention, held buttons and all.
+        let mut generic = Wheel::new(false);
+        assert_eq!(wheel_masks(&mut generic, 0x01, 1.0, 1.0), [0x11, 0x01, 0x41, 0x01]);
     }
 
     #[test]
@@ -8529,6 +8517,24 @@ mod tests {
         ); // 'a'
     }
 
+    /// Caps Lock leaves a Mac's shortcuts alone: Command-Z is Undo under it, not
+    /// the Command-Shift-Z the uppercase keysym would post. Other servers, and
+    /// letters typed without Command or Control, keep the case.
+    #[test]
+    fn caps_lock_does_not_shift_a_mac_shortcut() {
+        for modifier in ["MetaLeft", "ControlRight"] {
+            let mut keys = HashMap::new();
+            key_on(true, &mut keys, modifier, true, true);
+            assert_eq!(key_on(true, &mut keys, "KeyZ", true, true), key_event(true, 0x7a));
+        }
+        let mut keys = HashMap::new();
+        key_on(false, &mut keys, "ControlLeft", true, true);
+        assert_eq!(key_on(false, &mut keys, "KeyZ", true, true), key_event(true, 0x5a));
+        let mut keys = HashMap::new();
+        key_on(true, &mut keys, "AltLeft", true, true);
+        assert_eq!(key_on(true, &mut keys, "KeyZ", true, true), key_event(true, 0x5a));
+    }
+
     // ── The Apple dialect (no sockets: framed records over a slice) ─────────
 
     fn apple_keys() -> Keys {
@@ -9053,7 +9059,7 @@ mod tests {
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: true, poll: false },
-            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            Some(Apple::default()),
             sink.clone(),
         )
         .await;
@@ -9120,7 +9126,7 @@ mod tests {
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: true, poll: true },
-            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            Some(Apple::default()),
             sink,
         )
         .await;
@@ -9154,7 +9160,7 @@ mod tests {
                 reader,
                 shared,
                 ReadFlags { clipboard: true, poll: true },
-                Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+                Some(Apple::default()),
                 sink,
             ));
 
@@ -9217,7 +9223,7 @@ mod tests {
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: true, poll: false },
-            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            Some(Apple::default()),
             sink.clone(),
         )
         .await;
@@ -9237,13 +9243,12 @@ mod tests {
     #[tokio::test]
     async fn disabled_apple_pasteboards_do_not_consume_browser_requests() {
         let ordinary = vnc_apple_clipboard::send(7, "ignored").unwrap();
-        let oversized_len =
-            u32::try_from(vnc_apple_clipboard::MAX_COMPRESSED_BYTES + 1).unwrap();
+        // Declared past Apple's own limit, and so never inflated.
         let mut oversized = vec![0x1f, 0, 0, 0];
         oversized.extend_from_slice(&9u32.to_be_bytes());
-        oversized.extend_from_slice(&oversized_len.to_be_bytes());
-        oversized.extend_from_slice(&oversized_len.to_be_bytes());
-        oversized.extend(std::iter::repeat_n(0, oversized_len as usize));
+        oversized.extend_from_slice(&(vnc_apple_clipboard::MAX_ARCHIVE_BYTES + 1).to_be_bytes());
+        oversized.extend_from_slice(&4u32.to_be_bytes());
+        oversized.extend_from_slice(&[0; 4]);
 
         for (wire, session_id) in [(ordinary, 7), (oversized, 9)] {
             let (uplink, _sent) = test_uplink();
@@ -9727,7 +9732,7 @@ mod tests {
             shared_desktop((2, 2), None, None),
             test_shadow((2, 2)),
         );
-        let apple = Apple { asked_for_zlib: true, ..Apple::default() };
+        let apple = Apple::default();
 
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
@@ -9760,7 +9765,7 @@ mod tests {
             shared_desktop((2, 2), None, None),
             test_shadow((2, 2)),
         );
-        let apple = Apple { asked_for_zlib: true, ..Apple::default() };
+        let apple = Apple::default();
 
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
@@ -9780,10 +9785,10 @@ mod tests {
     }
 
     /// The layout payload builder, shared with `vnc_apple`'s own tests rather than
-    /// copied: it encodes the measured record offsets, and a second copy of those
+    /// copied: it encodes the record offsets, and a second copy of those
     /// would have to be kept in step with the parser by hand. `vnc_apple` is also
     /// where it is cross-checked against a captured payload.
-    use crate::vnc_apple::{TestScreen, test_layout as layout_payload};
+    use crate::vnc_apple::{TestScreen, test_layout_wire as layout_payload};
 
     /// A layout does three things, and the third is the one that is easy to miss:
     /// it resizes, it reports the screens, and it re-arms the server. Without the
@@ -9831,19 +9836,11 @@ mod tests {
             other => panic!("expected a display list, got {other:?}"),
         }
 
-        // What went back, in order: the second `SetEncodings` — the one that finally
-        // asks for zlib, which cannot be in the first without costing this whole
-        // layout — and then the re-arm for the display the Mac confirmed. The
-        // enclosing update loop sends the paired full request after it has consumed
-        // every rectangle in this FramebufferUpdate.
-        let mut expected = set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB);
-        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
-        assert_eq!(written(&sent), expected);
-        assert!(
-            vnc_apple::ENCODINGS_WITH_ZLIB.contains(&ENCODING_ZLIB)
-                && !vnc_apple::ENCODINGS.contains(&ENCODING_ZLIB),
-            "the first list must not carry zlib and the second must"
-        );
+        // What went back: the re-arm for the display the Mac confirmed, and no
+        // second `SetEncodings` without a media stream to ask for. The enclosing
+        // update loop sends the paired full request after it has consumed every
+        // rectangle in this FramebufferUpdate.
+        assert_eq!(written(&sent), vnc_apple::auto_framebuffer_update((3840, 2160)));
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the

@@ -173,9 +173,8 @@ with the same authentication error as incorrect credentials. See
 
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
-at full fidelity, and supports the native Apple pasteboard. After the initial
-display layout it asks the Mac to switch from raw rectangles to zlib; that second
-encoding request is required in both Apple modes. Apple Screen Sharing High
+at full fidelity, and supports the native Apple pasteboard. Both Apple modes ask
+the Mac for zlib rectangles from the start. Apple Screen Sharing High
 Performance mode (`ard-high-performance`) takes the same
 credentials, requests one virtual display at the pinned `width` and `height` when
 both are set, or at the full resolution and density of the client's screen
