@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use log::{info, warn};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use log::{debug, info, warn};
+use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceDaemon, ServiceInfo};
 
 use crate::audio::AudioBridge;
 use crate::config::AirPlayConfig;
@@ -205,12 +205,64 @@ fn advertise(config: &AirPlayConfig, port: u16, hw_addr: [u8; 6]) -> anyhow::Res
         ("sf", "0x4"),
     ];
     let host = format!("{}-airplay.local.", hw.to_lowercase());
+    // Before registering, so the first announcement is seen.
+    watch_advertisement(&mdns, config.name.clone())?;
     let service = ServiceInfo::new(SERVICE_TYPE, &instance, &host, (), port, txt)
         .context("describing the AirPlay service")?
         .enable_addr_auto();
     mdns.register(service).context("advertising the AirPlay service")?;
     info!("airplay: advertising the speaker {:?} on port {port}", config.name);
     Ok(mdns)
+}
+
+/// How long the speaker may go unannounced before the log says no Mac can see it.
+const ANNOUNCE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Log what the mDNS responder does with the advertisement from its own thread.
+/// It opens its sockets and sends lazily, after `register` has returned, so a
+/// failure there — no multicast-capable interface, a refused bind — shows as no
+/// announcement and is said so here, not as an error from `start`.
+fn watch_advertisement(mdns: &ServiceDaemon, name: String) -> anyhow::Result<()> {
+    let events = mdns.monitor().context("watching the mDNS responder for AirPlay")?;
+    std::thread::Builder::new()
+        .name("airplay-mdns".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + ANNOUNCE_DEADLINE;
+            let mut settled = false;
+            loop {
+                // Waits for the first announcement until the deadline, and then
+                // for whatever comes, until the daemon ends with the speaker.
+                let event = if settled {
+                    events.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                } else {
+                    events.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                };
+                match event {
+                    Ok(DaemonEvent::Announce(service, on)) => {
+                        debug!("airplay: announced {service} on {on}");
+                        settled = true;
+                    }
+                    Ok(DaemonEvent::Error(e)) => warn!("airplay: the mDNS responder failed: {e}"),
+                    Ok(DaemonEvent::NameChange(change)) => {
+                        info!("airplay: mDNS renamed {} to {}", change.original, change.new_name)
+                    }
+                    Ok(_) => {}
+                    Err(RecvTimeoutError::Timeout) => {
+                        warn!(
+                            "airplay: the speaker {name:?} has not been announced after {}s, and no \
+                             Mac will see it until it is — check the host has a multicast-capable \
+                             interface",
+                            ANNOUNCE_DEADLINE.as_secs()
+                        );
+                        // Said once; an announcement later is still logged.
+                        settled = true;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        })
+        .context("starting the AirPlay mDNS watcher")?;
+    Ok(())
 }
 
 #[cfg(test)]

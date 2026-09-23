@@ -3,7 +3,7 @@
 //! SET_PARAMETER and FLUSH until TEARDOWN — every request after the Digest
 //! challenge the password answers.
 
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
@@ -22,6 +22,10 @@ use super::rtp::{Codec, Params, Stream};
 /// without a password yet.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 256 * 1024;
+
+/// The most frames an ALAC packet may be announced with: ALAC's own default, and
+/// far more than fits in one UDP packet of 16-bit stereo.
+const MAX_ALAC_FRAMES: u32 = 4096;
 
 struct Request {
     method: String,
@@ -87,8 +91,10 @@ struct Conn {
 
 impl Conn {
     async fn run(&mut self, tcp: TcpStream) -> anyhow::Result<()> {
-        let local = tcp.local_addr()?.ip().to_canonical();
-        let peer = tcp.peer_addr()?.ip().to_canonical();
+        // Whole, IPv6 scope included: a link-local address is bound and reached
+        // through its interface.
+        let local = tcp.local_addr()?;
+        let peer = tcp.peer_addr()?;
         let (reader, mut writer) = tcp.into_split();
         let mut reader = BufReader::new(reader);
         while let Some(request) = read_request(&mut reader).await? {
@@ -109,7 +115,7 @@ impl Conn {
             // Answered on whatever it arrives with, a refusal included: a sender
             // that cannot verify the speaker never gets as far as the password.
             if let Some(challenge) = request.header("Apple-Challenge") {
-                match apple_response(challenge, local, self.shared.hw_addr) {
+                match apple_response(challenge, local.ip().to_canonical(), self.shared.hw_addr) {
                     Ok(answer) => response = response.header("Apple-Response", answer),
                     Err(e) => warn!("airplay #{}: {e:#}", self.id),
                 }
@@ -137,7 +143,7 @@ impl Conn {
         self.authorized
     }
 
-    async fn handle(&mut self, request: &Request, local: IpAddr, peer: IpAddr) -> anyhow::Result<Response> {
+    async fn handle(&mut self, request: &Request, local: SocketAddr, peer: SocketAddr) -> anyhow::Result<Response> {
         Ok(match request.method.as_str() {
             "OPTIONS" => Response::new(200).header(
                 "Public",
@@ -235,6 +241,10 @@ fn parse_sdp(sdp: &str) -> anyhow::Result<Params> {
             .map_err(|e| anyhow::anyhow!("the fmtp {params:?} is not ALAC's: {e:?}"))?;
         if info.sample_rate() != 44_100 || info.channels() != 2 || info.bit_depth() != 16 {
             bail!("the sender offered ALAC as {params:?}, and only 44.1 kHz 16-bit stereo is taken");
+        }
+        // The decoder's buffers are sized by it, and a Mac sends 352.
+        if info.max_frames_per_packet() > MAX_ALAC_FRAMES {
+            bail!("the sender offered ALAC packets of {} frames, more than {MAX_ALAC_FRAMES}", info.max_frames_per_packet());
         }
         Codec::Alac(info)
     } else if encoding.eq_ignore_ascii_case("L16/44100/2") {
@@ -362,6 +372,13 @@ mod tests {
         let sdp = "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 24 40 10 14 2 255 0 0 48000\r\n";
         let Err(err) = parse_sdp(sdp) else { panic!("a 24-bit 48 kHz stream was taken") };
         assert!(format!("{err:#}").contains("44.1 kHz"));
+    }
+
+    #[test]
+    fn an_oversized_alac_packet_is_refused() {
+        let sdp = "a=rtpmap:96 AppleLossless\r\na=fmtp:96 4000000000 0 16 40 10 14 2 255 0 0 44100\r\n";
+        let Err(err) = parse_sdp(sdp) else { panic!("a 4-billion-frame packet was taken") };
+        assert!(format!("{err:#}").contains("more than 4096"), "{err:#}");
     }
 
     #[tokio::test]

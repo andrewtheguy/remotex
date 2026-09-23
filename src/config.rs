@@ -2081,7 +2081,7 @@ impl ConfigFile {
             listen: ListenAddr::Unix(socket_path),
             targets: self.targets,
             auth: GatewayAuth::Token(token),
-            airplay: Self::resolve_airplay(self.airplay, &branding),
+            airplay: Self::resolve_airplay(self.airplay, &branding)?,
             branding,
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
@@ -2101,11 +2101,25 @@ impl ConfigFile {
     /// The `[airplay]` table resolved: the speaker is named after the gateway, so a
     /// Mac's Sound menu says which gateway it plays to, and marked as remotex's, so
     /// it says what the speaker is. Checked by [`Self::parse_with`].
-    fn resolve_airplay(section: Option<AirPlaySection>, branding: &Branding) -> Option<AirPlayConfig> {
-        section.map(|section| AirPlayConfig {
-            name: format!("{} - remotex", branding.text),
-            password: section.password,
-        })
+    ///
+    /// The mDNS instance is `<12 hex digits>@<name>`, one DNS label of at most 63
+    /// bytes, and a longer one is registered and then never sent: a branding that
+    /// long is refused rather than a speaker no Mac finds.
+    fn resolve_airplay(section: Option<AirPlaySection>, branding: &Branding) -> anyhow::Result<Option<AirPlayConfig>> {
+        const MAX_NAME_BYTES: usize = 63 - "000000000000@".len();
+        section
+            .map(|section| {
+                let name = format!("{} - remotex", branding.text);
+                anyhow::ensure!(
+                    name.len() <= MAX_NAME_BYTES,
+                    "[airplay] names the speaker {name:?}, {} bytes, and mDNS takes at most \
+                     {MAX_NAME_BYTES}. Shorten [branding].text to {} bytes",
+                    name.len(),
+                    MAX_NAME_BYTES - " - remotex".len()
+                );
+                Ok(AirPlayConfig { name, password: section.password })
+            })
+            .transpose()
     }
 
     /// The `[branding]` table resolved: the display name (or
@@ -2175,7 +2189,7 @@ impl ConfigFile {
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
-            airplay: Self::resolve_airplay(self.airplay, &branding),
+            airplay: Self::resolve_airplay(self.airplay, &branding)?,
             branding,
             dev_hostname: server
                 .dev_subdomain
@@ -4928,6 +4942,26 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("nothing would play through the speaker"), "{err:#}");
+    }
+
+    /// The speaker's name is one DNS label with the address in front of it, so a
+    /// branding that would overflow it is refused rather than never announced.
+    #[cfg(feature = "airplay")]
+    #[test]
+    fn an_airplay_name_past_a_dns_label_is_refused() {
+        let config = |text: &str| {
+            ConfigFile::parse(&format!(
+                "[server]\n{}\n[branding]\ntext = \"{text}\"\n[airplay]\npassword = \"sesame\"\n\
+                 [[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
+                 username = \"u\"\npassword = \"p\"\n",
+                site_passwd_line()
+            ))
+            .unwrap()
+            .resolve()
+        };
+        assert_eq!(config(&"a".repeat(40)).unwrap().airplay.unwrap().name.len(), 50);
+        let err = config(&"a".repeat(41)).unwrap_err();
+        assert!(format!("{err:#}").contains("Shorten [branding].text to 40 bytes"), "{err:#}");
     }
 
     /// A build without the speaker says so when asked for one, and its Macs

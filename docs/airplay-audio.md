@@ -35,7 +35,8 @@ picker and the session's Info card say whether AirPlay is on for a Mac, and the
 menu's **Enable AirPlay audio** button is shown only when it is. The table is top-level, like
 `[branding]` and `[meter]`, so a `remotex tui` instance config may set it too. The
 speaker is named `<[branding].text> - remotex`, which is what the Mac's Sound menu
-shows.
+shows. The name is one mDNS label, so `[branding].text` may be at most
+40 bytes while `[airplay]` is set.
 
 On the Mac, pick that name in Control Center → Sound, or in System Settings →
 Sound → Output, and enter the password when asked. The Mac keeps both the choice

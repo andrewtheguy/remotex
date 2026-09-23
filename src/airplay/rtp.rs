@@ -52,14 +52,14 @@ pub(super) struct Stream {
 
 impl Stream {
     pub async fn start(
-        local: IpAddr,
-        peer: IpAddr,
+        local: SocketAddr,
+        peer: SocketAddr,
         peer_timing_port: Option<u16>,
         params: Params,
         shared: Arc<Shared>,
     ) -> anyhow::Result<Self> {
         let bind = async |what: &str| {
-            UdpSocket::bind(SocketAddr::new(local, 0))
+            UdpSocket::bind(with_port(local, 0))
                 .await
                 .with_context(|| format!("binding the AirPlay {what} port on {local}"))
         };
@@ -73,10 +73,23 @@ impl Stream {
             timing_port: timing.local_addr()?.port(),
             stop,
         };
-        tokio::spawn(audio_loop(audio, peer, params, shared, stopped.clone()));
+        tokio::spawn(audio_loop(audio, peer.ip().to_canonical(), params, shared, stopped.clone()));
         tokio::spawn(control_loop(control, stopped.clone()));
-        tokio::spawn(timing_loop(timing, peer_timing_port.map(|p| SocketAddr::new(peer, p)), stopped));
+        tokio::spawn(timing_loop(timing, peer_timing_port.map(|p| with_port(peer, p)), stopped));
         Ok(stream)
+    }
+}
+
+/// `addr` on `port`: an IPv4-mapped address as IPv4, as the dual-stack RTSP
+/// socket reports an IPv4 sender, and an IPv6 one with its scope kept.
+fn with_port(addr: SocketAddr, port: u16) -> SocketAddr {
+    match addr.ip().to_canonical() {
+        IpAddr::V4(v4) => SocketAddr::new(v4.into(), port),
+        IpAddr::V6(_) => {
+            let mut addr = addr;
+            addr.set_port(port);
+            addr
+        }
     }
 }
 
