@@ -2391,13 +2391,22 @@ export function useRemoteDesktop(
 
     const toRemote = (e: MouseEvent) => toRemotePoint(e.clientX, e.clientY);
 
-    const onMouseMove = (e: MouseEvent) => {
-      releaseLapsedPointer(e);
+    // The pointer's position as this event finds it. A press or a wheel sends
+    // it first: a scroll, a reflow or a new composition can move the desktop
+    // under a pointer that has not moved, and the remote would otherwise act at
+    // the last position it was sent — or, over a composed canvas, the sender
+    // would still judge the pointer by the gap or screen it was last over.
+    const moveTo = (e: MouseEvent) => {
       const { x, y } = toRemote(e);
       // Keep the gesture cursor in sync with real mouse input on hybrid
       // touch+mouse devices.
       gestures?.notePointer(x, y);
       send({ type: "mouseMove", x, y });
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      releaseLapsedPointer(e);
+      moveTo(e);
     };
     const onMouseDown = (e: MouseEvent) => {
       el.focus(); // take keyboard focus on pointer interaction
@@ -2407,6 +2416,7 @@ export function useRemoteDesktop(
         return;
       }
       pressedButtons.add(button);
+      moveTo(e);
       send({
         type: "mouseButton",
         button,
@@ -2432,6 +2442,7 @@ export function useRemoteDesktop(
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       releaseLapsedPointer(e);
+      moveTo(e);
       send({
         type: "wheel",
         dx: e.deltaX,
