@@ -54,7 +54,7 @@ use crate::vnc_camera::{self, ServerCamera};
 use crate::mic::MicSignal;
 use crate::vnc_mic::{self, ServerMicrophone};
 use crate::vnc_clipboard;
-use crate::vnc_record::{self, Keys, RecordKeys, RecordReader, RecordWriter};
+use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
 use crate::vnc_rsa_aes::{self, FrameReader, Sealer, Strength};
 
 const SECURITY_NONE: u8 = 1;
@@ -429,10 +429,10 @@ impl Uplink {
         }
     }
 
-    fn shared_records(sock: impl AsyncWrite + Send + Unpin + 'static, keys: RecordKeys) -> Self {
+    fn records(sock: impl AsyncWrite + Send + Unpin + 'static, keys: Keys) -> Self {
         Self {
             out: Out::Socket(Box::new(sock)),
-            framing: Framing::Records(Box::new(RecordWriter::shared(keys))),
+            framing: Framing::Records(Box::new(RecordWriter::new(keys))),
         }
     }
 
@@ -1308,17 +1308,13 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
-    /// Shared by the record reader and writer on High Performance sessions. A
-    /// Standard session has Apple metadata but no record layer.
-    record_keys: Option<RecordKeys>,
 }
 
 impl Apple {
     /// The read loop's starting state for either Apple subtype.
-    fn new(high_performance: bool, record_keys: Option<RecordKeys>) -> Self {
+    fn new(high_performance: bool) -> Self {
         Self {
             virtual_display: high_performance,
-            record_keys,
             ..Self::default()
         }
     }
@@ -1472,7 +1468,7 @@ async fn session(
         return;
     };
 
-    let Connected { downlink, uplink, width, height, macos, apple, record_keys, poll } = connected;
+    let Connected { downlink, uplink, width, height, macos, apple, poll } = connected;
     info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -1507,7 +1503,6 @@ async fn session(
             pinned: (!apple).then(|| config.pinned_size()).flatten(),
             video: config.streams_video(),
             apple,
-            record_keys,
             high_performance,
             wlshare_audio,
             camera,
@@ -1569,8 +1564,6 @@ struct Flags {
     /// its zlib stream, cursor cache and display list to report. Both Apple
     /// subtypes negotiate them; only one uses the 003.889 record transport.
     apple: bool,
-    /// The shared 003.889 key epoch. Present only for High Performance.
-    record_keys: Option<RecordKeys>,
     /// Whether this is Apple's High Performance mode. It requests a virtual display
     /// during setup; plain `ard` does not.
     high_performance: bool,
@@ -1618,8 +1611,6 @@ struct Connected {
     macos: bool,
     /// Whether the preface negotiated Apple's display/cursor encodings.
     apple: bool,
-    /// The shared 003.889 key epoch. Present only for High Performance.
-    record_keys: Option<RecordKeys>,
     /// Whether the client drives the update cycle: one request, one update, repeat.
     ///
     /// True on both Apple dialects. A pending pasteboard fetch pauses the next
@@ -1892,7 +1883,6 @@ async fn rfb38_preface(
         height: server.height,
         macos,
         apple,
-        record_keys: None,
         poll: true,
     })
 }
@@ -2054,8 +2044,7 @@ async fn apple_preface(
     let keys = await_rekey(&mut reader, &wrap_key).await?;
     info!("vnc: Apple record layer active");
 
-    let record_keys = RecordKeys::new(keys);
-    let mut uplink = Uplink::shared_records(sock, record_keys.clone());
+    let mut uplink = Uplink::records(sock, keys);
     // High Performance mode is a virtual-display session. Request its mode before
     // the pixel format and encoding list. The same message is resent for later
     // viewport reports and screen changes; its dynamic-resolution flag is set here
@@ -2072,13 +2061,12 @@ async fn apple_preface(
         .await?;
 
     Ok(Connected {
-        downlink: Downlink::Records(Box::new(RecordReader::shared(reader, record_keys.clone()))),
+        downlink: Downlink::Records(Box::new(RecordReader::new(reader, keys))),
         uplink,
         width: server.width,
         height: server.height,
         macos,
         apple: true,
-        record_keys: Some(record_keys),
         poll: true,
     })
 }
@@ -2169,7 +2157,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         pinned,
         video,
         apple,
-        record_keys,
         high_performance,
         wlshare_audio,
         camera,
@@ -2260,7 +2247,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(|| Apple::new(high_performance, record_keys)),
+        apple.then(|| Apple::new(high_performance)),
         sink.clone(),
     ));
 
@@ -4042,26 +4029,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
         vnc_audio::ENCODING if shared.audio.is_some() => {
             return Ok(RectEffect::AUDIO_ANNOUNCED);
         }
+        // A rekey after the preface. The Mac rotates only when the viewer asks
+        // with `SetEncryption` command 1, which this client never sends after the
+        // handshake, and it switches both of its ciphers the instant it sends the
+        // rekey. Records this side has already framed under the old key — the
+        // writer encrypts as it queues — would then fail the Mac's check, so an
+        // unrequested rotation cannot be followed safely. Named and closed.
         vnc_apple::ENCODING_REKEY if apple.is_some() => {
-            anyhow::ensure!(
-                (x, y, w, h) == (0, 0, 0, 0),
-                "an Apple rekey used nonzero rectangle geometry {w}x{h}+{x}+{y}"
-            );
-            let mut body = [0u8; vnc_record::REKEY_LEN];
-            reader.read_exact(&mut body).await?;
-            let record_keys = apple
-                .as_ref()
-                .and_then(|state| state.record_keys.as_ref())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "the server sent a record-layer rekey outside a 003.889 session"
-                    )
-                })?;
-            let (generation, keys) =
-                vnc_record::unwrap_rekey(&record_keys.wrap_key(), &body);
-            record_keys.rotate(keys);
-            debug!("vnc: installed Apple record-layer rekey generation {generation}");
-            return Ok(RectEffect::NOTHING);
+            anyhow::bail!("the server re-keyed mid-session, which this client never requests")
         }
         other => {
             let label = encoding_label(other);
@@ -7305,10 +7280,7 @@ mod tests {
     fn test_records_uplink(keys: Keys) -> (SharedUplink, Wire) {
         let wire = Wire::default();
         (
-            Arc::new(Mutex::new(Uplink::shared_records(
-                wire.clone(),
-                RecordKeys::new(keys),
-            ))),
+            Arc::new(Mutex::new(Uplink::records(wire.clone(), keys))),
             wire,
         )
     }
@@ -8718,7 +8690,7 @@ mod tests {
 
     /// Frame a run of server messages into records, as the Mac would.
     fn framed(msgs: &[Vec<u8>]) -> Vec<u8> {
-        let mut writer = RecordWriter::shared(RecordKeys::new(apple_keys()));
+        let mut writer = RecordWriter::new(apple_keys());
         let mut wire = Vec::new();
         for msg in msgs {
             wire.extend_from_slice(writer.frame(msg).unwrap());
@@ -9133,7 +9105,7 @@ mod tests {
         // Reading past the last record is a clean end of stream, so the loop ends
         // with the hang-up error rather than hanging.
         let err = read_loop(
-            RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
+            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
             ReadFlags { clipboard: false, poll: false },
             Some(Apple::default()),
@@ -9149,56 +9121,6 @@ mod tests {
         let msg = rx.try_recv().expect("a tile");
         match msg {
             ServerMsg::Tile(tile) => assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2)),
-            other => panic!("expected a tile, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_mid_session_rekey_rotates_both_record_directions() {
-        let replacement = Keys {
-            key: *b"cccccccccccccccc",
-            iv: *b"dddddddddddddddd",
-        };
-
-        // The server sends the rekey under the old epoch, then switches before
-        // its next record without resetting the server-to-viewer sequence.
-        let server_keys = RecordKeys::new(apple_keys());
-        let mut server = RecordWriter::shared(server_keys.clone());
-        let mut wire = server
-            .frame(&rekey_update(&apple_keys().key, replacement))
-            .unwrap()
-            .to_vec();
-        server_keys.rotate(replacement);
-        wire.extend_from_slice(server.frame(&raw_update()).unwrap());
-
-        let session_keys = RecordKeys::new(apple_keys());
-        let uplink = Arc::new(Mutex::new(Uplink::shared_records(
-            Wire::default(),
-            session_keys.clone(),
-        )));
-        let (sink, mut rx) = test_sink();
-        let shared = test_shared(
-            uplink,
-            shared_desktop((2, 2), None, None),
-            test_shadow((2, 2)),
-        );
-        let err = read_loop(
-            RecordReader::shared(std::io::Cursor::new(wire), session_keys.clone()),
-            shared,
-            ReadFlags { clipboard: false, poll: false },
-            Some(Apple::new(true, Some(session_keys.clone()))),
-            sink.clone(),
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
-        assert_eq!(session_keys.wrap_key(), replacement.key);
-
-        sink.flush().await;
-        match rx.try_recv().expect("the new-key rectangle") {
-            ServerMsg::Tile(tile) => {
-                assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2));
-            }
             other => panic!("expected a tile, got {other:?}"),
         }
     }
@@ -9453,7 +9375,7 @@ mod tests {
                 test_shadow((2, 2)),
             );
             let _ = read_loop(
-                RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
+                RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
                 shared,
                 ReadFlags { clipboard: false, poll },
                 Some(Apple::default()),
@@ -9923,7 +9845,7 @@ mod tests {
         let apple = Apple::default();
 
         let _ = read_loop(
-            RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
+            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
             ReadFlags { clipboard: false, poll: true },
             Some(apple),
@@ -9956,7 +9878,7 @@ mod tests {
         let apple = Apple::default();
 
         let _ = read_loop(
-            RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
+            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
             ReadFlags { clipboard: false, poll: true },
             Some(apple),

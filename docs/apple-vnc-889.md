@@ -752,7 +752,10 @@ The live captures exercised only the initial rekey, but the daemon's
 again wraps the replacement under the current content key, sends the rekey in the
 old record epoch, and then rebuilds both CBC contexts with the replacement key and
 IV. Its send and receive sequence counters are not reset, and the generation field
-is written as 1 again rather than incremented. The daemon's record writer
+is written as 1 again rather than incremented. Remotex never sends command 1
+after the handshake, so it closes the session on any later rekey rather than
+follow it: the Mac switches both ciphers as it sends one, and records the gateway
+has already framed under the old key would fail its check. The daemon's record writer
 (`FUN_10005e9e7`) fills with the last body byte repeated and puts at most `0x8000`
 bytes in a record. The Mac may send
 `MiscStatus` (`0x14`) in the cleartext window between `SetEncryption` and the

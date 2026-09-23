@@ -673,7 +673,7 @@ async fn serve_fake_mac(
     requests: mpsc::UnboundedSender<MacRequest>,
     mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
-    use remotex::vnc_record::{Keys, RecordKeys, RecordReader, RecordWriter};
+    use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
 
     stream.write_all(b"RFB 003.889\n").await?;
@@ -777,8 +777,8 @@ async fn serve_fake_mac(
     }
 
     let (read_half, write_half) = stream.into_split();
-    let records = RecordReader::shared(read_half, RecordKeys::new(keys));
-    let writer = RecordWriter::shared(RecordKeys::new(keys));
+    let records = RecordReader::new(read_half, keys);
+    let writer = RecordWriter::new(keys);
     let mut configurations = Vec::new();
     // The gateway ends the session by closing the stream, and the close may land
     // while a reply is mid-write: a client is free to vanish between a request

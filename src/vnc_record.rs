@@ -27,15 +27,14 @@
 //! Three properties of it are load-bearing, and each is a silent failure if
 //! missed:
 //!
-//! - **One CBC stream per direction within each key epoch.** Record `N`'s last
-//!   ciphertext block is record `N+1`'s IV, so the context is never reset between
-//!   ordinary records. A rekey deliberately starts a new epoch at its supplied
-//!   IV; a per-record context instead decrypts record 0 and then produces garbage
-//!   that still passes as bytes.
+//! - **One CBC stream per direction, spanning the whole session.** Record `N`'s
+//!   last ciphertext block is record `N+1`'s IV, so the context is never reset
+//!   between records. A per-record context decrypts record 0 and then produces
+//!   garbage that still passes as bytes.
 //! - **A sequence number that never resets.** It is not on the wire; it is
 //!   prepended to the hash, so the two ends only agree while they have counted the
-//!   same number of records. It survives a rekey. Counting *messages* would drift
-//!   the moment a server payload spanned two records.
+//!   same number of records. Counting *messages* would drift the moment a server
+//!   payload spanned two records.
 //! - **Plain SHA-1, not HMAC.** The key authenticates nothing here; the trailer is
 //!   an integrity check over a stream only the key holder can produce.
 //!
@@ -52,7 +51,6 @@
 
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
 use aes::Aes128;
@@ -87,57 +85,16 @@ pub struct Keys {
     pub iv: [u8; BLOCK],
 }
 
-/// The key epoch shared by the running session's reader and writer.
-///
-/// The server wraps a replacement key and IV under the current content key, then
-/// changes both record directions immediately after sending that rekey rectangle.
-/// Publishing the replacement here lets each direction install it at its next
-/// record boundary while retaining its own sequence number.
-#[derive(Clone)]
-pub struct RecordKeys {
-    inner: Arc<Mutex<RecordKeyState>>,
-}
-
-#[derive(Clone, Copy)]
-struct RecordKeyState {
-    epoch: u64,
-    keys: Keys,
-}
-
-impl RecordKeys {
-    pub fn new(keys: Keys) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(RecordKeyState { epoch: 0, keys })),
-        }
-    }
-
-    /// The content key that wraps the next rekey payload.
-    pub fn wrap_key(&self) -> [u8; BLOCK] {
-        self.current().1.key
-    }
-
-    /// Publish a replacement key and IV for both record directions.
-    pub fn rotate(&self, keys: Keys) {
-        let mut state = self.inner.lock().expect("record-key lock poisoned");
-        state.epoch = state.epoch.wrapping_add(1);
-        state.keys = keys;
-    }
-
-    fn current(&self) -> (u64, Keys) {
-        let state = *self.inner.lock().expect("record-key lock poisoned");
-        (state.epoch, state.keys)
-    }
-}
-
 /// Recover the record layer's key and IV from a rekey blob.
 ///
 /// The two halves are single AES-128-**ECB** blocks, decrypted *independently* —
 /// no chaining between them, and no relation to the CBC that follows. ECB appears
 /// exactly here and nowhere else in the session.
 ///
-/// The returned key is also the wrap key for any *subsequent* rekey. `generation`
-/// comes back for logging rather than being treated as a monotonic counter: the
-/// measured daemon writes `1` on every rotation.
+/// The returned key is also the wrap key for any *subsequent* rekey, which is why
+/// `generation` comes back rather than being checked here: this client refuses a
+/// second rekey ([`crate::vnc`]) and the caller is where that refusal reads
+/// sensibly.
 pub fn unwrap_rekey(wrap_key: &[u8; BLOCK], body: &[u8; REKEY_LEN]) -> (u32, Keys) {
     let cipher = Aes128::new(wrap_key.into());
     let generation = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
@@ -154,10 +111,10 @@ pub fn unwrap_rekey(wrap_key: &[u8; BLOCK], body: &[u8; REKEY_LEN]) -> (u32, Key
 
 /// One direction's cipher, its chaining block, and its record counter.
 ///
-/// A struct rather than a function because the chain carries from one record to
-/// the next and the counter never resets, so both have to outlive any single
-/// record. Two of these exist per session, one each way. A rekey replaces the
-/// cipher and chain at a record boundary but deliberately retains the counter.
+/// A struct rather than a function because of what it must *not* do: the chain
+/// carries from one record to the next and the counter never resets, so both have
+/// to outlive any single record. Two of these exist per session, one each way, and
+/// they are never swapped or rebuilt.
 struct Cbc {
     cipher: Aes128,
     chain: [u8; BLOCK],
@@ -171,12 +128,6 @@ impl Cbc {
             chain: keys.iv,
             seq: 0,
         }
-    }
-
-    /// Start a new key epoch while preserving the record sequence number.
-    fn rekey(&mut self, keys: Keys) {
-        self.cipher = Aes128::new(&keys.key.into());
-        self.chain = keys.iv;
     }
 
     /// CBC-encrypt in place, advancing the chain. `data` must be whole blocks.
@@ -238,35 +189,17 @@ const MIN_CIPHERTEXT: usize = BODY_LEN + filler_len(0) + TRAILER;
 /// [`RecordReader`], and with no I/O inside the part that has to be exactly right.
 pub struct RecordWriter {
     cbc: Cbc,
-    /// The session's key epoch, which the reader rotates, and the one installed.
-    shared_keys: (RecordKeys, u64),
     /// Reused across records, so a steady session frames input events without
     /// allocating.
     buf: Vec<u8>,
 }
 
-/// Install the shared epoch's keys in `cbc` if a rekey has rotated them since.
-fn sync_keys(cbc: &mut Cbc, (shared, installed): &mut (RecordKeys, u64)) {
-    let (epoch, keys) = shared.current();
-    if epoch != *installed {
-        cbc.rekey(keys);
-        *installed = epoch;
-    }
-}
-
 impl RecordWriter {
-    /// Construct the running session's writer around a shared key epoch.
-    pub fn shared(keys: RecordKeys) -> Self {
-        let (epoch, current) = keys.current();
+    pub fn new(keys: Keys) -> Self {
         Self {
-            cbc: Cbc::new(current),
-            shared_keys: (keys, epoch),
+            cbc: Cbc::new(keys),
             buf: Vec::new(),
         }
-    }
-
-    fn sync_keys(&mut self) {
-        sync_keys(&mut self.cbc, &mut self.shared_keys);
     }
 
     /// Wrap one complete client→server message in one record.
@@ -276,7 +209,6 @@ impl RecordWriter {
     /// is what lets the framing be asserted byte for byte in a test — worth more
     /// than padding entropy that protects nothing.
     pub fn frame(&mut self, msg: &[u8]) -> anyhow::Result<&[u8]> {
-        self.sync_keys();
         anyhow::ensure!(
             msg.len() <= MAX_BODY,
             "a {}-byte message does not fit in one record (at most {MAX_BODY})",
@@ -324,8 +256,6 @@ enum Phase {
 pub struct RecordReader<R> {
     inner: R,
     cbc: Cbc,
-    /// Present on a live 003.889 session, where both directions rotate together.
-    shared_keys: (RecordKeys, u64),
     /// The record in flight: the length prefix while it is being read, then the
     /// ciphertext, decrypted in place. Reused between records.
     staging: Vec<u8>,
@@ -346,23 +276,16 @@ pub struct RecordReader<R> {
 }
 
 impl<R> RecordReader<R> {
-    /// Construct the running session's reader around a shared key epoch.
-    pub fn shared(inner: R, keys: RecordKeys) -> Self {
-        let (epoch, current) = keys.current();
+    pub fn new(inner: R, keys: Keys) -> Self {
         Self {
             inner,
-            cbc: Cbc::new(current),
-            shared_keys: (keys, epoch),
+            cbc: Cbc::new(keys),
             staging: Vec::new(),
             filled: 0,
             phase: Phase::Len,
             body: 0..0,
             failed: false,
         }
-    }
-
-    fn sync_keys(&mut self) {
-        sync_keys(&mut self.cbc, &mut self.shared_keys);
     }
 
     /// Decrypt and verify a complete record, leaving its body in `staging`.
@@ -438,11 +361,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for RecordReader<R> {
             }
             if buf.remaining() == 0 {
                 return Poll::Ready(Ok(()));
-            }
-            // A rotation applies after the old-key rekey rectangle has been
-            // consumed, never partway through a record already being verified.
-            if matches!(me.phase, Phase::Len) && me.filled == 0 {
-                me.sync_keys();
             }
             match me.phase {
                 Phase::Len => {
@@ -579,7 +497,7 @@ mod tests {
 
     #[test]
     fn a_framed_record_has_the_length_the_spec_computes() {
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let framed = writer.frame(&[0xaa; 10]).unwrap().to_vec();
         // 2 body-len + 10 body + 0 filler + 20 trailer = 32, and the outer prefix
         // counts only the ciphertext.
@@ -638,18 +556,18 @@ mod tests {
     /// context is not an optimisation.
     #[tokio::test]
     async fn a_record_only_decrypts_in_sequence() {
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let mut wire = writer.frame(b"first").unwrap().to_vec();
         let second = writer.frame(b"second").unwrap().to_vec();
         wire.extend_from_slice(&second);
 
-        let mut reader = RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
         let mut got = [0u8; 11];
         reader.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"firstsecond");
 
         // The second record alone, through a context that never saw the first.
-        let mut fresh = RecordReader::shared(std::io::Cursor::new(second), RecordKeys::new(keys()));
+        let mut fresh = RecordReader::new(std::io::Cursor::new(second), keys());
         let err = fresh.read_u8().await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
@@ -659,56 +577,27 @@ mod tests {
     #[tokio::test]
     async fn a_payload_split_across_records_reads_back_as_one() {
         let blob: Vec<u8> = (0..100u8).collect();
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let mut wire = writer.frame(&blob[..37]).unwrap().to_vec();
         let rest = writer.frame(&blob[37..]).unwrap().to_vec();
         wire.extend_from_slice(&rest);
 
-        let mut reader = RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
         let mut got = vec![0u8; 100];
         reader.read_exact(&mut got).await.unwrap();
         assert_eq!(got, blob);
     }
 
     #[tokio::test]
-    async fn a_rekey_restarts_cbc_but_not_the_record_sequence() {
-        let replacement = Keys {
-            key: *b"new-key-epoch!!!",
-            iv: *b"new-iv--epoch!!!",
-        };
-
-        let writer_keys = RecordKeys::new(keys());
-        let mut writer = RecordWriter::shared(writer_keys.clone());
-        let mut wire = writer.frame(b"old key").unwrap().to_vec();
-        assert_eq!(writer.cbc.seq, 1);
-        writer_keys.rotate(replacement);
-        wire.extend_from_slice(writer.frame(b"new key").unwrap());
-        assert_eq!(writer.cbc.seq, 2);
-
-        let reader_keys = RecordKeys::new(keys());
-        let mut reader = RecordReader::shared(std::io::Cursor::new(wire), reader_keys.clone());
-        let mut first = [0u8; 7];
-        reader.read_exact(&mut first).await.unwrap();
-        assert_eq!(&first, b"old key");
-        assert_eq!(reader.cbc.seq, 1);
-
-        reader_keys.rotate(replacement);
-        let mut second = [0u8; 7];
-        reader.read_exact(&mut second).await.unwrap();
-        assert_eq!(&second, b"new key");
-        assert_eq!(reader.cbc.seq, 2);
-    }
-
-    #[tokio::test]
     async fn a_tampered_record_yields_nothing_at_all() {
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let mut wire = writer.frame(b"payload").unwrap().to_vec();
         // Flip a byte of ciphertext. CBC will still "decrypt" it, and the trailer
         // is what notices.
         let last = wire.len() - 1;
         wire[last] ^= 0x01;
 
-        let mut reader = RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
         let mut got = [0u8; 7];
         let err = reader.read_exact(&mut got).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -735,13 +624,13 @@ mod tests {
         ] {
             let mut wire = len.to_be_bytes().to_vec();
             wire.resize(2 + usize::from(len.max(16)), 0);
-            let mut reader = RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(keys()));
+            let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
             let err = reader.read_u8().await.unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{what}");
         }
 
         // A body longer than the record that carries it.
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let framed = writer.frame(b"short").unwrap().to_vec();
         let mut forged = Cbc::new(keys());
         let mut plaintext = vec![0u8; framed.len() - 2];
@@ -753,7 +642,7 @@ mod tests {
         let mut wire = framed[..2].to_vec();
         wire.extend_from_slice(&plaintext);
 
-        let mut reader = RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
         let err = reader.read_u8().await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(format!("{err}").contains("9000"), "{err}");
@@ -761,18 +650,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_clean_hang_up_between_records_is_end_of_stream() {
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let wire = writer.frame(b"hi").unwrap().to_vec();
-        let mut reader = RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
         let mut got = Vec::new();
         reader.read_to_end(&mut got).await.unwrap();
         assert_eq!(got, b"hi");
 
         // Cut inside a record instead, and it is an error rather than a quiet end.
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let framed = writer.frame(b"hi").unwrap();
         let cut = framed[..framed.len() - 4].to_vec();
-        let mut reader = RecordReader::shared(std::io::Cursor::new(cut), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(std::io::Cursor::new(cut), keys());
         let err = reader.read_to_end(&mut Vec::new()).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
@@ -799,14 +688,14 @@ mod tests {
     #[tokio::test]
     async fn records_reassemble_a_byte_at_a_time() {
         let blob: Vec<u8> = (0..200u8).collect();
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         let mut wire = writer.frame(&blob[..64]).unwrap().to_vec();
         let a = writer.frame(&blob[64..70]).unwrap().to_vec();
         let b = writer.frame(&blob[70..]).unwrap().to_vec();
         wire.extend_from_slice(&a);
         wire.extend_from_slice(&b);
 
-        let mut reader = RecordReader::shared(Trickle(std::io::Cursor::new(wire)), RecordKeys::new(keys()));
+        let mut reader = RecordReader::new(Trickle(std::io::Cursor::new(wire)), keys());
         let mut got = vec![0u8; 200];
         reader.read_exact(&mut got).await.unwrap();
         assert_eq!(got, blob);
@@ -814,7 +703,7 @@ mod tests {
 
     #[test]
     fn a_message_too_large_for_one_record_is_refused() {
-        let mut writer = RecordWriter::shared(RecordKeys::new(keys()));
+        let mut writer = RecordWriter::new(keys());
         assert!(writer.frame(&vec![0u8; MAX_BODY]).is_ok());
         let err = writer.frame(&vec![0u8; MAX_BODY + 1]).unwrap_err();
         assert!(format!("{err:#}").contains("does not fit in one record"), "{err:#}");
