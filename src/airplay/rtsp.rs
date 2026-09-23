@@ -12,7 +12,7 @@ use base64::Engine as _;
 use log::{debug, info, warn};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 
 use super::Shared;
@@ -104,43 +104,62 @@ impl Conn {
         let mut reader = BufReader::new(reader);
         let mut sessions = self.shared.session.subscribe();
         loop {
-            // Cancelling a half-read request is harmless: the connection ends here.
-            let request = tokio::select! {
-                request = read_request(&mut reader) => request?,
-                () = session_ended(&mut sessions, self.session) => {
+            // The whole turn, answer included, is raced against the session: one
+            // stuck writing to a sender that stopped reading would hold the stream
+            // and the claim. Biased, so a request already buffered cannot win over
+            // a session that has ended. Cancelling a turn is harmless: the
+            // connection ends here.
+            let session = self.session;
+            let more = tokio::select! {
+                biased;
+                () = session_ended(&mut sessions, session) => {
                     info!("airplay #{}: the session ended; hanging up on the sender", self.id);
                     break;
                 }
+                more = self.turn(&mut reader, &mut writer, local, peer) => more?,
             };
-            let Some(request) = request else { break };
-            debug!("airplay #{}: {} {}", self.id, request.method, request.uri);
-            let cseq = request.header("CSeq").unwrap_or("0").to_owned();
-            let closing = request.method == "TEARDOWN";
-            let mut response = if self.authorize(&request) {
-                self.handle(&request, local, peer).await.unwrap_or_else(|e| {
-                    warn!("airplay #{}: {} failed: {e:#}", self.id, request.method);
-                    Response::new(400)
-                })
-            } else {
-                Response::new(401).header(
-                    "WWW-Authenticate",
-                    format!(r#"Digest realm="{REALM}", nonce="{}""#, self.nonce),
-                )
-            };
-            // Answered on whatever it arrives with, a refusal included: a sender
-            // that cannot verify the speaker never gets as far as the password.
-            if let Some(challenge) = request.header("Apple-Challenge") {
-                match apple_response(challenge, local.ip().to_canonical(), self.shared.hw_addr) {
-                    Ok(answer) => response = response.header("Apple-Response", answer),
-                    Err(e) => warn!("airplay #{}: {e:#}", self.id),
-                }
-            }
-            write_response(&mut writer, &cseq, response).await?;
-            if closing {
+            if !more {
                 break;
             }
         }
         Ok(())
+    }
+
+    /// Read one request and answer it; `false` once the connection is done.
+    async fn turn(
+        &mut self,
+        reader: &mut BufReader<OwnedReadHalf>,
+        writer: &mut OwnedWriteHalf,
+        local: SocketAddr,
+        peer: SocketAddr,
+    ) -> anyhow::Result<bool> {
+        let Some(request) = read_request(reader).await? else {
+            return Ok(false);
+        };
+        debug!("airplay #{}: {} {}", self.id, request.method, request.uri);
+        let cseq = request.header("CSeq").unwrap_or("0").to_owned();
+        let closing = request.method == "TEARDOWN";
+        let mut response = if self.authorize(&request) {
+            self.handle(&request, local, peer).await.unwrap_or_else(|e| {
+                warn!("airplay #{}: {} failed: {e:#}", self.id, request.method);
+                Response::new(400)
+            })
+        } else {
+            Response::new(401).header(
+                "WWW-Authenticate",
+                format!(r#"Digest realm="{REALM}", nonce="{}""#, self.nonce),
+            )
+        };
+        // Answered on whatever it arrives with, a refusal included: a sender
+        // that cannot verify the speaker never gets as far as the password.
+        if let Some(challenge) = request.header("Apple-Challenge") {
+            match apple_response(challenge, local.ip().to_canonical(), self.shared.hw_addr) {
+                Ok(answer) => response = response.header("Apple-Response", answer),
+                Err(e) => warn!("airplay #{}: {e:#}", self.id),
+            }
+        }
+        write_response(writer, &cseq, response).await?;
+        Ok(!closing)
     }
 
     fn authorize(&mut self, request: &Request) -> bool {
@@ -175,6 +194,12 @@ impl Conn {
                     warn!("airplay #{}: refused, no Apple audio session is running", self.id);
                     return Ok(Response::new(453));
                 };
+                // A stream stays with the session it was set up under: one whose
+                // session was replaced is hung up on, not moved to the new one.
+                if self.session.is_some_and(|own| own != session) {
+                    warn!("airplay #{}: refused, its session has ended", self.id);
+                    return Ok(Response::new(453));
+                }
                 {
                     let mut streaming = self.shared.streaming.lock().unwrap();
                     match *streaming {
@@ -420,6 +445,36 @@ mod tests {
 
         let request = read_request(&mut &b"\r\nOPTIONS * RTSP/1.0\r\nCSeq: 3\r\n\r\n"[..]).await.unwrap().unwrap();
         assert_eq!((request.method.as_str(), request.header("CSeq")), ("OPTIONS", Some("3")));
+    }
+
+    /// A connection whose session was replaced before it noticed is not moved to
+    /// the new one by another SETUP.
+    #[tokio::test]
+    async fn a_setup_does_not_rebind_a_stream_to_a_newer_session() {
+        let airplay = crate::airplay::AirPlay::start_unadvertised(&crate::config::AirPlayConfig {
+            name: "test".into(),
+            password: "sesame".into(),
+        })
+        .unwrap();
+        let bridge = Arc::new(crate::audio::AudioBridge::new());
+        let _newer = airplay.attach(&bridge);
+        let running = airplay.shared.session.borrow().unwrap();
+        let sdp = "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
+        let mut conn = Conn {
+            id: 1,
+            shared: Arc::clone(&airplay.shared),
+            nonce: String::new(),
+            authorized: true,
+            params: Some(parse_sdp(sdp).unwrap()),
+            stream: None,
+            session: Some(running - 1),
+        };
+        let setup = Request { method: "SETUP".into(), uri: String::new(), headers: Vec::new(), body: Vec::new() };
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let response = conn.handle(&setup, addr, addr).await.unwrap();
+        assert_eq!(response.status, 453);
+        assert_eq!(conn.session, Some(running - 1), "the stream was moved to the newer session");
+        assert!(conn.stream.is_none() && airplay.shared.streaming.lock().unwrap().is_none());
     }
 
     #[test]
