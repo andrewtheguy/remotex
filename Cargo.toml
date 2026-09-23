@@ -224,6 +224,14 @@ sspi = { version = "0.21", default-features = false }
 rsa = { version = "0.10.0-rc.18", default-features = false }
 eax = "0.6"
 sha2 = "0.11"
+# A Mac's sound, received as an AirPlay 1 speaker (src/airplay/): the Mac streams
+# Apple Lossless, which this pure-Rust decoder takes packet by packet from the
+# SDP's own parameters, and finds the speaker by DNS-SD, which `mdns-sd` answers
+# and announces from inside the process — no avahi or Bonjour on the host, and no
+# async runtime of its own. The RSA, AES and MD5 the protocol asks for are the
+# crates above.
+alac = "0.5"
+mdns-sd = "0.21"
 
 [build-dependencies]
 anyhow = "1"
@@ -248,6 +256,9 @@ name = "tui_control_plane_e2e"
 required-features = ["embedded-gateway"]
 
 [dev-dependencies]
+# Apple Lossless packets for the AirPlay receiver's test, made by Apple's own
+# encoder ported to Rust, which shares nothing with the decoder above.
+alac-encoder = "0.3"
 # FLAC frames for the audio decoder's tests, made the way wlshare makes them and
 # by an encoder that shares nothing with symphonia.
 flacenc = { version = "0.5", default-features = false }

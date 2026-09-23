@@ -1412,6 +1412,15 @@ pub struct ConfigFile {
     pub targets: Vec<TargetConfig>,
 }
 
+/// The gateway's AirPlay speaker, resolved: what it is called and the password a
+/// Mac is asked for. See [`crate::airplay`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AirPlayConfig {
+    /// The speaker's name in a Mac's Sound menu: the gateway's branding.
+    pub name: String,
+    pub password: String,
+}
+
 /// The `[meter]` table as written. See [`crate::throughput`].
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

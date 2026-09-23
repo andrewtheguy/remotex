@@ -3,6 +3,7 @@
 //! The library exposes the pieces the binary wires together and that the
 //! integration tests exercise at the protocol level. See docs/architecture.md.
 
+pub mod airplay;
 pub mod assets;
 pub mod audio;
 pub mod auth;
