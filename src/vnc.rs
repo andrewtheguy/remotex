@@ -2466,7 +2466,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // Ahead of the resize it describes, as when it was first sent.
                     let mosaic = display.lock().unwrap().mosaic.clone();
                     if let Some(regions) = mosaic
-                        && let Err(e) = sink.msg(ServerMsg::Mosaic { regions }).await
+                        && let Err(e) = sink.msg(ServerMsg::Mosaic { regions, resize: true }).await
                     {
                         break Err(e);
                     }
@@ -4657,13 +4657,18 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 
     // The composition goes first: it says how the framebuffer the resize names
     // is presented, and a browser must not present one layout's pixels through
-    // another's regions.
+    // another's regions. So it says whether that resize is coming, and the
+    // browser holds it until then rather than laying it over the old pixels.
     let mosaic = if virtual_display { None } else { layout.mosaic() };
+    let resize = {
+        let d = desktop.lock().unwrap();
+        d.size != layout.backing || d.scale != layout.scale()
+    };
     let mosaic_msg = {
         let mut state = display.lock().unwrap();
         (state.mosaic != mosaic).then(|| {
             state.mosaic.clone_from(&mosaic);
-            ServerMsg::Mosaic { regions: mosaic.unwrap_or_default() }
+            ServerMsg::Mosaic { regions: mosaic.unwrap_or_default(), resize }
         })
     };
     if let Some(msg) = mosaic_msg {
