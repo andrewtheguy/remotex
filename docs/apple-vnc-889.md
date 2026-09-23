@@ -40,7 +40,7 @@ boundary and a burst of viewport reports, but remains reverse engineered.
 | | |
 |---|---|
 | Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
-| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A layout's length prefix counts only what follows it, and a `u16` display count precedes the records. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours, and scrolls only on a mask of exactly `0x08` or `0x10`. ClientInit is `0x81`: `0x40` asks for a session-select exchange. |
+| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. Standard mode's `SetServerScaling` is a two-byte header plus a big-endian `f64`; the returned layout's viewer-scale field confirms what the daemon applied. `AutoFrameBufferUpdate` does not make the tested server stream. A layout's length prefix counts only what follows it, and a `u16` display count precedes the records. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours, and scrolls only on a mask of exactly `0x08` or `0x10`. ClientInit is `0x81`: `0x40` asks for a session-select exchange. |
 | Fractional ratios | A virtual display mode whose backing/scaled ratio is not 1 or 2 is not rounded by the Mac. Measured August 23, 2026 on macOS 26.6.2: 2561×1440 backing over 1707×960 scaled (1.5x) created 1707×960 points at 2x, 2880×1800 over 1920×1200 (1.5x) created 960×600 points at 2x, and 2560×1440 over 2048×1152 (1.25x) created 960×540 points at 2x — a desktop whose text looks zoomed while the Dock, shrunk to fit the width, does not. Remotex therefore asks only for 1x or 2x (`protocol::render_density`). |
 | Lingering display | The virtual display outlives its session: a reconnect within a few seconds found it still there (the new session's ServerInit reported the previous mode and the display kept its id), and one after 45 s found the Mac back on its 800×600 physical display with a fresh id. The new session's own layout arrives either way, including when the requested mode equals the lingering one. |
 | Pre-rekey messages | `MiscStatus` (`0x14`) can arrive in the cleartext window between `SetEncryption` and the rekey, especially after a server restart when the Mac has stale clipboard state. The client must tolerate it during `await_rekey`. |
@@ -74,6 +74,27 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 The **VNC viewers may control screen with password** setting is for clients that
 use RFB security type 2. Remotex authenticates with type 30 and the account's
 own password, so this legacy option does not need to be enabled.
+
+### Apple's private authentication types
+
+Only type 30 has been exercised on the wire and is implemented by remotex, but
+Apple's viewer identifies the other private types in
+`_RFBAuthenticateCore`:
+
+| Type | Apple viewer path | Audit status |
+|---:|---|---|
+| 30 (`0x1e`) | DH username/password | Wire-tested; implemented by remotex. |
+| 31 (`0x1f`) | `_AuthenticateDHNamePassword` | Statically identified; the distinction from types 30 and 32 is not yet isolated. |
+| 32 (`0x20`) | `_AuthenticateDHNamePassword` | Statically identified; the distinction from types 30 and 31 is not yet isolated. |
+| 33 (`0x21`) | RSA username/password | Statically identified; Apple's implementation has plain-RSA and RSA-plus-SRP branches and requires an RSA keychain label. |
+| 34 (`0x22`) | Preauthorized connection | Statically identified; exchanges a server challenge and client response using prearranged 16-byte key material. |
+| 35 (`0x23`) | Kerberos | Statically identified; performs the Kerberos token exchange and derives the session's AES contexts from the Kerberos session key. |
+| 36 (`0x24`) | SRP username/password | Statically identified; runs Apple's SRP exchange and then `_SetupAESKeys`. |
+
+These mappings describe the code paths in the macOS 26.6.2 viewer, not verified
+interoperability. They do not justify selecting another advertised type in the
+gateway: type 30 remains the known account-credential path and supplies the wrap
+key used by the 003.889 record-layer rekey.
 
 ## Confirmed display modes
 
@@ -117,7 +138,7 @@ The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
 ```text
 +0x00 u16      descriptor size, including the mode table
 +0x02 120B     display name, NUL-terminated by the daemon
-+0x7a u32      display_flags = 1 (bit 0 dynamic, bit 1 do not adjust refresh rate)
++0x7a u32      display_flags = 1 (bit 0 dynamic, bit 1 supplies a custom refresh rate)
 +0x7e u32      display_type = 4 (virtual display; the agent ignores it and sets 4)
 +0x82 f32 BE   physical width in millimetres
 +0x86 f32 BE   physical height in millimetres
@@ -159,6 +180,23 @@ the name only when it first creates the display (`FUN_10002b827`). Unless the
 display exclusive (option `0x40`), which is what hides the physical screens. The
 daemon clamps the display count to 2 and requires at least `0xc0` bytes.
 
+The current native descriptor is built in the arm64e ScreenSharing framework,
+not ScreenSharingUI. `-[SSSession stConfigureVirtualDisplaysWithDimensions:]`
+is gated by the `ScreenSharing/ProMode` feature and server feature `0x1a`; the
+x86-64 implementation of that method is a stub. The UI chooses Standard, one
+virtual display, or two virtual displays, while the framework constructs the
+wire request. It names them `Virtual Display` and `Virtual Display 2`, supplies
+five modes per display, and sends rotations `7`. The first mode is replaced by
+the opening dimensions passed to the method; the remaining logical/backing
+pairs are 1440×900/2880×1800, 1920×1080/3840×2160,
+1440×810/2880×1620, and 1312×848/2624×1696. All five have density 2.
+The framework sets display flag bit 0 for dynamic resolution, bit 1 when a
+custom refresh rate from 15 through 120 Hz is supplied, and mode flag bit 0
+when HDR was requested. Without a custom rate it asks the HEVC decoder for the
+maximum supported rate for each mode and falls back to 60 Hz. Fields left zero
+by this native builder include the display type; remotex's working descriptor
+explicitly sends type 4, as the daemon itself assigns to the virtual display.
+
 Apple's client UI may impose an 800×600 floor, but that is not a server protocol
 limit on the measured host: the same 26.6 session accepted 799×599 exactly and
 reported it in the answering layout. Remotex therefore does not clamp a viewport
@@ -171,8 +209,10 @@ only whether remotex acts on later viewport reports.
 Standard mode was independently remeasured July 31, 2026. After Apple DH auth,
 `RFB 003.008` plus the same ten metadata encodings produced an unsolicited
 `AppleDisplayLayout`. Selecting ids 4 and 1 produced 3200×1800 at 2× and
-1280×800 at 1×. It uses the same display protocol without the 003.889 record
-layer.
+1280×800 at 1× before server scaling was requested. It uses the same display
+protocol without the 003.889 record layer. Standard remains a fixed physical-
+display session: its target configuration requires `resize = false`, and neither
+viewport sizes nor `SetDesktopSize` are sent.
 
 Standard mode compresses on the same terms as High Performance, remeasured
 August 1, 2026. Over one identical 800×600 session zlib sent 3,380,550 bytes
@@ -246,16 +286,87 @@ echoing its choice in the next layout's `current_display`:
 
 The layout is authoritative; `src/vnc.rs` moves the checkmark only on confirmation.
 
-### The density, and why picking a screen is what fixes it
+### Server-side scaling in Standard mode
 
 Each display record carries **its own scale factor** as a big-endian `f64`: 1.0 for
-the 1280×800 screen, 2.0 for the Retina one. It agrees exactly with the ratio of
-that record's two bounds rects (3200/1600), so the two can be cross-checked.
+the 1280×800 screen, 2.0 for the Retina one. A second `f64` is the viewer scale the
+daemon applied. Their product agrees with the ratio of that record's returned
+backing and logical bounds, so the three can be cross-checked.
 
-**A combined framebuffer has no single density.** Here 4480×1800 combines a 1×
-1280×800 display and a 2× 3200×1800 display across 2880×900 points. The header
-ratio, 4480/2880 = 1.56, represents neither display. `Layout::scale` therefore
-returns `UNSCALED` for the combined view and the display's scale after selection.
+Apple's `_RFBSetServerScaling` emits exactly ten bytes: message type `0x08`, one
+reserved zero byte, then the requested factor as a big-endian `f64`. It accepts a
+factor greater than zero and no greater than one. `screensharingd`'s
+`HandleSetServerScalingMessage` stores that factor, rebuilds the client's scaled
+capture context and sends a resolution change. This is raster scaling in the Mac,
+not display resize: Standard still exposes the same physical displays and ignores
+browser viewport sizes.
+
+Remotex requests `min(1, browser_density / remote_density)`, as Apple's viewer
+does (`remoteScaleFactorForLocalScaleFactor:`). A selected display uses that
+display's density; All Displays over screens of one density uses theirs. All
+Displays over mixed densities asks for 1.0 and is composed in the browser — see
+below. For example, a
+1440×900 Retina display has 2880×1800 native backing. From a 1× browser display,
+factor 0.5 makes the Mac return 1440×900 with viewer scale 0.5 and effective
+density 1. A 2× browser asks for factor 1 and receives the native 2880×1800 at
+effective density 2.
+
+The gateway forwards those returned pixels unchanged. It reports the selected
+screen's effective density (`native density × viewer scale`), which maps the
+server's pixels to the browser display's device pixels without a separate
+fit-to-window or Apple-only frontend scale. Pointer events are the
+exception to "unchanged": the Mac still reads them in the unscaled framebuffer's
+pixels, so the gateway divides a browser position by the applied viewer scale.
+Measured on macOS 26.6.2 at factor 0.5, the Retina screen's centre sent in the
+scaled 1440×900 framebuffer's coordinates landed a quarter of the way in; divided,
+it lands on the centre. A browser density change and a display
+selection can send a new `SetServerScaling`; repeated layouts do not repeat an
+already-pending request, and only an answering layout confirms the factor.
+
+### All Displays over mixed densities
+
+No single factor renders a 1× screen beside a 2× one: 0.5 halves the 1× screen,
+1.0 leaves the 2× one at twice its size. Apple's viewer does not try. Measured
+from `screensharingd`'s log on macOS 26.6.2 (`/usr/bin/log show`, the
+`HandleSetServerScalingMessage - set scaling to` lines), Screen Sharing.app sent
+no `SetServerScaling` for its whole session on All Displays, from a 1× client
+and a 2× one, and received the native 4160×1800 mosaic of a 1280×800 1× screen
+beside a 1440×900 2× one. It composes the view itself. From the arm64e
+ScreenSharing framework:
+
+- `-[SSSession handleDisplayInfo2:]` sets mixed mode when the records are neither
+  all 1.0 nor all above it. `remoteScaleFactorForLocalScaleFactor:` then returns
+  1.0 for the combined view, and `setScalingFactor:forced:` sends only a change,
+  so nothing goes out.
+- Each screen becomes an `SSScreenInfo`: `frame` is the logical rect in points,
+  `scaledFrame` the backing rect in framebuffer pixels. The combined view is the
+  union of the frames — 2720×900 here, which is what the menu's "Both Displays:
+  2720 × 900" names. `-[SSFrameBufferView updateSubviews]` gives every screen its
+  own view at its frame, and `-[SSFrameBufferRenderView drawRect:]` draws that
+  screen's backing rect into it at `kCGInterpolationMedium`. A 2× screen's pixels
+  cover half a point each and a 1× screen's a whole point, on either client.
+- Between screens the view's layer background shows, RGB 0.1 grey
+  (`-[SSFrameBufferView updateLayer]`).
+- `frameBufferCoordinatesFromWindowCoordinates:` hit-tests the screens in order,
+  each rect widened by one on its far edges, and maps a point back by the screen's
+  own scale into its backing rect. Outside every screen it returns (−1, −1), and
+  `sendMouseEventWithWindowCoordinates:` sends nothing.
+- The cursor keeps one size in points: over a 2× region `_ScaleCursorForScreen`
+  doubles the image in framebuffer pixels, which the screen's half-point pixels
+  undo.
+
+Remotex does the same. For a combined layout whose records differ in density,
+`Layout::mosaic` builds each screen's backing rect and logical rect, both moved to
+start at zero, and the gateway sends them as `ServerMsg::Mosaic` ahead of the
+`Resize`; an empty one ends the composition, and the current one is replayed to a
+browser that attaches. The page's paint worker keeps the framebuffer off screen
+and draws every region at its points at the browser display's density, at medium
+smoothing, over the same grey. The page presents that canvas like any other, and
+its sender maps each pointer position back through the region under it, dropping
+positions in a gap — and presses and wheel there, though never a release, so a
+drag that ends in a gap cannot leave a button held. The gateway's pointer division
+is then 1, the factor in force. The All Displays entry is labelled with the points
+the screens span, as Apple's is.
 
 ## The other corrections
 
@@ -323,7 +434,7 @@ document models; a size is a difference of edges. The record, `0x38` bytes:
 
 ```text
 +0x00 f64 BE   this screen's scale factor    -- 1.0 or 2.0; 0.0 if the mode lookup failed
-+0x08 f64 BE   viewer scale factor           -- the daemon's server-side scaling, 1.0
++0x08 f64 BE   viewer scale factor           -- the daemon's applied server-side scaling
 +0x10 u32 BE   display_id (CGDirectDisplayID)
 +0x14 rect     logical bounds  (u16 top, left, bottom, right)
 +0x1c rect     backing bounds  (u16 top, left, bottom, right)
@@ -332,11 +443,11 @@ document models; a size is a difference of edges. The record, `0x38` bytes:
                the last four bytes (blue shift and padding) are always zero
 ```
 
-The scale is 0.0 when the agent's `hidpi_ScaleFactor` (`FUN_100045a47`) cannot
-look the screen's mode up ("bad mode ref"). The backing rect comes from the pixel
-bounds regardless, so remotex then takes the density from the ratio of the two
-rects rather than dropping the screen, which for High Performance's single record
-would end the session.
+The native scale is 0.0 when the agent's `hidpi_ScaleFactor` (`FUN_100045a47`)
+cannot look the screen's mode up ("bad mode ref"). The backing rect comes from the
+scaled pixel bounds regardless, so remotex divides its backing/logical ratio by
+the viewer scale to recover the native density rather than dropping the screen.
+For High Performance's single record, dropping it would end the session.
 
 And the header, which is 0x14 bytes after the length prefix:
 
@@ -606,13 +717,15 @@ Worth stating, because a reverse-engineered document offers no way to tell a
 measured claim from an inferred one, and these carried the most risk.
 
 **The record layer, in full and in both directions.** AES-128-CBC with one
-persistent context per direction, never reset — record N's last ciphertext block is
-record N+1's IV. `u16 ciphertext_len` outside, `u16 body_len || body || filler ||
+persistent context per direction and key epoch — record N's last ciphertext block
+is record N+1's IV until a rekey starts both directions from its replacement IV.
+`u16 ciphertext_len` outside, `u16 body_len || body || filler ||
 byte[20] integrity` inside, `filler_len = (-(2 + body_len + 20)) mod 16`, and
 `integrity = SHA1(u32_be(seq) || plaintext[0 .. len-20])` with independent
-non-resetting per-direction sequence counters from 0. Every record of every session
-verified its trailer, and the Mac accepted everything sent back the same way. Zero
-filler is accepted (the document permits zero or random).
+per-direction sequence counters from 0. Those counters do not reset at a rekey.
+Every record of every measured session verified its trailer, and the Mac accepted
+everything sent back the same way. Zero filler is accepted (the document permits
+zero or random).
 
 **Reassembly by concatenation is mandatory, not an edge case.** A full-screen zlib
 rectangle is ~400 KB against a 65 520-byte record ceiling, so it spans several
@@ -634,10 +747,17 @@ section as having no capture behind it.
 **The rekey.** Delivered as a single-rectangle FramebufferUpdate with `x=y=w=h=0`
 and encoding `0x44f`; body `u32 generation || 16B wrapped key || 16B wrapped iv`,
 each half AES-128-ECB-decrypted independently under the wrap key. `generation` is 1.
-Only ever one per session, so multi-rekey remains unexercised. The wrap key rotates
-to the new key, and the record sequence counter is never reset. The daemon's record
-writer (`FUN_10005e9e7`) fills with the last body byte repeated and puts at most
-`0x8000` bytes in a record. The Mac may send
+The live captures exercised only the initial rekey, but the daemon's
+`HandleSetEncryptionMessage` and send path settle repeated rotations: command 1
+again wraps the replacement under the current content key, sends the rekey in the
+old record epoch, and then rebuilds both CBC contexts with the replacement key and
+IV. Its send and receive sequence counters are not reset, and the generation field
+is written as 1 again rather than incremented. Remotex never sends command 1
+after the handshake, so it closes the session on any later rekey rather than
+follow it: the Mac switches both ciphers as it sends one, and records the gateway
+has already framed under the old key would fail its check. The daemon's record writer
+(`FUN_10005e9e7`) fills with the last body byte repeated and puts at most `0x8000`
+bytes in a record. The Mac may send
 `MiscStatus` (`0x14`) in the cleartext window between `SetEncryption` and the
 rekey; the client must step over it rather than bailing on it.
 
@@ -1011,14 +1131,18 @@ of no help in escaping the AAC-ELD decoder.
 
 ## Still unknown
 
-- Apple's still-image codecs `0x3ea` and `0x3f3`; the document leaves the first's
-  rectangle body and the second's command-code table unresolved, and neither was
-  advertised here, so nothing was learned.
+- Apple's private framebuffer codecs. Exported constants identify `0x3ea` as
+  `kSSVideoEncoding_SubZlibThousandsCodec` and `0x3f3` as
+  `kSSVideoEncoding_MultiVariantScreenshare`. The latter is a stateful adaptive
+  DCT/JPEG-like tile codec with partial updates and quantization tables, not merely
+  a still-image encoding. The first's rectangle body and the second's command-code
+  table remain unresolved, so neither is advertised here.
 - The media stream's **HEVC screen video** leg (`0x1c` video1/video2, SRTP). Only
   the audio leg was decoded — see "The media stream" above; the video offer had to
   be sent for audio to start, but its picture was never received or decoded.
-- Authentication types 33, 35 and 36: not attempted, type 30 being sufficient.
-- Multi-rekey, and whether sequence counters survive a second one.
+- The exact wire shapes and interoperability of authentication types 31 through
+  36. Their roles and implementation paths are identified above, but only type
+  30 has been exercised against the server.
 - The exact protected SRTCP receiver-report shape the native viewer sends. A
   clear eight-byte report kept the tested sender alive, but is not evidence that
   cleartext is the intended wire.
@@ -1026,8 +1150,6 @@ of no help in escaping the AAC-ELD decoder.
   the RTCP timeout were measured rather than read from their configuring code.
   AVConference's x86-64 slice has since settled the cipher-suite mapping above,
   but not those settings.
-- What Apple's viewer puts in its descriptor (name, modes, rotations = 7): that is
-  built in ScreenSharingUI, also not extracted.
 - ClientInit `0x81` against a non-console user, a mirrored Mac, a record whose scale
   is 0.0, and whether the `AutoFrameBufferUpdate` push path ever fires: the test Mac
   has one account and one screen.

@@ -548,10 +548,10 @@ struct ConfigResponse {
     /// Whether `GET /api/throughput` has a database to read, so the page offers the view only
     /// where there is something in it.
     throughput: bool,
-    /// The optional cargo features this gateway was built with, for the page's
-    /// version line. The version itself is in the bundle; these are facts about the
-    /// binary, which one bundle is compiled into every build of.
-    features: &'static [&'static str],
+    /// Whether the `[airplay]` table is set, so the page's version line says the
+    /// gateway runs a Mac's AirPlay speaker. A fact about the config, not the build:
+    /// a binary built with the feature and no table runs no speaker.
+    airplay: bool,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
@@ -561,7 +561,7 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
         branding: state.config.branding.text.clone(),
         logo: state.config.branding.logo.is_some(),
         throughput: state.throughput.store.is_some(),
-        features: crate::cli::FEATURES,
+        airplay: state.config.airplay.is_some(),
     })
 }
 
@@ -1442,12 +1442,12 @@ mod tests {
             branding: "remotex".to_owned(),
             logo: false,
             throughput: false,
-            features: &["embedded-gateway"],
+            airplay: true,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"remotex","logo":false,"throughput":false,"features":["embedded-gateway"]}"#
+            r#"{"branding":"remotex","logo":false,"throughput":false,"airplay":true}"#
         );
     }
 

@@ -13,21 +13,22 @@
 //!
 //! **Compression**: standard zlib (`ENCODING_ZLIB`, decoded in
 //! [`crate::vnc_encodings`]) instead of raw pixels, which is around fifty times
-//! fewer bytes on a static desktop. Apple's own still-image codecs would do better
-//! still, but their payload formats are unresolved in the reference this was
-//! written from, and a client must not advertise an encoding it cannot decode.
+//! fewer bytes on a static desktop. Apple's private framebuffer codecs would do
+//! better still, but their payload formats are unresolved in the reference this
+//! was written from, and a client must not advertise an encoding it cannot decode.
 //!
 //! **Picking a physical screen in Standard mode**:
 //! [`ENCODING_DISPLAY_LAYOUT`] carries the Mac's displays and
 //! [`set_display_message`] binds one of them, narrowing the framebuffer to that
 //! screen's own pixels.
 //!
-//! **The pixel density**, which comes with it. Each screen states its own scale,
-//! so a 2x display arrives at 3200x1800 and is reported as 1600x900 points — the
-//! desktop then draws at 100% instead of twice its size. Because the density is
-//! per screen, the *combined* view of a mixed-density Mac has no single scale (see
-//! [`Layout::scale`]), which makes picking a screen the thing that makes the
-//! geometry exact rather than a convenience.
+//! **The pixel density**, which comes with it. Each screen states both its native
+//! density and the server-side scale Apple applied. Standard mode asks the Mac to
+//! scale the framebuffer to the browser's display density, so a 2x 2880x1800
+//! screen viewed from a 1x display arrives as 1440x900 instead of being shrunk in
+//! the browser. Because density is per screen, the *combined* view of a
+//! mixed-density Mac has no single scale; it is composed in the browser from the
+//! regions [`Layout::mosaic`] names, as Apple's viewer composes it.
 //!
 //! **A virtual display in High Performance mode**:
 //! [`set_display_configuration`] asks for one virtual display at the configured
@@ -59,7 +60,9 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
-use crate::protocol::{CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM};
+use crate::protocol::{
+    CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM, MosaicRect, MosaicRegion,
+};
 use crate::vnc::ENCODING_ZLIB;
 use crate::vnc_encodings::inflate_independent;
 
@@ -105,9 +108,9 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
-/// here. That is why Apple's own still-image codecs are absent — the reference
-/// leaves their payload formats unresolved, so advertising them would ask for
-/// rectangles this client could only guess at. Media-stream encoding 1010 is
+/// here. That is why Apple's own private framebuffer codecs are absent — the
+/// reference leaves their payload formats unresolved, so advertising them would
+/// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
 /// absent because advertising it starts the separate Adaptive HEVC/AAC-ELD
 /// transport, which this engine deliberately does not implement.
 pub const ENCODINGS: &[i32] = &[
@@ -190,12 +193,13 @@ pub fn set_encryption_start() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]
 }
 
-/// `SetEncryption(command = 2)`.
+/// `SetEncryption(command = 2, argument = 1)`: tell the server to decrypt every
+/// client message it receives after the rekey.
 ///
-/// Nominally "stop encryption", which it plainly is not: native Screen Sharing
-/// sends this immediately after `command = 1` and the session that follows is
-/// encrypted throughout. Sent because native sends it.
-pub fn set_encryption_stop() -> Vec<u8> {
+/// The daemon names the resulting state exactly that way. Argument zero disables
+/// receive-side decryption; this is not a request to stop encrypting the server's
+/// stream.
+pub fn enable_inbound_record_decryption() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
@@ -232,6 +236,21 @@ pub fn set_display_message(id: Option<u32>) -> Vec<u8> {
     msg.extend_from_slice(&0u16.to_be_bytes()); // reserved
     // Ignored by the server when combining, and zero is what native sends there.
     msg.extend_from_slice(&id.unwrap_or(0).to_be_bytes());
+    msg
+}
+
+/// `SetServerScaling`: ask Standard Screen Sharing to render its framebuffer at
+/// `scale` before it is encoded.
+///
+/// This is not one of Apple's length-prefixed control messages. Native writes a
+/// two-byte header followed directly by one big-endian `f64`, and the daemon
+/// accepts factors in `(0, 1]`. The next [`Layout`] reports the applied factor in
+/// every display record's viewer-scale field.
+pub fn set_server_scaling(scale: f32) -> Vec<u8> {
+    debug_assert!(scale.is_finite() && scale > 0.0 && scale <= 1.0);
+    let mut msg = Vec::with_capacity(10);
+    msg.extend_from_slice(&[0x08, 0x00]);
+    msg.extend_from_slice(&f64::from(scale).to_be_bytes());
     msg
 }
 
@@ -342,13 +361,23 @@ fn message(kind: u8, body: &[u8]) -> Vec<u8> {
 pub struct Display {
     pub info: DisplayInfo,
     /// Pixels per point on *this* screen, as the Mac states it: the record's
-    /// leading `f64`, or the ratio of its two rects when that is 0.0. 1.0 or 2.0
-    /// on every Mac measured.
+    /// leading `f64`, or the ratio of its two rects divided by `viewer_scale`
+    /// when that is 0.0. 1.0 or 2.0 on every Mac measured.
     pub density: f32,
+    /// The server-side framebuffer scale applied to this screen. Apple reports
+    /// the same value in every record; keeping it with the record lets the
+    /// effective density be checked against that record's two rectangles.
+    pub viewer_scale: f32,
     /// This screen's backing-pixel size. The full repaint after a combined
     /// layout consists of one such region per non-mirrored display; gaps in the
     /// bounding framebuffer are not rectangles the Mac sends.
     pub backing: (u16, u16),
+    /// Where the backing region sits in the framebuffer, left then top.
+    pub backing_at: (i16, i16),
+    /// This screen's size in points, and where it sits in the Mac's own
+    /// arrangement, left then top.
+    pub logical: (u16, u16),
+    pub logical_at: (i16, i16),
 }
 
 /// The Mac's display layout: which screens it has, which one it is sending, and
@@ -368,33 +397,138 @@ pub struct Layout {
 impl Layout {
     /// Pixels per point, for [`crate::protocol::ServerMsg::Resize`].
     ///
-    /// The density of the *selected* screen, because that is the only place a
-    /// single number is true. The combined view is a mosaic of screens at
-    /// different densities — the measured Mac puts a 1x 1280x800 beside a 2x
-    /// 1600x900, giving a 4480x1800 framebuffer of 2880x900 points — and no one
-    /// scale describes it. There it reports [`UNSCALED`], which shows the
-    /// framebuffer at its pixel size: too large on the Retina half, but nothing
-    /// is misrepresented, and picking a screen is what makes it exact.
+    /// The effective density of the *selected* screen, after Apple's server-side
+    /// scaling.
     ///
-    /// A combined view of *one* screen is that screen, so its density holds for
-    /// the whole framebuffer. This is not a corner: a High Performance layout
-    /// always reports the combined sentinel over its single virtual display, so
-    /// the sentinel path is the one a granted Retina mode comes back on — reading
-    /// it as 1x told the client to show 3456x1804 backing pixels at full size,
-    /// and poisoned the point arithmetic every later resize starts from.
+    /// The combined view is the densest screen's effective density. Over screens
+    /// of one density that is every screen's. Over mixed densities no one number
+    /// is true, and the browser presents the view through [`Layout::mosaic`]
+    /// instead; this remains the Mac's own number, never one made up to fit.
+    ///
+    /// A combined view of *one* screen is that screen. This is not a corner: a
+    /// High Performance layout always reports the combined sentinel over its
+    /// single virtual display, so the sentinel path is the one a granted Retina
+    /// mode comes back on — reading it as 1x told the client to show 3456x1804
+    /// backing pixels at full size, and poisoned the point arithmetic every later
+    /// resize starts from.
     ///
     /// [`UNSCALED`]: crate::protocol::UNSCALED
     pub fn scale(&self) -> f32 {
         let Some(id) = self.current else {
-            return match self.displays.as_slice() {
-                [only] => only.density,
-                _ => crate::protocol::UNSCALED,
-            };
+            return self
+                .displays
+                .iter()
+                .map(Display::effective_density)
+                .fold(crate::protocol::UNSCALED, f32::max);
         };
         self.displays
             .iter()
             .find(|d| d.info.id == id)
-            .map_or(crate::protocol::UNSCALED, |d| d.density)
+            .map_or(crate::protocol::UNSCALED, Display::effective_density)
+    }
+
+    /// The server-side factor Apple says it applied to this framebuffer.
+    ///
+    /// `SetServerScaling` is connection-wide, so every usable record is expected
+    /// to agree. The parser warns about a disagreement and this takes the first
+    /// record, matching the framebuffer that was actually returned rather than
+    /// inventing another value.
+    pub fn viewer_scale(&self) -> f32 {
+        self.displays[0].viewer_scale
+    }
+
+    /// The server scale that makes `selection` match the browser display's
+    /// density, without asking Apple to enlarge pixels — Apple's
+    /// `remoteScaleFactorForLocalScaleFactor:`.
+    ///
+    /// A selected screen uses its own density, and All Displays over screens of
+    /// one density uses theirs: a 2880x1800 backing for a 1440x900 Retina display
+    /// arrives at 1440x900 on a 1x browser.
+    pub fn server_scale_for(&self, selection: Option<u32>, host_density: f32) -> f32 {
+        // A mosaic of mixed densities is composed in the browser from the Mac's
+        // own pixels, as Apple's viewer composes it: the daemon logs no
+        // `SetServerScaling` from Screen Sharing.app in that view, only the
+        // native combined framebuffer at 1.0.
+        if selection.is_none() && self.mixed_density() {
+            return 1.0;
+        }
+        let density = selection
+            .and_then(|id| self.displays.iter().find(|display| display.info.id == id))
+            .map_or_else(
+                || self.displays.iter().map(|display| display.density).fold(1.0, f32::max),
+                |display| display.density,
+            );
+        (host_density / density).clamp(f32::MIN_POSITIVE, 1.0)
+    }
+
+    /// Whether the screens differ in density, which no single framebuffer scale
+    /// can then describe.
+    fn mixed_density(&self) -> bool {
+        let first = self.displays[0].density;
+        self.displays.iter().any(|display| (display.density - first).abs() > 0.005)
+    }
+
+    /// How a client presents the combined view of screens at different
+    /// densities, or `None` where one density describes the framebuffer — a
+    /// selected screen, or screens that agree.
+    ///
+    /// Each region keeps the pixels the Mac sent and places them at the screen's
+    /// points in its own arrangement. Both spaces are moved to start at zero:
+    /// the framebuffer already does, and the arrangement's origin is wherever the
+    /// main screen puts it.
+    pub fn mosaic(&self) -> Option<Vec<MosaicRegion>> {
+        if self.current.is_some() || !self.mixed_density() {
+            return None;
+        }
+        let min = |at: fn(&Display) -> (i16, i16)| {
+            self.displays.iter().map(at).fold((i16::MAX, i16::MAX), |m, (x, y)| {
+                (m.0.min(x), m.1.min(y))
+            })
+        };
+        // From the least edge, so never negative, and within the u16 the edges
+        // were sent in.
+        let from = |at: i16, origin: i16| (i32::from(at) - i32::from(origin)) as u16;
+        let pixel_origin = min(|display| display.backing_at);
+        let point_origin = min(|display| display.logical_at);
+        Some(
+            self.displays
+                .iter()
+                .map(|display| MosaicRegion {
+                    pixels: MosaicRect {
+                        x: from(display.backing_at.0, pixel_origin.0),
+                        y: from(display.backing_at.1, pixel_origin.1),
+                        w: display.backing.0,
+                        h: display.backing.1,
+                    },
+                    points: MosaicRect {
+                        x: from(display.logical_at.0, point_origin.0),
+                        y: from(display.logical_at.1, point_origin.1),
+                        w: display.logical.0,
+                        h: display.logical.1,
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    /// The points every screen spans together, which is how Apple's viewer
+    /// names its combined view ("Both Displays: 2720 × 900"). Unlike the
+    /// framebuffer, it does not change with the selection.
+    pub fn points_spanned(&self) -> (u16, u16) {
+        let span = |start: fn(&Display) -> i16, size: fn(&Display) -> u16| {
+            let lo = self.displays.iter().map(|d| i32::from(start(d))).min().unwrap_or(0);
+            let hi = self
+                .displays
+                .iter()
+                .map(|d| i32::from(start(d)) + i32::from(size(d)))
+                .max()
+                .unwrap_or(0);
+            u16::try_from(hi - lo).unwrap_or(u16::MAX)
+        };
+        (
+            span(|d| d.logical_at.0, |d| d.logical.0),
+            span(|d| d.logical_at.1, |d| d.logical.1),
+        )
     }
 
     /// The screens as a client is offered them.
@@ -415,6 +549,12 @@ impl Layout {
             .iter()
             .map(|display| u64::from(display.backing.0) * u64::from(display.backing.1))
             .sum()
+    }
+}
+
+impl Display {
+    fn effective_density(&self) -> f32 {
+        self.density * self.viewer_scale
     }
 }
 
@@ -484,17 +624,22 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         if flags & 0x02 != 0 && origins.contains(&origin) {
             continue;
         }
+        // Signed: a screen left of or above the main one has negative edges in
+        // the Mac's global arrangement. Every value measured so far is positive,
+        // and reads the same either way.
+        let signed = |at: usize| be16(record, at).cast_signed();
         let edges = |at: usize| {
-            let (top, left, bottom, right) = (
-                be16(record, at),
-                be16(record, at + 2),
-                be16(record, at + 4),
-                be16(record, at + 6),
-            );
-            (right.saturating_sub(left), bottom.saturating_sub(top))
+            let (top, left, bottom, right) =
+                (signed(at), signed(at + 2), signed(at + 4), signed(at + 6));
+            let size = |from: i16, to: i16| {
+                u16::try_from(i32::from(to) - i32::from(from)).unwrap_or(0)
+            };
+            (size(left, right), size(top, bottom))
         };
         let logical = edges(0x14);
         let backing = edges(0x1c);
+        // (top, left, ...) on the wire, so the left edge is the second field.
+        let corner = |at: usize| (signed(at + 2), signed(at));
         // An unusable screen is dropped, the way a mirror copy is, rather than
         // taking the whole layout with it. One odd record among good ones would
         // otherwise cost the entire display list *and* the resize — and a layout
@@ -508,18 +653,37 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             );
             continue;
         }
-        // The Mac states the density twice over — once as a double, once as the
-        // ratio of the two rects. Taking the double and checking the ratio means a
-        // build that disagrees with itself says so, instead of quietly halving a
-        // desktop.
+        // The Mac states the native density as the first double and its applied
+        // server scale as the second. Their product is the ratio of the returned
+        // backing and logical rects, so all three fields check one another.
         let stated = f64::from_be_bytes(
             record[0x00..0x08].try_into().expect("eight bytes inside a 0x38-byte record"),
         );
+        let viewer_scale = f64::from_be_bytes(
+            record[0x08..0x10].try_into().expect("eight bytes inside a 0x38-byte record"),
+        );
         let ratio = f32::from(backing.0) / f32::from(logical.0);
+        // Only `SetServerScaling` moves this off 1.0, and a record is not dropped
+        // over it: High Performance lists one record, so dropping it would end the
+        // session. A value outside (0, 1] is read as the unscaled 1.0 it was
+        // before this field was read at.
+        let viewer_scale = if viewer_scale.is_finite() && viewer_scale > 0.0 && viewer_scale <= 1.0 {
+            viewer_scale as f32
+        } else {
+            warn!(
+                "vnc: display layout record {index} states a viewer scale of {viewer_scale}, \
+                 outside (0, 1]; reading it as 1"
+            );
+            1.0
+        };
         // The agent writes 0.0 when it cannot look the screen's mode up ("bad mode
-        // ref") and takes the backing rect from the pixel bounds regardless, so the
-        // rects are then the Mac's only statement of the density.
-        let stated = if stated == 0.0 { f64::from(ratio) } else { stated };
+        // ref") and takes the scaled backing rect from the pixel bounds regardless,
+        // so undo the viewer scale to recover the native density from the rects.
+        let stated = if stated == 0.0 {
+            f64::from(ratio / viewer_scale)
+        } else {
+            stated
+        };
         if !stated.is_finite() || !(1.0..=4.0).contains(&stated) {
             warn!(
                 "vnc: display layout record {index} states a scale factor of {stated}, \
@@ -528,10 +692,11 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             continue;
         }
         let density = stated as f32;
-        if (ratio - density).abs() > 0.01 {
+        let effective_density = density * viewer_scale;
+        if (ratio - effective_density).abs() > 0.01 {
             warn!(
-                "vnc: display {} states scale {density} but its rects give {ratio}; \
-                 using the stated one",
+                "vnc: display {} states density {density} at server scale {viewer_scale} but its \
+                 rects give {ratio}; using the stated values",
                 be32(record, 0x10)
             );
         }
@@ -561,11 +726,23 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
                 virtual_display,
             },
             density,
+            viewer_scale,
             backing,
+            backing_at: corner(0x1c),
+            logical,
+            logical_at: corner(0x14),
         });
     }
 
     anyhow::ensure!(!displays.is_empty(), "a display layout listed no usable display");
+    let viewer_scale = displays[0].viewer_scale;
+    if displays
+        .iter()
+        .skip(1)
+        .any(|display| (display.viewer_scale - viewer_scale).abs() > 0.005)
+    {
+        warn!("vnc: display layout records disagree about the server scaling factor");
+    }
     let backing = (be16(payload, 0x06), be16(payload, 0x08));
     anyhow::ensure!(
         backing.0 > 0 && backing.1 > 0,
@@ -721,6 +898,19 @@ pub(crate) fn test_layout(current: Option<u32>, displays: &[TestScreen]) -> Vec<
     payload
 }
 
+/// Restate a [`test_layout`] payload as the Mac sends it after
+/// `SetServerScaling`: every record's native density from `natives`, in order,
+/// and `viewer` as its applied factor. The builder derives the density from the
+/// rects, which after scaling no longer give the native one.
+#[cfg(test)]
+pub(crate) fn test_scale_layout(payload: &mut [u8], viewer: f64, natives: &[f64]) {
+    for (index, native) in natives.iter().enumerate() {
+        let at = LAYOUT_HEAD + index * LAYOUT_RECORD;
+        payload[at..at + 8].copy_from_slice(&native.to_be_bytes());
+        payload[at + 8..at + 16].copy_from_slice(&viewer.to_be_bytes());
+    }
+}
+
 /// [`test_layout`] as it arrives in the rectangle, behind its `u16` length.
 #[cfg(test)]
 pub(crate) fn test_layout_wire(current: Option<u32>, displays: &[TestScreen]) -> Vec<u8> {
@@ -765,7 +955,7 @@ mod tests {
             vec![0x12, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]
         );
         assert_eq!(
-            set_encryption_stop(),
+            enable_inbound_record_decryption(),
             vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
         );
     }
@@ -839,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn arming_and_display_selection_are_fixed_shapes() {
+    fn arming_display_selection_and_server_scaling_are_fixed_shapes() {
         let arm = auto_framebuffer_update((3840, 2160));
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
@@ -854,6 +1044,11 @@ mod tests {
 
         let all = set_display_message(None);
         assert_eq!(all, vec![0x0d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        assert_eq!(
+            set_server_scaling(0.5),
+            vec![0x08, 0x00, 0x3f, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     /// Dropping `DisplayInfo` or the layout from the list costs the display
@@ -925,11 +1120,11 @@ mod tests {
 
     #[test]
     fn the_scale_is_the_selected_screens_own() {
-        // Combined: no one scale is true of a 1x screen beside a 2x one, and the
-        // ratio of the header's own two geometries (4480/2880) is the meaningless
-        // number that reading it would produce.
+        // Combined: the densest screen's, which server scaling matches to the
+        // browser — never the ratio of the header's own two geometries
+        // (4480/2880), which describes neither screen.
         let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
-        assert_eq!(combined.scale(), crate::protocol::UNSCALED);
+        assert_eq!(combined.scale(), 2.0);
 
         // Selecting one screen makes it exact, which is the whole reason picking
         // matters. Both edits are what the Mac actually answered a `0x0d` with: the
@@ -954,6 +1149,102 @@ mod tests {
         // at its pixel size rather than guessing at another screen's density.
         payload[0x0a..0x0e].copy_from_slice(&99u32.to_be_bytes());
         assert_eq!(parse_layout(&payload).unwrap().scale(), crate::protocol::UNSCALED);
+    }
+
+    #[test]
+    fn server_scaling_matches_the_chosen_screen_to_the_browser_density() {
+        let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
+        assert_eq!(combined.viewer_scale(), 1.0);
+        // All Displays over mixed densities is composed from the native pixels.
+        assert_eq!(combined.server_scale_for(None, 1.0), 1.0);
+        assert_eq!(combined.server_scale_for(None, 2.0), 1.0);
+        assert_eq!(combined.server_scale_for(Some(1), 1.0), 1.0);
+        assert_eq!(combined.server_scale_for(Some(4), 1.0), 0.5);
+
+        // Apple keeps the native density in the first double and reports the
+        // applied server scale in the second. The returned backing rect contains
+        // the already-scaled pixels; their effective density is what the browser
+        // is told, so it maps one returned pixel to one device pixel at 1x.
+        let mut payload = layout(Some(4), &[(4, (1440, 900), (1440, 900), 0x01)]);
+        super::test_scale_layout(&mut payload, 0.5, &[2.0]);
+        let scaled = parse_layout(&payload).unwrap();
+        assert_eq!(scaled.displays[0].density, 2.0);
+        assert_eq!(scaled.viewer_scale(), 0.5);
+        assert_eq!(scaled.scale(), 1.0);
+
+        // All Displays at 0.5: the Retina screen arrives at 1x and the 1x screen
+        // at 0.5x. The densest is what the browser was matched to.
+        let mut payload = layout(
+            None,
+            &[(1, (1280, 800), (640, 400), 0x01), (4, (1600, 900), (1600, 900), 0x00)],
+        );
+        super::test_scale_layout(&mut payload, 0.5, &[1.0, 2.0]);
+        let both = parse_layout(&payload).unwrap();
+        assert_eq!(both.displays.len(), 2);
+        assert_eq!(both.viewer_scale(), 0.5);
+        assert_eq!(both.scale(), 1.0);
+    }
+
+    #[test]
+    fn a_screen_left_of_the_main_one_keeps_its_negative_place() {
+        // A 2x 1440x900 screen at x = -1440 points beside the 1x main screen at
+        // 0. Read unsigned, its left edge wrapped past the right one and the
+        // screen was dropped as zero-width.
+        let mut payload = layout(
+            None,
+            &[(7, (1440, 900), (2880, 1800), 0x00), (1, (1280, 800), (1280, 800), 0x01)],
+        );
+        let record = LAYOUT_HEAD;
+        payload[record + 0x16..record + 0x18].copy_from_slice(&(-1440i16).to_be_bytes());
+        payload[record + 0x1a..record + 0x1c].copy_from_slice(&0i16.to_be_bytes());
+        let second = LAYOUT_HEAD + LAYOUT_RECORD;
+        payload[second + 0x16..second + 0x18].copy_from_slice(&0i16.to_be_bytes());
+        payload[second + 0x1a..second + 0x1c].copy_from_slice(&1280i16.to_be_bytes());
+        let parsed = parse_layout(&payload).unwrap();
+        assert_eq!(parsed.displays.len(), 2);
+        assert_eq!(parsed.displays[0].logical, (1440, 900));
+        assert_eq!(parsed.points_spanned(), (2720, 900));
+        let mosaic = parsed.mosaic().unwrap();
+        assert_eq!((mosaic[0].points.x, mosaic[1].points.x), (0, 1440));
+    }
+
+    #[test]
+    fn an_unusable_viewer_scale_reads_as_unscaled_rather_than_dropping_the_screen() {
+        let mut payload = layout(None, &[(9, (1728, 902), (3456, 1804), 0x01)]);
+        super::test_scale_layout(&mut payload, 0.0, &[2.0]);
+        let parsed = parse_layout(&payload).unwrap();
+        assert_eq!(parsed.displays.len(), 1);
+        assert_eq!(parsed.viewer_scale(), 1.0);
+        assert_eq!(parsed.scale(), 2.0);
+    }
+
+    #[test]
+    fn only_a_mixed_density_combined_view_is_composed() {
+        // The captured Mac: a 1x screen at (0,0) beside a 2x one at 1280 points,
+        // whose pixels start 1280 pixels in.
+        let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
+        let rect = |x, y, w, h| MosaicRect { x, y, w, h };
+        assert_eq!(
+            combined.mosaic(),
+            Some(vec![
+                MosaicRegion { pixels: rect(0, 0, 1280, 800), points: rect(0, 0, 1280, 800) },
+                MosaicRegion {
+                    pixels: rect(1280, 0, 3200, 1800),
+                    points: rect(1280, 0, 1600, 900),
+                },
+            ])
+        );
+
+        assert_eq!(combined.points_spanned(), (2880, 900), "what Apple's viewer names it");
+
+        // A selected screen is one density, and so are screens that agree.
+        let mut payload = TWO_REAL_SCREENS.to_vec();
+        payload[0x0a..0x0e].copy_from_slice(&4u32.to_be_bytes());
+        assert_eq!(parse_layout(&payload).unwrap().mosaic(), None);
+        let alike = layout(None, &[(1, (1280, 800), (2560, 1600), 0x01), (2, (1440, 900), (2880, 1800), 0x00)]);
+        let alike = parse_layout(&alike).unwrap();
+        assert_eq!(alike.mosaic(), None);
+        assert_eq!(alike.server_scale_for(None, 1.0), 0.5);
     }
 
     /// The shared builder, which lives outside this module so [`crate::vnc`]'s tests

@@ -1113,6 +1113,24 @@ pub struct DisplayInfo {
     pub virtual_display: bool,
 }
 
+/// A rectangle in whole pixels or points, origin at the top left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MosaicRect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// One screen of a composed view: where its pixels sit in the framebuffer, and
+/// where it belongs in the remote's arrangement in points. See
+/// [`ServerMsg::Mosaic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MosaicRegion {
+    pub pixels: MosaicRect,
+    pub points: MosaicRect,
+}
+
 /// Server -> browser: screen updates and session status.
 ///
 /// Most variants come from the protocol engine (tiles, resize, error); the two
@@ -1234,6 +1252,17 @@ pub enum ServerMsg {
         active: u32,
         displays: Vec<DisplayInfo>,
     },
+    /// How the next framebuffers are presented, when no single density does it:
+    /// a Mac's combined view of screens at different densities. Each region is
+    /// drawn at its points, at the browser display's own density, the way Apple's
+    /// viewer composes the same view. This is the one place a browser rescales
+    /// remote pixels, and only here, because the Mac cannot render one
+    /// framebuffer at two densities.
+    ///
+    /// Sent ahead of the [`ServerMsg::Resize`] it describes, and replayed with it.
+    /// Empty ends the composition; a framebuffer is then presented whole at its
+    /// `Resize.scale` again.
+    Mosaic { regions: Vec<MosaicRegion> },
     /// Whether the remote runs macOS, discovered by the engine as it connects
     /// and sent once, next to the first [`ServerMsg::Resize`].
     ///
@@ -1429,6 +1458,9 @@ enum ControlMsg<'a> {
         active: u32,
         displays: Vec<WireDisplay<'a>>,
     },
+    Mosaic {
+        regions: &'a [MosaicRegion],
+    },
     AudioFormat {
         codec: &'a str,
         #[serde(rename = "sampleRate")]
@@ -1573,6 +1605,7 @@ impl ServerMsg {
                 packet_frames: *packet_frames,
                 head: base64::engine::general_purpose::STANDARD.encode(head),
             }),
+            ServerMsg::Mosaic { regions } => control(&ControlMsg::Mosaic { regions }),
             ServerMsg::Displays { active, displays } => control(&ControlMsg::Displays {
                 active: *active,
                 displays: displays
@@ -2018,6 +2051,27 @@ mod tests {
         match (ServerMsg::VideoEnd { stream: 3 }).text_frame() {
             Some(json) => assert_eq!(json, r#"{"type":"videoEnd","stream":3}"#),
             None => panic!("videoEnd must be a text frame"),
+        }
+        // A composition: each screen's pixels and its points, named so the page's
+        // parser can tell the two spaces apart; empty ends it.
+        let rect = |x, y, w, h| MosaicRect { x, y, w, h };
+        match (ServerMsg::Mosaic {
+            regions: vec![MosaicRegion {
+                pixels: rect(1280, 0, 2880, 1800),
+                points: rect(1280, 0, 1440, 900),
+            }],
+        })
+        .text_frame()
+        {
+            Some(json) => assert_eq!(
+                json,
+                r#"{"type":"mosaic","regions":[{"pixels":{"x":1280,"y":0,"w":2880,"h":1800},"points":{"x":1280,"y":0,"w":1440,"h":900}}]}"#
+            ),
+            None => panic!("mosaic must be a text frame"),
+        }
+        match (ServerMsg::Mosaic { regions: Vec::new() }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"mosaic","regions":[]}"#),
+            None => panic!("mosaic must be a text frame"),
         }
         match (ServerMsg::Displays {
             active: 7,

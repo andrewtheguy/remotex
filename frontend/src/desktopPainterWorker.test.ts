@@ -145,7 +145,7 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
     sequence: 4,
     generation: 2,
   });
-  h.host.handle({ type: "resize", w: 640, h: 480, seq: 7 });
+  h.host.handle({ type: "resize", w: 640, h: 480, seq: 7, view: null });
   h.host.handle({
     type: "videoFormat",
     stream: 2,
@@ -217,7 +217,7 @@ test("a later batch reports the time it waited behind earlier paint", async () =
 
 test("clear ends the attachment even with a draw that never finishes", async () => {
   const h = harness();
-  h.host.handle({ type: "resize", w: 640, h: 480, seq: 1 });
+  h.host.handle({ type: "resize", w: 640, h: 480, seq: 1, view: null });
   await settled();
   h.stall();
   h.host.handle({
@@ -252,7 +252,7 @@ test("the next attachment paints without waiting for the stuck one", async () =>
   // the page's "Waiting for the remote desktop…" overlay is held up by, and then
   // its own first batch.
   h.unstall();
-  h.host.handle({ type: "resize", w: 800, h: 600, seq: 2 });
+  h.host.handle({ type: "resize", w: 800, h: 600, seq: 2, view: null });
   h.host.handle({
     type: "frame",
     data: batchFrame(1),

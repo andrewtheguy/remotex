@@ -782,8 +782,8 @@ logins.
 `src/protocol.rs` and `frontend/src/protocol.ts` define the client contract.
 `GET /api/config` publishes the deployment branding before authentication —
 the display name, and whether `GET /api/logo` (equally public) serves an icon
-the page then sets as its favicon — and the optional cargo features the gateway
-was built with, which the page prints after its own version wherever it shows
+the page then sets as its favicon — and whether the `[airplay]` table is set,
+which the page prints as `(airplay)` after its own version wherever it shows
 one. There
 is no client/server version negotiation: the gateway serves the matching SPA from
 the same build, and no second client is supported.
@@ -1441,6 +1441,24 @@ advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple sub
 also negotiates Apple's display metadata, display picker and native pasteboard on
 the ordinary byte stream, and asks for zlib in its first `SetEncodings` exactly as
 High Performance does.
+
+**Apple Standard mode remains fixed-size.** It rejects `resize = true`, shares the
+Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
+Density is handled by the Mac instead: from each `AppleDisplayLayout`, the gateway
+reads the displays' native densities and the viewer scale already applied. It sends
+`SetServerScaling` so the selected display, or All Displays over screens of one
+density, matches the browser display's density. The answering layout is
+authoritative. Its pixels pass through unchanged, and its effective density
+(`native density × viewer scale`) is the `Resize.scale`.
+
+All Displays over screens of *different* densities is the one view no factor can
+render. There the gateway asks for 1.0, as Apple's viewer does, and sends a
+`ServerMsg::Mosaic` ahead of the `Resize`: each screen's rectangle in the
+framebuffer and in points. The paint worker keeps the framebuffer off screen and
+draws every screen at its points at the browser's own density, and the page maps
+pointer positions back through the same regions (`frontend/src/mosaic.ts`). It is
+the only place the browser rescales remote pixels. See
+[Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every

@@ -535,8 +535,9 @@ struct DesktopState {
     /// The density of the screen the client's window is on, from
     /// [`ClientMsg::HostDisplay`], seeded from the session-open's screen.
     ///
-    /// Only High Performance resize spends it: a virtual display renders `points ×
-    /// host_density` pixels, so a Retina client gets a Retina desktop. `scale` is
+    /// High Performance resize spends it when constructing a virtual-display
+    /// mode. Standard Screen Sharing spends it in `SetServerScaling`, asking the
+    /// Mac to return physical-display pixels at the browser's density. `scale` is
     /// what the *remote* granted; the two disagree exactly while a density change
     /// is in flight.
     host_density: f32,
@@ -1157,6 +1158,25 @@ type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
 #[derive(Debug, Default)]
 struct DisplayState {
     displays: Vec<DisplayInfo>,
+    /// The last physical-display layout a Standard Apple session returned.
+    /// Kept so a browser density report or display selection can derive the
+    /// connection-wide `SetServerScaling` factor from the chosen screen's native
+    /// density. High Performance manages density in its virtual-display mode and
+    /// leaves this empty.
+    apple_layout: Option<vnc_apple::Layout>,
+    /// A Standard Apple server scale sent but not yet confirmed by a layout.
+    /// Duplicate layouts are common around login and lock; they must not turn one
+    /// density change into an unbounded stream of identical requests. Layouts
+    /// that arrive before the confirming one answer messages sent earlier — a
+    /// selection's, or an older factor's — and are not reconciled against.
+    ///
+    /// With when it was sent: a request the Mac never answers — one it ignores
+    /// at the login window, say — must not stand in for the factor in force
+    /// forever. Past [`APPLE_SCALE_ANSWER`] the last layout's factor counts again.
+    apple_scale_pending: Option<(f32, std::time::Instant)>,
+    /// The composition last sent, `None` while a framebuffer is presented whole.
+    /// Kept to send only a change, and to replay it to a browser that attaches.
+    mosaic: Option<Vec<crate::protocol::MosaicRegion>>,
     /// Union area the next non-incremental Apple update is expected to paint.
     /// A combined framebuffer may include gaps which never arrive as rectangles.
     repaint_pixels: u64,
@@ -1194,7 +1214,85 @@ impl DisplayState {
             displays: self.displays.clone(),
         })
     }
+
+    /// Ask Standard Screen Sharing for the scale appropriate to `selection`, or
+    /// return nothing when that is already the factor in force. `None` is All
+    /// Displays; `Some` is a physical display id.
+    ///
+    /// A request still in flight is the factor in force: the Mac applies
+    /// messages in order, so a selection made before it answers is compared
+    /// with what it will answer at, not with the layout it is replacing.
+    fn request_apple_scale(&mut self, selection: Option<u32>, host_density: f32) -> Option<f32> {
+        let pending = self.pending_scale();
+        let layout = self.apple_layout.as_ref()?;
+        let want = layout.server_scale_for(selection, host_density);
+        let in_force = pending.unwrap_or_else(|| layout.viewer_scale());
+        if (in_force - want).abs() < 0.005 {
+            return None;
+        }
+        self.apple_scale_pending = Some((want, std::time::Instant::now()));
+        Some(want)
+    }
+
+    /// A browser pointer position, in the framebuffer it is looking at, as
+    /// Standard Screen Sharing reads it: in the display's native pixels.
+    ///
+    /// `SetServerScaling` shrinks only what the Mac sends. Its pointer events
+    /// still address the unscaled framebuffer — measured on macOS 26 at 0.5, the
+    /// centre of a 1440x900 Retina screen's scaled 1440x900 framebuffer sent as
+    /// is landed a quarter of the way in — so a position divides by the factor
+    /// of the layout the browser was last resized to. High Performance keeps no
+    /// Standard layout and passes through unchanged.
+    fn apple_pointer(&self, x: i32, y: i32) -> (i32, i32) {
+        let Some(scale) = self.apple_layout.as_ref().map(vnc_apple::Layout::viewer_scale) else {
+            return (x, y);
+        };
+        let native = |v: i32| (f64::from(v) / f64::from(scale)).round() as i32;
+        (native(x), native(y))
+    }
+
+    /// The factor sent and still awaiting its layout, unless it has waited past
+    /// [`APPLE_SCALE_ANSWER`].
+    fn pending_scale(&mut self) -> Option<f32> {
+        match self.apple_scale_pending {
+            Some((scale, sent)) if sent.elapsed() < APPLE_SCALE_ANSWER => Some(scale),
+            _ => {
+                self.apple_scale_pending = None;
+                None
+            }
+        }
+    }
+
+    /// Record Apple's answer and decide whether its returned scale needs one new
+    /// request for the browser display the session is currently on.
+    ///
+    /// Only a layout at the pending factor has caught up with everything sent.
+    /// One before it — the answer to a selection sent just ahead of the factor,
+    /// say — still shows the old scale, and asking again from it would undo the
+    /// request already on its way.
+    fn accept_apple_layout(
+        &mut self,
+        layout: &vnc_apple::Layout,
+        host_density: f32,
+    ) -> Option<f32> {
+        self.apple_layout = Some(layout.clone());
+        if let Some(pending) = self.pending_scale() {
+            if (pending - layout.viewer_scale()).abs() >= 0.005 {
+                return None;
+            }
+            self.apple_scale_pending = None;
+        }
+        self.request_apple_scale(layout.current, host_density)
+    }
 }
+
+/// How long a `SetServerScaling` is taken to be on its way. `screensharingd`
+/// answers one alone in the same millisecond (its log's `set scaling to` and
+/// `encode display info2` lines), but one queued behind a display switch waits
+/// for the switch: 3 s measured, switching to a virtual display just created.
+/// One unanswered this long was ignored, and a request repeated early is only
+/// a duplicate.
+const APPLE_SCALE_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
 
 type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
 
@@ -1213,10 +1311,12 @@ struct Apple {
 }
 
 impl Apple {
-    /// The read loop's starting state for either Apple subtype. `high_performance`
-    /// settles one thing only — whether a virtual display was asked for.
+    /// The read loop's starting state for either Apple subtype.
     fn new(high_performance: bool) -> Self {
-        Self { virtual_display: high_performance, ..Self::default() }
+        Self {
+            virtual_display: high_performance,
+            ..Self::default()
+        }
     }
 }
 
@@ -1481,10 +1581,11 @@ struct Flags {
     /// lent to a server that announces the wlshare microphone extension
     /// ([`vnc_mic`]). `None` on every Apple target and wherever the key is absent.
     microphone: Option<Arc<crate::mic::MicBridge>>,
-    /// The density the virtual display opened at, from the session-open's
-    /// screen. Seeding [`DesktopState::host_density`] with it keeps the
-    /// client's first `hostDisplay` — an echo of the same screen — from
-    /// reading as a density change against a desktop already rendered at it.
+    /// The browser display's density at session-open. High Performance uses it
+    /// for the opening virtual-display mode; Standard uses it when its first
+    /// physical-display layout chooses Apple's server-side scale. Seeding
+    /// [`DesktopState::host_density`] also keeps the client's first
+    /// `hostDisplay` — an echo of the same screen — from reading as a change.
     host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
@@ -1938,7 +2039,7 @@ async fn apple_preface(
         sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     sock.write_all(&vnc_apple::set_encryption_start()).await?;
-    sock.write_all(&vnc_apple::set_encryption_stop()).await?;
+    sock.write_all(&vnc_apple::enable_inbound_record_decryption()).await?;
 
     let keys = await_rekey(&mut reader, &wrap_key).await?;
     info!("vnc: Apple record layer active");
@@ -2237,6 +2338,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     info!("vnc: input channel closed; session shut down");
                     break Ok(());
                 };
+                // Into the Mac's pointer space before anything is held, while
+                // the framebuffer the position was taken on is still the one
+                // the layout names — see [`DisplayState::apple_pointer`].
+                let input = match input {
+                    ClientMsg::MouseMove { x, y } => {
+                        let (x, y) = display.lock().unwrap().apple_pointer(x, y);
+                        ClientMsg::MouseMove { x, y }
+                    }
+                    other => other,
+                };
                 // Motion waits while the uplink is behind — see [`HeldMotion`].
                 // Everything else goes out now, behind whatever was held.
                 let input = if backlog.behind(Backlog::MOTION_LIMIT) {
@@ -2267,11 +2378,11 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // and drop-the-no-op behaviour `request_resize` already has.
                 //
                 // `HostDisplay` is that request with no size of its own:
-                // mid-session it is a *density* report, and only a High
-                // Performance virtual display can render the same points at a
-                // new density, so only it listens — and like RDP it listens only
-                // where `resize` is granted. The size it carries mattered at
-                // session-open, where `opening_mode` already spent it.
+                // mid-session it is a *density* report. High Performance can
+                // render its virtual display at the new density when resize is
+                // granted. Standard cannot reconfigure a physical display, but
+                // does ask the Mac to scale the framebuffer before encoding it.
+                // The size it carries mattered only at session-open.
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
@@ -2298,6 +2409,28 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let changed = (d.host_density - density).abs() > 0.005;
                         d.host_density = density;
                         changed.then_some(ResizeAsk::Density)
+                    }
+                    ClientMsg::HostDisplay(screen) if apple && !high_performance => {
+                        let density = crate::protocol::render_density(screen.scale);
+                        desktop.lock().unwrap().host_density = density;
+                        // Decided and sent under the uplink lock, as every scale
+                        // request is, so the Mac receives them in the order they
+                        // were decided in — see [`DisplayState::request_apple_scale`].
+                        let mut out = uplink.lock().await;
+                        let scaling = {
+                            let mut state = display.lock().unwrap();
+                            let selection =
+                                state.apple_layout.as_ref().and_then(|layout| layout.current);
+                            state.request_apple_scale(selection, density)
+                        };
+                        if let Some(scale) = scaling {
+                            debug!("vnc: asking the Mac for {scale}x server scaling");
+                            // Break, not `?`: the tasks must be aborted on the way out.
+                            if let Err(e) = out.send(&vnc_apple::set_server_scaling(scale)).await {
+                                break Err(e);
+                            }
+                        }
+                        None
                     }
                     _ => None,
                 };
@@ -2330,6 +2463,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let d = desktop.lock().unwrap();
                         (d.poll_size(), d.resize_msg())
                     };
+                    // Ahead of the resize it describes, as when it was first sent.
+                    let mosaic = display.lock().unwrap().mosaic.clone();
+                    if let Some(regions) = mosaic
+                        && let Err(e) = sink.msg(ServerMsg::Mosaic { regions }).await
+                    {
+                        break Err(e);
+                    }
                     if let Err(e) = sink.msg(resize_msg).await {
                         break Err(e);
                     }
@@ -2463,6 +2603,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         // `combine_all_displays` byte rather than to an id.
                         let pick = (id != DisplayState::COMBINED).then_some(id);
                         debug!("vnc: asking the Mac for display {pick:?}");
+                        let host_density = desktop.lock().unwrap().host_density;
+                        // Held from the decision to the send; see `HostDisplay`.
+                        let mut out = uplink.lock().await;
+                        let scaling = display.lock().unwrap().request_apple_scale(pick, host_density);
                         // Queue the repaint while the selection is still the
                         // message in front of the Mac. Asking only after its
                         // answering layout is too late on macOS 26: the layout
@@ -2472,13 +2616,18 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         // accepts the old framebuffer bounds here and applies
                         // the request to the screen it is switching to.
                         let size = desktop.lock().unwrap().size;
-                        send_all(
-                            &uplink,
-                            &[
-                                vnc_apple::set_display_message(pick),
-                                update_request(false, size).to_vec(),
-                            ],
-                        )
+                        let mut messages = vec![vnc_apple::set_display_message(pick)];
+                        if let Some(scale) = scaling {
+                            debug!("vnc: asking the Mac for {scale}x server scaling");
+                            messages.push(vnc_apple::set_server_scaling(scale));
+                        }
+                        messages.push(update_request(false, size).to_vec());
+                        async {
+                            for msg in &messages {
+                                out.send(msg).await?;
+                            }
+                            anyhow::Ok(())
+                        }
                         .await
                     } else {
                         // wlshare: the list it sent is itself the proof it speaks
@@ -3880,13 +4029,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
         vnc_audio::ENCODING if shared.audio.is_some() => {
             return Ok(RectEffect::AUDIO_ANNOUNCED);
         }
-        // A second rekey. The key could be recovered — the wrap key rotates to the
-        // last content key — but installing it means swapping the ciphers on both
-        // halves of a running session at the same instant, and the read and write
-        // halves are in different tasks. Named and closed instead: macOS sends one
-        // rekey per session, so if this is ever seen the log says what to build.
+        // A rekey after the preface. The Mac rotates only when the viewer asks
+        // with `SetEncryption` command 1, which this client never sends after the
+        // handshake, and it switches both of its ciphers the instant it sends the
+        // rekey. Records this side has already framed under the old key — the
+        // writer encrypts as it queues — would then fail the Mac's check, so an
+        // unrequested rotation cannot be followed safely. Named and closed.
         vnc_apple::ENCODING_REKEY if apple.is_some() => {
-            anyhow::bail!("the server re-keyed mid-session, which this client does not implement")
+            anyhow::bail!("the server re-keyed mid-session, which this client never requests")
         }
         other => {
             let label = encoding_label(other);
@@ -4505,6 +4655,20 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         vnc_apple::parse_layout(&payload)?
     };
 
+    // The composition goes first: it says how the framebuffer the resize names
+    // is presented, and a browser must not present one layout's pixels through
+    // another's regions.
+    let mosaic = if virtual_display { None } else { layout.mosaic() };
+    let mosaic_msg = {
+        let mut state = display.lock().unwrap();
+        (state.mosaic != mosaic).then(|| {
+            state.mosaic.clone_from(&mosaic);
+            ServerMsg::Mosaic { regions: mosaic.unwrap_or_default() }
+        })
+    };
+    if let Some(msg) = mosaic_msg {
+        sink.msg(msg).await?;
+    }
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
         desktop.lock().unwrap().hp.layout(resized, tokio::time::Instant::now());
@@ -4515,7 +4679,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // from what was asked for. `current` is a screen id, or `None` for the combined
     // view of all of them — which is what a session starts on, and which
     // [`DisplayState::COMBINED`] is the client-facing name for.
-    let msg = {
+    let host_density = desktop.lock().unwrap().host_density;
+    // Held from the decision to the send, as every scale request is, so the Mac
+    // receives them in the order they were decided in.
+    let mut out = uplink.lock().await;
+    let (msg, server_scaling) = {
         let mut state = display.lock().unwrap();
         let mut infos = layout.infos();
         // With more than one screen there is a combined view to go back to, and it
@@ -4523,11 +4691,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         // one screen there is nothing to combine, and the entry would be the same
         // picture under a second name.
         if infos.len() > 1 {
-            // No size on this one, deliberately. The framebuffer is only the union
-            // of every screen while the combined view is the one selected; ask for a
-            // single screen and the next layout reports that screen's size instead,
-            // so any number here would be wrong half the time.
-            let detail = format!("{} screens side by side", infos.len());
+            // The points the screens span together, as Apple's viewer labels the
+            // same entry — not the framebuffer, which is only the union of every
+            // screen while this view is the one selected.
+            let (w, h) = layout.points_spanned();
+            let detail = format!("{w}×{h}");
             infos.insert(
                 0,
                 DisplayInfo {
@@ -4545,12 +4713,22 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         state.displays = infos;
         state.active = active;
         state.listed = true;
+        let server_scaling = if virtual_display {
+            None
+        } else {
+            state.accept_apple_layout(&layout, host_density)
+        };
         // Sent only on a change, since a client holds no display state of its own
         // and the checkmark is the only thing telling it what it is looking at. Most
         // layouts change neither half — one arrives at every login and lock — and
         // say nothing new.
-        changed.then(|| state.displays_msg()).flatten()
+        (changed.then(|| state.displays_msg()).flatten(), server_scaling)
     };
+    if let Some(scale) = server_scaling {
+        debug!("vnc: asking the Mac for {scale}x server scaling");
+        out.send(&vnc_apple::set_server_scaling(scale)).await?;
+    }
+    drop(out);
     if let Some(msg) = msg {
         sink.msg(msg).await?;
     }
@@ -9722,6 +9900,72 @@ mod tests {
     /// where it is cross-checked against a captured payload.
     use crate::vnc_apple::{TestScreen, test_layout_wire as layout_payload};
 
+    /// A selection sent while a server scale is still in flight is judged
+    /// against that scale, and the layouts answering messages sent before the
+    /// newest factor do not start a counter-request: the Mac applies messages in
+    /// order, so only the layout at the pending factor has caught up.
+    #[test]
+    fn standard_server_scaling_follows_the_messages_in_flight() {
+        use crate::vnc_apple::{parse_layout, test_layout, test_scale_layout};
+        const SCREENS: [TestScreen; 2] =
+            [(1, (1280, 800), (1280, 800), 0x01), (7, (1440, 900), (2880, 1800), 0x00)];
+        let mut state = DisplayState::default();
+
+        // A 1x browser on All Displays over mixed densities: composed from the
+        // native pixels, so nothing to ask.
+        let native = parse_layout(&test_layout(None, &SCREENS)).unwrap();
+        assert_eq!(state.accept_apple_layout(&native, 1.0), None);
+
+        // The Retina screen is picked, and asks for half.
+        assert_eq!(state.request_apple_scale(Some(7), 1.0), Some(0.5));
+        // The selection's own answer comes first, still at 1: it predates the
+        // factor, so it asks for nothing — not 1 again.
+        let picked = parse_layout(&test_layout(Some(7), &SCREENS)).unwrap();
+        assert_eq!(state.accept_apple_layout(&picked, 1.0), None);
+        let mut halved = test_layout(
+            Some(7),
+            &[(1, (1280, 800), (640, 400), 0x01), (7, (1440, 900), (1440, 900), 0x00)],
+        );
+        test_scale_layout(&mut halved, 0.5, &[1.0, 2.0]);
+        let halved = parse_layout(&halved).unwrap();
+        assert_eq!(state.accept_apple_layout(&halved, 1.0), None);
+        assert!(state.apple_scale_pending.is_none());
+
+        // Back to All Displays before the Mac answers a pick of the 1x screen:
+        // both want 1, which is already on its way.
+        assert_eq!(state.request_apple_scale(Some(1), 1.0), Some(1.0));
+        assert_eq!(state.request_apple_scale(None, 1.0), None);
+        // A 2x browser display needs no scaling on the 1x screen either.
+        assert_eq!(state.request_apple_scale(Some(1), 2.0), None);
+
+        // A request the Mac never answered stops standing in for the factor in
+        // force. The 1 asked for the 1x screen is still on its way, so picking
+        // that screen again asks for nothing; once it has gone unanswered too
+        // long, the last layout's 0.5 counts again and the pick asks anew.
+        assert_eq!(state.request_apple_scale(Some(1), 1.0), None, "still on its way");
+        let sent = std::time::Instant::now().checked_sub(APPLE_SCALE_ANSWER).unwrap();
+        state.apple_scale_pending = Some((1.0, sent));
+        assert_eq!(state.request_apple_scale(Some(1), 1.0), Some(1.0));
+    }
+
+    /// Standard's pointer addresses the unscaled framebuffer, so a position on
+    /// a framebuffer the Mac halved is doubled on the way out, and one on an
+    /// unscaled framebuffer — or with no Standard layout at all — is not.
+    #[test]
+    fn a_standard_pointer_is_sent_in_native_pixels() {
+        use crate::vnc_apple::{parse_layout, test_layout, test_scale_layout};
+        let mut state = DisplayState::default();
+        assert_eq!(state.apple_pointer(720, 450), (720, 450));
+
+        let mut halved = test_layout(Some(7), &[(7, (1440, 900), (1440, 900), 0x00)]);
+        test_scale_layout(&mut halved, 0.5, &[2.0]);
+        state.apple_layout = Some(parse_layout(&halved).unwrap());
+        assert_eq!(state.apple_pointer(720, 450), (1440, 900));
+
+        state.apple_layout = Some(parse_layout(&test_layout(Some(7), &[(7, (1440, 900), (2880, 1800), 0x00)])).unwrap());
+        assert_eq!(state.apple_pointer(1440, 900), (1440, 900));
+    }
+
     /// A layout does three things, and the third is the one that is easy to miss:
     /// it resizes, it reports the screens, and it re-arms the server. Without the
     /// re-arm the desktop keeps painting and only the pointer silently freezes, so
@@ -9743,9 +9987,9 @@ mod tests {
             .unwrap();
         assert!(resized);
 
-        // The framebuffer is the *backing* pixels, shown at that screen's own
-        // density — 100% of the logical desktop, not a canvas scaled to fit
-        // anything.
+        // This first layout still carries Apple's opening 1.0 viewer scale, so
+        // its returned framebuffer and effective density are reported exactly as
+        // received while the server-side correction is requested.
         assert_eq!(desktop.lock().unwrap().size, (3840, 2160));
         assert_eq!(desktop.lock().unwrap().scale, 2.0);
         sink.flush().await;
@@ -9768,10 +10012,13 @@ mod tests {
             other => panic!("expected a display list, got {other:?}"),
         }
 
-        // What went back: the re-arm for the display the Mac confirmed. The enclosing
+        // What went back: ask Apple to return this 2x screen at the browser's 1x
+        // density, then re-arm for the display the Mac confirmed. The enclosing
         // update loop sends the paired full request after it has consumed every
         // rectangle in this FramebufferUpdate.
-        assert_eq!(written(&sent), vnc_apple::auto_framebuffer_update((3840, 2160)));
+        let mut expected = vnc_apple::set_server_scaling(0.5);
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
+        assert_eq!(written(&sent), expected);
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the
