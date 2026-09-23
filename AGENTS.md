@@ -65,10 +65,14 @@ documentation.
   gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
 - Neither the gateway nor the browser rescales what a remote sends. Frames pass
   through at the remote's pixels and are presented at `w / scale` by the density
-  the remote confirmed; there is no per-engine or per-display exception. When the
-  size or density is wrong for the browser, ask the remote to render the right
-  one — RDP's negotiated density, a High Performance virtual-display mode, Apple
-  Standard's `SetServerScaling`, wlshare's density — and output its answer as is.
+  the remote confirmed. When the size or density is wrong for the browser, ask the
+  remote to render the right one — RDP's negotiated density, a High Performance
+  virtual-display mode, Apple Standard's `SetServerScaling`, wlshare's density —
+  and output its answer as is. The sole exception is Apple Standard's All
+  Displays over screens of different densities, which no one factor can render:
+  the gateway sends a `mosaic` and the browser composes each screen at its points,
+  as Apple's viewer does (`frontend/src/mosaic.ts`). Do not extend it to another
+  engine, view or density.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. `resize = true` means the window continuously
   drives the remote size; do not add a client resize toggle or remembered resize
