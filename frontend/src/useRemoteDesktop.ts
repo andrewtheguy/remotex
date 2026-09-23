@@ -900,6 +900,8 @@ export function useRemoteDesktop(
     // named: what a composition is recomputed from when either changes, or when
     // this window moves to a display of another density.
     let mosaicRegions: MosaicRegion[] | null = null;
+    // A `mosaic` whose resize is still to come, adopted with that resize.
+    let stagedMosaic: MosaicRegion[] | null | undefined;
     let framebufferSize: RemoteSize | null = null;
     let framebufferGrid: GridPitch | null = null;
     // The worker outlives socket reconnects, so a completion can return after
@@ -951,6 +953,7 @@ export function useRemoteDesktop(
       sizeRef.current = null;
       mosaicViewRef.current = null;
       mosaicRegions = null;
+      stagedMosaic = undefined;
       framebufferSize = null;
       framebufferGrid = null;
       setSize(null);
@@ -1430,6 +1433,10 @@ export function useRemoteDesktop(
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
+      if (stagedMosaic !== undefined) {
+        mosaicRegions = stagedMosaic;
+        stagedMosaic = undefined;
+      }
       framebufferSize = s;
       framebufferGrid = msg.tileGrid;
       const { size, view } = presentation(s);
@@ -1466,8 +1473,17 @@ export function useRemoteDesktop(
       painter.setView(view, seq);
     };
 
+    // A layout for a framebuffer still to come waits for its resize, so it is
+    // never laid over the pixels on screen; one around the same framebuffer
+    // recomposes it now.
     const handleMosaic = (msg: Extract<ControlMsg, { type: "mosaic" }>) => {
-      mosaicRegions = msg.regions.length > 0 ? msg.regions : null;
+      const regions = msg.regions.length > 0 ? msg.regions : null;
+      if (msg.resize) {
+        stagedMosaic = regions;
+        return;
+      }
+      stagedMosaic = undefined;
+      mosaicRegions = regions;
       recompose();
     };
 
@@ -2391,13 +2407,22 @@ export function useRemoteDesktop(
 
     const toRemote = (e: MouseEvent) => toRemotePoint(e.clientX, e.clientY);
 
-    const onMouseMove = (e: MouseEvent) => {
-      releaseLapsedPointer(e);
+    // The pointer's position as this event finds it. A press or a wheel sends
+    // it first: a scroll, a reflow or a new composition can move the desktop
+    // under a pointer that has not moved, and the remote would otherwise act at
+    // the last position it was sent — or, over a composed canvas, the sender
+    // would still judge the pointer by the gap or screen it was last over.
+    const moveTo = (e: MouseEvent) => {
       const { x, y } = toRemote(e);
       // Keep the gesture cursor in sync with real mouse input on hybrid
       // touch+mouse devices.
       gestures?.notePointer(x, y);
       send({ type: "mouseMove", x, y });
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      releaseLapsedPointer(e);
+      moveTo(e);
     };
     const onMouseDown = (e: MouseEvent) => {
       el.focus(); // take keyboard focus on pointer interaction
@@ -2407,6 +2432,7 @@ export function useRemoteDesktop(
         return;
       }
       pressedButtons.add(button);
+      moveTo(e);
       send({
         type: "mouseButton",
         button,
@@ -2432,6 +2458,7 @@ export function useRemoteDesktop(
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       releaseLapsedPointer(e);
+      moveTo(e);
       send({
         type: "wheel",
         dx: e.deltaX,

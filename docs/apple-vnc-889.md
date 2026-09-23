@@ -254,14 +254,19 @@ Its menu names the view by the points the screens span ("Both Displays:
 2720 × 900"). Its Separate Windows option is the same single connection, with
 each window drawing one screen out of the same framebuffer.
 
-Remotex matches it. For a combined layout whose screens differ in density, the
-gateway asks for factor 1.0 and sends a `ServerMsg::Mosaic`, each screen's
-rectangle in framebuffer pixels and in points, ahead of the `Resize`. The browser
-then:
+"Mixed" is what Apple's viewer treats as mixed: at least one screen at 1x and at
+least one that is not. Screens that are all HiDPI, whatever their densities, are not
+mixed.
+
+Remotex matches it. For a mixed combined layout, the gateway asks for factor 1.0
+and sends a `ServerMsg::Mosaic`, each screen's rectangle in framebuffer pixels
+and in points, ahead of the `Resize` (flagged so the browser adopts it with that
+framebuffer, not over the one on screen). The browser then:
 - composes the regions at its own density, at medium smoothing, over the same
   grey;
-- maps pointer positions back through the regions, dropping them in gaps (a
-  button release still goes, so a drag cannot leave a button held).
+- maps pointer positions back through the regions, re-mapping the position
+  before each press and wheel and dropping them in gaps (a button release still
+  goes, so a drag cannot leave a button held).
 
 This is the one place the browser rescales remote pixels (see AGENTS.md).
 

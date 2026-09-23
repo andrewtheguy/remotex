@@ -323,8 +323,10 @@ export type ControlMsg =
   // Mac's combined view of screens at different densities. Each region names
   // a screen's pixels in the framebuffer and its place in points; the page
   // composes them at this display's density (mosaic.ts). Sent ahead of the
-  // `resize` it describes; empty ends it.
-  | { type: "mosaic"; regions: MosaicRegion[] }
+  // `resize` it describes; `resize` says one follows, and the regions wait
+  // for it rather than recompose the framebuffer still on screen. Empty ends
+  // it.
+  | { type: "mosaic"; regions: MosaicRegion[]; resize: boolean }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed. Requested replies
   // populate the panel without silently copying; pushes retain automatic sync.

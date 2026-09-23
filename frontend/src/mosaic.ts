@@ -78,7 +78,7 @@ export function mosaicView(
  * A composed-canvas position as the Mac addresses it: a pixel of its combined
  * framebuffer, or null between screens. Apple's viewer hit-tests the screens in
  * order, each rect widened by one pixel on its far edges, and sends nothing for
- * a point outside all of them (`frameBufferCoordinatesFromWindowCoordinates:`).
+ * a point outside all of them.
  */
 export function mosaicToFramebuffer(
   view: MosaicView,

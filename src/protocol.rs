@@ -1260,9 +1260,12 @@ pub enum ServerMsg {
     /// framebuffer at two densities.
     ///
     /// Sent ahead of the [`ServerMsg::Resize`] it describes, and replayed with it.
-    /// Empty ends the composition; a framebuffer is then presented whole at its
-    /// `Resize.scale` again.
-    Mosaic { regions: Vec<MosaicRegion> },
+    /// `resize` says one follows: the browser then holds the regions and adopts
+    /// them with that framebuffer, never over the one still on screen. Without it
+    /// the layout changed around the same framebuffer, which is recomposed at
+    /// once. Empty ends the composition; a framebuffer is then presented whole
+    /// at its `Resize.scale` again.
+    Mosaic { regions: Vec<MosaicRegion>, resize: bool },
     /// Whether the remote runs macOS, discovered by the engine as it connects
     /// and sent once, next to the first [`ServerMsg::Resize`].
     ///
@@ -1460,6 +1463,7 @@ enum ControlMsg<'a> {
     },
     Mosaic {
         regions: &'a [MosaicRegion],
+        resize: bool,
     },
     AudioFormat {
         codec: &'a str,
@@ -1605,7 +1609,9 @@ impl ServerMsg {
                 packet_frames: *packet_frames,
                 head: base64::engine::general_purpose::STANDARD.encode(head),
             }),
-            ServerMsg::Mosaic { regions } => control(&ControlMsg::Mosaic { regions }),
+            ServerMsg::Mosaic { regions, resize } => {
+                control(&ControlMsg::Mosaic { regions, resize: *resize })
+            }
             ServerMsg::Displays { active, displays } => control(&ControlMsg::Displays {
                 active: *active,
                 displays: displays
@@ -2060,17 +2066,18 @@ mod tests {
                 pixels: rect(1280, 0, 2880, 1800),
                 points: rect(1280, 0, 1440, 900),
             }],
+            resize: true,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"mosaic","regions":[{"pixels":{"x":1280,"y":0,"w":2880,"h":1800},"points":{"x":1280,"y":0,"w":1440,"h":900}}]}"#
+                r#"{"type":"mosaic","regions":[{"pixels":{"x":1280,"y":0,"w":2880,"h":1800},"points":{"x":1280,"y":0,"w":1440,"h":900}}],"resize":true}"#
             ),
             None => panic!("mosaic must be a text frame"),
         }
-        match (ServerMsg::Mosaic { regions: Vec::new() }).text_frame() {
-            Some(json) => assert_eq!(json, r#"{"type":"mosaic","regions":[]}"#),
+        match (ServerMsg::Mosaic { regions: Vec::new(), resize: false }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"mosaic","regions":[],"resize":false}"#),
             None => panic!("mosaic must be a text frame"),
         }
         match (ServerMsg::Displays {
