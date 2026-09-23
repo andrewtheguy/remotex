@@ -106,13 +106,12 @@ documentation.
 - The current implementation of a Mac's audio, on either Apple subtype, is the
   gateway's AirPlay 1 speaker (`src/airplay/`): one gateway-wide receiver,
   advertised over mDNS, that requires the `[airplay]` password and feeds the
-  running Apple session's bridge. High Performance's separate
-  AVConference/SRTP/AAC-ELD system-audio stream is measured but deliberately not
-  implemented; AirPlay is the workaround, not part of Screen Sharing. The table
-  is the switch for every Mac's audio. It is experimental. Do not add AirPlay 2
-  pairing, a second decoder beside ALAC, a per-target speaker, or a per-target
-  audio key. See
-  [A Mac's sound over AirPlay](docs/airplay-audio.md).
+  running Apple session's bridge. The table is the switch for every Mac's audio.
+  It is experimental. Do not add AirPlay 2 pairing, a second decoder beside ALAC,
+  a per-target speaker, or a per-target audio key. See
+  [A Mac's sound over AirPlay](docs/airplay-audio.md) and, for High Performance's
+  own audio stream,
+  [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performance-system-audio).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and
