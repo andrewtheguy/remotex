@@ -141,6 +141,45 @@ export class MacKeyboardTranslator {
   /// applies there — the withheld keyup is the local browser's doing, and a Mac
   /// guest's ⌘Q is exactly the chord that hit it.
   translate(event: SourceKey, mapCommandToControl: boolean): TranslatedKey[] {
+    // Command's own events go through its own path below, which already ends
+    // what it held; every other event that reports it up ends it here first.
+    const lapsed = META_CODES.has(event.code)
+      ? []
+      : this.lapse(event.meta, event.caps);
+    lapsed.push(...this.translateEvent(event, mapCommandToControl));
+    return lapsed;
+  }
+
+  /// Everything held under a Command the event's own `metaKey` says is up.
+  ///
+  /// Command's release is otherwise the only thing that ends what it held, and
+  /// the page does not always hear it. When Command went down before the page
+  /// had focus — ⌘-Tab into the window, then ⌘V while still holding ⌘ — no
+  /// keydown put it in `heldModifiers.ts`, so a keyup the local system then
+  /// keeps is not lapsed there either, and the synthetic Control of the chord
+  /// typed under it stayed down on the guest. The flags on the next event are
+  /// what cannot be taken, so any event reporting Command up ends it the way its
+  /// release would, minus the bare tap: a Command nobody saw come up was not
+  /// tapped.
+  lapse(meta: boolean, caps: boolean): TranslatedKey[] {
+    if (meta) {
+      return [];
+    }
+    const translated = this.flushHeldTranslations(caps);
+    translated.push(...this.flushHeldUnderCommand(caps));
+    for (const code of this.forwardedCommandCodes) {
+      translated.push({ code, pressed: false, caps });
+    }
+    this.forwardedCommandCodes.clear();
+    this.pendingCommandCodes.clear();
+    this.commandWasUsed = false;
+    return translated;
+  }
+
+  private translateEvent(
+    event: SourceKey,
+    mapCommandToControl: boolean,
+  ): TranslatedKey[] {
     const { code, pressed, caps } = event;
 
     // Browsers report CapsLock as a press when it engages and a release when it

@@ -292,6 +292,10 @@ enum Out {
     Queue(mpsc::UnboundedSender<Vec<u8>>, Arc<Backlog>),
 }
 
+/// How long a session that is shutting down waits for its writer to deliver what
+/// is already queued — see the input loop's close.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(1);
+
 /// What [`write_queued`] has been handed and has not yet written.
 #[derive(Default)]
 struct Backlog {
@@ -2266,6 +2270,14 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             }
             input = input_rx.recv() => {
                 let Some(input) = input else {
+                    // The session layer's last word is the releases for what the
+                    // browser left held, queued just ahead of the close, and
+                    // aborting the writer below would drop whatever of them it has
+                    // not written. Bounded, because a server that has stopped
+                    // reading must not hold up the session that replaces this one.
+                    if tokio::time::timeout(SHUTDOWN_DRAIN, backlog.room(1)).await.is_err() {
+                        warn!("vnc: the server did not take the last input before shutdown");
+                    }
                     info!("vnc: input channel closed; session shut down");
                     break Ok(());
                 };
@@ -9307,6 +9319,34 @@ mod tests {
                 if poll { "" } else { " not" }
             );
         }
+    }
+
+    /// The shutdown drain: what was queued behind a slow socket — the session
+    /// layer's releases last — is on the wire before the writer is aborted.
+    #[tokio::test]
+    async fn the_shutdown_drain_waits_for_queued_input_to_be_written() {
+        let (sock, mut server) = tokio::io::duplex(16);
+        let (uplink, backlog, writer) = Uplink::plain(sock).queued();
+        let writer = tokio::spawn(writer);
+        let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
+
+        let mut queued = vec![vec![0u8; 64]; 8];
+        queued.push(key_event(false, 0xffe3).to_vec());
+        send_all(&uplink, &queued).await.unwrap();
+        assert!(backlog.behind(1), "a 16-byte socket cannot have taken it all yet");
+
+        let expected: Vec<u8> = queued.concat();
+        let reader = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut wire = vec![0u8; expected.len()];
+            server.read_exact(&mut wire).await.unwrap();
+            assert_eq!(wire, expected);
+        });
+        tokio::time::timeout(SHUTDOWN_DRAIN, backlog.room(1))
+            .await
+            .expect("the writer did not drain inside the shutdown bound");
+        writer.abort();
+        reader.await.unwrap();
     }
 
     /// The circle a busy Mac closed, with the server's half of it held still: input

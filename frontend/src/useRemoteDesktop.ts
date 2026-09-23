@@ -20,7 +20,11 @@ import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
-import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
+import {
+  isMacHost,
+  MacKeyboardTranslator,
+  type TranslatedKey,
+} from "./macKeys.ts";
 import type { AudioStreamInfo } from "./mediaLabel.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
@@ -116,6 +120,12 @@ const IS_MAC_HOST = isMacHost();
 
 // Whether Command chords should be translated for a non-Mac guest, as last set
 // here. Absent means on, matching the viewer's default-on menu item.
+// CapsLock as an event reports it. A touch event has no `getModifierState`,
+// and a release — the only key a touch sends here — ignores it anyway.
+function capsOf(e: KeyboardEvent | MouseEvent | TouchEvent): boolean {
+  return "getModifierState" in e && e.getModifierState("CapsLock");
+}
+
 function readMacKeyOverridesPreference(): boolean {
   try {
     return localStorage.getItem(MAC_KEYS_KEY) !== "off";
@@ -2297,7 +2307,7 @@ export function useRemoteDesktop(
     const toRemote = (e: MouseEvent) => toRemotePoint(e.clientX, e.clientY);
 
     const onMouseMove = (e: MouseEvent) => {
-      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
+      releaseLapsedPointer(e);
       const { x, y } = toRemote(e);
       // Keep the gesture cursor in sync with real mouse input on hybrid
       // touch+mouse devices.
@@ -2306,7 +2316,7 @@ export function useRemoteDesktop(
     };
     const onMouseDown = (e: MouseEvent) => {
       el.focus(); // take keyboard focus on pointer interaction
-      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
+      releaseLapsedPointer(e);
       const button = mouseButtonFromEvent(e.button);
       if (!button) {
         return;
@@ -2326,6 +2336,7 @@ export function useRemoteDesktop(
       if (!button || !pressedButtons.delete(button)) {
         return;
       }
+      releaseLapsedPointer(e);
       send({
         type: "mouseButton",
         button,
@@ -2335,7 +2346,7 @@ export function useRemoteDesktop(
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
+      releaseLapsedPointer(e);
       send({
         type: "wheel",
         dx: e.deltaX,
@@ -2356,7 +2367,13 @@ export function useRemoteDesktop(
     // preventDefaults every touch, so the browser never synthesises them, and
     // on a tablet the overlay then stayed unfocused with a hardware keyboard
     // typing into nothing while the gestures themselves worked.
-    const onTouchStart = () => el.focus({ preventScroll: true });
+    const onTouchStart = (e: TouchEvent) => {
+      el.focus({ preventScroll: true });
+      releaseLapsedPointer(e);
+    };
+    // A hardware keyboard's modifiers ride touches too, and the gesture and
+    // passthrough layers forward fingers without reading them.
+    const onTouchFlags = (e: TouchEvent) => releaseLapsedPointer(e);
     // Release everything still held so nothing sticks on the remote when focus
     // leaves the surface.
     const releaseKeys = () => {
@@ -2390,16 +2407,7 @@ export function useRemoteDesktop(
     // Taken apart from the DOM event so the translation and the held-key
     // bookkeeping have one home. In an installed app window the chords a normal
     // browser tab keeps — ⌘W, ⌘T and the rest — arrive here as ordinary key events.
-    const emitKey = (
-      code: string,
-      pressed: boolean,
-      caps: boolean,
-      meta: boolean,
-    ) => {
-      const translated = macKeys.translate(
-        { code, pressed, caps, meta },
-        macKeyOverridesActiveRef.current,
-      );
+    const sendWire = (translated: TranslatedKey[]) => {
       for (const key of translated) {
         // The code on the wire, which on a PC keyboard driving a Mac is not the
         // code that was typed: the left Alt key is Command there
@@ -2417,14 +2425,37 @@ export function useRemoteDesktop(
         send({ type: "key", ...key, code: wire });
       }
     };
+    const emitKey = (
+      code: string,
+      pressed: boolean,
+      caps: boolean,
+      meta: boolean,
+    ) => {
+      sendWire(
+        macKeys.translate(
+          { code, pressed, caps, meta },
+          macKeyOverridesActiveRef.current,
+        ),
+      );
+    };
     // A lapsed modifier goes out as the keyup it stands in for, through the
     // translator, so a translated Command lifts its synthetic Control with it.
     // Before the event that exposed it: the click or key that follows must not
     // arrive wearing a modifier nobody is holding.
-    const releaseLapsed = (lapsed: string[], e: KeyboardEvent | MouseEvent) => {
+    const releaseLapsed = (
+      lapsed: string[],
+      e: KeyboardEvent | MouseEvent | TouchEvent,
+    ) => {
       for (const code of lapsed) {
-        emitKey(code, false, e.getModifierState("CapsLock"), e.metaKey);
+        emitKey(code, false, capsOf(e), e.metaKey);
       }
+    };
+    // A pointer event's flags end a Command the translator still holds as well
+    // (a key event's are read inside `translate`), for the same reason and in
+    // the same place: before the click or scroll that exposed it.
+    const releaseLapsedPointer = (e: MouseEvent | TouchEvent) => {
+      releaseLapsed(heldModifiers.lapsed(modifierFlags(e)), e);
+      sendWire(macKeys.lapse(e.metaKey, capsOf(e)));
     };
     const sendTranslated = (e: KeyboardEvent, pressed: boolean) => {
       e.preventDefault();
@@ -2457,6 +2488,9 @@ export function useRemoteDesktop(
       capture: true,
       passive: true,
     });
+    for (const type of ["touchmove", "touchend"] as const) {
+      el.addEventListener(type, onTouchFlags, { capture: true, passive: true });
+    }
     // Keyboard is scoped to the focused overlay (not window) so the remote
     // surface only grabs keys when the user is interacting with it.
     el.addEventListener("keydown", onKeyDown);
@@ -2485,6 +2519,9 @@ export function useRemoteDesktop(
         el.removeEventListener(type, onGesture);
       }
       el.removeEventListener("touchstart", onTouchStart, { capture: true });
+      for (const type of ["touchmove", "touchend"] as const) {
+        el.removeEventListener(type, onTouchFlags, { capture: true });
+      }
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);

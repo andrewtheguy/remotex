@@ -456,3 +456,52 @@ test("a browser-reserved Command chord is always mapped when it arrives", () => 
   ]);
   assert.deepEqual(t.translate(up("MetaLeft"), true), []);
 });
+
+test("a Command the page never saw go down ends when an event reports it up", () => {
+  const t = new MacKeyboardTranslator();
+  // ⌘-Tab into the window, then ⌘C with Command still held: no MetaLeft
+  // keydown, only the letter's flag. macOS withholds C's keyup, and Command's
+  // own keyup is lost too.
+  assert.deepEqual(t.translate(down("KeyC", true), true), [
+    sent("ControlLeft", true),
+    sent("KeyC", true),
+  ]);
+  // The next key reports Command up, so the chord ends before it goes out.
+  assert.deepEqual(t.translate(down("KeyB"), true), [
+    sent("KeyC", false),
+    sent("ControlLeft", false),
+    sent("KeyB", true),
+  ]);
+});
+
+test("a pointer event's Command-up flag ends a chord without a bare tap", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), true);
+  t.translate(down("KeyB", true), true);
+  // Command was forwarded as itself for the unmapped B; both keyups lost.
+  assert.deepEqual(t.lapse(false, false), [
+    sent("KeyB", false),
+    sent("MetaLeft", false),
+  ]);
+  // Nothing left to end, and no stale pending Command to tap later.
+  assert.deepEqual(t.lapse(false, false), []);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), []);
+});
+
+test("an event that reports Command down ends nothing", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), true);
+  t.translate(down("KeyC", true), true);
+  assert.deepEqual(t.lapse(true, false), []);
+  assert.deepEqual(t.translate(down("ShiftLeft", true), true), [
+    sent("ShiftLeft", true),
+  ]);
+});
+
+test("pass-through ends a key held under a Command the page never saw", () => {
+  const t = new MacKeyboardTranslator();
+  assert.deepEqual(t.translate(down("KeyQ", true), false), [
+    sent("KeyQ", true),
+  ]);
+  assert.deepEqual(t.lapse(false, false), [sent("KeyQ", false)]);
+});

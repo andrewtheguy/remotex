@@ -37,12 +37,16 @@ const FAMILIES: ReadonlyMap<string, Family> = new Map([
 
 /// The modifier state an event carries. AltGraph counts as Alt: a layout that
 /// makes the right Alt key AltGr reports it under that name alone, and the key
-/// is no less held for it.
-export function modifierFlags(e: KeyboardEvent | MouseEvent): ModifierFlags {
+/// is no less held for it. A touch event has no `getModifierState`, and so no
+/// AltGraph to report.
+export function modifierFlags(
+  e: KeyboardEvent | MouseEvent | TouchEvent,
+): ModifierFlags {
   return {
     shift: e.shiftKey,
     control: e.ctrlKey,
-    alt: e.altKey || e.getModifierState("AltGraph"),
+    alt:
+      e.altKey || ("getModifierState" in e && e.getModifierState("AltGraph")),
     meta: e.metaKey,
   };
 }
