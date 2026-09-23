@@ -1386,8 +1386,8 @@ async fn session(
 
     let high_performance = Dialect::of(config.subtype) == Dialect::Apple889;
     // A generic server is asked for wlshare's audio extension on the connection
-    // itself ([`vnc_audio`]). A Mac's sound never rides RFB: the config file has
-    // refused `audio` on both Apple subtypes, so no bridge arrives for one.
+    // itself ([`vnc_audio`]). A Mac's sound never rides RFB: it arrives at the
+    // gateway's AirPlay speaker, which the session attached this bridge to.
     let wlshare_audio = audio.filter(|_| !apple);
     if let Err(e) = active_loop(
         downlink,

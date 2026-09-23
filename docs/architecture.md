@@ -910,8 +910,9 @@ does not reset the table.
 
 ### Audio frames
 
-Remote audio is opt-in per target — `audio = true` on an `rdp` or a plain
-`vnc` target — and it has a socket of its
+Remote audio is opt-in per target — `audio = true` on an `rdp`, a plain `vnc`,
+or either Apple target, whose sound arrives at the gateway's AirPlay speaker —
+and it has a socket of its
 own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.
@@ -944,7 +945,7 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
 | `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP, 48 000 for wlshare | 0 (self-describing) | empty |
+| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP and AirPlay, 48 000 for wlshare | 0 (self-describing) | empty |
 
 Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
 the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
@@ -970,7 +971,7 @@ reach no decoder at all — which is a property of the path, not a compatibility
 escape hatch: the client refuses to start without WebCodecs either way.
 
 It also makes it the only option whose `sampleRate` follows the source: 44.1 kHz
-from an RDP host, 48 kHz from wlshare. An
+from an RDP host or a Mac, 48 kHz from wlshare. An
 `AudioBuffer` carries its own rate, so a context built at 48 kHz before the
 format arrived simply resamples on playback, exactly as the OS mixer would for
 any buffer that is not at the device's rate.
@@ -1023,7 +1024,17 @@ not take surfaces as a decoder error naming it rather than as silence. A
 `pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
 `AudioBuffer` and schedules it directly.
 
-An audio-enabled **generic VNC** engine has no channel to negotiate. It
+An audio-enabled **Apple** engine carries no sound at all: Screen Sharing has
+none a client can take. The session attaches the engine's bridge to the gateway's
+AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1 receiver that
+the Mac picks from its Sound menu once and keeps. What reaches the bridge is the
+Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo in 24 ms wave
+buffers, from whichever Mac is playing to the speaker while that session runs.
+The speaker holds the bridge weakly, so the engine ending is what detaches it. It
+asks every sender for the `[airplay]` password, since it answers the whole LAN.
+See [A Mac's sound over AirPlay](airplay-audio.md).
+
+An audio-enabled **generic VNC** engine has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
 with an empty rectangle, at which point the gateway names the format it wants —
 48 kHz, 16-bit stereo, little-endian, so under `pcm` the packets are 48 kHz
@@ -1467,7 +1478,8 @@ in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this pat
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive media
 transport (`0x1c`, HEVC video and AAC-ELD audio over SRTP); the zlib rectangles
-are the only picture path, and neither subtype carries the Mac's sound. The
+are the only picture path, and a Mac's sound arrives over AirPlay instead
+([A Mac's sound over AirPlay](airplay-audio.md)). The
 transport's measurements are in
 [Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio).
 The native Apple pasteboard works on both

@@ -149,7 +149,8 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
         .context("cannot record websocket throughput ([meter].database)")?;
-    let app = server::router(config.clone(), throughput);
+    let airplay = config.airplay.as_ref().map(remotex::airplay::AirPlay::start).transpose()?;
+    let app = server::router(config.clone(), throughput, airplay);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

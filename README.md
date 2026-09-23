@@ -213,6 +213,14 @@ a client listens the host is silent: the desktop plays into a PipeWire sink of
 wlshare's own, whose monitor is what is captured, and a server that does not
 speak it — wayvnc, TigerVNC, x11vnc, QEMU — gives the desktop and no sound. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
+On a Mac, `audio = true` is **experimental**, and it does not use Screen Sharing,
+which carries no sound in either subtype. The gateway is instead an AirPlay 1
+speaker on the LAN, named after its branding with ` - remotex` after it, and
+protected by the password in `[airplay]`. The Mac picks it once from its Sound
+menu, and what it plays reaches whichever Mac session is running. The Mac must share the gateway's link, since it
+finds the speaker by mDNS, and a video playing on the Mac is heard about two
+seconds before it is seen. See [`docs/airplay-audio.md`](docs/airplay-audio.md).
+
 Two redirections send this browser's own media the other way and are
 **experimental**, for lack of tests: `camera = true` offers the remote a virtual
 webcam over MS-RDPECAM — or, on a generic `vnc` target, over wlshare's camera

@@ -73,7 +73,7 @@ impl Stream {
             timing_port: timing.local_addr()?.port(),
             stop,
         };
-        tokio::spawn(audio_loop(audio, params, shared, stopped.clone()));
+        tokio::spawn(audio_loop(audio, peer, params, shared, stopped.clone()));
         tokio::spawn(control_loop(control, stopped.clone()));
         tokio::spawn(timing_loop(timing, peer_timing_port.map(|p| SocketAddr::new(peer, p)), stopped));
         Ok(stream)
@@ -103,7 +103,16 @@ async fn recv<'a>(
     }
 }
 
-async fn audio_loop(socket: UdpSocket, params: Params, shared: Arc<Shared>, mut stopped: watch::Receiver<bool>) {
+/// Play what `peer`, the sender whose RTSP set this stream up, sends to `socket`.
+/// Anyone else on the LAN reaching the port is ignored, since the password was
+/// asked of `peer` alone.
+async fn audio_loop(
+    socket: UdpSocket,
+    peer: IpAddr,
+    params: Params,
+    shared: Arc<Shared>,
+    mut stopped: watch::Receiver<bool>,
+) {
     let cipher = params.aes.map(|(key, iv)| (payload_cipher(&key), iv));
     let (mut decoder, mut out) = match &params.codec {
         Codec::Alac(info) => (
@@ -120,8 +129,12 @@ async fn audio_loop(socket: UdpSocket, params: Params, shared: Arc<Shared>, mut 
     let (mut packets, mut undecodable) = (0u64, 0u64);
 
     while let Some((packet, from)) = recv(&socket, &mut buf, &mut stopped).await {
+        if from.ip().to_canonical() != peer {
+            debug!("airplay: {} bytes on the audio port from {from}, not the sender", packet.len());
+            continue;
+        }
         if packet.len() < 12 || packet[1] & 0x7f != 0x60 {
-            debug!("airplay: {} bytes of type {:#x} on the audio port from {from}", packet.len(), packet[1]);
+            debug!("airplay: {} bytes of type {:#x} on the audio port from {from}", packet.len(), packet.get(1).unwrap_or(&0));
             continue;
         }
         if packets == 0 {

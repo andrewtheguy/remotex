@@ -209,9 +209,14 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///
 /// `throughput` is where the browser sockets count their bytes and, when `[meter].enabled`
 /// is set, the database [`crate::throughput::start`] records them in and
-/// `/api/throughput` reads.
-pub fn router(config: AppConfig, throughput: Throughput) -> Router {
-    let sessions = Arc::new(SessionManager::new(config.targets.clone()));
+/// `/api/throughput` reads. `airplay` is the speaker a Mac's sound arrives at, started
+/// by the caller from `config.airplay` ([`crate::airplay`]).
+pub fn router(
+    config: AppConfig,
+    throughput: Throughput,
+    airplay: Option<Arc<crate::airplay::AirPlay>>,
+) -> Router {
+    let sessions = Arc::new(SessionManager::new(config.targets.clone(), airplay));
     router_with_sessions(config, sessions, throughput)
 }
 
@@ -939,7 +944,7 @@ mod tests {
             source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
         });
 
-        let response = router(config, Throughput::default())
+        let response = router(config, Throughput::default(), None)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/logo")
@@ -961,7 +966,7 @@ mod tests {
     /// assertion below is about the redirect, and a request that is *not*
     /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        router(router_config(dev_hostname), Throughput::default())
+        router(router_config(dev_hostname), Throughput::default(), None)
     }
 
     /// The config both test routers are built from, so the only thing that ever
@@ -1016,6 +1021,7 @@ mod tests {
             },
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
+            airplay: None,
         }
     }
 
@@ -1355,6 +1361,7 @@ mod tests {
             },
             dev_hostname: None,
             meter: None,
+            airplay: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1497,7 +1504,7 @@ mod tests {
         meters.counter(None, throughput::Socket::Session).received(4);
         meters.sample(now - 9);
         meters.counter(None, throughput::Socket::Session).received(2);
-        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) });
+        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) }, None);
 
         let response = app.clone().oneshot(get("/api/throughput", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1567,7 +1574,7 @@ mod tests {
             format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":0,"receivedPerSec":4}}]}}"#, now - 9)
         );
 
-        let app = router(router_config(None), Throughput::default());
+        let app = router(router_config(None), Throughput::default(), None);
         let cookie = log_in(app.clone()).await;
         let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

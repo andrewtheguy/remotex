@@ -144,6 +144,9 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
         .context("cannot record websocket throughput ([meter].database)")?;
+    // And the AirPlay speaker, for the same reason: a port or mDNS responder that
+    // cannot be had is a refused start, not a Mac that finds no speaker.
+    let airplay = config.airplay.as_ref().map(crate::airplay::AirPlay::start).transpose()?;
 
     let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {
         anyhow::bail!("the embedded gateway must listen on its private Unix socket");
@@ -175,7 +178,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         );
     }
 
-    let app = crate::server::router(config, throughput);
+    let app = crate::server::router(config, throughput, airplay);
     listener
         .set_nonblocking(true)
         .context("cannot make the listening socket non-blocking")?;
@@ -420,9 +423,9 @@ mod tests {
     }
 
     /// The whole point of `check`: it refuses what the gateway would refuse to
-    /// start on, not merely what fails to parse. `audio` on Apple's standard
-    /// Screen Sharing is well-formed TOML and an unusable config — that subtype
-    /// carries no sound and speaks no audio extension.
+    /// start on, not merely what fails to parse. `audio` on a Mac with no
+    /// `[airplay]` table is well-formed TOML and an unusable config — the Mac's
+    /// sound has no speaker to arrive at.
     #[test]
     fn checking_goes_as_far_as_starting_would() {
         let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"::1\"\nusername = \"a\"\npassword = \"b\"\naudio = true\n";

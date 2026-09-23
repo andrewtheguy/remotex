@@ -22,6 +22,7 @@ mod rtsp;
 
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use log::{info, warn};
@@ -32,6 +33,13 @@ use crate::config::AirPlayConfig;
 
 /// The DNS-SD service type an AirPlay 1 audio receiver registers.
 const SERVICE_TYPE: &str = "_raop._tcp.local.";
+
+/// How long a sender's connection may be idle before it is probed, how often it
+/// is probed, and how many probes go unanswered before it is dropped: a sender
+/// that is gone releases the stream about a minute later.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_RETRIES: u32 = 3;
 
 /// The gateway's AirPlay speaker, running from [`AirPlay::start`] until it is dropped.
 pub struct AirPlay {
@@ -74,7 +82,7 @@ impl AirPlay {
 
     /// Listen without advertising: the tests' receiver, reached by its port.
     #[cfg(test)]
-    fn start_unadvertised(config: &AirPlayConfig) -> anyhow::Result<Arc<Self>> {
+    pub(crate) fn start_unadvertised(config: &AirPlayConfig) -> anyhow::Result<Arc<Self>> {
         Ok(Arc::new(Self::listen(config)?))
     }
 
@@ -107,6 +115,16 @@ impl AirPlay {
             loop {
                 match listener.accept().await {
                     Ok((tcp, _)) => {
+                        // A Mac that vanishes without a TEARDOWN — asleep, off the
+                        // network — would otherwise hold the one stream forever,
+                        // and every other sender would be refused.
+                        let keepalive = socket2::TcpKeepalive::new()
+                            .with_time(KEEPALIVE_IDLE)
+                            .with_interval(KEEPALIVE_INTERVAL)
+                            .with_retries(KEEPALIVE_RETRIES);
+                        if let Err(e) = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive) {
+                            warn!("airplay: enabling keepalive on a sender's connection failed: {e}");
+                        }
                         next_id += 1;
                         tokio::spawn(rtsp::serve(tcp, next_id, Arc::clone(&accepting)));
                     }
@@ -123,17 +141,25 @@ impl AirPlay {
         *self.shared.route.0.lock().unwrap() = Arc::downgrade(bridge);
     }
 
+    /// The bridge a stream would be played into now, for the session's tests.
+    #[cfg(test)]
+    pub(crate) fn attached(&self) -> Option<Arc<AudioBridge>> {
+        self.shared.route.current()
+    }
+
     /// The RTSP port, which the mDNS record carries.
     pub fn port(&self) -> u16 {
         self.port
     }
 }
 
-/// A 48-bit address for the speaker, derived from its name so that two gateways
-/// with different names advertise different services, and locally administered
-/// (`0x02` set, `0x01` clear) so that it can be no NIC's.
+/// A 48-bit address for the speaker, derived from its name and the host's so that
+/// two gateways advertise different services even when they share a branding, yet
+/// keep theirs across restarts; and locally administered (`0x02` set, `0x01`
+/// clear) so that it can be no NIC's.
 fn hw_addr(name: &str) -> [u8; 6] {
-    let hash = xxhash_rust::xxh3::xxh3_64(name.as_bytes()).to_be_bytes();
+    let identity = format!("{name}\0{}", gethostname::gethostname().to_string_lossy());
+    let hash = xxhash_rust::xxh3::xxh3_64(identity.as_bytes()).to_be_bytes();
     [hash[0] & 0xfe | 0x02, hash[1], hash[2], hash[3], hash[4], hash[5]]
 }
 

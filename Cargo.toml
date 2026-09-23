@@ -229,9 +229,11 @@ sha2 = "0.11"
 # SDP's own parameters, and finds the speaker by DNS-SD, which `mdns-sd` answers
 # and announces from inside the process — no avahi or Bonjour on the host, and no
 # async runtime of its own. The RSA, AES and MD5 the protocol asks for are the
-# crates above.
+# crates above. The host's name, with the branding, is what keeps two gateways'
+# speakers distinct.
 alac = "0.5"
 mdns-sd = "0.21"
+gethostname = "1"
 
 [build-dependencies]
 anyhow = "1"

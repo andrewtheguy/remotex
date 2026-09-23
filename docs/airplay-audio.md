@@ -1,0 +1,83 @@
+# A Mac's sound over AirPlay
+
+**Experimental.** Apple's Screen Sharing carries no sound a client can take. So
+a Mac on either Apple subtype sends its sound the way it sends it to any speaker:
+the gateway is an AirPlay 1 speaker on the LAN, the Mac picks it from its Sound
+output menu, and what it plays reaches the browser like any other target's sound.
+
+The speaker is `src/airplay/`. It began as a standalone proof of concept that was
+measured against a physical Mac before any of it was wired in.
+
+## Configuration
+
+```toml
+[airplay]
+password = "choose one"
+
+[[targets]]
+name = "mac"
+protocol = "vnc"
+subtype = "ard"          # or "ard-high-performance"
+host = "mac.local"
+username = "me"
+password = "…"
+audio = true
+```
+
+`audio = true` on an Apple target needs the `[airplay]` table, and `[airplay]`
+with no Apple target carrying audio is refused. The table is top-level, like
+`[branding]` and `[meter]`, so a `remotex tui` instance config may set it too. The
+speaker is named `<[branding].text> - remotex`, which is what the Mac's Sound menu
+shows.
+
+On the Mac, pick that name in Control Center → Sound, or in System Settings →
+Sound → Output, and enter the password when asked. The Mac keeps both the choice
+and the password, so this is done once, not per session. `audio_codec`,
+`audio_bitrate` and the adaptive keys apply as on any other target.
+
+## What it is
+
+- **AirPlay 1 (RAOP), not AirPlay 2.** The gateway advertises `_raop._tcp` over
+  mDNS from inside the process, with no avahi or Bonjour on the host. It answers
+  RTSP, and it receives Apple Lossless over RTP, in AES-128-CBC under a key the
+  Mac wraps with RSA-OAEP. The RSA key is the one every AirPlay 1 receiver shares,
+  extracted from the AirPort Express, as shairport-sync ships it. It proves
+  nothing about the gateway: it only has to be used.
+- **The password is RTSP Digest**, realm `raop`, checked on every request until
+  one answers it. A Mac is asked on its first connection and remembers it after.
+  It keeps other Macs on the LAN from playing into the session. It encrypts
+  nothing that is not already encrypted.
+- **One speaker per gateway, outliving sessions.** The Mac chooses a speaker once
+  and keeps it, so the speaker stays up with the gateway. It feeds the audio bridge
+  of whichever Apple session with `audio` is running, and each engine's start
+  attaches its own bridge. With no such session, a stream is received and thrown
+  away, and the Mac keeps playing to it.
+- **One sender at a time.** A second Mac's SETUP gets `453` until the first
+  leaves.
+- **44.1 kHz 16-bit stereo**, the only format a Mac sends, so `pcm` passthrough
+  carries it at 1.41 Mbit/s like RDP's.
+
+## What it does not do
+
+- **Sync with video on the Mac.** An AirPlay sender expects the speaker to
+  buffer about two seconds, and a Mac video player delays its picture to match.
+  The gateway plays each packet as it arrives, since a remote desktop wants its
+  sound now. So a video playing on the Mac is heard about two seconds before it
+  is seen. Everything else, from system sounds to music to calls, is immediate.
+- **Resend what the network drops.** A lost packet is a gap, as it is on every
+  other path to the browser.
+- **Follow the Mac's volume.** An AirPlay 1 sender leaves volume to the speaker,
+  and this one leaves it to the browser.
+
+## Network
+
+- **The Mac must be on the gateway's link.** mDNS is link-local multicast, and
+  macOS has no way to add an AirPlay speaker by address. A gateway that reaches the
+  Mac over a VPN or a routed hop is never offered in its Sound menu, unless an mDNS
+  reflector carries the service across.
+- **The ports are ephemeral.** The RTSP port is whatever the OS picks, and the
+  advertisement carries it. Each stream opens three more UDP ports, whose numbers
+  the Mac learns from the RTSP answer. A host firewall has to let the Mac reach
+  the gateway on TCP and UDP from the LAN.
+- **A container needs the host's network** (`--network host`) for both the
+  multicast and those ports. A bridged container's speaker is never seen.

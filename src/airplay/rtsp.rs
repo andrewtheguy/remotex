@@ -251,10 +251,12 @@ fn parse_sdp(sdp: &str) -> anyhow::Result<Params> {
 
 async fn read_request<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> anyhow::Result<Option<Request>> {
     let mut line = String::new();
-    let mut header_bytes = 0;
+    // The request line, blank lines before it, and the headers all draw on one
+    // budget, taken from as each line is read so that no line outgrows it.
+    let mut budget = MAX_HEADER_BYTES;
     loop {
         line.clear();
-        if reader.read_line(&mut line).await? == 0 {
+        if read_line(reader, &mut line, &mut budget).await? == 0 {
             return Ok(None);
         }
         if !line.trim().is_empty() {
@@ -267,13 +269,8 @@ async fn read_request<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> any
     let mut headers = Vec::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
+        if read_line(reader, &mut line, &mut budget).await? == 0 {
             bail!("the connection closed inside a request's headers");
-        }
-        header_bytes += n;
-        if header_bytes > MAX_HEADER_BYTES {
-            bail!("a request's headers ran past {MAX_HEADER_BYTES} bytes");
         }
         let header = line.trim_end();
         if header.is_empty() {
@@ -296,6 +293,21 @@ async fn read_request<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> any
     request.body.resize(length, 0);
     reader.read_exact(&mut request.body).await.context("reading a request's body")?;
     Ok(Some(request))
+}
+
+/// Read one line into `line`, reading no more than what is left of `budget` and
+/// taking from it what the line used. `0` is the connection closing.
+async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut String,
+    budget: &mut usize,
+) -> anyhow::Result<usize> {
+    let n = (&mut *reader).take(*budget as u64).read_line(line).await?;
+    *budget -= n;
+    if n > 0 && !line.ends_with('\n') && *budget == 0 {
+        bail!("a request's headers ran past {MAX_HEADER_BYTES} bytes");
+    }
+    Ok(n)
 }
 
 async fn write_response(writer: &mut OwnedWriteHalf, cseq: &str, response: Response) -> anyhow::Result<()> {
@@ -342,6 +354,16 @@ mod tests {
         let sdp = "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 24 40 10 14 2 255 0 0 48000\r\n";
         let Err(err) = parse_sdp(sdp) else { panic!("a 24-bit 48 kHz stream was taken") };
         assert!(format!("{err:#}").contains("44.1 kHz"));
+    }
+
+    #[tokio::test]
+    async fn a_header_line_is_cut_off_at_the_budget() {
+        let endless = format!("OPTIONS * RTSP/1.0\r\nX: {}", "a".repeat(MAX_HEADER_BYTES));
+        let Err(err) = read_request(&mut endless.as_bytes()).await else { panic!("an endless header was taken") };
+        assert!(format!("{err:#}").contains("ran past"), "{err:#}");
+
+        let request = read_request(&mut &b"\r\nOPTIONS * RTSP/1.0\r\nCSeq: 3\r\n\r\n"[..]).await.unwrap().unwrap();
+        assert_eq!((request.method.as_str(), request.header("CSeq")), ("OPTIONS", Some("3")));
     }
 
     #[test]
