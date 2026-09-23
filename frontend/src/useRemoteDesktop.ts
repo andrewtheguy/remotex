@@ -26,7 +26,12 @@ import {
   type TranslatedKey,
 } from "./macKeys.ts";
 import type { AudioStreamInfo } from "./mediaLabel.ts";
-import { type MosaicView, mosaicSender, mosaicView } from "./mosaic.ts";
+import {
+  type MosaicView,
+  mosaicDensity,
+  mosaicSender,
+  mosaicView,
+} from "./mosaic.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
 import { createRectCache } from "./pointerRect.ts";
@@ -1415,7 +1420,7 @@ export function useRemoteDesktop(
     // its own density, or — under a mosaic — the composition at this window's.
     const presentation = (framebuffer: RemoteSize) => {
       const view = mosaicRegions
-        ? mosaicView(mosaicRegions, window.devicePixelRatio)
+        ? mosaicView(mosaicRegions, mosaicDensity(window.devicePixelRatio))
         : null;
       const size = view
         ? { w: view.w, h: view.h, scale: view.scale }

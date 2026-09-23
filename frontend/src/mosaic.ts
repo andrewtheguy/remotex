@@ -35,6 +35,16 @@ export interface MosaicView {
   draws: MosaicDraw[];
 }
 
+/**
+ * The density a composition is drawn at for a display of `devicePixelRatio`:
+ * 1 or 2, split at 1.5, as the gateway renders for (`render_density`). A Mac
+ * draws at no finer density than 2, and a phone at 3x would otherwise size the
+ * canvas past what Safari will allocate.
+ */
+export function mosaicDensity(devicePixelRatio: number): number {
+  return Number.isFinite(devicePixelRatio) && devicePixelRatio >= 1.5 ? 2 : 1;
+}
+
 export function mosaicView(
   regions: MosaicRegion[],
   density: number,

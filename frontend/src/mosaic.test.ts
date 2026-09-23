@@ -1,7 +1,12 @@
 // Run with `bun test src/mosaic.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mosaicSender, mosaicToFramebuffer, mosaicView } from "./mosaic.ts";
+import {
+  mosaicDensity,
+  mosaicSender,
+  mosaicToFramebuffer,
+  mosaicView,
+} from "./mosaic.ts";
 import type { ClientMsg } from "./protocol.ts";
 
 // The measured Mac: a 1x 1280x800 screen, and a 2x 1440x900 one to its right
@@ -95,4 +100,8 @@ test("without a composition every message passes through untouched", () => {
   );
   send({ type: "mouseMove", x: 100, y: 850 });
   assert.deepEqual(sent, [{ type: "mouseMove", x: 100, y: 850 }]);
+});
+
+test("a composition is drawn at 1x or 2x, never at a phone's 3x", () => {
+  assert.deepEqual([1, 1.25, 1.5, 2, 3].map(mosaicDensity), [1, 1, 2, 2, 2]);
 });

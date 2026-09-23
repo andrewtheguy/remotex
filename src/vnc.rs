@@ -1169,7 +1169,11 @@ struct DisplayState {
     /// density change into an unbounded stream of identical requests. Layouts
     /// that arrive before the confirming one answer messages sent earlier — a
     /// selection's, or an older factor's — and are not reconciled against.
-    apple_scale_pending: Option<f32>,
+    ///
+    /// With when it was sent: a request the Mac never answers — one it ignores
+    /// at the login window, say — must not stand in for the factor in force
+    /// forever. Past [`APPLE_SCALE_ANSWER`] the last layout's factor counts again.
+    apple_scale_pending: Option<(f32, std::time::Instant)>,
     /// The composition last sent, `None` while a framebuffer is presented whole.
     /// Kept to send only a change, and to replay it to a browser that attaches.
     mosaic: Option<Vec<crate::protocol::MosaicRegion>>,
@@ -1219,13 +1223,14 @@ impl DisplayState {
     /// messages in order, so a selection made before it answers is compared
     /// with what it will answer at, not with the layout it is replacing.
     fn request_apple_scale(&mut self, selection: Option<u32>, host_density: f32) -> Option<f32> {
+        let pending = self.pending_scale();
         let layout = self.apple_layout.as_ref()?;
         let want = layout.server_scale_for(selection, host_density);
-        let in_force = self.apple_scale_pending.unwrap_or_else(|| layout.viewer_scale());
+        let in_force = pending.unwrap_or_else(|| layout.viewer_scale());
         if (in_force - want).abs() < 0.005 {
             return None;
         }
-        self.apple_scale_pending = Some(want);
+        self.apple_scale_pending = Some((want, std::time::Instant::now()));
         Some(want)
     }
 
@@ -1246,6 +1251,18 @@ impl DisplayState {
         (native(x), native(y))
     }
 
+    /// The factor sent and still awaiting its layout, unless it has waited past
+    /// [`APPLE_SCALE_ANSWER`].
+    fn pending_scale(&mut self) -> Option<f32> {
+        match self.apple_scale_pending {
+            Some((scale, sent)) if sent.elapsed() < APPLE_SCALE_ANSWER => Some(scale),
+            _ => {
+                self.apple_scale_pending = None;
+                None
+            }
+        }
+    }
+
     /// Record Apple's answer and decide whether its returned scale needs one new
     /// request for the browser display the session is currently on.
     ///
@@ -1259,7 +1276,7 @@ impl DisplayState {
         host_density: f32,
     ) -> Option<f32> {
         self.apple_layout = Some(layout.clone());
-        if let Some(pending) = self.apple_scale_pending {
+        if let Some(pending) = self.pending_scale() {
             if (pending - layout.viewer_scale()).abs() >= 0.005 {
                 return None;
             }
@@ -1268,6 +1285,14 @@ impl DisplayState {
         self.request_apple_scale(layout.current, host_density)
     }
 }
+
+/// How long a `SetServerScaling` is taken to be on its way. `screensharingd`
+/// answers one alone in the same millisecond (its log's `set scaling to` and
+/// `encode display info2` lines), but one queued behind a display switch waits
+/// for the switch: 3 s measured, switching to a virtual display just created.
+/// One unanswered this long was ignored, and a request repeated early is only
+/// a duplicate.
+const APPLE_SCALE_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
 
 type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
 
@@ -2401,6 +2426,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     ClientMsg::HostDisplay(screen) if apple && !high_performance => {
                         let density = crate::protocol::render_density(screen.scale);
                         desktop.lock().unwrap().host_density = density;
+                        // Decided and sent under the uplink lock, as every scale
+                        // request is, so the Mac receives them in the order they
+                        // were decided in — see [`DisplayState::request_apple_scale`].
+                        let mut out = uplink.lock().await;
                         let scaling = {
                             let mut state = display.lock().unwrap();
                             let selection =
@@ -2409,7 +2438,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         };
                         if let Some(scale) = scaling {
                             debug!("vnc: asking the Mac for {scale}x server scaling");
-                            send(&uplink, &vnc_apple::set_server_scaling(scale)).await?;
+                            // Break, not `?`: the tasks must be aborted on the way out.
+                            if let Err(e) = out.send(&vnc_apple::set_server_scaling(scale)).await {
+                                break Err(e);
+                            }
                         }
                         None
                     }
@@ -2585,6 +2617,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let pick = (id != DisplayState::COMBINED).then_some(id);
                         debug!("vnc: asking the Mac for display {pick:?}");
                         let host_density = desktop.lock().unwrap().host_density;
+                        // Held from the decision to the send; see `HostDisplay`.
+                        let mut out = uplink.lock().await;
                         let scaling = display.lock().unwrap().request_apple_scale(pick, host_density);
                         // Queue the repaint while the selection is still the
                         // message in front of the Mac. Asking only after its
@@ -2601,7 +2635,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             messages.push(vnc_apple::set_server_scaling(scale));
                         }
                         messages.push(update_request(false, size).to_vec());
-                        send_all(&uplink, &messages).await
+                        async {
+                            for msg in &messages {
+                                out.send(msg).await?;
+                            }
+                            anyhow::Ok(())
+                        }
+                        .await
                     } else {
                         // wlshare: the list it sent is itself the proof it speaks
                         // the extension, since nothing else fills `displays` on a
@@ -4665,6 +4705,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // view of all of them — which is what a session starts on, and which
     // [`DisplayState::COMBINED`] is the client-facing name for.
     let host_density = desktop.lock().unwrap().host_density;
+    // Held from the decision to the send, as every scale request is, so the Mac
+    // receives them in the order they were decided in.
+    let mut out = uplink.lock().await;
     let (msg, server_scaling) = {
         let mut state = display.lock().unwrap();
         let mut infos = layout.infos();
@@ -4706,6 +4749,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         // say nothing new.
         (changed.then(|| state.displays_msg()).flatten(), server_scaling)
     };
+    if let Some(scale) = server_scaling {
+        debug!("vnc: asking the Mac for {scale}x server scaling");
+        out.send(&vnc_apple::set_server_scaling(scale)).await?;
+    }
+    drop(out);
     if let Some(msg) = msg {
         sink.msg(msg).await?;
     }
@@ -4717,10 +4765,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     let mut uplink = uplink.lock().await;
     if rearm_pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
-    }
-    if let Some(scale) = server_scaling {
-        debug!("vnc: asking the Mac for {scale}x server scaling");
-        uplink.send(&vnc_apple::set_server_scaling(scale)).await?;
     }
     debug!(
         "vnc: arming auto framebuffer updates for {}x{}",
@@ -8674,7 +8718,7 @@ mod tests {
 
     /// Frame a run of server messages into records, as the Mac would.
     fn framed(msgs: &[Vec<u8>]) -> Vec<u8> {
-        let mut writer = RecordWriter::new(apple_keys());
+        let mut writer = RecordWriter::shared(RecordKeys::new(apple_keys()));
         let mut wire = Vec::new();
         for msg in msgs {
             wire.extend_from_slice(writer.frame(msg).unwrap());
@@ -9089,7 +9133,7 @@ mod tests {
         // Reading past the last record is a clean end of stream, so the loop ends
         // with the hang-up error rather than hanging.
         let err = read_loop(
-            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+            RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
             shared,
             ReadFlags { clipboard: false, poll: false },
             Some(Apple::default()),
@@ -9409,7 +9453,7 @@ mod tests {
                 test_shadow((2, 2)),
             );
             let _ = read_loop(
-                RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+                RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
                 shared,
                 ReadFlags { clipboard: false, poll },
                 Some(Apple::default()),
@@ -9879,7 +9923,7 @@ mod tests {
         let apple = Apple::default();
 
         let _ = read_loop(
-            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+            RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
             shared,
             ReadFlags { clipboard: false, poll: true },
             Some(apple),
@@ -9912,7 +9956,7 @@ mod tests {
         let apple = Apple::default();
 
         let _ = read_loop(
-            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+            RecordReader::shared(std::io::Cursor::new(wire), RecordKeys::new(apple_keys())),
             shared,
             ReadFlags { clipboard: false, poll: true },
             Some(apple),
@@ -9963,7 +10007,7 @@ mod tests {
         test_scale_layout(&mut halved, 0.5, &[1.0, 2.0]);
         let halved = parse_layout(&halved).unwrap();
         assert_eq!(state.accept_apple_layout(&halved, 1.0), None);
-        assert_eq!(state.apple_scale_pending, None);
+        assert!(state.apple_scale_pending.is_none());
 
         // Back to All Displays before the Mac answers a pick of the 1x screen:
         // both want 1, which is already on its way.
@@ -9971,6 +10015,15 @@ mod tests {
         assert_eq!(state.request_apple_scale(None, 1.0), None);
         // A 2x browser display needs no scaling on the 1x screen either.
         assert_eq!(state.request_apple_scale(Some(1), 2.0), None);
+
+        // A request the Mac never answered stops standing in for the factor in
+        // force. The 1 asked for the 1x screen is still on its way, so picking
+        // that screen again asks for nothing; once it has gone unanswered too
+        // long, the last layout's 0.5 counts again and the pick asks anew.
+        assert_eq!(state.request_apple_scale(Some(1), 1.0), None, "still on its way");
+        let sent = std::time::Instant::now().checked_sub(APPLE_SCALE_ANSWER).unwrap();
+        state.apple_scale_pending = Some((1.0, sent));
+        assert_eq!(state.request_apple_scale(Some(1), 1.0), Some(1.0));
     }
 
     /// Standard's pointer addresses the unscaled framebuffer, so a position on

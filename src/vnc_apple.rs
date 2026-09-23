@@ -373,11 +373,11 @@ pub struct Display {
     /// bounding framebuffer are not rectangles the Mac sends.
     pub backing: (u16, u16),
     /// Where the backing region sits in the framebuffer, left then top.
-    pub backing_at: (u16, u16),
+    pub backing_at: (i16, i16),
     /// This screen's size in points, and where it sits in the Mac's own
     /// arrangement, left then top.
     pub logical: (u16, u16),
-    pub logical_at: (u16, u16),
+    pub logical_at: (i16, i16),
 }
 
 /// The Mac's display layout: which screens it has, which one it is sending, and
@@ -480,11 +480,14 @@ impl Layout {
         if self.current.is_some() || !self.mixed_density() {
             return None;
         }
-        let min = |at: fn(&Display) -> (u16, u16)| {
-            self.displays.iter().map(at).fold((u16::MAX, u16::MAX), |m, (x, y)| {
+        let min = |at: fn(&Display) -> (i16, i16)| {
+            self.displays.iter().map(at).fold((i16::MAX, i16::MAX), |m, (x, y)| {
                 (m.0.min(x), m.1.min(y))
             })
         };
+        // From the least edge, so never negative, and within the u16 the edges
+        // were sent in.
+        let from = |at: i16, origin: i16| (i32::from(at) - i32::from(origin)) as u16;
         let pixel_origin = min(|display| display.backing_at);
         let point_origin = min(|display| display.logical_at);
         Some(
@@ -492,14 +495,14 @@ impl Layout {
                 .iter()
                 .map(|display| MosaicRegion {
                     pixels: MosaicRect {
-                        x: display.backing_at.0 - pixel_origin.0,
-                        y: display.backing_at.1 - pixel_origin.1,
+                        x: from(display.backing_at.0, pixel_origin.0),
+                        y: from(display.backing_at.1, pixel_origin.1),
                         w: display.backing.0,
                         h: display.backing.1,
                     },
                     points: MosaicRect {
-                        x: display.logical_at.0 - point_origin.0,
-                        y: display.logical_at.1 - point_origin.1,
+                        x: from(display.logical_at.0, point_origin.0),
+                        y: from(display.logical_at.1, point_origin.1),
                         w: display.logical.0,
                         h: display.logical.1,
                     },
@@ -512,12 +515,12 @@ impl Layout {
     /// names its combined view ("Both Displays: 2720 × 900"). Unlike the
     /// framebuffer, it does not change with the selection.
     pub fn points_spanned(&self) -> (u16, u16) {
-        let span = |start: fn(&Display) -> u16, size: fn(&Display) -> u16| {
-            let lo = self.displays.iter().map(|d| u32::from(start(d))).min().unwrap_or(0);
+        let span = |start: fn(&Display) -> i16, size: fn(&Display) -> u16| {
+            let lo = self.displays.iter().map(|d| i32::from(start(d))).min().unwrap_or(0);
             let hi = self
                 .displays
                 .iter()
-                .map(|d| u32::from(start(d)) + u32::from(size(d)))
+                .map(|d| i32::from(start(d)) + i32::from(size(d)))
                 .max()
                 .unwrap_or(0);
             u16::try_from(hi - lo).unwrap_or(u16::MAX)
@@ -621,19 +624,22 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         if flags & 0x02 != 0 && origins.contains(&origin) {
             continue;
         }
+        // Signed: a screen left of or above the main one has negative edges in
+        // the Mac's global arrangement. Every value measured so far is positive,
+        // and reads the same either way.
+        let signed = |at: usize| be16(record, at).cast_signed();
         let edges = |at: usize| {
-            let (top, left, bottom, right) = (
-                be16(record, at),
-                be16(record, at + 2),
-                be16(record, at + 4),
-                be16(record, at + 6),
-            );
-            (right.saturating_sub(left), bottom.saturating_sub(top))
+            let (top, left, bottom, right) =
+                (signed(at), signed(at + 2), signed(at + 4), signed(at + 6));
+            let size = |from: i16, to: i16| {
+                u16::try_from(i32::from(to) - i32::from(from)).unwrap_or(0)
+            };
+            (size(left, right), size(top, bottom))
         };
         let logical = edges(0x14);
         let backing = edges(0x1c);
         // (top, left, ...) on the wire, so the left edge is the second field.
-        let corner = |at: usize| (be16(record, at + 2), be16(record, at));
+        let corner = |at: usize| (signed(at + 2), signed(at));
         // An unusable screen is dropped, the way a mirror copy is, rather than
         // taking the whole layout with it. One odd record among good ones would
         // otherwise cost the entire display list *and* the resize — and a layout
@@ -657,14 +663,19 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             record[0x08..0x10].try_into().expect("eight bytes inside a 0x38-byte record"),
         );
         let ratio = f32::from(backing.0) / f32::from(logical.0);
-        if !viewer_scale.is_finite() || !(0.0..=1.0).contains(&viewer_scale) || viewer_scale == 0.0 {
+        // Only `SetServerScaling` moves this off 1.0, and a record is not dropped
+        // over it: High Performance lists one record, so dropping it would end the
+        // session. A value outside (0, 1] is read as the unscaled 1.0 it was
+        // before this field was read at.
+        let viewer_scale = if viewer_scale.is_finite() && viewer_scale > 0.0 && viewer_scale <= 1.0 {
+            viewer_scale as f32
+        } else {
             warn!(
                 "vnc: display layout record {index} states a viewer scale of {viewer_scale}, \
-                 outside 0..=1; not offering it"
+                 outside (0, 1]; reading it as 1"
             );
-            continue;
-        }
-        let viewer_scale = viewer_scale as f32;
+            1.0
+        };
         // The agent writes 0.0 when it cannot look the screen's mode up ("bad mode
         // ref") and takes the scaled backing rect from the pixel bounds regardless,
         // so undo the viewer scale to recover the native density from the rects.
@@ -1172,6 +1183,39 @@ mod tests {
         assert_eq!(both.displays.len(), 2);
         assert_eq!(both.viewer_scale(), 0.5);
         assert_eq!(both.scale(), 1.0);
+    }
+
+    #[test]
+    fn a_screen_left_of_the_main_one_keeps_its_negative_place() {
+        // A 2x 1440x900 screen at x = -1440 points beside the 1x main screen at
+        // 0. Read unsigned, its left edge wrapped past the right one and the
+        // screen was dropped as zero-width.
+        let mut payload = layout(
+            None,
+            &[(7, (1440, 900), (2880, 1800), 0x00), (1, (1280, 800), (1280, 800), 0x01)],
+        );
+        let record = LAYOUT_HEAD;
+        payload[record + 0x16..record + 0x18].copy_from_slice(&(-1440i16).to_be_bytes());
+        payload[record + 0x1a..record + 0x1c].copy_from_slice(&0i16.to_be_bytes());
+        let second = LAYOUT_HEAD + LAYOUT_RECORD;
+        payload[second + 0x16..second + 0x18].copy_from_slice(&0i16.to_be_bytes());
+        payload[second + 0x1a..second + 0x1c].copy_from_slice(&1280i16.to_be_bytes());
+        let parsed = parse_layout(&payload).unwrap();
+        assert_eq!(parsed.displays.len(), 2);
+        assert_eq!(parsed.displays[0].logical, (1440, 900));
+        assert_eq!(parsed.points_spanned(), (2720, 900));
+        let mosaic = parsed.mosaic().unwrap();
+        assert_eq!((mosaic[0].points.x, mosaic[1].points.x), (0, 1440));
+    }
+
+    #[test]
+    fn an_unusable_viewer_scale_reads_as_unscaled_rather_than_dropping_the_screen() {
+        let mut payload = layout(None, &[(9, (1728, 902), (3456, 1804), 0x01)]);
+        super::test_scale_layout(&mut payload, 0.0, &[2.0]);
+        let parsed = parse_layout(&payload).unwrap();
+        assert_eq!(parsed.displays.len(), 1);
+        assert_eq!(parsed.viewer_scale(), 1.0);
+        assert_eq!(parsed.scale(), 2.0);
     }
 
     #[test]
