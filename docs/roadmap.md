@@ -242,19 +242,6 @@ has an answer rather than being rediscovered.
   less certain half, and widening standard `ard` still comes before deepening
   this subtype.
 
-### Apple Screen Sharing display modes
-
-- **Make Standard mode's All Displays view point-correct on mixed-density Macs.**
-  Standard mode's combined framebuffer is a mosaic of each physical screen's
-  backing pixels, but the current wire `Resize` describes the whole canvas with one
-  scale. No one scale is true for a 1× display beside a 2× display, so the combined
-  view falls back to 1× and the Retina screen appears at twice its logical size.
-  Apple's own client instead composes each screen in logical coordinates. The
-  gateway needs a density-aware compositor that normalizes each screen's backing
-  rectangle into one logical coordinate space, with the corresponding tile and
-  pointer transforms. High Performance mode is unaffected because it uses one
-  virtual display rather than a mosaic of physical displays.
-
 ### A virtual-display remote session for sway
 
 Console-style remote control of a physical sway machine, the way Apple's High

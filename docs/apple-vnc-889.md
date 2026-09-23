@@ -40,7 +40,7 @@ boundary and a burst of viewport reports, but remains reverse engineered.
 | | |
 |---|---|
 | Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
-| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. `AutoFrameBufferUpdate` does not make the tested server stream. A layout's length prefix counts only what follows it, and a `u16` display count precedes the records. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours, and scrolls only on a mask of exactly `0x08` or `0x10`. ClientInit is `0x81`: `0x40` asks for a session-select exchange. |
+| Protocol corrections | A dynamic descriptor's `max_width`/`max_height` are a fixed 3840×2160 backing ceiling, not the current mode. Standard mode's `SetServerScaling` is a two-byte header plus a big-endian `f64`; the returned layout's viewer-scale field confirms what the daemon applied. `AutoFrameBufferUpdate` does not make the tested server stream. A layout's length prefix counts only what follows it, and a `u16` display count precedes the records. `ViewerInfo`'s body carries numeric version triples rather than strings. High Performance reads the RFB pointer mask positionally — bit 2 is right and bit 3 is middle, the reverse of the RFB convention Standard mode honours, and scrolls only on a mask of exactly `0x08` or `0x10`. ClientInit is `0x81`: `0x40` asks for a session-select exchange. |
 | Fractional ratios | A virtual display mode whose backing/scaled ratio is not 1 or 2 is not rounded by the Mac. Measured August 23, 2026 on macOS 26.6.2: 2561×1440 backing over 1707×960 scaled (1.5x) created 1707×960 points at 2x, 2880×1800 over 1920×1200 (1.5x) created 960×600 points at 2x, and 2560×1440 over 2048×1152 (1.25x) created 960×540 points at 2x — a desktop whose text looks zoomed while the Dock, shrunk to fit the width, does not. Remotex therefore asks only for 1x or 2x (`protocol::render_density`). |
 | Lingering display | The virtual display outlives its session: a reconnect within a few seconds found it still there (the new session's ServerInit reported the previous mode and the display kept its id), and one after 45 s found the Mac back on its 800×600 physical display with a fresh id. The new session's own layout arrives either way, including when the requested mode equals the lingering one. |
 | Pre-rekey messages | `MiscStatus` (`0x14`) can arrive in the cleartext window between `SetEncryption` and the rekey, especially after a server restart when the Mac has stale clipboard state. The client must tolerate it during `await_rekey`. |
@@ -209,8 +209,10 @@ only whether remotex acts on later viewport reports.
 Standard mode was independently remeasured July 31, 2026. After Apple DH auth,
 `RFB 003.008` plus the same ten metadata encodings produced an unsolicited
 `AppleDisplayLayout`. Selecting ids 4 and 1 produced 3200×1800 at 2× and
-1280×800 at 1×. It uses the same display protocol without the 003.889 record
-layer.
+1280×800 at 1× before server scaling was requested. It uses the same display
+protocol without the 003.889 record layer. Standard remains a fixed physical-
+display session: its target configuration requires `resize = false`, and neither
+viewport sizes nor `SetDesktopSize` are sent.
 
 Standard mode compresses on the same terms as High Performance, remeasured
 August 1, 2026. Over one identical 800×600 session zlib sent 3,380,550 bytes
@@ -284,16 +286,46 @@ echoing its choice in the next layout's `current_display`:
 
 The layout is authoritative; `src/vnc.rs` moves the checkmark only on confirmation.
 
-### The density, and why picking a screen is what fixes it
+### Server-side scaling in Standard mode
 
 Each display record carries **its own scale factor** as a big-endian `f64`: 1.0 for
-the 1280×800 screen, 2.0 for the Retina one. It agrees exactly with the ratio of
-that record's two bounds rects (3200/1600), so the two can be cross-checked.
+the 1280×800 screen, 2.0 for the Retina one. A second `f64` is the viewer scale the
+daemon applied. Their product agrees with the ratio of that record's returned
+backing and logical bounds, so the three can be cross-checked.
 
-**A combined framebuffer has no single density.** Here 4480×1800 combines a 1×
-1280×800 display and a 2× 3200×1800 display across 2880×900 points. The header
-ratio, 4480/2880 = 1.56, represents neither display. `Layout::scale` therefore
-returns `UNSCALED` for the combined view and the display's scale after selection.
+Apple's `_RFBSetServerScaling` emits exactly ten bytes: message type `0x08`, one
+reserved zero byte, then the requested factor as a big-endian `f64`. It accepts a
+factor greater than zero and no greater than one. `screensharingd`'s
+`HandleSetServerScalingMessage` stores that factor, rebuilds the client's scaled
+capture context and sends a resolution change. This is raster scaling in the Mac,
+not display resize: Standard still exposes the same physical displays and ignores
+browser viewport sizes.
+
+Remotex requests `min(1, browser_density / remote_density)`. A selected display
+uses that display's density. All Displays uses the greatest density in the mosaic,
+so the densest display does not arrive oversized; Apple's factor is connection-
+wide, so every other display is reduced by the same amount. For example, a
+1440×900 Retina display has 2880×1800 native backing. From a 1× browser display,
+factor 0.5 makes the Mac return 1440×900 with viewer scale 0.5 and effective
+density 1. A 2× browser asks for factor 1 and receives the native 2880×1800 at
+effective density 2.
+
+The gateway forwards those returned pixels unchanged. It reports the selected
+screen's effective density (`native density × viewer scale`), which maps the
+server's pixels to the browser display's device pixels without a separate
+fit-to-window or Apple-only frontend scale. A browser density change and a display
+selection can send a new `SetServerScaling`; repeated layouts do not repeat an
+already-pending request, and only an answering layout confirms the factor.
+
+**A combined framebuffer is reported at its densest screen.** Here 4480×1800
+combines a 1× 1280×800 display and a 2× 3200×1800 display across 2880×900 points.
+The header ratio, 4480/2880 = 1.56, represents neither display. `Layout::scale`
+reports the greatest effective density among the records instead: the screen the
+server scale was matched to, so its pixels land one-to-one on the browser's device
+pixels. From a 1× browser the Mac answers at factor 0.5 — the Retina display
+arrives at 1600×900 with effective density 1, the 1× display at 640×400 — and the
+view is reported at 1. The smaller screen shows smaller because Apple rendered it
+that way; neither the gateway nor the browser rescales it.
 
 ## The other corrections
 
@@ -361,7 +393,7 @@ document models; a size is a difference of edges. The record, `0x38` bytes:
 
 ```text
 +0x00 f64 BE   this screen's scale factor    -- 1.0 or 2.0; 0.0 if the mode lookup failed
-+0x08 f64 BE   viewer scale factor           -- the daemon's server-side scaling, 1.0
++0x08 f64 BE   viewer scale factor           -- the daemon's applied server-side scaling
 +0x10 u32 BE   display_id (CGDirectDisplayID)
 +0x14 rect     logical bounds  (u16 top, left, bottom, right)
 +0x1c rect     backing bounds  (u16 top, left, bottom, right)
@@ -370,11 +402,11 @@ document models; a size is a difference of edges. The record, `0x38` bytes:
                the last four bytes (blue shift and padding) are always zero
 ```
 
-The scale is 0.0 when the agent's `hidpi_ScaleFactor` (`FUN_100045a47`) cannot
-look the screen's mode up ("bad mode ref"). The backing rect comes from the pixel
-bounds regardless, so remotex then takes the density from the ratio of the two
-rects rather than dropping the screen, which for High Performance's single record
-would end the session.
+The native scale is 0.0 when the agent's `hidpi_ScaleFactor` (`FUN_100045a47`)
+cannot look the screen's mode up ("bad mode ref"). The backing rect comes from the
+scaled pixel bounds regardless, so remotex divides its backing/logical ratio by
+the viewer scale to recover the native density rather than dropping the screen.
+For High Performance's single record, dropping it would end the session.
 
 And the header, which is 0x14 bytes after the length prefix:
 

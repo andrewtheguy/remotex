@@ -1442,6 +1442,16 @@ also negotiates Apple's display metadata, display picker and native pasteboard o
 the ordinary byte stream, and asks for zlib in its first `SetEncodings` exactly as
 High Performance does.
 
+**Apple Standard mode remains fixed-size.** It rejects `resize = true`, shares the
+Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
+Density is handled by the Mac instead: from each `AppleDisplayLayout`, the gateway
+reads the displays' native densities and the viewer scale already applied. It sends
+`SetServerScaling` so the selected display—or the densest display in All
+Displays—matches the browser display's density. The answering layout is
+authoritative. Its pixels pass through unchanged, and its effective density
+(`native density × viewer scale`) is the `Resize.scale` — the selected display's,
+or in All Displays the densest display's, which is the one matched to the browser.
+
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every
 claim in this section is measurement or a reading of Apple's binaries rather than
