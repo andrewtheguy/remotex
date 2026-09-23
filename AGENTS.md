@@ -63,6 +63,12 @@ documentation.
 - Pointer clients present the remote desktop at 100%; oversized desktops scroll.
   Do not add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile,
   gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
+- Neither the gateway nor the browser rescales what a remote sends. Frames pass
+  through at the remote's pixels and are presented at `w / scale` by the density
+  the remote confirmed; there is no per-engine or per-display exception. When the
+  size or density is wrong for the browser, ask the remote to render the right
+  one — RDP's negotiated density, a High Performance virtual-display mode, Apple
+  Standard's `SetServerScaling`, wlshare's density — and output its answer as is.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. `resize = true` means the window continuously
   drives the remote size; do not add a client resize toggle or remembered resize
