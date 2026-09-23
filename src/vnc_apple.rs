@@ -461,11 +461,12 @@ impl Layout {
         (host_density / density).clamp(f32::MIN_POSITIVE, 1.0)
     }
 
-    /// Whether the screens differ in density, which no single framebuffer scale
-    /// can then describe.
+    /// Whether some screens are at 1x and others are not, which no single
+    /// framebuffer scale can then describe — Apple's `globalIsMixedMode`. Screens
+    /// that are all HiDPI, at whatever densities, are not mixed to Apple either.
     fn mixed_density(&self) -> bool {
-        let first = self.displays[0].density;
-        self.displays.iter().any(|display| (display.density - first).abs() > 0.005)
+        let unscaled = |display: &Display| (display.density - 1.0).abs() <= 0.005;
+        self.displays.iter().any(unscaled) && !self.displays.iter().all(unscaled)
     }
 
     /// How a client presents the combined view of screens at different
@@ -1245,6 +1246,13 @@ mod tests {
         let alike = parse_layout(&alike).unwrap();
         assert_eq!(alike.mosaic(), None);
         assert_eq!(alike.server_scale_for(None, 1.0), 0.5);
+
+        // Mixed is Apple's `globalIsMixedMode`: a 1x screen beside one that is
+        // not. HiDPI screens that differ among themselves are served uniformly.
+        let hidpi = layout(None, &[(1, (1280, 800), (1920, 1200), 0x01), (2, (1440, 900), (2880, 1800), 0x00)]);
+        let hidpi = parse_layout(&hidpi).unwrap();
+        assert_eq!(hidpi.mosaic(), None);
+        assert_eq!(hidpi.server_scale_for(None, 1.0), 0.5);
     }
 
     /// The shared builder, which lives outside this module so [`crate::vnc`]'s tests
