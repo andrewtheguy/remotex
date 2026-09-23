@@ -213,7 +213,7 @@ impl Conn {
                 let transport = request.header("Transport").unwrap_or_default();
                 let timing_port = transport_port(transport, "timing_port");
                 self.stream = None;
-                let stream = match Stream::start(local, peer, timing_port, params, Arc::clone(&self.shared)).await {
+                let stream = match Stream::start(local, peer, timing_port, params, Arc::clone(&self.shared), session).await {
                     Ok(stream) => stream,
                     // The claim goes with it, or the connection would hold the one
                     // stream with nothing playing it.

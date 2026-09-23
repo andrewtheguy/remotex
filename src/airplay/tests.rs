@@ -121,6 +121,39 @@ fn announcement(aes_key: [u8; 16], aes_iv: [u8; 16]) -> String {
     )
 }
 
+/// Send `samples` to the audio port as a Mac does: ALAC packets of [`FRAMES`],
+/// encrypted under `aes_key`, over RTP.
+async fn play(audio_port: u16, aes_key: [u8; 16], aes_iv: [u8; 16], samples: &[i16]) {
+    let input = FormatDescription::pcm::<i16>(44_100.0, 2);
+    let alac = FormatDescription::alac(44_100.0, FRAMES as u32, 2);
+    let mut encoder = AlacEncoder::new(&alac);
+    let mut packet = vec![0u8; alac.max_packet_size()];
+    let cipher = aes::Aes128::new(&aes_key.into());
+    let rtp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let to = SocketAddr::from((Ipv4Addr::LOCALHOST, audio_port));
+    for (seq, chunk) in samples.chunks(FRAMES * 2).enumerate() {
+        let pcm: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let len = encoder.encode(&input, &pcm, &mut packet);
+        let mut payload = packet[..len].to_vec();
+        let mut chain = aes_iv;
+        for block in payload.as_chunks_mut::<16>().0 {
+            for (b, c) in block.iter_mut().zip(chain) {
+                *b ^= c;
+            }
+            cipher.encrypt_block(block.into());
+            chain = *block;
+        }
+        let mut datagram = vec![0x80, if seq == 0 { 0xe0 } else { 0x60 }];
+        datagram.extend_from_slice(&(seq as u16).to_be_bytes());
+        datagram.extend_from_slice(&((seq * FRAMES) as u32).to_be_bytes());
+        datagram.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        datagram.extend_from_slice(&payload);
+        rtp.send_to(&datagram, to).await.unwrap();
+        // Loopback drops a burst; pace it the way a sender does, only faster.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 fn server_port(headers: &[(String, String)]) -> u16 {
     header(headers, "Transport")
         .split(';')
@@ -197,34 +230,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
             [left as i16, right as i16]
         })
         .collect();
-    let input = FormatDescription::pcm::<i16>(44_100.0, 2);
-    let alac = FormatDescription::alac(44_100.0, FRAMES as u32, 2);
-    let mut encoder = AlacEncoder::new(&alac);
-    let mut packet = vec![0u8; alac.max_packet_size()];
-    let cipher = aes::Aes128::new(&aes_key.into());
-    let rtp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let to = SocketAddr::from((Ipv4Addr::LOCALHOST, audio_port));
-    for (seq, chunk) in sent.chunks(FRAMES * 2).enumerate() {
-        let pcm: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let len = encoder.encode(&input, &pcm, &mut packet);
-        let mut payload = packet[..len].to_vec();
-        let mut chain = aes_iv;
-        for block in payload.as_chunks_mut::<16>().0 {
-            for (b, c) in block.iter_mut().zip(chain) {
-                *b ^= c;
-            }
-            cipher.encrypt_block(block.into());
-            chain = *block;
-        }
-        let mut datagram = vec![0x80, if seq == 0 { 0xe0 } else { 0x60 }];
-        datagram.extend_from_slice(&(seq as u16).to_be_bytes());
-        datagram.extend_from_slice(&((seq * FRAMES) as u32).to_be_bytes());
-        datagram.extend_from_slice(&0x1234_5678u32.to_be_bytes());
-        datagram.extend_from_slice(&payload);
-        rtp.send_to(&datagram, to).await.unwrap();
-        // Loopback drops a burst; pace it the way a sender does, only faster.
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    play(audio_port, aes_key, aes_iv, &sent).await;
 
     let want = sent.len() * 2;
     let mut received = Vec::new();
@@ -306,4 +312,41 @@ async fn expect_hung_up(sender: &mut Sender) {
         .await
         .expect("the speaker hangs up");
     assert_eq!(read.unwrap(), 0, "the connection closed with nothing more said: {rest:?}");
+}
+
+/// A stream plays into the session it was set up under and no other: what it
+/// still holds when that session hands over, a partial buffer included, never
+/// reaches the session that took over.
+#[tokio::test]
+async fn a_stream_never_plays_into_the_session_that_took_over() {
+    let airplay = AirPlay::start_unadvertised(&config()).unwrap();
+    let (aes_key, aes_iv) = (*b"remotex-airplay!", *b"0123456789abcdef");
+    let sdp = announcement(aes_key, aes_iv);
+    let timing = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let transport = format!(
+        "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=9;timing_port={}",
+        timing.local_addr().unwrap().port()
+    );
+    let first = Arc::new(AudioBridge::new());
+    let first_session = airplay.attach(&first);
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    let (code, setup) = sender.request("SETUP", &[("Transport", &transport)], "").await;
+    assert_eq!(code, 200);
+
+    // One packet: less than a wave buffer, so the stream is still holding it.
+    play(server_port(&setup), aes_key, aes_iv, &[1000i16; FRAMES * 2]).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(first.negotiated_format().is_none(), "a partial buffer was fed early");
+
+    // Handed over with nothing running in between, as a takeover does.
+    let second = Arc::new(AudioBridge::new());
+    let mut listener = second.take_listener();
+    drop(first_session);
+    let _second_session = airplay.attach(&second);
+    expect_hung_up(&mut sender).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(second.negotiated_format().is_none(), "the old stream announced itself to the new session");
+    assert!(listener.queued_wave().is_none(), "the old stream played into the new session");
 }

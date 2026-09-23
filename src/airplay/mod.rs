@@ -74,14 +74,20 @@ struct Shared {
     streaming: Mutex<Option<u64>>,
 }
 
-/// Where decoded audio goes: the running Apple session's bridge, held weakly so
-/// that the session ending is all it takes to stop feeding it.
+/// Where decoded audio goes: the running Apple session's bridge, with the number
+/// [`AirPlay::attach`] gave that session, held weakly so that the session ending
+/// is all it takes to stop feeding it.
 #[derive(Default)]
-struct Route(Mutex<Weak<AudioBridge>>);
+struct Route(Mutex<Option<(u64, Weak<AudioBridge>)>>);
 
 impl Route {
-    fn current(&self) -> Option<Arc<AudioBridge>> {
-        self.0.lock().unwrap().upgrade()
+    /// The bridge of `session`, if that is still the one running: a stream plays
+    /// into the session it was set up under, and into no session that follows.
+    fn of(&self, session: u64) -> Option<Arc<AudioBridge>> {
+        match &*self.0.lock().unwrap() {
+            Some((id, bridge)) if *id == session => bridge.upgrade(),
+            _ => None,
+        }
     }
 }
 
@@ -164,7 +170,7 @@ impl AirPlay {
     pub fn attach(&self, bridge: &Arc<AudioBridge>) -> Attached {
         let id = self.shared.next_session.fetch_add(1, Ordering::Relaxed) + 1;
         let mut route = self.shared.route.0.lock().unwrap();
-        *route = Arc::downgrade(bridge);
+        *route = Some((id, Arc::downgrade(bridge)));
         self.shared.session.send_replace(Some(id));
         Attached { shared: Arc::clone(&self.shared), id }
     }
@@ -172,7 +178,8 @@ impl AirPlay {
     /// The bridge a stream would be played into now, for the session's tests.
     #[cfg(test)]
     pub(crate) fn attached(&self) -> Option<Arc<AudioBridge>> {
-        self.shared.route.current()
+        let route = self.shared.route.0.lock().unwrap();
+        route.as_ref().and_then(|(_, bridge)| bridge.upgrade())
     }
 
     /// The RTSP port, which the mDNS record carries.
@@ -200,7 +207,7 @@ impl Drop for Attached {
             ours
         });
         if ended {
-            *route = Weak::new();
+            *route = None;
         }
     }
 }

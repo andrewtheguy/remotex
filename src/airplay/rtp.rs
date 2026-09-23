@@ -57,6 +57,7 @@ impl Stream {
         peer_timing_port: Option<u16>,
         params: Params,
         shared: Arc<Shared>,
+        session: u64,
     ) -> anyhow::Result<Self> {
         let bind = async |what: &str| {
             UdpSocket::bind(with_port(local, 0))
@@ -73,7 +74,7 @@ impl Stream {
             timing_port: timing.local_addr()?.port(),
             stop,
         };
-        tokio::spawn(audio_loop(audio, peer.ip().to_canonical(), params, shared, stopped.clone()));
+        tokio::spawn(audio_loop(audio, peer.ip().to_canonical(), params, shared, session, stopped.clone()));
         tokio::spawn(control_loop(control, stopped.clone()));
         tokio::spawn(timing_loop(timing, peer_timing_port.map(|p| with_port(peer, p)), stopped));
         Ok(stream)
@@ -124,6 +125,7 @@ async fn audio_loop(
     peer: IpAddr,
     params: Params,
     shared: Arc<Shared>,
+    session: u64,
     mut stopped: watch::Receiver<bool>,
 ) {
     let cipher = params.aes.map(|(key, iv)| (payload_cipher(&key), iv));
@@ -177,11 +179,11 @@ async fn audio_loop(
             ),
         }
         if wave.len() >= WAVE_BYTES {
-            feed(&shared, &mut fed, std::mem::take(&mut wave));
+            feed(&shared, session, &mut fed, std::mem::take(&mut wave));
         }
     }
     if !wave.is_empty() {
-        feed(&shared, &mut fed, wave);
+        feed(&shared, session, &mut fed, wave);
     }
     if let Some(bridge) = fed.upgrade() {
         bridge.clear_format();
@@ -189,9 +191,10 @@ async fn audio_loop(
     info!("airplay: the stream ended after {packets} packet(s), {undecodable} undecodable");
 }
 
-/// Hand one wave buffer to the running Apple session, or drop it when there is none.
-fn feed(shared: &Shared, fed: &mut Weak<AudioBridge>, wave: Vec<u8>) {
-    let Some(bridge) = shared.route.current() else {
+/// Hand one wave buffer to `session`, the Apple session the stream was set up
+/// under, or drop it when that session is no longer the one running.
+fn feed(shared: &Shared, session: u64, fed: &mut Weak<AudioBridge>, wave: Vec<u8>) {
+    let Some(bridge) = shared.route.of(session) else {
         return;
     };
     if !std::ptr::eq(fed.as_ptr(), Arc::as_ptr(&bridge)) {
