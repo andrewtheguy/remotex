@@ -1,21 +1,20 @@
-// The build, as every screen that shows it spells it: the bundle's version, then
-// the optional features of the gateway serving it.
+// The version, as every screen that shows it spells it: the bundle's version, then
+// `(airplay)` when the gateway serving it runs a Mac's AirPlay speaker.
 //
 // Two sources because they are two facts. The version is compiled into the bundle;
-// the features belong to the binary, and one bundle is compiled into every build of
-// it, so only the gateway can say which it is. A gateway built with none adds nothing.
+// the speaker is the gateway's `[airplay]` table, which only the gateway can report.
 
 import { useEffect, useState } from "react";
 import { gatewayConfig } from "./gatewayConfig.ts";
 
 export function AppVersion({ className }: { className: string }) {
-  const [features, setFeatures] = useState<string[]>([]);
+  const [airplay, setAirplay] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     gatewayConfig().then((config) => {
       if (!cancelled) {
-        setFeatures(config.features);
+        setAirplay(config.airplay);
       }
     });
     return () => {
@@ -26,7 +25,7 @@ export function AppVersion({ className }: { className: string }) {
   return (
     <div className={className}>
       v{__APP_VERSION__}
-      {features.length > 0 && ` (${features.join(", ")})`}
+      {airplay && " (airplay)"}
     </div>
   );
 }

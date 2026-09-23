@@ -12,15 +12,15 @@ export interface GatewayConfig {
   logo: boolean;
   /** Whether the gateway records throughput `GET /api/throughput` can read. */
   throughput: boolean;
-  /** The optional cargo features the gateway was built with, for the version line. */
-  features: string[];
+  /** Whether the gateway's `[airplay]` table is set, for the version line. */
+  airplay: boolean;
 }
 
 const FALLBACK: GatewayConfig = {
   branding: "remotex",
   logo: false,
   throughput: false,
-  features: [],
+  airplay: false,
 };
 
 /** The config in a response body, holding each key to its type and its fallback. */
@@ -31,9 +31,7 @@ export function parseGatewayConfig(
     branding: config.branding || FALLBACK.branding,
     logo: config.logo === true,
     throughput: config.throughput === true,
-    features: Array.isArray(config.features)
-      ? config.features.filter((f) => typeof f === "string")
-      : [],
+    airplay: config.airplay === true,
   };
 }
 
