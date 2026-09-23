@@ -8,7 +8,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { connectionLabel, connectionShortLabel } from "./connectionLabel.ts";
+import {
+  airplayLabel,
+  airplayShortLabel,
+  connectionLabel,
+  connectionShortLabel,
+} from "./connectionLabel.ts";
 
 test("a target with no subtype is just its protocol", () => {
   assert.equal(connectionLabel("rdp", null), "RDP");
@@ -48,4 +53,13 @@ test("a subtype this build has never heard of still names itself", () => {
     connectionLabel("vnc", "ard-something-new"),
     "VNC · ard-something-new",
   );
+});
+
+test("a Mac says whether the gateway's AirPlay speaker is on, and nothing else does", () => {
+  assert.equal(airplayShortLabel(true), "AirPlay on");
+  assert.equal(airplayShortLabel(false), "AirPlay off");
+  assert.equal(airplayShortLabel(null), null);
+  assert.match(airplayLabel(true) ?? "", /^On/);
+  assert.match(airplayLabel(false) ?? "", /\[airplay\]/);
+  assert.equal(airplayLabel(null), null);
 });

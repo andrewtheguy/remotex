@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
             let config = file.resolve_with(listen.as_deref(), &remotex::config::state_dir(&path))?;
-            serve(config).await?;
+            serve(config, &path).await?;
         }
         #[cfg(all(feature = "embedded-gateway", unix))]
         Commands::Tui { port, instances_dir } => {
@@ -140,7 +140,7 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
     Ok(())
 }
 
-async fn serve(config: AppConfig) -> anyhow::Result<()> {
+async fn serve(config: AppConfig, config_path: &std::path::Path) -> anyhow::Result<()> {
     if let Some(recording) = &config.meter {
         info!("recording websocket throughput to {}", recording.database.display());
     }
@@ -149,7 +149,8 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
         .context("cannot record websocket throughput ([meter].database)")?;
-    let app = server::router(config.clone(), throughput);
+    let airplay = config.airplay.as_ref().map(|airplay| remotex::airplay::AirPlay::start(airplay, config_path)).transpose()?;
+    let app = server::router(config.clone(), throughput, airplay);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

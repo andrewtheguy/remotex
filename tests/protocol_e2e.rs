@@ -1020,10 +1020,11 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
+        airplay: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = server::router(config, Default::default());
+    let app = server::router(config, Default::default(), None);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -1057,6 +1058,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         resize: false,
         egfx: None,
         clipboard,
+        audio_key: None,
         audio: false,
         audio_codec: None,
         camera: false,

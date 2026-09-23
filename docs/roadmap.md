@@ -223,13 +223,12 @@ has an answer rather than being rediscovered.
   where the operator has already accepted lossy, the transcode is pure loss. The
   cost is a decoder this repo would then own.
 - **Apple High Performance screen video (HEVC).** High Performance supplies its
-  virtual display over zlib rectangles today. The same media stream that carries
-  system audio (shipped behind the `apple-hp-audio` feature — see
-  [`architecture.md`](architecture.md)) can also carry the screen as an HEVC
+  virtual display over zlib rectangles today. The media stream whose audio leg
+  remotex implemented through v0.0.249 can also carry the screen as an HEVC
   stream over SRTP, which would remove the zlib transcode on that subtype. Only
-  the audio leg has been reverse-engineered and implemented; the video leg's
-  offer is sent because the Mac refuses audio without it, but its payload was
-  never received — see [`apple-vnc-889.md`](apple-vnc-889.md). It is the larger,
+  the audio leg was reverse-engineered; the video leg's offer had to be sent
+  because the Mac refuses audio without it, but its payload was never received —
+  see [`apple-vnc-889.md`](apple-vnc-889.md#the-media-stream-high-performance-system-audio). It is the larger,
   less certain half, and widening standard `ard` still comes before deepening
   this subtype.
 

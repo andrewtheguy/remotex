@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.249"
+version = "0.0.250"
 
 [package]
 name = "remotex"
@@ -26,16 +26,13 @@ edition = "2024"
 [features]
 # Native builds include the local TUI control plane. Container artifacts
 # explicitly disable default features: a remotely deployed gateway must not
-# expose process supervision or its private worker surface.
-default = ["embedded-gateway"]
+# expose process supervision or its private worker surface. They turn `airplay`
+# back on, so every released artifact carries the Mac's AirPlay speaker.
+default = ["embedded-gateway", "airplay"]
 embedded-gateway = ["dep:crossterm", "dep:libc"]
-# Apple High Performance system audio (src/vnc_apple_audio.rs, src/aac_eld.rs).
-# Off by default and never in a release artifact: the Mac streams AAC-ELD, which
-# only Fraunhofer's own decoder takes portably, and its licence is not OSI-approved.
-# An operator who wants a Mac's sound builds the gateway with
-# `cargo build --release --features apple-hp-audio`; a config that asks for
-# `audio = true` on an `ard-high-performance` target is refused by any other build.
-apple-hp-audio = ["dep:aac"]
+# A Mac's sound, received as an AirPlay 1 speaker (src/airplay/). Without it, the
+# config refuses `[airplay]` and `audio` on a Mac.
+airplay = ["dep:alac", "dep:mdns-sd", "dep:gethostname"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -116,16 +113,6 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # the binary is self-contained on every runner without any env coaxing. The lib is
 # still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260906161304-8dd83e8" }
-# AAC-ELD, for Apple High Performance system audio, behind the `apple-hp-audio`
-# feature above. Fraunhofer's decoder, but the Rust one: AOSP ships a pure-Rust
-# port of it as `platform/external/aac`, `rust/`, which is not published on
-# crates.io. The repository below is that crate cut down to the one thing asked
-# of it here — ER AAC ELD, mono or stereo, no SBR, raw access units — and checked
-# sample for sample against the unmodified decoder. It is the odd one out among
-# the media dependencies for needing nothing prebuilt — no static archive, no sys
-# crate, no C++ toolchain. The licence is unchanged by the rewrite and by the
-# cutting down, and still not OSI-approved, which is what keeps the feature off.
-aac = { git = "https://github.com/andrewtheguy/fdk-aac-rust", tag = "v0.2.0", optional = true }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
@@ -241,6 +228,16 @@ sspi = { version = "0.21", default-features = false }
 rsa = { version = "0.10.0-rc.18", default-features = false }
 eax = "0.6"
 sha2 = "0.11"
+# A Mac's sound, received as an AirPlay 1 speaker (src/airplay/): the Mac streams
+# Apple Lossless, which this pure-Rust decoder takes packet by packet from the
+# SDP's own parameters, and finds the speaker by DNS-SD, which `mdns-sd` answers
+# and announces from inside the process — no avahi or Bonjour on the host, and no
+# async runtime of its own. The RSA, AES and MD5 the protocol asks for are the
+# crates above. The host's name, with the branding, is what keeps two gateways'
+# speakers distinct.
+alac = { version = "0.5", optional = true }
+mdns-sd = { version = "0.21", optional = true }
+gethostname = { version = "1", optional = true }
 
 [build-dependencies]
 anyhow = "1"
@@ -265,6 +262,9 @@ name = "tui_control_plane_e2e"
 required-features = ["embedded-gateway"]
 
 [dev-dependencies]
+# Apple Lossless packets for the AirPlay receiver's test, made by Apple's own
+# encoder ported to Rust, which shares nothing with the decoder above.
+alac-encoder = "0.3"
 # FLAC frames for the audio decoder's tests, made the way wlshare makes them and
 # by an encoder that shares nothing with symphonia.
 flacenc = { version = "0.5", default-features = false }

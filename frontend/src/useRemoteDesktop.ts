@@ -530,6 +530,10 @@ export function useRemoteDesktop(
   // behaviour hangs off it, because every capability that varies by subtype already
   // arrives as its own flag on the same message. See connectionLabel.ts.
   const [connection, setConnection] = useState("");
+  // On a Mac, whether the gateway's AirPlay speaker is on, from `connected`; null
+  // on every other target and in the picker. For the card alone: `audio` already
+  // says whether there is sound to enable.
+  const [airplay, setAirplay] = useState<boolean | null>(null);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -1469,6 +1473,7 @@ export function useRemoteDesktop(
       // toggle, the same way it offers none for `resize`.
       setGridDebug(msg.gridDebug);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
+      setAirplay(msg.airplay);
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
@@ -1663,6 +1668,7 @@ export function useRemoteDesktop(
           setVideoError(null);
           setRenderPlan("");
           setConnection("");
+          setAirplay(null);
           // The lattice belongs to the session that stated it. Said here rather
           // than left for the cleared framebuffer to imply, so the halves of
           // the overlay — the switch, the pitch and the desktop it is drawn over
@@ -2557,6 +2563,7 @@ export function useRemoteDesktop(
     hostScale,
     renderPlan,
     connection,
+    airplay,
     canClipboard,
     canAudio,
     audioEnabled,

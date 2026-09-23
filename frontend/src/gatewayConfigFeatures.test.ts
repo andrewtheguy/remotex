@@ -7,11 +7,11 @@ import { test } from "node:test";
 import { parseGatewayConfig } from "./gatewayConfig.ts";
 
 test("the features are the strings the gateway named, and nothing else it sent", () => {
-  const body = { features: ["apple-hp-audio", 7, null] } as unknown;
+  const body = { features: ["embedded-gateway", 7, null] } as unknown;
   assert.deepEqual(
     parseGatewayConfig(body as Parameters<typeof parseGatewayConfig>[0])
       .features,
-    ["apple-hp-audio"],
+    ["embedded-gateway"],
   );
 });
 

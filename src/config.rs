@@ -677,15 +677,19 @@ pub struct TargetConfig {
     /// native pasteboard protocol; RDP uses MS-RDPECLIP `CF_UNICODETEXT`.
     #[serde(default)]
     pub clipboard: bool,
+    /// The `audio` key as written, which [`ConfigFile::parse`] resolves into
+    /// [`Self::audio`]. Refused on either Apple subtype, whose sound the
+    /// `[airplay]` table decides.
+    #[serde(default, rename = "audio")]
+    pub audio_key: Option<bool>,
     /// Carry the remote's sound. Packets are sent only while the attached client
     /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
     /// asks a generic server for wlshare's audio extension, FLAC on the RFB
-    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]; an
-    /// `ard-high-performance` target negotiates the Mac's system audio over its
-    /// media stream, and only in a gateway built with the `apple-hp-audio` feature
-    /// — see [`crate::vnc_apple_audio`]. Refused on Apple's standard Screen
-    /// Sharing, which has neither.
-    #[serde(default)]
+    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]. Both
+    /// opt in with `audio = true`. Either Apple subtype carries it exactly when
+    /// the gateway-wide `[airplay]` table is set: the Mac sends its sound to the
+    /// gateway's AirPlay speaker — see [`crate::airplay`].
+    #[serde(skip)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
     /// [`AudioCodec::Opus`]. `Option` rather than a bare default so that setting
@@ -1065,8 +1069,8 @@ impl TargetConfig {
 
     /// The one PCM format this target's wave buffers can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
-    /// ([`crate::audio::PCM_CD_QUALITY`]), what the Mac's AAC-ELD decodes to
-    /// ([`crate::vnc_apple_audio::SOURCE_FORMAT`]), or what a generic VNC server
+    /// ([`crate::audio::PCM_CD_QUALITY`]), what AirPlay carries from a Mac (the
+    /// same), or what a generic VNC server
     /// is asked to send over wlshare's audio extension
     /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
@@ -1077,14 +1081,17 @@ impl TargetConfig {
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
-            // Named rather than wildcarded, so a subtype added later has to
-            // say which of the two audio paths it is. Standard `ard` carries
-            // neither and is refused the key at parse; naming it beside the
-            // generic case is what makes that a decision rather than a default.
-            Protocol::Vnc => match self.subtype {
-                Some(Subtype::ArdHighPerformance) => crate::vnc_apple_audio::SOURCE_FORMAT,
-                None | Some(Subtype::Ard) => crate::vnc_audio::SOURCE_FORMAT,
-            },
+            Protocol::Vnc if self.receives_airplay() => crate::audio::PCM_CD_QUALITY,
+            Protocol::Vnc => crate::vnc_audio::SOURCE_FORMAT,
+        }
+    }
+
+    /// Whether this target's sound, when it has any, arrives at the gateway's AirPlay
+    /// speaker rather than over its own connection: either Apple subtype.
+    pub fn receives_airplay(&self) -> bool {
+        match (self.protocol, self.subtype) {
+            (Protocol::Vnc, Some(Subtype::Ard | Subtype::ArdHighPerformance)) => true,
+            (Protocol::Vnc, None) | (Protocol::Rdp, _) => false,
         }
     }
 
@@ -1418,8 +1425,35 @@ pub struct ConfigFile {
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
+    /// The `[airplay]` table: the password of the AirPlay speaker a Mac sends its
+    /// sound to. Its presence turns audio on for every Apple target, and it is
+    /// refused when no target has an Apple subtype.
+    /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
+    #[serde(default)]
+    pub airplay: Option<AirPlaySection>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// The `[airplay]` table as written. See [`crate::airplay`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AirPlaySection {
+    /// What a Mac is asked for when it picks the speaker, and remembers in its
+    /// keychain after. Required: the speaker is on the whole LAN, and any Mac on it
+    /// that knew no password could play into whichever session is running.
+    /// Plaintext, because AirPlay's Digest challenge needs it to verify an answer.
+    pub password: String,
+}
+
+/// The gateway's AirPlay speaker, resolved: what it is called and the password a
+/// Mac is asked for. See [`crate::airplay`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AirPlayConfig {
+    /// The speaker's name in a Mac's Sound menu: the gateway's branding, with
+    /// ` - remotex` after it.
+    pub name: String,
+    pub password: String,
 }
 
 /// The `[meter]` table as written. See [`crate::throughput`].
@@ -1474,6 +1508,8 @@ pub struct AppConfig {
     pub dev_hostname: Option<String>,
     /// `[meter]`, resolved. `None` records nothing.
     pub meter: Option<MeterConfig>,
+    /// The AirPlay speaker, when an Apple target carries audio; `None` starts none.
+    pub airplay: Option<AirPlayConfig>,
 }
 
 impl ConfigFile {
@@ -1492,10 +1528,26 @@ impl ConfigFile {
         let mut config: ConfigFile = toml::from_str(text).context("invalid TOML config")?;
         // An omitted port deserializes as 0 (never a valid target port), which
         // resolves here to the protocol's standard port.
+        let airplay = config.airplay.is_some();
         for target in &mut config.targets {
             if target.port == 0 {
                 target.port = target.protocol.default_port();
             }
+            // A Mac's sound is the gateway's AirPlay speaker's, which is not the
+            // target's to turn on or off: the `[airplay]` table is, for every Mac.
+            anyhow::ensure!(
+                !(target.receives_airplay() && target.audio_key.is_some()),
+                "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
+                 AirPlay speaker — the [airplay] table turns that on for every Mac. Remove \
+                 the key.",
+                target.name,
+                target.subtype.map_or("apple", Subtype::name)
+            );
+            target.audio = if target.receives_airplay() {
+                airplay
+            } else {
+                target.audio_key.unwrap_or(false)
+            };
         }
         #[cfg(feature = "embedded-gateway")]
         if audience == Audience::Embedded {
@@ -1532,6 +1584,26 @@ impl ConfigFile {
                  meter.sqlite3 in the gateway's state directory"
             );
             anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
+        }
+        // Every Mac's sound arrives at the gateway's AirPlay speaker, which the
+        // `[airplay]` table turns on and which asks every sender for its password:
+        // the speaker answers the whole LAN. A table with no Mac to play through it
+        // is refused rather than started.
+        if let Some(airplay) = &config.airplay {
+            anyhow::ensure!(
+                cfg!(feature = "airplay"),
+                "[airplay] is set, and this remotex was built without the airplay feature"
+            );
+            anyhow::ensure!(
+                config.targets.iter().any(TargetConfig::receives_airplay),
+                "[airplay] is set, and there is no ard or ard-high-performance target, so \
+                 nothing would play through the speaker. Remove the table, or add a Mac"
+            );
+            anyhow::ensure!(
+                !airplay.password.trim().is_empty(),
+                "[airplay].password is empty — every Mac on the LAN could then play into the \
+                 session. Set one"
+            );
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -1624,17 +1696,11 @@ impl ConfigFile {
                  through the graphics pipeline alone. Remove one of the two keys.",
                 target.name
             );
-            // Audio is carried by three paths and refused elsewhere rather than
-            // ignored: MS-RDPEA on RDP, wlshare's audio extension on a generic VNC
-            // target ([`crate::vnc_audio`]), and Apple's media stream on High
-            // Performance mode — the last only in a build with the AAC-ELD decoder
-            // the Mac's stream needs (the `apple-hp-audio` feature, off by default
-            // and absent from every release binary). What is left is Apple's
-            // standard Screen Sharing, which carries no sound and does not speak
-            // wlshare's extension either, so `audio = true` there could only ever be
-            // a mistake about what the subtype carries. Naming each case at parse
-            // time is the difference between a config error and a session that is
-            // silent for no stated reason.
+            // Audio is carried three ways: MS-RDPEA on RDP, wlshare's audio
+            // extension on a generic VNC target ([`crate::vnc_audio`]), and the
+            // gateway's AirPlay speaker for either Apple subtype, whose Screen
+            // Sharing carries no sound a client can take ([`crate::airplay`]). The
+            // last is checked with the `[airplay]` table above.
             //
             // A generic VNC target is *asked* rather than assumed: the extension is
             // discovered on the connection, and a server that never announces it —
@@ -1643,7 +1709,7 @@ impl ConfigFile {
             //
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about the
-            // *engine* and the *build* and not about any of them.
+            // *engine* and not about any of them.
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // generic VNC target, asked for the way its audio extension is: a
             // server that never announces it leaves the camera unplugged. Apple's
@@ -1666,27 +1732,6 @@ impl ConfigFile {
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
             );
-            if target.audio && target.protocol == Protocol::Vnc {
-                anyhow::ensure!(
-                    target.subtype != Some(Subtype::Ard),
-                    "target {:?} sets audio on a {} target, and Apple's standard Screen Sharing \
-                     carries none: its system audio exists in High Performance mode alone, and \
-                     wlshare's audio extension a generic vnc target is asked for is not something \
-                     a Mac speaks. Remove the key to start the session without sound.",
-                    target.name,
-                    Subtype::Ard.name()
-                );
-                anyhow::ensure!(
-                    target.subtype != Some(Subtype::ArdHighPerformance)
-                        || cfg!(feature = "apple-hp-audio"),
-                    "target {:?} sets audio on an ard-high-performance target, and this gateway \
-                     was built without the apple-hp-audio feature: the Mac's system audio is \
-                     AAC-ELD, which needs a decoder that is not in the default build or in any \
-                     release binary. Build it yourself with `cargo build --release --features \
-                     apple-hp-audio`, or remove the key to start the session without sound.",
-                    target.name
-                );
-            }
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
             // is a forgotten `audio = true` rather than a deliberate choice.
@@ -2029,13 +2074,15 @@ impl ConfigFile {
         socket_path: PathBuf,
         state_dir: &Path,
     ) -> anyhow::Result<AppConfig> {
+        let branding = Self::resolve_branding(self.branding.as_ref())?;
         Ok(AppConfig {
             // Only the native control plane reaches this listener. It owns the TCP
             // origin a browser addresses and proxies both HTTP and WebSockets here.
             listen: ListenAddr::Unix(socket_path),
             targets: self.targets,
             auth: GatewayAuth::Token(token),
-            branding: Self::resolve_branding(self.branding.as_ref())?,
+            airplay: Self::resolve_airplay(self.airplay, &branding)?,
+            branding,
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
         })
@@ -2049,6 +2096,30 @@ impl ConfigFile {
             database: state_dir.join(section.database.as_deref().unwrap_or(Path::new(METER_DATABASE))),
             max_records: section.max_records,
         })
+    }
+
+    /// The `[airplay]` table resolved: the speaker is named after the gateway, so a
+    /// Mac's Sound menu says which gateway it plays to, and marked as remotex's, so
+    /// it says what the speaker is. Checked by [`Self::parse_with`].
+    ///
+    /// The mDNS instance is `<12 hex digits>@<name>`, one DNS label of at most 63
+    /// bytes, and a longer one is registered and then never sent: a branding that
+    /// long is refused rather than a speaker no Mac finds.
+    fn resolve_airplay(section: Option<AirPlaySection>, branding: &Branding) -> anyhow::Result<Option<AirPlayConfig>> {
+        const MAX_NAME_BYTES: usize = 63 - "000000000000@".len();
+        section
+            .map(|section| {
+                let name = format!("{} - remotex", branding.text);
+                anyhow::ensure!(
+                    name.len() <= MAX_NAME_BYTES,
+                    "[airplay] names the speaker {name:?}, {} bytes, and mDNS takes at most \
+                     {MAX_NAME_BYTES}. Shorten [branding].text to {} bytes",
+                    name.len(),
+                    MAX_NAME_BYTES - " - remotex".len()
+                );
+                Ok(AirPlayConfig { name, password: section.password })
+            })
+            .transpose()
     }
 
     /// The `[branding]` table resolved: the display name (or
@@ -2112,12 +2183,14 @@ impl ConfigFile {
             )?;
         let site_passwd =
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
+        let branding = Self::resolve_branding(self.branding.as_ref())?;
         Ok(AppConfig {
             listen,
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
-            branding: Self::resolve_branding(self.branding.as_ref())?,
+            airplay: Self::resolve_airplay(self.airplay, &branding)?,
+            branding,
             dev_hostname: server
                 .dev_subdomain
                 .as_deref()
@@ -4805,76 +4878,114 @@ mod tests {
         assert!(rendered.contains("egfx = false"), "{rendered}");
     }
 
-    /// Standard mode has no audio to offer — Apple's media stream is High
-    /// Performance's — so `ard` is refused the same way plain `vnc` is, and the
-    /// error names the subtype that does carry it.
+    /// A Mac's sound arrives over AirPlay on either subtype, so the gateway-wide
+    /// `[airplay]` table, not the target, is what decides it: every Mac carries
+    /// audio exactly when the table is set, and the resolved config carries the
+    /// speaker under the gateway's name.
+    #[cfg(feature = "airplay")]
     #[test]
-    fn audio_is_refused_on_standard_ard_by_subtype_name() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
+    fn a_macs_audio_follows_the_airplay_table() {
+        for subtype in ["ard", "ard-high-performance"] {
+            let target = format!(
+                "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\n\
+                 host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n"
+            );
+            let silent = ConfigFile::parse(&format!("[server]\n{}\n{target}", site_passwd_line()))
+                .unwrap()
+                .resolve()
+                .unwrap();
+            assert!(!silent.targets[0].audio, "no [airplay], no sound");
+            assert_eq!(silent.airplay, None);
 
-            [[targets]]
-            name = "mac"
-            protocol = "vnc"
-            subtype = "ard"
-            host = "10.0.0.5"
-            username = "andrew"
-            password = "h"
-            audio = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("on a ard target"), "{rendered}");
-        assert!(rendered.contains("High Performance"), "{rendered}");
-        assert!(
-            rendered.contains("wlshare's audio extension"),
-            "the other path a vnc target can have is named too: {rendered}"
-        );
-    }
+            let config = ConfigFile::parse(&format!(
+                "[server]\n{}\n[branding]\ntext = \"Studio\"\n[airplay]\npassword = \"sesame\"\n{target}",
+                site_passwd_line()
+            ))
+            .unwrap()
+            .resolve()
+            .unwrap();
+            assert!(config.targets[0].audio, "[airplay] carries every Mac's sound");
+            assert_eq!(
+                config.airplay,
+                Some(AirPlayConfig { name: "Studio - remotex".into(), password: "sesame".into() })
+            );
+            assert_eq!(config.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
 
-    /// High Performance audio is a build decision before it is a config one: the
-    /// key is accepted exactly when the gateway has the AAC-ELD decoder compiled
-    /// in, and otherwise refused by an error that says how to build one. Both
-    /// halves are asserted from the same test, under the same `cfg`, so a build
-    /// with either answer runs the check that applies to it.
-    #[test]
-    fn audio_on_high_performance_follows_the_build() {
-        let parsed = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
+            for key in ["audio = true", "audio = false"] {
+                let err = ConfigFile::parse(&format!(
+                    "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{target}{key}\n",
+                    site_passwd_line()
+                ))
+                .unwrap_err();
+                let rendered = format!("{err:#}");
+                assert!(rendered.contains(&format!("sets audio on an {subtype} target")), "{rendered}");
+                assert!(rendered.contains("Remove the key"), "{rendered}");
+            }
 
-            [[targets]]
-            name = "mac"
-            protocol = "vnc"
-            subtype = "ard-high-performance"
-            host = "10.0.0.5"
-            username = "andrew"
-            password = "h"
-            audio = true
-            audio_codec = "pcm"
-            "#,
-            site_passwd_line()
-        ));
-        if cfg!(feature = "apple-hp-audio") {
-            let config = parsed.unwrap().resolve().unwrap();
-            let target = &config.targets[0];
-            assert!(target.audio);
-            assert_eq!(target.audio_codec, Some(AudioCodec::Pcm));
-            assert_eq!(target.audio_source_format(), crate::vnc_apple_audio::SOURCE_FORMAT);
-        } else {
-            let rendered = format!("{:#}", parsed.unwrap_err());
-            assert!(rendered.contains("apple-hp-audio"), "{rendered}");
-            assert!(rendered.contains("--features"), "the fix is spelled out: {rendered}");
+            let empty = ConfigFile::parse(&format!(
+                "[server]\n{}\n[airplay]\npassword = \" \"\n{target}",
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            assert!(format!("{empty:#}").contains("[airplay].password is empty"), "{empty:#}");
         }
     }
 
+    /// A speaker no Mac could play through is refused rather than started.
+    #[cfg(feature = "airplay")]
+    #[test]
+    fn airplay_without_a_mac_is_refused() {
+        let vnc = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nhost = \"h\"\naudio = true\n";
+        let err = ConfigFile::parse(&format!(
+            "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{vnc}",
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("nothing would play through the speaker"), "{err:#}");
+    }
+
+    /// The speaker's name is one DNS label with the address in front of it, so a
+    /// branding that would overflow it is refused rather than never announced.
+    #[cfg(feature = "airplay")]
+    #[test]
+    fn an_airplay_name_past_a_dns_label_is_refused() {
+        let config = |text: &str| {
+            ConfigFile::parse(&format!(
+                "[server]\n{}\n[branding]\ntext = \"{text}\"\n[airplay]\npassword = \"sesame\"\n\
+                 [[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
+                 username = \"u\"\npassword = \"p\"\n",
+                site_passwd_line()
+            ))
+            .unwrap()
+            .resolve()
+        };
+        assert_eq!(config(&"a".repeat(40)).unwrap().airplay.unwrap().name.len(), 50);
+        let err = config(&"a".repeat(41)).unwrap_err();
+        assert!(format!("{err:#}").contains("Shorten [branding].text to 40 bytes"), "{err:#}");
+    }
+
+    /// A build without the speaker says so when asked for one, and its Macs
+    /// carry no sound.
+    #[cfg(not(feature = "airplay"))]
+    #[test]
+    fn a_build_without_airplay_refuses_the_table() {
+        let mac = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
+                   username = \"u\"\npassword = \"p\"\n";
+        let err = ConfigFile::parse(&format!(
+            "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{mac}",
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("without the airplay feature"), "{err:#}");
+        let config = ConfigFile::parse(&format!("[server]\n{}\n{mac}", site_passwd_line()))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(!config.targets[0].audio);
+    }
+
     /// The pre-negotiation format follows the engine: CD quality is what RDP is
-    /// asked for, 48 kHz stereo is what the Mac's AAC-ELD decodes to.
+    /// asked for, 48 kHz stereo is what a generic server is asked for.
     #[test]
     fn the_audio_source_format_is_the_engines() {
         // Without the key, which RDP is refused until its client carries sound —
@@ -4887,8 +4998,6 @@ mod tests {
         .resolve()
         .unwrap();
         assert_eq!(rdp.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
-        assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.sample_rate, 48_000);
-        assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.channels, 2);
 
         // A generic vnc target's is the format this client asks the extension
         // for, which is the same 48 kHz stereo and needs no resampling either.

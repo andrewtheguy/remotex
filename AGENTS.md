@@ -103,9 +103,13 @@ documentation.
   take raw PCM from the RFB connection, add a second codec to it, or add a
   configuration key naming the server. See
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
-- Apple High Performance system audio remains behind the non-default
-  `apple-hp-audio` feature and absent from release artifacts. Do not add a second
-  decoder beside the feature-gated AAC-ELD path.
+- A Mac's audio, on either Apple subtype, is the gateway's AirPlay 1 speaker
+  (`src/airplay/`), not Screen Sharing: one gateway-wide receiver, advertised over
+  mDNS, that requires the `[airplay]` password and feeds the running Apple
+  session's bridge. The table is the switch for every Mac's audio. It is
+  experimental. Do not add AirPlay 2 pairing, a second decoder beside ALAC, a
+  per-target speaker, or a per-target audio key. See
+  [A Mac's sound over AirPlay](docs/airplay-audio.md).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and
@@ -132,7 +136,8 @@ documentation.
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the Unix-only `remotex tui` control
   plane and its hidden `serve-embedded` workers. Containers must be built through
-  `packaging/build-container-binary.sh`, with default features disabled, and must
+  `packaging/build-container-binary.sh`, with default features disabled except
+  `airplay`, and must
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
 - Windows ships only `serve`, `check-config`, and `gen-passwd` in the MSI. Build
   it with `packaging/build-windows-msi.ps1` on `windows-ci-build` through

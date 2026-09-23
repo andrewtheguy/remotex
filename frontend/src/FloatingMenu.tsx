@@ -11,6 +11,7 @@ import {
 import { AppVersion } from "./AppVersion.tsx";
 import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
+import { airplayLabel } from "./connectionLabel.ts";
 import DisplayPanel from "./DisplayPanel.tsx";
 import { desktopViewportSize, sizeWindowToDesktop } from "./desktopWindow.ts";
 import {
@@ -559,6 +560,7 @@ function ScreenHelp({
   size,
   hostScale,
   connection,
+  airplay,
   renderPlan,
   audio,
   videoStreams,
@@ -566,11 +568,13 @@ function ScreenHelp({
   size: RemoteSize | null;
   hostScale: number;
   connection: string;
+  airplay: boolean | null;
   renderPlan: string;
   audio: AudioRow;
   videoStreams: readonly string[];
 }) {
   const video = videoLabel(videoStreams);
+  const airplayRow = airplayLabel(airplay);
   return (
     <>
       <h3>This session</h3>
@@ -619,6 +623,15 @@ function ScreenHelp({
               stopped. See mediaLabel.ts. */}
           <dd>{audioLabel(audio)}</dd>
         </div>
+        {/* A Mac's sound is the gateway's AirPlay speaker's, on for every Mac or
+            for none, so on a Mac with no Audio button this is the row that says
+            why. Absent on every other target. */}
+        {airplayRow && (
+          <div className="help-item">
+            <dt>AirPlay</dt>
+            <dd>{airplayRow}</dd>
+          </div>
+        )}
         {/* Absent for every session with no video in it, which the Render row has
             already said: a "none" here would be repeating it. */}
         {video && (
@@ -640,11 +653,15 @@ function ScreenHelp({
 // playable AudioContext. Targets without audio omit the row.
 function AudioSection({
   available,
+  airplay,
   enabled,
   error,
   onChange,
 }: {
   available: boolean;
+  // A Mac's sound, which arrives through the gateway's AirPlay speaker rather
+  // than the connection, and says so: it is only heard once the Mac plays to it.
+  airplay: boolean;
   enabled: boolean;
   error: string | null;
   onChange: (enabled: boolean) => void;
@@ -662,7 +679,7 @@ function AudioSection({
         aria-pressed={enabled}
         title="Play the remote's sound in this browser"
       >
-        {enabled ? "Disable audio" : "Enable audio"}
+        {`${enabled ? "Disable" : "Enable"} ${airplay ? "AirPlay audio" : "audio"}`}
       </button>
       {/* Quiet remotes have no distinct client-visible state. */}
       {error && <p className="audio-note">{error}</p>}
@@ -905,6 +922,7 @@ export default function FloatingMenu({
   size,
   hostScale,
   connection,
+  airplay,
   renderPlan,
   canAudio,
   audioEnabled,
@@ -970,6 +988,8 @@ export default function FloatingMenu({
   // What this session is speaking, one line, from `connected` — the protocol and
   // the target's subtype where it has one. See connectionLabel.ts.
   connection: string;
+  // On a Mac, whether the gateway's AirPlay speaker is on; null elsewhere.
+  airplay: boolean | null;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
   // Whether this session can carry the remote's sound, which hides the Audio
@@ -1424,6 +1444,7 @@ export default function FloatingMenu({
 
           <AudioSection
             available={canAudio}
+            airplay={airplay === true}
             enabled={audioEnabled}
             error={audioError}
             onChange={onAudioChange}
@@ -1514,6 +1535,7 @@ export default function FloatingMenu({
             size={size}
             hostScale={hostScale}
             connection={connection}
+            airplay={airplay}
             renderPlan={renderPlan}
             audio={{
               available: canAudio,

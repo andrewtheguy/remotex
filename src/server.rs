@@ -209,9 +209,14 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///
 /// `throughput` is where the browser sockets count their bytes and, when `[meter].enabled`
 /// is set, the database [`crate::throughput::start`] records them in and
-/// `/api/throughput` reads.
-pub fn router(config: AppConfig, throughput: Throughput) -> Router {
-    let sessions = Arc::new(SessionManager::new(config.targets.clone()));
+/// `/api/throughput` reads. `airplay` is the speaker a Mac's sound arrives at, started
+/// by the caller from `config.airplay` ([`crate::airplay`]).
+pub fn router(
+    config: AppConfig,
+    throughput: Throughput,
+    airplay: Option<Arc<crate::airplay::AirPlay>>,
+) -> Router {
+    let sessions = Arc::new(SessionManager::new(config.targets.clone(), airplay));
     router_with_sessions(config, sessions, throughput)
 }
 
@@ -626,6 +631,9 @@ struct TargetInfo {
     subtype: Option<&'static str>,
     host: String,
     port: u16,
+    /// On a Mac, whether the gateway's AirPlay speaker is on, which is whether
+    /// the Mac's sound can reach the browser at all; `null` on every other target.
+    airplay: Option<bool>,
 }
 
 /// The list of target profiles the browser may pick from the post-login picker.
@@ -641,6 +649,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
             subtype: t.subtype.map(crate::config::Subtype::name),
             host: t.host.clone(),
             port: t.port,
+            airplay: t.receives_airplay().then_some(t.audio),
         })
         .collect();
     Json(targets)
@@ -939,7 +948,7 @@ mod tests {
             source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
         });
 
-        let response = router(config, Throughput::default())
+        let response = router(config, Throughput::default(), None)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/logo")
@@ -961,7 +970,7 @@ mod tests {
     /// assertion below is about the redirect, and a request that is *not*
     /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        router(router_config(dev_hostname), Throughput::default())
+        router(router_config(dev_hostname), Throughput::default(), None)
     }
 
     /// The config both test routers are built from, so the only thing that ever
@@ -985,6 +994,7 @@ mod tests {
                 resize: false,
                 egfx: None,
                 clipboard: false,
+                audio_key: None,
                 audio: false,
                 audio_codec: None,
                 camera: false,
@@ -1016,6 +1026,7 @@ mod tests {
             },
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
+            airplay: None,
         }
     }
 
@@ -1255,6 +1266,7 @@ mod tests {
             resize: false,
             egfx: None,
             clipboard: false,
+            audio_key: None,
             audio: true,
             audio_codec: tone_codec,
             camera: false,
@@ -1355,6 +1367,7 @@ mod tests {
             },
             dev_hostname: None,
             meter: None,
+            airplay: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1400,11 +1413,12 @@ mod tests {
             subtype: Some("ard-high-performance"),
             host: "192.0.2.10".to_owned(),
             port: 5900,
+            airplay: Some(true),
         })
         .unwrap();
         assert_eq!(
             mac,
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard-high-performance","host":"192.0.2.10","port":5900}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard-high-performance","host":"192.0.2.10","port":5900,"airplay":true}"#
         );
 
         let win = serde_json::to_string(&TargetInfo {
@@ -1413,9 +1427,11 @@ mod tests {
             subtype: None,
             host: "192.0.2.11".to_owned(),
             port: 3389,
+            airplay: None,
         })
         .unwrap();
         assert!(win.contains(r#""subtype":null"#), "{win}");
+        assert!(win.contains(r#""airplay":null"#), "{win}");
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the
@@ -1426,12 +1442,12 @@ mod tests {
             branding: "remotex".to_owned(),
             logo: false,
             throughput: false,
-            features: &["apple-hp-audio"],
+            features: &["embedded-gateway"],
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"remotex","logo":false,"throughput":false,"features":["apple-hp-audio"]}"#
+            r#"{"branding":"remotex","logo":false,"throughput":false,"features":["embedded-gateway"]}"#
         );
     }
 
@@ -1497,7 +1513,7 @@ mod tests {
         meters.counter(None, throughput::Socket::Session).received(4);
         meters.sample(now - 9);
         meters.counter(None, throughput::Socket::Session).received(2);
-        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) });
+        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) }, None);
 
         let response = app.clone().oneshot(get("/api/throughput", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1567,7 +1583,7 @@ mod tests {
             format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":0,"receivedPerSec":4}}]}}"#, now - 9)
         );
 
-        let app = router(router_config(None), Throughput::default());
+        let app = router(router_config(None), Throughput::default(), None);
         let cookie = log_in(app.clone()).await;
         let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

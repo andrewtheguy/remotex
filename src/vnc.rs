@@ -46,7 +46,6 @@ use crate::protocol::{
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
-use crate::vnc_apple_audio::{self, MediaStream};
 use crate::vnc_audio::{self, FrameDecoder, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
@@ -596,8 +595,8 @@ struct DesktopState {
 
 /// How long a High Performance viewport has to hold still before the Mac is
 /// asked for it. A window drag reports sizes faster than `SetDisplayConfiguration`
-/// can be served, and each one the Mac acts on reconfigures the virtual display
-/// and restarts the media stream: only the size the window came to rest at goes out.
+/// can be served, and each one the Mac acts on reconfigures the virtual display:
+/// only the size the window came to rest at goes out.
 const HP_RESIZE_SETTLE: Duration = Duration::from_secs(1);
 
 /// How long after the Mac's last layout the resize counts as settled and the
@@ -648,15 +647,13 @@ enum HpPhase {
 ///
 /// The Mac cannot serve overlapping `SetDisplayConfiguration`s — it answers some
 /// with its old layout, and a second one arriving mid-change has crashed its
-/// agent — and every one it acts on stops the media stream until it is offered
-/// again. So a reported size waits for [`HP_RESIZE_SETTLE`] of quiet and for any
+/// agent. So a reported size waits for [`HP_RESIZE_SETTLE`] of quiet and for any
 /// request already out to be answered, and goes out at an update boundary with
 /// pixel polling held to [`HP_HOLD_REQUEST`] until the answering layout. From the
 /// first report until [`HP_LAYOUT_QUIET`] after that layout, the browser is told a
 /// resize is in progress ([`ServerMsg::Resizing`]) and covers the desktop, as
-/// Apple's client does; the media stream is offered again only after that. A
-/// session opens covered, and its first offer waits for the resize from the
-/// Mac's opening display to the window's to settle too.
+/// Apple's client does. A session opens covered, through the resize from the
+/// Mac's opening display to the window's.
 ///
 /// Pure state with the clock passed in; [`hp_resize_step`] and the read loop act
 /// on it, and the input loop wakes at [`HpResize::deadline`].
@@ -677,12 +674,6 @@ struct HpResize {
     /// covered ([`Self::opening`]): the display it connects to is the Mac's own,
     /// not the window's, and the virtual display replacing it is still to come.
     awaiting_layout: bool,
-    /// The media-stream offer for the newest layout, held until the resize it
-    /// arrived in has settled — see [`MediaStream::offer`]. The Mac stops its
-    /// audio when a display change begins and starts it again only on an offer;
-    /// one made mid-resize holds the agent's media lock against the next change
-    /// and is torn down by it anyway.
-    offer: Option<Vec<u8>>,
 }
 
 /// What [`HpResize::step`] says to do next.
@@ -693,9 +684,8 @@ enum HpStep {
     /// A size is due: prompt the Mac for an update, at whose end the read loop
     /// sends it.
     Drain,
-    /// Tell the browser the resize has settled, and offer the media stream for
-    /// the layout it settled on.
-    Hide(Option<Vec<u8>>),
+    /// Tell the browser the resize has settled.
+    Hide,
     /// The Mac never answered: re-arm the full `AutoFrameBufferUpdate` region
     /// and ask for a full repaint, which the answering layout would have done.
     GiveUp,
@@ -755,12 +745,6 @@ impl HpResize {
         self.phase != HpPhase::Idle
     }
 
-    /// Whether nothing is pending, out or covered: the media stream may be
-    /// offered again.
-    fn settled(&self) -> bool {
-        !self.shown && self.phase == HpPhase::Idle && self.want.is_none()
-    }
-
     /// The points due to go out, taken at an update boundary; the request is in
     /// flight from here.
     fn take_due(&mut self, now: tokio::time::Instant) -> Option<(u16, u16)> {
@@ -813,7 +797,7 @@ impl HpResize {
         if self.shown && self.quiet_until.is_none_or(|at| now >= at) {
             self.shown = false;
             self.quiet_until = None;
-            return Some(HpStep::Hide(self.offer.take()));
+            return Some(HpStep::Hide);
         }
         None
     }
@@ -865,7 +849,7 @@ enum Density {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Audio {
     /// The target asked for no sound, or this is an Apple dialect, whose audio
-    /// is the media stream in [`crate::vnc_apple_audio`] and never this.
+    /// arrives over AirPlay and never on the RFB connection.
     Off,
     /// Listed in `SetEncodings`, with nothing announced yet.
     Asked,
@@ -1225,23 +1209,13 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
-    /// Whether the media stream has been asked for yet, in a second `SetEncodings`
-    /// once the Mac has reported its displays — see
-    /// [`vnc_apple_audio::encodings_with_media_stream`]. Once, hence the flag: a
-    /// layout arrives at every login and lock.
-    asked_for_media: bool,
-    /// The Mac's system audio, on a High Performance target that asked for it: the
-    /// `0x1c` offer goes out with the first layout's `SetEncodings`, and the Mac's
-    /// encoding-1010 reply starts the receiver. Dropped with the read loop, which
-    /// ends the receiver.
-    media: Option<MediaStream>,
 }
 
 impl Apple {
     /// The read loop's starting state for either Apple subtype. `high_performance`
     /// settles one thing only — whether a virtual display was asked for.
-    fn new(high_performance: bool, media: Option<MediaStream>) -> Self {
-        Self { virtual_display: high_performance, media, ..Self::default() }
+    fn new(high_performance: bool) -> Self {
+        Self { virtual_display: high_performance, ..Self::default() }
     }
 }
 
@@ -1386,21 +1360,14 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        // The two addresses are read before the handshake owns the socket: the
-        // Mac's media stream sends its audio from the peer to the local one.
-        |stream| async {
-            let peer = stream.peer_addr()?;
-            let local = stream.local_addr()?;
-            let connected = connect(&config, display, stream).await?;
-            Ok::<_, anyhow::Error>((connected, peer, local))
-        },
+        |stream| connect(&config, display, stream),
     )
     .await
     else {
         return;
     };
 
-    let (Connected { downlink, uplink, width, height, macos, apple, poll }, peer, local) = connected;
+    let Connected { downlink, uplink, width, height, macos, apple, poll } = connected;
     info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -1418,17 +1385,10 @@ async fn session(
     }
 
     let high_performance = Dialect::of(config.subtype) == Dialect::Apple889;
-    // Sound reaches this engine two ways, and the target decides which: High
-    // Performance negotiates Apple's media stream off the RFB connection
-    // ([`vnc_apple_audio`]), and every other VNC target asks a generic server for
-    // wlshare's audio extension on the connection itself ([`vnc_audio`]).
-    // Standard `ard` has neither, and the config file has already refused `audio`
-    // there. The bridge the session built goes to whichever path this is.
-    let (media, wlshare_audio) = match audio {
-        Some(bridge) if high_performance => (Some(MediaStream::new(bridge, peer, local)), None),
-        Some(bridge) if !apple => (None, Some(bridge)),
-        _ => (None, None),
-    };
+    // A generic server is asked for wlshare's audio extension on the connection
+    // itself ([`vnc_audio`]). A Mac's sound never rides RFB: it arrives at the
+    // gateway's AirPlay speaker, which the session attached this bridge to.
+    let wlshare_audio = audio.filter(|_| !apple);
     if let Err(e) = active_loop(
         downlink,
         uplink,
@@ -1442,7 +1402,6 @@ async fn session(
             video: config.streams_video(),
             apple,
             high_performance,
-            media,
             wlshare_audio,
             camera,
             microphone,
@@ -1506,10 +1465,6 @@ struct Flags {
     /// Whether this is Apple's High Performance mode. It requests a virtual display
     /// during setup; plain `ard` does not.
     high_performance: bool,
-    /// The Mac's system audio, when the target asked for it: the negotiation the
-    /// read loop sends after the first display layout, and the receiver it then
-    /// starts ([`vnc_apple_audio`]). `None` on every other target.
-    media: Option<MediaStream>,
     /// The desktop's sound over wlshare's audio extension, when a generic target
     /// asked for it: the queue the read loop feeds the samples a server that
     /// announces the extension then sends ([`vnc_audio`]). `None` on every
@@ -2100,7 +2055,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         video,
         apple,
         high_performance,
-        media,
         wlshare_audio,
         camera,
         microphone,
@@ -2190,7 +2144,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(|| Apple::new(high_performance, media)),
+        apple.then(|| Apple::new(high_performance)),
         sink.clone(),
     ));
 
@@ -2662,14 +2616,7 @@ async fn hp_resize_step(
         match step {
             None => return Ok(()),
             Some(HpStep::Show) => sink.msg(ServerMsg::Resizing { active: true }).await?,
-            // Sound comes back with the picture: the offer goes from here rather
-            // than the read loop, which can be inside a large update for seconds.
-            Some(HpStep::Hide(offer)) => {
-                if let Some(offer) = offer {
-                    send(uplink, &offer).await?;
-                }
-                sink.msg(ServerMsg::Resizing { active: false }).await?;
-            }
+            Some(HpStep::Hide) => sink.msg(ServerMsg::Resizing { active: false }).await?,
             // A full request answers at once even on a still desktop, so the
             // boundary the read loop waits for comes now rather than at the next
             // change on screen; the one pixel it asks for is in every mode.
@@ -3878,19 +3825,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
             return Ok(RectEffect::NOTHING);
         }
         vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
-            let first = apple.as_ref().is_some_and(|a| !a.asked_for_media);
             let virtual_display = apple.as_ref().is_some_and(|a| a.virtual_display);
-            if let Some(a) = apple.as_mut() {
-                a.asked_for_media = true;
-            }
-            let media = apple.as_mut().and_then(|a| a.media.as_mut());
             read_display_layout(
                 reader,
                 shared,
-                first,
                 virtual_display,
                 clipboard_enabled && virtual_display,
-                media,
                 sink,
             )
             .await?;
@@ -3926,27 +3866,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
             reader.read_exact(&mut head).await?;
             let count = u64::from(u16::from_be_bytes([head[8], head[9]]));
             discard(reader, count * 0x1c).await?;
-            return Ok(RectEffect::NOTHING);
-        }
-        // The Mac's replies to the media-stream offer ([`vnc_apple_audio`]):
-        // message 1 names the UDP port its audio will arrive at, message 2 accepts
-        // the AVConference offer, and message 3 says why it will not. Only
-        // advertised on a target that asked for audio, so a reply on any other
-        // session is stepped over — the body is framed by its own `u16` size either
-        // way, and a failure to *act* on it must not end the desktop: sound is an
-        // extra on the session, not the session.
-        vnc_apple_audio::ENCODING_MEDIA_STREAM if apple.is_some() => {
-            let len = reader.read_u16().await?;
-            let mut body = vec![0u8; usize::from(len)];
-            reader.read_exact(&mut body).await?;
-            match apple.as_mut().and_then(|a| a.media.as_mut()) {
-                Some(media) => {
-                    if let Err(e) = media.on_reply(&body).await {
-                        warn!("vnc: the Mac's audio could not be started: {e:#}");
-                    }
-                }
-                None => debug!("vnc: ignoring a media-stream reply; this session asked for none"),
-            }
             return Ok(RectEffect::NOTHING);
         }
         // wlshare's audio announcement: an empty rectangle of the
@@ -4569,10 +4488,8 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
 async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
-    ask_for_media: bool,
     virtual_display: bool,
     rearm_pasteboard: bool,
-    media: Option<&mut MediaStream>,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, hp_wake, .. } = shared;
@@ -4639,17 +4556,8 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // A layout that answered nothing leaves a High Performance change out, and
     // the region stays narrowed until the one that answers it — see
     // [`HP_HOLD_REQUEST`].
-    let (size, armed) = {
-        let d = desktop.lock().unwrap();
-        (d.size, d.poll_size())
-    };
+    let armed = desktop.lock().unwrap().poll_size();
     let mut uplink = uplink.lock().await;
-    if ask_for_media && media.is_some() {
-        debug!("vnc: display layout received, asking for the media stream");
-        uplink
-            .send(&set_encodings(&vnc_apple_audio::encodings_with_media_stream()))
-            .await?;
-    }
     if rearm_pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
@@ -4658,19 +4566,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         armed.0, armed.1
     );
     uplink.send(&vnc_apple::auto_framebuffer_update(armed)).await?;
-    // A layout mid-resize, the session's opening one included, is offered for
-    // once the resize has settled — see [`HpResize::offer`].
-    let offer = media.and_then(|media| media.offer(&layout, size)).and_then(|offer| {
-        let mut d = desktop.lock().unwrap();
-        if d.hp.settled() {
-            return Some(offer);
-        }
-        d.hp.offer = Some(offer);
-        None
-    });
-    if let Some(offer) = offer {
-        uplink.send(&offer).await?;
-    }
     Ok(resized)
 }
 
@@ -6651,7 +6546,7 @@ mod tests {
     }
 
     /// The pseudo-encoding is asked for only where the target asked for sound,
-    /// and never of a Mac — whose audio is the media stream, not this. QEMU's
+    /// and never of a Mac — whose audio arrives over AirPlay, not this. QEMU's
     /// own, which promises raw samples, is never asked.
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
@@ -7716,7 +7611,7 @@ mod tests {
 
     /// A resizing session opens covered. Nothing is asked of the Mac until its
     /// opening display has arrived, and the cover stays through the resize to
-    /// the window's size, with the media stream offered only once that settles.
+    /// the window's size.
     #[test]
     fn hp_opens_covered_until_the_first_resize_settles() {
         let t0 = tokio::time::Instant::now();
@@ -7735,14 +7630,11 @@ mod tests {
         assert_eq!(hp.take_due(ms(6_100)), Some((1728, 902)));
         hp.layout(false, ms(6_200));
         assert!(hp.holds_pixels(), "a repeated layout is not the answer");
-        hp.offer = Some(vec![0x1c]);
-        assert!(!hp.settled());
 
         hp.layout(true, ms(8_000));
         assert_eq!(hp.step(ms(8_000)), None, "the cover waits out the quiet");
-        assert_eq!(hp.step(ms(8_000) + HP_LAYOUT_QUIET), Some(HpStep::Hide(Some(vec![0x1c]))));
-        assert!(hp.settled());
-        assert_eq!(hp.offer, None, "offered once");
+        assert_eq!(hp.step(ms(8_000) + HP_LAYOUT_QUIET), Some(HpStep::Hide));
+        assert!(!hp.shown);
     }
 
     /// A window already the size of the opening display asks for nothing; the
@@ -7754,7 +7646,7 @@ mod tests {
         hp.report((1728, 1080), false, t0);
         hp.report((1728, 1080), true, t0);
         hp.layout(true, t0);
-        assert_eq!(hp.step(t0 + HP_LAYOUT_QUIET), Some(HpStep::Hide(None)));
+        assert_eq!(hp.step(t0 + HP_LAYOUT_QUIET), Some(HpStep::Hide));
         assert!(!hp.holds_pixels());
     }
 
@@ -7784,7 +7676,6 @@ mod tests {
         // the Mac takes.
         hp.report((1300, 700), false, ms(1900));
         assert_eq!(hp.step(ms(20_000)), None, "one request in flight at a time");
-        assert!(!hp.settled());
         hp.layout(false, ms(10_000));
         assert!(hp.holds_pixels(), "a layout that changes nothing answers nothing");
         hp.layout(true, ms(20_100));
@@ -7797,9 +7688,8 @@ mod tests {
         hp.layout(false, ms(20_500));
         assert_eq!(hp.step(ms(20_900)), None);
         assert_eq!(hp.deadline(ms(20_900)), Some(ms(20_500) + HP_LAYOUT_QUIET));
-        assert!(!hp.settled(), "the media stream waits for the cover");
-        assert_eq!(hp.step(ms(21_000)), Some(HpStep::Hide(None)));
-        assert!(hp.settled());
+        assert_eq!(hp.step(ms(21_000)), Some(HpStep::Hide));
+        assert!(!hp.shown);
         assert_eq!(hp.deadline(ms(21_000)), None, "nothing more is due");
     }
 
@@ -7837,7 +7727,7 @@ mod tests {
         assert_eq!(hp.deadline(expiry), Some(expiry));
         assert_eq!(hp.step(expiry), Some(HpStep::GiveUp));
         assert!(!hp.holds_pixels());
-        assert_eq!(hp.step(expiry), Some(HpStep::Hide(None)));
+        assert_eq!(hp.step(expiry), Some(HpStep::Hide));
     }
 
     /// The body of an OutputScale report for `size` at `scale`.
@@ -9846,7 +9736,7 @@ mod tests {
             Some(11),
             &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
         );
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, false, false, None, &sink)
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink)
             .await
             .unwrap();
         assert!(resized);
@@ -9876,8 +9766,7 @@ mod tests {
             other => panic!("expected a display list, got {other:?}"),
         }
 
-        // What went back: the re-arm for the display the Mac confirmed, and no
-        // second `SetEncodings` without a media stream to ask for. The enclosing
+        // What went back: the re-arm for the display the Mac confirmed. The enclosing
         // update loop sends the paired full request after it has consumed every
         // rectangle in this FramebufferUpdate.
         assert_eq!(written(&sent), vnc_apple::auto_framebuffer_update((3840, 2160)));
@@ -9903,20 +9792,20 @@ mod tests {
 
         // A session opens on the combined view, which is what the Mac sends when
         // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, None, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         // Then a screen, then back again. Each move is a layout, never a request.
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, None, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, None, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
             .await
             .unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, None, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);

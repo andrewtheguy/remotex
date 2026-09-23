@@ -910,9 +910,10 @@ does not reset the table.
 
 ### Audio frames
 
-Remote audio is opt-in per target — `audio = true` on a plain
-`vnc` target, or on an Apple High Performance target in a gateway built with the
-`apple-hp-audio` feature (see the VNC engine below) — and it has a socket of its
+Remote audio is opt-in — `audio = true` on an `rdp` or a plain `vnc` target,
+and the gateway-wide `[airplay]` table for every target of either Apple subtype,
+whose sound arrives at the gateway's AirPlay speaker
+([A Mac's sound over AirPlay](airplay-audio.md)) — and it has a socket of its
 own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.
@@ -945,7 +946,7 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
 | `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP, 48 000 for wlshare and High Performance | 0 (self-describing) | empty |
+| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP and AirPlay, 48 000 for wlshare | 0 (self-describing) | empty |
 
 Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
 the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
@@ -971,7 +972,7 @@ reach no decoder at all — which is a property of the path, not a compatibility
 escape hatch: the client refuses to start without WebCodecs either way.
 
 It also makes it the only option whose `sampleRate` follows the source: 44.1 kHz
-from an RDP host, 48 kHz from wlshare and from High Performance. An
+from an RDP host or a Mac, 48 kHz from wlshare. An
 `AudioBuffer` carries its own rate, so a context built at 48 kHz before the
 format arrived simply resamples on playback, exactly as the OS mixer would for
 any buffer that is not at the device's rate.
@@ -1024,21 +1025,21 @@ not take surfaces as a decoder error naming it rather than as silence. A
 `pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
 `AudioBuffer` and schedules it directly.
 
-An audio-enabled **High Performance** engine has no channel to negotiate; it asks
-the Mac for its system audio over the media stream described under the VNC engine,
-and what reaches the bridge is the AAC-ELD decoder's output — 48 kHz, 16-bit
-stereo PCM, two 10 ms access units per wave buffer. Under `opus` no resampler is
-built for it (48 kHz is already the encoder's rate); under `pcm` the packets are
-48 kHz rather than 44.1, and `audioFormat` says so. The session builds its
-encoder from `TargetConfig::audio_source_format` — the one format each engine's
-wave buffers can be in — when the audio socket opens before the remote's channel
-is up, which is what keeps a 48 kHz stream from being encoded as 44.1.
+An audio-enabled **Apple** engine carries no sound at all: Screen Sharing has
+none a client can take. The session attaches the engine's bridge to the gateway's
+AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1 receiver that
+the Mac picks from its Sound menu once and keeps. What reaches the bridge is the
+Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo in 24 ms wave
+buffers, from whichever Mac is playing to the speaker while that session runs.
+The speaker holds the bridge weakly, so the engine ending is what detaches it. It
+asks every sender for the `[airplay]` password, since it answers the whole LAN.
+See [A Mac's sound over AirPlay](airplay-audio.md).
 
 An audio-enabled **generic VNC** engine has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
 with an empty rectangle, at which point the gateway names the format it wants —
-48 kHz, 16-bit stereo, little-endian, so under `pcm` the packets are 48 kHz as
-High Performance's are — and turns the stream on; the sound then
+48 kHz, 16-bit stereo, little-endian, so under `pcm` the packets are 48 kHz
+rather than 44.1, and `audioFormat` says so — and turns the stream on; the sound then
 arrives as FLAC frames on the RFB connection itself, and each is decoded into
 exactly the samples wlshare captured, in the format the queue takes. A server
 that announces nothing gives a desktop and no sound, which is the whole of the
@@ -1221,21 +1222,18 @@ cannot ask it for a smaller desktop.
 
 High Performance paces what the window asks for. A second
 `SetDisplayConfiguration` overlapping the first, or a region of the old size
-served just after a change shrinks the display, crashes the Mac's agent. Every
-change it acts on also stops the media stream. So a viewport or density report
+served just after a change shrinks the display, crashes the Mac's agent. So a viewport or density report
 waits for a second of quiet, and the newest size is the one that goes. Only one
 change is out at a time, with no timeout short of 30 seconds. It is sent at the
 end of an update, just after the automatic-update region is re-armed to one pixel,
 and pixel polling holds to that pixel until the answering layout. A layout that
 changes nothing, such as the Mac's repeat of its opening one, is not an answer.
-The media stream is offered again only once the resize has settled, and the input
-loop sends that offer as the cover comes down. From the first report until the
+From the first report until the
 answering layout has held still for half a second, the gateway sends `resizing`
 with `active: true`, and the page covers the desktop with a dimmed, blurred
 "Resizing…" as Apple's client does, instead of showing each intermediate mode. A
 session opens covered. The display it connects to is the Mac's own, and the
-virtual display and then the window's size follow; the first media offer waits
-for them too. The cover takes no input and leaves the menu reachable, and a
+virtual display and then the window's size follow. The cover takes no input and leaves the menu reachable, and a
 browser that reattaches mid-resize is told again. No other engine sends
 `resizing`. The measurements are in
 [Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
@@ -1479,52 +1477,13 @@ no layout; and a layout's `u16` length counts the bytes after itself, with a `u1
 display count ahead of the records. The byte layouts and protocol corrections are
 in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
-**High Performance system audio** is the **experimental** part of this path, and
-it is behind the `apple-hp-audio` Cargo feature — off by default,
-in no release artifact or container image, built by hand with
-`cargo build --release --features apple-hp-audio`. The Mac's sound does not ride
-RFB: after the first display layout the client advertises encoding 1010 (`0x3f2`) in
-a second `SetEncodings` and sends message `0x1c`,
-`RFBMediaStreamServerConfiguration`, carrying a session UUID, an SRTP master key per
-direction per stream and an AVConference offer per stream; the Mac answers with a
-rectangle naming a UDP port (or an error) and streams AAC-ELD — 48 kHz stereo, one
-480-sample access unit per RTP packet — over SRTP (AES-256 counter mode, RFC 3711
-derivation, an HMAC-SHA1-80 tag the receiver strips) from its own address to the
-gateway's on that port, expecting RTCP once a second. The Mac re-sends encoding 1010
-after every display layout change (resize, display switch), tearing down its old RTP
-stream and starting a new one on the same port; the receiver must be restarted.
-`src/vnc_apple_audio.rs` is the whole of that wire, always compiled and tested
-against captured bytes: the offers are Apple's own negotiator plists rebuilt field
-by field (a binary plist around a zlib'd protobuf) and checked byte-for-byte against
-what Apple's client produced.
-What the feature gates is `src/aac_eld.rs`, the decoder, and the receiver that
-needs it: AAC-ELD is decodable by no browser's WebCodecs and no native FFmpeg
-decoder, the Mac's transmitter emits it whatever codec the offer agrees (measured:
-an offer with AAC-ELD removed was accepted and streamed AAC-ELD anyway), and the
-decoder is Fraunhofer's own in Rust — the port AOSP ships as `platform/external/aac`,
-`rust/`, mirrored for Cargo — whose licence is not OSI-approved; see
+Deliberately absent: Apple's own still-image codecs and the Adaptive media
+transport (`0x1c`, HEVC video and AAC-ELD audio over SRTP); the zlib rectangles
+are the only picture path, and a Mac's sound arrives over AirPlay instead
+([A Mac's sound over AirPlay](airplay-audio.md)). The
+transport's measurements are in
 [Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio).
-It is single-threaded by construction, so it decodes on a thread of its own and the
-socket task hands it one access unit per message. Two
-consequences are worth knowing before enabling it: the Mac refuses an audio-only
-stream, so a screen-video offer whose HEVC picture is never received rides beside
-every audio offer; and the audio arrives by UDP at the gateway's address on the
-port the Mac names (the VNC port's own number, measured), so a gateway the Mac
-cannot reach by UDP gets no sound and a warning after five seconds. A config
-asking for `audio` on this subtype is refused by any build without the feature,
-naming the build command. Measured end to end on macOS 26.6.2: 1000 packets
-decoded with none concealed, the decoded signal's level constant through a run
-with music playing on the Mac.
-
-Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
-transport's *video* leg. The rule is that a client must not advertise an encoding
-it cannot decode, and the HEVC offer is the one intentional exception to it: with
-audio enabled the gateway *sends* a screen-video offer inside the `0x1c` message,
-because the Mac refuses an audio-only media stream, yet it never opens the video
-port, never receives the HEVC payload and has no decoder for it. The offer is a
-negotiation input the audio cannot do without, not a promise to render, and the
-zlib rectangles remain the only picture path. Without the `apple-hp-audio`
-feature no such offer is sent at all. The native Apple pasteboard works on both
+The native Apple pasteboard works on both
 subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
 data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 
@@ -1705,7 +1664,7 @@ The entire substrate is behind the default `embedded-gateway` Cargo feature:
 the module, token authentication, config audience, CLI commands, and their
 `check-config --embedded` validation mode compile out together. Native packages
 retain it. Container artifacts are built separately with
-`--no-default-features`; the build script and Dockerfile reject a
+`--no-default-features --features airplay`; the build script and Dockerfile reject a
 binary that exposes any embedded CLI surface.
 
 There is still no separate native client: every instance is the same SPA loaded
