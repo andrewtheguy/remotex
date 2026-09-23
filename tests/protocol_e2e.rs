@@ -356,7 +356,7 @@ async fn serve_scrolling_vnc(
 // ── Apple Screen Sharing (RFB 003.889), scripted ────────────────────────────
 //
 // The `ard-high-performance` subtype's whole wire, played from the server side:
-// Apple's version banner, its DH authentication, the `0xC1` ClientInit, the
+// Apple's version banner, its DH authentication, the `0x81` ClientInit, the
 // cleartext prelude, the rekey that switches on the record layer, and then a
 // display layout and a framebuffer update *inside* that record layer.
 //

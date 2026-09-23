@@ -370,8 +370,7 @@ password = "change-me"
 #
 # `subtype = "ard"` is standard screen sharing on the ordinary RFB wire: the Mac's
 # physical display list and native pasteboard, with one framebuffer holding every
-# attached display at once. The first encoding list must remain zlib-free so the
-# display layout arrives; a second list then switches the pixels from raw to zlib.
+# attached display at once, sent as zlib rectangles.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"

@@ -1439,17 +1439,18 @@ target, so a server can always say its size changed; `resize = true` decides onl
 whether the window asks it to change, with `SetDesktopSize`. Generic VNC clipboard support uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple subtype
 also negotiates Apple's display metadata, display picker and native pasteboard on
-the ordinary byte stream, and asks for zlib in the second `SetEncodings` exactly as
-High Performance does — the upgrade waits on a display layout, not on a dialect.
+the ordinary byte stream, and asks for zlib in its first `SetEncodings` exactly as
+High Performance does.
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every
-claim in this section is measurement rather than specification, holding for the
-Macs in [apple-vnc-889.md](apple-vnc-889.md) rather than for the protocol. The
+claim in this section is measurement or a reading of Apple's binaries rather than
+specification, holding for the Macs in [apple-vnc-889.md](apple-vnc-889.md) rather
+than for the protocol. The
 dynamic-resolution path behind `resize = true` remains reverse engineered. It
 authenticates identically — the same security type 30 — and then
-differs in three places and nowhere else: the version banner, the `0xC1` ClientInit
-byte, and a cleartext `SetEncryption` prelude after which every byte in both
+differs in three places and nowhere else: the version banner, the `0x81` ClientInit
+byte (the enhanced ServerInit, without the session-select exchange `0x40` asks for), and a cleartext `SetEncryption` prelude after which every byte in both
 directions rides inside an AES-128-CBC record layer keyed by a rekey message the
 server delivers, of all places, inside a framebuffer rectangle. `src/vnc_record.rs`
 is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` and
@@ -1472,19 +1473,18 @@ resize mode or one-shot button. The Mac supplies that virtual display over the
 003.889 record transport, with zlib rectangles instead of raw pixels. Apple's
 virtual-display-count and resolution-preset controls remain unimplemented.
 
-The wire constraints remain load-bearing: the *first* `SetEncodings` must be the
-measured exact list, so zlib is requested in a second one after a layout has arrived
-— for both Apple subtypes;
-and a layout payload is two bytes shorter than its own length prefix claims. The
-byte layouts and measured protocol corrections are in
-[`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
+The wire constraints remain load-bearing: `SetEncodings` must list both
+`DisplayInfo` (`0x44d`) and the layout (`0x451`), in any order, or the Mac reports
+no layout; and a layout's `u16` length counts the bytes after itself, with a `u16`
+display count ahead of the records. The byte layouts and protocol corrections are
+in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
 **High Performance system audio** is the **experimental** part of this path, and
 it is behind the `apple-hp-audio` Cargo feature — off by default,
 in no release artifact or container image, built by hand with
 `cargo build --release --features apple-hp-audio`. The Mac's sound does not ride
 RFB: after the first display layout the client advertises encoding 1010 (`0x3f2`) in
-the second `SetEncodings` and sends message `0x1c`,
+a second `SetEncodings` and sends message `0x1c`,
 `RFBMediaStreamServerConfiguration`, carrying a session UUID, an SRTP master key per
 direction per stream and an AVConference offer per stream; the Mac answers with a
 rectangle naming a UDP port (or an error) and streams AAC-ELD — 48 kHz stereo, one

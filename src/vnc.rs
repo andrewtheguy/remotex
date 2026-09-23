@@ -1500,8 +1500,7 @@ struct Flags {
     /// subtypes negotiate them; only one uses the 003.889 record transport.
     apple: bool,
     /// Whether this is Apple's High Performance mode. It requests a virtual display
-    /// during setup and asks for zlib after the first layout; plain `ard` does
-    /// neither.
+    /// during setup; plain `ard` does not.
     high_performance: bool,
     /// The Mac's system audio, when the target asked for it: the negotiation the
     /// read loop sends after the first display layout, and the receiver it then
@@ -3891,8 +3890,8 @@ async fn read_rect<R: AsyncRead + Unpin>(
             return Ok(RectEffect::FULL_REPAINT);
         }
         // Where the pointer is, which the rect header carries and nothing else does.
-        // Advertised because the layout depends on the exact list, and ignored
-        // because a client draws the pointer where it last put it.
+        // Advertised, and ignored because a client draws the pointer where it last
+        // put it.
         vnc_apple::ENCODING_CURSOR_POS if apple.is_some() => return Ok(RectEffect::NOTHING),
         // The Mac's keyboard, which this gateway does not act on. Both frame
         // themselves the same way — a `u16` saying how much follows — and reading

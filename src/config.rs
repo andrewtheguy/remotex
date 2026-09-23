@@ -50,9 +50,7 @@ pub enum Subtype {
     ///
     /// The Mac's metadata extension lists every attached display, permits selecting
     /// one or their combined desktop, and supplies each display's pixel density.
-    /// Apple's native pasteboard is available. Once the first layout arrives, a
-    /// second `SetEncodings` switches the rectangles from raw to zlib without losing
-    /// that display metadata.
+    /// Apple's native pasteboard is available, and the rectangles are zlib.
     Ard,
     /// The same Mac over Apple's own protocol revision, RFB 003.889: an
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's

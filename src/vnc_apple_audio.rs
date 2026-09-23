@@ -21,9 +21,9 @@
 //! ## The negotiation
 //!
 //! After the first display layout the client advertises encoding **1010**
-//! ([`ENCODING_MEDIA_STREAM`]) in the second `SetEncodings` — the one that also asks
-//! for zlib — and sends message **`0x1c`** (`RFBMediaStreamServerConfiguration`,
-//! [`media_stream_configuration`]): a session UUID, an SRTP master key per direction
+//! ([`ENCODING_MEDIA_STREAM`]) in a second `SetEncodings` and sends message
+//! **`0x1c`** (`RFBMediaStreamServerConfiguration`, [`media_stream_configuration`]):
+//! a session UUID, an SRTP master key per direction
 //! per stream, and an AVConference *offer* per stream. The Mac answers through
 //! encoding 1010: message 1 names the UDP ports, message 2 is the AVConference
 //! answer, and message 3 is an error ([`MediaReply`]). Audio arrives at the named
