@@ -163,7 +163,15 @@ impl Conn {
                 let transport = request.header("Transport").unwrap_or_default();
                 let timing_port = transport_port(transport, "timing_port");
                 self.stream = None;
-                let stream = Stream::start(local, peer, timing_port, params, Arc::clone(&self.shared)).await?;
+                let stream = match Stream::start(local, peer, timing_port, params, Arc::clone(&self.shared)).await {
+                    Ok(stream) => stream,
+                    // The claim goes with it, or the connection would hold the one
+                    // stream with nothing playing it.
+                    Err(e) => {
+                        self.stop();
+                        return Err(e);
+                    }
+                };
                 let reply = format!(
                     "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port={};timing_port={};server_port={}",
                     stream.control_port, stream.timing_port, stream.audio_port

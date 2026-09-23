@@ -132,7 +132,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     assert_eq!(code, 401);
     let mut signed = challenge.to_vec();
     signed.extend_from_slice(&[127, 0, 0, 1]);
-    signed.extend_from_slice(&hw_addr("remotex test"));
+    signed.extend_from_slice(&hw_addr("remotex test", Path::new("remotex.toml")));
     signed.resize(32, 0);
     public_key()
         .verify(Pkcs1v15Sign::new_unprefixed(), &signed, &B64.decode(header(&headers, "Apple-Response")).unwrap())

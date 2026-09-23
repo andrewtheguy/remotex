@@ -1426,7 +1426,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub meter: Option<MeterSection>,
     /// The `[airplay]` table: the password of the AirPlay speaker a Mac sends its
-    /// sound to. Required when an Apple target sets `audio`, refused otherwise.
+    /// sound to. Its presence turns audio on for every Apple target, and it is
+    /// refused when no target has an Apple subtype.
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub airplay: Option<AirPlaySection>,

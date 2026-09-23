@@ -910,9 +910,10 @@ does not reset the table.
 
 ### Audio frames
 
-Remote audio is opt-in per target — `audio = true` on an `rdp`, a plain `vnc`,
-or either Apple target, whose sound arrives at the gateway's AirPlay speaker —
-and it has a socket of its
+Remote audio is opt-in — `audio = true` on an `rdp` or a plain `vnc` target,
+and the gateway-wide `[airplay]` table for every target of either Apple subtype,
+whose sound arrives at the gateway's AirPlay speaker
+([A Mac's sound over AirPlay](airplay-audio.md)) — and it has a socket of its
 own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.

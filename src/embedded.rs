@@ -146,7 +146,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         .context("cannot record websocket throughput ([meter].database)")?;
     // And the AirPlay speaker, for the same reason: a port or mDNS responder that
     // cannot be had is a refused start, not a Mac that finds no speaker.
-    let airplay = config.airplay.as_ref().map(crate::airplay::AirPlay::start).transpose()?;
+    let airplay = config.airplay.as_ref().map(|airplay| crate::airplay::AirPlay::start(airplay, &instance.config_path())).transpose()?;
 
     let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {
         anyhow::bail!("the embedded gateway must listen on its private Unix socket");

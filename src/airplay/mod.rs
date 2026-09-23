@@ -21,6 +21,7 @@ mod rtp;
 mod rtsp;
 
 use std::net::{Ipv6Addr, SocketAddr};
+use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -40,6 +41,9 @@ const SERVICE_TYPE: &str = "_raop._tcp.local.";
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
+
+/// How long the listener waits after a failed accept before the next.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 /// The gateway's AirPlay speaker, running from [`AirPlay::start`] until it is dropped.
 pub struct AirPlay {
@@ -74,8 +78,10 @@ impl Route {
 
 impl AirPlay {
     /// Listen, and advertise the speaker on every interface the host has.
-    pub fn start(config: &AirPlayConfig) -> anyhow::Result<Arc<Self>> {
-        let airplay = Self::listen(config)?;
+    /// `config_path` is the gateway's config file, which tells this gateway's
+    /// speaker from another's on the same host; see [`hw_addr`].
+    pub fn start(config: &AirPlayConfig, config_path: &Path) -> anyhow::Result<Arc<Self>> {
+        let airplay = Self::listen(config, config_path)?;
         let mdns = advertise(config, airplay.port, airplay.shared.hw_addr)?;
         Ok(Arc::new(Self { _mdns: Some(mdns), ..airplay }))
     }
@@ -83,10 +89,10 @@ impl AirPlay {
     /// Listen without advertising: the tests' receiver, reached by its port.
     #[cfg(test)]
     pub(crate) fn start_unadvertised(config: &AirPlayConfig) -> anyhow::Result<Arc<Self>> {
-        Ok(Arc::new(Self::listen(config)?))
+        Ok(Arc::new(Self::listen(config, Path::new("remotex.toml"))?))
     }
 
-    fn listen(config: &AirPlayConfig) -> anyhow::Result<Self> {
+    fn listen(config: &AirPlayConfig, config_path: &Path) -> anyhow::Result<Self> {
         // One dual-stack socket rather than two: a Mac reaches the speaker on
         // whichever address mDNS gave it, and the port is whatever the OS picks,
         // since the advertisement is what carries it. Dual-stack explicitly, since
@@ -105,7 +111,7 @@ impl AirPlay {
 
         let shared = Arc::new(Shared {
             password: config.password.clone(),
-            hw_addr: hw_addr(&config.name),
+            hw_addr: hw_addr(&config.name, config_path),
             route: Route::default(),
             streaming: Mutex::new(None),
         });
@@ -128,7 +134,12 @@ impl AirPlay {
                         next_id += 1;
                         tokio::spawn(rtsp::serve(tcp, next_id, Arc::clone(&accepting)));
                     }
-                    Err(e) => warn!("airplay: accepting a sender failed: {e}"),
+                    // Paced, so that one that keeps failing — out of file
+                    // descriptors — does not spin.
+                    Err(e) => {
+                        warn!("airplay: accepting a sender failed: {e}");
+                        tokio::time::sleep(ACCEPT_RETRY).await;
+                    }
                 }
             }
         });
@@ -153,12 +164,17 @@ impl AirPlay {
     }
 }
 
-/// A 48-bit address for the speaker, derived from its name and the host's so that
-/// two gateways advertise different services even when they share a branding, yet
-/// keep theirs across restarts; and locally administered (`0x02` set, `0x01`
-/// clear) so that it can be no NIC's.
-fn hw_addr(name: &str) -> [u8; 6] {
-    let identity = format!("{name}\0{}", gethostname::gethostname().to_string_lossy());
+/// A 48-bit address for the speaker, derived from its name, the host's and the
+/// gateway's config file so that two gateways advertise different services even
+/// when they share a branding or a host, yet keep theirs across restarts; and
+/// locally administered (`0x02` set, `0x01` clear) so that it can be no NIC's.
+fn hw_addr(name: &str, config_path: &Path) -> [u8; 6] {
+    let config_path = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_owned());
+    let identity = format!(
+        "{name}\0{}\0{}",
+        gethostname::gethostname().to_string_lossy(),
+        config_path.to_string_lossy()
+    );
     let hash = xxhash_rust::xxh3::xxh3_64(identity.as_bytes()).to_be_bytes();
     [hash[0] & 0xfe | 0x02, hash[1], hash[2], hash[3], hash[4], hash[5]]
 }
