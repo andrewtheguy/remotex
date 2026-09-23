@@ -313,7 +313,12 @@ effective density 2.
 The gateway forwards those returned pixels unchanged. It reports the selected
 screen's effective density (`native density × viewer scale`), which maps the
 server's pixels to the browser display's device pixels without a separate
-fit-to-window or Apple-only frontend scale. A browser density change and a display
+fit-to-window or Apple-only frontend scale. Pointer events are the
+exception to "unchanged": the Mac still reads them in the unscaled framebuffer's
+pixels, so the gateway divides a browser position by the applied viewer scale.
+Measured on macOS 26.6.2 at factor 0.5, the Retina screen's centre sent in the
+scaled 1440×900 framebuffer's coordinates landed a quarter of the way in; divided,
+it lands on the centre. A browser density change and a display
 selection can send a new `SetServerScaling`; repeated layouts do not repeat an
 already-pending request, and only an answering layout confirms the factor.
 

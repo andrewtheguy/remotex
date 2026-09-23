@@ -1226,6 +1226,23 @@ impl DisplayState {
         Some(want)
     }
 
+    /// A browser pointer position, in the framebuffer it is looking at, as
+    /// Standard Screen Sharing reads it: in the display's native pixels.
+    ///
+    /// `SetServerScaling` shrinks only what the Mac sends. Its pointer events
+    /// still address the unscaled framebuffer — measured on macOS 26 at 0.5, the
+    /// centre of a 1440x900 Retina screen's scaled 1440x900 framebuffer sent as
+    /// is landed a quarter of the way in — so a position divides by the factor
+    /// of the layout the browser was last resized to. High Performance keeps no
+    /// Standard layout and passes through unchanged.
+    fn apple_pointer(&self, x: i32, y: i32) -> (i32, i32) {
+        let Some(scale) = self.apple_layout.as_ref().map(vnc_apple::Layout::viewer_scale) else {
+            return (x, y);
+        };
+        let native = |v: i32| (f64::from(v) / f64::from(scale)).round() as i32;
+        (native(x), native(y))
+    }
+
     /// Record Apple's answer and decide whether its returned scale needs one new
     /// request for the browser display the session is currently on.
     ///
@@ -2305,6 +2322,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     info!("vnc: input channel closed; session shut down");
                     break Ok(());
+                };
+                // Into the Mac's pointer space before anything is held, while
+                // the framebuffer the position was taken on is still the one
+                // the layout names — see [`DisplayState::apple_pointer`].
+                let input = match input {
+                    ClientMsg::MouseMove { x, y } => {
+                        let (x, y) = display.lock().unwrap().apple_pointer(x, y);
+                        ClientMsg::MouseMove { x, y }
+                    }
+                    other => other,
                 };
                 // Motion waits while the uplink is behind — see [`HeldMotion`].
                 // Everything else goes out now, behind whatever was held.
@@ -9920,6 +9947,24 @@ mod tests {
         assert_eq!(state.request_apple_scale(Some(1), 2.0), None);
         assert_eq!(state.request_apple_scale(None, 2.0), None);
         assert_eq!(state.request_apple_scale(None, 1.0), Some(0.5));
+    }
+
+    /// Standard's pointer addresses the unscaled framebuffer, so a position on
+    /// a framebuffer the Mac halved is doubled on the way out, and one on an
+    /// unscaled framebuffer — or with no Standard layout at all — is not.
+    #[test]
+    fn a_standard_pointer_is_sent_in_native_pixels() {
+        use crate::vnc_apple::{parse_layout, test_layout, test_scale_layout};
+        let mut state = DisplayState::default();
+        assert_eq!(state.apple_pointer(720, 450), (720, 450));
+
+        let mut halved = test_layout(Some(7), &[(7, (1440, 900), (1440, 900), 0x00)]);
+        test_scale_layout(&mut halved, 0.5, &[2.0]);
+        state.apple_layout = Some(parse_layout(&halved).unwrap());
+        assert_eq!(state.apple_pointer(720, 450), (1440, 900));
+
+        state.apple_layout = Some(parse_layout(&test_layout(Some(7), &[(7, (1440, 900), (2880, 1800), 0x00)])).unwrap());
+        assert_eq!(state.apple_pointer(1440, 900), (1440, 900));
     }
 
     /// A layout does three things, and the third is the one that is easy to miss:
