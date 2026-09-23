@@ -39,9 +39,10 @@ shows. The name is one mDNS label, so `[branding].text` may be at most
 40 bytes while `[airplay]` is set.
 
 On the Mac, pick that name in Control Center → Sound, or in System Settings →
-Sound → Output, and enter the password when asked. The Mac keeps both the choice
-and the password, so this is done once, not per session. `audio_codec`,
-`audio_bitrate` and the adaptive keys apply as on any other target.
+Sound → Output, and enter the password when asked. The Mac remembers the
+password, so it is asked once. The choice lasts one session: when the session
+ends the speaker hangs up, and the speaker is picked again for the next one.
+`audio_codec`, `audio_bitrate` and the adaptive keys apply as on any other target.
 
 ## What it is
 
@@ -55,11 +56,14 @@ and the password, so this is done once, not per session. `audio_codec`,
   one answers it. A Mac is asked on its first connection and remembers it after.
   It keeps other Macs on the LAN from playing into the session. It encrypts
   nothing that is not already encrypted.
-- **One speaker per gateway, outliving sessions.** The Mac chooses a speaker once
-  and keeps it, so the speaker stays up with the gateway. It feeds the audio bridge
-  of whichever Apple session is running, and each engine's start
-  attaches its own bridge. With no such session, a stream is received and thrown
-  away, and the Mac keeps playing to it.
+- **One speaker per gateway, one stream per session.** The speaker stays up and
+  advertised with the gateway, and feeds the audio bridge of whichever Apple
+  session is running: each engine's start attaches its own bridge. A stream
+  belongs to the session it was set up under. When that session ends, by
+  disconnect, takeover or the engine exiting, though not when a browser briefly
+  detaches, the speaker closes the Mac's connection, and the Mac takes its sound
+  back to its own output. With no session running, a SETUP gets `453`. A
+  new session does not win the Mac back: it has to pick the speaker again.
 - **One sender at a time.** A second Mac's SETUP gets `453` until the first
   leaves.
 - **44.1 kHz 16-bit stereo**, the only format a Mac sends, so `pcm` passthrough

@@ -278,6 +278,10 @@ struct EngineSlot {
     /// Where the mic socket's packets go, for a microphone target, with the camera's
     /// survival rule.
     microphone: Option<Arc<MicBridge>>,
+    /// A Mac's hold on the gateway's AirPlay speaker, for an Apple target with
+    /// audio. Here so that every way an engine ends drops it, which hangs up on
+    /// the Mac streaming into this session.
+    _airplay: Option<crate::airplay::Attached>,
     /// Resolves when this engine has ended: its pump holds the other half and
     /// drops it when the frame channel closes, which is the engine's own exit.
     /// [`State::take_engine`] keeps it as [`State::ending`], so the next engine
@@ -1347,13 +1351,12 @@ impl SessionManager {
         // a socket of its own beyond that.
         let audio = target.audio.then(|| Arc::new(AudioBridge::new()));
         // A Mac's sound comes from the AirPlay speaker, not from the engine, which
-        // leaves the bridge alone. The speaker holds it weakly, so the engine slot
-        // dropping it is what stops the feed.
-        if let (Some(bridge), Some(airplay)) = (&audio, &self.airplay)
-            && target.receives_airplay()
-        {
-            airplay.attach(bridge);
-        }
+        // leaves the bridge alone. The slot holds the attachment, so the engine
+        // ending is what stops the feed and hangs up on the Mac.
+        let airplay = match (&audio, &self.airplay) {
+            (Some(bridge), Some(airplay)) if target.receives_airplay() => Some(airplay.attach(bridge)),
+            _ => None,
+        };
         // The camera bridge is per-engine, like the engine's own audio half — and
         // there is no arm/re-arm machinery beside it: the camera socket that would
         // use it does not exist yet, because every engine end closed the previous
@@ -1370,6 +1373,7 @@ impl SessionManager {
             audio: audio.clone(),
             camera: uplinks.camera.clone(),
             microphone: uplinks.microphone.clone(),
+            _airplay: airplay,
             ended,
             held: HeldInput::default(),
         });
@@ -2763,8 +2767,7 @@ mod tests {
 
     /// A Mac's sound comes from the gateway's AirPlay speaker, so connecting to a
     /// Mac with audio attaches the engine's bridge to it, and the engine ending is
-    /// what detaches it: the speaker holds the bridge weakly, and nothing else is
-    /// left holding it once the slot and the engine have let go.
+    /// what detaches it — at once, while the engine still holds its bridge.
     #[cfg(feature = "airplay")]
     #[tokio::test]
     async fn a_mac_with_audio_is_fed_by_the_airplay_speaker_while_its_engine_runs() {
@@ -2801,11 +2804,12 @@ mod tests {
         // Another target's sound is its own engine's: the speaker is left alone,
         // and once the Mac's engine is gone it has nothing to feed.
         mgr.disconnect(att.id);
+        assert!(airplay.attached().is_none(), "the speaker outlived the Mac's session");
         drop(mac_engine);
         mgr.connect(att.id, "rdp-audio", None).await.unwrap();
         let _rdp_engine = hooks.try_recv().unwrap();
+        assert!(airplay.attached().is_none(), "another target's session attached the speaker");
         drop(bridge);
-        assert!(airplay.attached().is_none(), "the speaker outlived the Mac's session");
     }
 
     /// A connected `rdp-audio` session, with the queue the engine was handed.

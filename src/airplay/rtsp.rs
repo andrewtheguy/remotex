@@ -1,7 +1,8 @@
 //! One sender's RTSP conversation: OPTIONS with its Apple-Challenge, ANNOUNCE
 //! with the codec and the wrapped AES key, SETUP for the UDP ports, RECORD, then
 //! SET_PARAMETER and FLUSH until TEARDOWN — every request after the Digest
-//! challenge the password answers.
+//! challenge the password answers. A stream is set up only while an Apple audio
+//! session is running, and the connection is closed when that session ends.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use log::{debug, info, warn};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::sync::watch;
 
 use super::Shared;
 use super::crypto::{B64, REALM, apple_response, digest_matches, unwrap_aes_key};
@@ -70,6 +72,7 @@ pub(super) async fn serve(tcp: TcpStream, id: u64, shared: Arc<Shared>) {
         authorized: false,
         params: None,
         stream: None,
+        session: None,
     };
     if let Err(e) = conn.run(tcp).await {
         warn!("airplay #{id}: {e:#}");
@@ -87,6 +90,8 @@ struct Conn {
     authorized: bool,
     params: Option<Params>,
     stream: Option<Stream>,
+    /// The Apple audio session this connection's stream was set up under.
+    session: Option<u64>,
 }
 
 impl Conn {
@@ -97,7 +102,17 @@ impl Conn {
         let peer = tcp.peer_addr()?;
         let (reader, mut writer) = tcp.into_split();
         let mut reader = BufReader::new(reader);
-        while let Some(request) = read_request(&mut reader).await? {
+        let mut sessions = self.shared.session.subscribe();
+        loop {
+            // Cancelling a half-read request is harmless: the connection ends here.
+            let request = tokio::select! {
+                request = read_request(&mut reader) => request?,
+                () = session_ended(&mut sessions, self.session) => {
+                    info!("airplay #{}: the session ended; hanging up on the sender", self.id);
+                    break;
+                }
+            };
+            let Some(request) = request else { break };
             debug!("airplay #{}: {} {}", self.id, request.method, request.uri);
             let cseq = request.header("CSeq").unwrap_or("0").to_owned();
             let closing = request.method == "TEARDOWN";
@@ -156,6 +171,10 @@ impl Conn {
             }
             "SETUP" => {
                 let params = self.params.clone().context("SETUP before ANNOUNCE")?;
+                let Some(session) = *self.shared.session.borrow() else {
+                    warn!("airplay #{}: refused, no Apple audio session is running", self.id);
+                    return Ok(Response::new(453));
+                };
                 {
                     let mut streaming = self.shared.streaming.lock().unwrap();
                     match *streaming {
@@ -184,6 +203,7 @@ impl Conn {
                 );
                 info!("airplay #{}: streaming to UDP port {}", self.id, stream.audio_port);
                 self.stream = Some(stream);
+                self.session = Some(session);
                 Response::new(200).header("Transport", reply).header("Session", "1")
             }
             "RECORD" => Response::new(200).header("Audio-Latency", "11025"),
@@ -212,11 +232,22 @@ impl Conn {
 
     fn stop(&mut self) {
         self.stream = None;
+        self.session = None;
         let mut streaming = self.shared.streaming.lock().unwrap();
         if *streaming == Some(self.id) {
             *streaming = None;
         }
     }
+}
+
+/// Resolves once `session` is no longer the one running; never for a connection
+/// with no stream, which the speaker has no reason to hang up on.
+async fn session_ended(sessions: &mut watch::Receiver<Option<u64>>, session: Option<u64>) {
+    let Some(id) = session else {
+        return std::future::pending().await;
+    };
+    // The sender lives in `Shared`, which this connection holds.
+    let _ = sessions.wait_for(|running| *running != Some(id)).await;
 }
 
 fn transport_port(transport: &str, key: &str) -> Option<u16> {

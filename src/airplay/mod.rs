@@ -9,10 +9,11 @@
 //! session with `audio = true` is running. Nothing is ever sent back but
 //! answers: it is a sink.
 //!
-//! The receiver is gateway-wide and outlives sessions, because a Mac selects an
-//! AirPlay speaker once and keeps it; a speaker that came and went with each
-//! session would have to be picked again every time. While no Apple audio session
-//! is running, a stream that arrives is received and thrown away.
+//! The receiver is gateway-wide and outlives sessions, but a stream does not: a
+//! Mac's stream plays into the one Apple audio session that was running when it
+//! was set up, and the speaker hangs up on it when that session ends, so the Mac
+//! takes its sound back to its own output. While no such session is running, a
+//! stream is refused.
 //!
 //! See docs/airplay-audio.md.
 
@@ -22,12 +23,14 @@ mod rtsp;
 
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::Context as _;
 use log::{debug, info, warn};
 use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceDaemon, ServiceInfo};
+use tokio::sync::watch;
 
 use crate::audio::AudioBridge;
 use crate::config::AirPlayConfig;
@@ -60,6 +63,12 @@ struct Shared {
     /// answer carry; see [`hw_addr`].
     hw_addr: [u8; 6],
     route: Route,
+    /// The Apple audio session the speaker plays into now, by the number
+    /// [`AirPlay::attach`] gave it, or `None` between sessions. A stream belongs to
+    /// the session it was set up under, and its connection watches this to hang up
+    /// when that session ends.
+    session: watch::Sender<Option<u64>>,
+    next_session: AtomicU64,
     /// The one connection currently streaming. A second sender is refused until it
     /// ends, as the gateway has one session to play it to.
     streaming: Mutex<Option<u64>>,
@@ -113,6 +122,8 @@ impl AirPlay {
             password: config.password.clone(),
             hw_addr: hw_addr(&config.name, config_path),
             route: Route::default(),
+            session: watch::Sender::new(None),
+            next_session: AtomicU64::new(0),
             streaming: Mutex::new(None),
         });
         let accepting = Arc::clone(&shared);
@@ -146,10 +157,16 @@ impl AirPlay {
         Ok(Self { shared, port, _mdns: None })
     }
 
-    /// Send what the speaker receives to `bridge` from now on, until the session
-    /// that owns it drops it or another one is attached.
-    pub fn attach(&self, bridge: &Arc<AudioBridge>) {
-        *self.shared.route.0.lock().unwrap() = Arc::downgrade(bridge);
+    /// Send what the speaker receives to `bridge` from now on, until the returned
+    /// guard is dropped — which is the session ending, and hangs up on the Mac
+    /// streaming into it — or another session is attached.
+    #[must_use = "dropping the guard ends the session's sound"]
+    pub fn attach(&self, bridge: &Arc<AudioBridge>) -> Attached {
+        let id = self.shared.next_session.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut route = self.shared.route.0.lock().unwrap();
+        *route = Arc::downgrade(bridge);
+        self.shared.session.send_replace(Some(id));
+        Attached { shared: Arc::clone(&self.shared), id }
     }
 
     /// The bridge a stream would be played into now, for the session's tests.
@@ -161,6 +178,30 @@ impl AirPlay {
     /// The RTSP port, which the mDNS record carries.
     pub fn port(&self) -> u16 {
         self.port
+    }
+}
+
+/// An Apple audio session's hold on the speaker, from [`AirPlay::attach`]: the
+/// engine slot keeps it, so every way an engine ends drops it.
+pub struct Attached {
+    shared: Arc<Shared>,
+    id: u64,
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        let mut route = self.shared.route.0.lock().unwrap();
+        // A newer session attached since is left alone.
+        let ended = self.shared.session.send_if_modified(|session| {
+            let ours = *session == Some(self.id);
+            if ours {
+                *session = None;
+            }
+            ours
+        });
+        if ended {
+            *route = Weak::new();
+        }
     }
 }
 

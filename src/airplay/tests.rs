@@ -108,6 +108,19 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {name} in {headers:?}"))
 }
 
+/// The SDP a Mac ANNOUNCEs: ALAC, with `aes_key` wrapped for the receiver.
+fn announcement(aes_key: [u8; 16], aes_iv: [u8; 16]) -> String {
+    let wrapped = public_key().encrypt(&mut rand::rng(), Oaep::<sha1::Sha1>::new(), &aes_key).unwrap();
+    format!(
+        "v=0\r\no=iTunes 1 0 IN IP4 127.0.0.1\r\ns=iTunes\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+         m=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless\r\n\
+         a=fmtp:96 {FRAMES} 0 16 40 10 14 2 255 0 0 44100\r\n\
+         a=rsaaeskey:{}\r\na=aesiv:{}\r\na=min-latency:11025\r\n",
+        B64.encode(wrapped),
+        B64.encode(aes_iv),
+    )
+}
+
 fn server_port(headers: &[(String, String)]) -> u16 {
     header(headers, "Transport")
         .split(';')
@@ -122,7 +135,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     let airplay = AirPlay::start_unadvertised(&config()).unwrap();
     let bridge = Arc::new(AudioBridge::new());
     let mut listener = bridge.take_listener();
-    airplay.attach(&bridge);
+    let _session = airplay.attach(&bridge);
 
     // The Apple-Challenge is answered even on a refusal, and signs 127.0.0.1 —
     // the IPv4 address, not the mapped IPv6 one — and the advertised address.
@@ -146,15 +159,7 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     // ANNOUNCE a session key only the receiver can unwrap.
     let aes_key = *b"remotex-airplay!";
     let aes_iv = *b"0123456789abcdef";
-    let wrapped = public_key().encrypt(&mut rand::rng(), Oaep::<sha1::Sha1>::new(), &aes_key).unwrap();
-    let sdp = format!(
-        "v=0\r\no=iTunes 1 0 IN IP4 127.0.0.1\r\ns=iTunes\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
-         m=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless\r\n\
-         a=fmtp:96 {FRAMES} 0 16 40 10 14 2 255 0 0 44100\r\n\
-         a=rsaaeskey:{}\r\na=aesiv:{}\r\na=min-latency:11025\r\n",
-        B64.encode(wrapped),
-        B64.encode(aes_iv),
-    );
+    let sdp = announcement(aes_key, aes_iv);
     assert_eq!(sender.request("ANNOUNCE", &[("Content-Type", "application/sdp")], &sdp).await.0, 200);
 
     let control = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -246,4 +251,59 @@ async fn a_sender_is_challenged_answered_and_played_to_the_session() {
     })
     .await
     .expect("the format is cleared when the stream ends");
+}
+
+/// A stream belongs to the session it was set up under: none is set up while no
+/// session runs, and the session ending hangs up on the sender, so the Mac takes
+/// its sound back — while a newer session attached in between is left alone.
+#[tokio::test]
+async fn a_stream_is_refused_without_a_session_and_hung_up_on_when_it_ends() {
+    let airplay = AirPlay::start_unadvertised(&config()).unwrap();
+    let sdp = announcement(*b"remotex-airplay!", *b"0123456789abcdef");
+    let timing = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let transport = format!(
+        "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=9;timing_port={}",
+        timing.local_addr().unwrap().port()
+    );
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 453);
+
+    // Refused, not dropped: once a session starts, the same connection may stream.
+    let bridge = Arc::new(AudioBridge::new());
+    let first = airplay.attach(&bridge);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 200);
+    assert_eq!(sender.request("RECORD", &[], "").await.0, 200);
+
+    // A session that has already been replaced ends nothing when it is dropped.
+    let second = airplay.attach(&bridge);
+    drop(first);
+    assert!(airplay.attached().is_some(), "the newer session still has the speaker");
+    // The stream was set up under the first session, so its replacement ended it.
+    expect_hung_up(&mut sender).await;
+
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 200);
+    drop(second);
+    assert!(airplay.attached().is_none(), "the ended session is no longer fed");
+    expect_hung_up(&mut sender).await;
+
+    // The claim went with the connection, so the next session's sender streams.
+    let _third = airplay.attach(&bridge);
+    let mut sender = Sender::connect(airplay.port()).await;
+    assert_eq!(sender.log_in(PASSWORD).await, 200);
+    assert_eq!(sender.request("ANNOUNCE", &[], &sdp).await.0, 200);
+    assert_eq!(sender.request("SETUP", &[("Transport", &transport)], "").await.0, 200);
+}
+
+/// The speaker closed the sender's connection without being asked.
+async fn expect_hung_up(sender: &mut Sender) {
+    let mut rest = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), sender.reader.read_line(&mut rest))
+        .await
+        .expect("the speaker hangs up");
+    assert_eq!(read.unwrap(), 0, "the connection closed with nothing more said: {rest:?}");
 }
