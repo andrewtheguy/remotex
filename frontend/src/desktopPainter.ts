@@ -18,6 +18,7 @@
 // worker — at which point the old one holds the bitmap of an element that is
 // gone, and is terminated rather than left decoding for it.
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
+import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
@@ -57,8 +58,17 @@ export interface DesktopPainter {
   unbind(): void;
   /** Hand one binary socket frame to the worker. Transfers the buffer. */
   draw(frame: ArrayBuffer, generation: number): void;
-  /** Set the canvas bitmap (framebuffer pixels) and fill it black. */
-  resize(bitmap: { w: number; h: number }, seq: number): void;
+  /**
+   * Set the framebuffer (its pixels) and fill it black. With a `view`, the
+   * framebuffer is held off screen and the canvas shows that composition.
+   */
+  resize(
+    bitmap: { w: number; h: number },
+    seq: number,
+    view: MosaicView | null,
+  ): void;
+  /** Recompose what is already painted under `view`, or show it whole. */
+  setView(view: MosaicView | null, seq: number): void;
   setVideoFormat(stream: number, format: VideoFormat): void;
   /** One stream's region is over; release its decoder. */
   endVideoStream(stream: number): void;
@@ -130,8 +140,11 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
       }
       post({ type: "frame", data: frame, sequence, generation }, [frame]);
     },
-    resize(bitmap, seq) {
-      post({ type: "resize", w: bitmap.w, h: bitmap.h, seq });
+    resize(bitmap, seq, view) {
+      post({ type: "resize", w: bitmap.w, h: bitmap.h, seq, view });
+    },
+    setView(view, seq) {
+      post({ type: "view", view, seq });
     },
     setVideoFormat(stream, format) {
       post({ type: "videoFormat", stream, format });

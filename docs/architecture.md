@@ -1446,11 +1446,19 @@ High Performance does.
 Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
 Density is handled by the Mac instead: from each `AppleDisplayLayout`, the gateway
 reads the displays' native densities and the viewer scale already applied. It sends
-`SetServerScaling` so the selected display—or the densest display in All
-Displays—matches the browser display's density. The answering layout is
+`SetServerScaling` so the selected display, or All Displays over screens of one
+density, matches the browser display's density. The answering layout is
 authoritative. Its pixels pass through unchanged, and its effective density
-(`native density × viewer scale`) is the `Resize.scale` — the selected display's,
-or in All Displays the densest display's, which is the one matched to the browser.
+(`native density × viewer scale`) is the `Resize.scale`.
+
+All Displays over screens of *different* densities is the one view no factor can
+render. There the gateway asks for 1.0, as Apple's viewer does, and sends a
+`ServerMsg::Mosaic` ahead of the `Resize`: each screen's rectangle in the
+framebuffer and in points. The paint worker keeps the framebuffer off screen and
+draws every screen at its points at the browser's own density, and the page maps
+pointer positions back through the same regions (`frontend/src/mosaic.ts`). It is
+the only place the browser rescales remote pixels. See
+[Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every

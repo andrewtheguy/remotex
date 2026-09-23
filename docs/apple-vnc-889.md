@@ -301,10 +301,11 @@ capture context and sends a resolution change. This is raster scaling in the Mac
 not display resize: Standard still exposes the same physical displays and ignores
 browser viewport sizes.
 
-Remotex requests `min(1, browser_density / remote_density)`. A selected display
-uses that display's density. All Displays uses the greatest density in the mosaic,
-so the densest display does not arrive oversized; Apple's factor is connection-
-wide, so every other display is reduced by the same amount. For example, a
+Remotex requests `min(1, browser_density / remote_density)`, as Apple's viewer
+does (`remoteScaleFactorForLocalScaleFactor:`). A selected display uses that
+display's density; All Displays over screens of one density uses theirs. All
+Displays over mixed densities asks for 1.0 and is composed in the browser — see
+below. For example, a
 1440×900 Retina display has 2880×1800 native backing. From a 1× browser display,
 factor 0.5 makes the Mac return 1440×900 with viewer scale 0.5 and effective
 density 1. A 2× browser asks for factor 1 and receives the native 2880×1800 at
@@ -322,15 +323,50 @@ it lands on the centre. A browser density change and a display
 selection can send a new `SetServerScaling`; repeated layouts do not repeat an
 already-pending request, and only an answering layout confirms the factor.
 
-**A combined framebuffer is reported at its densest screen.** Here 4480×1800
-combines a 1× 1280×800 display and a 2× 3200×1800 display across 2880×900 points.
-The header ratio, 4480/2880 = 1.56, represents neither display. `Layout::scale`
-reports the greatest effective density among the records instead: the screen the
-server scale was matched to, so its pixels land one-to-one on the browser's device
-pixels. From a 1× browser the Mac answers at factor 0.5 — the Retina display
-arrives at 1600×900 with effective density 1, the 1× display at 640×400 — and the
-view is reported at 1. The smaller screen shows smaller because Apple rendered it
-that way; neither the gateway nor the browser rescales it.
+### All Displays over mixed densities
+
+No single factor renders a 1× screen beside a 2× one: 0.5 halves the 1× screen,
+1.0 leaves the 2× one at twice its size. Apple's viewer does not try. Measured
+from `screensharingd`'s log on macOS 26.6.2 (`/usr/bin/log show`, the
+`HandleSetServerScalingMessage - set scaling to` lines), Screen Sharing.app sent
+no `SetServerScaling` for its whole session on All Displays, from a 1× client
+and a 2× one, and received the native 4160×1800 mosaic of a 1280×800 1× screen
+beside a 1440×900 2× one. It composes the view itself. From the arm64e
+ScreenSharing framework:
+
+- `-[SSSession handleDisplayInfo2:]` sets mixed mode when the records are neither
+  all 1.0 nor all above it. `remoteScaleFactorForLocalScaleFactor:` then returns
+  1.0 for the combined view, and `setScalingFactor:forced:` sends only a change,
+  so nothing goes out.
+- Each screen becomes an `SSScreenInfo`: `frame` is the logical rect in points,
+  `scaledFrame` the backing rect in framebuffer pixels. The combined view is the
+  union of the frames — 2720×900 here, which is what the menu's "Both Displays:
+  2720 × 900" names. `-[SSFrameBufferView updateSubviews]` gives every screen its
+  own view at its frame, and `-[SSFrameBufferRenderView drawRect:]` draws that
+  screen's backing rect into it at `kCGInterpolationMedium`. A 2× screen's pixels
+  cover half a point each and a 1× screen's a whole point, on either client.
+- Between screens the view's layer background shows, RGB 0.1 grey
+  (`-[SSFrameBufferView updateLayer]`).
+- `frameBufferCoordinatesFromWindowCoordinates:` hit-tests the screens in order,
+  each rect widened by one on its far edges, and maps a point back by the screen's
+  own scale into its backing rect. Outside every screen it returns (−1, −1), and
+  `sendMouseEventWithWindowCoordinates:` sends nothing.
+- The cursor keeps one size in points: over a 2× region `_ScaleCursorForScreen`
+  doubles the image in framebuffer pixels, which the screen's half-point pixels
+  undo.
+
+Remotex does the same. For a combined layout whose records differ in density,
+`Layout::mosaic` builds each screen's backing rect and logical rect, both moved to
+start at zero, and the gateway sends them as `ServerMsg::Mosaic` ahead of the
+`Resize`; an empty one ends the composition, and the current one is replayed to a
+browser that attaches. The page's paint worker keeps the framebuffer off screen
+and draws every region at its points at the browser display's density, at medium
+smoothing, over the same grey. The page presents that canvas like any other, and
+its sender maps each pointer position back through the region under it, dropping
+positions in a gap — and presses and wheel there, though never a release, so a
+drag that ends in a gap cannot leave a button held. The gateway's pointer division
+is then 1, the factor in force. The All Displays entry is labelled with the points
+the screens span, as Apple's is.
 
 ## The other corrections
 

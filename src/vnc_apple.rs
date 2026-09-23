@@ -27,7 +27,8 @@
 //! scale the framebuffer to the browser's display density, so a 2x 2880x1800
 //! screen viewed from a 1x display arrives as 1440x900 instead of being shrunk in
 //! the browser. Because density is per screen, the *combined* view of a
-//! mixed-density Mac still has no single scale (see [`Layout::scale`]).
+//! mixed-density Mac has no single scale; it is composed in the browser from the
+//! regions [`Layout::mosaic`] names, as Apple's viewer composes it.
 //!
 //! **A virtual display in High Performance mode**:
 //! [`set_display_configuration`] asks for one virtual display at the configured
@@ -59,7 +60,9 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
-use crate::protocol::{CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM};
+use crate::protocol::{
+    CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM, MosaicRect, MosaicRegion,
+};
 use crate::vnc::ENCODING_ZLIB;
 use crate::vnc_encodings::inflate_independent;
 
@@ -369,6 +372,12 @@ pub struct Display {
     /// layout consists of one such region per non-mirrored display; gaps in the
     /// bounding framebuffer are not rectangles the Mac sends.
     pub backing: (u16, u16),
+    /// Where the backing region sits in the framebuffer, left then top.
+    pub backing_at: (u16, u16),
+    /// This screen's size in points, and where it sits in the Mac's own
+    /// arrangement, left then top.
+    pub logical: (u16, u16),
+    pub logical_at: (u16, u16),
 }
 
 /// The Mac's display layout: which screens it has, which one it is sending, and
@@ -391,12 +400,10 @@ impl Layout {
     /// The effective density of the *selected* screen, after Apple's server-side
     /// scaling.
     ///
-    /// The combined view is the densest screen's effective density. That is the
-    /// screen [`Layout::server_scale_for`] matched to the browser display, so its
-    /// returned pixels land one-to-one on device pixels; a less dense screen in
-    /// the same mosaic shows smaller, exactly as Apple rendered it. The number is
-    /// still the Mac's own — a record's stated density times its applied viewer
-    /// scale — never one the gateway made up to fit.
+    /// The combined view is the densest screen's effective density. Over screens
+    /// of one density that is every screen's. Over mixed densities no one number
+    /// is true, and the browser presents the view through [`Layout::mosaic`]
+    /// instead; this remains the Mac's own number, never one made up to fit.
     ///
     /// A combined view of *one* screen is that screen. This is not a corner: a
     /// High Performance layout always reports the combined sentinel over its
@@ -430,15 +437,21 @@ impl Layout {
         self.displays[0].viewer_scale
     }
 
-    /// The server scale that makes the densest screen in `selection` match the
-    /// browser display's density, without asking Apple to enlarge pixels.
+    /// The server scale that makes `selection` match the browser display's
+    /// density, without asking Apple to enlarge pixels — Apple's
+    /// `remoteScaleFactorForLocalScaleFactor:`.
     ///
-    /// A selected screen uses its own density. All Displays uses the greatest
-    /// density in the mosaic: that is the screen which otherwise arrives
-    /// oversized (for example a 2880x1800 backing for a 1440x900 Retina display).
-    /// Apple's scaling is uniform, so lower-density screens in the combined view
-    /// are reduced by the same factor.
+    /// A selected screen uses its own density, and All Displays over screens of
+    /// one density uses theirs: a 2880x1800 backing for a 1440x900 Retina display
+    /// arrives at 1440x900 on a 1x browser.
     pub fn server_scale_for(&self, selection: Option<u32>, host_density: f32) -> f32 {
+        // A mosaic of mixed densities is composed in the browser from the Mac's
+        // own pixels, as Apple's viewer composes it: the daemon logs no
+        // `SetServerScaling` from Screen Sharing.app in that view, only the
+        // native combined framebuffer at 1.0.
+        if selection.is_none() && self.mixed_density() {
+            return 1.0;
+        }
         let density = selection
             .and_then(|id| self.displays.iter().find(|display| display.info.id == id))
             .map_or_else(
@@ -446,6 +459,73 @@ impl Layout {
                 |display| display.density,
             );
         (host_density / density).clamp(f32::MIN_POSITIVE, 1.0)
+    }
+
+    /// Whether the screens differ in density, which no single framebuffer scale
+    /// can then describe.
+    fn mixed_density(&self) -> bool {
+        let first = self.displays[0].density;
+        self.displays.iter().any(|display| (display.density - first).abs() > 0.005)
+    }
+
+    /// How a client presents the combined view of screens at different
+    /// densities, or `None` where one density describes the framebuffer — a
+    /// selected screen, or screens that agree.
+    ///
+    /// Each region keeps the pixels the Mac sent and places them at the screen's
+    /// points in its own arrangement. Both spaces are moved to start at zero:
+    /// the framebuffer already does, and the arrangement's origin is wherever the
+    /// main screen puts it.
+    pub fn mosaic(&self) -> Option<Vec<MosaicRegion>> {
+        if self.current.is_some() || !self.mixed_density() {
+            return None;
+        }
+        let min = |at: fn(&Display) -> (u16, u16)| {
+            self.displays.iter().map(at).fold((u16::MAX, u16::MAX), |m, (x, y)| {
+                (m.0.min(x), m.1.min(y))
+            })
+        };
+        let pixel_origin = min(|display| display.backing_at);
+        let point_origin = min(|display| display.logical_at);
+        Some(
+            self.displays
+                .iter()
+                .map(|display| MosaicRegion {
+                    pixels: MosaicRect {
+                        x: display.backing_at.0 - pixel_origin.0,
+                        y: display.backing_at.1 - pixel_origin.1,
+                        w: display.backing.0,
+                        h: display.backing.1,
+                    },
+                    points: MosaicRect {
+                        x: display.logical_at.0 - point_origin.0,
+                        y: display.logical_at.1 - point_origin.1,
+                        w: display.logical.0,
+                        h: display.logical.1,
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    /// The points every screen spans together, which is how Apple's viewer
+    /// names its combined view ("Both Displays: 2720 × 900"). Unlike the
+    /// framebuffer, it does not change with the selection.
+    pub fn points_spanned(&self) -> (u16, u16) {
+        let span = |start: fn(&Display) -> u16, size: fn(&Display) -> u16| {
+            let lo = self.displays.iter().map(|d| u32::from(start(d))).min().unwrap_or(0);
+            let hi = self
+                .displays
+                .iter()
+                .map(|d| u32::from(start(d)) + u32::from(size(d)))
+                .max()
+                .unwrap_or(0);
+            u16::try_from(hi - lo).unwrap_or(u16::MAX)
+        };
+        (
+            span(|d| d.logical_at.0, |d| d.logical.0),
+            span(|d| d.logical_at.1, |d| d.logical.1),
+        )
     }
 
     /// The screens as a client is offered them.
@@ -552,6 +632,8 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         };
         let logical = edges(0x14);
         let backing = edges(0x1c);
+        // (top, left, ...) on the wire, so the left edge is the second field.
+        let corner = |at: usize| (be16(record, at + 2), be16(record, at));
         // An unusable screen is dropped, the way a mirror copy is, rather than
         // taking the whole layout with it. One odd record among good ones would
         // otherwise cost the entire display list *and* the resize — and a layout
@@ -635,6 +717,9 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
             density,
             viewer_scale,
             backing,
+            backing_at: corner(0x1c),
+            logical,
+            logical_at: corner(0x14),
         });
     }
 
@@ -1059,7 +1144,8 @@ mod tests {
     fn server_scaling_matches_the_chosen_screen_to_the_browser_density() {
         let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
         assert_eq!(combined.viewer_scale(), 1.0);
-        assert_eq!(combined.server_scale_for(None, 1.0), 0.5);
+        // All Displays over mixed densities is composed from the native pixels.
+        assert_eq!(combined.server_scale_for(None, 1.0), 1.0);
         assert_eq!(combined.server_scale_for(None, 2.0), 1.0);
         assert_eq!(combined.server_scale_for(Some(1), 1.0), 1.0);
         assert_eq!(combined.server_scale_for(Some(4), 1.0), 0.5);
@@ -1086,6 +1172,35 @@ mod tests {
         assert_eq!(both.displays.len(), 2);
         assert_eq!(both.viewer_scale(), 0.5);
         assert_eq!(both.scale(), 1.0);
+    }
+
+    #[test]
+    fn only_a_mixed_density_combined_view_is_composed() {
+        // The captured Mac: a 1x screen at (0,0) beside a 2x one at 1280 points,
+        // whose pixels start 1280 pixels in.
+        let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
+        let rect = |x, y, w, h| MosaicRect { x, y, w, h };
+        assert_eq!(
+            combined.mosaic(),
+            Some(vec![
+                MosaicRegion { pixels: rect(0, 0, 1280, 800), points: rect(0, 0, 1280, 800) },
+                MosaicRegion {
+                    pixels: rect(1280, 0, 3200, 1800),
+                    points: rect(1280, 0, 1600, 900),
+                },
+            ])
+        );
+
+        assert_eq!(combined.points_spanned(), (2880, 900), "what Apple's viewer names it");
+
+        // A selected screen is one density, and so are screens that agree.
+        let mut payload = TWO_REAL_SCREENS.to_vec();
+        payload[0x0a..0x0e].copy_from_slice(&4u32.to_be_bytes());
+        assert_eq!(parse_layout(&payload).unwrap().mosaic(), None);
+        let alike = layout(None, &[(1, (1280, 800), (2560, 1600), 0x01), (2, (1440, 900), (2880, 1800), 0x00)]);
+        let alike = parse_layout(&alike).unwrap();
+        assert_eq!(alike.mosaic(), None);
+        assert_eq!(alike.server_scale_for(None, 1.0), 0.5);
     }
 
     /// The shared builder, which lives outside this module so [`crate::vnc`]'s tests

@@ -160,6 +160,21 @@ export interface DisplayInfo {
   virtual: boolean;
 }
 
+// A rectangle in whole pixels or points, origin at the top left.
+export interface MosaicRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// One screen of a composed view: its pixels in the framebuffer, and where it
+// belongs in the remote's arrangement, in points.
+export interface MosaicRegion {
+  pixels: MosaicRect;
+  points: MosaicRect;
+}
+
 // Server -> browser text frames: everything but screen tiles. `resize`/`error`
 // come from the engine; `picker`/`connected` are the session-slot status the
 // server sends so the browser knows which post-login state it is in.
@@ -304,6 +319,12 @@ export type ControlMsg =
   // showing what is really on screen. An engine that cannot offer a choice
   // never sends this, and the FAB then has no Display section at all.
   | { type: "displays"; active: number; displays: DisplayInfo[] }
+  // How the next framebuffers are presented when no one density does it: a
+  // Mac's combined view of screens at different densities. Each region names
+  // a screen's pixels in the framebuffer and its place in points; the page
+  // composes them at this display's density (mosaic.ts). Sent ahead of the
+  // `resize` it describes; empty ends it.
+  | { type: "mosaic"; regions: MosaicRegion[] }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed. Requested replies
   // populate the panel without silently copying; pushes retain automatic sync.

@@ -1170,6 +1170,9 @@ struct DisplayState {
     /// that arrive before the confirming one answer messages sent earlier — a
     /// selection's, or an older factor's — and are not reconciled against.
     apple_scale_pending: Option<f32>,
+    /// The composition last sent, `None` while a framebuffer is presented whole.
+    /// Kept to send only a change, and to replay it to a browser that attaches.
+    mosaic: Option<Vec<crate::protocol::MosaicRegion>>,
     /// Union area the next non-incremental Apple update is expected to paint.
     /// A combined framebuffer may include gaps which never arrive as rectangles.
     repaint_pixels: u64,
@@ -2441,6 +2444,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let d = desktop.lock().unwrap();
                         (d.poll_size(), d.resize_msg())
                     };
+                    // Ahead of the resize it describes, as when it was first sent.
+                    let mosaic = display.lock().unwrap().mosaic.clone();
+                    if let Some(regions) = mosaic
+                        && let Err(e) = sink.msg(ServerMsg::Mosaic { regions }).await
+                    {
+                        break Err(e);
+                    }
                     if let Err(e) = sink.msg(resize_msg).await {
                         break Err(e);
                     }
@@ -4630,6 +4640,20 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         vnc_apple::parse_layout(&payload)?
     };
 
+    // The composition goes first: it says how the framebuffer the resize names
+    // is presented, and a browser must not present one layout's pixels through
+    // another's regions.
+    let mosaic = if virtual_display { None } else { layout.mosaic() };
+    let mosaic_msg = {
+        let mut state = display.lock().unwrap();
+        (state.mosaic != mosaic).then(|| {
+            state.mosaic.clone_from(&mosaic);
+            ServerMsg::Mosaic { regions: mosaic.unwrap_or_default() }
+        })
+    };
+    if let Some(msg) = mosaic_msg {
+        sink.msg(msg).await?;
+    }
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
         desktop.lock().unwrap().hp.layout(resized, tokio::time::Instant::now());
@@ -4649,11 +4673,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         // one screen there is nothing to combine, and the entry would be the same
         // picture under a second name.
         if infos.len() > 1 {
-            // No size on this one, deliberately. The framebuffer is only the union
-            // of every screen while the combined view is the one selected; ask for a
-            // single screen and the next layout reports that screen's size instead,
-            // so any number here would be wrong half the time.
-            let detail = format!("{} screens side by side", infos.len());
+            // The points the screens span together, as Apple's viewer labels the
+            // same entry — not the framebuffer, which is only the union of every
+            // screen while this view is the one selected.
+            let (w, h) = layout.points_spanned();
+            let detail = format!("{w}×{h}");
             infos.insert(
                 0,
                 DisplayInfo {
@@ -9921,32 +9945,32 @@ mod tests {
             [(1, (1280, 800), (1280, 800), 0x01), (7, (1440, 900), (2880, 1800), 0x00)];
         let mut state = DisplayState::default();
 
-        // A 1x browser on All Displays: the Retina screen arrives oversized.
+        // A 1x browser on All Displays over mixed densities: composed from the
+        // native pixels, so nothing to ask.
         let native = parse_layout(&test_layout(None, &SCREENS)).unwrap();
-        assert_eq!(state.accept_apple_layout(&native, 1.0), Some(0.5));
-        // A duplicate of the same layout does not ask twice.
         assert_eq!(state.accept_apple_layout(&native, 1.0), None);
 
-        // The 1x screen is picked before the Mac answers: 0.5 is what is in
-        // force by the time the selection lands, so the pick asks for 1.
-        assert_eq!(state.request_apple_scale(Some(1), 1.0), Some(1.0));
-
-        // The Mac's answer to the 0.5 is the combined view at 0.5. It predates
-        // the newest factor, so it asks for nothing — not 0.5 again.
-        let mut halved = test_layout(None, &[(1, (1280, 800), (640, 400), 0x01), (7, (1440, 900), (1440, 900), 0x00)]);
-        test_scale_layout(&mut halved, 0.5, &[1.0, 2.0]);
-        assert_eq!(state.accept_apple_layout(&parse_layout(&halved).unwrap(), 1.0), None);
-
-        // The selection's answer at 1 has caught up, and is what was wanted.
-        let picked = parse_layout(&test_layout(Some(1), &SCREENS)).unwrap();
+        // The Retina screen is picked, and asks for half.
+        assert_eq!(state.request_apple_scale(Some(7), 1.0), Some(0.5));
+        // The selection's own answer comes first, still at 1: it predates the
+        // factor, so it asks for nothing — not 1 again.
+        let picked = parse_layout(&test_layout(Some(7), &SCREENS)).unwrap();
         assert_eq!(state.accept_apple_layout(&picked, 1.0), None);
+        let mut halved = test_layout(
+            Some(7),
+            &[(1, (1280, 800), (640, 400), 0x01), (7, (1440, 900), (1440, 900), 0x00)],
+        );
+        test_scale_layout(&mut halved, 0.5, &[1.0, 2.0]);
+        let halved = parse_layout(&halved).unwrap();
+        assert_eq!(state.accept_apple_layout(&halved, 1.0), None);
         assert_eq!(state.apple_scale_pending, None);
 
-        // A move to a 2x browser display needs no scaling on a 1x screen, and
-        // going back to All Displays there needs none on the Retina one either.
+        // Back to All Displays before the Mac answers a pick of the 1x screen:
+        // both want 1, which is already on its way.
+        assert_eq!(state.request_apple_scale(Some(1), 1.0), Some(1.0));
+        assert_eq!(state.request_apple_scale(None, 1.0), None);
+        // A 2x browser display needs no scaling on the 1x screen either.
         assert_eq!(state.request_apple_scale(Some(1), 2.0), None);
-        assert_eq!(state.request_apple_scale(None, 2.0), None);
-        assert_eq!(state.request_apple_scale(None, 1.0), Some(0.5));
     }
 
     /// Standard's pointer addresses the unscaled framebuffer, so a position on

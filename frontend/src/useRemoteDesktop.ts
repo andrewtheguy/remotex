@@ -26,6 +26,7 @@ import {
   type TranslatedKey,
 } from "./macKeys.ts";
 import type { AudioStreamInfo } from "./mediaLabel.ts";
+import { type MosaicView, mosaicSender, mosaicView } from "./mosaic.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
 import { createRectCache } from "./pointerRect.ts";
@@ -38,6 +39,7 @@ import {
   type DisplayInfo,
   decodeAudioFrame,
   MAX_CLIPBOARD_BYTES,
+  type MosaicRegion,
   type MouseButton,
   mouseButtonFromEvent,
   type RemoteClipboard,
@@ -814,10 +816,21 @@ export function useRemoteDesktop(
     });
   }, [canvasRef, overlayRef, pointerRef]);
 
+  // The composition the canvas presents, while a Mac's mixed-density combined
+  // view is on screen (mosaic.ts); null otherwise.
+  const mosaicViewRef = useRef<MosaicView | null>(null);
+
   // The single choke point for everything sent to the server, including the
   // touch gesture layer's synthesized events. Pointer motion is coalesced here
-  // while the socket is backed up; see `createSender`.
-  const sendRef = useRef(createSender(() => wsRef.current));
+  // while the socket is backed up; see `createSender`. Every position is taken
+  // on the canvas as presented, so a composed one goes back into the Mac's
+  // framebuffer here, once, for the mouse and the gestures alike.
+  const sendRef = useRef(
+    mosaicSender(
+      createSender(() => wsRef.current),
+      () => mosaicViewRef.current,
+    ),
+  );
 
   // The audio context, from the click that enabled audio until the decoder is built
   // around it, and null after that — the player owns it from then on. Two refs
@@ -876,8 +889,14 @@ export function useRemoteDesktop(
     // second's grid over the first's desktop.
     const pendingResizes = new Map<
       number,
-      { size: RemoteSize; grid: GridPitch }
+      { size: RemoteSize; grid: GridPitch; view: MosaicView | null }
     >();
+    // The regions of the last `mosaic`, and the framebuffer the last `resize`
+    // named: what a composition is recomputed from when either changes, or when
+    // this window moves to a display of another density.
+    let mosaicRegions: MosaicRegion[] | null = null;
+    let framebufferSize: RemoteSize | null = null;
+    let framebufferGrid: GridPitch | null = null;
     // The worker outlives socket reconnects, so a completion can return after
     // the socket that posted its frame has died. A generation travels through
     // the worker with each batch; only the live generation may acknowledge on
@@ -910,7 +929,7 @@ export function useRemoteDesktop(
         const applied = pendingResizes.get(seq);
         if (applied) {
           pendingResizes.delete(seq);
-          presentResize(applied.size, applied.grid);
+          presentResize(applied.size, applied.grid, applied.view);
         }
       },
     });
@@ -925,6 +944,10 @@ export function useRemoteDesktop(
     // flash on the way back.
     const clearDesktop = () => {
       sizeRef.current = null;
+      mosaicViewRef.current = null;
+      mosaicRegions = null;
+      framebufferSize = null;
+      framebufferGrid = null;
       setSize(null);
       // A resize still waiting on its echo belongs to the attachment this is
       // ending; letting it land later would resurrect that desktop's size
@@ -1365,7 +1388,12 @@ export function useRemoteDesktop(
     // instead would read as a glimpse of the previous desktop: the overlay
     // hides the canvas only while `size` is null, and the worker could still
     // be painting the old attachment's backlog onto the old bitmap.
-    const presentResize = (s: RemoteSize, grid: GridPitch) => {
+    const presentResize = (
+      s: RemoteSize,
+      grid: GridPitch,
+      view: MosaicView | null,
+    ) => {
+      mosaicViewRef.current = view;
       applyCanvasCss(
         canvasRef.current,
         gridRef.current,
@@ -1377,16 +1405,32 @@ export function useRemoteDesktop(
       setSize(s);
       // The lattice this framebuffer is cut at, presented with it rather than
       // on the message's arrival, so the overlay never draws one resize's grid
-      // over another's desktop.
-      setTileGrid(grid);
+      // over another's desktop. A composed canvas is not cut at any one
+      // lattice, so it has none.
+      setTileGrid(view ? null : grid);
       syncCursor();
+    };
+
+    // What the canvas presents for `framebuffer`: the framebuffer itself at
+    // its own density, or — under a mosaic — the composition at this window's.
+    const presentation = (framebuffer: RemoteSize) => {
+      const view = mosaicRegions
+        ? mosaicView(mosaicRegions, window.devicePixelRatio)
+        : null;
+      const size = view
+        ? { w: view.w, h: view.h, scale: view.scale }
+        : framebuffer;
+      return { size, view };
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
+      framebufferSize = s;
+      framebufferGrid = msg.tileGrid;
+      const { size, view } = presentation(s);
       if (!painter) {
         // No canvas, so nothing queues either; the state may as well be true.
-        presentResize(s, msg.tileGrid);
+        presentResize(size, msg.tileGrid, view);
         return;
       }
       // The bitmap belongs to the worker; this command queues behind the
@@ -1394,8 +1438,32 @@ export function useRemoteDesktop(
       // gave a resize — the previous desktop finishes painting before its
       // canvas is replaced and filled black.
       const seq = ++resizeSeq;
-      pendingResizes.set(seq, { size: s, grid: msg.tileGrid });
-      painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq);
+      pendingResizes.set(seq, { size, grid: msg.tileGrid, view });
+      painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq, view);
+    };
+
+    // A new composition over the framebuffer already on screen: a `mosaic`, or
+    // this window reaching a display of another density. Nothing is repainted;
+    // the worker recomposes what it holds.
+    const recompose = () => {
+      if (!framebufferSize || !framebufferGrid) {
+        // Nothing presented yet: the next resize carries it.
+        return;
+      }
+      const { size, view } = presentation(framebufferSize);
+      const grid = framebufferGrid;
+      if (!painter) {
+        presentResize(size, grid, view);
+        return;
+      }
+      const seq = ++resizeSeq;
+      pendingResizes.set(seq, { size, grid, view });
+      painter.setView(view, seq);
+    };
+
+    const handleMosaic = (msg: Extract<ControlMsg, { type: "mosaic" }>) => {
+      mosaicRegions = msg.regions.length > 0 ? msg.regions : null;
+      recompose();
     };
 
     // The remote's display list, and the one follow-up a change of display needs:
@@ -1623,6 +1691,9 @@ export function useRemoteDesktop(
           }
           break;
         }
+        case "mosaic":
+          handleMosaic(msg);
+          break;
         case "displays":
           handleDisplays(msg);
           break;
@@ -1759,6 +1830,9 @@ export function useRemoteDesktop(
     };
     function onDprChange() {
       sendHostDisplay();
+      if (mosaicRegions) {
+        recompose();
+      }
       watchDpr();
     }
     watchDpr();
