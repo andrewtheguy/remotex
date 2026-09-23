@@ -1890,6 +1890,7 @@ mod tests {
             resize: false,
             egfx: None,
             clipboard: false,
+            audio_key: None,
             audio,
             audio_codec: None,
             camera: false,

@@ -631,6 +631,9 @@ struct TargetInfo {
     subtype: Option<&'static str>,
     host: String,
     port: u16,
+    /// On a Mac, whether the gateway's AirPlay speaker is on, which is whether
+    /// the Mac's sound can reach the browser at all; `null` on every other target.
+    airplay: Option<bool>,
 }
 
 /// The list of target profiles the browser may pick from the post-login picker.
@@ -646,6 +649,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
             subtype: t.subtype.map(crate::config::Subtype::name),
             host: t.host.clone(),
             port: t.port,
+            airplay: t.receives_airplay().then_some(t.audio),
         })
         .collect();
     Json(targets)
@@ -990,6 +994,7 @@ mod tests {
                 resize: false,
                 egfx: None,
                 clipboard: false,
+                audio_key: None,
                 audio: false,
                 audio_codec: None,
                 camera: false,
@@ -1261,6 +1266,7 @@ mod tests {
             resize: false,
             egfx: None,
             clipboard: false,
+            audio_key: None,
             audio: true,
             audio_codec: tone_codec,
             camera: false,
@@ -1407,11 +1413,12 @@ mod tests {
             subtype: Some("ard-high-performance"),
             host: "192.0.2.10".to_owned(),
             port: 5900,
+            airplay: Some(true),
         })
         .unwrap();
         assert_eq!(
             mac,
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard-high-performance","host":"192.0.2.10","port":5900}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard-high-performance","host":"192.0.2.10","port":5900,"airplay":true}"#
         );
 
         let win = serde_json::to_string(&TargetInfo {
@@ -1420,9 +1427,11 @@ mod tests {
             subtype: None,
             host: "192.0.2.11".to_owned(),
             port: 3389,
+            airplay: None,
         })
         .unwrap();
         assert!(win.contains(r#""subtype":null"#), "{win}");
+        assert!(win.contains(r#""airplay":null"#), "{win}");
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the

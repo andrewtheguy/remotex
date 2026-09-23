@@ -677,14 +677,19 @@ pub struct TargetConfig {
     /// native pasteboard protocol; RDP uses MS-RDPECLIP `CF_UNICODETEXT`.
     #[serde(default)]
     pub clipboard: bool,
+    /// The `audio` key as written, which [`ConfigFile::parse`] resolves into
+    /// [`Self::audio`]. Refused on either Apple subtype, whose sound the
+    /// `[airplay]` table decides.
+    #[serde(default, rename = "audio")]
+    pub audio_key: Option<bool>,
     /// Carry the remote's sound. Packets are sent only while the attached client
     /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
     /// asks a generic server for wlshare's audio extension, FLAC on the RFB
-    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]. On
-    /// either Apple subtype the Mac sends its sound to the gateway's AirPlay
-    /// speaker instead, which the `[airplay]` table sets up — see
-    /// [`crate::airplay`].
-    #[serde(default)]
+    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]. Both
+    /// opt in with `audio = true`. Either Apple subtype carries it exactly when
+    /// the gateway-wide `[airplay]` table is set: the Mac sends its sound to the
+    /// gateway's AirPlay speaker — see [`crate::airplay`].
+    #[serde(skip)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
     /// [`AudioCodec::Opus`]. `Option` rather than a bare default so that setting
@@ -1522,10 +1527,26 @@ impl ConfigFile {
         let mut config: ConfigFile = toml::from_str(text).context("invalid TOML config")?;
         // An omitted port deserializes as 0 (never a valid target port), which
         // resolves here to the protocol's standard port.
+        let airplay = config.airplay.is_some();
         for target in &mut config.targets {
             if target.port == 0 {
                 target.port = target.protocol.default_port();
             }
+            // A Mac's sound is the gateway's AirPlay speaker's, which is not the
+            // target's to turn on or off: the `[airplay]` table is, for every Mac.
+            anyhow::ensure!(
+                !(target.receives_airplay() && target.audio_key.is_some()),
+                "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
+                 AirPlay speaker — the [airplay] table turns that on for every Mac. Remove \
+                 the key.",
+                target.name,
+                target.subtype.map_or("apple", Subtype::name)
+            );
+            target.audio = if target.receives_airplay() {
+                airplay
+            } else {
+                target.audio_key.unwrap_or(false)
+            };
         }
         #[cfg(feature = "embedded-gateway")]
         if audience == Audience::Embedded {
@@ -1563,44 +1584,25 @@ impl ConfigFile {
             );
             anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
         }
-        // A Mac's sound arrives at the gateway's AirPlay speaker, which asks every
-        // sender for a password: the speaker answers the whole LAN. So an Apple
-        // target with audio needs `[airplay]`, and `[airplay]` without one is a
-        // speaker nothing would ever play through — refused rather than started.
-        let apple_audio = config.targets.iter().find(|t| t.audio && t.receives_airplay());
-        if !cfg!(feature = "airplay") {
-            if let Some(target) = apple_audio {
-                anyhow::bail!(
-                    "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
-                     AirPlay speaker, and this remotex was built without the airplay feature",
-                    target.name,
-                    target.subtype.map_or("apple", Subtype::name)
-                );
-            }
+        // Every Mac's sound arrives at the gateway's AirPlay speaker, which the
+        // `[airplay]` table turns on and which asks every sender for its password:
+        // the speaker answers the whole LAN. A table with no Mac to play through it
+        // is refused rather than started.
+        if let Some(airplay) = &config.airplay {
             anyhow::ensure!(
-                config.airplay.is_none(),
+                cfg!(feature = "airplay"),
                 "[airplay] is set, and this remotex was built without the airplay feature"
             );
-        }
-        match (apple_audio, &config.airplay) {
-            (Some(target), None) => anyhow::bail!(
-                "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
-                 AirPlay speaker, and the config has no [airplay] table: add one with the \
-                 password a Mac will be asked for",
-                target.name,
-                target.subtype.map_or("apple", Subtype::name)
-            ),
-            (None, Some(_)) => anyhow::bail!(
-                "[airplay] is set, and no ard or ard-high-performance target sets audio = true, \
-                 so nothing would play through the speaker. Remove the table, or turn audio on \
-                 for a Mac"
-            ),
-            (Some(_), Some(airplay)) => anyhow::ensure!(
+            anyhow::ensure!(
+                config.targets.iter().any(TargetConfig::receives_airplay),
+                "[airplay] is set, and there is no ard or ard-high-performance target, so \
+                 nothing would play through the speaker. Remove the table, or add a Mac"
+            );
+            anyhow::ensure!(
                 !airplay.password.trim().is_empty(),
                 "[airplay].password is empty — every Mac on the LAN could then play into the \
                  session. Set one"
-            ),
-            (None, None) => {}
+            );
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -4861,36 +4863,24 @@ mod tests {
         assert!(rendered.contains("egfx = false"), "{rendered}");
     }
 
-    /// A Mac's sound arrives over AirPlay on either subtype, so `audio` there
-    /// needs the speaker's password, and the resolved config carries the speaker
-    /// under the gateway's name.
+    /// A Mac's sound arrives over AirPlay on either subtype, so the gateway-wide
+    /// `[airplay]` table, not the target, is what decides it: every Mac carries
+    /// audio exactly when the table is set, and the resolved config carries the
+    /// speaker under the gateway's name.
     #[cfg(feature = "airplay")]
     #[test]
-    fn audio_on_either_apple_subtype_needs_the_airplay_password() {
+    fn a_macs_audio_follows_the_airplay_table() {
         for subtype in ["ard", "ard-high-performance"] {
             let target = format!(
-                r#"
-                [[targets]]
-                name = "mac"
-                protocol = "vnc"
-                subtype = "{subtype}"
-                host = "10.0.0.5"
-                username = "andrew"
-                password = "h"
-                audio = true
-                "#
+                "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\n\
+                 host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n"
             );
-            let err = ConfigFile::parse(&format!("[server]\n{}\n{target}", site_passwd_line())).unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains(&format!("on an {subtype} target")), "{rendered}");
-            assert!(rendered.contains("[airplay]"), "{rendered}");
-
-            let empty = ConfigFile::parse(&format!(
-                "[server]\n{}\n[airplay]\npassword = \" \"\n{target}",
-                site_passwd_line()
-            ))
-            .unwrap_err();
-            assert!(format!("{empty:#}").contains("[airplay].password is empty"), "{empty:#}");
+            let silent = ConfigFile::parse(&format!("[server]\n{}\n{target}", site_passwd_line()))
+                .unwrap()
+                .resolve()
+                .unwrap();
+            assert!(!silent.targets[0].audio, "no [airplay], no sound");
+            assert_eq!(silent.airplay, None);
 
             let config = ConfigFile::parse(&format!(
                 "[server]\n{}\n[branding]\ntext = \"Studio\"\n[airplay]\npassword = \"sesame\"\n{target}",
@@ -4899,19 +4889,51 @@ mod tests {
             .unwrap()
             .resolve()
             .unwrap();
+            assert!(config.targets[0].audio, "[airplay] carries every Mac's sound");
             assert_eq!(
                 config.airplay,
                 Some(AirPlayConfig { name: "Studio - remotex".into(), password: "sesame".into() })
             );
             assert_eq!(config.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
+
+            for key in ["audio = true", "audio = false"] {
+                let err = ConfigFile::parse(&format!(
+                    "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{target}{key}\n",
+                    site_passwd_line()
+                ))
+                .unwrap_err();
+                let rendered = format!("{err:#}");
+                assert!(rendered.contains(&format!("sets audio on an {subtype} target")), "{rendered}");
+                assert!(rendered.contains("Remove the key"), "{rendered}");
+            }
+
+            let empty = ConfigFile::parse(&format!(
+                "[server]\n{}\n[airplay]\npassword = \" \"\n{target}",
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            assert!(format!("{empty:#}").contains("[airplay].password is empty"), "{empty:#}");
         }
     }
 
-    /// A speaker nothing plays through is refused rather than started, and a
-    /// config without Apple audio starts none.
+    /// A speaker no Mac could play through is refused rather than started.
     #[cfg(feature = "airplay")]
     #[test]
-    fn airplay_without_apple_audio_is_refused() {
+    fn airplay_without_a_mac_is_refused() {
+        let vnc = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nhost = \"h\"\naudio = true\n";
+        let err = ConfigFile::parse(&format!(
+            "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{vnc}",
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("nothing would play through the speaker"), "{err:#}");
+    }
+
+    /// A build without the speaker says so when asked for one, and its Macs
+    /// carry no sound.
+    #[cfg(not(feature = "airplay"))]
+    #[test]
+    fn a_build_without_airplay_refuses_the_table() {
         let mac = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
                    username = \"u\"\npassword = \"p\"\n";
         let err = ConfigFile::parse(&format!(
@@ -4919,29 +4941,12 @@ mod tests {
             site_passwd_line()
         ))
         .unwrap_err();
-        assert!(format!("{err:#}").contains("nothing would play through the speaker"), "{err:#}");
-
+        assert!(format!("{err:#}").contains("without the airplay feature"), "{err:#}");
         let config = ConfigFile::parse(&format!("[server]\n{}\n{mac}", site_passwd_line()))
             .unwrap()
             .resolve()
             .unwrap();
-        assert_eq!(config.airplay, None);
-    }
-
-    /// A build without the speaker says so, rather than asking for a table it
-    /// would then refuse.
-    #[cfg(not(feature = "airplay"))]
-    #[test]
-    fn a_build_without_airplay_refuses_a_macs_audio_and_the_table() {
-        let mac = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"h\"\n\
-                   username = \"u\"\npassword = \"p\"\n";
-        for text in [
-            format!("[server]\n{}\n[airplay]\npassword = \"sesame\"\n{mac}audio = true\n", site_passwd_line()),
-            format!("[server]\n{}\n[airplay]\npassword = \"sesame\"\n{mac}", site_passwd_line()),
-        ] {
-            let err = ConfigFile::parse(&text).unwrap_err();
-            assert!(format!("{err:#}").contains("without the airplay feature"), "{err:#}");
-        }
+        assert!(!config.targets[0].audio);
     }
 
     /// The pre-negotiation format follows the engine: CD quality is what RDP is

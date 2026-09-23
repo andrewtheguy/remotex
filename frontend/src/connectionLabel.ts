@@ -54,3 +54,26 @@ export function connectionShortLabel(
   const family = protocol.toUpperCase();
   return subtype ? `${family} · ${subtype}` : family;
 }
+
+/**
+ * Whether a Mac's sound can reach this browser, which is not the target's to say:
+ * a Mac plays to the gateway's AirPlay speaker, and the gateway-wide `[airplay]`
+ * table is what turns that on — for every Mac or for none. `null` is every other
+ * target, whose sound is its own connection's, and has no line.
+ */
+export function airplayLabel(airplay: boolean | null): string | null {
+  if (airplay === null) {
+    return null;
+  }
+  return airplay
+    ? "On — pick this gateway's speaker in the Mac's Sound menu"
+    : "Off — the gateway has no [airplay] table, so the Mac's sound stays on the Mac";
+}
+
+/** The same, for the target picker's row. */
+export function airplayShortLabel(airplay: boolean | null): string | null {
+  if (airplay === null) {
+    return null;
+  }
+  return airplay ? "AirPlay on" : "AirPlay off";
+}

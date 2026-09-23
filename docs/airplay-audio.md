@@ -10,8 +10,8 @@ measured against a physical Mac before any of it was wired in.
 
 It is the `airplay` Cargo feature: on by default, and in every released
 artifact, the container included. A build with `--no-default-features` and
-without `--features airplay` has no speaker, and refuses both `[airplay]` and
-`audio` on a Mac.
+without `--features airplay` has no speaker, refuses `[airplay]`, and carries no
+sound from a Mac.
 
 ## Configuration
 
@@ -26,11 +26,13 @@ subtype = "ard"          # or "ard-high-performance"
 host = "mac.local"
 username = "me"
 password = "…"
-audio = true
 ```
 
-`audio = true` on an Apple target needs the `[airplay]` table, and `[airplay]`
-with no Apple target carrying audio is refused. The table is top-level, like
+The speaker is gateway-wide, and so is the switch: with `[airplay]`, every target
+of either Apple subtype carries audio, and without it none does. An Apple target
+refuses the `audio` key, and `[airplay]` with no Apple target is refused. The
+picker and the session's Info card say whether AirPlay is on for a Mac, and the
+menu's **Enable AirPlay audio** button is shown only when it is. The table is top-level, like
 `[branding]` and `[meter]`, so a `remotex tui` instance config may set it too. The
 speaker is named `<[branding].text> - remotex`, which is what the Mac's Sound menu
 shows.
@@ -54,7 +56,7 @@ and the password, so this is done once, not per session. `audio_codec`,
   nothing that is not already encrypted.
 - **One speaker per gateway, outliving sessions.** The Mac chooses a speaker once
   and keeps it, so the speaker stays up with the gateway. It feeds the audio bridge
-  of whichever Apple session with `audio` is running, and each engine's start
+  of whichever Apple session is running, and each engine's start
   attaches its own bridge. With no such session, a stream is received and thrown
   away, and the Mac keeps playing to it.
 - **One sender at a time.** A second Mac's SETUP gets `453` until the first
