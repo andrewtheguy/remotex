@@ -1,9 +1,14 @@
 # A Mac's sound over AirPlay
 
-**Experimental.** Apple's Screen Sharing carries no sound a client can take. So
-a Mac on either Apple subtype sends its sound the way it sends it to any speaker:
-the gateway is an AirPlay 1 speaker on the LAN, the Mac picks it from its Sound
-output menu, and what it plays reaches the browser like any other target's sound.
+**Experimental.** This is a workaround for the Screen Sharing audio path current
+remotex does not implement. High Performance Screen Sharing has a measured
+private AAC-ELD-over-SRTP system-audio stream; Standard mode has no measured
+equivalent. Neither path supplies audio to the current Apple engine. Instead, a
+Mac on either subtype sends its sound the way it sends it to any speaker: the
+gateway is an AirPlay 1 speaker on the LAN, the Mac picks it from its Sound output
+menu, and what it plays reaches the browser like any other target's sound. See
+[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio)
+for the native High Performance path and why it remains deliberately absent.
 
 The speaker is `src/airplay/`. It began as a standalone proof of concept that was
 measured against a physical Mac before any of it was wired in.

@@ -13,10 +13,13 @@ Ghidra 12.1.4 headless and objdump for code Ghidra had not disassembled:
 - `screensharingd`, the server daemon, which is stripped — its functions are cited
   by Ghidra address, with the name its own `__func__` log strings give in brackets;
 - `ScreensharingAgent`, the per-session agent that captures, posts input, owns the
-  pasteboard and builds the display messages.
+  pasteboard and builds the display messages;
+- `AVConference`, the private media stack.
 
-Where a measurement and the binary disagree, the binary wins. The binaries and
-their decompiles are archived outside the repository.
+Wire captures and live behavior decide what is emitted; the binaries decide
+server branches and rules that the wire cannot expose. An apparent disagreement
+must be traced through conversion layers rather than resolved from an
+intermediate numeric value.
 
 The implementation is `src/vnc_record.rs` (the 003.889 transport),
 `src/vnc_apple.rs` (Apple messages and encodings), and the two Apple paths in
@@ -41,7 +44,7 @@ boundary and a burst of viewport reports, but remains reverse engineered.
 | Fractional ratios | A virtual display mode whose backing/scaled ratio is not 1 or 2 is not rounded by the Mac. Measured August 23, 2026 on macOS 26.6.2: 2561×1440 backing over 1707×960 scaled (1.5x) created 1707×960 points at 2x, 2880×1800 over 1920×1200 (1.5x) created 960×600 points at 2x, and 2560×1440 over 2048×1152 (1.25x) created 960×540 points at 2x — a desktop whose text looks zoomed while the Dock, shrunk to fit the width, does not. Remotex therefore asks only for 1x or 2x (`protocol::render_density`). |
 | Lingering display | The virtual display outlives its session: a reconnect within a few seconds found it still there (the new session's ServerInit reported the previous mode and the display kept its id), and one after 45 s found the Mac back on its 800×600 physical display with a fresh id. The new session's own layout arrives either way, including when the requested mode equals the lingering one. |
 | Pre-rekey messages | `MiscStatus` (`0x14`) can arrive in the cleartext window between `SetEncryption` and the rekey, especially after a server restart when the Mac has stale clipboard state. The client must tolerate it during `await_rekey`. |
-| Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
+| Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets; the Adaptive media stream (`0x1c`), including its HEVC video and AAC-ELD system-audio legs. Remotex's Mac audio is an AirPlay workaround, not evidence that High Performance has no audio. |
 | Authentication | Remote Management's default "All users" setting rejects valid account credentials with the same error as an incorrect password. Add the account to the per-user access list with Observe and Control before treating the failure as a protocol fault. |
 
 ## Remote Management access
@@ -664,18 +667,26 @@ incremental flag of 0 is a forced full update.
 
 ## The media stream: High Performance system audio
 
-> **Remotex no longer speaks this stream.** The implementation this section
-> describes — `src/vnc_apple_audio.rs` (the wire), `src/aac_eld.rs` (the decoder,
-> behind the `apple-hp-audio` Cargo feature) and `tests/hp_audio_probe.py` — was
-> removed after **v0.0.249**, the last release that carries it; `git checkout
-> v0.0.249` recovers all of it. Wherever the text below names one of those files
-> or says what remotex does, it describes v0.0.249. The measurements are kept
-> because they hold for the Mac whether or not anything here uses them.
+> **Current remotex does not speak this stream.** Standard Screen Sharing has no
+> measured equivalent audio path. High Performance does: the private Adaptive
+> media stream below carries system audio, but current remotex deliberately does
+> not negotiate or receive it. The gateway-wide AirPlay receiver is the current
+> workaround for both Apple subtypes; it is not part of Screen Sharing.
+>
+> The removed implementation — `src/vnc_apple_audio.rs` (the wire),
+> `src/aac_eld.rs` (the decoder, behind the `apple-hp-audio` Cargo feature) and
+> `tests/hp_audio_probe.py` — was present through **v0.0.249**; `git checkout
+> v0.0.249` recovers it. Wherever the text below names one of those files or says
+> what remotex does, it describes that historical version. Its unconditional
+> stripping of a ten-byte SRTP authentication tag without verifying it, and its
+> cleartext RTCP receiver reports, were functional shortcuts rather than a
+> complete SRTP/SRTCP implementation; do not copy them. The measurements are
+> kept because they hold for the Mac whether or not anything here uses them.
 
-High Performance carries the Mac's **system audio**, and it does not ride RFB at
-all. The agent (`ScreensharingAgent`'s `SSUDPSender`) opens an AVConference — the
+High Performance carries the Mac's **system audio**. Its payload does not ride
+RFB: the agent (`ScreensharingAgent`'s `SSUDPSender`) opens an AVConference — the
 FaceTime media stack — `AVCAudioStream` over **UDP with SRTP** straight to the
-viewer. RFB only negotiates it. The gateway implemented this in
+viewer, while RFB negotiates it. The gateway implemented this in
 `src/vnc_apple_audio.rs` (the wire) and `src/aac_eld.rs` (the decoder); the
 offers Apple's client generated were rebuilt there field by field and checked
 against the captured bytes. This was measured on macOS 26.6.2 with a throwaway
@@ -683,6 +694,14 @@ Python client (`tests/hp_audio_probe.py`) that speaks the whole 003.889 wire by
 hand and never calls into `src/`; it **negotiated and decrypted 1,794 live audio
 packets** from a Mac that had sound playing. None of the mechanism below is
 documented by Apple.
+
+This path was usable, not merely a negotiation experiment. September 22 gateway
+QA reached **6,000 consecutive RTP packets and 6,000 decoded AAC-ELD units in
+about 61 seconds**, with zero full-queue drops, zero concealed units and zero
+undecodable units. In a repeated run an attached `/ws/audio` subscriber was sent
+413 Opus packets before it disconnected. Its removal therefore describes current
+product scope and dependency/licensing tradeoffs, not an absence of audio in
+Apple's protocol.
 
 **The negotiation is one client message and up to three server reply types.** A
 successful negotiation gets message 1 (the ports) and message 2 (the answer); message
@@ -815,17 +834,31 @@ configure:` log and from the decrypted packets):
   exactly 480 per packet.
 - **RTCP once a second, timeout 3 s.** A viewer that never sends RTCP has its
   stream stopped by the agent.
-- **SRTP AES-256 counter mode.** RFC 3711 key derivation from the 46-byte master
-  (32-byte key, 14-byte salt); per-packet IV is `(salt << 16) XOR (ssrc << 64) XOR
-  (packetIndex << 16)`. Decrypting the captured packets with the key the client
-  itself sent produced structured AAC-ELD: 1,423 of 1,794 frames share the
-  `0x89ffffff` near-silence prefix, which random output from a wrong key never
-  does. The client binary sets `SRTPCipherSuite = 5`
-  (`AES_256_AUTH_NONE`), yet the agent's negotiated config logged suite **7**
-  (`AES_256_AUTH_SHA1_80`, a 10-byte auth tag appended to each packet). Both
-  readings decrypt the same leading bytes, since the tag is appended rather than
-  encrypted; a real receiver should strip a trailing 10-byte tag if suite 7 is
-  confirmed on its host.
+- **SRTP AES-256 counter mode with HMAC-SHA1-80.** RFC 3711 key derivation from
+  the 46-byte master (32-byte key, 14-byte salt); per-packet IV is
+  `(salt << 16) XOR (ssrc << 64) XOR (packetIndex << 16)`. Decrypting the
+  captured packets with the key the client itself sent produced structured
+  AAC-ELD: 1,423 of 1,794 frames share the `0x89ffffff` near-silence prefix,
+  which random output from a wrong key never does. Both native ends initially
+  select client-facing numeric suite **5**. The agent's
+  `-[SSUDPSender sendToRemoteAddress:...]` calls `setSRTPCipherSuite:5` and
+  `setSRTCPCipherSuite:5` on the generated audio configuration before it installs
+  the keys and creates `AVCAudioStream`. That is not the internal SRTP enum:
+  `AVCMediaStreamConfig`'s dictionary builder calls
+  `_VCMediaStreamCipherSuite_CipherSuiteWithClientCipherSuite`, whose table maps
+  client suite 5 to internal suite **7**. AVConference's internal description
+  table names 7 `SRTP_CIPHER_AES_256_AUTH_SHA1_80`. This settles the earlier
+  apparent 5-versus-7 disagreement and confirms the negotiated-config log. The
+  wire agrees: removing the trailing ten bytes exposes the four-byte AAC-ELD
+  near-silence units seen throughout the archived QA runs. A correct receiver
+  must verify and remove that HMAC-SHA1-80 tag; v0.0.249 removed it without
+  verification.
+
+The same client-5-to-internal-7 conversion applies to SRTCP. The historical
+probe and gateway sent an eight-byte cleartext receiver report once a second,
+and the Mac kept streaming, but that demonstrates permissive liveness behavior,
+not the native protected RTCP wire. A new implementation should protect SRTCP
+and should not depend on the clear report being accepted.
 
 One correction to the probe, found when its RTCP check was ported: it masked the
 second byte to seven bits before testing for 200–207, so the Mac's once-a-second
@@ -986,9 +1019,13 @@ of no help in escaping the AAC-ELD decoder.
   be sent for audio to start, but its picture was never received or decoded.
 - Authentication types 33, 35 and 36: not attempted, type 30 being sufficient.
 - Multi-rekey, and whether sequence counters survive a second one.
-- The negotiation codec table's source, the audio payload type and bitrate, and the
-  RTCP timeout were measured, not read: AVConference's x86-64 slice was not
-  extracted.
+- The exact protected SRTCP receiver-report shape the native viewer sends. A
+  clear eight-byte report kept the tested sender alive, but is not evidence that
+  cleartext is the intended wire.
+- The negotiation codec table's source, the audio payload type and bitrate, and
+  the RTCP timeout were measured rather than read from their configuring code.
+  AVConference's x86-64 slice has since settled the cipher-suite mapping above,
+  but not those settings.
 - What Apple's viewer puts in its descriptor (name, modes, rotations = 7): that is
   built in ScreenSharingUI, also not extracted.
 - ClientInit `0x81` against a non-console user, a mirrored Mac, a record whose scale
@@ -1000,10 +1037,12 @@ of no help in escaping the AAC-ELD decoder.
 The probe was throwaway Python speaking the protocol by hand — deliberately not
 calling into `src/`, so a misreading on one side could not be agreed with by the
 other. It lived at `tmp/apple889_probe.py` (gitignored). The shape is: TCP to port
-5900, `RFB 003.889\n` both ways, security type 30, the DH exchange above, ClientInit
-`0xC1` (the `0x40` in it was harmless only because it ran as the console user),
-ServerInit, `SetEncodings`, `SetPixelFormat`, `SetEncryption(1)` and `(2)`,
-read the rekey, then a record layer as specified above around ordinary RFB.
+5900, `RFB 003.889\n` both ways, security type 30, the DH exchange above,
+ClientInit `0x81`, ServerInit, `SetEncodings`, `SetPixelFormat`,
+`SetEncryption(1)` and `(2)`, read the rekey, then a record layer as specified
+above around ordinary RFB. Do not use the older probe's `0xC1`: its `0x40` asks
+for the session-select exchange and happened to be harmless only for the console
+user.
 
 The pointer-mask measurement used two later probes, gitignored the same way:
 `tmp/input_trace_probe.py` drives the gateway WebSocket and reads

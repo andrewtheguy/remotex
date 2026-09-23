@@ -678,17 +678,18 @@ pub struct TargetConfig {
     #[serde(default)]
     pub clipboard: bool,
     /// The `audio` key as written, which [`ConfigFile::parse`] resolves into
-    /// [`Self::audio`]. Refused on either Apple subtype, whose sound the
-    /// `[airplay]` table decides.
+    /// [`Self::audio`]. Refused on either Apple subtype, whose external AirPlay
+    /// workaround the gateway-wide `[airplay]` table decides.
     #[serde(default, rename = "audio")]
     pub audio_key: Option<bool>,
     /// Carry the remote's sound. Packets are sent only while the attached client
     /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
     /// asks a generic server for wlshare's audio extension, FLAC on the RFB
     /// connection, and is answered by wlshare — see [`crate::vnc_audio`]. Both
-    /// opt in with `audio = true`. Either Apple subtype carries it exactly when
-    /// the gateway-wide `[airplay]` table is set: the Mac sends its sound to the
-    /// gateway's AirPlay speaker — see [`crate::airplay`].
+    /// opt in with `audio = true`. For either Apple subtype this flag instead
+    /// enables the bridge exactly when the gateway-wide `[airplay]` table is set:
+    /// the Mac sends its sound separately to the gateway's AirPlay speaker — see
+    /// [`crate::airplay`].
     #[serde(skip)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
@@ -1426,8 +1427,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub meter: Option<MeterSection>,
     /// The `[airplay]` table: the password of the AirPlay speaker a Mac sends its
-    /// sound to. Its presence turns audio on for every Apple target, and it is
-    /// refused when no target has an Apple subtype.
+    /// sound to. Its presence enables that workaround for every Apple target, and
+    /// it is refused when no target has an Apple subtype.
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub airplay: Option<AirPlaySection>,
@@ -1533,13 +1534,14 @@ impl ConfigFile {
             if target.port == 0 {
                 target.port = target.protocol.default_port();
             }
-            // A Mac's sound is the gateway's AirPlay speaker's, which is not the
-            // target's to turn on or off: the `[airplay]` table is, for every Mac.
+            // A Mac's sound uses the gateway's external AirPlay workaround, which
+            // is not the target's to turn on or off: the `[airplay]` table is, for
+            // every Mac.
             anyhow::ensure!(
                 !(target.receives_airplay() && target.audio_key.is_some()),
-                "target {:?} sets audio on an {} target, whose sound arrives at the gateway's \
-                 AirPlay speaker — the [airplay] table turns that on for every Mac. Remove \
-                 the key.",
+                "target {:?} sets audio on an {} target, whose sound uses the gateway's \
+                 AirPlay workaround — the [airplay] table enables that for every Mac. \
+                 Remove the key.",
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
             );
@@ -1698,9 +1700,10 @@ impl ConfigFile {
             );
             // Audio is carried three ways: MS-RDPEA on RDP, wlshare's audio
             // extension on a generic VNC target ([`crate::vnc_audio`]), and the
-            // gateway's AirPlay speaker for either Apple subtype, whose Screen
-            // Sharing carries no sound a client can take ([`crate::airplay`]). The
-            // last is checked with the `[airplay]` table above.
+            // gateway's AirPlay speaker for either Apple subtype. The current
+            // Apple engine deliberately does not negotiate High Performance's
+            // private media stream; AirPlay is its workaround ([`crate::airplay`]).
+            // The last is checked with the `[airplay]` table above.
             //
             // A generic VNC target is *asked* rather than assumed: the extension is
             // discovered on the connection, and a server that never announces it —
@@ -4649,8 +4652,8 @@ mod tests {
         }
     }
 
-    /// RDP and generic VNC both take audio; Apple's standard Screen Sharing is
-    /// the one target that refuses it by name.
+    /// RDP and generic VNC both take a per-target audio key; Apple audio is
+    /// selected gateway-wide by `[airplay]`, so both Apple subtypes refuse it.
     ///
     /// The error has to say what does carry it, because the mistake behind the
     /// key is a belief about what the subtype does rather than a typo — and a
@@ -4878,10 +4881,10 @@ mod tests {
         assert!(rendered.contains("egfx = false"), "{rendered}");
     }
 
-    /// A Mac's sound arrives over AirPlay on either subtype, so the gateway-wide
-    /// `[airplay]` table, not the target, is what decides it: every Mac carries
-    /// audio exactly when the table is set, and the resolved config carries the
-    /// speaker under the gateway's name.
+    /// A Mac's sound arrives separately over AirPlay on either subtype, so the
+    /// gateway-wide `[airplay]` table, not the target, decides the workaround:
+    /// every Mac has an audio bridge exactly when the table is set, and the
+    /// resolved config carries the speaker under the gateway's name.
     #[cfg(feature = "airplay")]
     #[test]
     fn a_macs_audio_follows_the_airplay_table() {
@@ -4904,7 +4907,7 @@ mod tests {
             .unwrap()
             .resolve()
             .unwrap();
-            assert!(config.targets[0].audio, "[airplay] carries every Mac's sound");
+            assert!(config.targets[0].audio, "[airplay] enables every Mac's audio bridge");
             assert_eq!(
                 config.airplay,
                 Some(AirPlayConfig { name: "Studio - remotex".into(), password: "sesame".into() })
@@ -4964,8 +4967,8 @@ mod tests {
         assert!(format!("{err:#}").contains("Shorten [branding].text to 40 bytes"), "{err:#}");
     }
 
-    /// A build without the speaker says so when asked for one, and its Macs
-    /// carry no sound.
+    /// A build without the speaker says so when asked for one, and its current
+    /// Apple engine supplies no sound.
     #[cfg(not(feature = "airplay"))]
     #[test]
     fn a_build_without_airplay_refuses_the_table() {
