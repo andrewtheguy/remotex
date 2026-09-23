@@ -13,9 +13,9 @@
 //!
 //! **Compression**: standard zlib (`ENCODING_ZLIB`, decoded in
 //! [`crate::vnc_encodings`]) instead of raw pixels, which is around fifty times
-//! fewer bytes on a static desktop. Apple's own still-image codecs would do better
-//! still, but their payload formats are unresolved in the reference this was
-//! written from, and a client must not advertise an encoding it cannot decode.
+//! fewer bytes on a static desktop. Apple's private framebuffer codecs would do
+//! better still, but their payload formats are unresolved in the reference this
+//! was written from, and a client must not advertise an encoding it cannot decode.
 //!
 //! **Picking a physical screen in Standard mode**:
 //! [`ENCODING_DISPLAY_LAYOUT`] carries the Mac's displays and
@@ -105,9 +105,9 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
-/// here. That is why Apple's own still-image codecs are absent — the reference
-/// leaves their payload formats unresolved, so advertising them would ask for
-/// rectangles this client could only guess at. Media-stream encoding 1010 is
+/// here. That is why Apple's own private framebuffer codecs are absent — the
+/// reference leaves their payload formats unresolved, so advertising them would
+/// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
 /// absent because advertising it starts the separate Adaptive HEVC/AAC-ELD
 /// transport, which this engine deliberately does not implement.
 pub const ENCODINGS: &[i32] = &[
@@ -190,12 +190,13 @@ pub fn set_encryption_start() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]
 }
 
-/// `SetEncryption(command = 2)`.
+/// `SetEncryption(command = 2, argument = 1)`: tell the server to decrypt every
+/// client message it receives after the rekey.
 ///
-/// Nominally "stop encryption", which it plainly is not: native Screen Sharing
-/// sends this immediately after `command = 1` and the session that follows is
-/// encrypted throughout. Sent because native sends it.
-pub fn set_encryption_stop() -> Vec<u8> {
+/// The daemon names the resulting state exactly that way. Argument zero disables
+/// receive-side decryption; this is not a request to stop encrypting the server's
+/// stream.
+pub fn enable_inbound_record_decryption() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
@@ -765,7 +766,7 @@ mod tests {
             vec![0x12, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]
         );
         assert_eq!(
-            set_encryption_stop(),
+            enable_inbound_record_decryption(),
             vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
         );
     }

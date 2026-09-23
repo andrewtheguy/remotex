@@ -75,6 +75,27 @@ The **VNC viewers may control screen with password** setting is for clients that
 use RFB security type 2. Remotex authenticates with type 30 and the account's
 own password, so this legacy option does not need to be enabled.
 
+### Apple's private authentication types
+
+Only type 30 has been exercised on the wire and is implemented by remotex, but
+Apple's viewer identifies the other private types in
+`_RFBAuthenticateCore`:
+
+| Type | Apple viewer path | Audit status |
+|---:|---|---|
+| 30 (`0x1e`) | DH username/password | Wire-tested; implemented by remotex. |
+| 31 (`0x1f`) | `_AuthenticateDHNamePassword` | Statically identified; the distinction from types 30 and 32 is not yet isolated. |
+| 32 (`0x20`) | `_AuthenticateDHNamePassword` | Statically identified; the distinction from types 30 and 31 is not yet isolated. |
+| 33 (`0x21`) | RSA username/password | Statically identified; Apple's implementation has plain-RSA and RSA-plus-SRP branches and requires an RSA keychain label. |
+| 34 (`0x22`) | Preauthorized connection | Statically identified; exchanges a server challenge and client response using prearranged 16-byte key material. |
+| 35 (`0x23`) | Kerberos | Statically identified; performs the Kerberos token exchange and derives the session's AES contexts from the Kerberos session key. |
+| 36 (`0x24`) | SRP username/password | Statically identified; runs Apple's SRP exchange and then `_SetupAESKeys`. |
+
+These mappings describe the code paths in the macOS 26.6.2 viewer, not verified
+interoperability. They do not justify selecting another advertised type in the
+gateway: type 30 remains the known account-credential path and supplies the wrap
+key used by the 003.889 record-layer rekey.
+
 ## Confirmed display modes
 
 `subtype = "ard"` is Apple Screen Sharing's Standard mode over RFB 3.8 and shares
@@ -117,7 +138,7 @@ The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
 ```text
 +0x00 u16      descriptor size, including the mode table
 +0x02 120B     display name, NUL-terminated by the daemon
-+0x7a u32      display_flags = 1 (bit 0 dynamic, bit 1 do not adjust refresh rate)
++0x7a u32      display_flags = 1 (bit 0 dynamic, bit 1 supplies a custom refresh rate)
 +0x7e u32      display_type = 4 (virtual display; the agent ignores it and sets 4)
 +0x82 f32 BE   physical width in millimetres
 +0x86 f32 BE   physical height in millimetres
@@ -158,6 +179,23 @@ the name only when it first creates the display (`FUN_10002b827`). Unless the
 `com.apple.RemoteManagement BlankScreen` preference is false it creates the virtual
 display exclusive (option `0x40`), which is what hides the physical screens. The
 daemon clamps the display count to 2 and requires at least `0xc0` bytes.
+
+The current native descriptor is built in the arm64e ScreenSharing framework,
+not ScreenSharingUI. `-[SSSession stConfigureVirtualDisplaysWithDimensions:]`
+is gated by the `ScreenSharing/ProMode` feature and server feature `0x1a`; the
+x86-64 implementation of that method is a stub. The UI chooses Standard, one
+virtual display, or two virtual displays, while the framework constructs the
+wire request. It names them `Virtual Display` and `Virtual Display 2`, supplies
+five modes per display, and sends rotations `7`. The first mode is replaced by
+the opening dimensions passed to the method; the remaining logical/backing
+pairs are 1440×900/2880×1800, 1920×1080/3840×2160,
+1440×810/2880×1620, and 1312×848/2624×1696. All five have density 2.
+The framework sets display flag bit 0 for dynamic resolution, bit 1 when a
+custom refresh rate from 15 through 120 Hz is supplied, and mode flag bit 0
+when HDR was requested. Without a custom rate it asks the HEVC decoder for the
+maximum supported rate for each mode and falls back to 60 Hz. Fields left zero
+by this native builder include the display type; remotex's working descriptor
+explicitly sends type 4, as the daemon itself assigns to the virtual display.
 
 Apple's client UI may impose an 800×600 floor, but that is not a server protocol
 limit on the measured host: the same 26.6 session accepted 799×599 exactly and
@@ -606,13 +644,15 @@ Worth stating, because a reverse-engineered document offers no way to tell a
 measured claim from an inferred one, and these carried the most risk.
 
 **The record layer, in full and in both directions.** AES-128-CBC with one
-persistent context per direction, never reset — record N's last ciphertext block is
-record N+1's IV. `u16 ciphertext_len` outside, `u16 body_len || body || filler ||
+persistent context per direction and key epoch — record N's last ciphertext block
+is record N+1's IV until a rekey starts both directions from its replacement IV.
+`u16 ciphertext_len` outside, `u16 body_len || body || filler ||
 byte[20] integrity` inside, `filler_len = (-(2 + body_len + 20)) mod 16`, and
 `integrity = SHA1(u32_be(seq) || plaintext[0 .. len-20])` with independent
-non-resetting per-direction sequence counters from 0. Every record of every session
-verified its trailer, and the Mac accepted everything sent back the same way. Zero
-filler is accepted (the document permits zero or random).
+per-direction sequence counters from 0. Those counters do not reset at a rekey.
+Every record of every measured session verified its trailer, and the Mac accepted
+everything sent back the same way. Zero filler is accepted (the document permits
+zero or random).
 
 **Reassembly by concatenation is mandatory, not an edge case.** A full-screen zlib
 rectangle is ~400 KB against a 65 520-byte record ceiling, so it spans several
@@ -634,10 +674,14 @@ section as having no capture behind it.
 **The rekey.** Delivered as a single-rectangle FramebufferUpdate with `x=y=w=h=0`
 and encoding `0x44f`; body `u32 generation || 16B wrapped key || 16B wrapped iv`,
 each half AES-128-ECB-decrypted independently under the wrap key. `generation` is 1.
-Only ever one per session, so multi-rekey remains unexercised. The wrap key rotates
-to the new key, and the record sequence counter is never reset. The daemon's record
-writer (`FUN_10005e9e7`) fills with the last body byte repeated and puts at most
-`0x8000` bytes in a record. The Mac may send
+The live captures exercised only the initial rekey, but the daemon's
+`HandleSetEncryptionMessage` and send path settle repeated rotations: command 1
+again wraps the replacement under the current content key, sends the rekey in the
+old record epoch, and then rebuilds both CBC contexts with the replacement key and
+IV. Its send and receive sequence counters are not reset, and the generation field
+is written as 1 again rather than incremented. The daemon's record writer
+(`FUN_10005e9e7`) fills with the last body byte repeated and puts at most `0x8000`
+bytes in a record. The Mac may send
 `MiscStatus` (`0x14`) in the cleartext window between `SetEncryption` and the
 rekey; the client must step over it rather than bailing on it.
 
@@ -1011,14 +1055,18 @@ of no help in escaping the AAC-ELD decoder.
 
 ## Still unknown
 
-- Apple's still-image codecs `0x3ea` and `0x3f3`; the document leaves the first's
-  rectangle body and the second's command-code table unresolved, and neither was
-  advertised here, so nothing was learned.
+- Apple's private framebuffer codecs. Exported constants identify `0x3ea` as
+  `kSSVideoEncoding_SubZlibThousandsCodec` and `0x3f3` as
+  `kSSVideoEncoding_MultiVariantScreenshare`. The latter is a stateful adaptive
+  DCT/JPEG-like tile codec with partial updates and quantization tables, not merely
+  a still-image encoding. The first's rectangle body and the second's command-code
+  table remain unresolved, so neither is advertised here.
 - The media stream's **HEVC screen video** leg (`0x1c` video1/video2, SRTP). Only
   the audio leg was decoded — see "The media stream" above; the video offer had to
   be sent for audio to start, but its picture was never received or decoded.
-- Authentication types 33, 35 and 36: not attempted, type 30 being sufficient.
-- Multi-rekey, and whether sequence counters survive a second one.
+- The exact wire shapes and interoperability of authentication types 31 through
+  36. Their roles and implementation paths are identified above, but only type
+  30 has been exercised against the server.
 - The exact protected SRTCP receiver-report shape the native viewer sends. A
   clear eight-byte report kept the tested sender alive, but is not evidence that
   cleartext is the intended wire.
@@ -1026,8 +1074,6 @@ of no help in escaping the AAC-ELD decoder.
   the RTCP timeout were measured rather than read from their configuring code.
   AVConference's x86-64 slice has since settled the cipher-suite mapping above,
   but not those settings.
-- What Apple's viewer puts in its descriptor (name, modes, rotations = 7): that is
-  built in ScreenSharingUI, also not extracted.
 - ClientInit `0x81` against a non-console user, a mirrored Mac, a record whose scale
   is 0.0, and whether the `AutoFrameBufferUpdate` push path ever fires: the test Mac
   has one account and one screen.
