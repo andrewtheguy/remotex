@@ -60,7 +60,6 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with all default features disabled |
-| `publish-full-image.sh` | build the operator's own linux/amd64 image of a release tag with `apple-hp-audio`, from the source archive GitHub serves for it, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -130,13 +129,6 @@ freed memory in per-thread arenas, and the gateway's per-session threads grew it
 with every session. jemalloc fixes its page size at build time, and a 4K build
 will not start on the 16K and 64K kernels arm64 boards ship, so the linux-arm64
 release sets `JEMALLOC_SYS_WITH_LG_PAGE=16`. Windows keeps the system heap.
-
-The optional `apple-hp-audio` feature needs no archive at all: its AAC-ELD
-decoder is Fraunhofer's own Rust port, pure Rust and sourced as a git crate, so
-it adds nothing to a builder's prerequisites. Its non-OSI-approved
-license is what keeps it out of every release artifact. See [Audio frames](../docs/architecture.md#audio-frames) for the media
-design and [Installing remotex](../docs/install.md#apple-high-performance-audio-build-it-yourself)
-for a manual feature build.
 
 ## Releases
 

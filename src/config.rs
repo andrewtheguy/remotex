@@ -680,11 +680,8 @@ pub struct TargetConfig {
     /// Carry the remote's sound. Packets are sent only while the attached client
     /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
     /// asks a generic server for wlshare's audio extension, FLAC on the RFB
-    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]; an
-    /// `ard-high-performance` target negotiates the Mac's system audio over its
-    /// media stream, and only in a gateway built with the `apple-hp-audio` feature
-    /// — see [`crate::vnc_apple_audio`]. Refused on Apple's standard Screen
-    /// Sharing, which has neither.
+    /// connection, and is answered by wlshare — see [`crate::vnc_audio`].
+    /// Refused on both Apple subtypes, whose Screen Sharing carries no sound.
     #[serde(default)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
@@ -1065,8 +1062,7 @@ impl TargetConfig {
 
     /// The one PCM format this target's wave buffers can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
-    /// ([`crate::audio::PCM_CD_QUALITY`]), what the Mac's AAC-ELD decodes to
-    /// ([`crate::vnc_apple_audio::SOURCE_FORMAT`]), or what a generic VNC server
+    /// ([`crate::audio::PCM_CD_QUALITY`]), or what a generic VNC server
     /// is asked to send over wlshare's audio extension
     /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
@@ -1077,14 +1073,8 @@ impl TargetConfig {
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
-            // Named rather than wildcarded, so a subtype added later has to
-            // say which of the two audio paths it is. Standard `ard` carries
-            // neither and is refused the key at parse; naming it beside the
-            // generic case is what makes that a decision rather than a default.
-            Protocol::Vnc => match self.subtype {
-                Some(Subtype::ArdHighPerformance) => crate::vnc_apple_audio::SOURCE_FORMAT,
-                None | Some(Subtype::Ard) => crate::vnc_audio::SOURCE_FORMAT,
-            },
+            // Both Apple subtypes are refused the key at parse.
+            Protocol::Vnc => crate::vnc_audio::SOURCE_FORMAT,
         }
     }
 
@@ -1624,13 +1614,10 @@ impl ConfigFile {
                  through the graphics pipeline alone. Remove one of the two keys.",
                 target.name
             );
-            // Audio is carried by three paths and refused elsewhere rather than
-            // ignored: MS-RDPEA on RDP, wlshare's audio extension on a generic VNC
-            // target ([`crate::vnc_audio`]), and Apple's media stream on High
-            // Performance mode — the last only in a build with the AAC-ELD decoder
-            // the Mac's stream needs (the `apple-hp-audio` feature, off by default
-            // and absent from every release binary). What is left is Apple's
-            // standard Screen Sharing, which carries no sound and does not speak
+            // Audio is carried by two paths and refused elsewhere rather than
+            // ignored: MS-RDPEA on RDP, and wlshare's audio extension on a generic
+            // VNC target ([`crate::vnc_audio`]). What is left is Apple's Screen
+            // Sharing, which carries no sound in either subtype and does not speak
             // wlshare's extension either, so `audio = true` there could only ever be
             // a mistake about what the subtype carries. Naming each case at parse
             // time is the difference between a config error and a session that is
@@ -1643,7 +1630,7 @@ impl ConfigFile {
             //
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about the
-            // *engine* and the *build* and not about any of them.
+            // *engine* and not about any of them.
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // generic VNC target, asked for the way its audio extension is: a
             // server that never announces it leaves the camera unplugged. Apple's
@@ -1666,27 +1653,14 @@ impl ConfigFile {
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
             );
-            if target.audio && target.protocol == Protocol::Vnc {
-                anyhow::ensure!(
-                    target.subtype != Some(Subtype::Ard),
-                    "target {:?} sets audio on a {} target, and Apple's standard Screen Sharing \
-                     carries none: its system audio exists in High Performance mode alone, and \
-                     wlshare's audio extension a generic vnc target is asked for is not something \
-                     a Mac speaks. Remove the key to start the session without sound.",
-                    target.name,
-                    Subtype::Ard.name()
-                );
-                anyhow::ensure!(
-                    target.subtype != Some(Subtype::ArdHighPerformance)
-                        || cfg!(feature = "apple-hp-audio"),
-                    "target {:?} sets audio on an ard-high-performance target, and this gateway \
-                     was built without the apple-hp-audio feature: the Mac's system audio is \
-                     AAC-ELD, which needs a decoder that is not in the default build or in any \
-                     release binary. Build it yourself with `cargo build --release --features \
-                     apple-hp-audio`, or remove the key to start the session without sound.",
-                    target.name
-                );
-            }
+            anyhow::ensure!(
+                !target.audio || target.protocol == Protocol::Rdp || target.subtype.is_none(),
+                "target {:?} sets audio on an {} target, and Apple's Screen Sharing carries no \
+                 sound, while wlshare's audio extension a generic vnc target is asked for is not \
+                 something a Mac speaks. Remove the key to start the session without sound.",
+                target.name,
+                target.subtype.map_or("apple", Subtype::name)
+            );
             // Same rule one step down: a codec for audio that was never turned on
             // is a key that could not do anything, and the likely typo behind it
             // is a forgotten `audio = true` rather than a deliberate choice.
@@ -4805,76 +4779,37 @@ mod tests {
         assert!(rendered.contains("egfx = false"), "{rendered}");
     }
 
-    /// Standard mode has no audio to offer — Apple's media stream is High
-    /// Performance's — so `ard` is refused the same way plain `vnc` is, and the
-    /// error names the subtype that does carry it.
+    /// Neither Apple subtype carries sound, so both are refused the key the way a
+    /// misplaced camera is, and the error names the subtype and the path a vnc
+    /// target can have instead.
     #[test]
-    fn audio_is_refused_on_standard_ard_by_subtype_name() {
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
+    fn audio_is_refused_on_both_apple_subtypes() {
+        for subtype in ["ard", "ard-high-performance"] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
 
-            [[targets]]
-            name = "mac"
-            protocol = "vnc"
-            subtype = "ard"
-            host = "10.0.0.5"
-            username = "andrew"
-            password = "h"
-            audio = true
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("on a ard target"), "{rendered}");
-        assert!(rendered.contains("High Performance"), "{rendered}");
-        assert!(
-            rendered.contains("wlshare's audio extension"),
-            "the other path a vnc target can have is named too: {rendered}"
-        );
-    }
-
-    /// High Performance audio is a build decision before it is a config one: the
-    /// key is accepted exactly when the gateway has the AAC-ELD decoder compiled
-    /// in, and otherwise refused by an error that says how to build one. Both
-    /// halves are asserted from the same test, under the same `cfg`, so a build
-    /// with either answer runs the check that applies to it.
-    #[test]
-    fn audio_on_high_performance_follows_the_build() {
-        let parsed = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "mac"
-            protocol = "vnc"
-            subtype = "ard-high-performance"
-            host = "10.0.0.5"
-            username = "andrew"
-            password = "h"
-            audio = true
-            audio_codec = "pcm"
-            "#,
-            site_passwd_line()
-        ));
-        if cfg!(feature = "apple-hp-audio") {
-            let config = parsed.unwrap().resolve().unwrap();
-            let target = &config.targets[0];
-            assert!(target.audio);
-            assert_eq!(target.audio_codec, Some(AudioCodec::Pcm));
-            assert_eq!(target.audio_source_format(), crate::vnc_apple_audio::SOURCE_FORMAT);
-        } else {
-            let rendered = format!("{:#}", parsed.unwrap_err());
-            assert!(rendered.contains("apple-hp-audio"), "{rendered}");
-            assert!(rendered.contains("--features"), "the fix is spelled out: {rendered}");
+                [[targets]]
+                name = "mac"
+                protocol = "vnc"
+                subtype = "{subtype}"
+                host = "10.0.0.5"
+                username = "andrew"
+                password = "h"
+                audio = true
+                "#,
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains(&format!("on an {subtype} target")), "{rendered}");
+            assert!(rendered.contains("wlshare's audio extension"), "{rendered}");
         }
     }
 
     /// The pre-negotiation format follows the engine: CD quality is what RDP is
-    /// asked for, 48 kHz stereo is what the Mac's AAC-ELD decodes to.
+    /// asked for, 48 kHz stereo is what a generic server is asked for.
     #[test]
     fn the_audio_source_format_is_the_engines() {
         // Without the key, which RDP is refused until its client carries sound —
@@ -4887,8 +4822,6 @@ mod tests {
         .resolve()
         .unwrap();
         assert_eq!(rdp.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
-        assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.sample_rate, 48_000);
-        assert_eq!(crate::vnc_apple_audio::SOURCE_FORMAT.channels, 2);
 
         // A generic vnc target's is the format this client asks the extension
         // for, which is the same 48 kHz stereo and needs no resampling either.

@@ -3,8 +3,6 @@
 //! The library exposes the pieces the binary wires together and that the
 //! integration tests exercise at the protocol level. See docs/architecture.md.
 
-#[cfg(feature = "apple-hp-audio")]
-pub mod aac_eld;
 pub mod assets;
 pub mod audio;
 pub mod auth;
@@ -41,7 +39,6 @@ pub mod tiles;
 pub mod video;
 pub mod vnc;
 pub mod vnc_apple;
-pub mod vnc_apple_audio;
 pub mod vnc_apple_clipboard;
 pub mod vnc_audio;
 pub mod vnc_camera;

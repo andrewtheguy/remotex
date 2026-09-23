@@ -1613,9 +1613,8 @@ impl SessionManager {
 /// engine — fine here, since multi session is permanently out of scope
 /// (single user, one active session at a time; see CLAUDE.md).
 /// `audio` is `Some` only when the target opted in, which the config file has
-/// already confined to the three paths that can carry it: RDP's MS-RDPEA,
-/// wlshare's audio extension a generic VNC target asks a server for, and Apple High
-/// Performance's media stream in a build with its decoder. Each of the `uplinks` is
+/// already confined to the two paths that can carry it: RDP's MS-RDPEA, and
+/// wlshare's audio extension a generic VNC target asks a server for. Each of the `uplinks` is
 /// `Some` only for an RDP target with its key.
 // Eight positional handoffs — the engine's whole input surface — rather than a
 // parameter struct that would exist only to be destructured at the one call site.

@@ -103,9 +103,6 @@ documentation.
   take raw PCM from the RFB connection, add a second codec to it, or add a
   configuration key naming the server. See
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
-- Apple High Performance system audio remains behind the non-default
-  `apple-hp-audio` feature and absent from release artifacts. Do not add a second
-  decoder beside the feature-gated AAC-ELD path.
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and

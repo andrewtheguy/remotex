@@ -1426,12 +1426,12 @@ mod tests {
             branding: "remotex".to_owned(),
             logo: false,
             throughput: false,
-            features: &["apple-hp-audio"],
+            features: &["embedded-gateway"],
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"remotex","logo":false,"throughput":false,"features":["apple-hp-audio"]}"#
+            r#"{"branding":"remotex","logo":false,"throughput":false,"features":["embedded-gateway"]}"#
         );
     }
 

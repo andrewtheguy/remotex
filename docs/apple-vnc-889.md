@@ -32,9 +32,7 @@ measurement, not specification: Apple documents none of RFB 003.889, and the
 confirmations here hold for the Macs and the macOS version named above rather
 than for the protocol. A macOS update is free to invalidate any row. The
 dynamic-resolution descriptor has been exercised against the arbitrary-size
-boundary and a burst of viewport reports, but remains reverse engineered. The
-system audio below is **experimental** and stays behind the non-default
-`apple-hp-audio` feature.
+boundary and a burst of viewport reports, but remains reverse engineered.
 
 | | |
 |---|---|
@@ -263,7 +261,7 @@ returns `UNSCALED` for the combined view and the display's scale after selection
 `screensharingd` resets its display flags on every `SetEncodings` and sets one for
 `DisplayInfo` (`0x44d`) and one for `AppleDisplayLayout` (`0x451`) wherever they
 appear in the list. Measured on macOS 26.6 with `tests/hp_audio_probe.py
---first-encodings`:
+--first-encodings` (in v0.0.249; see [The media stream](#the-media-stream-high-performance-system-audio)):
 
 | first `SetEncodings` | the Mac sends |
 |---|---|
@@ -666,18 +664,25 @@ incremental flag of 0 is a forced full update.
 
 ## The media stream: High Performance system audio
 
+> **Remotex no longer speaks this stream.** The implementation this section
+> describes — `src/vnc_apple_audio.rs` (the wire), `src/aac_eld.rs` (the decoder,
+> behind the `apple-hp-audio` Cargo feature) and `tests/hp_audio_probe.py` — was
+> removed after **v0.0.249**, the last release that carries it; `git checkout
+> v0.0.249` recovers all of it. Wherever the text below names one of those files
+> or says what remotex does, it describes v0.0.249. The measurements are kept
+> because they hold for the Mac whether or not anything here uses them.
+
 High Performance carries the Mac's **system audio**, and it does not ride RFB at
 all. The agent (`ScreensharingAgent`'s `SSUDPSender`) opens an AVConference — the
 FaceTime media stack — `AVCAudioStream` over **UDP with SRTP** straight to the
-viewer. RFB only negotiates it. The gateway implements this in
-`src/vnc_apple_audio.rs` (the wire, always built) and `src/aac_eld.rs` (the
-decoder, behind the non-default `apple-hp-audio` feature); the offers Apple's
-client generated are rebuilt there field by field and checked against the
-captured bytes. This was measured on macOS 26.6.2 with a
-throwaway Python client ([`tests/hp_audio_probe.py`](../tests/hp_audio_probe.py)) that speaks the
-whole 003.889 wire by hand and never calls into `src/`; it **negotiated and
-decrypted 1,794 live audio packets** from a Mac that had sound playing. None of
-the mechanism below is documented by Apple.
+viewer. RFB only negotiates it. The gateway implemented this in
+`src/vnc_apple_audio.rs` (the wire) and `src/aac_eld.rs` (the decoder); the
+offers Apple's client generated were rebuilt there field by field and checked
+against the captured bytes. This was measured on macOS 26.6.2 with a throwaway
+Python client (`tests/hp_audio_probe.py`) that speaks the whole 003.889 wire by
+hand and never calls into `src/`; it **negotiated and decrypted 1,794 live audio
+packets** from a Mac that had sound playing. None of the mechanism below is
+documented by Apple.
 
 **The negotiation is one client message and up to three server reply types.** A
 successful negotiation gets message 1 (the ports) and message 2 (the answer); message

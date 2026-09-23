@@ -245,8 +245,7 @@ its record layer, its control messages or its virtual display handling, so all o
 it is reverse engineered and only as correct as the Macs it has been measured
 against. A macOS update is free to change any of it. The dynamic-resolution
 descriptor has been measured across its arbitrary-size boundary and a burst of
-viewport reports, but remains reverse engineered. Its system audio is
-**experimental** and stays behind the non-default `apple-hp-audio` build feature.
+viewport reports, but remains reverse engineered.
 
 ## Container
 

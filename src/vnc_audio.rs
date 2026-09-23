@@ -33,8 +33,7 @@
 //!
 //! wlshare is the server this was built against; see docs/wlshare-audio.md.
 //! Apple's dialects are not asked: neither Screen Sharing subtype speaks this
-//! extension, and High Performance carries its system audio over the separate
-//! media stream in [`crate::vnc_apple_audio`].
+//! extension.
 
 use anyhow::Context as _;
 use symphonia_bundle_flac::FlacDecoder;

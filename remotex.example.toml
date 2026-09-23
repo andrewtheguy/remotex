@@ -232,27 +232,19 @@ password = "change-me"
 # floating menu's Audio button. An "rdp" target negotiates sound redirection
 # (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM; without the key the
 # host's own audio settings are left untouched and the session has no audio device.
-# A Windows host sends nothing on the channel until something plays. An
-# "ard-high-performance" target carries the Mac's system audio over Apple's media
-# stream — EXPERIMENTAL, and only in a gateway built by hand with
-# `cargo build --release --features apple-hp-audio`, because that stream is AAC-ELD
-# and the decoder's licence keeps it out of every release binary; any other build
-# refuses the key at startup. A plain "vnc" target asks the server for wlshare's
-# audio extension, and one that never announces it gives a silent session; Standard
-# Apple "ard" has no sound and refuses the key rather than ignoring it.
+# A Windows host sends nothing on the channel until something plays. A plain
+# "vnc" target asks the server for wlshare's audio extension, and one that never
+# announces it gives a silent session; both Apple subtypes have no sound and
+# refuse the key rather than ignoring it.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
-# sound away while nobody is listening. The Mac's stream decodes to 48000 Hz
-# 16-bit stereo. The Mac sends
-# by UDP to this gateway's address on a port it chooses, so it must reach the
-# gateway directly.
+# sound away while nobody is listening.
 #
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound works wherever the target carries it — an "rdp" target,
-# a plain "vnc" server that speaks wlshare's extension, or "ard-high-performance" in
-# an apple-hp-audio build.
+# or a plain "vnc" server that speaks wlshare's extension.
 #
 # Off leaves the remote's sound where it is.
 #audio = false

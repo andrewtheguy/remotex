@@ -37,9 +37,8 @@ Nothing names the server or the extension: a target that asks and connects to
 wayvnc, TigerVNC or x11vnc gets a desktop and no sound, which is what those
 servers have to give. So does QEMU, whose own audio extension carries raw
 samples and is not asked for. On the gateway side `audio = true` is now accepted on any
-plain `vnc` target; it stays refused on Apple's standard Screen Sharing, which
-carries no sound and speaks no audio extension, and on High Performance it
-still means Apple's media stream and still needs the `apple-hp-audio` build.
+plain `vnc` target; neither Apple subtype speaks the extension, so a Mac is
+never asked for it.
 
 wlshare's own `audio` key (default `false`) is the server's side of the same
 switch: with it off the extension is not announced, and a client that lists the
