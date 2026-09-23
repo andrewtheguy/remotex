@@ -1,13 +1,15 @@
 //! A Mac's sound, received as an AirPlay 1 speaker.
 //!
-//! Apple's Screen Sharing carries no audio a client can take in either subtype, so
-//! a Mac sends its sound the way it sends it to any speaker: it picks this gateway
-//! from its Sound output menu, and streams the system mix over RAOP — RTSP to set
-//! up, ALAC over RTP in AES-128-CBC to play. The gateway advertises itself over
-//! mDNS as a speaker named after its branding, asks for the password in
-//! `[airplay]`, and decodes what arrives into the audio bridge of whatever Apple
-//! session with `audio = true` is running. Nothing is ever sent back but
-//! answers: it is a sink.
+//! Current remotex does not receive audio from either Apple Screen Sharing
+//! subtype. High Performance has a measured private AAC-ELD-over-SRTP media path,
+//! but the Apple engine deliberately does not implement it; Standard has no
+//! measured equivalent. AirPlay is the workaround: a Mac sends its sound the way
+//! it sends it to any speaker, by picking this gateway from its Sound output menu
+//! and streaming the system mix over RAOP — RTSP to set up, ALAC over RTP in
+//! AES-128-CBC to play. The gateway advertises itself over mDNS as a speaker named
+//! after its branding, asks for the password in `[airplay]`, and decodes what
+//! arrives into the audio bridge of whatever Apple session with `audio = true` is
+//! running. Nothing is ever sent back but answers: it is a sink.
 //!
 //! The receiver is gateway-wide and outlives sessions, but a stream does not: a
 //! Mac's stream plays into the one Apple audio session that was running when it

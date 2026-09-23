@@ -1025,15 +1025,17 @@ not take surfaces as a decoder error naming it rather than as silence. A
 `pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
 `AudioBuffer` and schedules it directly.
 
-An audio-enabled **Apple** engine carries no sound at all: Screen Sharing has
-none a client can take. The session attaches the engine's bridge to the gateway's
-AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1 receiver that
-the Mac picks from its Sound menu once and keeps. What reaches the bridge is the
-Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo in 24 ms wave
-buffers, from whichever Mac is playing to the speaker while that session runs.
-The speaker holds the bridge weakly, so the engine ending is what detaches it. It
-asks every sender for the `[airplay]` password, since it answers the whole LAN.
-See [A Mac's sound over AirPlay](airplay-audio.md).
+An audio-enabled **Apple** engine receives no sound from its Screen Sharing
+connection. High Performance has a measured private AAC-ELD-over-SRTP media
+stream, but this engine deliberately does not negotiate it; Standard has no
+measured equivalent path. The session attaches the engine's bridge to the
+gateway's AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1
+receiver that the Mac picks from its Sound menu once and keeps. What reaches the
+bridge is the Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo
+in 24 ms wave buffers, from whichever Mac is playing to the speaker while that
+session runs. The speaker holds the bridge weakly, so the engine ending is what
+detaches it. It asks every sender for the `[airplay]` password, since it answers
+the whole LAN. See [A Mac's sound over AirPlay](airplay-audio.md).
 
 An audio-enabled **generic VNC** engine has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
@@ -1479,7 +1481,8 @@ in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this pat
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive media
 transport (`0x1c`, HEVC video and AAC-ELD audio over SRTP); the zlib rectangles
-are the only picture path, and a Mac's sound arrives over AirPlay instead
+are the only picture path. High Performance's native system-audio path is
+measured but not implemented, and a Mac's sound arrives over AirPlay instead
 ([A Mac's sound over AirPlay](airplay-audio.md)). The
 transport's measurements are in
 [Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio).
