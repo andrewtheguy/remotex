@@ -38,7 +38,7 @@ import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
  * What shows between a composition's screens: the grey Apple's viewer backs
- * its framebuffer view with (`-[SSFrameBufferView updateLayer]`, RGB 0.1).
+ * its framebuffer view with (RGB 0.1).
  */
 const GAP = "rgb(26, 26, 26)";
 
@@ -136,7 +136,7 @@ export function createPainterWorker(
   };
 
   // Every region onto the canvas at its points, as Apple's viewer draws them
-  // (`-[SSFrameBufferRenderView drawRect:]`, at medium interpolation). The gaps
+  // (at medium interpolation). The gaps
   // between unequal screens keep `GAP`.
   const compose = () => {
     if (!framebuffer || !ctx || !view) {

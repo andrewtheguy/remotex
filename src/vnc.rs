@@ -619,7 +619,7 @@ const HP_RESIZE_STUCK: Duration = Duration::from_secs(30);
 /// The Mac's agent reads the screen for a region out of the capture surface
 /// without checking it against the new, smaller one. A region of the old size
 /// served just after a shrinking change is a `memcpy` past the end of the surface
-/// in `SSAgent_ReadScreenDataIntoSharedMemory_rpc`, and the agent dies with the
+/// in the agent's screen-read call, and the agent dies with the
 /// session's display, audio and input. Two regions are live: a pixel request's,
 /// and the one `AutoFrameBufferUpdate` armed, which the Mac serves on every
 /// captured frame and so also on the first after the change. Both are narrowed to

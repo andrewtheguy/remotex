@@ -254,8 +254,8 @@ Its menu names the view by the points the screens span ("Both Displays:
 2720 × 900"). Its Separate Windows option is the same single connection, with
 each window drawing one screen out of the same framebuffer.
 
-"Mixed" is Apple's `globalIsMixedMode`: at least one screen at 1x and at least
-one that is not. Screens that are all HiDPI, whatever their densities, are not
+"Mixed" is what Apple's viewer treats as mixed: at least one screen at 1x and at
+least one that is not. Screens that are all HiDPI, whatever their densities, are not
 mixed.
 
 Remotex matches it. For a mixed combined layout, the gateway asks for factor 1.0
