@@ -8,7 +8,7 @@ macOS update is free to invalidate any of it.
 
 This document states behaviour and the rules remotex follows because of it. The
 evidence behind it is archived outside the repository, in
-`apple-screensharing-audit-2026-09-23` and `apple-screensharing-mixeddpi-2026-09-23`:
+`apple-screensharing-audit-2026-09-23_2`:
 - function-level traces of Apple's viewer, `screensharingd` and
   `ScreensharingAgent`;
 - captures, daemon logs and probe scripts;
