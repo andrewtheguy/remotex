@@ -106,9 +106,15 @@ impl Receiver {
     }
 
     /// Inflate the next compressed bytes of the archive.
+    ///
+    /// A buffer filled to the brim may leave inflated bytes behind in the decoder
+    /// after the last compressed byte is taken — flate2 does not promise otherwise,
+    /// and C zlib can stop mid-match — so the loop runs until a pass leaves room
+    /// to spare, not until the input is gone.
     pub fn feed(&mut self, mut compressed: &[u8]) -> anyhow::Result<()> {
         let mut out = vec![0u8; INFLATE_CHUNK];
-        while !compressed.is_empty() && self.archive.text.is_none() {
+        let mut full = false;
+        while (full || !compressed.is_empty()) && self.archive.text.is_none() {
             let (before_in, before_out) = (self.decoder.total_in(), self.decoder.total_out());
             self.decoder
                 .decompress(compressed, &mut out, FlushDecompress::Sync)
@@ -120,7 +126,11 @@ impl Receiver {
                 "Apple pasteboard inflates past its declared {} bytes",
                 self.declared
             );
-            anyhow::ensure!(read != 0 || written != 0, "Apple pasteboard inflater made no progress");
+            full = written == out.len();
+            anyhow::ensure!(
+                full || read != 0 || written != 0 || compressed.is_empty(),
+                "Apple pasteboard inflater made no progress"
+            );
             compressed = &compressed[read..];
             self.archive.feed(&out[..written])?;
         }
@@ -488,6 +498,31 @@ mod tests {
             receiver.feed(piece).unwrap();
         }
         assert_eq!(receiver.finish().unwrap(), Incoming::Text("copied ✓".to_owned()));
+    }
+
+    /// The last compressed bytes can inflate to more than one buffer's worth, all
+    /// of which has to be read out before the input counts as consumed.
+    #[test]
+    fn inflated_bytes_past_one_buffer_are_all_read() {
+        let filler = vec![0u8; 8 * INFLATE_CHUNK];
+        let mut bytes = 1u32.to_be_bytes().to_vec();
+        flavor(&mut bytes, b"public.tiff", &[], &filler);
+        let (header, compressed) = from_mac(&bytes);
+        assert!(compressed.len() < INFLATE_CHUNK, "inflates well past one buffer");
+        assert_eq!(parse(header, &compressed).unwrap(), Incoming::NoText);
+        for size in [1, 7, 100, 1000] {
+            let mut receiver = Receiver::new(header).unwrap();
+            for piece in compressed.chunks(size) {
+                receiver.feed(piece).unwrap();
+            }
+            assert_eq!(receiver.finish().unwrap(), Incoming::NoText, "pieces of {size}");
+        }
+
+        let mut bytes = 2u32.to_be_bytes().to_vec();
+        flavor(&mut bytes, b"public.tiff", &[], &filler);
+        flavor(&mut bytes, UTF8_TEXT, &[], b"after");
+        let (header, compressed) = from_mac(&bytes);
+        assert_eq!(parse(header, &compressed).unwrap(), Incoming::Text("after".to_owned()));
     }
 
     /// The text may be in a later item than the first.
