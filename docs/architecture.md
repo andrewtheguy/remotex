@@ -341,8 +341,12 @@ BSD-3-Clause with a patent grant and present in every browser build, the ones th
 carry no proprietary codecs included. On synthetic screen content at 1080p and
 quality 60 it encodes a frame in **4.7 ms** at **18 KB** — measure with
 `cargo test --release measure_the_encoder -- --ignored --nocapture`; a debug build
-reports nonsense, because the RGB→YUV conversion it also times is scalar Rust and runs
-66× slower unoptimised.
+reports nonsense, because the RGB→YUV conversion it also times is Rust — the `yuv`
+crate's, on the AVX2 or NEON path the machine has — and runs an order of magnitude
+slower unoptimised. The conversion is the one part of an encode this gateway owns,
+and the scalar loop that came before the crate was two fifths of a 1080p encode on
+a six-core host, its 4:2:0 averaging the slower of its two paths; the crate's takes
+a third of that time at either chroma.
 
 Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
 `stream.rs` and the wire carry access units, a keyframe bit and a configuration

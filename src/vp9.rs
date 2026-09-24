@@ -238,7 +238,7 @@ impl Stream {
         // would cost compression to protect against loss that cannot happen. The same argument
         // removes the periodic keyframe below.
         cfg.g_error_resilient = 0;
-        // Several threads for the one stream, which has nothing to overlap with. See
+        // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
         let threads = crate::video::threads();
         cfg.g_threads = threads as u32;
@@ -338,17 +338,20 @@ impl Stream {
             // Off: adaptive quantization would move the quantizer off the dial that was just
             // pinned.
             stream.control(vpx::vp8e_enc_control_id_VP9E_SET_AQ_MODE, 0, "aq_mode")?;
+            // Tile columns for the threads to have separate work — as many as the width is
+            // wide enough for and the threads can fill, see `video::tile_columns_log2`.
+            // Set whatever the thread count: libvpx's default is 6, every column the
+            // width allows, which one thread would code one after another for the bytes
+            // and nothing else.
+            stream.control(
+                vpx::vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS,
+                crate::video::tile_columns_log2(coded.0, threads) as c_int,
+                "tile_columns",
+            )?;
             if threads > 1 {
-                // Both are what turns `g_threads` into actual parallelism on one picture:
-                // row-based multithreading inside a tile, and enough tile columns for the
-                // threads to have separate work. Inert at one thread. libvpx clamps the column
-                // count to what the picture's breadth allows.
+                // What turns `g_threads` into actual parallelism inside a tile: row-based
+                // multithreading. Inert at one thread.
                 stream.control(vpx::vp8e_enc_control_id_VP9E_SET_ROW_MT, 1, "row_mt")?;
-                stream.control(
-                    vpx::vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS,
-                    threads.ilog2() as c_int,
-                    "tile_columns",
-                )?;
             }
 
             // An image that *wraps* the conversion buffer rather than owning one. A non-null

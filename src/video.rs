@@ -249,54 +249,65 @@ pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How many threads the encoder gets: half the machine. The stream has one
-/// picture and nothing to overlap with, so its parallelism has to come from inside
-/// the picture — VP9's row-based multithreading, set by the caller alongside this
-/// count. The engine's read loop and the socket still need somewhere to run.
+/// How many threads the encoder gets: every core but one, at least two where there
+/// are two, at most [`MAX_THREADS`]. The stream has one picture and nothing to
+/// overlap with, so its parallelism has to come from inside the picture — VP9's
+/// row-based multithreading and the tile columns [`tile_columns_log2`] gives it,
+/// set by the caller alongside this count. An encode is a burst of milliseconds
+/// that the person at the browser is waiting on, so it gets the machine; the one
+/// core kept back is for the engine's read loop and the socket, which are what
+/// make the next frame. Measured with [`Yuv`]'s bench on six cores: at 1080p the
+/// picture is too small for more than three threads to matter either way, and at
+/// 4K six threads take a frame in six sevenths of the time three do.
 pub fn threads() -> usize {
     threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
-/// The most threads libvpx's VP9 encoder takes. Not a choice made here: libvpx
-/// v1.16.0 defines `MAX_NUM_THREADS 64` in `vp9/encoder/vp9_ethread.h`, and
-/// `validate_config` in `vp9/vp9_cx_iface.c` refuses a larger `g_threads` with
-/// "g_threads out of range [..MAX_NUM_THREADS]", which fails the encoder's creation.
-/// At 64 the tile-column count [`crate::vp9`] derives, `ilog2(64) = 6`, is also exactly
-/// the top of that file's `tile_columns` range, 0–6.
-const LIBVPX_MAX_THREADS: usize = 64;
+/// The most threads the encoder takes, whatever the machine: what a 4K picture
+/// can use. The useful count is the picture's, not the machine's — libvpx's
+/// row-based multithreading hands out superblock rows within each tile column,
+/// so the work to share grows with the picture — and the bench's two points, 1080p
+/// saturating at three threads and 4K still gaining at six, put it at about one
+/// thread a megapixel: eight for 4K's 8.3. 4K is the largest desktop this gateway
+/// is tuned for; a larger one is an edge case that streams, not a target, and
+/// gets the 4K count. Not measured past six threads, since the host had six cores.
+/// libvpx itself refuses more than 64.
+const MAX_THREADS: usize = 8;
 
-/// [`threads`] for a machine of `cores`: half of them, and never fewer than two once
-/// there are two — the one core a single-core machine has is all it gets. Half of
-/// two or three cores is one thread, which leaves the picture unsplit on exactly the
-/// small machine that can least afford it. Held to [`LIBVPX_MAX_THREADS`], past which
-/// the encoder would not start at all.
+/// [`threads`] for a machine of `cores`.
 fn threads_for(cores: usize) -> usize {
-    (cores / 2).max(cores.min(2)).min(LIBVPX_MAX_THREADS)
+    if cores <= 2 { cores } else { (cores - 1).min(MAX_THREADS) }
+}
+
+/// A tile column is about this wide, so libvpx's `tile_columns` is the log2 of how
+/// many of them the picture holds: none under 1920 pixels, two at 1080p, four at
+/// 4K. The width rather than the thread count decides it because a tile is a cost
+/// as well as a split — the columns are coded apart, which costs bytes, and at
+/// 1080p four of them coded slower than two whatever the threads — while at 4K four
+/// were worth having. Never more than the threads can fill, since a tile no thread
+/// takes is the cost without the split. libvpx clamps the value to what the width
+/// allows in any case.
+const TILE_WIDTH: usize = 960;
+
+/// libvpx's `VP9E_SET_TILE_COLUMNS` for a picture `width` wide coded on `threads`.
+pub fn tile_columns_log2(width: u16, threads: usize) -> u32 {
+    (usize::from(width) / TILE_WIDTH).max(1).ilog2().min(threads.max(1).ilog2())
 }
 
 /// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
 ///
-/// Scalar integer BT.601 studio-swing arithmetic, owned here rather than a library's.
+/// BT.601 studio swing, the `yuv` crate's, on the AVX2 or NEON path the machine has.
 /// The chroma planes are one sample per pixel or one per 2×2 group averaged, as
 /// [`Chroma`] says — the tight `(w, w, w)` I444 or `(w, w/2, w/2)` I420 layout libvpx
 /// wraps without copying. The conversion's cost is measured separately in the encoder
-/// bench, because if it ever dominates a release encode, *that* is the number that
-/// would justify libyuv.
+/// bench: the scalar loop this replaced was two fifths of a 1080p encode on a
+/// six-core host, and its 4:2:0 averaging the slower of its two paths.
 pub struct Yuv {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
     size: (usize, usize),
     chroma: Chroma,
-}
-
-/// BT.601 studio-swing chroma for one colour, whether that colour is a pixel's own or
-/// a 2×2 group's average. The arithmetic never leaves i16: the largest coefficient
-/// sum is 112 × 255.
-fn chroma_of(r: i16, g: i16, b: i16) -> (u8, u8) {
-    let u = (((-38 * r - 74 * g + 112 * b) >> 8) + 128) as u8;
-    let v = (((112 * r - 94 * g - 18 * b) >> 8) + 128) as u8;
-    (u, v)
 }
 
 impl Yuv {
@@ -330,39 +341,26 @@ impl Yuv {
             "a video crop came back {} bytes for a {w}x{h} picture",
             rgb.len(),
         );
-        for (pix, y) in rgb.as_chunks::<3>().0.iter().zip(self.y.iter_mut()) {
-            *y = (((66 * u32::from(pix[0]) + 129 * u32::from(pix[1]) + 25 * u32::from(pix[2]))
-                >> 8)
-                + 16) as u8;
-        }
+        use yuv::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
+        let (_, chroma_stride, _) = self.strides();
+        let mut image = YuvPlanarImageMut {
+            y_plane: BufferStoreMut::Borrowed(&mut self.y),
+            y_stride: w as u32,
+            u_plane: BufferStoreMut::Borrowed(&mut self.u),
+            u_stride: chroma_stride as u32,
+            v_plane: BufferStoreMut::Borrowed(&mut self.v),
+            v_stride: chroma_stride as u32,
+            width: w as u32,
+            height: h as u32,
+        };
+        let (range, matrix, mode) = (YuvRange::Limited, YuvStandardMatrix::Bt601, YuvConversionMode::Balanced);
+        // The 4:2:0 chroma sample is the 2×2 group's rounded average, as the crate
+        // takes it; `the_conversion_is_bt601_studio_swing` holds it to that.
         match self.chroma {
-            Chroma::Full => {
-                for (pix, (u, v)) in
-                    rgb.as_chunks::<3>().0.iter().zip(self.u.iter_mut().zip(self.v.iter_mut()))
-                {
-                    (*u, *v) = chroma_of(i16::from(pix[0]), i16::from(pix[1]), i16::from(pix[2]));
-                }
-            }
-            Chroma::Subsampled => {
-                // One sample per 2×2 pixel group, from the group's average.
-                let half = w / 2;
-                let rows0 = rgb.chunks_exact(w * 3).step_by(2);
-                let rows1 = rgb.chunks_exact(w * 3).skip(1).step_by(2);
-                let u_rows = self.u.chunks_exact_mut(half);
-                let v_rows = self.v.chunks_exact_mut(half);
-                for (((row0, row1), u_row), v_row) in rows0.zip(rows1).zip(u_rows).zip(v_rows) {
-                    for (((pix0, pix1), u), v) in
-                        row0.as_chunks::<6>().0.iter().zip(row1.as_chunks::<6>().0).zip(u_row).zip(v_row)
-                    {
-                        let r = (i16::from(pix0[0]) + i16::from(pix0[3]) + i16::from(pix1[0]) + i16::from(pix1[3]) + 2) / 4;
-                        let g = (i16::from(pix0[1]) + i16::from(pix0[4]) + i16::from(pix1[1]) + i16::from(pix1[4]) + 2) / 4;
-                        let b = (i16::from(pix0[2]) + i16::from(pix0[5]) + i16::from(pix1[2]) + i16::from(pix1[5]) + 2) / 4;
-                        (*u, *v) = chroma_of(r, g, b);
-                    }
-                }
-            }
+            Chroma::Full => yuv::rgb_to_yuv444(&mut image, rgb, (w * 3) as u32, range, matrix, mode),
+            Chroma::Subsampled => yuv::rgb_to_yuv420(&mut image, rgb, (w * 3) as u32, range, matrix, mode),
         }
-        Ok(())
+        .map_err(|e| anyhow::anyhow!("converting a {w}x{h} picture to {}: {e}", self.chroma.name()))
     }
 
     /// The three planes, for the codec's image to point at.
@@ -402,13 +400,27 @@ mod tests {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
     }
 
-    /// Half the cores, but never fewer than two once there are two to use, one on a
-    /// single core, and never more than libvpx accepts.
+    /// Every core but one, both cores of a two-core machine, the one core of a
+    /// single-core one, and eight at most.
     #[test]
-    fn the_encoder_takes_at_least_two_threads_where_there_are_two_cores() {
-        let cores = [1, 2, 3, 4, 5, 6, 8, 16, 32, 128, 129, 130, 256];
+    fn the_encoder_takes_every_core_but_one_up_to_eight() {
+        let cores = [1, 2, 3, 4, 5, 6, 8, 9, 16, 64, 256];
         let threads: Vec<usize> = cores.into_iter().map(threads_for).collect();
-        assert_eq!(threads, [1, 2, 2, 2, 2, 3, 4, 8, 16, 64, 64, 64, 64]);
+        assert_eq!(threads, [1, 2, 2, 3, 4, 5, 7, 8, 8, 8, 8]);
+    }
+
+    /// Tile columns follow the width — one under 1920, two at 1080p, four at 4K and
+    /// 5K — and never outnumber the threads.
+    #[test]
+    fn tile_columns_follow_the_width_and_never_outnumber_the_threads() {
+        assert_eq!(tile_columns_log2(1280, 8), 0);
+        assert_eq!(tile_columns_log2(1920, 8), 1);
+        assert_eq!(tile_columns_log2(2560, 8), 1);
+        assert_eq!(tile_columns_log2(3840, 8), 2);
+        assert_eq!(tile_columns_log2(5120, 8), 2);
+        assert_eq!(tile_columns_log2(3840, 2), 1);
+        assert_eq!(tile_columns_log2(3840, 1), 0);
+        assert_eq!(tile_columns_log2(3840, 0), 0);
     }
 
     /// Synthetic screen content: a light panel with text-like runs, and one window being
@@ -465,21 +477,20 @@ mod tests {
     /// wrong thing and says so convincingly.** The encoder is C and is optimized
     /// whatever this profile is: libvpx is compiled `-O3` once, into the archive
     /// `libvpx-prebuilt` publishes, and nothing a consumer does can touch it. The
-    /// conversion is *Rust* — [`Yuv::read_rgb`] — so it is compiled with **this**
-    /// crate's profile, and at
-    /// `opt-level = 0` it is per-pixel arithmetic with bounds checks and no vectorization.
-    /// Measured: 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
-    /// that makes the conversion look like 90% of the encode and sends the reader off to
-    /// replace it with libyuv for nothing.
+    /// conversion is *Rust* — [`Yuv::read_rgb`], the `yuv` crate's — so it is compiled
+    /// with **this** crate's profile, and at `opt-level = 0` its SIMD paths are function
+    /// calls around scalar arithmetic with bounds checks. The scalar loop it replaced
+    /// measured 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
+    /// that made the conversion look like 90% of the encode.
     ///
     /// ```sh
     /// cargo test --release --lib video::tests::measure_the_encoder -- --ignored --nocapture
     /// ```
     ///
-    /// The conversion column is still measured separately, for the case the paragraph
-    /// above rules out today: if it ever
-    /// does dominate a release encode, it is the thing to replace — and nothing else here
-    /// would say so. Sweeping VP9's speed and thread settings means editing the constants
+    /// The conversion column is measured separately because it is the one part of an
+    /// encode this crate owns: on a six-core host the scalar loop was two fifths of a
+    /// 1080p encode, which is what put the `yuv` crate in front of the encoder, and
+    /// nothing else here would say so. Sweeping VP9's speed and thread settings means editing the constants
     /// at the top of `src/vp9.rs` and running this again; they are compile-time on
     /// purpose, since a deployment has no business setting them.
     #[test]

@@ -2372,7 +2372,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.254"
+version = "0.0.255"
 dependencies = [
  "aes",
  "alac",
@@ -2424,6 +2424,7 @@ dependencies = [
  "tower",
  "uuid",
  "xxhash-rust",
+ "yuv",
 ]
 
 [[package]]
@@ -3922,6 +3923,15 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
+]
+
+[[package]]
+name = "yuv"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a295923535c00a4e72a50a0a1130097f93160b39892dd4d2d006b1e2b90d6bf9"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
