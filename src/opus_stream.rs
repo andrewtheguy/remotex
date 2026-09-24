@@ -23,6 +23,13 @@ pub const FRAME_FRAMES: usize = 960;
 /// worth allowing for; at the default 96 kbit/s a packet is nearer 240.
 const MAX_PACKET_BYTES: usize = 4000;
 
+/// libopus's encoder effort, 0–10. The top: the encoder is one stereo stream
+/// beside a VP9 encoder of the whole desktop, and a minute of stereo at 10 took
+/// 1.9 s of one core on a loaded development box against 1.4 s at 5 — three
+/// percent of a core either way — while the quality the effort buys matters
+/// most at the adaptive floor, where every bit has to count.
+const COMPLEXITY: i32 = 10;
+
 /// Turns PCM buffers into Opus packets.
 pub struct OpusStream {
     encoder: Encoder,
@@ -54,15 +61,30 @@ impl OpusStream {
         };
         let channel_count = usize::from(format.channels);
 
+        // `Audio`, not `Voip`: desktop sound is music and effects as often as
+        // speech, and this is the mode that spends the bits on fidelity rather
+        // than intelligibility.
         let mut encoder = Encoder::new(SAMPLE_RATE, channels, Application::Audio)
             .map_err(|e| anyhow::anyhow!("create the opus encoder: {e}"))?;
+        // The rate is an average: constrained VBR lets silence cost a few bytes
+        // and a loud passage a little more than the number, and keeps the running
+        // rate close enough to it that the configured kbit/s is what the link
+        // sees. Written out rather than left to libopus's defaults, which happen
+        // to be the same, because the adaptive walk's arithmetic and the config's
+        // wording both depend on it. CBR would spend the same bits on silence
+        // for nothing, and unconstrained VBR would make the walk chase the sound
+        // instead of the link.
+        encoder
+            .set_vbr(true)
+            .map_err(|e| anyhow::anyhow!("set the opus rate control: {e}"))?;
+        encoder
+            .set_vbr_constraint(true)
+            .map_err(|e| anyhow::anyhow!("set the opus rate constraint: {e}"))?;
         encoder
             .set_bitrate(Bitrate::Bits(bitrate_bps))
             .map_err(|e| anyhow::anyhow!("set the opus bitrate: {e}"))?;
-        // libopus defaults to complexity 9; 5 costs a fraction of the encoder CPU
-        // for no audible difference at this bitrate on desktop audio.
         encoder
-            .set_complexity(5)
+            .set_complexity(COMPLEXITY)
             .map_err(|e| anyhow::anyhow!("set the opus complexity: {e}"))?;
 
         let pcm = Pcm48::new(format)?;
@@ -157,6 +179,38 @@ mod tests {
     /// 20 ms of 44.1 kHz stereo silence, as bytes on the queue.
     fn silence(frames: usize) -> Vec<u8> {
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
+    }
+
+    /// The rate control the config's wording promises: variable-rate, held to
+    /// the number, at full effort. Read back from libopus rather than assumed
+    /// from its defaults, since the defaults are exactly what this must not
+    /// silently depend on.
+    #[test]
+    fn the_encoder_is_constrained_vbr_at_full_complexity() {
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
+        assert!(stream.encoder.get_vbr().expect("vbr"), "variable-rate, not CBR");
+        assert!(stream.encoder.get_vbr_constraint().expect("constraint"), "held near the rate");
+        assert_eq!(stream.encoder.get_complexity().expect("complexity"), COMPLEXITY);
+        assert_eq!(stream.encoder.get_bitrate().expect("bitrate"), Bitrate::Bits(96_000));
+        assert!(!stream.encoder.get_inband_fec().expect("fec"), "TCP loses nothing");
+        assert!(!stream.encoder.get_dtx().expect("dtx"), "the walk sheds silence itself");
+    }
+
+    /// Silence is where variable-rate shows: a packet of it costs a few bytes,
+    /// nothing like the configured rate's share.
+    #[test]
+    fn silence_costs_almost_nothing() {
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
+        let packets = stream.push(&silence(882 * 20)).expect("push");
+        assert!(!packets.is_empty());
+        let at_rate = 96_000 / 8 / 50;
+        for packet in packets.iter().skip(2) {
+            assert!(
+                packet.len() * 4 < at_rate,
+                "a silent packet should be a fraction of the {at_rate} bytes a packet at the rate, got {}",
+                packet.len()
+            );
+        }
     }
 
     #[test]

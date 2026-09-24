@@ -47,7 +47,8 @@ On the Mac, pick that name in Control Center → Sound, or in System Settings �
 Sound → Output, and enter the password when asked. The Mac remembers the
 password, so it is asked once. The choice lasts one session: when the session
 ends the speaker hangs up, and the speaker is picked again for the next one.
-`audio_codec`, `audio_bitrate` and the adaptive keys apply as on any other target.
+`audio_codec`, `audio_bitrate`, `audio_adaptive` and `audio_adaptive_min` apply as
+on any other target.
 
 ## What it is
 

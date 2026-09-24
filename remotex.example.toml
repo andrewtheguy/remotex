@@ -266,9 +266,10 @@ password = "change-me"
 # How that audio is carried. Valid only with `audio = true` above; setting it
 # without audio is refused rather than ignored.
 #
-#   "opus" (the default) — 96 kbps, 20 ms packets. Well clear of where stereo Opus
-#     starts to be audibly lossy. Right for anything that leaves the building, and
-#     the one to leave alone unless the link is a fast local network.
+#   "opus" (the default) — variable-rate, 20 ms packets, averaging `audio_bitrate`
+#     below and walking down from it when the link falls behind. Right for
+#     anything that leaves the building, and the one to leave alone unless the
+#     link is a fast local network.
 #   "pcm" — the remote's own samples, unencoded and unresampled, at 1.41 Mbit/s.
 #     Fifteen times the bandwidth, and in exchange nothing on the way to the browser
 #     touches a sample: no encoder here, no resampler here, and no decoder there.
@@ -281,20 +282,27 @@ password = "change-me"
 # way and only this way, which is where it came from.
 #audio_codec = "opus"
 
-# Opus bitrate in kbit/s, 6–510. The default is 96. Valid only for Opus audio;
-# PCM has no encoder to tune.
+# The Opus bitrate this target's sound holds on a link that can carry it, in
+# kbit/s, 6–510. The default is 96: well clear of where stereo Opus starts to be
+# audibly lossy. Like `video_quality` it is a ceiling, not a promise — and an
+# average, not a packet size: Opus is variable-rate, so silence costs a few bytes
+# a packet and music about this. Valid only for Opus audio; PCM has no encoder
+# to tune.
 #audio_bitrate = 96
 
-# Let Opus adapt to the audio socket's own backpressure. The configured bitrate
-# stays the ceiling: sustained slow sends walk it down, sustained clear sends
-# walk it back up, and silence is shed while the link is behind so old sound does
-# not accumulate. Off by default, and valid only for Opus audio.
-#audio_adaptive = false
+# Let that bitrate follow the audio socket's own backpressure — on by default,
+# like `render_adaptive`. Sustained slow sends walk the bitrate down toward
+# `audio_adaptive_min`, sustained clear sends walk it back up to `audio_bitrate`,
+# and silence is shed while the link is behind so old sound does not accumulate.
+# `false` holds `audio_bitrate` whatever the link does. Valid only for Opus
+# audio; either value is refused beside "pcm".
+#audio_adaptive = true
 
-# Floor for that adaptive walk in kbit/s, default 32. Valid only with
-# `audio_adaptive = true`; an explicit floor must be 6–510 and below the bitrate
-# ceiling.
-#audio_bitrate_min = 32
+# Floor for that walk in kbit/s, default 32: degraded, but continuous, which is
+# the point of giving bitrate up. An explicit floor must be 6–510 and below
+# `audio_bitrate`; the default one is held to `audio_bitrate` where that sits
+# lower. Refused beside `audio_adaptive = false`.
+#audio_adaptive_min = 32
 
 # Camera redirection: offer the remote a virtual webcam whose frames are this
 # browser's, over MS-RDPECAM on "rdp" — or, on a generic "vnc" target, over

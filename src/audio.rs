@@ -446,7 +446,7 @@ impl AudioSignals {
 pub struct AudioCongestion {
     /// The configured bitrate: the finest this will ever ask for.
     ceiling: i32,
-    /// The configured floor ([`crate::config::TargetConfig::audio_bitrate_min`]).
+    /// The configured floor ([`crate::config::TargetConfig::audio_adaptive_min`]).
     floor: i32,
     /// The bitrate in force.
     bitrate: i32,
