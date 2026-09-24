@@ -1394,12 +1394,17 @@ while it is open and not paused, one poll out at a time, keeps for the last five
 minutes, and shows the way a network meter does: the rate now over a graph of the
 chosen range, one per direction on its own scale, narrowed to a target or a socket
 by its filters. Four grid lines carry the scale and its rates, and a dashed line in
-the direction's own colour crosses the plot at the busiest second of the range — the
-same second the tile beside the graph names, so the line carries no rate of its own.
-The scale fits that second rather than the highest step drawn, which is what keeps
-the line on the plot: second by second the two are one number, but a recorded step is
-an average over its timeframe and the busiest second inside it stands above that. A
-range that moved nothing gets no line, since one at zero only traces the axis.
+the direction's own colour crosses the plot at the range's average rate — its bytes
+over the seconds something moved in, so an idle stretch does not pull it down — the
+same average the tile beside the graph names, so the line carries no rate of its
+own. The tile names the busiest second of the range too, but the graph does not mark
+it: a line at the peak lets one busy second set the graph's mark, where a line at
+the average shows that second as the outlier it is. The scale fits the highest step
+drawn, not the busiest second: second by second the two are one number, but a
+recorded step is an average over its timeframe and the busiest second inside it
+stands above that, and a scale fitted to it would flatten the graph under a number
+it does not draw. A range that moved nothing gets no line, since one at zero only
+traces the axis.
 `GET /api/throughput?within=<seconds>` is the recorded rows, counted
 back from the gateway's clock the rows were stamped with rather than the
 browser's, with the gateway's clock at the read and the open timeframe as it

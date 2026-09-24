@@ -1,7 +1,7 @@
 // Drawing one direction of the throughput meter: the points of a range on a
 // canvas, an area under a line, a dot on the newest second, four grid lines with
-// their rate at the right edge, an unlabelled dashed line across the busiest second
-// of the range, and a gap where a point was not read. The rendering is the panel's
+// their rate at the right edge, an unlabelled dashed line across the range's average
+// rate, and a gap where a point was not read. The rendering is the panel's
 // (ThroughputPanel.tsx); this is the geometry and the strokes.
 
 import { formatRate } from "./throughput.ts";
@@ -12,8 +12,8 @@ export const SCALE_WIDTH = 68;
 const PAD_TOP = 6;
 const PAD_BOTTOM = 4;
 const LABEL_FONT = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
-/// The max line's dash, in CSS pixels: on, then off.
-const MAX_DASH = [4, 4];
+/// The mean line's dash, in CSS pixels: on, then off.
+const MEAN_DASH = [4, 4];
 
 export interface ChartInk {
   line: string;
@@ -30,8 +30,8 @@ export interface ChartLayout {
   points: readonly (number | null)[];
   /** The rate at the top of the plot. */
   top: number;
-  /** The rate the max line marks; `0` draws none. */
-  max: number;
+  /** The rate the mean line marks; `0` draws none. */
+  mean: number;
 }
 
 /** The runs of read seconds in `points`, each as `[from, to)`. */
@@ -90,19 +90,21 @@ function drawGrid(
   }
 }
 
-/// The busiest second of the range: one dashed line across the plot in the direction's
-/// own ink, drawn over the area so the fill does not swallow it, and dashed so it reads
-/// as a mark on the graph rather than as data. It carries no rate of its own — the tile
-/// beside the graph names the same second.
-function drawMax(
+/// The range's average rate: one dashed line across the plot in the direction's own
+/// ink, drawn over the area so the fill does not swallow it, and dashed so it reads as
+/// a mark on the graph rather than as data. It carries no rate of its own — the tile
+/// beside the graph names the same average. It is the average and not the peak so
+/// that one busy second marks the graph as the outlier it is rather than setting its
+/// line; the peak is the tile's text.
+function drawMean(
   ctx: CanvasRenderingContext2D,
   layout: ChartLayout,
   ink: ChartInk,
 ) {
-  const y = lineY(layout.max, layout);
+  const y = lineY(layout.mean, layout);
   ctx.strokeStyle = ink.line;
   ctx.lineWidth = 1;
-  ctx.setLineDash(MAX_DASH);
+  ctx.setLineDash(MEAN_DASH);
   ctx.beginPath();
   ctx.moveTo(0, y);
   ctx.lineTo(layout.width - SCALE_WIDTH, y);
@@ -190,8 +192,8 @@ export function drawChart(
     drawRun(ctx, layout, ink, from, to);
   }
   // A range that moved nothing gets no line: one at zero only traces the axis.
-  if (layout.max > 0) {
-    drawMax(ctx, layout, ink);
+  if (layout.mean > 0) {
+    drawMean(ctx, layout, ink);
   }
   drawNewest(ctx, layout, ink);
 }

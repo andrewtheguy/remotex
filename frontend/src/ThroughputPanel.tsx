@@ -15,6 +15,7 @@ import {
   fetchThroughput,
   fetchThroughputLive,
   formatRate,
+  highest,
   isThroughputWindow,
   liveSeries,
   liveTotals,
@@ -125,18 +126,19 @@ function targetKey(target: string | null): string {
   return target === null ? "picker" : `target:${target}`;
 }
 
-/// One direction's rate right now, large, and its busiest second in the range.
+/// One direction's rate right now, large, and under it the range's average — the
+/// graph's dashed line — and its busiest second, which the graph does not mark.
 function RateTile({
   name,
   direction,
   now,
-  busiest,
+  series,
   rangeLabel,
 }: {
   name: string;
   direction: "sent" | "received";
   now: number | null;
-  busiest: number;
+  series: RateSeries;
   rangeLabel: string;
 }) {
   const [value, unit] = now === null ? ["—", ""] : formatRate(now).split(" ");
@@ -151,7 +153,8 @@ function RateTile({
         {unit && <small>{unit}</small>}
       </span>
       <span className="throughput-tile-sub">
-        peak {formatRate(busiest)}, {rangeLabel}
+        avg {formatRate(series.mean)}, peak {formatRate(series.busiest)},{" "}
+        {rangeLabel}
       </span>
     </div>
   );
@@ -204,8 +207,10 @@ function RateChart({
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [hovered, setPointed] = useState<number | null>(null);
-  const { points, busiest } = series;
-  const top = rateScale(busiest);
+  const { points, mean } = series;
+  // The scale fits what is drawn: over recorded timeframes the busiest second stands
+  // above every step, and is the tile's to name.
+  const top = rateScale(highest(points));
   // A series of another length may replace this one under a resting pointer.
   const pointed = hovered !== null && hovered < points.length ? hovered : null;
   const sampled = stepSecs === 1 && relative;
@@ -232,13 +237,13 @@ function RateChart({
         surface.height = Math.round(height * dpr);
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawChart(ctx, { width, height, points, top, max: busiest }, ink);
+      drawChart(ctx, { width, height, points, top, mean }, ink);
     };
     draw();
     const observer = new ResizeObserver(draw);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [points, top, busiest, ink]);
+  }, [points, top, mean, ink]);
 
   const width = box.current?.clientWidth ?? 0;
   const pointedValue = pointed === null ? null : points[pointed];
@@ -268,7 +273,7 @@ function RateChart({
           small ? "throughput-chart throughput-chart-small" : "throughput-chart"
         }
         role="img"
-        aria-label={`${name}, ${rangeLabel}, peak ${formatRate(series.busiest)}`}
+        aria-label={`${name}, ${rangeLabel}, average ${formatRate(mean)}, peak ${formatRate(series.busiest)}`}
         onPointerMove={(e) => {
           const left = e.currentTarget.getBoundingClientRect().left;
           setPointed(
@@ -323,14 +328,14 @@ function Meter({
           name="Sent"
           direction="sent"
           now={rates === null ? null : rates.sent}
-          busiest={series.sent.busiest}
+          series={series.sent}
           rangeLabel={rangeLabel}
         />
         <RateTile
           name="Received"
           direction="received"
           now={rates === null ? null : rates.received}
-          busiest={series.received.busiest}
+          series={series.received}
           rangeLabel={rangeLabel}
         />
       </div>
@@ -531,7 +536,7 @@ function meterView(
   relative: boolean;
 } {
   const { within, end } = throughputBounds(range);
-  const unread: RateSeries = { points: [null, null], busiest: 0 };
+  const unread: RateSeries = { points: [null, null], mean: 0, busiest: 0 };
   let series: ThroughputSeries;
   if (throughputRangeIsLive(range) && within !== null) {
     series = liveSeries(read.history, within, keep, read.now);
@@ -550,7 +555,7 @@ function meterView(
   return {
     series,
     relative: !isThroughputWindow(range),
-    // A window names itself; the rest read on after "peak 5.0 Mbps, ".
+    // A window names itself; the rest read on after "avg 1.2 Mbps, peak 5.0 Mbps, ".
     rangeLabel: isThroughputWindow(range)
       ? label
       : label[0].toLowerCase() + label.slice(1),
