@@ -249,29 +249,44 @@ pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How many threads the encoder gets: half the machine. The stream has one
-/// picture and nothing to overlap with, so its parallelism has to come from inside
-/// the picture — VP9's row-based multithreading, set by the caller alongside this
-/// count. The engine's read loop and the socket still need somewhere to run.
+/// How many threads the encoder gets: every core but one, at least two where there
+/// are two, at most [`MAX_THREADS`]. The stream has one picture and nothing to
+/// overlap with, so its parallelism has to come from inside the picture — VP9's
+/// row-based multithreading and the tile columns [`tile_columns_log2`] gives it,
+/// set by the caller alongside this count. An encode is a burst of milliseconds
+/// that the person at the browser is waiting on, so it gets the machine; the one
+/// core kept back is for the engine's read loop and the socket, which are what
+/// make the next frame. Measured with [`Yuv`]'s bench on six cores: at 1080p the
+/// picture is too small for more than three threads to matter either way, and at
+/// 4K six threads take a frame in six sevenths of the time three do.
 pub fn threads() -> usize {
     threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
-/// The most threads libvpx's VP9 encoder takes. Not a choice made here: libvpx
-/// v1.16.0 defines `MAX_NUM_THREADS 64` in `vp9/encoder/vp9_ethread.h`, and
-/// `validate_config` in `vp9/vp9_cx_iface.c` refuses a larger `g_threads` with
-/// "g_threads out of range [..MAX_NUM_THREADS]", which fails the encoder's creation.
-/// At 64 the tile-column count [`crate::vp9`] derives, `ilog2(64) = 6`, is also exactly
-/// the top of that file's `tile_columns` range, 0–6.
-const LIBVPX_MAX_THREADS: usize = 64;
+/// The most threads the encoder takes, whatever the machine. Past eight a 4K
+/// picture has too few superblock rows a tile for the threads to have separate
+/// work, and a gateway on a large server has other sessions' work for the rest.
+/// libvpx itself refuses more than 64.
+const MAX_THREADS: usize = 8;
 
-/// [`threads`] for a machine of `cores`: half of them, and never fewer than two once
-/// there are two — the one core a single-core machine has is all it gets. Half of
-/// two or three cores is one thread, which leaves the picture unsplit on exactly the
-/// small machine that can least afford it. Held to [`LIBVPX_MAX_THREADS`], past which
-/// the encoder would not start at all.
+/// [`threads`] for a machine of `cores`.
 fn threads_for(cores: usize) -> usize {
-    (cores / 2).max(cores.min(2)).min(LIBVPX_MAX_THREADS)
+    if cores <= 2 { cores } else { (cores - 1).min(MAX_THREADS) }
+}
+
+/// A tile column is about this wide, so libvpx's `tile_columns` is the log2 of how
+/// many of them the picture holds: none under 1920 pixels, two at 1080p, four at
+/// 4K. The width rather than the thread count decides it because a tile is a cost
+/// as well as a split — the columns are coded apart, which costs bytes, and at
+/// 1080p four of them coded slower than two whatever the threads — while at 4K four
+/// were worth having. Never more than the threads can fill, since a tile no thread
+/// takes is the cost without the split. libvpx clamps the value to what the width
+/// allows in any case.
+const TILE_WIDTH: usize = 960;
+
+/// libvpx's `VP9E_SET_TILE_COLUMNS` for a picture `width` wide coded on `threads`.
+pub fn tile_columns_log2(width: u16, threads: usize) -> u32 {
+    (usize::from(width) / TILE_WIDTH).max(1).ilog2().min(threads.max(1).ilog2())
 }
 
 /// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
@@ -380,13 +395,27 @@ mod tests {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
     }
 
-    /// Half the cores, but never fewer than two once there are two to use, one on a
-    /// single core, and never more than libvpx accepts.
+    /// Every core but one, both cores of a two-core machine, the one core of a
+    /// single-core one, and eight at most.
     #[test]
-    fn the_encoder_takes_at_least_two_threads_where_there_are_two_cores() {
-        let cores = [1, 2, 3, 4, 5, 6, 8, 16, 32, 128, 129, 130, 256];
+    fn the_encoder_takes_every_core_but_one_up_to_eight() {
+        let cores = [1, 2, 3, 4, 5, 6, 8, 9, 16, 64, 256];
         let threads: Vec<usize> = cores.into_iter().map(threads_for).collect();
-        assert_eq!(threads, [1, 2, 2, 2, 2, 3, 4, 8, 16, 64, 64, 64, 64]);
+        assert_eq!(threads, [1, 2, 2, 3, 4, 5, 7, 8, 8, 8, 8]);
+    }
+
+    /// Tile columns follow the width — one under 1920, two at 1080p, four at 4K and
+    /// 5K — and never outnumber the threads.
+    #[test]
+    fn tile_columns_follow_the_width_and_never_outnumber_the_threads() {
+        assert_eq!(tile_columns_log2(1280, 8), 0);
+        assert_eq!(tile_columns_log2(1920, 8), 1);
+        assert_eq!(tile_columns_log2(2560, 8), 1);
+        assert_eq!(tile_columns_log2(3840, 8), 2);
+        assert_eq!(tile_columns_log2(5120, 8), 2);
+        assert_eq!(tile_columns_log2(3840, 2), 1);
+        assert_eq!(tile_columns_log2(3840, 1), 0);
+        assert_eq!(tile_columns_log2(3840, 0), 0);
     }
 
     /// Synthetic screen content: a light panel with text-like runs, and one window being
