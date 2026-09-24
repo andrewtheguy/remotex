@@ -249,12 +249,20 @@ pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How many threads the encoder gets: half the machine, capped. The stream has one
+/// How many threads the encoder gets: half the machine. The stream has one
 /// picture and nothing to overlap with, so its parallelism has to come from inside
 /// the picture — VP9's row-based multithreading, set by the caller alongside this
 /// count. The engine's read loop and the socket still need somewhere to run.
 pub fn threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
+    threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// [`threads`] for a machine of `cores`: half of them, and never fewer than two once
+/// there are two — the one core a single-core machine has is all it gets. Half of
+/// two or three cores is one thread, which leaves the picture unsplit on exactly the
+/// small machine that can least afford it.
+fn threads_for(cores: usize) -> usize {
+    (cores / 2).max(cores.min(2))
 }
 
 /// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
@@ -383,6 +391,13 @@ mod tests {
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// Half the cores, but never fewer than two once there are two to use.
+    #[test]
+    fn the_encoder_takes_at_least_two_threads_where_there_are_two_cores() {
+        let threads: Vec<usize> = [1, 2, 3, 4, 5, 6, 8, 16, 32].into_iter().map(threads_for).collect();
+        assert_eq!(threads, [1, 2, 2, 2, 2, 3, 4, 8, 16]);
     }
 
     /// Synthetic screen content: a light panel with text-like runs, and one window being
