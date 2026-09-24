@@ -276,27 +276,18 @@ fn threads_for(cores: usize) -> usize {
 
 /// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
 ///
-/// Scalar integer BT.601 studio-swing arithmetic, owned here rather than a library's.
+/// BT.601 studio swing, the `yuv` crate's, on the AVX2 or NEON path the machine has.
 /// The chroma planes are one sample per pixel or one per 2×2 group averaged, as
 /// [`Chroma`] says — the tight `(w, w, w)` I444 or `(w, w/2, w/2)` I420 layout libvpx
 /// wraps without copying. The conversion's cost is measured separately in the encoder
-/// bench, because if it ever dominates a release encode, *that* is the number that
-/// would justify libyuv.
+/// bench: the scalar loop this replaced was two fifths of a 1080p encode on a
+/// six-core host, and its 4:2:0 averaging the slower of its two paths.
 pub struct Yuv {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
     size: (usize, usize),
     chroma: Chroma,
-}
-
-/// BT.601 studio-swing chroma for one colour, whether that colour is a pixel's own or
-/// a 2×2 group's average. The arithmetic never leaves i16: the largest coefficient
-/// sum is 112 × 255.
-fn chroma_of(r: i16, g: i16, b: i16) -> (u8, u8) {
-    let u = (((-38 * r - 74 * g + 112 * b) >> 8) + 128) as u8;
-    let v = (((112 * r - 94 * g - 18 * b) >> 8) + 128) as u8;
-    (u, v)
 }
 
 impl Yuv {
@@ -330,39 +321,26 @@ impl Yuv {
             "a video crop came back {} bytes for a {w}x{h} picture",
             rgb.len(),
         );
-        for (pix, y) in rgb.as_chunks::<3>().0.iter().zip(self.y.iter_mut()) {
-            *y = (((66 * u32::from(pix[0]) + 129 * u32::from(pix[1]) + 25 * u32::from(pix[2]))
-                >> 8)
-                + 16) as u8;
-        }
+        use yuv::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
+        let (_, chroma_stride, _) = self.strides();
+        let mut image = YuvPlanarImageMut {
+            y_plane: BufferStoreMut::Borrowed(&mut self.y),
+            y_stride: w as u32,
+            u_plane: BufferStoreMut::Borrowed(&mut self.u),
+            u_stride: chroma_stride as u32,
+            v_plane: BufferStoreMut::Borrowed(&mut self.v),
+            v_stride: chroma_stride as u32,
+            width: w as u32,
+            height: h as u32,
+        };
+        let (range, matrix, mode) = (YuvRange::Limited, YuvStandardMatrix::Bt601, YuvConversionMode::Balanced);
+        // The 4:2:0 chroma sample is the 2×2 group's rounded average, as the crate
+        // takes it; `the_conversion_is_bt601_studio_swing` holds it to that.
         match self.chroma {
-            Chroma::Full => {
-                for (pix, (u, v)) in
-                    rgb.as_chunks::<3>().0.iter().zip(self.u.iter_mut().zip(self.v.iter_mut()))
-                {
-                    (*u, *v) = chroma_of(i16::from(pix[0]), i16::from(pix[1]), i16::from(pix[2]));
-                }
-            }
-            Chroma::Subsampled => {
-                // One sample per 2×2 pixel group, from the group's average.
-                let half = w / 2;
-                let rows0 = rgb.chunks_exact(w * 3).step_by(2);
-                let rows1 = rgb.chunks_exact(w * 3).skip(1).step_by(2);
-                let u_rows = self.u.chunks_exact_mut(half);
-                let v_rows = self.v.chunks_exact_mut(half);
-                for (((row0, row1), u_row), v_row) in rows0.zip(rows1).zip(u_rows).zip(v_rows) {
-                    for (((pix0, pix1), u), v) in
-                        row0.as_chunks::<6>().0.iter().zip(row1.as_chunks::<6>().0).zip(u_row).zip(v_row)
-                    {
-                        let r = (i16::from(pix0[0]) + i16::from(pix0[3]) + i16::from(pix1[0]) + i16::from(pix1[3]) + 2) / 4;
-                        let g = (i16::from(pix0[1]) + i16::from(pix0[4]) + i16::from(pix1[1]) + i16::from(pix1[4]) + 2) / 4;
-                        let b = (i16::from(pix0[2]) + i16::from(pix0[5]) + i16::from(pix1[2]) + i16::from(pix1[5]) + 2) / 4;
-                        (*u, *v) = chroma_of(r, g, b);
-                    }
-                }
-            }
+            Chroma::Full => yuv::rgb_to_yuv444(&mut image, rgb, (w * 3) as u32, range, matrix, mode),
+            Chroma::Subsampled => yuv::rgb_to_yuv420(&mut image, rgb, (w * 3) as u32, range, matrix, mode),
         }
-        Ok(())
+        .map_err(|e| anyhow::anyhow!("converting a {w}x{h} picture to {}: {e}", self.chroma.name()))
     }
 
     /// The three planes, for the codec's image to point at.
@@ -465,21 +443,20 @@ mod tests {
     /// wrong thing and says so convincingly.** The encoder is C and is optimized
     /// whatever this profile is: libvpx is compiled `-O3` once, into the archive
     /// `libvpx-prebuilt` publishes, and nothing a consumer does can touch it. The
-    /// conversion is *Rust* — [`Yuv::read_rgb`] — so it is compiled with **this**
-    /// crate's profile, and at
-    /// `opt-level = 0` it is per-pixel arithmetic with bounds checks and no vectorization.
-    /// Measured: 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
-    /// that makes the conversion look like 90% of the encode and sends the reader off to
-    /// replace it with libyuv for nothing.
+    /// conversion is *Rust* — [`Yuv::read_rgb`], the `yuv` crate's — so it is compiled
+    /// with **this** crate's profile, and at `opt-level = 0` its SIMD paths are function
+    /// calls around scalar arithmetic with bounds checks. The scalar loop it replaced
+    /// measured 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
+    /// that made the conversion look like 90% of the encode.
     ///
     /// ```sh
     /// cargo test --release --lib video::tests::measure_the_encoder -- --ignored --nocapture
     /// ```
     ///
-    /// The conversion column is still measured separately, for the case the paragraph
-    /// above rules out today: if it ever
-    /// does dominate a release encode, it is the thing to replace — and nothing else here
-    /// would say so. Sweeping VP9's speed and thread settings means editing the constants
+    /// The conversion column is measured separately because it is the one part of an
+    /// encode this crate owns: on a six-core host the scalar loop was two fifths of a
+    /// 1080p encode, which is what put the `yuv` crate in front of the encoder, and
+    /// nothing else here would say so. Sweeping VP9's speed and thread settings means editing the constants
     /// at the top of `src/vp9.rs` and running this again; they are compile-time on
     /// purpose, since a deployment has no business setting them.
     #[test]

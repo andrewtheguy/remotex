@@ -85,6 +85,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # asserts nothing — it returns error codes — which is why `src/vp9.rs` can be a
 # plain `?` path under `panic = "abort"`.
 vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260918235810-31a9bf7" }
+# The RGB→YUV conversion in front of that encoder (`Yuv::read_rgb` in src/video.rs),
+# for both chroma samplings. Pure Rust with AVX2 and NEON paths chosen at run time —
+# no C, no assembler, the same bargain as above — and three times the speed of the
+# scalar loop it replaced, which on a six-core host was two fifths of a 1080p encode.
+yuv = "0.8"
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a

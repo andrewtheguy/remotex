@@ -2424,6 +2424,7 @@ dependencies = [
  "tower",
  "uuid",
  "xxhash-rust",
+ "yuv",
 ]
 
 [[package]]
@@ -3922,6 +3923,15 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
+]
+
+[[package]]
+name = "yuv"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a295923535c00a4e72a50a0a1130097f93160b39892dd4d2d006b1e2b90d6bf9"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
