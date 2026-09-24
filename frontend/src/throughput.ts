@@ -6,8 +6,8 @@
 // drawn from the recorded rows instead, read from `GET /api/throughput` with the timeframe
 // still being counted; each row carries its busiest second. The shapes mirror
 // `crate::throughput` and the handlers' responses in src/server.rs. Rates are shown in bits
-// per second, the way a network meter does, and an average is derived here: bytes over
-// the seconds they moved in.
+// per second, the way a network meter does, and the averages are derived here: a step's
+// over the seconds it spans, and the range's over the seconds something moved in.
 
 import { gatewayFetch } from "./gateway.ts";
 
@@ -410,13 +410,17 @@ export function appendLive(
 
 /**
  * One direction over a range: a rate per step, oldest first, `null` for a step nothing
- * was read in, and `busiest`, the busiest second in the range, all in bytes per second.
- * The scale fits `busiest`, so the graph is drawn under the peak it names rather than
- * under the highest step: second by second the two are one number, but over recorded
- * timeframes a step is an average and the busiest second stands above it.
+ * was read in; `mean`, the average rate over the seconds something moved in — the
+ * range's bytes over those seconds, so an idle stretch does not pull it down; and
+ * `busiest`, the busiest second in the range, all in bytes per second. The graph draws
+ * `mean` as its dashed line and fits its scale to the highest step, so one busy second
+ * does not flatten the rest; `busiest` is the tile's text. Second by second the
+ * busiest second is the highest step, but over recorded timeframes a step is an
+ * average and the busiest second stands above it.
  */
 export interface RateSeries {
   points: (number | null)[];
+  mean: number;
   busiest: number;
 }
 
@@ -432,11 +436,37 @@ export interface ThroughputSeries {
   end: number | null;
 }
 
-function highest(points: readonly (number | null)[]): number {
+/** The highest step read in `points`: what a graph's scale has to reach. */
+export function highest(points: readonly (number | null)[]): number {
   return points.reduce<number>(
     (max, p) => (p === null ? max : Math.max(max, p)),
     0,
   );
+}
+
+/**
+ * The average over the seconds something moved in: the bytes of the steps in `points`
+ * that moved, each weighted by the seconds it spans as `secondsAt` gives them, over
+ * `movedSecs` — or, where the seconds that moved are not known one by one, over the
+ * seconds those steps span. A step that moved nothing is idle time, not a rate of
+ * zero, and weighs nothing. Zero where nothing moved.
+ */
+function meanOf(
+  points: readonly (number | null)[],
+  secondsAt: (index: number) => number,
+  movedSecs: number | null = null,
+): number {
+  let bytes = 0;
+  let secs = 0;
+  points.forEach((p, i) => {
+    if (p !== null && p > 0) {
+      const weight = secondsAt(i);
+      bytes += p * weight;
+      secs += weight;
+    }
+  });
+  const over = movedSecs ?? secs;
+  return over > 0 ? bytes / over : 0;
 }
 
 /**
@@ -467,6 +497,7 @@ export function liveSeries(
   }
   const series = (points: (number | null)[]): RateSeries => ({
     points,
+    mean: meanOf(points, () => 1),
     busiest: highest(points),
   });
   return {
@@ -503,12 +534,14 @@ function stepSecondsAt(index: number, grid: Grid): number {
   );
 }
 
-/// One row's named seconds, each added to the step it falls in as the rate it is.
+/// One row's named seconds, each added to the step it falls in as the rate it is, and
+/// noted in `moved` by direction: one second two sockets moved in is one second.
 function addSeconds(
   row: ThroughputRecord,
   grid: Grid,
   sent: number[],
   received: number[],
+  moved: { sent: Set<number>; received: Set<number> },
 ) {
   for (const [at, sentPerSec, receivedPerSec] of row.seconds) {
     const when = row.start + at;
@@ -521,6 +554,12 @@ function addSeconds(
     );
     sent[i] += sentPerSec;
     received[i] += receivedPerSec;
+    if (sentPerSec > 0) {
+      moved.sent.add(when);
+    }
+    if (receivedPerSec > 0) {
+      moved.received.add(when);
+    }
   }
 }
 
@@ -588,9 +627,12 @@ function spanOf(
  * cutoff exactly: the part of a row before it is left out, and the oldest step, which
  * the cutoff may fall inside, averages over the seconds it has after it. A timeframe
  * nothing moved in has no row, so a step with none is zero and a recorded range has no
- * gaps. The busiest second is one row's: one socket's, never two sockets' seconds added
- * together. A range of one step is that one number twice, so it is drawn as the flat it
- * is, and one that has not begun yet is drawn as nothing read.
+ * gaps. The mean is the range's bytes over the seconds something moved in: those
+ * seconds themselves where the read names them, and otherwise the seconds of the steps
+ * that moved, each weighted by what it has inside the range. The busiest second is one
+ * row's: one socket's, never two sockets' seconds added together. A range of one step
+ * is that one number twice, so it is drawn as the flat it is, and one that has not
+ * begun yet is drawn as nothing read.
  */
 export function recordedSeries(
   report: ThroughputReport,
@@ -606,7 +648,7 @@ export function recordedSeries(
   if (within !== null && until !== null && until - within >= end) {
     // A range that has not begun: nothing is recorded ahead of the clock, and the second
     // before the read is not this range's, so it holds nothing read at all.
-    const unread: RateSeries = { points: [null, null], busiest: 0 };
+    const unread: RateSeries = { points: [null, null], mean: 0, busiest: 0 };
     return {
       sent: unread,
       received: unread,
@@ -635,11 +677,12 @@ export function recordedSeries(
   const received = new Array<number>(count).fill(0);
   let busiestSent = 0;
   let busiestReceived = 0;
+  const moved = { sent: new Set<number>(), received: new Set<number>() };
   for (const row of kept) {
     busiestSent = Math.max(busiestSent, row.peakSentPerSec);
     busiestReceived = Math.max(busiestReceived, row.peakReceivedPerSec);
     if (detailed) {
-      addSeconds(row, grid, sent, received);
+      addSeconds(row, grid, sent, received, moved);
     } else {
       addTimeframe(row, grid, sent, received);
     }
@@ -653,19 +696,28 @@ export function recordedSeries(
       received[i] /= secs;
     }
   }
+  // The steps before the range's first — the one a range of one step pads with — weigh
+  // nothing in its mean.
+  const secondsAt = (i: number) =>
+    i < count - steps ? 0 : stepSecondsAt(i, grid);
+  const series = (
+    points: number[],
+    busiest: number,
+    movedSecs: Set<number>,
+  ): RateSeries => ({
+    points,
+    mean: meanOf(points, secondsAt, detailed ? movedSecs.size : null),
+    busiest: Math.max(busiest, highest(points)),
+  });
   if (steps < 2) {
     // The range is one step, and a graph is drawn from two points: the second point says
     // what the first does, rather than a step before the range that nothing falls in.
     sent[0] = sent[1];
     received[0] = received[1];
   }
-  const series = (points: number[], busiest: number): RateSeries => ({
-    points,
-    busiest: Math.max(busiest, highest(points)),
-  });
   return {
-    sent: series(sent, busiestSent),
-    received: series(received, busiestReceived),
+    sent: series(sent, busiestSent, moved.sent),
+    received: series(received, busiestReceived, moved.received),
     stepSecs,
     spanSecs: span,
     end,
@@ -673,9 +725,9 @@ export function recordedSeries(
 }
 
 /**
- * The top of a graph's scale for a busiest second in bytes per second: a round number
+ * The top of a graph's scale for its highest step in bytes per second: a round number
  * of bits per second — 1, 2, 2.5 or 5 of a power of ten — at least a tenth above the
- * second, and never below one kilobit per second, so nothing moved is not a scale of
+ * step, and never below one kilobit per second, so nothing moved is not a scale of
  * nothing.
  */
 export function rateScale(peakBytesPerSec: number): number {

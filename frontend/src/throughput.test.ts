@@ -117,11 +117,17 @@ test("the history keeps one sample per second, newest last, as long as the longe
   assert.equal(history[0].at, 105, "the oldest fall off");
 });
 
-/// A series whose busiest second is its highest point, as a sampled one's is.
-const series = (points: (number | null)[], busiest: number) => ({
-  points,
-  busiest,
-});
+/// A sampled series: its busiest second is its highest point, and its mean is that of
+/// the seconds something moved in.
+const series = (points: (number | null)[], busiest: number) => {
+  const moved = points.filter((p): p is number => p !== null && p > 0);
+  return {
+    points,
+    mean:
+      moved.length > 0 ? moved.reduce((a, b) => a + b, 0) / moved.length : 0,
+    busiest,
+  };
+};
 
 test("a series is the window's seconds up to now, summed over what is kept, with gaps for seconds not read", () => {
   const history = [
@@ -220,6 +226,11 @@ test("a recorded range is a point per timeframe, the average over it, zero where
     6000,
     "one socket's busiest second, well above the averages the steps hold",
   );
+  assert.equal(
+    all.sent.mean,
+    8100 / 180,
+    "every byte over the timeframes that moved, not the idle ones",
+  );
   const audio = recordedSeries(read, back(360), (s) => s.socket === "audio");
   assert.deepEqual(audio.sent.points, [0, 20, 0, 0, 0, 0]);
   assert.equal(audio.sent.busiest, 1200);
@@ -244,6 +255,11 @@ test("a recorded range is a point per timeframe, the average over it, zero where
   assert.equal(ragged.spanSecs, 330);
   assert.deepEqual(ragged.sent.points, [150, 100, 0, 0, 0, 0]);
   assert.equal(ragged.sent.busiest, 9000);
+  assert.equal(
+    ragged.sent.mean,
+    (150 * 30 + 100 * 60) / 90,
+    "the oldest step weighs the seconds it has after the cutoff",
+  );
 });
 
 test("the seconds a row names are drawn a point each, the quiet ones as zero", () => {
@@ -271,6 +287,11 @@ test("the seconds a row names are drawn a point each, the quiet ones as zero", (
     second.sent.busiest,
     6000,
     "the row's own busiest second stands",
+  );
+  assert.equal(
+    second.sent.mean,
+    6600 / 3,
+    "over the three seconds that moved, not the 120 of the range",
   );
 
   // Past the points a graph holds, a step averages the seconds in it, the quiet
@@ -312,6 +333,7 @@ test("the seconds a row names are drawn a point each, the quiet ones as zero", (
   assert.equal(quiet.stepSecs, 1);
   assert.equal(quiet.sent.points.length, 120);
   assert.equal(quiet.sent.busiest, 0);
+  assert.equal(quiet.sent.mean, 0);
 });
 
 test("a recorded range past the most points shares them between timeframes", () => {
@@ -352,6 +374,7 @@ test("a range of one step is that step twice, and one not yet begun is nothing r
   );
   assert.equal(one.stepSecs, 60);
   assert.deepEqual(one.sent.points, [100, 100]);
+  assert.equal(one.sent.mean, 100, "the padding step weighs nothing");
 
   // A window that begins after the read: the second before the read is not its second.
   const ahead = recordedSeries(
@@ -361,6 +384,7 @@ test("a range of one step is that step twice, and one not yet begun is nothing r
   );
   assert.deepEqual(ahead.sent.points, [null, null]);
   assert.equal(ahead.sent.busiest, 0);
+  assert.equal(ahead.sent.mean, 0);
   assert.equal(
     ahead.spanSecs,
     600,
