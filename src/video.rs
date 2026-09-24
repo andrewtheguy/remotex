@@ -257,12 +257,21 @@ pub fn threads() -> usize {
     threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
+/// The most threads libvpx's VP9 encoder takes. Not a choice made here: libvpx
+/// v1.16.0 defines `MAX_NUM_THREADS 64` in `vp9/encoder/vp9_ethread.h`, and
+/// `validate_config` in `vp9/vp9_cx_iface.c` refuses a larger `g_threads` with
+/// "g_threads out of range [..MAX_NUM_THREADS]", which fails the encoder's creation.
+/// At 64 the tile-column count [`crate::vp9`] derives, `ilog2(64) = 6`, is also exactly
+/// the top of that file's `tile_columns` range, 0–6.
+const LIBVPX_MAX_THREADS: usize = 64;
+
 /// [`threads`] for a machine of `cores`: half of them, and never fewer than two once
 /// there are two — the one core a single-core machine has is all it gets. Half of
 /// two or three cores is one thread, which leaves the picture unsplit on exactly the
-/// small machine that can least afford it.
+/// small machine that can least afford it. Held to [`LIBVPX_MAX_THREADS`], past which
+/// the encoder would not start at all.
 fn threads_for(cores: usize) -> usize {
-    (cores / 2).max(cores.min(2))
+    (cores / 2).max(cores.min(2)).min(LIBVPX_MAX_THREADS)
 }
 
 /// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
@@ -393,11 +402,13 @@ mod tests {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
     }
 
-    /// Half the cores, but never fewer than two once there are two to use.
+    /// Half the cores, but never fewer than two once there are two to use, one on a
+    /// single core, and never more than libvpx accepts.
     #[test]
     fn the_encoder_takes_at_least_two_threads_where_there_are_two_cores() {
-        let threads: Vec<usize> = [1, 2, 3, 4, 5, 6, 8, 16, 32].into_iter().map(threads_for).collect();
-        assert_eq!(threads, [1, 2, 2, 2, 2, 3, 4, 8, 16]);
+        let cores = [1, 2, 3, 4, 5, 6, 8, 16, 32, 128, 129, 130, 256];
+        let threads: Vec<usize> = cores.into_iter().map(threads_for).collect();
+        assert_eq!(threads, [1, 2, 2, 2, 2, 3, 4, 8, 16, 64, 64, 64, 64]);
     }
 
     /// Synthetic screen content: a light panel with text-like runs, and one window being
