@@ -552,22 +552,32 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
-| `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s | 48 000 | 960 (20 ms) | `OpusHead` |
+| `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`, default 32 | 48 000 | 960 (20 ms) | `OpusHead` |
 | `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP and AirPlay, 48 000 for wlshare | 0 (self-describing) | empty |
 
-Opus's rate is a per-target key, and `audio_adaptive = true` makes it a ceiling
-the link may fall below: `AudioCongestion` (`src/audio.rs`) lives beside the
-pump's send. The audio socket's queue is deliberately two deep; two consecutive
-sends that each wait at least 20 ms are a behind verdict. The walk moves the
-encoder's bitrate down by a third toward `audio_bitrate_min` (default 32 kbit/s),
-and back up by an eighth after sustained clear sends. The change reaches the live
-encoder through `OPUS_SET_BITRATE`; packets stay 20 ms and independently
-decodable, so nothing is re-announced. While the link is
-*behind*, wave buffers that are pure silence are shed before the encoder instead
-of queued — silence is the one content whose loss cannot be heard, the client
-just receives no packets for a while (what a quiet remote already produces), and
-the backlog drains by exactly that much. Both keys are Opus-only and refused
-beside `pcm`, which has no encoder to tune.
+Opus is encoded in `Application::Audio` mode under constrained VBR, set
+explicitly in `src/opus_stream.rs`: `audio_bitrate` is the average the encoder
+holds to, silence costs a few bytes a packet and a loud passage a little more
+than the number, and the running rate stays close enough to it that the
+configured kbit/s is what the link sees. There is no FEC and no DTX — the socket
+is TCP, nothing is lost, and the adaptive walk already sheds silence.
+
+The rate is a per-target key and the audio dial's `video_quality`: a ceiling the
+link may fall below, on by default like `render_adaptive`, with
+`audio_adaptive = false` holding the rate whatever the link does.
+`AudioCongestion` (`src/audio.rs`) lives beside the pump's send. The audio
+socket's queue is deliberately two deep; two consecutive sends that each wait at
+least 20 ms are a behind verdict. The walk moves the encoder's bitrate down by a
+third toward `audio_adaptive_min`, and back up by an eighth after sustained
+clear sends. The change reaches the live encoder through `OPUS_SET_BITRATE`;
+packets stay 20 ms and independently decodable, so nothing is re-announced.
+While the link is *behind*, wave buffers that are pure silence are shed before
+the encoder instead of queued — silence is the one content whose loss cannot be
+heard, the client just receives no packets for a while (what a quiet remote
+already produces), and the backlog drains by exactly that much. All three keys
+are Opus-only and refused beside `pcm`, which has no encoder to tune; the floor
+is also refused beside `audio_adaptive = false`, and the default floor is held
+to a lower `audio_bitrate` rather than refused.
 
 `pcm` is passthrough: the remote's wave buffer becomes one packet, byte for
 byte, with no encoder in the gateway and no decoder in the client. `pcm-s16le`

@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 
 use super::Handshake;
 use crate::config::{
-    DEFAULT_AUDIO_BITRATE_KBPS, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
+    DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -672,10 +672,13 @@ fn describe_audio(target: &TargetConfig) -> String {
             "pcm passthrough, 1.41 Mbit/s, no encoder and no decoder".to_owned()
         }
         crate::config::AudioCodec::Opus => {
-            let ceiling = target.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
+            let ceiling = plan.bitrate_bps / 1000;
             match plan.adaptive_floor_bps {
-                Some(floor) => format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s", floor / 1000),
-                None => format!("opus at {ceiling} kbit/s"),
+                Some(floor) if floor < plan.bitrate_bps => {
+                    format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s", floor / 1000)
+                }
+                // A walk clamped to its ceiling, or none: the rate is the rate.
+                Some(_) | None => format!("opus at {ceiling} kbit/s"),
             }
         }
     }
@@ -1532,7 +1535,10 @@ mod tests {
         assert!(page.contains("192.168.1.20:3389"), "the standard port is filled in: {page}");
         assert!(page.contains("account password set"), "{page}");
         assert!(!page.contains("hunter2"), "a password does not reach the screen: {page}");
-        assert!(page.contains("opus at 96 kbit/s"), "an unset dial is named at its default: {page}");
+        assert!(
+            page.contains("opus ≤96 kbit/s, adaptive down to 32 kbit/s"),
+            "an unset dial is named at its defaults, walk included: {page}"
+        );
         assert!(page.contains("video q70"), "the render plan describes itself: {page}");
 
         // A config the gateway would refuse says so, instead of a page of

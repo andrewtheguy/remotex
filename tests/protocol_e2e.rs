@@ -1067,8 +1067,8 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         render_adaptive: None,
         render_adaptive_min: None,
         audio_bitrate: None,
-        audio_adaptive: false,
-        audio_bitrate_min: None,
+        audio_adaptive: None,
+        audio_adaptive_min: None,
     }
 }
 
