@@ -335,9 +335,9 @@ password = "change-me"
 #microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is
-# ignored, an explicit security is refused, and width/height only ever answer a
-# default-size request (see above). `vnc_password` is the server's own password
-# and is all a server without user accounts takes.
+# ignored, and width/height only ever answer a default-size request (see above).
+# `vnc_password` is the server's own password and is all a server without user
+# accounts takes.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
@@ -469,15 +469,14 @@ password = "change-me"
 #
 #   Set "420" for a fleet that must stay on a hardware decoder, or where the target is
 #   photographic rather than text and the extra colour buys nothing worth the bytes.
-#   It is a selection like "444", not the quiet answer it used to be.
 #render_chroma = "auto"
 
 # `video_quality` tracks measured client queueing — on unless this turns it off. The
 # configured quality remains the ceiling; the stream adds the client's paint lag to its
 # existing send-pressure signal, and never goes below render_adaptive_min.
 #
-# Turning it off leaves the walk the stream had before this key existed: pressure only,
-# floored at 1, which is worth having only to pin one side of a measurement.
+# Turning it off walks on send pressure alone, floored at 1, which is worth having only
+# to pin one side of a measurement.
 #render_adaptive = true
 
 # Floor for that adaptive walk, 1–100 and defaulting to 20. Refused beside
