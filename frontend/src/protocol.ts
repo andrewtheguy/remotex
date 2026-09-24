@@ -92,15 +92,9 @@ export type ClientMsg =
   // a canvas that has gone wrong; the
   // browser has no button for it, since there is a reload right there.
   | { type: "refresh" }
-  // "I lost the tiles you told me to remember." Sent when a cached tile will not
-  // decode, or when a reference names a slot this client does not hold. The
-  // server empties its slot table and repaints; deliberately not "refresh",
-  // which is routed to the engine and would leave the table intact — the repaint
-  // would come back as the same references and miss again.
   // There is no audio message. Subscribing is opening `/ws/audio`, and stopping is
   // closing it — see useRemoteDesktop's `setAudio`. The UI click that does it also
   // authorizes playback, which is why it has to be a click either way.
-  | { type: "cacheReset" }
   // The paint worker finished this batch after its ordered parse/decode/draw
   // pass. The sequence came from the batch header; the timings make the
   // browser backlog visible to the gateway instead of stopping at WebSocket
@@ -175,7 +169,7 @@ export interface MosaicRegion {
   points: MosaicRect;
 }
 
-// Server -> browser text frames: everything but screen tiles. `resize`/`error`
+// Server -> browser text frames: everything but the video stream. `resize`/`error`
 // come from the engine; `picker`/`connected` are the session-slot status the
 // server sends so the browser knows which post-login state it is in.
 export type ControlMsg =
@@ -183,18 +177,12 @@ export type ControlMsg =
   // per point of its *own* desktop (1 for VNC, RDP and a 1x Mac, 2 for a Retina
   // one). The canvas bitmap remains `w` by `h`, while its CSS box is
   // `w / scale` by `h / scale`, preserving every source pixel without changing
-  // the remote desktop's logical size. `tileGrid` is the gateway's tile lattice
-  // for this framebuffer, in its pixels: 64 points, so 64 at 1x and 128 at 2x.
-  // It rides every resize because it follows the density, and it travels
-  // rather than living here as a constant: an overlay that draws a different
-  // grid from the one damage was cut at still looks like a grid, which is the
-  // one failure nobody would spot. Drawn only under `connected.gridDebug`.
+  // the remote desktop's logical size.
   | {
       type: "resize";
       w: number;
       h: number;
       scale: number;
-      tileGrid: { w: number; h: number };
     }
   // The remote pointer shape, sent only by engines whose server hands the
   // cursor over instead of drawing it into the framebuffer (the VNC Cursor
@@ -245,17 +233,11 @@ export type ControlMsg =
       // Whether this target redirects the browser's microphone to the remote. The
       // camera's twin: enabled afresh each session by opening /ws/mic.
       microphone: boolean;
-      // The render dial this session resolved to, in one line — `tiles · webp q60`,
-      // `motion · base png, moving stream q40`, `video q60`. The *resolved plan*
-      // rather than the config keys, which the reader may not have and which take a
-      // pairing matrix to collapse into what the encoder is actually doing.
+      // The render dial this session resolved to, in one line —
+      // `video q90 4:4:4 · adaptive ≥20`. The *resolved plan* rather than the config
+      // keys, which the reader may not have: defaults and the browser's own chroma
+      // are already applied.
       render: string;
-      // `render_grid_debug`: draw the gateway's tile lattice over the desktop.
-      // False on every target that did not ask for it, which is all of them by
-      // default and `render_type = "video"` always (it sends no tiles). The pitch
-      // is not here — it rides every `resize`, because it follows the
-      // framebuffer's density and there is no framebuffer yet.
-      gridDebug: boolean;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already
@@ -280,22 +262,13 @@ export type ControlMsg =
   // whenever it changes — a decoder configured afterwards has already thrown away the
   // frame it was meant to decode. The video counterpart of `audioFormat`.
   //
-  // Per `stream`, not per session: under `render_motion = true` a session
-  // runs up to four at once over regions of different sizes, and the configuration
-  // string carries a size-derived level, so one string for the session would be wrong
-  // for some of them.
+  // One per session, plus one per resize and per repaint: the string carries a
+  // size-derived level, and a browser that just attached has seen none.
   //
   // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08.01.06.06.06.00`.
   // Nothing here parses a bitstream to find it out; VP9 has no parameter sets to
   // parse.
-  | { type: "videoFormat"; stream: number; decode: string }
-  // One stream's region is over: nothing more arrives on this id until it is
-  // announced again. The counterpart of `videoFormat`, and it is about the resource
-  // rather than the picture — a decoder holds a platform decode session, there are
-  // few of them, and under `render_motion = true` regions come and go all
-  // session. Without this the browser would keep one decoder per id it had ever seen
-  // and hand the next region to start a platform with nothing left to give it.
-  | { type: "videoEnd"; stream: number }
+  | { type: "videoFormat"; decode: string }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
@@ -351,44 +324,15 @@ export type ControlMsg =
   | { type: "micOpen" }
   | { type: "micClose" };
 
-export interface TileMsg {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  // Where the server wants this remembered, or NO_SLOT for "do not".
-  slot: number;
-  // The encoded picture, in `codec`.
-  data: Uint8Array;
-  // What `data` is, as a MIME type handed to createImageBitmap as a Blob: the
-  // gateway sends lossless PNG by default, and a target on a lossy render
-  // dial sends WebP instead. Both are a self-contained picture;
-  // a frame that only means something in sequence is a VideoMsg, not a tile.
-  codec: "image/png" | "image/webp";
-}
-
-// "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
-export interface TileRefMsg {
-  slot: number;
-  x: number;
-  y: number;
-}
-
-// One video access unit for one region of the framebuffer.
+// One video access unit of the desktop's stream.
 //
-// Not a tile, and the separate record is the point: a tile is a self-contained
-// picture — reorderable, cacheable, droppable once something covers it — and this is
-// one link in a chain, where losing any link decodes wrongly until the next keyframe.
+// One link in a chain, where losing any link decodes wrongly until the next
+// keyframe — so none may be dropped, reordered, or decoded twice.
 //
-// `stream` says which decoder it belongs to. A session may run several at once — one
-// per moving region under `render_motion = true`, exactly one under
-// `render_type = "video"` — and ids are reused as regions come and go, so a record
-// whose size differs from the last one on the same id means that decoder is starting
-// over on a differently sized picture.
-//
-// `(x, y, w, h)` is the true region rectangle. The decoded picture may be a pixel
-// wider or taller, because the encoders are held to even sides and a region at the edge
-// of an odd desktop does not have them: draw the top-left w×h of it at (x, y).
+// `(w, h)` is the true desktop size. The decoded picture may be a pixel wider or
+// taller, because the encoder is held to even sides and an odd desktop does not have
+// them: draw the top-left w×h of it. A size that differs from the last unit's means
+// the stream started over on a differently sized picture.
 //
 // `keyframe` comes from the record's flags byte, and so from the encoder rather than
 // from a parse of what it produced. It is on the wire because VP9 carries no parameter
@@ -396,39 +340,11 @@ export interface TileRefMsg {
 // configure the decoder, and always arrives first. See `VideoUnit` in src/protocol.rs
 // for the whole contract.
 export interface VideoMsg {
-  stream: number;
-  x: number;
-  y: number;
   w: number;
   h: number;
   keyframe: boolean;
   data: Uint8Array;
 }
-
-// Pixels the client already holds, moved from one place on its canvas to another:
-// RFB's CopyRect carried through to the browser rather than stopping at the gateway,
-// which used to read the source out of its own copy and re-encode it. Thirteen bytes
-// whatever the rectangle's size, which for a scrolling window is most of a desktop.
-//
-// The source is read as the canvas stands when the record is applied, so records
-// before it in the batch must already have been drawn — and an overlapping copy moves
-// the original pixels, which is what a canvas blit does anyway. There is no payload
-// and no slot: a copy is an instruction, not a picture, so it is never cached,
-// referenced, or superseded. See `CopyRect` in src/protocol.rs.
-export interface CopyMsg {
-  sx: number;
-  sy: number;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-export type BatchRecord =
-  | ({ kind: "tile" } & TileMsg)
-  | ({ kind: "ref" } & TileRefMsg)
-  | ({ kind: "video" } & VideoMsg)
-  | ({ kind: "copy" } & CopyMsg);
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
@@ -438,39 +354,14 @@ const AUDIO_PACKET_HEADER_LEN = 2;
 const CAMERA_FRAME_KIND = 0x04;
 const CAMERA_KEYFRAME = 0x01;
 const MIC_FRAME_KIND = 0x05;
-const OP_TILE = 0x01;
-const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
-const OP_COPY = 0x04;
-const TILE_HEADER_LEN = 16;
-const TILE_REF_LEN = 7;
-const VIDEO_HEADER_LEN = 15;
-const COPY_LEN = 13;
+const VIDEO_HEADER_LEN = 10;
 // A VIDEO record's only flag: a decoder that has seen nothing before it can start here.
 // Any other bit means a gateway newer than this client, and the record is dropped rather
 // than guessed at — the same strictness the batch's own flags byte gets.
 const VIDEO_KEYFRAME = 0x01;
-// The format byte, as what the payload is: `Tile::FORMAT_PNG`,
-// `Tile::FORMAT_WEBP`. A byte outside this map (a stale gateway's, or a corrupt
-// frame) yields `undefined`, and `decodeTile` drops the record rather than handing
-// unknown bytes to a decoder.
-const CODEC_BY_FORMAT: Record<number, TileMsg["codec"] | undefined> = {
-  1: "image/png",
-  2: "image/webp",
-};
-export const NO_SLOT = 0xffff;
-// How many video streams one session may run at once. Part of the wire contract
-// (`batch::MAX_STREAMS`), and the same kind of bound as SLOT_COUNT: a stream id at
-// or above it is a malformed record rather than a reason to hold another decoder,
-// which keeps this client's memory a function of the protocol instead of of what a
-// gateway chooses to send. The gateway's own cap on concurrent regions is smaller.
-export const MAX_STREAMS = 16;
-// How many tiles the server may ask this client to remember. Part of the wire
-// contract (`batch::SLOT_COUNT`), which is what makes the cache a fixed array
-// rather than something a server could grow without limit.
-export const SLOT_COUNT = 256;
 
-// Parse a binary batch frame into its tile records. Layout (little-endian,
+// Parse a binary batch frame into its access units. Layout (little-endian,
 // matching `batch` in `src/protocol.rs`):
 //
 //   offset 0: u8  frame kind, always 0x02 (batch)
@@ -479,27 +370,22 @@ export const SLOT_COUNT = 256;
 //   offset 4: u32 sequence, increasing per attachment
 //   offset 8: records, back to back
 //
-//   TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
-//                       | u32 len | payload[len]
-//   TILE_REF (op 0x02):  u16 slot | u16 x | u16 y
-//   VIDEO (op 0x03):     u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
-//                       | u32 len | payload[len]
-//   COPY (op 0x04):      u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
+//   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
 // only because the header carries a record count — without it, a short read
 // would look like a complete but smaller batch.
-export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
+export function decodeBatchFrame(buf: ArrayBuffer): VideoMsg[] | null {
   if (batchFrameSequence(buf) === null) {
     return null;
   }
   const view = new DataView(buf);
   const count = view.getUint16(2, true);
-  const records: BatchRecord[] = [];
+  const records: VideoMsg[] = [];
   let at = BATCH_HEADER_LEN;
   while (at < buf.byteLength) {
-    const parsed = decodeRecord(view, buf, at);
+    const parsed = decodeVideo(view, buf, at);
     if (!parsed) {
       return null;
     }
@@ -527,133 +413,30 @@ export function batchFrameSequence(buf: ArrayBuffer): number | null {
   return sequence === 0 ? null : sequence;
 }
 
-function decodeRecord(
-  view: DataView,
-  buf: ArrayBuffer,
-  at: number,
-): { record: BatchRecord; next: number } | null {
-  switch (view.getUint8(at)) {
-    case OP_TILE_REF:
-      return decodeRef(view, buf.byteLength, at);
-    case OP_VIDEO:
-      return decodeVideo(view, buf, at);
-    case OP_COPY:
-      return decodeCopy(view, buf.byteLength, at);
-    default:
-      return decodeTile(view, buf, at);
-  }
-}
-
-function decodeRef(
-  view: DataView,
-  length: number,
-  at: number,
-): { record: BatchRecord; next: number } | null {
-  if (at + TILE_REF_LEN > length) {
-    return null;
-  }
-  const slot = view.getUint16(at + 1, true);
-  if (slot >= SLOT_COUNT) {
-    return null;
-  }
-  return {
-    record: {
-      kind: "ref",
-      slot,
-      x: view.getUint16(at + 3, true),
-      y: view.getUint16(at + 5, true),
-    },
-    next: at + TILE_REF_LEN,
-  };
-}
-
-function decodeTile(
-  view: DataView,
-  buf: ArrayBuffer,
-  at: number,
-): { record: BatchRecord; next: number } | null {
-  if (view.getUint8(at) !== OP_TILE || at + TILE_HEADER_LEN > buf.byteLength) {
-    return null;
-  }
-  const slot = view.getUint16(at + 2, true);
-  if (slot !== NO_SLOT && slot >= SLOT_COUNT) {
-    return null;
-  }
-  const codec = CODEC_BY_FORMAT[view.getUint8(at + 1)];
-  if (!codec) {
-    return null;
-  }
-  const len = view.getUint32(at + 12, true);
-  const start = at + TILE_HEADER_LEN;
-  if (start + len > buf.byteLength) {
-    return null;
-  }
-  return {
-    record: {
-      kind: "tile",
-      slot,
-      x: view.getUint16(at + 4, true),
-      y: view.getUint16(at + 6, true),
-      w: view.getUint16(at + 8, true),
-      h: view.getUint16(at + 10, true),
-      data: new Uint8Array(buf, start, len),
-      codec,
-    },
-    next: start + len,
-  };
-}
-
-function decodeCopy(
-  view: DataView,
-  length: number,
-  at: number,
-): { record: BatchRecord; next: number } | null {
-  if (at + COPY_LEN > length) {
-    return null;
-  }
-  return {
-    record: {
-      kind: "copy",
-      sx: view.getUint16(at + 1, true),
-      sy: view.getUint16(at + 3, true),
-      x: view.getUint16(at + 5, true),
-      y: view.getUint16(at + 7, true),
-      w: view.getUint16(at + 9, true),
-      h: view.getUint16(at + 11, true),
-    },
-    next: at + COPY_LEN,
-  };
-}
-
 function decodeVideo(
   view: DataView,
   buf: ArrayBuffer,
   at: number,
-): { record: BatchRecord; next: number } | null {
-  if (at + VIDEO_HEADER_LEN > buf.byteLength) {
+): { record: VideoMsg; next: number } | null {
+  if (
+    view.getUint8(at) !== OP_VIDEO ||
+    at + VIDEO_HEADER_LEN > buf.byteLength
+  ) {
     return null;
   }
-  const stream = view.getUint8(at + 1);
-  if (stream >= MAX_STREAMS) {
-    return null;
-  }
-  const flags = view.getUint8(at + 2);
+  const flags = view.getUint8(at + 1);
   if ((flags & ~VIDEO_KEYFRAME) !== 0) {
     return null;
   }
-  const len = view.getUint32(at + 11, true);
+  const len = view.getUint32(at + 6, true);
   const start = at + VIDEO_HEADER_LEN;
   if (start + len > buf.byteLength) {
     return null;
   }
   return {
     record: {
-      kind: "video",
-      stream,
-      x: view.getUint16(at + 3, true),
-      y: view.getUint16(at + 5, true),
-      w: view.getUint16(at + 7, true),
-      h: view.getUint16(at + 9, true),
+      w: view.getUint16(at + 2, true),
+      h: view.getUint16(at + 4, true),
       keyframe: (flags & VIDEO_KEYFRAME) !== 0,
       data: new Uint8Array(buf, start, len),
     },

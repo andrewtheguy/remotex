@@ -152,7 +152,7 @@ const LAG_CLEAR: Duration = Duration::from_millis(30);
 /// larger delta — which is cheaper than coding the same movement across four
 /// frames, not merely fewer frames of it.
 ///
-/// 33_333 µs is the interval `VIDEO_FRAME_US` in `frontend/src/tilePainter.ts`
+/// 33_333 µs is the interval `VIDEO_FRAME_US` in `frontend/src/videoDecoder.ts`
 /// already stamps access units with, so the timestamps stop being a fiction.
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 

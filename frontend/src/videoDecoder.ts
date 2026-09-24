@@ -1,14 +1,10 @@
-// A WebCodecs `VideoDecoder` shaped like the rest of the tile path.
+// A WebCodecs `VideoDecoder` for the desktop's one stream.
 //
-// Two render dials send access units (see `VideoUnit` in src/protocol.rs).
-// `render_type = "video"` sends the whole desktop as one inter-frame stream;
-// `render_motion = true` sends one stream per moving region, with the
-// still codecs carrying everything else — so a session may have several of these
-// running at once, which is what `createVideoStreams` is for. Everything else about
-// that path is ordinary: the units arrive as VIDEO records in the same batches and
-// are painted onto the same canvas. What is not ordinary is that each stream is a
-// *chain* — every frame means "what changed since the one before it" — so unlike a
-// still tile, none of them may be dropped, reordered, or decoded twice.
+// Every target sends the whole desktop as one inter-frame VP9 stream (see
+// `VideoUnit` in src/protocol.rs). The units arrive as VIDEO records in the batches
+// and are painted onto the canvas. What is not ordinary is that the stream is a
+// *chain* — every frame means "what changed since the one before it" — so none of
+// them may be dropped, reordered, or decoded twice.
 //
 // **Nothing here parses a bitstream.** The gateway says how to decode a stream in a
 // `videoFormat` control message before its first unit, and marks each unit's keyframe
@@ -31,12 +27,11 @@
 // one output per `decode()`, and a decoder that quietly produces nothing for a chunk —
 // a frame whose references it does not have is the ordinary way — settles nothing and
 // says nothing. One such chunk is enough on its own: the worker draws one batch at a
-// time and a batch carries at most one unit per stream, so there is never a later frame
-// to shake the FIFO loose. Hence the backstop below, which is what makes the promise
+// time, so there is never a later frame to shake the FIFO loose. Hence the backstop below, which is what makes the promise
 // this file hands out a promise rather than a hope.
 
 /**
- * How to decode one stream, from the gateway's `videoFormat` message.
+ * How to decode the stream, from the gateway's `videoFormat` message.
  *
  * `decode` is the exact string to hand `VideoDecoder.configure`: `vp09.00.40.08.01.06.06.06.00`. It
  * is also what an error message names.
@@ -45,70 +40,46 @@ export interface VideoFormat {
   decode: string;
 }
 
-/** One session's decoders, one per `stream` id on the wire. */
-export interface VideoStreams {
+/** The desktop's decoder, rebuilt as the stream it decodes starts over. */
+export interface DesktopVideo {
   /**
-   * Adopt the gateway's `videoFormat` for one stream.
+   * Adopt the gateway's `videoFormat`.
    *
-   * Always arrives before that stream's first unit, and again after a repaint — which
+   * Always arrives before the stream's first unit, and again after a repaint — which
    * is what a browser that just attached gets, and it has seen neither the original
    * announcement nor a keyframe. A format that says the same thing as the one in force
    * changes nothing, so a re-announcement costs no decoder.
    */
-  setFormat: (stream: number, format: VideoFormat) => void;
+  setFormat: (format: VideoFormat) => void;
   /**
-   * Decode one access unit for `stream`, resolving to its frame — or to null when
-   * there is nothing to paint for it.
+   * Decode one access unit, resolving to its frame — or to null when there is nothing
+   * to paint for it.
    *
-   * A record whose size differs from the last one on the same id means that region
-   * restarted on a different picture: the decoder is replaced rather than reused,
-   * because the configuration string carries no resolution and an in-band
-   * size change is not a thing to bet two browsers on. The gateway sends a keyframe
-   * whenever that happens, so a fresh decoder always has somewhere to start.
+   * A unit whose size differs from the last one means the stream restarted on a
+   * different picture: the decoder is replaced rather than reused, because the
+   * configuration string carries no resolution and an in-band size change is not a
+   * thing to bet two browsers on. The gateway sends a keyframe whenever that happens,
+   * so a fresh decoder always has somewhere to start.
    */
   decode: (
-    stream: number,
     size: { w: number; h: number },
     data: Uint8Array,
     keyframe: boolean,
   ) => Promise<VideoFrame | null>;
-  /**
-   * One stream's region is over.
-   *
-   * The gateway says this because it is the only side that knows it — an id that has
-   * ended is otherwise indistinguishable from one whose region is merely still. What
-   * it buys is a resource: a decoder holds a platform decode session, a hardware one
-   * holds a scarce one, and under `render_motion = true` regions come and
-   * go all session, so a table that never released anything would hold a session per
-   * id it had ever seen.
-   *
-   * **The decoder is retired, not closed.** Closing it here was measured to cost more
-   * than it saved: over a real scroll the gateway ended a stream 88 times in 98
-   * retunes, and most of those ids were handed straight back to another region at the
-   * same picture size — which an open decoder decodes from the next keyframe without
-   * being rebuilt at all. Closing on the spot turned 37 decoder builds into 97, and a
-   * decoder *build* is the expensive, failure-prone half of a hardware session's life.
-   * So the end starts a clock ([`RETIRE_MS`]) instead, and a stream that comes back
-   * before it runs out costs nothing.
-   */
-  end: (stream: number) => void;
-  /** Drop every decoder. Everything still pending resolves to null. */
+  /** Drop the decoder. Everything still pending resolves to null. */
   close: () => void;
 }
 
 /**
- * Build the decoder table for one connection.
+ * Build the desktop's decoder for one connection.
  *
  * That `VideoDecoder` exists is the client's entry condition and not a question for
- * this path (preflight.ts). Decoders themselves are created on the first unit for
- * their id, because most targets send none at all and a target on the region dial may
- * never use more than one.
+ * this path (preflight.ts). The decoder itself is created on the first unit.
  */
-export function createVideoStreams(
+export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
-  retireMs: number = RETIRE_MS,
-): VideoStreams {
+): DesktopVideo {
   interface Live {
     stream: VideoStream;
     format: VideoFormat;
@@ -121,74 +92,47 @@ export function createVideoStreams(
      */
     timestamp: number;
   }
-  const live = new Map<number, Live>();
-  // Streams the gateway has said are over, and when their decoder goes. Held rather
-  // than closed, per `end` above.
-  const retiring = new Map<number, ReturnType<typeof setTimeout>>();
-  // What the gateway last announced per stream, which is not the same as what a
-  // decoder is running on: the announcement arrives first and the decoder is built by
-  // the unit that follows it.
-  const formats = new Map<number, VideoFormat>();
-  // Streams already logged as arriving before their format, so a takeover costs one
+  let live: Live | null = null;
+  // What the gateway last announced, which is not the same as what a decoder is
+  // running on: the announcement arrives first and the decoder is built by the unit
+  // that follows it.
+  let format: VideoFormat | null = null;
+  // Whether a unit arriving before its format has been logged, so a takeover costs one
   // console line rather than one per frame until the repaint lands.
-  const warned = new Set<number>();
+  let warned = false;
 
-  const keepAlive = (id: number) => {
-    const clock = retiring.get(id);
-    if (clock !== undefined) {
-      clearTimeout(clock);
-      retiring.delete(id);
-    }
+  const dropDecoder = () => {
+    live?.stream.close();
+    live = null;
   };
 
-  const dropDecoder = (id: number) => {
-    keepAlive(id);
-    const held = live.get(id);
-    if (held) {
-      held.stream.close();
-      live.delete(id);
-    }
-  };
-
-  // The decoder for one stream, built on demand and replaced when its picture changes.
-  // Split out of `decode` because it is the only part with branches worth naming: the
-  // caller's job is the format lookup and the timestamp, and this one's is the decoder's
-  // lifetime.
+  // The decoder, built on demand and replaced when its picture changes.
   const liveStream = (
-    id: number,
     size: { w: number; h: number },
     format: VideoFormat,
   ): Live | null => {
-    const existing = live.get(id);
-    if (existing && existing.w === size.w && existing.h === size.h) {
-      return existing;
+    if (live && live.w === size.w && live.h === size.h) {
+      return live;
     }
-    if (existing) {
-      // A region that restarted on a different picture. The configuration
-      // string carries no resolution, and an in-band size change is not a thing to bet
-      // two browsers on, so the decoder is replaced rather than reused.
-      dropDecoder(id);
-    }
+    // A stream that restarted on a different picture. The configuration string
+    // carries no resolution, and an in-band size change is not a thing to bet two
+    // browsers on, so the decoder is replaced rather than reused.
+    dropDecoder();
     let entry: Live | undefined;
-    // Bound to this id, so a decoder that gives up takes its own region down and no
-    // others: under `render_motion = true` the rest of the desktop is still
-    // arriving as still tiles and still painting, and the other regions have chains of
-    // their own that this one says nothing about. Under `render_type = "video"` there is
-    // only ever one, so it is the same outcome.
     const failed = (reason: string, recoverable: boolean) => {
-      // Only if this entry is still the live one: a region that restarted on a new size
-      // has already replaced it, and dropping the newer decoder because the older one
-      // errored would lose a chain that is decoding fine.
-      if (live.get(id) === entry) {
-        live.delete(id);
+      // Only if this entry is still the live one: a stream that restarted on a new
+      // size has already replaced it, and dropping the newer decoder because the older
+      // one errored would lose a chain that is decoding fine.
+      if (live === entry) {
+        live = null;
       }
       handlers.onError(reason, recoverable);
       if (recoverable) {
-        // Asked for, exactly as a stall is. The next unit on this id builds a fresh
-        // decoder, and a fresh decoder can start at nothing but a keyframe — so
-        // without this the region is not "one failed frame" but every frame after
-        // it, and the banner the error just raised would go on telling the truth.
-        handlers.onNeedsKeyframe(`stream ${id}: ${reason}`);
+        // Asked for, exactly as a stall is. The next unit builds a fresh decoder,
+        // and a fresh decoder can start at nothing but a keyframe — so without this
+        // the desktop is not "one failed frame" but every frame after it, and the
+        // banner the error just raised would go on telling the truth.
+        handlers.onNeedsKeyframe(reason);
       }
     };
     let stream: VideoStream;
@@ -197,25 +141,20 @@ export function createVideoStreams(
         format,
         {
           onError: failed,
-          // Named, because the one thing worth knowing about a stall is which region
-          // it was: under `render_motion = true` there are several of
-          // these and they stop for their own reasons. A stall is as terminal for
-          // the decoder as an error (see `stalled` in `createVideoStream`), so the
-          // entry goes the same way — the next unit on this id builds afresh, with
-          // the same guard as `failed` for the same reason.
+          // A stall is as terminal for the decoder as an error (see `stalled` in
+          // `createVideoStream`), so the entry goes the same way — the next unit
+          // builds afresh, with the same guard as `failed` for the same reason.
           onNeedsKeyframe: (reason) => {
-            if (live.get(id) === entry) {
-              live.delete(id);
+            if (live === entry) {
+              live = null;
             }
-            handlers.onNeedsKeyframe(`stream ${id}: ${reason}`);
+            handlers.onNeedsKeyframe(reason);
           },
         },
         stallMs,
       );
     } catch (e) {
-      // Unreachable once the table exists — it refused to be built without a decoder —
-      // but a throw from here would escape into the paint loop and drop a whole batch of
-      // tiles that had nothing to do with video.
+      // A throw from here would escape into the paint loop and drop the batch.
       handlers.onError(
         e instanceof Error ? e.message : "This browser cannot decode video.",
         // A runtime with no decoder at all. No keyframe repairs that either.
@@ -224,90 +163,46 @@ export function createVideoStreams(
       return null;
     }
     entry = { stream, format, w: size.w, h: size.h, timestamp: 0 };
-    live.set(id, entry);
+    live = entry;
     return entry;
   };
 
   return {
-    setFormat(id, format) {
-      // An announcement is a stream starting on this id, so a retirement in progress
-      // is over: left running, it could fire between this and the first unit and
-      // take the format it just deleted with it.
-      keepAlive(id);
-      formats.set(id, format);
-      warned.delete(id);
-      const held = live.get(id);
-      if (held && held.format.decode !== format.decode) {
+    setFormat(next) {
+      format = next;
+      warned = false;
+      if (live && live.format.decode !== next.decode) {
         // A stream that came back configured differently — a resize is the way this
         // happens — is a new chain, and its old decoder cannot decode it.
-        dropDecoder(id);
+        dropDecoder();
       }
     },
-    decode(id, size, data, keyframe) {
-      const format = formats.get(id);
+    decode(size, data, keyframe) {
       if (!format) {
         // **Dropped, and that is correct rather than defensive.** It happens on a
-        // takeover: the gateway announces a stream once, to whoever was attached, and a
-        // browser that takes the session over receives whatever units were already in
-        // flight before the repaint its attach triggers has taken effect. Those units
-        // are undecodable here whatever this does — a decoder that has just been built
-        // can only start at a keyframe, and the keyframe is in the repaint that is
-        // already on its way with the format in front of it.
-        //
-        // So this used to report "the gateway sent video before saying how to decode
-        // it", and that was wrong twice over: it named a contract violation for an
-        // ordinary race, and it left a banner up over a session that had already
-        // recovered.
-        if (!warned.has(id)) {
-          warned.add(id);
-          console.warn(
-            `video: dropping a unit on stream ${id} until its format arrives`,
-          );
+        // takeover: the gateway announces the stream once, to whoever was attached,
+        // and a browser that takes the session over receives whatever units were
+        // already in flight before the repaint its attach triggers has taken effect.
+        // Those units are undecodable here whatever this does — a decoder that has
+        // just been built can only start at a keyframe, and the keyframe is in the
+        // repaint that is already on its way with the format in front of it.
+        if (!warned) {
+          warned = true;
+          console.warn("video: dropping a unit until its format arrives");
         }
         return Promise.resolve(null);
       }
-      // Whatever this id was, it is live again — see `end`.
-      keepAlive(id);
-      const held = liveStream(id, size, format);
+      const held = liveStream(size, format);
       if (!held) {
         return Promise.resolve(null);
       }
       held.timestamp += VIDEO_FRAME_US;
       return held.stream.decode(data, held.timestamp, keyframe);
     },
-    end(id) {
-      if (!live.has(id) || retiring.has(id)) {
-        return;
-      }
-      retiring.set(
-        id,
-        setTimeout(() => {
-          retiring.delete(id);
-          // The format goes with the decoder: the next stream on this id announces its
-          // own before its first unit, and a stale one would configure the wrong
-          // picture. Both stay while the decoder is merely retiring, which is what
-          // lets a region that comes back reuse it.
-          const held = live.get(id);
-          if (held) {
-            held.stream.close();
-            live.delete(id);
-          }
-          formats.delete(id);
-          warned.delete(id);
-        }, retireMs),
-      );
-    },
     close() {
-      for (const clock of retiring.values()) {
-        clearTimeout(clock);
-      }
-      retiring.clear();
-      for (const held of live.values()) {
-        held.stream.close();
-      }
-      live.clear();
-      formats.clear();
-      warned.clear();
+      dropDecoder();
+      format = null;
+      warned = false;
     },
   };
 }
@@ -322,35 +217,18 @@ const VIDEO_FRAME_US = 33_333;
 
 // How long a decoder may owe a frame before the stream is treated as stalled.
 //
-// Generous on purpose, because this is a liveness backstop and not a deadline: a
-// decoder holds at most one access unit per stream at a time — the worker draws one
-// batch at a time, and a batch carries at most one unit per stream — so this is sixty
-// frames' grace at the 30 Hz `VIDEO_FRAME_INTERVAL` in src/encode.rs paces rounds at.
+// Generous on purpose, because this is a liveness backstop and not a deadline: the
+// worker draws one batch at a time, so this is sixty frames' grace at the 30 Hz `VIDEO_FRAME_INTERVAL` in src/encode.rs paces rounds at.
 // A decode that has not landed by now is not slow, it is not coming.
 const STALL_MS = 2_000;
-
-// How long a decoder outlives the end of the stream it was decoding.
-//
-// The gateway ends a region's stream after half a second of stillness and starts one
-// again the moment it moves, so ids come back constantly — and a returning region on
-// a decoder that is still open and still the right size costs nothing at all, where a
-// rebuilt one costs a platform decode session. Four seconds is long enough to cover
-// the way a scroll actually stops and starts, and short enough that a session the
-// picture has genuinely finished with is handed back while the desktop is still on
-// screen rather than at the end of the session.
-const RETIRE_MS = 4_000;
 
 export interface VideoHandlers {
   /**
    * A decoder gave up, and the stream it was decoding is over: every frame after
    * the one it failed on is expressed against history it no longer has.
    *
-   * Reported rather than worked around, because there is no fallback to switch to.
-   * How much of the desktop that costs depends on the dial — under
-   * `render_type = "video"` it is all of it, and under
-   * `render_motion = true` it is one region, with the still codecs
-   * carrying everything around it — so this says what happened and lets the caller
-   * decide how loudly to say it.
+   * Reported rather than worked around, because there is no fallback to switch to:
+   * the stream is the whole desktop.
    *
    * `recoverable` is false when the browser refused the configuration itself. That
    * is not a cut chain but a standing fact: the next decoder is refused exactly as
@@ -359,15 +237,13 @@ export interface VideoHandlers {
    */
   onError: (reason: string, recoverable: boolean) => void;
   /**
-   * This stream's chain has been cut and it cannot pick up again until a keyframe
+   * The stream's chain has been cut and it cannot pick up again until a keyframe
    * arrives. Both ways of cutting it come here — a decoder that went quiet and one
-   * that failed — and both throw the decoder away: the next unit on the id builds a
-   * fresh one, which can start at nothing but the keyframe this asks for.
+   * that failed — and both throw the decoder away: the next unit builds a fresh one,
+   * which can start at nothing but the keyframe this asks for.
    *
    * Only the gateway can send that keyframe, so this has to reach something that can
-   * ask. Left unasked it is a region that never paints again — and under
-   * `render_type = "video"` that is the whole desktop, since that dial's one stream
-   * is never restarted by a region coming and going.
+   * ask. Left unasked it is a desktop that never paints again.
    */
   onNeedsKeyframe: (reason: string) => void;
 }
@@ -394,7 +270,7 @@ interface Pending {
 }
 
 /**
- * Build a decoder for one stream, configured from the format the gateway announced.
+ * Build one decoder, configured from the format the gateway announced.
  *
  * A configuration string this browser refuses is *not* a throw, because WebCodecs
  * reports that asynchronously — it arrives at `onError`, naming the configuration.
@@ -457,7 +333,7 @@ export function createVideoStream(
   };
 
   // The decoder owes frames it is not going to produce. Everything it owes is settled
-  // to null — one unpainted region for as long as it takes a keyframe to arrive, where
+  // to null — an unpainted desktop for as long as it takes a keyframe to arrive, where
   // leaving them pending is the whole session, permanently — and the decoder goes with
   // them. `close()` is what makes abandoning them safe rather than merely quick: it
   // guarantees no output after it, so a frame that arrives late cannot resolve a
@@ -537,11 +413,9 @@ export function createVideoStream(
     // of every stall, silence where a decode error belongs and then a failed
     // end-of-stream flush (see `stalled`), where software libvpx answers every chunk
     // on the calling thread, error and all — and what it goes quiet under is churn:
-    // decode sessions built and torn down as regions come and go. src/regions.rs
-    // restarts a stream only when its region outgrows the rectangle — a shrinking one
-    // keeps the stream it has — and `ServerMsg::VideoEnd` hands a finished stream's
-    // session back rather than leaving it held. The stall backstop above stands
-    // whatever ends up decoding.
+    // decode sessions built and torn down in quick succession. The desktop's one
+    // stream is rebuilt only by a resize. The stall backstop above stands whatever
+    // ends up decoding.
   });
 
   return {

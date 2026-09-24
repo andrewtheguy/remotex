@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { altAsCommand } from "./altAsCommand.ts";
 import {
   type AudioPlayer,
@@ -51,7 +51,6 @@ import {
   wheelUnitFromEvent,
 } from "./protocol.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
-import { clearTileGrid, drawTileGrid, type GridPitch } from "./tileGrid.ts";
 import {
   attachTouchGestures,
   MAX_ZOOM,
@@ -224,16 +223,8 @@ const pointerRectCache = createRectCache((clear) =>
 // sized here, in the remote's own points. This is the same high-density canvas
 // split used by ordinary DPR-aware renderers, except the guest has already drawn
 // the high-density pixels, so the 2D context needs no scale transform.
-//
-// `grid` is the `render_grid_debug` overlay (tileGrid.ts), which is not a second
-// thing to lay out but the same one: it holds the framebuffer's bitmap like the
-// desktop canvas does, so it is right exactly when it wears the identical box.
-// Sizing it here rather than in CSS is what keeps that true through the touch
-// transform, where the box is a computed scale and a translate and there is
-// nothing for a stylesheet to inherit.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
-  grid: HTMLCanvasElement | null,
   size: RemoteSize | null,
   view: TouchViewState,
   bottomInset = 0,
@@ -242,15 +233,10 @@ function applyCanvasCss(
     return;
   }
   const box = (w: number, h: number, transform?: string) => {
-    for (const el of [canvas, grid]) {
-      if (!el) {
-        continue;
-      }
-      el.style.width = `${w}px`;
-      el.style.height = `${h}px`;
-      if (transform !== undefined) {
-        el.style.transform = transform;
-      }
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+    if (transform !== undefined) {
+      canvas.style.transform = transform;
     }
   };
   // Every write below moves or resizes the canvas box, and a pointer event in
@@ -439,20 +425,12 @@ function viewportMsg(size: {
 // because it participates in the connection effects.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  gridRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
-  // The `render_grid_debug` lattice this session was told to draw, or null for
-  // every ordinary target. State rather than a ref because the overlay is
-  // redrawn from it, and the redraw is the effect below.
-  // The two halves of the `render_grid_debug` overlay: whether this session
-  // draws it (`connected`) and the pitch of the current framebuffer (`resize`).
-  const [gridDebug, setGridDebug] = useState(false);
-  const [tileGrid, setTileGrid] = useState<GridPitch | null>(null);
   // This screen's density, kept in state only so the menu can show it beside the
   // remote's. Nothing about how the desktop is presented reads it — see
   // applyCanvasCss. Seeded from the screen rather than left null, so the readout
@@ -515,21 +493,14 @@ export function useRemoteDesktop(
   // decoder means no desktop at all, so this needs a surface that stays up while
   // `status` is "connected", which the status overlay does not.
   const [videoError, setVideoError] = useState<string | null>(null);
-  // The configuration string every video decoder this attachment holds was built
-  // with, by stream id — the card's Video row, and the counterpart of `audioStream`.
+  // The configuration string the video decoder this attachment holds was built
+  // with — the card's Video row, and the counterpart of `audioStream`.
   //
   // Kept here as well as in the worker because they are two different uses of the
   // same fact: the worker configures a `VideoDecoder` with it, and this reports what
-  // was configured. Emptied with the decoders themselves in `clearDesktop`, so it
-  // never describes a desktop that has ended.
-  const [videoDecodes, setVideoDecodes] = useState<Record<number, string>>({});
-  // The same thing without its ids, which is all the card wants: stream ids are how
-  // a format finds its decoder, not something to show. Memoized so a repaint that
-  // re-announces an unchanged format hands the card the same array it had.
-  const videoStreams = useMemo(
-    () => Object.values(videoDecodes),
-    [videoDecodes],
-  );
+  // was configured. Emptied with the decoder itself in `clearDesktop`, so it never
+  // describes a desktop that has ended.
+  const [videoDecode, setVideoDecode] = useState<string | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // What this session is speaking, from `connected`: the protocol and the target's
@@ -874,8 +845,7 @@ export function useRemoteDesktop(
     // The claim the sockets attach with, kept so audio can be opened and closed at any
     // point in the session rather than only when the session socket is built.
     let session: string | null = null;
-    // The parse→decode→paint path — the slot table, the video decoders and the
-    // batch draw loop — runs in a worker that owns this canvas's bitmap, so a
+    // The parse→decode→paint path — the video decoder and the batch draw loop — runs in a worker that owns this canvas's bitmap, so a
     // batch neither draws nor reaches the screen through this thread's input and
     // React work (desktopPainterWorker.ts says what that is and is not worth). This
     // effect only posts to it; the worker itself outlives the effect (see
@@ -889,12 +859,11 @@ export function useRemoteDesktop(
     // abandons whatever is pending so a late echo cannot resurrect a size the
     // attachment it belonged to has already left behind.
     let resizeSeq = 0;
-    // Each queued resize with the lattice its framebuffer is cut at, so the two
-    // are presented together and a rapid pair of resizes never shows the
-    // second's grid over the first's desktop.
+    // Each queued resize with the composition it presents, so the two are
+    // presented together.
     const pendingResizes = new Map<
       number,
-      { size: RemoteSize; grid: GridPitch; view: MosaicView | null }
+      { size: RemoteSize; view: MosaicView | null }
     >();
     // The regions of the last `mosaic`, and the framebuffer the last `resize`
     // named: what a composition is recomputed from when either changes, or when
@@ -903,7 +872,6 @@ export function useRemoteDesktop(
     // A `mosaic` whose resize is still to come, adopted with that resize.
     let stagedMosaic: MosaicRegion[] | null | undefined;
     let framebufferSize: RemoteSize | null = null;
-    let framebufferGrid: GridPitch | null = null;
     // The worker outlives socket reconnects, so a completion can return after
     // the socket that posted its frame has died. A generation travels through
     // the worker with each batch; only the live generation may acknowledge on
@@ -911,11 +879,9 @@ export function useRemoteDesktop(
     // attachment starts them over.
     let paintSocket: WebSocket | null = null;
     painter?.bind({
-      onCacheReset: () => sendRef.current({ type: "cacheReset" }),
       onVideoError: setVideoError,
-      // A repaint rather than a cache reset: the slot table is not what went
-      // wrong, and a repaint is what re-announces every stream's format and arms
-      // a keyframe on it (`reset_render` in src/encode.rs). Logged rather than
+      // A repaint is what re-announces the stream's format and arms a keyframe on
+      // it (`reset_render` in src/encode.rs). Logged rather than
       // shown — the recovery is a frame away and nothing asked the person for it.
       onVideoNeedsKeyframe: (reason) => {
         console.warn(`video: ${reason}; asking for a repaint`);
@@ -936,7 +902,7 @@ export function useRemoteDesktop(
         const applied = pendingResizes.get(seq);
         if (applied) {
           pendingResizes.delete(seq);
-          presentResize(applied.size, applied.grid, applied.view);
+          presentResize(applied.size, applied.view);
         }
       },
     });
@@ -955,7 +921,6 @@ export function useRemoteDesktop(
       mosaicRegions = null;
       stagedMosaic = undefined;
       framebufferSize = null;
-      framebufferGrid = null;
       setSize(null);
       // A resize still waiting on its echo belongs to the attachment this is
       // ending; letting it land later would resurrect that desktop's size
@@ -967,14 +932,11 @@ export function useRemoteDesktop(
       cursorRef.current = null;
       touchCursorRef.current = null;
       // One message: the worker zeroes the canvas bitmap it owns and drops the
-      // slot table and the decoders with it. The next attachment's server
-      // starts with an empty table, so holding any of it would only cost
-      // memory. (Nothing could be *drawn* wrongly: a reference always follows
-      // the tile that filled its slot on the same socket.)
+      // decoder with it. The next attachment starts its stream from a keyframe.
       painter?.clear();
-      // The decoders went with it, so what the card says about them goes too. The
-      // next attachment re-announces every stream it has.
-      setVideoDecodes((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+      // The decoder went with it, so what the card says about it goes too. The
+      // next attachment re-announces its stream.
+      setVideoDecode(null);
       // Sound's own socket goes with this one. The gateway would keep the
       // subscription alive across a reattach — it belongs to the claim now — but this
       // browser cannot: rebuilding a decoder needs an AudioContext, and a context
@@ -1251,7 +1213,7 @@ export function useRemoteDesktop(
 
     // Sound arrives on its own socket, so nothing it does can be delayed by a repaint
     // and nothing it does can delay one. No promise queue either, unlike the messages
-    // above: there is nothing here to keep in order with a tile draw, and the packets
+    // above: there is nothing here to keep in order with a frame draw, and the packets
     // are handed straight to WebCodecs, which decodes off-thread and calls back.
     // The only control message this socket carries. Anything else is a gateway that
     // has changed under this build.
@@ -1396,26 +1358,16 @@ export function useRemoteDesktop(
     // instead would read as a glimpse of the previous desktop: the overlay
     // hides the canvas only while `size` is null, and the worker could still
     // be painting the old attachment's backlog onto the old bitmap.
-    const presentResize = (
-      s: RemoteSize,
-      grid: GridPitch,
-      view: MosaicView | null,
-    ) => {
+    const presentResize = (s: RemoteSize, view: MosaicView | null) => {
       mosaicViewRef.current = view;
       applyCanvasCss(
         canvasRef.current,
-        gridRef.current,
         s,
         viewRef.current,
         bottomInsetRef.current,
       );
       sizeRef.current = s;
       setSize(s);
-      // The lattice this framebuffer is cut at, presented with it rather than
-      // on the message's arrival, so the overlay never draws one resize's grid
-      // over another's desktop. A composed canvas is not cut at any one
-      // lattice, so it has none.
-      setTileGrid(view ? null : grid);
       syncCursor();
     };
 
@@ -1438,11 +1390,10 @@ export function useRemoteDesktop(
         stagedMosaic = undefined;
       }
       framebufferSize = s;
-      framebufferGrid = msg.tileGrid;
       const { size, view } = presentation(s);
       if (!painter) {
         // No canvas, so nothing queues either; the state may as well be true.
-        presentResize(size, msg.tileGrid, view);
+        presentResize(size, view);
         return;
       }
       // The bitmap belongs to the worker; this command queues behind the
@@ -1450,7 +1401,7 @@ export function useRemoteDesktop(
       // gave a resize — the previous desktop finishes painting before its
       // canvas is replaced and filled black.
       const seq = ++resizeSeq;
-      pendingResizes.set(seq, { size, grid: msg.tileGrid, view });
+      pendingResizes.set(seq, { size, view });
       painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq, view);
     };
 
@@ -1458,18 +1409,17 @@ export function useRemoteDesktop(
     // this window reaching a display of another density. Nothing is repainted;
     // the worker recomposes what it holds.
     const recompose = () => {
-      if (!framebufferSize || !framebufferGrid) {
+      if (!framebufferSize) {
         // Nothing presented yet: the next resize carries it.
         return;
       }
       const { size, view } = presentation(framebufferSize);
-      const grid = framebufferGrid;
       if (!painter) {
-        presentResize(size, grid, view);
+        presentResize(size, view);
         return;
       }
       const seq = ++resizeSeq;
-      pendingResizes.set(seq, { size, grid, view });
+      pendingResizes.set(seq, { size, view });
       painter.setView(view, seq);
     };
 
@@ -1560,7 +1510,6 @@ export function useRemoteDesktop(
       // The operator's QA overlay, stated per session like everything else on
       // `connected`: this browser holds no preference for it and offers no
       // toggle, the same way it offers none for `resize`.
-      setGridDebug(msg.gridDebug);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       setAirplay(msg.airplay);
       lastViewport = null;
@@ -1657,33 +1606,10 @@ export function useRemoteDesktop(
           // string drops a live decoder that queued units still need. A browser
           // that cannot decode what it names finds out from the decoder's own
           // error, which arrives at `onVideoError` naming the configuration.
-          painter?.setVideoFormat(msg.stream, {
-            decode: msg.decode,
-          });
+          painter?.setVideoFormat({ decode: msg.decode });
           // And the same string for the card, which is the only place the exact
-          // configuration is written down while the picture is working. Unchanged
-          // formats are re-announced on every repaint, so a repeat must not be a
-          // new object: the card would re-render for every refresh.
-          setVideoDecodes((prev) =>
-            prev[msg.stream] === msg.decode
-              ? prev
-              : { ...prev, [msg.stream]: msg.decode },
-          );
-          break;
-        case "videoEnd":
-          // Queued in the worker like a format is, so the units already posted for
-          // this stream decode before its decoder goes.
-          painter?.endVideoStream(msg.stream);
-          // Off the card too: the configuration written there is the one a decoder is
-          // running on, and there is no longer a decoder on this id.
-          setVideoDecodes((prev) => {
-            if (!(msg.stream in prev)) {
-              return prev;
-            }
-            const next = { ...prev };
-            delete next[msg.stream];
-            return next;
-          });
+          // configuration is written down while the picture is working.
+          setVideoDecode(msg.decode);
           break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
@@ -1761,12 +1687,6 @@ export function useRemoteDesktop(
           setRenderPlan("");
           setConnection("");
           setAirplay(null);
-          // The lattice belongs to the session that stated it. Said here rather
-          // than left for the cleared framebuffer to imply, so the halves of
-          // the overlay — the switch, the pitch and the desktop it is drawn over
-          // — are always dropped by the same message.
-          setGridDebug(false);
-          setTileGrid(null);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1821,7 +1741,6 @@ export function useRemoteDesktop(
       resizeTimer = setTimeout(() => {
         applyCanvasCss(
           canvasRef.current,
-          gridRef.current,
           sizeRef.current,
           viewRef.current,
           bottomInsetRef.current,
@@ -1878,9 +1797,8 @@ export function useRemoteDesktop(
       ws?.close();
       // The worker outlives this effect — its canvas element can only be
       // transferred once, and StrictMode reruns the effect on the same element
-      // (see desktopPainter.ts) — but what it holds must not: under
-      // `render_type = "video"` that includes a `VideoDecoder`, hardware
-      // rather than just memory. `clearDesktop` frees it on every path
+      // (see desktopPainter.ts) — but what it holds must not: that includes a
+      // `VideoDecoder`, hardware rather than just memory. `clearDesktop` frees it on every path
       // *through* the session; this is the one that leaves.
       painter?.clear();
       painter?.unbind();
@@ -1888,7 +1806,6 @@ export function useRemoteDesktop(
     };
   }, [
     canvasRef,
-    gridRef,
     onUnauthorized,
     syncCursor,
     settleClipboardWaiters,
@@ -2244,26 +2161,6 @@ export function useRemoteDesktop(
     };
   }, [mode, canClipboard]);
 
-  // Paint the tile lattice, and repaint it whenever any part of what it is made
-  // of changes. It takes all three — `connected` says whether to draw it, every
-  // `resize` states the pitch, and the presented size says what to draw it over —
-  // and they land in that order on a fresh connect but not on a reattach, so this
-  // waits for the set instead of drawing from whichever handler happened to run
-  // last. A session without the overlay clears it, which is also how a switch
-  // from a `render_grid_debug` target to an ordinary one leaves no lattice
-  // behind.
-  useEffect(() => {
-    const grid = gridRef.current;
-    if (!grid) {
-      return;
-    }
-    if (gridDebug && tileGrid && size) {
-      drawTileGrid(grid, size, tileGrid);
-    } else {
-      clearTileGrid(grid);
-    }
-  }, [gridRef, size, gridDebug, tileGrid]);
-
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
   // excluded: the desktop can pan up above it and the gesture cursor won't
@@ -2273,14 +2170,13 @@ export function useRemoteDesktop(
       bottomInsetRef.current = Math.max(0, px);
       applyCanvasCss(
         canvasRef.current,
-        gridRef.current,
         sizeRef.current,
         viewRef.current,
         bottomInsetRef.current,
       );
       syncCursor();
     },
-    [canvasRef, gridRef, syncCursor],
+    [canvasRef, syncCursor],
   );
 
   // The toolbar took a chord that had Command in it. Stable, so the handler that
@@ -2352,7 +2248,6 @@ export function useRemoteDesktop(
       viewRef.current.pan = { x: 0, y: 0 };
       applyCanvasCss(
         canvasRef.current,
-        gridRef.current,
         sizeRef.current,
         viewRef.current,
         bottomInsetRef.current,
@@ -2381,7 +2276,6 @@ export function useRemoteDesktop(
               viewRef.current.pan = pan;
               applyCanvasCss(
                 canvasRef.current,
-                gridRef.current,
                 sizeRef.current,
                 viewRef.current,
                 bottomInsetRef.current,
@@ -2638,7 +2532,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, gridRef, syncCursor, touchActive, viewOnly]);
+  }, [overlayRef, canvasRef, syncCursor, touchActive, viewOnly]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth
@@ -2679,7 +2573,7 @@ export function useRemoteDesktop(
     // rows: the codec each decoder was built with, which the render dial does not
     // say and which nothing else on screen writes down.
     audioStream,
-    videoStreams,
+    videoDecode,
     canCamera,
     cameraEnabled,
     cameraError,

@@ -563,7 +563,7 @@ function ScreenHelp({
   airplay,
   renderPlan,
   audio,
-  videoStreams,
+  videoDecode,
 }: {
   size: RemoteSize | null;
   hostScale: number;
@@ -571,9 +571,9 @@ function ScreenHelp({
   airplay: boolean | null;
   renderPlan: string;
   audio: AudioRow;
-  videoStreams: readonly string[];
+  videoDecode: string | null;
 }) {
-  const video = videoLabel(videoStreams);
+  const video = videoLabel(videoDecode);
   const airplayRow = airplayLabel(airplay);
   return (
     <>
@@ -632,18 +632,14 @@ function ScreenHelp({
             <dd>{airplayRow}</dd>
           </div>
         )}
-        {/* Absent for every session with no video in it, which the Render row has
-            already said: a "none" here would be repeating it. */}
-        {video && (
-          <div className="help-item">
-            <dt>Video decoder</dt>
-            {/* The exact WebCodecs configuration each decoder was built with. It is
-                what a `VideoDecoder` complaint names, and until this row it was
-                readable only in the console — on a session that is *working*, not
-                one that failed, which is when the question is usually asked. */}
-            <dd>{video}</dd>
-          </div>
-        )}
+        <div className="help-item">
+          <dt>Video decoder</dt>
+          {/* The exact WebCodecs configuration the decoder was built with. It is
+              what a `VideoDecoder` complaint names, and until this row it was
+              readable only in the console — on a session that is *working*, not
+              one that failed, which is when the question is usually asked. */}
+          <dd>{video}</dd>
+        </div>
       </dl>
     </>
   );
@@ -928,7 +924,7 @@ export default function FloatingMenu({
   audioEnabled,
   audioError,
   audioStream,
-  videoStreams,
+  videoDecode,
   onAudioChange,
   canCamera,
   cameraEnabled,
@@ -1006,10 +1002,10 @@ export default function FloatingMenu({
   audioEnabled: boolean;
   audioError: string | null;
   // The two the card reads and the drawer does not: what the sound turned out to
-  // be, and what each video decoder was configured with. Both null/empty until a
-  // format arrives, which is a state the card words rather than hides.
+  // be, and what the video decoder was configured with. Both null until a format
+  // arrives, which is a state the card words rather than hides.
   audioStream: AudioStreamInfo | null;
-  videoStreams: readonly string[];
+  videoDecode: string | null;
   onAudioChange: (enabled: boolean) => void;
   // The camera, under Audio's hide-don't-disable rule: `camera = true` is
   // RDP's and generic VNC's (wlshare's camera extension) alone, so on every other
@@ -1543,7 +1539,7 @@ export default function FloatingMenu({
               error: audioError,
               stream: audioStream,
             }}
-            videoStreams={videoStreams}
+            videoDecode={videoDecode}
           />
           <h3>Shortcuts</h3>
           <dl className="help-list">

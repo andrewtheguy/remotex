@@ -96,25 +96,7 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
   );
 });
 
-test("a session with no video prints no row", () => {
-  // Every tile-only dial, and a motion-stream session that has not moved yet. The
-  // Render row above has already said which of the two it is.
-  assert.equal(videoLabel([]), null);
-});
-
-test("one stream is its configuration and nothing else", () => {
-  assert.equal(videoLabel(["vp09.00.40.08"]), "vp09.00.40.08");
-});
-
-test("several streams count themselves and list what is distinct about them", () => {
-  // The configuration carries a size-derived level, so regions of different sizes
-  // produce different strings — and four identical ones are still four decoders.
-  assert.equal(
-    videoLabel(["vp09.00.40.08", "vp09.00.10.08", "vp09.00.40.08"]),
-    "3 streams · vp09.00.10.08, vp09.00.40.08",
-  );
-  assert.equal(
-    videoLabel(["vp09.00.40.08", "vp09.00.40.08"]),
-    "2 streams · vp09.00.40.08",
-  );
+test("the video row waits for the format, then names it", () => {
+  assert.equal(videoLabel(null), "Waiting for the video format");
+  assert.equal(videoLabel("vp09.00.40.08"), "vp09.00.40.08");
 });

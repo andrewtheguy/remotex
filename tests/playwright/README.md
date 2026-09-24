@@ -27,24 +27,16 @@ agree with their own fixtures and disagree with each other. Its frame parser is
 deliberately a second implementation rather than an import of the SPA's, because a
 wrong parser would otherwise agree with itself.
 
-`video-stream.spec.ts` is the video dial read from the same socket. Video is VP9
-only, so everything it asserts is decidable without asking the browser anything. It
-parses VIDEO records itself —
-op, keyframe flags byte, the coded rectangle's even sides — and checks that no
-stream's first access unit outran the `videoFormat` that says how to decode it.
+`video-stream.spec.ts` is the desktop's stream read from the same socket. Video is
+VP9 only, so everything it asserts is decidable without asking the browser anything.
+It parses VIDEO records itself — op, keyframe flags byte, the desktop size the last
+`resize` announced — and checks that no access unit outran the `videoFormat` that
+says how to decode it.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, and that opening and closing
 that socket is the whole subscription. The deterministic tone harness in
 `src/server.rs` supplies audio without a remote.
-
-`tile-grid.spec.ts` is the `render_grid_debug` lattice, the one render debug aid
-the client draws instead of receiving. It asserts the two halves of that: the
-gateway states the pitch on `connected`, and the overlay canvas the client answers
-with is the framebuffer canvas's twin — same bitmap, same CSS box, no pointer. The
-dashes themselves are pixels and so are the operator's to look at; that the overlay
-sits exactly over the desktop is a decision, and a lattice one box off would point
-at the wrong columns while still looking like a grid.
 
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
@@ -108,7 +100,7 @@ that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
-The video spec needs a local gateway config with a VP9 video target. Put that
+The video spec needs a local gateway config with a live target. Put that
 gitignored config under `tmp/` (for example, `tmp/qa_video.toml`) and name the
 target with `REMOTEX_PLAYWRIGHT_VIDEO_TARGET`:
 
@@ -128,21 +120,6 @@ bun run test:video
 That gateway serves the SPA compiled into its binary, so rebuild the gateway
 after a frontend change and restart it; a stale bundle is exactly what these
 specs cannot see.
-
-The grid spec wants two targets on one such config: one with `render_grid_debug =
-true` and one without, so the overlay is checked for being absent as well as for
-being right. `REMOTEX_PLAYWRIGHT_GRID_TARGET` names the first and is the opt-in;
-`REMOTEX_PLAYWRIGHT_TARGET` names the second.
-
-```sh
-cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52888/' \
-REMOTEX_PLAYWRIGHT_USERNAME='admin' \
-REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_GRID_TARGET='gridtiles' \
-REMOTEX_PLAYWRIGHT_TARGET='<tiles-target>' \
-bun run test:grid
-```
 
 The audio spec uses the test-tone gateway instead of a live target:
 

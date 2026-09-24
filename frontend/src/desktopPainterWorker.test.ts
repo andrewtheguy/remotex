@@ -13,7 +13,7 @@ import {
   createPainterWorker,
   type PainterEvent,
 } from "./desktopPainterWorker.ts";
-import type { createTilePainter, TilePainter } from "./tilePainter.ts";
+import type { createFramePainter, FramePainter } from "./framePainter.ts";
 
 // A one-record-free batch frame: kind 0x02, flags 0, count 0, then its u32
 // sequence. Valid enough for the kind check, which is all the worker itself reads.
@@ -32,9 +32,9 @@ function harness() {
   let releaseDraw = () => {};
   let stallDraws = false;
   let clock = 0;
-  let painterOptions: Parameters<typeof createTilePainter>[0] | null = null;
+  let painterOptions: Parameters<typeof createFramePainter>[0] | null = null;
 
-  const painter: TilePainter = {
+  const painter: FramePainter = {
     draw(frame) {
       calls.push("draw");
       drawn.push(frame);
@@ -48,11 +48,8 @@ function harness() {
     clear() {
       calls.push("clear");
     },
-    setVideoFormat(stream, format) {
-      calls.push(`format:${stream}:${format.decode}`);
-    },
-    endVideoStream(stream) {
-      calls.push(`end:${stream}`);
+    setVideoFormat(format) {
+      calls.push(`format:${format.decode}`);
     },
   };
 
@@ -148,7 +145,6 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   h.host.handle({ type: "resize", w: 640, h: 480, seq: 7, view: null });
   h.host.handle({
     type: "videoFormat",
-    stream: 2,
     format: { decode: "vp09.00.40.08" },
   });
   await settled();
@@ -160,7 +156,7 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   h.advance(12);
   h.release();
   await settled();
-  assert.deepEqual(h.calls, ["draw", "fill", "format:2:vp09.00.40.08"]);
+  assert.deepEqual(h.calls, ["draw", "fill", "format:vp09.00.40.08"]);
   assert.equal(h.canvas.width, 640);
   assert.equal(h.canvas.height, 480);
   assert.equal(h.ctx.fillStyle, "#000");
@@ -299,14 +295,12 @@ test("a frame queued before the clear never reaches the next attachment", async 
 test("the painter's callbacks travel back as events", () => {
   const h = harness();
   const options = h.painterOptions();
-  options.onCacheReset();
   options.onVideoError("no decoder");
   options.onVideoError(null);
-  options.onVideoNeedsKeyframe("stream 2: went quiet");
+  options.onVideoNeedsKeyframe("went quiet");
   assert.deepEqual(h.events, [
-    { type: "cacheReset" },
     { type: "videoError", reason: "no decoder" },
     { type: "videoError", reason: null },
-    { type: "videoNeedsKeyframe", reason: "stream 2: went quiet" },
+    { type: "videoNeedsKeyframe", reason: "went quiet" },
   ]);
 });

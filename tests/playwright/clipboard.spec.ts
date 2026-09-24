@@ -59,7 +59,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
           remotePushes += 1;
         }
       } catch {
-        // Binary tile frames and unrelated non-JSON data are not clipboard
+        // Binary video frames and unrelated non-JSON data are not clipboard
         // control messages.
       }
     });
