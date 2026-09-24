@@ -1399,12 +1399,13 @@ over the seconds something moved in, so an idle stretch does not pull it down �
 same average the tile beside the graph names, so the line carries no rate of its
 own. The tile names the busiest second of the range too, but the graph does not mark
 it: a line at the peak lets one busy second set the graph's mark, where a line at
-the average shows that second as the outlier it is. The scale fits the highest step
-drawn, not the busiest second: second by second the two are one number, but a
-recorded step is an average over its timeframe and the busiest second inside it
-stands above that, and a scale fitted to it would flatten the graph under a number
-it does not draw. A range that moved nothing gets no line, since one at zero only
-traces the axis.
+the average shows that second as the outlier it is. The scale fits what is drawn —
+the highest step, or the average line where a step's quiet seconds put that above
+every step — and not the busiest second: second by second the two are one number,
+but a recorded step is an average over its timeframe and the busiest second inside
+it stands above that, and a scale fitted to it would flatten the graph under a
+number it does not draw. A range that moved nothing gets no line, since one at zero
+only traces the axis.
 `GET /api/throughput?within=<seconds>` is the recorded rows, counted
 back from the gateway's clock the rows were stamped with rather than the
 browser's, with the gateway's clock at the read and the open timeframe as it

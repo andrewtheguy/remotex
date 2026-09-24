@@ -208,9 +208,10 @@ function RateChart({
   const canvas = useRef<HTMLCanvasElement>(null);
   const [hovered, setPointed] = useState<number | null>(null);
   const { points, mean } = series;
-  // The scale fits what is drawn: over recorded timeframes the busiest second stands
-  // above every step, and is the tile's to name.
-  const top = rateScale(highest(points));
+  // The scale fits what is drawn — the steps and the mean line, which stands above
+  // every step when a step averages quiet seconds the mean leaves out. The busiest
+  // second stands above both over recorded timeframes, and is the tile's to name.
+  const top = rateScale(Math.max(highest(points), mean));
   // A series of another length may replace this one under a resting pointer.
   const pointed = hovered !== null && hovered < points.length ? hovered : null;
   const sampled = stepSecs === 1 && relative;
