@@ -394,7 +394,8 @@ pub struct TargetConfig {
     /// [`Subtype`] — see [`ConfigFile::parse`].
     #[serde(default)]
     pub vnc_password: String,
-    /// Optional domain.
+    /// Optional domain of an RDP account. Refused on any other protocol, which has
+    /// nowhere to send it.
     #[serde(default)]
     pub domain: Option<String>,
     /// Pinned desktop width, in points. Optional, and *specified* means
@@ -1492,6 +1493,14 @@ impl ConfigFile {
                     target.vnc_password.is_empty(),
                     "target {:?} is protocol {:?} but sets vnc_password, which only \"vnc\" \
                      targets use",
+                    target.name,
+                    target.protocol.name()
+                );
+            }
+            if target.protocol != Protocol::Rdp {
+                anyhow::ensure!(
+                    target.domain.is_none(),
+                    "target {:?} is protocol {:?} but sets domain, which only \"rdp\" targets use",
                     target.name,
                     target.protocol.name()
                 );
@@ -2982,6 +2991,18 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
+    }
+
+    #[test]
+    fn a_domain_on_a_vnc_target_is_rejected() {
+        for subtype in ["", "subtype = \"ard\"\n", "subtype = \"ard-high-performance\"\n"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!(
+                "{subtype}username = \"u\"\npassword = \"p\"\ndomain = \"CORP\""
+            )))
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("sets domain"), "{subtype:?}: {msg}");
+        }
     }
 
     /// The RDP client logs on only through NLA, so a target without both halves of

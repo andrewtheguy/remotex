@@ -172,7 +172,7 @@ password = "change-me"
 # separate credential: it proves knowledge of a machine secret and names nobody.
 # VNC only, rejected elsewhere. See the VNC target below.
 #vnc_password = "change-me"
-# Optional domain (leave unset for a local account). RDP only.
+# Optional domain (leave unset for a local account). RDP only, rejected elsewhere.
 #domain = ""
 
 # Optional pinned opening size. Set both keys or neither.
@@ -335,7 +335,7 @@ password = "change-me"
 #microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is
-# ignored, and width/height only ever answer a default-size request (see above).
+# refused, and width/height only ever answer a default-size request (see above).
 # `vnc_password` is the server's own password and is all a server without user
 # accounts takes.
 # [[targets]]
@@ -344,19 +344,16 @@ password = "change-me"
 # host = "10.0.0.2"
 # vnc_password = "change-me"
 
-# A wlroots-based Wayland desktop behind the wlshare VNC server reports the pixel
-# density of its output over one private RFB extension, so a `scale 2` output is
-# shown at 2x and a resizing window is asked for in points × scale. The subtype is explicit
-# because it changes what goes on the wire; a plain "vnc" target to the same
-# server stays at 1x. Like a Mac's, the credentials are an account's: wlshare
-# checks the username and password of the account it runs as through PAM over
-# RSA-AES, encrypting the session. A password_file on the server is its VNC
-# password, which a plain "vnc" target takes as vnc_password. See
-# docs/wlshare-density.md.
+# A wlroots-based Wayland desktop behind the wlshare VNC server is a plain "vnc"
+# target. Every plain target asks its server for wlshare's pixel-density
+# extension, so a `scale 2` output is shown at 2x and a resizing window is asked
+# for in points × scale; a server that does not answer is shown at 1x. With a
+# username and password, wlshare checks the account it runs as through PAM over
+# RSA-AES, encrypting the session; a password_file on the server is its VNC
+# password instead, which goes in vnc_password. See docs/wlshare-density.md.
 # [[targets]]
 # name = "workstation-wayland"
 # protocol = "vnc"
-# subtype = "wlshare"
 # host = "127.0.0.1"
 # username = "me"
 # password = "that-account's-password"
