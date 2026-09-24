@@ -1662,7 +1662,7 @@ dependencies = [
 [[package]]
 name = "libvpx-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260918235810-31a9bf7#31a9bf7ba659ae668e7ef58883d3009b87f5e2a3"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260924182850-e78d74f#e78d74fff89fe8d03a6ee0323da9421cf6c5dc73"
 
 [[package]]
 name = "linux-raw-sys"
