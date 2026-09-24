@@ -263,9 +263,14 @@ pub fn threads() -> usize {
     threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
-/// The most threads the encoder takes, whatever the machine. Past eight a 4K
-/// picture has too few superblock rows a tile for the threads to have separate
-/// work, and a gateway on a large server has other sessions' work for the rest.
+/// The most threads the encoder takes, whatever the machine: what a 4K picture
+/// can use. The useful count is the picture's, not the machine's — libvpx's
+/// row-based multithreading hands out superblock rows within each tile column,
+/// so the work to share grows with the picture — and the bench's two points, 1080p
+/// saturating at three threads and 4K still gaining at six, put it at about one
+/// thread a megapixel: eight for 4K's 8.3. 4K is the largest desktop this gateway
+/// is tuned for; a larger one is an edge case that streams, not a target, and
+/// gets the 4K count. Not measured past six threads, since the host had six cores.
 /// libvpx itself refuses more than 64.
 const MAX_THREADS: usize = 8;
 
