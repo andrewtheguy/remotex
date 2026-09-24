@@ -4,7 +4,7 @@
 //! The web server never speaks RDP to the browser: [`crate::ws`] bridges a
 //! browser WebSocket to [`run`] here over a pair of channels. `run` starts a
 //! session — the RDP client's own thread does TCP, TLS, CredSSP and activation — then
-//! drives it, turning damage into [`ServerMsg::Tile`] updates and [`ClientMsg`]
+//! drives it, turning damage into a video stream ([`ServerMsg::Video`]) and [`ClientMsg`]
 //! input into RDP input events.
 //!
 //! ## Threads
@@ -31,14 +31,12 @@ use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
 use crate::config::{RenderPlan, TargetConfig};
-use crate::copies;
-use crate::encode::TileSink;
+use crate::encode::VideoSink;
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CopyRect, CursorShape, CursorUnit, HostDisplay,
-    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED,
-    WheelUnit,
+    ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, HostDisplay, MAX_CLIPBOARD_BYTES,
+    MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
 };
 use crate::rdp_camera;
 use crate::rdp_mic;
@@ -49,7 +47,7 @@ use crate::rdp_client::{
     Session,
 };
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
-use crate::tiles::{self, Rect, Shadow};
+use crate::shadow::{self, Rect, Shadow};
 
 // A layout — a size, a density, or both — the remote has been asked for and has
 // not answered.
@@ -136,11 +134,11 @@ fn connect_budget() -> Duration {
 /// Both closing (browser gone / RDP ended) tears the session down.
 ///
 /// A thin wrapper so the shutdown cannot be missed. Everything this engine sends the
-/// client goes through a [`TileSink`], which forwards from a task of its own — and
+/// client goes through a [`VideoSink`], which forwards from a task of its own — and
 /// the engine thread's runtime dies with this function, so anything the sink still
 /// held would be lost. That includes the session's final `Error`, whose absence
 /// would put the browser back on the picker with nothing to explain why. The body has
-/// several early returns; this has one exit, and [`TileSink::finish`] is on it.
+/// several early returns; this has one exit, and [`VideoSink::finish`] is on it.
 ///
 /// `audio` is `Some` exactly for a target that opted in: the RDP client then asks the
 /// host to redirect its sound and hands every buffer to the bridge from its own
@@ -167,7 +165,7 @@ pub async fn run(
     uplinks: Uplinks,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, plan, feedback);
+    let sink = VideoSink::new("rdp", frame_tx, plan, feedback);
     session(config, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
@@ -202,7 +200,7 @@ async fn session(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
     uplinks: Uplinks,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) {
     let (session, mut events) = Session::start(connect_config(&config, display, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
@@ -245,7 +243,6 @@ async fn session(
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: config.default_size(),
-            video: config.streams_video(),
         },
         (width, height),
         input_rx,
@@ -269,7 +266,7 @@ async fn session(
 async fn await_desktop(
     events: &mut mpsc::Receiver<Event>,
     config: &TargetConfig,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> Option<(u16, u16)> {
     let dest = engine::host_port(&config.host, config.port);
     let report = async |message: String| {
@@ -288,7 +285,7 @@ async fn await_desktop(
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(Event::Connected { width, height })) => {
                 // Narrowed rather than trusted: everything downstream — the
-                // shadow, the tile grid, the pointer clamp — is `u16`, and a
+                // shadow, the mirror, the pointer clamp — is `u16`, and a
                 // desktop larger than that is a server saying something this
                 // gateway cannot represent.
                 return Some((narrow(width), narrow(height)));
@@ -342,7 +339,7 @@ fn connect_config(
     let (width, height) = config.opening_size(display);
     let (width, height) =
         Layout { w: u32::from(width), h: u32::from(height), density: Density::One }
-            .held(config.streams_video())
+            .held()
             .size();
     Connect {
         host: config.host.clone(),
@@ -376,10 +373,6 @@ struct Flags {
     /// the built-in default. Points rather than pixels because the density can
     /// move underneath it — see [`Density::pixels`].
     default_size: (u16, u16),
-    /// Whether this target puts moving pixels on the wire as a video stream
-    /// ([`TargetConfig::streams_video`]), which is what decides whether a layout
-    /// is held under the stream's picture ceiling — see [`Layout::held`].
-    video: bool,
 }
 
 /// How dense a desktop this session has asked the RDP server to render.
@@ -489,9 +482,7 @@ impl Layout {
         Self { w: px(self.w), h: px(self.h), density }
     }
 
-    /// The same request held under the video stream's picture ceiling when
-    /// `video` — the target streams — and unchanged otherwise, where a tile path
-    /// carries any desktop and an oversized one simply scrolls.
+    /// The same request held under the video stream's picture ceiling.
     ///
     /// Applied to every layout this engine asks for, after the density: the
     /// ceiling is on pixels, and 2560×1440 points is under it at 1x and a 5K
@@ -501,10 +492,7 @@ impl Layout {
     /// encoder's refusal, which ends the session. Every side stays even: the
     /// ceiling's sides are, and an axis left alone was whatever
     /// [`Self::adjusted`] makes of it.
-    fn held(self, video: bool) -> Self {
-        if !video {
-            return self;
-        }
+    fn held(self) -> Self {
         let (w, h) = crate::video::fit_ceiling(self.size());
         if (w, h) != self.size() {
             info!("rdp: holding {self} under the video stream's {w}x{h} picture ceiling");
@@ -712,7 +700,7 @@ impl ClipboardState {
     /// the read of what the remote used to hold, and an answer already on the wire
     /// when it did would otherwise be published afterwards as a fresh remote copy —
     /// pushing the older remote text over the newer browser one.
-    async fn remote_data(&mut self, data: &[u8], sink: &TileSink) -> anyhow::Result<()> {
+    async fn remote_data(&mut self, data: &[u8], sink: &VideoSink) -> anyhow::Result<()> {
         if self.pending.take().is_none() {
             debug!("rdp: a remote clipboard answer arrived for a read nothing is waiting on");
             return Ok(());
@@ -743,7 +731,7 @@ impl ClipboardState {
     /// A remote copy that never arrived at all, because it was larger than the
     /// channel will carry. The same report as one the ceiling above refused: what was
     /// copied is known, and only its size.
-    async fn oversized(&mut self, bytes: u64, sink: &TileSink) -> anyhow::Result<()> {
+    async fn oversized(&mut self, bytes: u64, sink: &VideoSink) -> anyhow::Result<()> {
         // Outstanding or nothing, for the reason [`Self::remote_data`] gives.
         if self.pending.take().is_none() {
             debug!("rdp: an oversized clipboard answer arrived for a read nothing waits on");
@@ -844,7 +832,7 @@ impl ClipboardState {
         self.remote.clone().unwrap_or_else(ClipboardSnapshot::unobserved)
     }
 
-    async fn publish(&mut self, snapshot: ClipboardSnapshot, sink: &TileSink) -> anyhow::Result<()> {
+    async fn publish(&mut self, snapshot: ClipboardSnapshot, sink: &VideoSink) -> anyhow::Result<()> {
         self.remote = Some(snapshot.clone());
         sink.msg(ServerMsg::Clipboard {
             text: snapshot.text,
@@ -862,19 +850,16 @@ async fn active_loop(
     flags: Flags,
     connected_at: (u16, u16),
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, clipboard: clipboard_enabled, default_size, video } = flags;
+    let Flags { resize, clipboard: clipboard_enabled, default_size } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
     let mut desktop = connected_at;
     // The pixels the browser has already been sent. Lives beside the framebuffer
     // it shadows, and is forgotten on a repaint and on a resize.
-    // At 1x, like the `Resize` the connect announced; a density the host later
-    // grants re-cuts it with the desktop it comes with.
-    let mut shadow = Shadow::new("rdp", desktop.0, desktop.1, TileGrid::at(Density::One.scale()));
-    shadow.classify_cells(sink.wants_cells());
+    let mut shadow = Shadow::new("rdp", desktop.0, desktop.1);
 
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
@@ -912,7 +897,7 @@ async fn active_loop(
     // no channel was opened and none of the events below can arrive.
     let mut clipboard = ClipboardState::default();
 
-    // Damage accumulated toward the next tile flush, and its deadline. A busy RDP
+    // Damage accumulated toward the next flush into the mirror, and its deadline. A busy RDP
     // server reports damage far faster than anything presents it — ~126 batches a
     // second measured against a 60 Hz screen, back when the pointer was composited
     // into the framebuffer and even a still desktop produced one per mouse event.
@@ -947,7 +932,7 @@ async fn active_loop(
             }
         };
         // Video only, and `None` unless the mirror is holding pixels no access unit
-        // has carried — see `TileSink::due_at` for why a paced stream cannot rely on
+        // has carried — see `VideoSink::due_at` for why a paced stream cannot rely on
         // the next event to come and collect them. A clean mirror parks on
         // the round-returned signal instead of forever: while a round is away being
         // encoded the live table is empty and `due_at` cannot see the damage that
@@ -1040,10 +1025,7 @@ async fn active_loop(
                         // framebuffer that no longer exists.
                         pending_damage.clear();
                         damage_due = None;
-                        shadow.resize(desktop.0, desktop.1, TileGrid::at(applied.scale()));
-                        // The cell grid is anchored at (0,0) in framebuffer pixels and
-                        // pitched at the density, so a new size or density makes every
-                        // key name somewhere else.
+                        shadow.resize(desktop.0, desktop.1);
                         sink.reset_render();
                         last_pos = (
                             last_pos.0.min(desktop.0.saturating_sub(1)),
@@ -1081,7 +1063,7 @@ async fn active_loop(
                         // session is over either way, and the shadow's claim about them
                         // dies with it.
                         for rect in pending_damage.drain(..) {
-                            if send_tiles(framebuffer, rect, &mut shadow, sink).await.is_err() {
+                            if send_damage(framebuffer, rect, &mut shadow, sink).await.is_err() {
                                 break;
                             }
                         }
@@ -1125,7 +1107,7 @@ async fn active_loop(
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
-                    send_tiles(
+                    send_damage(
                         framebuffer,
                         Rect {
                             left: 0,
@@ -1164,7 +1146,7 @@ async fn active_loop(
                             .as_ref()
                             .map_or_else(|| Layout::current(desktop, applied), |p| p.layout);
                         install_layout(
-                            base.at_density(want).held(video),
+                            base.at_density(want).held(),
                             Layout::current(desktop, applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -1206,7 +1188,7 @@ async fn active_loop(
                         // so a size and a density never race to set `applied`.
                         let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
                         install_layout(
-                            Layout { w, h, density: Density::One }.at_density(density).held(video),
+                            Layout { w, h, density: Density::One }.at_density(density).held(),
                             Layout::current(desktop, applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -1448,13 +1430,13 @@ fn narrow(v: u32) -> u16 {
     v.min(u32::from(u16::MAX)) as u16
 }
 
-/// One damage rectangle, in the inclusive-edge form the tile path uses.
+/// One damage rectangle, in the inclusive-edge form the shadow uses.
 ///
 /// The two disagree on purpose and the conversion is the only place that knows: the
 /// RDP client reports position-and-size, and [`Rect`] is inclusive on all four
-/// edges because that is how RFB reports one and both engines share the tile path.
+/// edges because that is how RFB reports one and both engines share the shadow.
 /// Saturating throughout, so an oversized rectangle becomes a clamped one rather
-/// than an overflow — `send_tiles` intersects it with the framebuffer anyway.
+/// than an overflow — `send_damage` intersects it with the framebuffer anyway.
 fn damaged(rect: client::Rect) -> Rect {
     Rect {
         left: narrow(rect.x),
@@ -1648,12 +1630,8 @@ fn translate_input(
         // the camera reaches this engine through its feed, never through input.
         ClientMsg::CameraFormat { .. } => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
-        // bridge handles them and they never reach here. `CacheReset` is one of
-        // them: it empties that socket's tile cache and injects its own `Refresh`.
-        ClientMsg::Connect { .. }
-        | ClientMsg::Disconnect
-        | ClientMsg::CacheReset
-        | ClientMsg::PaintAck { .. } => Vec::new(),
+        // bridge handles them and they never reach here.
+        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::PaintAck { .. } => Vec::new(),
         // An RDP session is one framebuffer spanning every monitor the server
         // composed into it, and its protocol has no way to ask for one of them.
         // So this engine never sends a display list, no client offers the
@@ -1662,9 +1640,8 @@ fn translate_input(
     }
 }
 
-/// The shortest gap between two tile flushes — the still path's counterpart to
-/// `VIDEO_FRAME_INTERVAL`, at the 60 Hz a screen actually presents rather than the
-/// stream's 30.
+/// The shortest gap between two damage flushes into the mirror, at the 60 Hz a
+/// screen actually presents; `VIDEO_FRAME_INTERVAL` paces the encodes at 30.
 ///
 /// The interval coalesces, it does not merely defer: a busy server's ~126 damage
 /// batches a second overlap heavily and [`stage_damage`] folds an overlapping
@@ -1685,11 +1662,8 @@ const FRAME_NET: Duration = Duration::from_millis(100);
 /// make room.
 ///
 /// Slop from a merge costs a pack and a `memcmp` on pixels that did not change —
-/// exactly what the shadow exists to absorb — never wire bytes. What it can cost
-/// beyond that is the reason the merge picks its pair rather than boxing the lot:
-/// a band cut from a loose rectangle is judged as one tile by
-/// `render_subtype = "classify"`, so damage stretched across unrelated content
-/// sends that content lossy.
+/// exactly what the shadow exists to absorb — never wire bytes. The merge picks its
+/// pair rather than boxing the lot so that the slop stays that small.
 const DAMAGE_RECTS_CAP: usize = 32;
 
 /// Fold `rect` into the damage accumulated toward the next flush.
@@ -1735,74 +1709,35 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
     pending[pick] = union(&pending[pick], &rect);
 }
 
-/// Drain the staged damage: copies first, tiles for the rest.
-///
-/// Under a plan that takes copies, the flush's damage is searched for regions the
-/// client already holds elsewhere on its canvas — a scroll, mostly — and each find
-/// goes out as a `COPY` record instead of image bytes ([`crate::copies`]). The
-/// shadow applies every copy exactly as the client will, so the tile pass that
-/// follows sees the copied pixels as delivered and pays nothing for them; whatever
-/// a copy did not carry — the newly revealed strip of a scroll — travels as tiles
-/// like any other damage. The copy records go through `msg`, as VNC's CopyRect
-/// does, because that queue's order against the tiles is the contract a copy reads
-/// the canvas under.
+/// Drain the staged damage into the mirror.
 async fn flush_damage(
     framebuffer: &Framebuffer,
     pending: &mut Vec<Rect>,
     shadow: &mut Shadow,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    if sink.copies() && !pending.is_empty() {
-        let plans = framebuffer.with(|frame| {
-            copies::plan(
-                &frame.pixels,
-                frame.stride,
-                narrow(frame.width),
-                narrow(frame.height),
-                pending,
-                shadow,
-            )
-        });
-        for copy in plans {
-            // `Some(true)` is the only answer that owes the client a record: `None`
-            // means the shadow cannot make the move (drop it — the tiles carry those
-            // pixels instead), `Some(false)` that the destination already held them.
-            if shadow.copy_within(copy.src, copy.dst) == Some(true) {
-                sink.msg(ServerMsg::Copy(CopyRect {
-                    sx: copy.src.left,
-                    sy: copy.src.top,
-                    x: copy.dst.left,
-                    y: copy.dst.top,
-                    w: copy.dst.w(),
-                    h: copy.dst.h(),
-                }))
-                .await?;
-            }
-        }
-    }
     for rect in pending.drain(..) {
-        send_tiles(framebuffer, rect, shadow, sink).await?;
+        send_damage(framebuffer, rect, shadow, sink).await?;
     }
     Ok(())
 }
 
-/// Send whatever part of `rect` the client does not already have, as tiles of at
-/// most [`crate::tiles::BAND_ROWS`] tall each. How that region is cut, and what
-/// each piece is encoded as, is [`TileSink::damage`]'s business.
+/// Hand the sink whatever part of `rect` the client does not already have.
 ///
 /// Comparing against `shadow` earns its keep on this engine in particular: it
 /// repaints regions that did not change, which nothing upstream filters. They come
-/// back as `None` here and cost nothing but a pack and a `memcmp`.
+/// back as `None` here and cost nothing but a pack and a `memcmp` — and, since they
+/// never reach the mirror, no access unit either.
 ///
 /// The framebuffer lock is held for the pack and released before the await, which
 /// is what keeps a slow encoder from stalling the RDP client's next paint: the
 /// frame is handed out under a mutex the client's thread also takes to copy every
 /// decoded rectangle in.
-async fn send_tiles(
+async fn send_damage(
     framebuffer: &Framebuffer,
     rect: Rect,
     shadow: &mut Shadow,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let mut buf = Vec::new();
     let Some(rect) = framebuffer.with(|frame| {
@@ -1833,18 +1768,15 @@ async fn send_tiles(
     let Some(changed) = shadow.accept(rect, &buf) else {
         return Ok(());
     };
-
-    // Its own buffer per piece, not the one above: the encoder reads those pixels
-    // after this call has returned, and the framebuffer is overwritten by the next
-    // paint. Cropped out of the pack already made rather than repacked from the
-    // frame — a piece's rows are not contiguous in `buf`, but they are row copies,
-    // where a repack is another per-pixel swizzle over the same pixels.
-    sink.damage(&changed, |piece| {
-        let mut pixels = Vec::new();
-        tiles::crop(&buf, rect, piece, &mut pixels);
-        pixels
-    })
-    .await
+    if changed == rect {
+        return sink.damage(rect, &buf).await;
+    }
+    // Cropped out of the pack already made rather than repacked from the frame — the
+    // changed rows are not contiguous in `buf`, but they are row copies, where a
+    // repack is another per-pixel swizzle over the same pixels.
+    let mut pixels = Vec::new();
+    shadow::crop(&buf, rect, changed, &mut pixels);
+    sink.damage(changed, &pixels).await
 }
 
 /// Pack `rect` out of the framebuffer into `buf` as RGB888.
@@ -2000,13 +1932,13 @@ mod tests {
     #[tokio::test]
     async fn a_clipboard_answer_nothing_is_waiting_on_is_not_published() {
         let (frame_tx, _frames) = mpsc::channel(4);
-        let plan = crate::config::RenderPlan::Tiles {
-            base: crate::config::TileCodec::Png,
-            motion: None,
-            debug: false,
+        let plan = crate::config::RenderPlan {
+            quality: 60,
+            adaptive: None,
+            chroma: crate::config::Chroma::Subsampled,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
-        let sink = TileSink::new("test", frame_tx, plan, feedback);
+        let sink = VideoSink::new("test", frame_tx, plan, feedback);
 
         // The remote copied and this end asked for the bytes.
         let mut clipboard = ClipboardState {
@@ -2043,7 +1975,7 @@ mod tests {
     }
 
     /// The edge convention flips here, and getting it wrong is a one-pixel seam
-    /// down the right and bottom of every tile — visible, and easy to stare past.
+    /// down the right and bottom of every damage rectangle — visible, and easy to stare past.
     #[test]
     fn a_damage_rectangle_becomes_inclusive_on_every_edge() {
         let r = damaged(client::Rect { x: 10, y: 20, width: 4, height: 2 });
@@ -2113,9 +2045,8 @@ mod tests {
 
     /// The whole reason the cap merges a pair instead of boxing the list: the
     /// graphics pipeline reports a frame as disjoint tiles, and a box round all of
-    /// them is most of the desktop — which `render_subtype = "classify"` then judges
-    /// as one tile. Neighbouring tiles merge for nothing, so the damage keeps its
-    /// shape however many of them arrive.
+    /// them is most of the desktop to pack and compare. Neighbouring tiles merge for
+    /// nothing, so the damage keeps its shape however many of them arrive.
     #[test]
     fn neighbouring_tiles_merge_without_waste() {
         let mut pending = Vec::new();
@@ -2407,19 +2338,17 @@ mod tests {
     }
 
     /// A screen the video encoder would refuse is asked for as the desktop it
-    /// will take, at the density the screen has; a tiles target asks for the
-    /// screen as it is.
+    /// will take, at the density the screen has.
     #[test]
-    fn a_layout_is_held_under_the_video_ceiling_only_when_the_target_streams() {
+    fn a_layout_is_held_under_the_video_ceiling() {
         let retina = Layout { w: 2560, h: 1440, density: Density::One }.at_density(Density::Two);
-        assert_eq!(retina.held(true), Layout { w: 3840, h: 2400, density: Density::Two });
-        assert_eq!(retina.held(false), retina, "a tile path carries any desktop");
+        assert_eq!(retina.held(), Layout { w: 3840, h: 2400, density: Density::Two });
         // A 16:10 4K panel — 1920×1200 at 2x — is a picture the stream takes.
         let inside = Layout { w: 1920, h: 1200, density: Density::One }.at_density(Density::Two);
-        assert_eq!(inside.held(true), inside, "a desktop the stream takes is untouched");
+        assert_eq!(inside.held(), inside, "a desktop the stream takes is untouched");
         // And the held layout is what the server's answer is checked against, so the
         // retry ladder recognises the desktop it asked for.
-        let pending = PendingLayout::new(retina.held(true));
+        let pending = PendingLayout::new(retina.held());
         assert!(confirms(&pending, (3840, 2400)));
         assert!(!confirms(&pending, (5120, 2880)));
     }

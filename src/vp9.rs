@@ -1,10 +1,10 @@
-//! VP9 encoding: one stream over a rectangle of a [`crate::video::Mirror`].
+//! VP9 encoding: one stream over a [`crate::video::Mirror`].
 //!
 //! The video codec — this gateway streams VP9 only. It is BSD-licensed with a patent grant,
 //! which is exactly the property that gets it into every browser build: a Chromium built
 //! without proprietary codecs still decodes it.
 //!
-//! What is not libvpx's — the mirror, the coded rectangle, the RGB→YUV conversion, the
+//! What is not libvpx's — the mirror, the picture limits, the RGB→YUV conversion, the
 //! 1–100 dial — is [`crate::video`]'s, and the chroma sampling is the config's
 //! ([`Chroma`]). This module is only libvpx.
 //!
@@ -25,10 +25,7 @@ use std::os::raw::{c_int, c_ulong};
 use vpx_sys as vpx;
 
 use crate::config::Chroma;
-use crate::tiles::Rect;
-use crate::video::{
-    AccessUnit, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, Yuv, coded_rect, outline, threads_for,
-};
+use crate::video::{AccessUnit, Mirror, QUALITY_MAX, QUALITY_MIN, Yuv, check_picture};
 
 /// Turn a libvpx return code into an `anyhow::Error` naming the call and libvpx's own explanation.
 ///
@@ -136,7 +133,7 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// keyframe header says BT.601 (SMPTE 170M primaries, transfer and matrix — code 6 each,
 /// what Chromium's own VP9 parser maps that header flag to) at studio swing. The level
 /// comes from `LEVELS`. `None` for a picture no VP9 level covers, which
-/// [`crate::video::coded_rect`] has already refused long before this is reached; it is `Option`
+/// [`crate::video::check_picture`] has already refused long before this is reached; it is `Option`
 /// rather than a panic because this runs on the session's own path and the whole module's premise
 /// is that nothing here aborts the process.
 ///
@@ -160,12 +157,11 @@ pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
     Some(format!("vp09.{profile}.{level:02}.08.{sampling}.06.06.06.00"))
 }
 
-/// One VP9 stream over a fixed rectangle of a [`Mirror`].
+/// One VP9 stream over a [`Mirror`]'s coded picture.
 ///
-/// The rectangle is fixed for the stream's whole life, and that is what makes an inter-frame
-/// stream mean anything: every frame is expressed as a change from the last one at the same
-/// place. A region that moves or grows gets a *new* stream, which is [`crate::regions`]'
-/// decision to make.
+/// The picture size is fixed for the stream's whole life, and that is what makes an inter-frame
+/// stream mean anything: every frame is expressed as a change from the last one. A desktop that
+/// is resized gets a *new* stream.
 pub struct Stream {
     ctx: vpx::vpx_codec_ctx_t,
     /// The configuration libvpx is running on, kept so [`Self::set_quality`] can hand back the
@@ -175,14 +171,10 @@ pub struct Stream {
     /// An image that *borrows* the conversion buffer's planes. Built once, its pointers replaced
     /// on every frame. Never freed: `vpx_img_wrap` allocated nothing.
     img: vpx::vpx_image_t,
-    /// The region as the client knows it, and as a record header reports it.
-    rect: Rect,
-    /// The picture actually encoded: [`Self::rect`] grown to even sides.
-    coded: Rect,
+    /// The picture encoded: the mirror's coded size, the desktop grown to even sides.
+    coded: (u16, u16),
     /// The conversion in front of the encoder, reused across frames.
     yuv: Yuv,
-    /// [`Self::coded`] cropped out of the mirror, reused for the same reason.
-    scratch: Vec<u8>,
     /// The 1–100 dial in force, which [`Self::set_quality`] moves and the totals report.
     quality: u8,
     /// Whether the next frame must be one a decoder can start from.
@@ -201,14 +193,12 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// A stream over `rect` of a mirror whose coded size is `mirror`, at `quality` (1–100)
-    /// and `chroma`.
+    /// A stream over a mirror whose coded size is `coded`, at `quality` (1–100) and `chroma`.
     ///
-    /// The coded rectangle, and the refusal of a picture too large for it, are
-    /// [`coded_rect`]'s. VP9 does not need even sides and is held to them anyway — see the note
-    /// there.
-    pub fn new(rect: Rect, mirror: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
-        let coded = coded_rect(rect, mirror)?;
+    /// The refusal of a picture too large is [`check_picture`]'s. VP9 does not need even sides
+    /// and is held to them anyway — see the note there.
+    pub fn new(coded: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
+        check_picture(coded)?;
         let q = q_for(quality);
 
         // SAFETY: `vpx_codec_vp9_cx` takes no arguments and returns a pointer to a static
@@ -224,8 +214,8 @@ impl Stream {
             vpx!(vpx::vpx_codec_enc_config_default(iface, &mut cfg, 0), "config_default")?;
         }
 
-        cfg.g_w = u32::from(coded.w());
-        cfg.g_h = u32::from(coded.h());
+        cfg.g_w = u32::from(coded.0);
+        cfg.g_h = u32::from(coded.1);
         // The profile is the chroma sampling and nothing else at eight bits: 0 is 4:2:0,
         // 1 is 4:4:4. It has to match the image format handed to `vpx_img_wrap` below, and
         // `codec_string` tells the decoder the same number.
@@ -248,13 +238,12 @@ impl Stream {
         // would cost compression to protect against loss that cannot happen. The same argument
         // removes the periodic keyframe below.
         cfg.g_error_resilient = 0;
-        // One thread per *region* stream — several regions encode in parallel with each
-        // other, which is where the cores go — and several for the one stream that covers
-        // the whole mirror, which has nothing to overlap with. See `video::threads_for`.
-        let threads = threads_for(coded, mirror);
+        // Several threads for the one stream, which has nothing to overlap with. See
+        // `video::threads`.
+        let threads = crate::video::threads();
         cfg.g_threads = threads as u32;
         // No fixed keyframe interval; every keyframe is one somebody asked for — a repaint, a
-        // resize, a client coming back, a region that grew.
+        // resize, a client coming back.
         cfg.kf_mode = vpx::vpx_kf_mode_VPX_KF_DISABLED;
         // Constant quality with the quantizer pinned top and bottom. `VPX_Q` plus the `CQ_LEVEL`
         // control below is what decides it; min == max is what makes that a guarantee rather
@@ -263,14 +252,14 @@ impl Stream {
         cfg.rc_end_usage = vpx::vpx_rc_mode_VPX_Q;
         cfg.rc_min_quantizer = q;
         cfg.rc_max_quantizer = q;
-        // Zero, explicitly, and this one is load-bearing rather than tidy: `crate::tiles::Shadow`
+        // Zero, explicitly, and this one is load-bearing rather than tidy: `crate::shadow::Shadow`
         // records source pixels as delivered the moment they are blitted into the mirror, so a
         // frame libvpx decided to drop is permanently wrong pixels that nothing re-sends. It is
         // also libvpx's default, and a default is a thing that can change.
         cfg.rc_dropframe_thresh = 0;
         // Likewise: an encoder that resized itself would change the picture size mid-stream,
-        // while every stream here has one rectangle for its whole life and a client crops the
-        // decoded picture to it.
+        // while the stream has one picture size for its whole life and a client crops the
+        // decoded picture to the desktop.
         cfg.rc_resize_allowed = 0;
 
         // SAFETY: `ctx` is zeroed and written through by `enc_init_ver`, `cfg` is the struct
@@ -290,7 +279,7 @@ impl Stream {
                 "enc_init_ver"
             )
             .map_err(|e| {
-                anyhow::anyhow!("vp9 encoder for a {}x{} picture: {e}", coded.w(), coded.h())
+                anyhow::anyhow!("vp9 encoder for a {}x{} picture: {e}", coded.0, coded.1)
             })?;
         }
 
@@ -302,15 +291,13 @@ impl Stream {
             cfg,
             // SAFETY: zeroed, then filled in by `vpx_img_wrap` below.
             img: unsafe { std::mem::zeroed() },
-            rect,
             coded,
-            // Even by construction — `coded_rect`'s theorem — which is what keeps the conversion
-            // from asserting on an odd chroma plane.
-            yuv: Yuv::new(coded.w(), coded.h(), chroma),
-            scratch: Vec::new(),
+            // Even by construction — the mirror is held at even sides — which is what keeps the
+            // conversion from asserting on an odd chroma plane.
+            yuv: Yuv::new(coded.0, coded.1, chroma),
             quality: quality.clamp(QUALITY_MIN, QUALITY_MAX),
             keyframe_owed: false,
-            decode: codec_string(coded.w(), coded.h(), chroma),
+            decode: codec_string(coded.0, coded.1, chroma),
             started: std::time::Instant::now(),
             #[cfg(test)]
             refusals: 0,
@@ -354,9 +341,8 @@ impl Stream {
             if threads > 1 {
                 // Both are what turns `g_threads` into actual parallelism on one picture:
                 // row-based multithreading inside a tile, and enough tile columns for the
-                // threads to have separate work. Inert at one thread, so they are set only
-                // where the whole desktop is one stream. libvpx clamps the column count to
-                // what the picture's breadth allows.
+                // threads to have separate work. Inert at one thread. libvpx clamps the column
+                // count to what the picture's breadth allows.
                 stream.control(vpx::vp8e_enc_control_id_VP9E_SET_ROW_MT, 1, "row_mt")?;
                 stream.control(
                     vpx::vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS,
@@ -385,12 +371,6 @@ impl Stream {
         }
 
         Ok(stream)
-    }
-
-    /// The region this stream is for — what a record header reports, and what a client crops the
-    /// decoded picture to.
-    pub fn rect(&self) -> Rect {
-        self.rect
     }
 
     /// The dial this stream is currently encoding at.
@@ -458,37 +438,25 @@ impl Stream {
         Ok(())
     }
 
-    /// Encode this stream's rectangle of `mirror` as it stands.
+    /// Encode `mirror` as it stands.
     ///
     /// `None` means the encoder produced no bitstream. The caller must then leave its dirty flag
     /// set, so those pixels ride on the next frame — which is what keeps a frame that produced
     /// nothing from becoming pixels the client never gets. With `rc_dropframe_thresh = 0` and
     /// `g_lag_in_frames = 0` it should be unreachable; it is a return value rather than an
-    /// assertion because the caller already has to handle it for the other codec.
+    /// assertion because the caller has to be ready for it anyway.
     ///
-    /// The mirror must have been padded ([`Mirror::pad_edges`]) if any stream reaches into the
-    /// padding, which is the caller's job because it is once per round rather than once per
-    /// stream.
-    pub fn encode(
-        &mut self,
-        mirror: &Mirror,
-        mark: Option<Mark>,
-    ) -> anyhow::Result<Option<AccessUnit>> {
-        let coded = (usize::from(self.coded.w()), usize::from(self.coded.h()));
-        // The whole-mirror stream reads the mirror's own buffer; only a sub-rectangle,
-        // or a debug outline that must not be painted on the source, goes through the
-        // crop. See `Mirror::whole`.
-        let rgb: &[u8] = match (mark, mirror.whole(self.coded)) {
-            (None, Some(rgb)) => rgb,
-            _ => {
-                mirror.crop_into(self.coded, &mut self.scratch)?;
-                if let Some(mark) = mark {
-                    outline(&mut self.scratch, coded, mark);
-                }
-                &self.scratch
-            }
-        };
-        self.yuv.read_rgb(rgb)?;
+    /// The mirror must have been padded ([`Mirror::pad_edges`]), which is the caller's job.
+    pub fn encode(&mut self, mirror: &Mirror) -> anyhow::Result<Option<AccessUnit>> {
+        anyhow::ensure!(
+            mirror.coded() == self.coded,
+            "a {}x{} vp9 stream was handed a {}x{} mirror",
+            self.coded.0,
+            self.coded.1,
+            mirror.coded().0,
+            mirror.coded().1
+        );
+        self.yuv.read_rgb(mirror.picture())?;
 
         let (y, u, v) = self.yuv.planes();
         let (sy, su, sv) = self.yuv.strides();
@@ -582,12 +550,12 @@ impl Stream {
 
 // SAFETY: a `Stream` owns its encoder exclusively — it is not `Clone`, `encode` and `set_quality`
 // take `&mut self`, and libvpx keeps no thread-local state for an encoder instance, so moving one
-// between threads is sound. It is needed because [`crate::regions::Round`] carries every live
-// stream onto a `spawn_blocking` worker for the encode and back afterwards.
+// between threads is sound. It is needed because [`crate::encode`]'s round carries the stream
+// onto a `spawn_blocking` worker for the encode and back afterwards.
 //
 // Deliberately **not** `Sync`. Two threads calling `vpx_codec_encode` on one context concurrently
-// is undefined behaviour, and nothing here needs to: the round holds the streams exclusively for
-// as long as it is encoding them.
+// is undefined behaviour, and nothing here needs to: the round holds the stream exclusively for
+// as long as it is encoding it.
 //
 // `img`'s plane pointers borrow `yuv`, which moves with the struct — they are overwritten at the
 // top of every `encode` before libvpx reads them, so a stale pointer is never dereferenced.
@@ -607,6 +575,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shadow::Rect;
 
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -623,10 +592,10 @@ mod tests {
             .collect()
     }
 
-    /// A mirror and one stream over the whole of it, which is the `video` shape.
+    /// A mirror and the stream over it.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.rect(), mirror.coded(), quality, Chroma::Subsampled)
+        let stream = Stream::new(mirror.coded(), quality, Chroma::Subsampled)
             .expect("a stream");
         (mirror, stream)
     }
@@ -759,7 +728,7 @@ mod tests {
             picture[at..at + 300].fill(230);
         }
         mirror.blit(rect(0, 0, 320, 240), &picture).expect("a full-screen blit");
-        stream.encode(mirror, None).expect("an encode").expect("an access unit")
+        stream.encode(mirror).expect("an encode").expect("an access unit")
     }
 
     #[test]
@@ -843,17 +812,17 @@ mod tests {
 
         let (mut mirror, mut stream) = whole(w, h, QUALITY_MIN);
         mirror.blit(rect(0, 0, w, h), &picture).expect("a full-screen blit");
-        let mut units = vec![stream.encode(&mirror, None).expect("an encode").expect("a unit")];
+        let mut units = vec![stream.encode(&mirror).expect("an encode").expect("a unit")];
         let coarse = error(&decode_chain(&units));
 
         stream.set_quality(90).expect("the encoder to accept a new quantizer");
-        let settle = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+        let settle = stream.encode(&mirror).expect("an encode").expect("a unit");
         assert!(!settle.keyframe, "the settle frame cost a keyframe");
         units.push(settle);
         let settled = error(&decode_chain(&units));
 
         let (_, mut fresh) = whole(w, h, 90);
-        let fine = error(&decode(&fresh.encode(&mirror, None).expect("an encode").expect("a unit")));
+        let fine = error(&decode(&fresh.encode(&mirror).expect("an encode").expect("a unit")));
         assert!(
             settled < coarse / 4.0 && settled < fine * 2.0,
             "one frame at quality 90 left the unchanged picture at error {settled:.2} (coarse \
@@ -885,17 +854,16 @@ mod tests {
         );
     }
 
-    /// The odd case, which is where a chroma plane would be half a pixel wide if
-    /// [`coded_rect`]'s theorem did not hold.
+    /// The odd case, which is where a chroma plane would be half a pixel wide if the mirror
+    /// were not held at even sides.
     #[test]
     fn an_odd_desktop_is_padded_and_still_encodes() {
         let (mut mirror, mut stream) = whole(1919, 1079, 60);
-        assert_eq!(stream.rect(), mirror.rect(), "a record header carries the true region");
         mirror
             .blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90]))
             .expect("a full-screen blit");
         mirror.pad_edges();
-        assert!(stream.encode(&mirror, None).expect("an encode").is_some());
+        assert!(stream.encode(&mirror).expect("an encode").is_some());
     }
 
     /// The level table, at the rows a desktop actually lands on. The numbers are libvpx's own;
@@ -954,10 +922,10 @@ mod tests {
         let (rgb, at) = stems(64, 64);
         let worst = |chroma: Chroma| -> u8 {
             let mut mirror = Mirror::new(64, 64).expect("a mirror");
-            let mut stream = Stream::new(mirror.rect(), mirror.coded(), QUALITY_MAX, chroma)
+            let mut stream = Stream::new(mirror.coded(), QUALITY_MAX, chroma)
                 .expect("a stream");
             mirror.blit(rect(0, 0, 64, 64), &rgb).expect("a full-screen blit");
-            let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+            let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
             let decoded = decode(&unit);
             at.iter()
                 .map(|&(x, y)| {
@@ -988,9 +956,9 @@ mod tests {
         for chroma in [Chroma::Subsampled, Chroma::Full] {
             let mut mirror = Mirror::new(64, 64).expect("a mirror");
             let mut stream =
-                Stream::new(mirror.rect(), mirror.coded(), 60, chroma).expect("a stream");
+                Stream::new(mirror.coded(), 60, chroma).expect("a stream");
             mirror.blit(rect(0, 0, 64, 64), &flat(64, 64, [200, 30, 30])).expect("a blit");
-            let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+            let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
             let decoded = decode(&unit);
             assert_eq!(decoded.cs, vpx::vpx_color_space_VPX_CS_BT_601, "{chroma:?}");
             assert_eq!(decoded.range, vpx::vpx_color_range_VPX_CR_STUDIO_RANGE, "{chroma:?}");
@@ -1005,40 +973,22 @@ mod tests {
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
         let Err(refused) =
-            Stream::new(rect(0, 0, 5120, 2880), (5120, 2880), 60, Chroma::Subsampled)
+            Stream::new((5120, 2880), 60, Chroma::Subsampled)
         else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
-        assert!(message.contains("webp"), "the message does not say what to do instead");
+        assert!(message.contains("resize"), "the message does not say what to do instead");
     }
 
-    /// Two streams over disjoint regions of one mirror, which is the motion shape: each sees
-    /// its own pixels and neither sees the other's.
+    /// A stream is built for one picture size, and a mirror of any other is refused rather
+    /// than read past its end.
     #[test]
-    fn two_regions_of_one_mirror_encode_independently() {
-        let mut mirror = Mirror::new(640, 128).expect("a mirror");
-        let left = Rect { left: 0, top: 0, right: 319, bottom: 127 };
-        let right = Rect { left: 320, top: 0, right: 639, bottom: 127 };
-        let mut a = Stream::new(left, mirror.coded(), 60, Chroma::Subsampled).expect("a stream");
-        let mut b = Stream::new(right, mirror.coded(), 60, Chroma::Subsampled).expect("a stream");
-
-        mirror.blit(left, &flat(320, 128, [200, 30, 30])).expect("a blit");
-        mirror.blit(right, &flat(320, 128, [30, 30, 200])).expect("a blit");
-        assert!(a.encode(&mirror, None).expect("an encode").expect("a unit").keyframe);
-        assert!(b.encode(&mirror, None).expect("an encode").expect("a unit").keyframe);
-
-        // Only the left region changes. The right one still encodes — nothing here decides
-        // whether it should, that is the caller's dirty flag — but it has nothing to describe.
-        mirror.blit(left, &flat(320, 128, [30, 200, 30])).expect("a blit");
-        let changed = a.encode(&mirror, None).expect("an encode").expect("a unit").data.len();
-        let unchanged = b.encode(&mirror, None).expect("an encode").expect("a unit").data.len();
-        assert!(
-            unchanged < changed,
-            "the right region cost {unchanged} bytes against the changed one's {changed}; the \
-             two streams are not seeing different pixels"
-        );
+    fn a_mirror_of_another_size_is_refused() {
+        let (_, mut stream) = whole(320, 240, 60);
+        let other = Mirror::new(640, 480).expect("a mirror");
+        assert!(stream.encode(&other).is_err());
     }
 }

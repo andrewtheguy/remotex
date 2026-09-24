@@ -18,7 +18,7 @@ use std::time::Duration;
 use log::warn;
 use tokio::net::TcpStream;
 
-use crate::encode::TileSink;
+use crate::encode::VideoSink;
 use crate::protocol::ServerMsg;
 
 /// Idle time before the kernel starts probing a silent peer.
@@ -121,7 +121,7 @@ pub async fn connect_and_handshake<T, F, Fut>(
     protocol: &str,
     dest: &str,
     budget: Duration,
-    sink: &TileSink,
+    sink: &VideoSink,
     handshake: F,
 ) -> Option<T>
 where
@@ -238,17 +238,17 @@ mod tests {
 
     use super::*;
 
-    /// A sink and the channel behind it. `TileSink` forwards through a task of its
-    /// own, so a test reads the channel only after [`TileSink::flush`].
-    fn sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
+    /// A sink and the channel behind it. `VideoSink` forwards through a task of its
+    /// own, so a test reads the channel only after [`VideoSink::flush`].
+    fn sink() -> (VideoSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(4);
-        let plan = crate::config::RenderPlan::Tiles {
-            base: crate::config::TileCodec::Png,
-            motion: None,
-            debug: false,
+        let plan = crate::config::RenderPlan {
+            quality: 60,
+            adaptive: None,
+            chroma: crate::config::Chroma::Subsampled,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
-        (TileSink::new("test", frame_tx, plan, feedback), frame_rx)
+        (VideoSink::new("test", frame_tx, plan, feedback), frame_rx)
     }
 
     // The detection itself is not testable here, and the reason is the same one

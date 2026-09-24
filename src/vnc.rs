@@ -36,15 +36,15 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::{RenderPlan, Subtype, TargetConfig};
-use crate::encode::TileSink;
+use crate::encode::VideoSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    self, ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, DisplayInfo, HostDisplay,
-    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, TileGrid, UNSCALED, WheelUnit,
+    ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, DisplayInfo, HostDisplay,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
     clipboard_fits,
 };
-use crate::tiles::{self, Rect, Shadow};
+use crate::shadow::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
 use crate::vnc_audio::{self, FrameDecoder, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
@@ -561,10 +561,6 @@ struct DesktopState {
     /// generic rect from then on. `None` on every other server and until the
     /// first report: generic RFB is [`UNSCALED`] by default.
     wire_scale: Option<f32>,
-    /// Whether the target streams video, which holds every generic resize under
-    /// the stream's picture ceiling — see [`Flags::video`]. Kept here because
-    /// the read loop sends such requests too.
-    video: bool,
     /// Whether the window drives the desktop size ([`Flags::resize`]). The
     /// browser's density is declared to a reporting server only then: the server
     /// sets its output's scale to what is declared, and a client that could not
@@ -893,17 +889,16 @@ impl DesktopState {
 
     /// The pixels a generic `SetDesktopSize` asks for a window of `points`:
     /// points × the reported scale, so the logical desktop is the window, and
-    /// under the video ceiling when the target streams.
+    /// under the video stream's picture ceiling.
     fn generic_pixels(&self, points: (u16, u16)) -> (u16, u16) {
         self.pixels_at(points, self.generic_scale())
     }
 
-    /// The pixels a window of `points` is at `scale`, under the video ceiling
-    /// when the target streams.
+    /// The pixels a window of `points` is at `scale`, under the video stream's
+    /// picture ceiling.
     fn pixels_at(&self, points: (u16, u16), scale: f32) -> (u16, u16) {
         let px = |v: u16| (f32::from(v) * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16;
-        let pixels = (px(points.0), px(points.1));
-        if self.video { held_under_ceiling(pixels) } else { pixels }
+        held_under_ceiling((px(points.0), px(points.1)))
     }
 
     /// The generic resize request for a window of `points`, or `None` when
@@ -1437,7 +1432,7 @@ pub async fn run(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = TileSink::new("vnc", frame_tx, plan, feedback);
+    let sink = VideoSink::new("vnc", frame_tx, plan, feedback);
     session(config, display, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
 }
@@ -1449,7 +1444,7 @@ async fn session(
     audio: Option<Arc<crate::audio::AudioBridge>>,
     camera: Option<Arc<crate::camera::CameraBridge>>,
     microphone: Option<Arc<crate::mic::MicBridge>>,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) {
     // The budget covers the RFB handshake, which can stall on a host that accepts
     // the connection and then says nothing — no socket timeout catches that. The
@@ -1501,7 +1496,6 @@ async fn session(
             clipboard: config.clipboard,
             default_size: config.default_size(),
             pinned: (!apple).then(|| config.pinned_size()).flatten(),
-            video: config.streams_video(),
             apple,
             high_performance,
             wlshare_audio,
@@ -1556,10 +1550,6 @@ struct Flags {
     /// [`opening_mode`] at connect (High Performance) or refused by the config
     /// file (Standard `ard` exposes physical displays).
     pinned: Option<(u16, u16)>,
-    /// Whether this target puts moving pixels on the wire as a video stream
-    /// ([`TargetConfig::streams_video`]): a generic `SetDesktopSize` is then
-    /// held under the stream's picture ceiling — see [`request_resize`].
-    video: bool,
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
     /// subtypes negotiate them; only one uses the 003.889 record transport.
@@ -2147,7 +2137,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     size: (u16, u16),
     flags: Flags,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
-    sink: TileSink,
+    sink: VideoSink,
 ) -> anyhow::Result<()> {
     let Flags {
         macos,
@@ -2155,7 +2145,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         clipboard: clipboard_enabled,
         default_size,
         pinned,
-        video,
         apple,
         high_performance,
         wlshare_audio,
@@ -2183,7 +2172,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         viewport: None,
         density: if apple { Density::Off } else { Density::Asked },
         wire_scale: None,
-        video,
         resize,
         following: false,
         declared: None,
@@ -2193,11 +2181,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
     let shadow: SharedShadow = Arc::new(std::sync::Mutex::new({
-        // At 1x, like the `Resize` the connect announced; a layout that says
-        // otherwise re-cuts it with the desktop it comes with.
-        let mut shadow = Shadow::new("vnc", size.0, size.1, TileGrid::ONE);
-        shadow.classify_cells(sink.wants_cells());
-        shadow
+        Shadow::new("vnc", size.0, size.1)
     }));
     let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
     let hp_wake = Arc::new(tokio::sync::Notify::new());
@@ -2709,8 +2693,8 @@ enum ResizeAsk {
 /// window to a Retina display re-renders the same desktop at 2x. Generic VNC uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
 /// rect; until then, its report is stashed for replay. It has no density to
-/// apply, so its points are its pixels — and when the target streams `video`,
-/// they are held under the stream's picture ceiling ([`crate::video::fit_ceiling`])
+/// apply, so its points are its pixels — and they are held under the video
+/// stream's picture ceiling ([`crate::video::fit_ceiling`])
 /// before anything is sent or stashed, so the desktop asked for is one the encoder
 /// takes. A High Performance display needs no such hold: the Mac's own 3840×2160
 /// backing ceiling in [`vnc_apple::virtual_display_mode`] is already inside it.
@@ -2760,7 +2744,7 @@ async fn request_resize(
 async fn hp_resize_step(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     loop {
         let step = desktop.lock().unwrap().hp.step(tokio::time::Instant::now());
@@ -2857,7 +2841,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     shared: Shared,
     flags: ReadFlags,
     mut apple: Option<Apple>,
-    sink: TileSink,
+    sink: VideoSink,
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared { uplink, desktop, clipboard, display, hp_wake, audio, camera, microphone, .. } =
@@ -2888,7 +2872,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
-        // has gone quiet — see `TileSink::due_at` for why that is correctness rather
+        // has gone quiet — see `VideoSink::due_at` for why that is correctness rather
         // than smoothness. `None` on every still target, which leaves this exactly as
         // it was.
         //
@@ -3597,7 +3581,7 @@ async fn finish_apple_clipboard_fetch(
 
 /// Forward one already-recorded remote clipboard snapshot. Returns whether the
 /// browser link is gone, matching the read loop's other sink helpers.
-async fn emit_clipboard(sink: &TileSink, snapshot: ClipboardSnapshot, requested: bool) -> bool {
+async fn emit_clipboard(sink: &VideoSink, snapshot: ClipboardSnapshot, requested: bool) -> bool {
     sink.msg(ServerMsg::Clipboard {
         text: snapshot.text,
         changed_at_ms: snapshot.changed_at_ms,
@@ -3614,7 +3598,7 @@ async fn emit_clipboard(sink: &TileSink, snapshot: ClipboardSnapshot, requested:
 async fn request_apple_clipboard(
     clipboard: &SharedClipboard,
     uplink: &SharedUplink,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let (fetch, snapshot) = {
         let mut state = clipboard.lock().unwrap();
@@ -3649,7 +3633,7 @@ async fn extended_cut_text(
     body: &[u8],
     uplink: &SharedUplink,
     clipboard: &SharedClipboard,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<bool> {
     let message = match vnc_clipboard::parse(body) {
         Ok(message) => message,
@@ -3917,7 +3901,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     apple: &mut Option<Apple>,
     decoders: &mut Decoders,
     clipboard_enabled: bool,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<RectEffect> {
     let Shared { uplink, desktop, cursor, shadow, .. } = shared;
     let x = reader.read_u16().await?;
@@ -4060,31 +4044,13 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // has no framing of its own above the record layer, so stepping past by the
     // wrong number of bytes desyncs everything after it.
     let decoded = decoders
-        .decode(reader, payload, shadow, sink.copies().then_some((x, y)), w, h)
+        .decode(reader, payload, shadow, w, h)
         .await?;
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(RectEffect::NOTHING);
     };
     let rgb = match decoded {
         Decoded::Pixels(rgb) => rgb,
-        // A CopyRect this client can do itself. The shadow has already moved its
-        // own copy of the pixels, so the record is all that is owed — and it goes
-        // through `msg` rather than the tile path because that is the queue whose
-        // order against the tiles is the contract a copy reads the canvas under.
-        Decoded::Copied(src) => {
-            sink.msg(ServerMsg::Copy(protocol::CopyRect {
-                sx: src.left,
-                sy: src.top,
-                x,
-                y,
-                w,
-                h,
-            }))
-            .await?;
-            return Ok(RectEffect::pixels(rect));
-        }
-        // A CopyRect onto pixels identical to the ones already there.
-        Decoded::Unchanged => return Ok(RectEffect::pixels(rect)),
         // A CopyRect whose source this side never learned. Guessing would leave
         // wrong pixels on screen until something else happened to change that area;
         // one full request makes the source known instead.
@@ -4100,14 +4066,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
     };
 
     // Cropped out of the rect just read rather than out of the shadow: the bytes
-    // are the same and this needs no lock. Its own buffer per piece, since the
-    // encoder reads it after this function has returned and `rgb` is gone.
-    sink.damage(&changed, |piece| {
+    // are the same and this needs no lock.
+    if changed == rect {
+        sink.damage(rect, &rgb).await?;
+    } else {
         let mut pixels = Vec::new();
-        tiles::crop(&rgb, rect, piece, &mut pixels);
-        pixels
-    })
-    .await?;
+        shadow::crop(&rgb, rect, changed, &mut pixels);
+        sink.damage(changed, &pixels).await?;
+    }
     Ok(RectEffect::pixels(rect))
 }
 
@@ -4123,7 +4089,7 @@ async fn read_cursor<R: AsyncRead + Unpin>(
     reader: &mut R,
     cursor: &SharedCursor,
     (hx, hy, w, h): (u16, u16, u16, u16),
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let (state, msg) = if w == 0 || h == 0 {
         debug!("vnc: server hid the pointer");
@@ -4177,7 +4143,7 @@ async fn read_alpha_cursor<R: AsyncRead + Unpin>(
     reader: &mut R,
     cursor: &SharedCursor,
     (hx, hy, w, h): (u16, u16, u16, u16),
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let encoding = reader.read_i32().await?;
     anyhow::ensure!(
@@ -4239,7 +4205,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
     (reason, status, w, h): (u16, u16, u16, u16),
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<bool> {
     let screens = reader.read_u8().await?;
     let mut padding = [0u8; 3];
@@ -4342,7 +4308,7 @@ async fn read_output_scale<R: AsyncRead + Unpin>(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let mut body = [0u8; OUTPUT_SCALE_BODY];
     reader.read_exact(&mut body).await?;
@@ -4451,7 +4417,7 @@ async fn read_output_list<R: AsyncRead + Unpin>(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     display: &SharedDisplay,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let mut header = [0u8; OUTPUT_LIST_HEADER];
     reader.read_exact(&mut header).await?;
@@ -4548,7 +4514,7 @@ async fn apply_resize(
     shadow: &SharedShadow,
     new: (u16, u16),
     scale: f32,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<bool> {
     anyhow::ensure!(
         new.0 > 0 && new.1 > 0,
@@ -4568,9 +4534,7 @@ async fn apply_resize(
     };
     // The old pixels describe a framebuffer that no longer exists, and the
     // browser is about to reallocate its canvas.
-    shadow.lock().unwrap().resize(new.0, new.1, TileGrid::at(scale));
-    // The cell grid is anchored at (0,0) in framebuffer pixels and pitched at the
-    // density, so a new size or scale makes every key name somewhere else.
+    shadow.lock().unwrap().resize(new.0, new.1);
     sink.reset_render();
     info!(
         "vnc: desktop resized from {}x{} px at {}x to {}x{} px at {scale}x ({}x{} pt)",
@@ -4598,7 +4562,7 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
     cursor: &SharedCursor,
     hotspot: (u16, u16),
     size: (u16, u16),
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<()> {
     let id = reader.read_u32().await?;
     let len = reader.read_u32().await?;
@@ -4642,7 +4606,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     shared: &Shared,
     virtual_display: bool,
     rearm_pasteboard: bool,
-    sink: &TileSink,
+    sink: &VideoSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, hp_wake, .. } = shared;
     // The length counts the bytes after itself — see [`vnc_apple::parse_layout`].
@@ -5046,13 +5010,11 @@ fn translate_input(
         // shared buffer and the tile sink) before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
-        // bridge handles them and they never reach here. `CacheReset` is one of
-        // them: it empties that socket's tile cache and injects its own `Refresh`.
-        // `CameraFormat` is the camera socket's opening message, never forwarded as
-        // input, and a VNC target carries no camera anyway.
+        // bridge handles them and they never reach here. `CameraFormat` is the
+        // camera socket's opening message, never forwarded as input, and a VNC
+        // target carries no camera anyway.
         ClientMsg::Connect { .. }
         | ClientMsg::Disconnect
-        | ClientMsg::CacheReset
         | ClientMsg::PaintAck { .. }
         | ClientMsg::CameraFormat { .. } => Vec::new(),
         // Intercepted by the input loop, which is where the requested screen is
@@ -7308,7 +7270,6 @@ mod tests {
             viewport: None,
             density: Density::Off,
             wire_scale: None,
-            video: false,
             resize: true,
             following: false,
             declared: None,
@@ -7346,29 +7307,53 @@ mod tests {
     /// A shadow of whatever size the test's desktop is; most of these tests never
     /// put a pixel through it.
     fn test_shadow(size: (u16, u16)) -> SharedShadow {
-        Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1, TileGrid::ONE)))
+        Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)))
     }
 
     /// A sink and the frame channel behind it.
-    fn test_sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
+    fn test_sink() -> (VideoSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(8);
-        let plan = crate::config::RenderPlan::Tiles {
-            base: crate::config::TileCodec::Png,
-            motion: None,
-            debug: false,
+        let plan = crate::config::RenderPlan {
+            quality: 60,
+            adaptive: None,
+            chroma: crate::config::Chroma::Subsampled,
         };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
-        (TileSink::new("vnc", frame_tx, plan, feedback), frame_rx)
+        let sink = VideoSink::new("vnc", frame_tx, plan, feedback);
+        // Larger than any desktop these tests paint, so a rectangle lands in the
+        // mirror without the `Resize` a live engine would have sent first.
+        sink.presize(256, 256);
+        (sink, frame_rx)
+    }
+
+    /// A sink that has been told the desktop is `size`, which its mirror needs before
+    /// it takes a pixel — on a live session that is the engine's own `Resize`.
+    async fn sized_sink(size: (u16, u16)) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        let (sink, mut rx) = test_sink();
+        sink.msg(ServerMsg::Resize { w: size.0, h: size.1, scale: UNSCALED }).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(rx.recv().await, Some(ServerMsg::Resize { .. })));
+        (sink, rx)
+    }
+
+    /// The access units a flushed sink has put on its channel.
+    fn units(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<crate::protocol::VideoUnit> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ServerMsg::Video(unit) => Some(unit),
+                _ => None,
+            })
+            .collect()
     }
 
     /// What the sink has forwarded so far, or `None` for nothing.
     ///
-    /// The flush is the point: a [`TileSink`] forwards from a task of its own, so a
+    /// The flush is the point: a [`VideoSink`] forwards from a task of its own, so a
     /// bare `try_recv` would race it and read `None` for a message that is on its
     /// way. `None` here means the engine sent nothing, which is what these tests
     /// mean when they assert it.
     async fn forwarded(
-        sink: &TileSink,
+        sink: &VideoSink,
         rx: &mut mpsc::Receiver<ServerMsg>,
     ) -> Option<ServerMsg> {
         sink.flush().await;
@@ -7622,15 +7607,13 @@ mod tests {
         assert_eq!(d.viewport, Some((640, 480)));
     }
 
-    /// A streaming target never asks a generic server for a desktop the encoder
-    /// refuses: the window's size is held under the picture ceiling before it is
-    /// sent or stashed, and a tiles target asks for the window as it is.
+    /// A generic server is never asked for a desktop the encoder refuses: the
+    /// window's size is held under the picture ceiling before it is sent or stashed.
     #[tokio::test]
-    async fn a_generic_resize_is_held_under_the_video_ceiling_only_where_it_streams() {
+    async fn a_generic_resize_is_held_under_the_video_ceiling() {
         let (uplink, wire) = test_uplink();
         let screen = Screen { id: 7, flags: 0 };
         let desktop = shared_desktop((1024, 768), Some(screen), None);
-        desktop.lock().unwrap().video = true;
 
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((5120, 2880)), false).await.unwrap();
         assert_eq!(written(&wire), set_desktop_size((3840, 2400), screen));
@@ -7643,16 +7626,9 @@ mod tests {
         // Stashed before support is declared: the stash is the window in points,
         // and the replay holds it under the same ceiling the live request would.
         let stashed = shared_desktop((1024, 768), None, None);
-        stashed.lock().unwrap().video = true;
         request_resize(&uplink, &stashed, ResizeAsk::Viewport((5120, 2880)), false).await.unwrap();
         assert_eq!(stashed.lock().unwrap().pending, Some((5120, 2880)));
         assert_eq!(stashed.lock().unwrap().generic_pixels((5120, 2880)), (3840, 2400));
-
-        // A tiles target carries the oversized desktop and asks for it whole.
-        let (uplink, wire) = test_uplink();
-        let desktop = shared_desktop((1024, 768), Some(screen), None);
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((5120, 2880)), false).await.unwrap();
-        assert_eq!(written(&wire), set_desktop_size((5120, 2880), screen));
     }
 
     /// Let a High Performance report settle, run what falls due, and play the
@@ -7661,7 +7637,7 @@ mod tests {
     async fn hp_settle(
         uplink: &SharedUplink,
         desktop: &SharedDesktop,
-        sink: &TileSink,
+        sink: &VideoSink,
     ) -> Option<Vec<u8>> {
         tokio::time::advance(HP_RESIZE_SETTLE).await;
         hp_resize_step(uplink, desktop, sink).await.unwrap();
@@ -8870,15 +8846,12 @@ mod tests {
         rects.push(zlib_rect(&mut zlib_stream, (0, 0, 2, 2), &bgrx));
 
         let (uplink, _sent) = test_uplink();
-        let (sink, mut rx) = test_sink();
-        let shared = test_shared(
-            uplink,
-            shared_desktop((2, 2), None, None),
-            test_shadow((2, 2)),
-        );
+        let (sink, mut rx) = sized_sink((2, 2)).await;
+        let shadow = test_shadow((2, 2));
+        let shared = test_shared(uplink, shared_desktop((2, 2), None, None), Arc::clone(&shadow));
         // Kept, not discarded: a decoder that bailed on the third encoding would
-        // leave the first rectangle's tile sitting there and the count below would
-        // still read 1. Running out of stream is the only acceptable way to stop.
+        // leave the first rectangle's pixels in the shadow and the check below would
+        // still pass. Running out of stream is the only acceptable way to stop.
         let err = read_loop(
             std::io::Cursor::new(update(&rects)),
             shared,
@@ -8891,32 +8864,27 @@ mod tests {
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         sink.flush().await;
-        let mut tiles = 0;
-        while let Ok(msg) = rx.try_recv() {
-            if matches!(msg, ServerMsg::Tile(_)) {
-                tiles += 1;
-            }
-        }
-        assert_eq!(tiles, 1, "five encodings of one picture, one tile");
+        assert_eq!(units(&mut rx).len(), 1, "one update, one access unit");
+        // Every encoding decoded the same picture, so the shadow — which holds what
+        // the last of them left — matches the first.
+        let held = shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 2, 2).unwrap());
+        let first: Vec<u8> = bgrx.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
+        assert_eq!(held, Some(first), "five encodings of one picture, one picture");
     }
 
-    /// CopyRect saves the VNC link its pixels, and now the browser link too: the
-    /// destination is a thirteen-byte record naming where the client already has
-    /// them, not an encode of pixels it is holding.
+    /// CopyRect saves the VNC link its pixels: the source is read back out of the
+    /// shadow and lands at the destination, in the mirror the next unit encodes.
     #[tokio::test]
-    async fn a_copy_rect_reaches_the_browser_as_a_copy() {
+    async fn a_copy_rect_is_read_back_out_of_the_shadow() {
         let wire = update(&[
             raw_rect(0, 0, 2, 2, [0x30, 0x20, 0x10]),
             copy_rect((2, 0, 2, 2), (0, 0)),
         ]);
 
         let (uplink, _sent) = test_uplink();
-        let (sink, mut rx) = test_sink();
-        let shared = test_shared(
-            uplink,
-            shared_desktop((4, 2), None, None),
-            test_shadow((4, 2)),
-        );
+        let (sink, mut rx) = sized_sink((4, 2)).await;
+        let shadow = test_shadow((4, 2));
+        let shared = test_shared(uplink, shared_desktop((4, 2), None, None), Arc::clone(&shadow));
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
@@ -8929,90 +8897,12 @@ mod tests {
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         sink.flush().await;
-        let mut tiles = Vec::new();
-        let mut copies = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                ServerMsg::Tile(tile) => tiles.push(tile),
-                ServerMsg::Copy(copy) => copies.push(copy),
-                _ => {}
-            }
-        }
-        assert_eq!(tiles.len(), 1, "only the painted rect carried pixels");
-        assert_eq!((tiles[0].x, tiles[0].y), (0, 0));
+        assert_eq!(units(&mut rx).len(), 1, "the paint and the copy are one update");
+        let shadow = shadow.lock().unwrap();
         assert_eq!(
-            copies,
-            vec![protocol::CopyRect { sx: 0, sy: 0, x: 2, y: 0, w: 2, h: 2 }],
-            "the copy names the source and lands at the destination"
-        );
-    }
-
-    /// The plans a copy is not sound on fall back to what this engine always did:
-    /// the source read out of the shadow and encoded as a tile. Under a motion
-    /// strategy the client's moving pixels come from a decoder rather than from
-    /// tiles, and the mirror — not the canvas — is what a region is encoded from,
-    /// so there is nothing on the client worth copying from.
-    #[tokio::test]
-    async fn a_target_with_a_motion_strategy_still_gets_the_pixels() {
-        let wire = update(&[
-            raw_rect(0, 0, 2, 2, [0x30, 0x20, 0x10]),
-            copy_rect((2, 0, 2, 2), (0, 0)),
-        ]);
-
-        let (uplink, _sent) = test_uplink();
-        let (frame_tx, mut rx) = mpsc::channel(8);
-        let sink = TileSink::new(
-            "vnc",
-            frame_tx,
-            crate::config::RenderPlan::Tiles {
-                base: crate::config::TileCodec::Png,
-                motion: Some(crate::config::MotionEncode {
-                    quality: 60,
-                    adaptive: None,
-                    chroma: crate::config::Chroma::Subsampled,
-                }),
-                debug: false,
-            },
-            Arc::new(crate::feedback::LinkFeedback::new()),
-        );
-        assert!(!sink.copies(), "a motion plan must not be offered copies");
-        // The stream's mirror will not take pixels before it knows how big the
-        // desktop is, which on a live session is the engine's own ServerInit.
-        sink.msg(ServerMsg::Resize { w: 4, h: 2, scale: crate::protocol::UNSCALED })
-            .await
-            .unwrap();
-        sink.flush().await;
-        let shared = test_shared(
-            uplink,
-            shared_desktop((4, 2), None, None),
-            test_shadow((4, 2)),
-        );
-        let err = read_loop(
-            std::io::Cursor::new(wire),
-            shared,
-            ReadFlags { clipboard: false, poll: false },
-            None,
-            sink.clone(),
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
-
-        sink.flush().await;
-        let mut tiles = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                ServerMsg::Tile(tile) => tiles.push(tile),
-                ServerMsg::Copy(_) => panic!("a motion plan was sent a copy record"),
-                ServerMsg::Video(_) => panic!("nothing moved long enough to earn a stream"),
-                _ => {}
-            }
-        }
-        assert_eq!(tiles.len(), 2, "the painted rect and the copy of it, as pixels");
-        assert_eq!(
-            (tiles[1].x, tiles[1].y, tiles[1].w, tiles[1].h),
-            (2, 0, 2, 2),
-            "the copy lands at the destination, not the source"
+            shadow.copy_out(Rect::from_size(2, 0, 2, 2).unwrap()),
+            shadow.copy_out(Rect::from_size(0, 0, 2, 2).unwrap()),
+            "the copy landed at the destination"
         );
     }
 
@@ -9068,7 +8958,7 @@ mod tests {
         wire.extend_from_slice(&raw);
 
         let (uplink, _sent) = test_uplink();
-        let (sink, mut rx) = test_sink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
         let shared = test_shared(
             uplink,
             shared_desktop((2, 2), None, None),
@@ -9086,22 +8976,17 @@ mod tests {
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         sink.flush().await;
-        match rx.try_recv().expect("the rectangle behind the empty one") {
-            ServerMsg::Tile(tile) => {
-                assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2));
-            }
-            other => panic!("expected a tile, got {other:?}"),
-        }
+        assert_eq!(units(&mut rx).len(), 1, "the rectangle behind the empty one");
     }
 
     #[tokio::test]
-    async fn a_rectangle_split_across_records_still_becomes_tiles() {
+    async fn a_rectangle_split_across_records_still_becomes_a_frame() {
         let update = raw_update();
         let (a, b) = update.split_at(update.len() - 6);
         let wire = framed(&[a.to_vec(), b.to_vec()]);
 
         let (uplink, _sent) = test_records_uplink(apple_keys());
-        let (sink, mut rx) = test_sink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
         let shared = test_shared(
             uplink,
             shared_desktop((2, 2), None, None),
@@ -9120,14 +9005,9 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
-        // The tile arrived whole, which is the point: one 2x2 rectangle, not two
-        // fragments of one.
+        // The rectangle arrived whole, which is the point: one 2x2 frame.
         sink.flush().await;
-        let msg = rx.try_recv().expect("a tile");
-        match msg {
-            ServerMsg::Tile(tile) => assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2)),
-            other => panic!("expected a tile, got {other:?}"),
-        }
+        assert_eq!(units(&mut rx).len(), 1, "one frame");
     }
 
     #[tokio::test]
@@ -9730,7 +9610,7 @@ mod tests {
         wire.extend_from_slice(&raw_update());
 
         let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = test_sink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
         let shared = test_shared(
             uplink,
             shared_desktop((2, 2), None, None),
@@ -9751,7 +9631,7 @@ mod tests {
         assert_eq!(written(&sent), expected);
         sink.flush().await;
         assert!(
-            std::iter::from_fn(|| rx.try_recv().ok()).any(|m| matches!(m, ServerMsg::Tile(_))),
+            !units(&mut rx).is_empty(),
             "the rectangle behind the oversized fence has to survive it"
         );
     }
@@ -9766,7 +9646,7 @@ mod tests {
         wire.extend_from_slice(&raw_update());
 
         let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = test_sink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
         let shared = test_shared(
             uplink,
             shared_desktop((2, 2), None, None),
@@ -9788,7 +9668,7 @@ mod tests {
         );
         sink.flush().await;
         assert!(
-            std::iter::from_fn(|| rx.try_recv().ok()).any(|m| matches!(m, ServerMsg::Tile(_))),
+            !units(&mut rx).is_empty(),
             "the rectangle behind the fence has to survive it"
         );
     }

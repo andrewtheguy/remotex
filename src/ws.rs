@@ -15,14 +15,13 @@
 //! session-control messages (`connect` to pick a target from the post-login picker,
 //! `disconnect` to switch back to it) act on the slot; everything else is engine
 //! input, routed to the current engine (or dropped in the picker state). Outbound
-//! `ServerMsg` go to the browser as screen tiles in binary frames and control messages
+//! `ServerMsg` go to the browser as access units in binary frames and control messages
 //! (resize/error, the picker/connected status) as JSON text (see [`crate::protocol`]).
 //!
 //! `/ws/audio?session=<token>` is sound, and **opening it is the subscription** —
 //! there is no message that turns audio on. It carries exactly two things, the format
-//! and then packets, and it exists so that neither ever waits behind a picture: on a
-//! `render_type = "video"` target the session socket's queue is four frames deep, and
-//! an audio pump stuck behind it stops draining the bridge, which then drops wave
+//! and then packets, and it exists so that neither ever waits behind a picture: the
+//! session socket's queue is four frames deep, and an audio pump stuck behind it stops draining the bridge, which then drops wave
 //! buffers outright. It is bound to the *claim* rather than to an attachment, so it
 //! survives a reattach and a target switch and ends only when the claim does.
 //!
@@ -63,7 +62,6 @@ use log::{info, warn};
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
@@ -129,7 +127,7 @@ const MAX_TRACKED_PAINTS: usize = 4096;
 /// RFB has no pacing of its own (see `src/rdp.rs` `DAMAGE_INTERVAL`, deliberately
 /// not mirrored in VNC), so nothing between that engine and the canvas was
 /// telling it to stop. Windowed, the same run held 24 in flight at 2/43ms
-/// end-to-end and carried the same picture in half as many tile records.
+/// end-to-end and carried the same picture in half as many records.
 ///
 /// Above the deepest working depth on purpose: a window that a healthy
 /// attachment hits is a throughput tax, not backpressure. Eight was measured too
@@ -740,7 +738,7 @@ async fn audio(
         (attachment.id, attachment.packets, attachment.evicted);
     // The same encoder the session socket uses, so the two cannot disagree about a
     // frame layout, and so `Totals` keeps reporting audio bytes where the field
-    // measurement already reads them. Its tile machinery simply never sees a tile.
+    // measurement already reads them. Its batching simply never sees a unit.
     let mut wire = Wire::default();
     let mut heartbeat = interval(heartbeat_timings.interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1138,13 +1136,6 @@ async fn session(
     let (attach_id, mut events) = (attachment.id, attachment.events);
     let superseded = attachment.superseded;
 
-    // How many times the client has said it lost its tile cache. The inbound half
-    // bumps it; the outbound half, which owns the cache, notices before its next
-    // batch. A counter and not a flag or a channel: the outbound task must not have
-    // to *wait* for this, an extra clear is always harmless, and comparing two
-    // numbers needs no lock and cannot deadlock against the send path.
-    let cache_epoch = Arc::new(AtomicU64::new(0));
-    let inbound_epoch = Arc::clone(&cache_epoch);
     let paint = Arc::new(Mutex::new(PaintTracker::publishing(attachment.feedback)));
     let outbound_paint = Arc::clone(&paint);
     // Woken by the inbound half whenever an acknowledgment advances the window,
@@ -1157,7 +1148,6 @@ async fn session(
     // measured in the field. Ends on eviction (explicit close) or engine death.
     let mut outbound = tokio::spawn(async move {
         let mut wire = Wire::default();
-        let mut seen_epoch = 0u64;
         let mut heartbeat = interval(heartbeat_timings.interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Whether the loop ended on an eviction, which is owed a close frame.
@@ -1178,19 +1168,8 @@ async fn session(
                 }
             };
 
-            // Before anything is encoded: if the client has said it lost its
-            // cache, stop believing it holds anything. Checked here rather than on
-            // arrival because this is the task that knows, and one iteration of
-            // latency costs at most a batch of references the client would answer
-            // with another reset.
-            let epoch = cache_epoch.load(Ordering::Relaxed);
-            if epoch != seen_epoch {
-                seen_epoch = epoch;
-                wire.reset_cache();
-            }
-
             // Take everything already queued behind the first message, so a burst
-            // of tiles is batched instead of costing a frame each. `try_recv` and
+            // of units is batched instead of costing a frame each. `try_recv` and
             // not another `await`: a batch must never *wait* for more work, only
             // collect what is already there. Under a slow link the channel fills
             // and the batches grow, which is the adaptation wanted — bigger writes
@@ -1347,14 +1326,6 @@ async fn session(
                     }
                 }
                 Ok(ClientMsg::Disconnect) => sessions.disconnect(attach_id),
-                // The client lost the tiles it was told to remember. Both halves
-                // have to act: the outbound task forgets the slots (through the
-                // epoch), and the engine repaints — a repaint alone would come back
-                // as the same references and miss again.
-                Ok(ClientMsg::CacheReset) => {
-                    inbound_epoch.fetch_add(1, Ordering::Relaxed);
-                    sessions.forward_input(attach_id, ClientMsg::Refresh);
-                }
                 // Attachment transport feedback, not remote input. Consuming
                 // it here is what keeps an RDP/VNC engine from learning that a
                 // browser or a paint worker exists.
@@ -1895,15 +1866,8 @@ mod tests {
             audio_codec: None,
             camera: false,
             microphone: false,
-            render_type: crate::config::RenderType::Tiles,
-            render_subtype: None,
-            image_quality: None,
             video_quality: None,
-            render_motion: false,
-            render_motion_debug: false,
             render_chroma: None,
-            render_classify_debug: false,
-            render_grid_debug: false,
             render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,
@@ -2055,23 +2019,23 @@ mod tests {
         // From here the client is never polled: it acknowledges nothing and answers
         // no ping, which is all the gateway can see of a link that has stopped.
         let budget = Arc::new(tokio::sync::Semaphore::new(100_000));
-        let tile = |seed: u8| {
-            ServerMsg::Tile(crate::protocol::Tile {
-                format: crate::protocol::Tile::FORMAT_PNG,
-                // Each somewhere else, so none supersedes another inside a batch.
-                x: u16::from(seed) * 64,
-                y: 0,
-                w: 64,
-                h: 64,
-                data: vec![seed; 10_000],
-                held: Held::take_now(&budget, 10_000, 100_000),
-            })
+        let unit = |seed: u8| {
+            let budget = Arc::clone(&budget);
+            async move {
+                ServerMsg::Video(crate::protocol::VideoUnit {
+                    w: 64,
+                    h: 64,
+                    keyframe: seed == 1,
+                    data: vec![seed; 10_000],
+                    held: Held::take(&budget, 10_000, 100_000).await,
+                })
+            }
         };
-        frame_tx.send(tile(1)).await.unwrap();
+        frame_tx.send(unit(1).await).await.unwrap();
         // Long enough unacknowledged that the next batch parks behind it.
         tokio::time::sleep(PAINT_LAG_LIMIT * 2).await;
         for seed in 2..6 {
-            frame_tx.send(tile(seed)).await.unwrap();
+            frame_tx.send(unit(seed).await).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(budget.available_permits() <= 60_000, "nothing was parked behind the silent client");
@@ -2089,10 +2053,10 @@ mod tests {
             replacement.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Connected { .. }))
         ));
-        frame_tx.send(tile(6)).await.unwrap();
+        frame_tx.send(unit(6).await).await.unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), replacement.events.recv()).await,
-            Ok(Some(AttachEvent::Msg(ServerMsg::Tile(_))))
+            Ok(Some(AttachEvent::Msg(ServerMsg::Video(_))))
         ));
 
         drop(client);

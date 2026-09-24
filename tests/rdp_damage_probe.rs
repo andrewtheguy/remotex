@@ -1,7 +1,7 @@
 //! Whether the RDP client reports every pixel it paints.
 //!
 //! The gateway sends a client only what the engine was told changed: `Event::Paint`
-//! names a rectangle, the tile path compares that rectangle against its shadow, and
+//! names a rectangle, the engine compares that rectangle against its shadow, and
 //! a pixel inside no rectangle is a pixel the browser is never offered. So a
 //! framebuffer written outside a reported rectangle is a pixel that goes stale on
 //! the far end and stays stale — the leftover pieces a moving picture leaves behind.
@@ -36,7 +36,7 @@ const DUMP_ENV: &str = "REMOTEX_DAMAGE_DUMP";
 /// The size the operator's QA runs at.
 const SIZE: (u32, u32) = (1920, 980);
 
-/// The tile the report is cut into, and the grid the gateway's shadow uses.
+/// The cell a leak is counted in.
 const CELL: u32 = 64;
 
 /// How many consecutive frames a cell must disagree before it is a leak and not the
@@ -114,7 +114,7 @@ impl Shadow {
         self.width as usize * 4
     }
 
-    /// Take the framebuffer's pixels inside one reported rectangle, as the tile path
+    /// Take the framebuffer's pixels inside one reported rectangle, as the engine
     /// does when it sends them.
     fn accept(&mut self, frame: &[u8], rect: remotex::rdp_client::Rect) {
         let right = rect.x.saturating_add(rect.width).min(self.width);

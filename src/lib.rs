@@ -12,10 +12,8 @@ pub mod assets;
 pub mod audio;
 pub mod auth;
 pub mod camera;
-pub mod classify;
 pub mod cli;
 pub mod config;
-pub mod copies;
 // The control plane is a Unix process graph and has not been ported; see the
 // `tui` arm in src/main.rs.
 #[cfg(all(feature = "embedded-gateway", unix))]
@@ -35,12 +33,11 @@ pub mod rdp_camera;
 pub mod rdp_client;
 pub mod rdp_clipboard;
 pub mod rdp_mic;
-pub mod regions;
 pub mod server;
 pub mod session;
-pub mod tape;
+pub mod shadow;
+pub mod stream;
 pub mod throughput;
-pub mod tiles;
 pub mod video;
 pub mod vnc;
 pub mod vnc_apple;

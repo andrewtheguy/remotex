@@ -64,7 +64,7 @@ async fn spawn_fake_vnc() -> u16 {
 ///
 /// The announcement is written *before* the framebuffer update that answers the
 /// same request, which is what makes the test deterministic: RFB is one ordered
-/// stream, so a browser that has seen the tile is guaranteed to be talking to an
+/// stream, so a browser that has seen the frame is guaranteed to be talking to an
 /// engine that has already filed the clipboard.
 async fn spawn_fake_vnc_with_clipboard(
     cut_text: Option<&'static [u8]>,
@@ -128,7 +128,7 @@ async fn serve_fake_vnc(
                     continue; // incremental: nothing changed, stay quiet
                 }
                 // ServerCutText first, so the engine has filed it by the time
-                // the tile from the same request reaches the browser.
+                // the frame from the same request reaches the browser.
                 if let Some(text) = cut_text {
                     let mut msg = vec![3u8, 0, 0, 0]; // type + 3 padding
                     msg.extend_from_slice(&(text.len() as u32).to_be_bytes());
@@ -177,8 +177,7 @@ async fn serve_fake_vnc(
 //
 // A second RFB 3.8 server, separate from the one above rather than a flag on it,
 // because it plays a different game: it announces the ContinuousUpdates extension,
-// pushes updates the client never asked for, and moves a region with CopyRect so
-// the browser link is handed a `COPY` record instead of an encode.
+// pushes updates the client never asked for, and moves a region with CopyRect.
 //
 // Written from the extension's own definition, not from `src/vnc.rs` — the point of
 // an e2e here is that two independent readings of the wire agree.
@@ -955,7 +954,7 @@ async fn serve_fake_mac_records(
                 // The explicit display request is a deterministic test-side fence:
                 // pixels have already arrived before this change notification, so
                 // no clipboard control message can be consumed while waiting for a
-                // tile. A real Mac may send this status at any time after setup.
+                // frame. A real Mac may send this status at any time after setup.
                 if !std::mem::replace(&mut sent_clipboard_status, true) {
                     let status = [0x14, 0, 0, 4, 0, 1, 0, 2];
                     write_half.write_all(writer.frame(&status).unwrap()).await?;
@@ -1063,15 +1062,8 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         audio_codec: None,
         camera: false,
         microphone: false,
-        render_type: remotex::config::RenderType::Tiles,
-        render_subtype: None,
-        image_quality: None,
         video_quality: None,
-        render_motion: false,
-        render_motion_debug: false,
         render_chroma: None,
-        render_classify_debug: false,
-        render_grid_debug: false,
         render_adaptive: None,
         render_adaptive_min: None,
         audio_bitrate: None,
@@ -1129,13 +1121,9 @@ async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                     if text.contains(r#""type":"resize""#) {
-                        // At 1x the tile grid is its 64 points in pixels, and every
-                        // resize states it.
                         assert_eq!(
                             text,
-                            format!(
-                                r#"{{"type":"resize","w":{w},"h":{h},"scale":1.0,"tileGrid":{{"w":64,"h":64}}}}"#
-                            )
+                            format!(r#"{{"type":"resize","w":{w},"h":{h},"scale":1.0}}"#)
                         );
                         return;
                     }
@@ -1172,93 +1160,28 @@ async fn expect_picker(ws: &mut Ws) {
     .expect("timed out waiting for picker");
 }
 
-/// Read from the socket until a binary tile frame arrives.
-async fn expect_tile(ws: &mut Ws) {
+/// Read from the socket until a binary frame of the desktop's stream arrives.
+async fn expect_frame(ws: &mut Ws) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
-                    // are checked on the way past. Records, not painted tiles —
-                    // this only cares that paint arrived, and a repeat of pixels
-                    // the client already has legitimately arrives as a reference.
-                    assert!(!common::batch_records(&frame).is_empty());
+                    // are checked on the way past.
+                    assert!(!common::batch_units(&frame).is_empty());
                     return;
                 }
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                 }
-                Message::Close(frame) => panic!("closed while waiting for a tile: {frame:?}"),
+                Message::Close(frame) => panic!("closed while waiting for a frame: {frame:?}"),
                 _ => {}
             }
         }
-        panic!("websocket ended while waiting for a tile");
+        panic!("websocket ended while waiting for a frame");
     })
     .await
-    .expect("timed out waiting for a tile");
-}
-
-/// Read from the socket until a batch frame carrying a `COPY` record arrives,
-/// returning `(sx, sy, x, y, w, h)`.
-///
-/// Fails on the spot if a tile turns up carrying the copied region as pixels
-/// instead. That is the gateway having fallen back — a legitimate answer to a
-/// source the shadow never learned, and the wrong one here, where the source was
-/// painted first and acknowledged before the scroll was cued. Named rather than
-/// left to the timeout, because "no copy arrived in ten seconds" and "the copy
-/// arrived as an encode of the whole region" are different bugs.
-async fn expect_copy(ws: &mut Ws) -> (u16, u16, u16, u16, u16, u16) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
-            match msg.expect("websocket receive") {
-                Message::Binary(frame) => {
-                    for record in common::batch_records(&frame) {
-                        match record {
-                            common::BatchRecord::Copy { sx, sy, x, y, w, h } => {
-                                return (sx, sy, x, y, w, h);
-                            }
-                            // The destination is the right half, and nothing in
-                            // this script paints there: the server sent one raw
-                            // rectangle covering the left half and then a CopyRect.
-                            // So anything painting past the halfway line is the
-                            // expansion, not the paint that seeded it.
-                            //
-                            // A reference counts, and is in fact the shape the
-                            // fallback takes here: the two halves are the same
-                            // colour, so the expanded pixels encode to the bytes
-                            // already in a slot and go out as a position. Cheaper
-                            // than a payload and still not a copy — the gateway
-                            // held the whole region's pixels to find that out.
-                            common::BatchRecord::Tile(tile) if tile.x + tile.w > SCROLL_W => {
-                                panic!(
-                                    "the gateway expanded the copy: a {}x{} tile at ({}, {}) \
-                                     carries the copied region as pixels",
-                                    tile.w, tile.h, tile.x, tile.y
-                                );
-                            }
-                            common::BatchRecord::Reference { slot, x, y }
-                                if x >= SCROLL_W =>
-                            {
-                                panic!(
-                                    "the gateway expanded the copy: slot {slot} redrawn at \
-                                     ({x}, {y}), which is the copy's destination"
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Message::Text(text) => {
-                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
-                }
-                Message::Close(frame) => panic!("closed while waiting for a copy: {frame:?}"),
-                _ => {}
-            }
-        }
-        panic!("websocket ended while waiting for a copy");
-    })
-    .await
-    .expect("timed out waiting for a copy record")
+    .expect("timed out waiting for a frame");
 }
 
 async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) -> ScrollRequest {
@@ -1381,14 +1304,14 @@ async fn an_audio_socket_without_a_valid_token_is_closed_with_4000() {
 }
 
 /// The two halves of the RFB scroll path, end to end over the real socket: the
-/// server drives the update cycle, and a region it says has moved reaches the
-/// browser as thirteen bytes naming where the pixels already are.
+/// server drives the update cycle, and a region it says has moved — read back out
+/// of the shadow — reaches the browser as a frame it never asked for.
 ///
 /// Both are asserted from the other side of a wire nothing in `src/vnc.rs` wrote:
 /// the scripted server reads the client's messages itself, and the records are
-/// parsed by `common::batch_records`.
+/// parsed by `common::batch_units`.
 #[tokio::test]
-async fn continuous_updates_carry_a_copyrect_to_the_browser_as_a_copy() {
+async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
     let (vnc_port, mut seen) = spawn_scrolling_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
@@ -1427,7 +1350,7 @@ async fn continuous_updates_carry_a_copyrect_to_the_browser_as_a_copy() {
     );
 
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     // The cue for the scroll, and an input event rather than a request: what comes
     // back is an update this client never asked for.
@@ -1435,11 +1358,7 @@ async fn continuous_updates_carry_a_copyrect_to_the_browser_as_a_copy() {
         .await
         .unwrap();
 
-    assert_eq!(
-        expect_copy(&mut ws).await,
-        (0, 0, SCROLL_W, 0, SCROLL_W, FAKE_DESKTOP),
-        "the copy names the source and lands at the destination"
-    );
+    expect_frame(&mut ws).await;
 
     // Nothing between the first request and the copy was an incremental poll: the
     // round trip per frame is the whole point of the extension.
@@ -1464,7 +1383,7 @@ async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_
     let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
     common::connect_target(&mut ws_a, "test-target").await;
     expect_resize(&mut ws_a, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws_a).await;
+    expect_frame(&mut ws_a).await;
 
     // Browser B: a plain claim is refused while A is attached…
     let (status, _) = common::post_session(addr, &cookie, "{}").await;
@@ -1495,7 +1414,7 @@ async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_
 
     let mut ws_b = connect_ws(addr, &token_b, &cookie).await;
     expect_resize(&mut ws_b, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws_b).await;
+    expect_frame(&mut ws_b).await;
 }
 
 /// Logging out ends the desktop, and the login after it starts from the picker.
@@ -1520,7 +1439,7 @@ async fn logging_out_ends_the_desktop_and_the_next_login_starts_at_the_picker() 
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     let request = format!(
         "POST /api/auth/logout HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
@@ -1552,7 +1471,7 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     // Detach: the browser goes away, the engine keeps running.
     ws.close(None).await.unwrap();
@@ -1569,7 +1488,7 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
         .to_owned();
     let mut ws = connect_ws(addr, &token, &cookie).await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 }
 
 #[tokio::test]
@@ -1608,7 +1527,7 @@ async fn switch_target_returns_to_the_picker_then_reconnects() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     // Switch target: disconnect returns the slot to the picker over the same
     // socket (no reclaim, no close).
@@ -1618,7 +1537,7 @@ async fn switch_target_returns_to_the_picker_then_reconnects() {
     // Picking again on the same socket starts a fresh engine and repaints.
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1676,7 +1595,7 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
     // Remote → browser, unprompted: ServerCutText is forwarded as it arrives,
     // which is what drives automatic sync. Deterministic because the fake
     // writes the cut text ahead of the framebuffer update, so it cannot be
-    // racing the tile below. The engine decodes latin-1, so the é the server
+    // racing the frame below. The engine decodes latin-1, so the é the server
     // sent as one byte arrives as one character.
     let pushed = expect_clipboard(&mut ws).await;
     assert_eq!(pushed.text, "copied on café");
@@ -1685,7 +1604,7 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
         "a live remote clipboard change needs an activity timestamp"
     );
     assert!(!pushed.requested, "a live remote change must remain a push");
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     // And the same text is still there to be fetched: a browser that attached
     // after the push — or reattached — has to be able to ask.
@@ -1751,9 +1670,9 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    // The tile first, so the engine is demonstrably live and has simply nothing
+    // The frame first, so the engine is demonstrably live and has simply nothing
     // filed rather than not having got there yet.
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
     assert_eq!(
@@ -1778,7 +1697,7 @@ async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
 
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
     ws.send(Message::text(r#"{"type":"clipboard","text":"leaked"}"#))
@@ -1786,7 +1705,7 @@ async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
         .unwrap();
 
     // Nothing may come back, and nothing may reach the server. A refresh acts
-    // as the fence: its tile can only arrive after both clipboard messages have
+    // as the fence: its frame can only arrive after both clipboard messages have
     // been handled, so silence up to that point is silence for good.
     ws.send(Message::text(r#"{"type":"refresh"}"#)).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1798,15 +1717,15 @@ async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
                         "clipboard answered for a target that did not opt in: {text}"
                     );
                 }
-                Message::Binary(_) => return, // the refresh's tile: the fence
+                Message::Binary(_) => return, // the refresh's frame: the fence
                 Message::Close(frame) => panic!("closed unexpectedly: {frame:?}"),
                 _ => {}
             }
         }
-        panic!("websocket ended while waiting for the refresh tile");
+        panic!("websocket ended while waiting for the refresh frame");
     })
     .await
-    .expect("timed out waiting for the refresh tile");
+    .expect("timed out waiting for the refresh frame");
     assert!(
         cut_texts.try_recv().is_err(),
         "a target that did not opt in must not write the remote's clipboard"
@@ -1897,7 +1816,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(displays[0]["label"], "Virtual display", "{msg}");
     assert_eq!(displays[0]["virtual"], true, "{msg}");
     assert_eq!(msg["active"], MAC_VIRTUAL_DISPLAY, "{msg}");
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
@@ -1998,7 +1917,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((24, 18))
     );
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::IncrementalFramebuffer
@@ -2055,10 +1974,7 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH * 2, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT * 2, "{resize}");
     assert_eq!(resize["scale"], 2.0, "{resize}");
-    // And the grid that framebuffer is cut at: 64 points, which at 2x is 128 of
-    // its pixels — the same number of cells as the 1x desktop, not four times.
-    assert_eq!(resize["tileGrid"], serde_json::json!({ "w": 128, "h": 128 }), "{resize}");
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
@@ -2071,7 +1987,7 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
     // The re-arm rides with one more update request; consume its repaint so the
     // fake Mac is back at its read loop — and sees a clean end of stream rather
     // than a mid-write break — when the disconnect closes the session.
-    expect_tile(&mut ws).await;
+    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::IncrementalFramebuffer

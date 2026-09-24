@@ -86,15 +86,8 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             audio_codec: None,
             camera: true,
             microphone: true,
-            render_type: remotex::config::RenderType::Tiles,
-            render_subtype: None,
-            image_quality: None,
             video_quality: None,
-            render_motion: false,
-            render_motion_debug: false,
             render_chroma: None,
-            render_classify_debug: false,
-            render_grid_debug: false,
             render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,
@@ -121,34 +114,32 @@ struct Size {
 
 /// What the browser has been told so far on one socket.
 struct View {
-    stream: common::TileStream,
-    /// The last announced size; tiles are bounded by it.
+    /// The last announced size; every access unit is of it.
     size: Option<Size>,
     /// Every size announced, in order.
     sizes: Vec<Size>,
     /// The last `displays` message: the active id and each entry's id and label.
     displays: Option<(u64, Vec<(u64, String)>)>,
-    /// Pixels painted since the last announced size.
-    covered: u64,
+    /// Whether a keyframe of the last announced size has arrived.
+    painted: bool,
 }
 
 impl View {
     fn new() -> Self {
         Self {
-            stream: common::TileStream::new(),
             size: None,
             sizes: Vec::new(),
             displays: None,
-            covered: 0,
+            painted: false,
         }
     }
 
-    /// Read until `done` holds for this view with the framebuffer fully painted
-    /// at the last announced size, failing on a session error or a tile outside
-    /// the desktop it arrived under.
+    /// Read until `done` holds for this view with the framebuffer painted at the
+    /// last announced size, failing on a session error or an access unit of
+    /// another size.
     async fn until(&mut self, ws: &mut common::Ws, what: &str, done: impl Fn(&Self) -> bool) {
         let painted = |view: &Self| {
-            view.size.is_some_and(|size| view.covered >= size.w * size.h) && done(view)
+            view.size.is_some() && view.painted && done(view)
         };
         tokio::time::timeout(Duration::from_secs(60), async {
             while !painted(self) {
@@ -157,7 +148,7 @@ impl View {
                 };
                 match msg.expect("websocket receive") {
                     Message::Text(text) => self.control(&text),
-                    Message::Binary(frame) => self.tiles(&frame),
+                    Message::Binary(frame) => self.units(&frame),
                     _ => {}
                 }
             }
@@ -178,7 +169,7 @@ impl View {
                 };
                 self.size = Some(size);
                 self.sizes.push(size);
-                self.covered = 0;
+                self.painted = false;
             }
             Some("displays") => {
                 let entries = msg["displays"]
@@ -193,17 +184,17 @@ impl View {
         }
     }
 
-    fn tiles(&mut self, frame: &[u8]) {
-        let size = self.size.expect("a tile arrived before any resize");
-        for record in self.stream.paint(frame) {
-            let (x, y, w, h) = record.rect();
-            assert!(
-                u64::from(x) + u64::from(w) <= size.w && u64::from(y) + u64::from(h) <= size.h,
-                "rectangle {w}x{h}+{x}+{y} exceeds the {}x{} desktop",
+    fn units(&mut self, frame: &[u8]) {
+        let size = self.size.expect("a frame arrived before any resize");
+        for unit in common::batch_units(frame) {
+            assert_eq!(
+                (u64::from(unit.w), u64::from(unit.h)),
+                (size.w, size.h),
+                "an access unit that is not the {}x{} desktop",
                 size.w,
                 size.h
             );
-            self.covered += u64::from(w) * u64::from(h);
+            self.painted |= unit.keyframe;
         }
     }
 
@@ -453,7 +444,7 @@ async fn wlshare_lends_the_desktop_the_browsers_microphone() {
     // microphone is plugged before the engine can have heard wlshare's answer. How far
     // ahead is the handshake's to decide; `MicBridge`'s unit tests fix the order.
     let mut mic = common::connect_mic_ws(addr, &token, &cookie).await;
-    // The session's tiles are nobody's business here, but its socket is read so
+    // The session's frames are nobody's business here, but its socket is read so
     // nothing backs up behind it.
     let session = tokio::spawn(async move { while let Some(Ok(_)) = ws.next().await {} });
 

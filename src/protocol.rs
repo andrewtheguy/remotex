@@ -1,8 +1,7 @@
-//! Client wire types: tagged JSON for control and input, binary batches for still
-//! tiles and VP9 access units, and binary frames for Opus or PCM audio.
-//! WebSocket ordering is required because resize messages change the coordinate
-//! space of following tiles — and because an access unit means nothing out of
-//! sequence. Audio travels on its own WebSocket.
+//! Client wire types: tagged JSON for control and input, binary batches for VP9
+//! access units, and binary frames for Opus or PCM audio. WebSocket ordering is
+//! required because resize messages change the picture that follows — and because
+//! an access unit means nothing out of sequence. Audio travels on its own WebSocket.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -68,9 +67,7 @@ pub fn render_density(scale: u16) -> f32 {
 }
 
 /// A ratio of pixels per point as the whole number of pixels the remote is drawing
-/// per point: 1 or 2, decided at the 1.5 midpoint. The one quantization behind
-/// [`render_density`] and [`TileGrid::at`], so a density a remote is asked for and
-/// the grid its framebuffer is cut at can never disagree about where 2× starts.
+/// per point: 1 or 2, decided at the 1.5 midpoint.
 fn density_steps(ratio: f32) -> u16 {
     if ratio >= 1.5 { 2 } else { 1 }
 }
@@ -287,9 +284,6 @@ pub enum ClientMsg {
     /// wrong. A browser has no
     /// such command: a reload is right there, and it does more.
     Refresh,
-    /// Clear this attachment's tile-cache table and repaint. Unlike
-    /// [`ClientMsg::Refresh`], this repairs disagreement about cache slots.
-    CacheReset,
     /// The browser's paint worker finished this screen batch, including every
     /// asynchronous image or video decode ahead of its last draw.
     ///
@@ -392,13 +386,10 @@ pub enum ClientMsg {
 ///
 /// record = u8 op | body   (little-endian throughout)
 ///
-/// 0x01 TILE      u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
-/// 0x02 TILE_REF  u16 slot | u16 x | u16 y
-/// 0x03 VIDEO     u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
-/// 0x04 COPY      u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
+/// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// ```
 ///
-/// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
+/// `VIDEO` is the only record. Its flags are `0x01` for a keyframe and nothing else; a receiver rejects any
 /// other bit, as it does for the frame's own flags byte. The encoder knows which frames are
 /// keyframes, so telling the client costs one byte and saves it parsing a bitstream — which is
 /// what it used to do, and which VP9 does not offer: VP9 carries no parameter sets, so there is
@@ -409,47 +400,13 @@ pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
     pub const HEADER_LEN: usize = 8;
 
-    pub const OP_TILE: u8 = 0x01;
-    pub const OP_TILE_REF: u8 = 0x02;
     pub const OP_VIDEO: u8 = 0x03;
-    pub const OP_COPY: u8 = 0x04;
 
-    /// Bytes a `TILE` record costs besides its payload.
-    pub const TILE_HEADER_LEN: usize = 16;
-    /// A whole `TILE_REF` record.
-    pub const TILE_REF_LEN: usize = 7;
     /// Bytes a `VIDEO` record costs besides its payload.
-    pub const VIDEO_HEADER_LEN: usize = 15;
-    /// A whole `COPY` record.
-    pub const COPY_LEN: usize = 13;
+    pub const VIDEO_HEADER_LEN: usize = 10;
 
     /// A `VIDEO` record's only flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
-
-    /// The most video streams one session may run at once, and so the range of a
-    /// `VIDEO` record's `stream` byte.
-    ///
-    /// A client may size a decoder table by it. The gateway's own cap on concurrent
-    /// regions is `crate::regions::MAX_STREAMS`, which is smaller; this is the wire's
-    /// bound rather than the policy's.
-    pub const MAX_STREAMS: u8 = 16;
-
-    /// `slot` meaning "draw this and do not remember it".
-    ///
-    /// Needed so one enormous photographic tile cannot evict a screenful of
-    /// useful small ones, and so a three-pixel caret rectangle need not consume a
-    /// slot at all.
-    pub const NO_SLOT: u16 = 0xFFFF;
-
-    /// Number of encoded-payload cache slots in the wire contract.
-    pub const SLOT_COUNT: u16 = 256;
-
-    /// The largest payload worth a slot.
-    ///
-    /// A slot spent on one screen-sized photograph is a slot not spent on the
-    /// dozens of small tiles a returning menu or a blinking caret is made of, and
-    /// large payloads are the least likely to recur byte for byte anyway.
-    pub const MAX_CACHED_BYTES: usize = 32 * 1024;
 }
 
 /// The layout of a server -> client **audio** frame: one outbound audio chunk.
@@ -550,67 +507,9 @@ pub mod mic {
     }
 }
 
-/// The tile grid's pitch in *points*: 64 on each axis.
-///
-/// Points rather than pixels because the grid is a unit of work, and work on a
-/// desktop scales with what is on it, not with how densely it is drawn. A 2×
-/// framebuffer holds four times the pixels of the same desktop at 1×, and a fixed
-/// 64-pixel grid would cut it into four times the cells — four times the cell
-/// hashes, the motion keys, the copy-search probes and the tile records for the same
-/// window scrolling the same distance. Cut at 64 points, a cell is 128×128 pixels on
-/// a 2× desktop, and the cell count is the same on both. [`TileGrid::at`] is where
-/// points become pixels.
-pub const CELL_POINTS: u16 = 64;
-
-/// The tile lattice: the canonical grid in framebuffer pixels, anchored at (0,0).
-///
-/// Damage is still reported by RDP and VNC in their own rectangles and is still
-/// *sent* in those rectangles — nothing snaps outward to the grid, which would
-/// mean shipping pixels that did not change. What the grid gives is a stable
-/// **identity**: [`crate::tiles::Rect::cells`] splits a rectangle at these lines
-/// so the same region of the screen always lands under the same
-/// [`crate::tiles::Rect::cell_key`], however differently the two protocols happen
-/// to describe it from one frame to the next. That identity is what the render
-/// dial's `render_motion` switch counts churn against.
-///
-/// A runtime value rather than a constant because its pitch follows the
-/// framebuffer's density: [`CELL_POINTS`] on each axis, in the pixels of the
-/// desktop announced by [`ServerMsg::Resize`]. Every announcement carries it, so a
-/// client draws the grid the gateway actually cut damage at rather than a copy of
-/// the number: a duplicated constant is one edit away from being a different grid
-/// that still looks plausible. Both sides are always even — 64 or 128 — which is
-/// what [`crate::video::coded_rect`]'s evenness rests on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct TileGrid {
-    pub w: u16,
-    pub h: u16,
-}
-
-impl TileGrid {
-    /// The grid of a 1× framebuffer, where a point is a pixel.
-    pub const ONE: Self = Self { w: CELL_POINTS, h: CELL_POINTS };
-
-    /// The grid for a framebuffer whose pixels are `scale` per point — the
-    /// `scale` on [`ServerMsg::Resize`], quantized like [`render_density`]: 64×64
-    /// pixels below the 1.5 midpoint, 128×128 from it up.
-    pub fn at(scale: f32) -> Self {
-        let pitch = CELL_POINTS * density_steps(scale);
-        Self { w: pitch, h: pitch }
-    }
-}
-
-/// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
-/// [`batch`] frame. The payload is an image stream the client decodes natively —
-/// PNG or WebP, named by the `format` byte so `createImageBitmap` gets the
-/// right MIME type.
-///
-/// The RDP and VNC engines decode a framebuffer and compress it here: lossless
-/// PNG ([`Tile::from_rgb`], the default) or, for a target on a lossy render dial,
-/// WebP ([`Tile::from_rgb_webp`]). The format travels with the tile instead of
-/// being a constant.
 /// A payload's share of its engine's queue budget, given back when this drops.
 ///
-/// Taken in [`crate::encode`] before a tile or a round of access units is encoded,
+/// Taken in [`crate::encode`] before a round is encoded,
 /// settled to the payload's real size once that is known, and carried inside the
 /// payload so that every way out of the queues towards the browser returns the
 /// share — written to the socket, superseded in a batch, dropped while nobody is
@@ -645,32 +544,16 @@ impl Held {
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
     }
 
-    /// Take `bytes` of `budget` if it has them now, and nothing otherwise.
-    pub fn take_now(budget: &std::sync::Arc<tokio::sync::Semaphore>, bytes: usize, limit: u32) -> Self {
+    /// Take `bytes` of `budget` if it has them now, and nothing otherwise — a share
+    /// a test can build without an executor.
+    #[cfg(test)]
+    pub(crate) fn take_now(budget: &std::sync::Arc<tokio::sync::Semaphore>, bytes: usize, limit: u32) -> Self {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(limit);
         match budget.try_acquire_many(bytes) {
             Ok(permit) => permit.forget(),
             Err(_) => return Self::default(),
         }
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
-    }
-
-    /// How much of the budget this holds.
-    pub fn bytes(&self) -> usize {
-        self.share.as_ref().map_or(0, |share| share.bytes as usize)
-    }
-
-    /// Carve `bytes` of this share off for one payload, or whatever is left of it:
-    /// how a reservation taken for several payloads at once is handed to each.
-    pub fn split(&mut self, bytes: usize) -> Self {
-        let Some(share) = &mut self.share else {
-            return Self::default();
-        };
-        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(share.bytes);
-        share.bytes -= bytes;
-        Self {
-            share: Some(Share { budget: std::sync::Arc::clone(&share.budget), bytes, limit: share.limit }),
-        }
     }
 
     /// Correct an estimated share to the payload's real size. What was taken in
@@ -706,218 +589,32 @@ impl Clone for Held {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Tile {
-    /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_WEBP`]. Both
-    /// are a self-contained picture; a frame
-    /// that only means something in sequence is a [`VideoUnit`] and not a tile at all.
-    pub format: u8,
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
-    /// The encoded image stream, in `format`.
-    pub data: Vec<u8>,
-    /// This payload's share of the queue budget — see [`Held`].
-    pub held: Held,
-}
-
-impl Tile {
-    pub const FORMAT_PNG: u8 = 1;
-    pub const FORMAT_WEBP: u8 = 2;
-
-    /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
-    pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
-        let expected = usize::from(w) * usize::from(h) * 3;
-        anyhow::ensure!(
-            rgb.len() == expected,
-            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
-            rgb.len()
-        );
-        let data = encode_png(w, h, png::ColorType::Rgb, rgb)?;
-        Ok(Self {
-            format: Self::FORMAT_PNG,
-            x,
-            y,
-            w,
-            h,
-            data,
-            held: Held::default(),
-        })
-    }
-
-    /// Build a tile from packed RGB888 pixels, WebP-compressing the payload at a
-    /// fixed `quality` (1–100). The render dial's lossy still, the counterpart to
-    /// [`Tile::from_rgb`], differing on the wire only in the format byte since
-    /// every client this gateway has decodes WebP natively.
-    ///
-    /// Whether every tile is handed here is the render dial's decision: all of
-    /// them under `render_subtype = "webp"`, only the ones the picture classifier
-    /// reads as photographic under `render_subtype = "classify"` (see
-    /// [`crate::classify`]).
-    ///
-    /// No chroma argument: lossy WebP is 4:2:0 and has no other mode to pin, so
-    /// the quality is the whole of the dial.
-    pub fn from_rgb_webp(
-        x: u16,
-        y: u16,
-        w: u16,
-        h: u16,
-        rgb: &[u8],
-        quality: u8,
-    ) -> anyhow::Result<Self> {
-        let expected = usize::from(w) * usize::from(h) * 3;
-        anyhow::ensure!(
-            rgb.len() == expected,
-            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
-            rgb.len()
-        );
-        let data = encode_webp(w, h, rgb, quality)?;
-        Ok(Self {
-            format: Self::FORMAT_WEBP,
-            x,
-            y,
-            w,
-            h,
-            data,
-            held: Held::default(),
-        })
-    }
-
-    /// What this tile will cost inside a batch, payload included.
-    pub fn record_len(&self) -> usize {
-        batch::TILE_HEADER_LEN + self.data.len()
-    }
-
-    /// Append this tile as a `TILE` record. `slot` is where the client should
-    /// remember it, or [`batch::NO_SLOT`] not to.
-    ///
-    /// Appends rather than returning a buffer because a batch is built by writing
-    /// records one after another into one allocation.
-    pub fn write_record(&self, slot: u16, out: &mut Vec<u8>) {
-        out.push(batch::OP_TILE);
-        out.push(self.format);
-        out.extend_from_slice(&slot.to_le_bytes());
-        out.extend_from_slice(&self.x.to_le_bytes());
-        out.extend_from_slice(&self.y.to_le_bytes());
-        out.extend_from_slice(&self.w.to_le_bytes());
-        out.extend_from_slice(&self.h.to_le_bytes());
-        // u32, not u16: a full-width Retina band (3200×64) has been measured at
-        // ~192 KB, and a length field that cannot describe the payload is not a
-        // saving.
-        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&self.data);
-    }
-}
-
-/// Append a `TILE_REF` record: redraw whatever the client has in `slot` at
-/// `(x, y)`. Seven bytes in place of a payload.
-pub fn write_tile_ref(slot: u16, x: u16, y: u16, out: &mut Vec<u8>) {
-    out.push(batch::OP_TILE_REF);
-    out.extend_from_slice(&slot.to_le_bytes());
-    out.extend_from_slice(&x.to_le_bytes());
-    out.extend_from_slice(&y.to_le_bytes());
-}
-
-/// Pixels the client already holds, moved from one place on its canvas to
-/// another: a `COPY` record inside a [`batch`] frame, and thirteen bytes whatever
-/// the rectangle's size.
-///
-/// This is RFB's CopyRect carried through to the browser instead of stopping at
-/// the gateway. A server sends CopyRect for a scroll or a window move — the pixels
-/// are on both sides of *that* link already — and reading the source back out of
-/// the shadow and re-encoding it saved the RFB hop while paying the browser hop in
-/// full, which for a scrolling window is most of a desktop per frame.
-///
-/// The contract every client implements:
-///
-/// - The source `(sx, sy)` and the destination `(x, y)` are both in framebuffer
-///   pixels, and both rectangles are `w`x`h`. The source is read **as the canvas
-///   stood when this record is applied**, so an overlapping copy moves the original
-///   pixels rather than smearing them — which is what a canvas blit does anyway,
-///   and what RFB requires.
-/// - Records are applied in order, so everything earlier in the batch has been
-///   drawn before this reads the canvas. That is why [`crate::wire`] must not drop
-///   a tile that precedes one of these — see its `supersede`.
-/// - There is no payload and no cache slot. A copy is not a picture: it cannot be
-///   remembered, referenced, or drawn twice to mean the same thing.
-///
-/// Only a target whose client canvas is made *entirely* of tiles is sent these —
-/// see [`crate::encode::TileSink::copies`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CopyRect {
-    /// Where the pixels are now.
-    pub sx: u16,
-    pub sy: u16,
-    /// Where they are going.
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
-}
-
-impl CopyRect {
-    /// What this copy will cost inside a batch. Constant: there is no payload.
-    pub fn record_len(&self) -> usize {
-        batch::COPY_LEN
-    }
-
-    /// Append this copy as a `COPY` record.
-    pub fn write_record(&self, out: &mut Vec<u8>) {
-        out.push(batch::OP_COPY);
-        out.extend_from_slice(&self.sx.to_le_bytes());
-        out.extend_from_slice(&self.sy.to_le_bytes());
-        out.extend_from_slice(&self.x.to_le_bytes());
-        out.extend_from_slice(&self.y.to_le_bytes());
-        out.extend_from_slice(&self.w.to_le_bytes());
-        out.extend_from_slice(&self.h.to_le_bytes());
-    }
-}
-
-/// One video access unit for one region of the framebuffer, carried as a `VIDEO`
-/// record inside a [`batch`] frame.
-///
-/// A record of its own rather than a fourth [`Tile`] format, because it is not the
-/// same kind of thing. A tile is a self-contained picture: independent, reorderable,
-/// cacheable, and droppable once something covers it. This is one link in a chain,
-/// where losing any link decodes wrongly until the next keyframe. Making it a
-/// different record is what keeps [`crate::wire`]'s cache and coverage rules from
-/// ever having to ask whether they apply.
+/// One video access unit, carried as a `VIDEO` record inside a [`batch`] frame.
 ///
 /// The contract every client implements:
 ///
 /// - The payload is **one whole access unit** — exactly one frame's worth, never a partial one
 ///   and never two: the frame as libvpx emitted it.
-/// - **[`ServerMsg::VideoFormat`] arrives first**, before this stream's first record, and names
+/// - **[`ServerMsg::VideoFormat`] arrives first**, before the stream's first record, and names
 ///   the exact WebCodecs configuration string to build the decoder with. Nothing in
 ///   the payload can be parsed to find that out — VP9 has no parameter sets at all.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
-/// - `stream` names which decoder this belongs to. A session may run several at once
-///   — one per moving region under `render_motion = true`, exactly one
-///   under `render_type = "video"` — and ids are reused as regions come and go, so a
-///   record whose `(w, h)` differs from the last one on the same id means that
-///   decoder is starting over on a differently sized picture, and a fresh `VideoFormat`
-///   precedes it.
-/// - `(x, y, w, h)` is the **true region rectangle**, in framebuffer pixels. The
-///   decoded picture may be one pixel wider and/or taller, because the encoders are held to even
-///   sides and a region at the edge of an odd desktop does not have them: a client
-///   draws the top-left `w`×`h` of what it decodes, at `(x, y)`, and ignores the rest.
-/// - Every access unit matters and their order matters — including their order
-///   against the tiles around them, since a still tile covering the same pixels is
-///   how a settled region is restored to full quality.
+/// - `(w, h)` is the **true desktop size**, in framebuffer pixels. The decoded picture may be
+///   one pixel wider and/or taller, because the encoder is held to even sides and an odd
+///   desktop does not have them: a client draws the top-left `w`×`h` of what it decodes and
+///   ignores the rest. A record whose size differs from the last one means the decoder is
+///   starting over on a differently sized picture, and a fresh `VideoFormat` precedes it.
+/// - Every access unit matters and their order matters: each is a link in a chain, where
+///   losing any link decodes wrongly until the next keyframe.
 #[derive(Debug, Clone)]
 pub struct VideoUnit {
-    /// Which of this session's streams, `0..batch::MAX_STREAMS`.
-    pub stream: u8,
-    pub x: u16,
-    pub y: u16,
     pub w: u16,
     pub h: u16,
     /// Whether a decoder that has seen nothing before this can start here.
     ///
     /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte, and from the encoder
     /// rather than from a parse of what it produced. The gateway also keeps it for the totals,
-    /// where keyframe bytes against total bytes is the whole measurement of whether a stream is
+    /// where keyframe bytes against total bytes is the whole measurement of whether the stream is
     /// winning.
     pub keyframe: bool,
     /// The access unit, in whatever codec [`ServerMsg::VideoFormat`] announced.
@@ -935,15 +632,11 @@ impl VideoUnit {
     /// Append this unit as a `VIDEO` record.
     pub fn write_record(&self, out: &mut Vec<u8>) {
         out.push(batch::OP_VIDEO);
-        out.push(self.stream);
         out.push(if self.keyframe { batch::VIDEO_KEYFRAME } else { 0 });
-        out.extend_from_slice(&self.x.to_le_bytes());
-        out.extend_from_slice(&self.y.to_le_bytes());
         out.extend_from_slice(&self.w.to_le_bytes());
         out.extend_from_slice(&self.h.to_le_bytes());
-        // u32 for the same reason a tile's length is: a keyframe of a 4K desktop runs
-        // to hundreds of kilobytes, and a length field that cannot describe the
-        // payload is not a saving.
+        // A keyframe of a 4K desktop runs to hundreds of kilobytes, and a length field
+        // that cannot describe the payload is not a saving.
         out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.data);
     }
@@ -980,8 +673,8 @@ pub struct CursorShape {
     pub point_sized: bool,
     /// PNG-encoded RGBA image (the alpha channel carries the cursor mask).
     ///
-    /// PNG rather than the tile codec because [`CursorShape::png`] rides the JSON
-    /// control channel as base64 and needs one self-describing image.
+    /// PNG because [`CursorShape::png`] rides the JSON control channel as base64 and
+    /// needs one self-describing image.
     pub png: Vec<u8>,
 }
 
@@ -1022,12 +715,8 @@ impl CursorShape {
 /// `Fast` means `Filter::Adaptive` — all five PNG filters run and scored per
 /// row — and this runs on the session's hot path.
 ///
-/// Shared by [`Tile::from_rgb`] (RGB screen tiles) and [`CursorShape::from_rgba`]
-/// (RGBA cursor shapes).
+/// The PNG a [`CursorShape`] carries.
 fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
-    // Room for a tile that compressed to a quarter, in one allocation: screen
-    // content usually does far better, and a `Vec::new()` here grew through five
-    // reallocations per tile on the way to the same place.
     let mut out = Vec::with_capacity(pixels.len() / 4 + 256);
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
     encoder.set_color(color);
@@ -1037,42 +726,6 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
     writer.write_image_data(pixels)?;
     writer.finish()?;
     Ok(out)
-}
-
-/// The largest edge libwebp will encode, from its own `WEBP_MAX_DIMENSION`. The
-/// narrower ceiling of the two still encoders on the tile path — PNG has none —
-/// and so the one [`crate::tiles::BAND_COLS`] cuts bands to, which is what keeps
-/// the check below off the damage path.
-pub(crate) const WEBP_MAX_DIMENSION: u16 = 16383;
-
-/// WebP-encode packed RGB888 at a fixed `quality` (1–100), the lossy tile path
-/// ([`Tile::from_rgb_webp`]). It carries its own decoding parameters, so nothing
-/// about the encode rides the wire beside the format byte.
-///
-/// `method` stays at libwebp's default 4, the middle of its speed-against-size
-/// search: the settings above it are where the measured encode times stopped being
-/// affordable on a damage hot path (see
-/// docs/still-image-classification-research.md). `thread_level` is left off — this
-/// runs on an encode worker that is already one of several encoding tiles of the
-/// same frame, and a second layer of fan-out underneath would compete with the
-/// first for the same cores.
-fn encode_webp(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
-    // Said here rather than left to libwebp's `BadDimension`, which names no
-    // number. A tile is a damage rectangle cut at the band, so only a framebuffer
-    // wider than this could reach it — and an operator reading the log deserves to
-    // know it is the format's limit and not their configuration.
-    anyhow::ensure!(
-        w <= WEBP_MAX_DIMENSION && h <= WEBP_MAX_DIMENSION,
-        "tile is {w}x{h}, past WebP's {WEBP_MAX_DIMENSION}-pixel limit on either axis"
-    );
-    let mut config = webp::WebPConfig::new()
-        .map_err(|()| anyhow::anyhow!("WebP encoder rejected its default configuration"))?;
-    config.quality = f32::from(quality);
-    config.method = 4;
-    webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
-        .encode_advanced(&config)
-        .map(|encoded| encoded.to_vec())
-        .map_err(|e| anyhow::anyhow!("WebP encode failed: {e:?}"))
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
@@ -1133,22 +786,16 @@ pub struct MosaicRegion {
 
 /// Server -> browser: screen updates and session status.
 ///
-/// Most variants come from the protocol engine (tiles, resize, error); the two
+/// Most variants come from the protocol engine (video, resize, error); the two
 /// session-status variants ([`ServerMsg::Picker`] / [`ServerMsg::Connected`])
 /// come from the session layer (src/session.rs) to tell the browser which
 /// post-login state it is in — the target picker, or a live desktop.
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
-    Tile(Tile),
-    /// One VP9 access unit for one region. Like a tile this has no text
-    /// encoding and is not a control message: it is a binary record, and
-    /// [`crate::wire`] puts it in a batch in its place among the tiles, which is
-    /// load-bearing.
+    /// One VP9 access unit. It has no text encoding and is not a control message:
+    /// it is a binary record, and [`crate::wire`] puts it in a batch in its place
+    /// among the control messages around it, which is load-bearing.
     Video(VideoUnit),
-    /// Pixels the client already holds, moved on its own canvas — see [`CopyRect`].
-    /// A binary record like the two above, and its place among the tiles is
-    /// load-bearing for the same reason and then some: it *reads* the canvas.
-    Copy(CopyRect),
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1160,10 +807,6 @@ pub enum ServerMsg {
     /// resample that to its own display, which is what keeps a remote the same
     /// physical size on a 1x screen and a Retina one. A size that arrived without
     /// its density would be presented at the wrong size until the next message.
-    ///
-    /// On the wire the announcement also carries the tile lattice for this
-    /// framebuffer, [`TileGrid::at`] its `scale`, for the client's
-    /// `render_grid_debug` overlay.
     Resize { w: u16, h: u16, scale: f32 },
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
@@ -1223,21 +866,6 @@ pub enum ServerMsg {
         /// this slow" began with reading the operator's config file, which the person
         /// looking at the screen generally does not have.
         render: String,
-        /// Draw the tile lattice over the desktop: the operator's
-        /// `render_grid_debug`. The pitch is not here — it rides every
-        /// [`ServerMsg::Resize`], because it follows the framebuffer's density and a
-        /// session has no framebuffer yet when this is sent.
-        ///
-        /// A debug aid the *client* draws, unlike the two that mark encode
-        /// decisions in the pixels themselves (`render_motion_debug`,
-        /// `render_classify_debug`). It has to be: the lattice is fixed to the
-        /// framebuffer, and pixels are not. A `COPY` record slides pixels across
-        /// the screen, a cached tile is a bitmap redrawn wherever the server names,
-        /// and a region nothing has changed since the last repaint is never sent at
-        /// all — so a lattice painted into tiles would drift with the first scroll
-        /// and stop short at the first still corner. Drawn over the canvas it is
-        /// exact everywhere, always complete, and costs the encoders nothing.
-        grid_debug: bool,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -1325,7 +953,7 @@ pub enum ServerMsg {
     },
     /// One wave buffer's worth of audio packets, framed by [`audio::frame`].
     ///
-    /// Like a tile, this has no text encoding and is not a control message: it is a
+    /// Like an access unit, this has no text encoding and is not a control message: it is a
     /// binary frame, and [`crate::wire`] is what turns it into one. [`bytes::Bytes`]
     /// because a passthrough packet is a refcounted slice of the wave buffer the
     /// bridge holds — see [`crate::pcm_stream`] — and a `Vec` here would copy it back.
@@ -1338,31 +966,14 @@ pub enum ServerMsg {
     /// to decode. [`crate::wire`] flushes the pending batch before any text frame, so pushing this
     /// ahead of a round's units is enough to guarantee the order.
     ///
-    /// **Per stream, not per session.** Under `render_motion = true` a session runs up
-    /// to four at once over regions of different sizes, and the configuration string
-    /// carries a size-derived level — so one string for the session would be wrong for some of
-    /// them. Under `render_type = "video"` there is exactly one stream, and so one of these per
-    /// session plus one per resize.
+    /// One per session, plus one per resize and per repaint: the configuration string carries a
+    /// size-derived level, and a browser that just attached has seen none.
     ///
     /// `decode` is the exact WebCodecs configuration string to hand `VideoDecoder.configure` —
     /// `vp09.00.40.08.01.06.06.06.00`. It comes from the encoder rather than from a prediction, and it is sent
     /// with the round that produced the stream's first unit because that is where the encoder's
     /// answer exists.
-    VideoFormat { stream: u8, decode: String },
-    /// One stream's region is over: nothing further will arrive on this id until it
-    /// is announced again, and the decoder holding it should be released now.
-    ///
-    /// The counterpart of [`ServerMsg::VideoFormat`], and it exists for the resource
-    /// rather than for the picture. A client is otherwise never told a stream ended —
-    /// an id simply goes quiet — so under `render_motion = true`, where
-    /// regions come and go with the motion, it accumulates a decoder per id it has
-    /// ever seen and holds them for the session. Every one of those is a decode
-    /// session on a platform that has few of them, and the ones a hardware decoder has
-    /// are what the *next* region to start will be asking for.
-    ///
-    /// **Ordered against [`ServerMsg::Video`] like a format is.** Ids are reused, so
-    /// this must not overtake the units of the next stream to be given the same one.
-    VideoEnd { stream: u8 },
+    VideoFormat { decode: String },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1408,7 +1019,7 @@ pub enum WireFrame {
     Audio(Vec<u8>),
 }
 
-/// JSON shape of the text-frame control messages (`ServerMsg` minus tiles).
+/// JSON shape of the text-frame control messages (`ServerMsg` minus the binary ones).
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ControlMsg<'a> {
@@ -1416,8 +1027,6 @@ enum ControlMsg<'a> {
         w: u16,
         h: u16,
         scale: f32,
-        #[serde(rename = "tileGrid")]
-        tile_grid: TileGrid,
     },
     /// `image` is a base64 PNG (the browser wraps it in a `data:` URL), null
     /// when the remote hid the pointer.
@@ -1443,8 +1052,6 @@ enum ControlMsg<'a> {
         camera: bool,
         microphone: bool,
         render: &'a str,
-        #[serde(rename = "gridDebug")]
-        grid_debug: bool,
     },
     RemoteOs { macos: bool },
     TouchReady,
@@ -1478,11 +1085,7 @@ enum ControlMsg<'a> {
         head: String,
     },
     VideoFormat {
-        stream: u8,
         decode: &'a str,
-    },
-    VideoEnd {
-        stream: u8,
     },
     CameraStart {
         width: u32,
@@ -1511,23 +1114,19 @@ struct WireDisplay<'a> {
 }
 
 impl ServerMsg {
-    /// The JSON text frame for a control message, or `None` for a tile.
+    /// The JSON text frame for a control message, or `None` for a binary one.
     ///
-    /// `None` rather than a panic or a placeholder because a tile genuinely has no
-    /// standalone encoding any more: it only exists as a record inside a batch,
-    /// and only [`crate::wire`] knows which slot to give it. Making that a
-    /// type-level fact is what stops a future caller sending one on its own.
+    /// `None` rather than a panic or a placeholder because an access unit has no
+    /// standalone encoding: it only exists as a record inside a batch, which only
+    /// [`crate::wire`] builds. Making that a type-level fact is what stops a future
+    /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Tile(_)
-            | ServerMsg::Video(_)
-            | ServerMsg::Copy(_)
-            | ServerMsg::Audio(_) => return None,
+            ServerMsg::Video(_) | ServerMsg::Audio(_) => return None,
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
                 scale: *scale,
-                tile_grid: TileGrid::at(*scale),
             }),
             ServerMsg::Cursor(shape) => control(&match shape {
                 Some(c) => ControlMsg::Cursor {
@@ -1560,7 +1159,6 @@ impl ServerMsg {
                 camera,
                 microphone,
                 render,
-                grid_debug,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -1572,9 +1170,7 @@ impl ServerMsg {
                 camera: *camera,
                 microphone: *microphone,
                 render,
-                grid_debug: *grid_debug,
             }),
-            ServerMsg::VideoEnd { stream } => control(&ControlMsg::VideoEnd { stream: *stream }),
             ServerMsg::CameraStart {
                 width,
                 height,
@@ -1590,9 +1186,7 @@ impl ServerMsg {
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
             ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
-            ServerMsg::VideoFormat { stream, decode } => {
-                control(&ControlMsg::VideoFormat { stream: *stream, decode })
-            }
+            ServerMsg::VideoFormat { decode } => control(&ControlMsg::VideoFormat { decode }),
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
@@ -1846,7 +1440,7 @@ mod tests {
             ServerMsg::Audio(vec![bytes::Bytes::from_static(&[1, 2, 3])])
                 .text_frame()
                 .is_none(),
-            "packets are a binary frame, like a tile"
+            "packets are a binary frame, like an access unit"
         );
     }
 
@@ -1956,7 +1550,7 @@ mod tests {
             Some(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"resize","w":1280,"h":800,"scale":1.0,"tileGrid":{"w":64,"h":64}}"#
+                    r#"{"type":"resize","w":1280,"h":800,"scale":1.0}"#
                 )
             }
             None => panic!("resize must be a text frame"),
@@ -1977,14 +1571,13 @@ mod tests {
             airplay: Some(false),
             camera: false,
             microphone: false,
-            render: "tiles · lossless png".to_owned(),
-            grid_debug: false,
+            render: "video q90 4:4:4 · adaptive ≥20".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"airplay":false,"camera":false,"microphone":false,"render":"tiles · lossless png","gridDebug":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"airplay":false,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive ≥20"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -2001,7 +1594,6 @@ mod tests {
             camera: false,
             microphone: false,
             render: "video q60".to_owned(),
-            grid_debug: false,
         })
         .text_frame()
         {
@@ -2011,52 +1603,12 @@ mod tests {
             }
             None => panic!("connected must be a text frame"),
         }
-        // `render_grid_debug` is a flag here; the lattice's pitch rides the resize,
-        // because it follows the framebuffer's density and there is none yet.
-        match (ServerMsg::Connected {
-            name: "desk".to_owned(),
-            protocol: "rdp",
-            subtype: None,
-            resize: true,
-            clipboard: false,
-            audio: false,
-            airplay: None,
-            camera: false,
-            microphone: false,
-            render: "tiles · lossless png".to_owned(),
-            grid_debug: true,
-        })
-        .text_frame()
-        {
-            Some(json) => assert!(json.contains(r#""gridDebug":true"#), "{json}"),
-            None => panic!("connected must be a text frame"),
-        }
-        // A 2x framebuffer is cut at 64 points, which is 128 of its pixels, and the
-        // announcement says so.
-        match (ServerMsg::Resize { w: 2560, h: 1600, scale: 2.0 }).text_frame() {
-            Some(json) => assert!(json.contains(r#""tileGrid":{"w":128,"h":128}"#), "{json}"),
-            None => panic!("resize must be a text frame"),
-        }
-        // How to decode one stream, which is the message a client cannot work out for
+        // How to decode the stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's
         // answer and a renamed one is a decoder that never gets configured.
-        match (ServerMsg::VideoFormat {
-            stream: 3,
-            decode: "vp09.00.40.08".to_owned(),
-        })
-        .text_frame()
-        {
-            Some(json) => assert_eq!(
-                json,
-                r#"{"type":"videoFormat","stream":3,"decode":"vp09.00.40.08"}"#
-            ),
+        match (ServerMsg::VideoFormat { decode: "vp09.00.40.08".to_owned() }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"videoFormat","decode":"vp09.00.40.08"}"#),
             None => panic!("videoFormat must be a text frame"),
-        }
-        // And the end of one, which is what hands its decoder — and the platform decode
-        // session behind it — back before the next region asks for one.
-        match (ServerMsg::VideoEnd { stream: 3 }).text_frame() {
-            Some(json) => assert_eq!(json, r#"{"type":"videoEnd","stream":3}"#),
-            None => panic!("videoEnd must be a text frame"),
         }
         // A composition: each screen's pixels and its points, named so the page's
         // parser can tell the two spaces apart; empty ends it.
@@ -2311,319 +1863,30 @@ mod tests {
         assert!(CursorShape::from_rgba(2, 2, 0, 0, CursorUnit::Pixels, &[0u8; 12]).is_err());
     }
 
-    // A tile has no standalone frame any more, only a record inside a batch. The
-    // type says so, which is what keeps a caller from sending one on its own.
+    // An access unit has no standalone frame, only a record inside a batch. The type
+    // says so, which is what keeps a caller from sending one on its own.
     #[test]
-    fn a_tile_has_no_text_encoding() {
-        let tile = Tile::from_rgb(0, 0, 1, 1, &[0, 0, 0]).unwrap();
-        assert!((ServerMsg::Tile(tile)).text_frame().is_none());
+    fn an_access_unit_has_no_text_encoding() {
+        let unit = VideoUnit { w: 1, h: 1, keyframe: true, data: vec![1], held: Held::default() };
+        assert!((ServerMsg::Video(unit)).text_frame().is_none());
     }
 
     // The record layout `protocol.ts` (decodeBatchFrame) parses.
     #[test]
-    fn tile_record_layout_is_op_format_slot_le_coords_len_payload() {
-        let tile = Tile {
-            format: Tile::FORMAT_PNG,
-            x: 0x0102,
-            y: 0x0304,
-            w: 2,
-            h: 1,
-            data: vec![10, 20, 30, 40, 50, 60],
+    fn video_record_layout_is_op_flags_le_size_len_payload() {
+        let unit = VideoUnit {
+            w: 0x0102,
+            h: 0x0304,
+            keyframe: true,
+            data: vec![0xAA, 0xBB],
             held: Held::default(),
         };
         let mut out = Vec::new();
-        tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[0], batch::OP_TILE);
-        assert_eq!(out[1], Tile::FORMAT_PNG);
-        assert_eq!(&out[2..4], &[0xFF, 0xFF]); // slot: NO_SLOT
-        assert_eq!(&out[4..6], &[0x02, 0x01]); // x, little-endian
-        assert_eq!(&out[6..8], &[0x04, 0x03]); // y
-        assert_eq!(&out[8..10], &[2, 0]); // w
-        assert_eq!(&out[10..12], &[1, 0]); // h
-        assert_eq!(&out[12..16], &[6, 0, 0, 0]); // payload length, u32
-        assert_eq!(&out[16..], &[10, 20, 30, 40, 50, 60]);
-        assert_eq!(out.len(), tile.record_len());
-        assert_eq!(batch::TILE_HEADER_LEN, 16);
-
-        // A real slot only changes those two bytes.
-        let mut out = Vec::new();
-        tile.write_record(9, &mut out);
-        assert_eq!(&out[2..4], &[9, 0]);
-    }
-
-    #[test]
-    fn tile_ref_record_is_seven_bytes_of_slot_and_position() {
-        let mut out = Vec::new();
-        write_tile_ref(0x0102, 0x0304, 0x0506, &mut out);
-        assert_eq!(out[0], batch::OP_TILE_REF);
-        assert_eq!(&out[1..3], &[0x02, 0x01]); // slot
-        assert_eq!(&out[3..5], &[0x04, 0x03]); // x
-        assert_eq!(&out[5..7], &[0x06, 0x05]); // y
-        assert_eq!(out.len(), batch::TILE_REF_LEN);
-    }
-
-    // from_rgb still stamps PNG, so RDP and VNC are unaffected by the new field.
-    #[test]
-    fn from_rgb_still_marks_its_payload_as_png() {
-        let tile = Tile::from_rgb(0, 0, 2, 2, &[0u8; 12]).unwrap();
-        assert_eq!(tile.format, Tile::FORMAT_PNG);
-        let mut out = Vec::new();
-        tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[1], Tile::FORMAT_PNG);
-    }
-
-    /// A high-entropy, photographic-like band: PNG cannot compress it, which is
-    /// exactly where a lossy codec earns its keep (a smooth gradient is the
-    /// opposite case — PNG wins it, so it is no test of the lossy path).
-    fn noisy_rgb(w: u16, h: u16) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
-        for y in 0..u32::from(h) {
-            for x in 0..u32::from(w) {
-                let n = x
-                    .wrapping_mul(2_654_435_761)
-                    .wrapping_add(y.wrapping_mul(40_503))
-                    .rotate_left(13);
-                rgb.extend_from_slice(&[n as u8, (n >> 8) as u8, (n >> 16) as u8]);
-            }
-        }
-        rgb
-    }
-
-    // The lossy path stamps WebP and produces a real RIFF container, which is
-    // what tells the browser's decoder apart from the lossless one.
-    #[test]
-    fn from_rgb_webp_marks_its_payload_as_webp() {
-        let (w, h) = (16, 16);
-        let tile =
-            Tile::from_rgb_webp(0, 0, w, h, &vec![0u8; usize::from(w) * usize::from(h) * 3], 60)
-                .unwrap();
-        assert_eq!(tile.format, Tile::FORMAT_WEBP);
-        assert_eq!(&tile.data[..4], b"RIFF", "RIFF container");
-        assert_eq!(&tile.data[8..12], b"WEBP", "WebP form type");
-        let mut out = Vec::new();
-        tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[1], Tile::FORMAT_WEBP);
-    }
-
-    // The whole point of the dial: a photographic band is far smaller than its
-    // PNG, and a lower quality is smaller still.
-    #[test]
-    fn webp_is_smaller_than_png_on_photographic_content() {
-        let (w, h) = (320, 64);
-        let rgb = noisy_rgb(w, h);
-        let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap();
-        let webp = Tile::from_rgb_webp(0, 0, w, h, &rgb, 60).unwrap();
-        assert!(
-            webp.data.len() < png.data.len(),
-            "WebP should beat PNG on photographic content: {} vs {}",
-            webp.data.len(),
-            png.data.len()
+        unit.write_record(&mut out);
+        assert_eq!(out.len(), unit.record_len());
+        assert_eq!(
+            out,
+            [batch::OP_VIDEO, batch::VIDEO_KEYFRAME, 0x02, 0x01, 0x04, 0x03, 2, 0, 0, 0, 0xAA, 0xBB]
         );
-        let lower = Tile::from_rgb_webp(0, 0, w, h, &rgb, 20).unwrap();
-        assert!(
-            lower.data.len() < webp.data.len(),
-            "lower quality should be smaller: {} vs {}",
-            lower.data.len(),
-            webp.data.len()
-        );
-    }
-
-    // A payload whose length disagrees with its geometry is rejected, same as the
-    // PNG constructor.
-    #[test]
-    fn from_rgb_webp_rejects_a_mismatched_payload() {
-        assert!(Tile::from_rgb_webp(0, 0, 2, 2, &[0u8; 11], 60).is_err());
-    }
-
-    /// The format's own edge limit, refused by name. Nothing this gateway cuts
-    /// reaches it today — a tile is a damage rectangle inside a framebuffer — but
-    /// the error an operator would read should say which limit was hit.
-    #[test]
-    fn from_rgb_webp_refuses_a_tile_wider_than_the_format_allows() {
-        let w = WEBP_MAX_DIMENSION + 1;
-        let err = Tile::from_rgb_webp(0, 0, w, 1, &vec![0u8; usize::from(w) * 3], 60).unwrap_err();
-        assert!(format!("{err:#}").contains("16383"), "{err:#}");
-    }
-
-    /// A desktop-like band: horizontal gradient, repeated rows.
-    fn gradient_rgb(w: u16, h: u16) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
-        for _ in 0..h {
-            for x in 0..w {
-                let v = (x % 256) as u8;
-                rgb.extend_from_slice(&[v, v / 2, 255 - v]);
-            }
-        }
-        rgb
-    }
-
-    #[test]
-    fn screen_content_compresses_to_png_and_roundtrips() {
-        let (w, h) = (320, 64);
-        let rgb = gradient_rgb(w, h);
-        let tile = Tile::from_rgb(7, 9, w, h, &rgb).unwrap();
-        assert!(
-            tile.data.len() < rgb.len() / 4,
-            "PNG should compress a gradient well: {} vs raw {}",
-            tile.data.len(),
-            rgb.len()
-        );
-
-        // Decode the PNG back and verify the pixels survived.
-        let decoder = png::Decoder::new(std::io::Cursor::new(tile.data.as_slice()));
-        let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
-        let info = reader.next_frame(&mut buf).unwrap();
-        assert_eq!((info.width, info.height), (u32::from(w), u32::from(h)));
-        assert_eq!(info.color_type, png::ColorType::Rgb);
-        assert_eq!(&buf[..info.buffer_size()], rgb.as_slice());
-    }
-
-    // The binary tile record's reason to exist: it must beat the old
-    // base64-in-JSON baseline by a wide margin for screen-like content.
-    #[test]
-    fn tile_record_beats_old_base64_json_baseline() {
-        let (w, h) = (1280, 64);
-        let rgb = gradient_rgb(w, h);
-        let mut frame = Vec::new();
-        Tile::from_rgb(0, 0, w, h, &rgb)
-            .unwrap()
-            .write_record(batch::NO_SLOT, &mut frame);
-        // Old wire cost: RGBA (4 bytes/px) -> base64 (4/3) + ~90 bytes of JSON.
-        let old = usize::from(w) * usize::from(h) * 4 * 4 / 3 + 90;
-        assert!(
-            frame.len() * 10 < old,
-            "expected >10x reduction: {} vs baseline {old}",
-            frame.len()
-        );
-    }
-
-    #[test]
-    fn tiny_tile_is_still_a_valid_png() {
-        // 2x2 of "noise" — PNG's fixed overhead dominates here, which is
-        // accepted: one decode path beats saving a few dozen bytes.
-        let rgb = [1u8, 200, 3, 250, 5, 90, 7, 160, 9, 30, 11, 220];
-        let tile = Tile::from_rgb(0, 0, 2, 2, &rgb).unwrap();
-        assert_eq!(&tile.data[..8], b"\x89PNG\r\n\x1a\n");
-    }
-
-    #[test]
-    fn tile_with_wrong_payload_length_is_rejected() {
-        assert!(Tile::from_rgb(0, 0, 2, 2, &[0u8; 5]).is_err());
-    }
-
-    /// Flat UI: a few colours and hard edges, which is what most of a desktop is.
-    fn flat_ui_rgb(w: u16, h: u16) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
-        for y in 0..h {
-            for x in 0..w {
-                if (y / 16) % 2 == 0 && (x / 7) % 3 == 0 {
-                    rgb.extend_from_slice(&[20, 20, 24]); // "text"
-                } else {
-                    rgb.extend_from_slice(&[246, 246, 248]);
-                }
-            }
-        }
-        rgb
-    }
-
-    /// What a change-detection hash costs against what it skips, and what a
-    /// narrower cell costs when its pixels really did change.
-    ///
-    /// Ignored and assertion-free on purpose: it prints, it does not judge. There
-    /// is no benchmark harness here and a timing assertion on a shared machine is
-    /// a flaky test — but these numbers decide two real design questions, so
-    /// guessing at them is worse than a test nobody runs by accident:
-    ///
-    /// 1. **Does a change-detection gate pay for itself?** Only if hashing is much
-    ///    cheaper than the encode it skips.
-    /// 2. **How wide should a cell be?** A narrower cell skips more often but pays
-    ///    PNG's per-stream overhead more times, and gets less redundancy to
-    ///    compress within each stream. The ratio printed here is what a grid costs
-    ///    in the case where it wins nothing, so it sets the skip rate the grid has
-    ///    to achieve before it is worth having at all. The last row is the cell the
-    ///    gateway cuts at today: 64×64 pixels on a 1× desktop, which on the 2× band
-    ///    this encodes is a 128×128 cell — the rows are pixel sizes, not cells of the
-    ///    grid. The ones above it are the widths it was weighed against, kept so the
-    ///    trade stays on the record.
-    ///
-    /// Run it in **release**: `png` at `Compression::Fast` is several times slower
-    /// in a debug build, which would flatter the hash and slander the grid.
-    ///
-    /// ```sh
-    /// cargo test --release --lib -- --ignored --nocapture encode_cost
-    /// ```
-    #[test]
-    #[ignore = "prints timings; run explicitly in release"]
-    fn encode_cost_against_hash_cost() {
-        use std::time::Instant;
-
-        // A full-width Retina band: BAND_ROWS tall at any density.
-        let (sw, sh) = (3200u16, 64u16);
-        let runs = 20;
-
-        for (label, make) in [
-            ("flat UI ", flat_ui_rgb as fn(u16, u16) -> Vec<u8>),
-            ("gradient", gradient_rgb as fn(u16, u16) -> Vec<u8>),
-        ] {
-            let strip = make(sw, sh);
-
-            let started = Instant::now();
-            for _ in 0..runs {
-                std::hint::black_box(xxhash_rust::xxh3::xxh3_64(&strip));
-            }
-            let hash = started.elapsed() / runs;
-
-            let started = Instant::now();
-            for _ in 0..runs {
-                std::hint::black_box(Tile::from_rgb(0, 0, sw, sh, &strip).unwrap());
-            }
-            let whole = started.elapsed() / runs;
-            let strip_bytes = Tile::from_rgb(0, 0, sw, sh, &strip).unwrap().data.len();
-
-            println!(
-                "\n{label}  {sw}x{sh} strip: {strip_bytes} bytes, encode {whole:?}, \
-                 hash {hash:?} ({:.0}x cheaper)",
-                whole.as_secs_f64() / hash.as_secs_f64().max(f64::EPSILON),
-            );
-            println!("  cell      tiles  bytes   vs strip  encode     vs strip  break-even");
-
-            // Both axes, because they are not equivalent: PNG filters and
-            // compresses *along rows*, so cutting the width throws away redundancy
-            // inside every stream, while cutting the height keeps each row whole
-            // and only pays the per-stream overhead again.
-            for (cw, ch) in [
-                (3200u16, 32u16),
-                (3200, 16),
-                (800, 64),
-                (640, 64),
-                (320, 64),
-                (320, 32),
-                (256, 64),
-                (128, 64),
-                (64, 64),
-            ] {
-                let tiles = usize::from(sw / cw) * usize::from(sh / ch);
-                let cell = make(cw, ch);
-                let started = Instant::now();
-                for _ in 0..runs {
-                    for _ in 0..tiles {
-                        std::hint::black_box(Tile::from_rgb(0, 0, cw, ch, &cell).unwrap());
-                    }
-                }
-                let split = started.elapsed() / runs;
-                let cell_bytes = Tile::from_rgb(0, 0, cw, ch, &cell).unwrap().data.len();
-                let total = cell_bytes * tiles;
-                // How many tiles may change before sending tiles costs more than
-                // sending the whole strip. Below this the grid wins.
-                let break_even = (strip_bytes as f64 / cell_bytes as f64).min(tiles as f64);
-                println!(
-                    "  {cw:>4}x{ch:<3}  {tiles:>5}  {total:>6}  {:>7.2}x  {split:>9?}  \
-                     {:>6.2}x  {break_even:>5.1}/{tiles}",
-                    total as f64 / strip_bytes as f64,
-                    split.as_secs_f64() / whole.as_secs_f64().max(f64::EPSILON),
-                );
-            }
-        }
     }
 }
