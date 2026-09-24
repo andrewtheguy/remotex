@@ -4,7 +4,7 @@ The gateway speaks RDP with its own client, `src/rdp_client/`, down to the wire
 format. `rdp_client/proto/` encodes and decodes every PDU against [MS-RDPBCGR]
 and its extensions; the modules above it own one thread per session, a complete
 framebuffer painted from those decoders, and an event per damaged rectangle. The
-engine that consumes those events — damage into tiles, `ClientMsg` into scancodes
+engine that consumes those events — damage into the video stream, `ClientMsg` into scancodes
 — is `src/rdp.rs`, and the boundary between the two is the point of this document:
 everything below it is protocol, everything above it is this gateway's.
 
@@ -225,13 +225,6 @@ says, so a size past `bitmap::MAX_DESKTOP_BYTES` — named in a Demand Active, a
 ResetGraphics or a CreateSurface — ends the session before anything is allocated
 for it. One compressed rectangle is held to the same ceiling, before its planes
 are.
-
-Under a plan that takes copies, each flush first searches the damage for regions
-the client already holds elsewhere on its canvas (`src/copies.rs`, guacamole-
-server's cell-hash search over this gateway's shadow): a scroll goes out as a few
-`COPY` records instead of image bytes, and the tile pass carries only what the
-copies did not — including repainting anything a copy got wrong, which is what
-makes a wrong copy waste rather than corruption.
 
 ## The pointer
 

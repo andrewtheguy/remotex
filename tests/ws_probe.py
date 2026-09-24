@@ -234,7 +234,7 @@ async def main() -> int:
         burst_sent = False
         mouse_sent = False
         clipboard_sent = False
-        tiles = 0
+        frames = 0
         audio_format = None
         audio_frames = 0
         audio_error = None
@@ -379,7 +379,7 @@ async def main() -> int:
             async with asyncio.timeout(args.seconds):
                 async for message in socket:
                     if isinstance(message, bytes):
-                        tiles += 1
+                        frames += 1
                         # Acknowledge the batch at once, as a client that painted it
                         # instantly would: the gateway's paint window holds the next
                         # batch when too many are owed, and a probe that never acked
@@ -418,7 +418,6 @@ async def main() -> int:
                         audio_count = f"  audio={audio_frames}" if args.audio else ""
                         print(
                             f"  resize  {data['w']}x{data['h']}  scale={data['scale']}"
-                            f"  tileGrid={data['tileGrid']['w']}x{data['tileGrid']['h']}"
                             f"   -> {data['w'] / data['scale']:g}x"
                             f"{data['h'] / data['scale']:g} CSS px{audio_count}"
                         )
@@ -566,7 +565,7 @@ async def main() -> int:
                     pass
             if viewport_task is not None and not viewport_task.done():
                 viewport_task.cancel()
-        print(f"\n  {tiles} tile frames")
+        print(f"\n  {frames} video frames")
         if args.audio:
             print(f"  {audio_frames} audio frames; format={audio_format}")
             if audio_error is not None:

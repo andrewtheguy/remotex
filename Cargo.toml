@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.253"
+version = "0.0.254"
 
 [package]
 name = "remotex"
@@ -65,32 +65,14 @@ futures-util = "0.3"
 # clones a pointer instead of 32 KB. Already in the tree through axum.
 bytes = "1"
 toml = "1"
-# Tiles and cursor shapes both. The RDP and VNC engines PNG-compress screen tiles
-# (`Tile::from_rgb`), and VNC cursor shapes ride the JSON control channel as base64
-# PNG. `encode_png` in src/protocol.rs is shared by both. Fast compression on the
-# session's hot path.
+# Cursor shapes, which ride the JSON control channel as base64 PNG
+# (`encode_png` in src/protocol.rs).
 png = "0.18"
-# WebP, the lossy still codec on the render dial: `render_subtype = "webp"`
-# encodes every tile at a fixed `image_quality` instead of lossless PNG
-# (`Tile::from_rgb_webp` in src/protocol.rs), and `render_subtype = "classify"`
-# encodes the tiles its picture classifier reads as photographic
-# (src/classify.rs) the same way. The format byte already distinguishes PNG from
-# WebP on the wire and the client decodes either, so this is a gateway-only
-# encoder (docs/still-image-classification-research.md holds the measurements).
-# `default-features = false` drops the crate's `image` bridge: tiles arrive here as
-# packed RGB888 and `Encoder::from_rgb` takes them as they are. Its sys crate
-# compiles libwebp with `cc` — no cmake, no system library, and libwebp selects its
-# own SSE/AVX/NEON kernels at run time, which is the CPU floor packaging/README.md
-# requires.
-webp = { version = "0.3", default-features = false }
 # SQLite, for `[meter]`: the browser sockets' throughput per timeframe, which the page
 # reads back through `GET /api/throughput` (src/throughput.rs). `bundled` compiles
-# SQLite's one C file with `cc`, the same bargain as `webp` above — no system library
-# to find.
+# SQLite's one C file with `cc` — no system library to find.
 rusqlite = { version = "0.40", features = ["bundled"] }
-# libvpx, for VP9 — the video codec, for either streaming mode: the whole framebuffer
-# under `render_type = "video"`, or moving regions under `render_motion = true`
-# (src/vp9.rs). VP9 is BSD-3-Clause with a patent grant, so every browser
+# libvpx, for VP9 — the video codec every desktop is streamed with (src/vp9.rs). VP9 is BSD-3-Clause with a patent grant, so every browser
 # build decodes it, proprietary-codec-free ones included.
 #
 # Its sys crate downloads a prebuilt static archive and compiles no C: the same bargain
@@ -136,13 +118,7 @@ symphonia-core = "0.6"
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
 rubato = "4"
-# Content hashing on the tile path: which pixels changed, and whether a payload
-# has been sent before. Not a checksum for integrity, so it is not cryptographic
-# — but it is 64-bit rather than 32, because a collision here means permanently
-# wrong pixels rather than a retry. xxh3 over blake2/sha2 because this runs on
-# every tile of every frame. Pure Rust, which is a nice property but not the
-# reason it was chosen: `ring` already compiles C on every runner, so a C
-# dependency here would have cost nothing new either.
+# A stable hash of the AirPlay speaker's identity (src/airplay/mod.rs).
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cursor shapes ride the JSON control channel as base64 PNG (see
 # src/protocol.rs) — small and rare enough not to warrant a binary frame kind.

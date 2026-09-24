@@ -96,29 +96,9 @@ export function audioLabel(row: AudioRow): string {
 }
 
 /**
- * The Video row: the exact configuration every decoder this attachment configured
- * was built with, or null for a session that has no video in it at all.
- *
- * Null rather than "none", and that is why this returns one: under every tile-only
- * dial there is no decoder to describe and the Render row above has already said
- * so, so the honest thing is not to print a row. A motion-stream session that has
- * simply not moved yet is the same case — the row appears when the first stream
- * does.
- *
- * The count is stream ids, which is what the client holds rather than what is
- * moving this instant: ids are reused as regions come and go and nothing on the
- * wire retires one, so a decoder configured for a region that has since gone quiet
- * is still a decoder. Distinct strings rather than one line per stream, because the
- * configuration carries a size-derived level — four streams over four region sizes
- * may name four different ones or all the same, and this says which in one line.
+ * The Video row: the exact configuration the decoder was built with, or what the
+ * row is waiting for before the stream's format has arrived.
  */
-export function videoLabel(decodes: readonly string[]): string | null {
-  if (decodes.length === 0) {
-    return null;
-  }
-  const distinct = [...new Set(decodes)].sort();
-  if (decodes.length === 1) {
-    return distinct[0];
-  }
-  return `${decodes.length} streams · ${distinct.join(", ")}`;
+export function videoLabel(decode: string | null): string {
+  return decode ?? "Waiting for the video format";
 }

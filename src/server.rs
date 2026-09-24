@@ -39,7 +39,7 @@ pub struct AppState {
 
 /// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
 ///
-/// Every socket accepted here feeds an ack-gated window — tiles wait on `paintAck`, and a
+/// Every socket accepted here feeds an ack-gated window — batches wait on `paintAck`, and a
 /// segment Nagle holds back is that window stalled for a round trip on a link that was never
 /// the problem. guacd sets the same flag on every accepted connection (`guacd/daemon.c`),
 /// naming Nagle as the reason; the VNC-to-host socket here already does, and FreeRDP sets it
@@ -999,15 +999,8 @@ mod tests {
                 audio_codec: None,
                 camera: false,
                 microphone: false,
-                render_type: crate::config::RenderType::Tiles,
-                render_subtype: None,
-                image_quality: None,
                 video_quality: None,
-                render_motion: false,
-                render_motion_debug: false,
                 render_chroma: None,
-                render_classify_debug: false,
-                render_grid_debug: false,
                 render_adaptive: None,
                 render_adaptive_min: None,
                 audio_bitrate: None,
@@ -1271,15 +1264,8 @@ mod tests {
             audio_codec: tone_codec,
             camera: false,
             microphone: false,
-            render_type: crate::config::RenderType::Tiles,
-            render_subtype: None,
-            image_quality: None,
             video_quality: None,
-            render_motion: false,
-            render_motion_debug: false,
             render_chroma: None,
-            render_classify_debug: false,
-            render_grid_debug: false,
             render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,

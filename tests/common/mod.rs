@@ -156,302 +156,54 @@ pub type Ws = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
-/// One record parsed out of a batch frame: a tile, or a reference to a tile the
-/// client was told to keep.
-///
-/// A reference carries no payload and no size — those belong to whatever filled
-/// the slot — so a test that measures painted area has to resolve it against the
-/// tiles it has already seen, exactly as a client does.
+/// One `VIDEO` record parsed out of a batch frame: an access unit of the desktop's
+/// stream. No test here decodes the VP9 inside; what is checked is the envelope and
+/// the geometry.
 #[allow(dead_code)]
-pub enum BatchRecord {
-    Tile(BatchTile),
-    Reference { slot: u16, x: u16, y: u16 },
-    /// Pixels the client already holds, moved on its own canvas — RFB's CopyRect
-    /// carried through rather than expanded into an encode. No payload and no slot:
-    /// it is an instruction, and the only thing to check about it is its geometry.
-    Copy {
-        sx: u16,
-        sy: u16,
-        x: u16,
-        y: u16,
-        w: u16,
-        h: u16,
-    },
-    /// One access unit of a moving region's stream, on a `motion` or `video`
-    /// target. Geometry only: the payload is a VP9 bitstream and no test here
-    /// decodes one.
-    Video { x: u16, y: u16, w: u16, h: u16 },
-}
-
-/// One record as a client would *paint* it: pixels that arrived, or pixels it
-/// already had being moved.
-#[allow(dead_code)]
-pub enum Painted {
-    Tile(BatchTile),
-    /// Pixels a decoder puts on screen rather than the batch itself.
-    Video { x: u16, y: u16, w: u16, h: u16 },
-    Copy {
-        sx: u16,
-        sy: u16,
-        x: u16,
-        y: u16,
-        w: u16,
-        h: u16,
-    },
-}
-
-#[allow(dead_code)]
-impl Painted {
-    /// The rectangle this puts on screen, whichever kind it is.
-    pub fn rect(&self) -> (u16, u16, u16, u16) {
-        match self {
-            Painted::Tile(tile) => (tile.x, tile.y, tile.w, tile.h),
-            Painted::Copy { x, y, w, h, .. } => (*x, *y, *w, *h),
-            Painted::Video { x, y, w, h } => (*x, *y, *w, *h),
-        }
-    }
-}
-
-/// One `TILE` record parsed out of a batch frame.
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct BatchTile {
-    pub format: u8,
-    pub x: u16,
-    pub y: u16,
+pub struct BatchUnit {
+    pub keyframe: bool,
     pub w: u16,
     pub h: u16,
-    pub slot: u16,
     pub payload: Vec<u8>,
 }
 
-/// Parse a server -> client binary frame into its records.
+/// Parse a server -> client binary frame into its access units.
 ///
-/// One parser for every test that looks at painted pixels, because four of them
-/// used to decode the header by hand and a wire change had to be applied four
-/// times to four subtly different copies. Asserts the envelope's own invariants on
-/// the way through — kind, zero flags, a record count that matches the records
-/// present, and records that exactly fill the frame — so every test that reads a
-/// tile also checks the frame carrying it was well formed.
+/// One parser for every test that looks at what was painted, so a wire change is
+/// applied once. Asserts the envelope's own invariants on the way through — kind,
+/// zero flags, a record count that matches the records present, and records that
+/// exactly fill the frame — so every test that reads a unit also checks the frame
+/// carrying it was well formed.
 #[allow(dead_code)]
-pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
+pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
     use remotex::protocol::batch;
 
-    assert!(
-        frame.len() >= batch::HEADER_LEN,
-        "frame is shorter than a batch header"
-    );
+    assert!(frame.len() >= batch::HEADER_LEN, "frame is shorter than a batch header");
     assert_eq!(frame[0], batch::FRAME_KIND, "unexpected frame kind");
     assert_eq!(frame[1], 0, "flags must be zero");
     let count = u16::from_le_bytes([frame[2], frame[3]]);
 
     let mut at = batch::HEADER_LEN;
-    let mut records = Vec::new();
+    let mut units = Vec::new();
     while at < frame.len() {
+        assert_eq!(frame[at], batch::OP_VIDEO, "unknown record op {}", frame[at]);
+        let flags = frame[at + 1];
+        assert_eq!(flags & !batch::VIDEO_KEYFRAME, 0, "unknown record flags {flags:#x}");
         let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
-        match frame[at] {
-            batch::OP_TILE_REF => {
-                let slot = le(1);
-                assert!(slot < batch::SLOT_COUNT, "slot {slot} is outside the cache");
-                records.push(BatchRecord::Reference {
-                    slot,
-                    x: le(3),
-                    y: le(5),
-                });
-                at += batch::TILE_REF_LEN;
-            }
-            batch::OP_TILE => {
-                let len = u32::from_le_bytes([
-                    frame[at + 12],
-                    frame[at + 13],
-                    frame[at + 14],
-                    frame[at + 15],
-                ]) as usize;
-                let slot = le(2);
-                assert!(
-                    slot == batch::NO_SLOT || slot < batch::SLOT_COUNT,
-                    "slot {slot} is outside the cache"
-                );
-                let start = at + batch::TILE_HEADER_LEN;
-                records.push(BatchRecord::Tile(BatchTile {
-                    format: frame[at + 1],
-                    slot,
-                    x: le(4),
-                    y: le(6),
-                    w: le(8),
-                    h: le(10),
-                    payload: frame[start..start + len].to_vec(),
-                }));
-                at = start + len;
-            }
-            batch::OP_COPY => {
-                records.push(BatchRecord::Copy {
-                    sx: le(1),
-                    sy: le(3),
-                    x: le(5),
-                    y: le(7),
-                    w: le(9),
-                    h: le(11),
-                });
-                at += batch::COPY_LEN;
-            }
-            // A `motion` target carries its moving regions here rather than as
-            // tiles. The pixels reach the screen all the same, so the geometry
-            // counts toward coverage; the payload is a VP9 access unit and this
-            // stand-in decodes nothing.
-            batch::OP_VIDEO => {
-                let len = u32::from_le_bytes([
-                    frame[at + 11],
-                    frame[at + 12],
-                    frame[at + 13],
-                    frame[at + 14],
-                ]) as usize;
-                records.push(BatchRecord::Video {
-                    x: le(3),
-                    y: le(5),
-                    w: le(7),
-                    h: le(9),
-                });
-                at += batch::VIDEO_HEADER_LEN + len;
-            }
-            op => panic!("unknown record op {op}"),
-        }
+        let len =
+            u32::from_le_bytes([frame[at + 6], frame[at + 7], frame[at + 8], frame[at + 9]]) as usize;
+        let start = at + batch::VIDEO_HEADER_LEN;
+        units.push(BatchUnit {
+            keyframe: flags & batch::VIDEO_KEYFRAME != 0,
+            w: le(2),
+            h: le(4),
+            payload: frame[start..start + len].to_vec(),
+        });
+        at = start + len;
     }
     assert_eq!(at, frame.len(), "records must exactly fill the frame");
-    assert_eq!(
-        records.len(),
-        usize::from(count),
-        "the header's count must match the records present"
-    );
-    records
-}
-
-/// A client's-eye view of a batch stream: the tiles each frame *paints*, with
-/// references resolved against the slots filled so far.
-///
-/// Every test that measures painted pixels needs this rather than the raw records,
-/// because the gateway may send a tile the client already has as a slot and a
-/// position. Keeping the resolution here — one implementation, shaped like a real
-/// client's — also means the reference path is exercised by every one of those
-/// tests instead of only by a unit test of the encoder.
-#[allow(dead_code)]
-pub struct TileStream {
-    slots: Vec<Option<BatchTile>>,
-    /// References seen, so a test can say whether the cache was exercised at all.
-    pub references: u64,
-    /// Copies seen, and the pixels they moved. The same question for the other
-    /// record that carries no payload — whether the gateway ever used it.
-    pub copies: u64,
-    pub copied_pixels: u64,
-}
-
-#[allow(dead_code)]
-impl TileStream {
-    pub fn new() -> Self {
-        Self {
-            slots: vec![None; usize::from(remotex::protocol::batch::SLOT_COUNT)],
-            references: 0,
-            copies: 0,
-            copied_pixels: 0,
-        }
-    }
-
-    /// What `frame` paints, in wire order.
-    ///
-    /// Panics on a reference to an empty slot: a real client answers that with a
-    /// `cacheReset`, but in a test it means the gateway and the client disagree about
-    /// what was sent, which is the bug this would otherwise hide.
-    ///
-    /// A copy comes back as itself. This holds slots rather than a framebuffer, so
-    /// it cannot say what pixels a copy moves — only where they land, which is what
-    /// a coverage measurement is asking.
-    pub fn paint(&mut self, frame: &[u8]) -> Vec<Painted> {
-        let mut painted = Vec::new();
-        for record in batch_records(frame) {
-            match record {
-                BatchRecord::Tile(tile) => {
-                    if tile.slot != remotex::protocol::batch::NO_SLOT {
-                        self.slots[usize::from(tile.slot)] = Some(tile.clone());
-                    }
-                    painted.push(Painted::Tile(tile));
-                }
-                BatchRecord::Reference { slot, x, y } => {
-                    self.references += 1;
-                    let held = self.slots[usize::from(slot)]
-                        .clone()
-                        .unwrap_or_else(|| panic!("reference to empty slot {slot}"));
-                    painted.push(Painted::Tile(BatchTile { x, y, ..held }));
-                }
-                BatchRecord::Copy { sx, sy, x, y, w, h } => {
-                    self.copies += 1;
-                    self.copied_pixels += u64::from(w) * u64::from(h);
-                    painted.push(Painted::Copy { sx, sy, x, y, w, h });
-                }
-                BatchRecord::Video { x, y, w, h } => {
-                    painted.push(Painted::Video { x, y, w, h });
-                }
-            }
-        }
-        painted
-    }
-}
-
-impl Default for TileStream {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Pixel coverage of one announced desktop, so "the whole screen was painted"
-/// is the finish line rather than a tile count that depends on how the encoder
-/// happened to band the damage. Tiles may overlap or repaint a region, so a
-/// pixel advances the completion count at most once.
-#[allow(dead_code)]
-pub struct TileCoverage {
-    width: u32,
-    height: u32,
-    pixels: Vec<bool>,
-    covered: u64,
-}
-
-#[allow(dead_code)]
-impl TileCoverage {
-    pub fn new(width: u32, height: u32) -> Self {
-        let pixels = usize::try_from(u64::from(width) * u64::from(height))
-            .expect("desktop is too large to track coverage");
-        Self {
-            width,
-            height,
-            pixels: vec![false; pixels],
-            covered: 0,
-        }
-    }
-
-    /// Mark the rectangle painted, clamped to the desktop. Takes the tuple
-    /// [`Painted::rect`] returns.
-    pub fn add(&mut self, (x, y, w, h): (u16, u16, u16, u16)) {
-        let right = u32::from(x).saturating_add(u32::from(w)).min(self.width);
-        let bottom = u32::from(y).saturating_add(u32::from(h)).min(self.height);
-        for y in u32::from(y).min(self.height)..bottom {
-            for x in u32::from(x).min(self.width)..right {
-                let at = usize::try_from(u64::from(y) * u64::from(self.width) + u64::from(x))
-                    .expect("desktop index does not fit usize");
-                if !self.pixels[at] {
-                    self.pixels[at] = true;
-                    self.covered += 1;
-                }
-            }
-        }
-    }
-
-    /// Distinct pixels painted so far, for the timeout's progress report.
-    pub fn covered(&self) -> u64 {
-        self.covered
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.covered == u64::from(self.width) * u64::from(self.height)
-    }
+    assert_eq!(units.len(), usize::from(count), "the header's count must match the records present");
+    units
 }
 
 /// Let the gateway log during an opted-in e2e run.

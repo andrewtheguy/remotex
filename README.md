@@ -361,7 +361,7 @@ The container-backed VNC test uses Docker or Podman and does not start a
 browser. It is ignored by default; run it explicitly with:
 
 ```sh
-cargo test --test vnc_tiles_e2e -- --ignored
+cargo test --test vnc_e2e -- --ignored
 ```
 
 RDP has no container to test against: the gateway's RDP client speaks NLA to a
@@ -378,7 +378,7 @@ For a remote Podman connection:
 ```sh
 CONTAINER_CONNECTION=workstation-wsl \
 REMOTEX_TEST_CONTAINER_HOST=<engine-host> \
-cargo test --test vnc_tiles_e2e -- --ignored
+cargo test --test vnc_e2e -- --ignored
 ```
 
 `CONTAINER_CONNECTION` is the Podman system connection name.

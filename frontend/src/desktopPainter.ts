@@ -23,13 +23,11 @@ import { batchFrameSequence } from "./protocol.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
-  /** The worker found a slot this client does not hold; ask the server to reset. */
-  onCacheReset: () => void;
-  /** Why a video target shows nothing, or null once it shows something. */
+  /** Why the desktop shows nothing, or null once it shows something. */
   onVideoError: (reason: string | null) => void;
   /**
-   * A stream's decoder was reset out of a stall, or failed and was thrown away.
-   * Either way the region it was carrying is frozen until a keyframe arrives, and
+   * The decoder was reset out of a stall, or failed and was thrown away. Either
+   * way the desktop is frozen until a keyframe arrives, and
    * asking for one is the page's job because only it holds the socket.
    */
   onVideoNeedsKeyframe: (reason: string) => void;
@@ -69,10 +67,8 @@ export interface DesktopPainter {
   ): void;
   /** Recompose what is already painted under `view`, or show it whole. */
   setView(view: MosaicView | null, seq: number): void;
-  setVideoFormat(stream: number, format: VideoFormat): void;
-  /** One stream's region is over; release its decoder. */
-  endVideoStream(stream: number): void;
-  /** The attachment boundary: wipe the bitmap, the caches and the decoders. */
+  setVideoFormat(format: VideoFormat): void;
+  /** The attachment boundary: wipe the bitmap and the decoder. */
   clear(): void;
 }
 
@@ -105,9 +101,7 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
   let handlers: PainterHandlers | null = null;
   worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
     const event = ev.data;
-    if (event.type === "cacheReset") {
-      handlers?.onCacheReset();
-    } else if (event.type === "videoError") {
+    if (event.type === "videoError") {
       handlers?.onVideoError(event.reason);
     } else if (event.type === "videoNeedsKeyframe") {
       handlers?.onVideoNeedsKeyframe(event.reason);
@@ -146,11 +140,8 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
     setView(view, seq) {
       post({ type: "view", view, seq });
     },
-    setVideoFormat(stream, format) {
-      post({ type: "videoFormat", stream, format });
-    },
-    endVideoStream(stream) {
-      post({ type: "videoEnd", stream });
+    setVideoFormat(format) {
+      post({ type: "videoFormat", format });
     },
     clear() {
       post({ type: "clear" });

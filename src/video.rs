@@ -1,38 +1,27 @@
-//! What the video path shares with the rest of the gateway: the framebuffer copy the
-//! streams read, the rectangle one of them may encode, and the colour conversion in
-//! front of it.
+//! What the video stream shares with the rest of the gateway: the framebuffer copy it
+//! reads, the picture limits it encodes within, and the colour conversion in front of
+//! it. [`crate::vp9`] knows only how to encode a picture; when a round is taken is
+//! [`crate::encode`]'s business.
 //!
-//! Two render dials arrive at a stream and they differ only in how many rectangles
-//! they ask for. `render_type = "video"` asks for one covering the whole desktop.
-//! `render_motion = true` asks for one per coalesced moving region, with the still
-//! codecs carrying everything else. Which rectangles, and when they start and stop, is
-//! [`crate::regions`]' business; [`crate::vp9`] knows only how to encode one.
-//!
-//! Three things about the shape follow from the rest of the gateway rather than from
+//! Two things about the shape follow from the rest of the gateway rather than from
 //! any codec:
 //!
-//! - **A frame may never be dropped.** [`crate::tiles::Shadow`] records source pixels
-//!   as delivered the moment it accepts them, so a frame an encoder skipped is
+//! - **A frame may never be dropped.** [`crate::shadow::Shadow`] records source pixels
+//!   as delivered the moment it accepts them, so a frame the encoder skipped is
 //!   permanently wrong pixels — nothing re-sends it. Hence an empty bitstream leaves
 //!   the caller's dirty flag alone instead of clearing it.
-//! - **A stream is fed rectangles, not frames.** Damage arrives as rectangles, and
+//! - **The stream is fed rectangles, not frames.** Damage arrives as rectangles, and
 //!   VNC's can only be cropped out of the one it just decoded, so the [`Mirror`] holds
-//!   the whole framebuffer and every stream encodes a crop of it when the engine says a
-//!   frame has ended. One mirror rather than one per stream is also what lets a stream
-//!   start in the middle of a session: its region's pixels are already there, whether
-//!   or not they have changed recently.
-//! - **The mirror is the newest truth, so a cleanup needs no stash.** Everything
-//!   blitted is exact source, moving or not, so a region that settles is re-sent crisp
-//!   by cropping it out of here — never from a remembered frame that has since been
-//!   overtaken. See [`crate::regions`].
+//!   the whole framebuffer and the stream encodes it when the engine says a frame has
+//!   ended.
 //!
 //! A detach drops frames outright (`SessionManager::pump`), so a client coming back has
-//! missed part of every stream and cannot decode from where it left off. It recovers
-//! because every attach injects a repaint, which is one of the moments a stream's
+//! missed part of the stream and cannot decode from where it left off. It recovers
+//! because every attach injects a repaint, which is one of the moments the stream's
 //! keyframe is forced.
 
 use crate::config::Chroma;
-use crate::tiles::Rect;
+use crate::shadow::Rect;
 
 /// The 1–100 quality dial, coarsest first.
 ///
@@ -54,7 +43,7 @@ pub const QUALITY_MAX: u8 = 100;
 ///
 /// libvpx has no ceiling this near — 4K is only VP9 level 5.0 of 6.2 — so this is the
 /// gateway's own line: past 4K a software realtime encode of a desktop stops being
-/// realtime, and the still paths carry such a desktop better. 4K is the *panel*, in
+/// realtime. 4K is the *panel*, in
 /// either shape: 3840×2160 is a 16:9 one and 3840×2400 the 16:10 one a 1920×1200
 /// laptop at 2x is, 11% more pixels and one VP9 level up (6.0, which every browser's
 /// decoder takes). 5K is past the line.
@@ -63,7 +52,7 @@ pub const MAX_LONG_SIDE: u16 = 3840;
 pub const MAX_SHORT_SIDE: u16 = 2400;
 
 /// Whether a picture of this many pixels is one a stream will encode — the test
-/// [`coded_rect`] refuses on, for a caller deciding what to ask a remote for.
+/// [`check_picture`] refuses on, for a caller deciding what to ask a remote for.
 pub fn within_ceiling((w, h): (u32, u32)) -> bool {
     let (long, short) = (w.max(h), w.min(h));
     long <= u32::from(MAX_LONG_SIDE) && short <= u32::from(MAX_SHORT_SIDE)
@@ -96,22 +85,7 @@ pub struct AccessUnit {
     pub keyframe: bool,
 }
 
-/// A `render_motion_debug` outline drawn round the picture a stream encodes.
-///
-/// Painted on the crop, never on the [`Mirror`]: the mirror is what
-/// [`crate::tiles::Shadow`] has already recorded as delivered and what a cleanup crops,
-/// so a mark left there would be restored as though it were content and nothing would
-/// ever take it off again. On the crop it lives exactly as long as the stream does, and
-/// the cleanup that follows erases it.
-#[derive(Clone, Copy)]
-pub struct Mark {
-    pub colour: [u8; 3],
-    /// Border thickness in pixels. Owned by the caller because the still path draws the
-    /// same outline round its own pieces, and one thickness should mean one thickness.
-    pub px: u16,
-}
-
-/// The whole framebuffer as packed RGB888, and the one copy every stream reads.
+/// The whole framebuffer as packed RGB888, and the copy the stream reads.
 ///
 /// Held at the desktop size rounded up to even sides. Only an encoder ever sees those
 /// extra pixels — a client is told the true size and crops — and they are filled from
@@ -149,11 +123,6 @@ impl Mirror {
         self.coded
     }
 
-    /// The whole desktop as a rectangle — the region a `video` target streams.
-    pub fn rect(&self) -> Rect {
-        Rect::from_size(0, 0, self.size.0, self.size.1).expect("a desktop with pixels")
-    }
-
     /// Copy `rgb` — packed RGB888 for `rect` — into the mirror.
     ///
     /// A rectangle outside the desktop is refused rather than clipped: it means this
@@ -184,12 +153,10 @@ impl Mirror {
         Ok(())
     }
 
-    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses.
-    ///
-    /// `rect` may reach into the padding — that is exactly what a stream at the
-    /// desktop's odd edge does — so this is bounded by [`Self::coded`] rather than by
-    /// [`Self::size`]. Out of those bounds it refuses: the alternative is an index
-    /// panic, and this binary aborts on one.
+    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses — for the
+    /// tests asserting what landed where. Bounded by [`Self::coded`], so it can read
+    /// the padding too.
+    #[cfg(test)]
     pub fn crop_into(&self, rect: Rect, out: &mut Vec<u8>) -> anyhow::Result<()> {
         anyhow::ensure!(
             rect.right < self.coded.0 && rect.bottom < self.coded.1,
@@ -213,7 +180,7 @@ impl Mirror {
     }
 
     /// Copy `rect`'s pixels from `src` — the double-buffer sync in
-    /// [`crate::regions::Regions::take_round`].
+    /// [`crate::encode`]'s round.
     ///
     /// The two mirrors are twins by construction (the spare is a clone of the
     /// current one), and every staged rect went through [`Self::blit`]'s bounds
@@ -233,20 +200,15 @@ impl Mirror {
         }
     }
 
-    /// The whole coded picture as one packed RGB888 slice, when `rect` *is* the
-    /// coded picture — the `Policy::Whole` stream, whose crop was a full-framebuffer
-    /// copy producing byte-for-byte what this buffer already holds. `None` for any
-    /// smaller rectangle, whose rows are not contiguous here.
-    pub fn whole(&self, rect: Rect) -> Option<&[u8]> {
-        (rect.left == 0 && rect.top == 0 && (rect.w(), rect.h()) == self.coded)
-            .then_some(&self.rgb)
+    /// The whole coded picture as one packed RGB888 slice — what the stream encodes.
+    pub fn picture(&self) -> &[u8] {
+        &self.rgb
     }
 
     /// Fill the at-most-one padding column and row from their neighbours.
     ///
-    /// Only an odd-sized desktop has any. Called once per encode round rather than per
-    /// stream: at most one stream can reach the pad on each axis, and finding out which
-    /// is more work than repeating a column copy.
+    /// Only an odd-sized desktop has any. Called before every encode, because a blit
+    /// can overwrite the edge the pad repeats.
     pub fn pad_edges(&mut self) {
         let stride = usize::from(self.coded.0) * 3;
         if self.coded.0 != self.size.0 {
@@ -263,95 +225,53 @@ impl Mirror {
     }
 }
 
-/// The rectangle a stream over `rect` actually encodes: `rect` grown to even sides.
+/// Refuse a coded picture the encoder will not take.
 ///
-/// **The evenness of the coded rectangle is a theorem, not a hope, and this is where it
-/// is checked.** 4:2:0 subsamples chroma 2×2, so [`Yuv`] needs even sides there — and
-/// 4:4:4, which would not, is held to the same ones: one geometry, not two. A region is
-/// a union of whole grid cells
-/// clipped to the desktop, and both sides of a [`crate::protocol::TileGrid`] are even, so a region's origin is
-/// always even and its size is odd only where its right or bottom edge is the desktop's
-/// own and the desktop is odd there — in which case the mirror's own padding is exactly
-/// the column or row needed. So the coded rectangle is the region grown right and down,
-/// it never leaves the mirror, and it never contains a pixel that was invented. A
-/// whole-desktop `video` stream is the same statement with the region set to the
-/// desktop.
+/// The coded picture is the mirror's: the desktop grown to even sides. 4:2:0
+/// subsamples chroma 2×2, so [`Yuv`] needs even sides there — and 4:4:4, which would
+/// not, is held to the same ones: one geometry, not two. VP9 itself does not need
+/// them either; the mirror's padding already supplies the column or row an odd
+/// desktop is short of, and an odd-width chroma plane would be a second path to be
+/// wrong in.
 ///
-/// VP9 itself does not need even sides, and it is held to them anyway. The mirror's
-/// padding, the conversion's whole-pixel chroma groups and the geometry theorem in
-/// [`crate::regions`] are one argument, and an odd-width chroma plane would be a second
-/// path to be wrong in — for no gain, since the pad column is already there and costs
-/// one column of repeated pixels.
-///
-/// Fails for a picture the encoder will not take. That cannot be a config-time refusal —
-/// only the remote knows its own size, and it may change mid-session — so the message
-/// has to carry the whole explanation to wherever it surfaces.
-pub fn coded_rect(rect: Rect, mirror: (u16, u16)) -> anyhow::Result<Rect> {
-    // Checked rather than plain arithmetic, though a rectangle ending at the last
-    // representable pixel needs a desktop wider than `u16` can describe: this binary
-    // aborts on an arithmetic overflow, and the point of this function is that nothing
-    // invalid gets as far as an abort.
-    let (right, bottom) = rect
-        .right
-        .checked_add(rect.w() % 2)
-        .zip(rect.bottom.checked_add(rect.h() % 2))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "a video stream over {}x{} at ({},{}) cannot be grown to even sides \
-                 without leaving the framebuffer's coordinate space",
-                rect.w(),
-                rect.h(),
-                rect.left,
-                rect.top
-            )
-        })?;
-    let coded = Rect { left: rect.left, top: rect.top, right, bottom };
+/// That cannot be a config-time refusal — only the remote knows its own size, and it
+/// may change mid-session — so the message has to carry the whole explanation to
+/// wherever it surfaces.
+pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
     anyhow::ensure!(
-        coded.right < mirror.0 && coded.bottom < mirror.1,
-        "a video stream over {}x{} at ({},{}) needs even sides, and growing it to \
-         {}x{} leaves a {}x{} mirror — a region is a union of grid cells, so this \
-         is a region that was not",
-        rect.w(),
-        rect.h(),
-        rect.left,
-        rect.top,
-        coded.w(),
-        coded.h(),
-        mirror.0,
-        mirror.1
-    );
-    anyhow::ensure!(
-        within_ceiling((u32::from(coded.w()), u32::from(coded.h()))),
-        "a video stream will not encode a {}x{} picture: one is refused with a long \
+        within_ceiling((u32::from(w), u32::from(h))),
+        "a video stream will not encode a {w}x{h} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
-         target render_type = \"tiles\" (with render_subtype = \"webp\" for a lossy \
-         picture), or a remote that can be asked for a smaller desktop: with \
-         resize = true the gateway holds every size it asks for under this ceiling",
-        rect.w(),
-        rect.h()
+         target a remote that can be asked for a smaller desktop: with resize = true \
+         the gateway holds every size it asks for under this ceiling"
     );
-    Ok(coded)
+    Ok(())
 }
 
-/// How many threads a stream's encoder gets: several for the one stream that covers
-/// the whole mirror, one for a region stream.
-///
-/// Region streams are disjoint and encode in parallel with each other on the same
-/// round, which is where the cores go — a second level of threading inside each
-/// would oversubscribe them. `Policy::Whole` has exactly one stream and nothing to
-/// overlap with, so its parallelism has to come from inside the picture: VP9's
-/// row-based multithreading, set by the caller alongside this count. Half the
-/// machine, capped: the engine's read loop, the socket and the tile workers still
-/// need somewhere to run.
-pub fn threads_for(coded: Rect, mirror: (u16, u16)) -> usize {
-    let whole = coded.left == 0
-        && coded.top == 0
-        && (coded.w(), coded.h()) == mirror;
-    if !whole {
-        return 1;
-    }
-    std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
+/// How many threads the encoder gets: half the machine. The stream has one
+/// picture and nothing to overlap with, so its parallelism has to come from inside
+/// the picture — VP9's row-based multithreading, set by the caller alongside this
+/// count. The engine's read loop and the socket still need somewhere to run.
+pub fn threads() -> usize {
+    threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// The most threads libvpx's VP9 encoder takes. Not a choice made here: libvpx
+/// v1.16.0 defines `MAX_NUM_THREADS 64` in `vp9/encoder/vp9_ethread.h`, and
+/// `validate_config` in `vp9/vp9_cx_iface.c` refuses a larger `g_threads` with
+/// "g_threads out of range [..MAX_NUM_THREADS]", which fails the encoder's creation.
+/// At 64 the tile-column count [`crate::vp9`] derives, `ilog2(64) = 6`, is also exactly
+/// the top of that file's `tile_columns` range, 0–6.
+const LIBVPX_MAX_THREADS: usize = 64;
+
+/// [`threads`] for a machine of `cores`: half of them, and never fewer than two once
+/// there are two — the one core a single-core machine has is all it gets. Half of
+/// two or three cores is one thread, which leaves the picture unsplit on exactly the
+/// small machine that can least afford it. Held to [`LIBVPX_MAX_THREADS`], past which
+/// the encoder would not start at all.
+fn threads_for(cores: usize) -> usize {
+    (cores / 2).max(cores.min(2)).min(LIBVPX_MAX_THREADS)
 }
 
 /// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
@@ -383,8 +303,8 @@ impl Yuv {
     /// A buffer for a `w`×`h` picture, both even.
     ///
     /// Reused across frames so a 1080p conversion is not a 3 MB allocation apiece.
-    /// Evenness is [`coded_rect`]'s theorem, and it is what keeps the 4:2:0 chroma
-    /// rows below made of whole 2×2 groups.
+    /// Even because the mirror is held at even sides, which is what keeps the 4:2:0
+    /// chroma rows below made of whole 2×2 groups.
     pub fn new(w: u16, h: u16, chroma: Chroma) -> Self {
         let size = (usize::from(w), usize::from(h));
         let samples = match chroma {
@@ -460,24 +380,6 @@ impl Yuv {
     }
 }
 
-/// Paint `mark`'s border round a `w`×`h` packed-RGB888 picture, in place.
-pub fn outline(rgb: &mut [u8], (w, h): (usize, usize), mark: Mark) {
-    let t = usize::from(mark.px);
-    let mut paint = |row: usize, from: usize, to: usize| {
-        for x in from..to {
-            rgb[(row * w + x) * 3..][..3].copy_from_slice(&mark.colour);
-        }
-    };
-    for y in 0..h {
-        if y < t || y + t >= h {
-            paint(y, 0, w);
-        } else {
-            paint(y, 0, t.min(w));
-            paint(y, w.saturating_sub(t), w);
-        }
-    }
-}
-
 #[cfg(test)]
 impl Mirror {
     /// The pixel at `(x, y)`, for the tests about blitting and padding.
@@ -498,6 +400,15 @@ mod tests {
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// Half the cores, but never fewer than two once there are two to use, one on a
+    /// single core, and never more than libvpx accepts.
+    #[test]
+    fn the_encoder_takes_at_least_two_threads_where_there_are_two_cores() {
+        let cores = [1, 2, 3, 4, 5, 6, 8, 16, 32, 128, 129, 130, 256];
+        let threads: Vec<usize> = cores.into_iter().map(threads_for).collect();
+        assert_eq!(threads, [1, 2, 2, 2, 2, 3, 4, 8, 16, 64, 64, 64, 64]);
     }
 
     /// Synthetic screen content: a light panel with text-like runs, and one window being
@@ -593,18 +504,18 @@ mod tests {
             {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
                 let mut stream =
-                    crate::vp9::Stream::new(mirror.rect(), mirror.coded(), quality, chroma)
+                    crate::vp9::Stream::new(mirror.coded(), quality, chroma)
                         .expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
                 let mut encode = std::time::Duration::ZERO;
                 for frame in 0..FRAMES {
                     mirror
-                        .blit(mirror.rect(), &screen(w, h, frame))
+                        .blit(rect(0, 0, w, h), &screen(w, h, frame))
                         .expect("a full-screen blit");
                     let started = std::time::Instant::now();
                     let unit = stream
-                        .encode(&mirror, None)
+                        .encode(&mirror)
                         .expect("an encode")
                         .expect("an access unit");
                     encode += started.elapsed();
@@ -617,8 +528,7 @@ mod tests {
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
                 let mut yuv = Yuv::new(mirror.coded().0, mirror.coded().1, chroma);
-                let mut crop = Vec::new();
-                mirror.crop_into(mirror.rect(), &mut crop).expect("a crop");
+                let crop = mirror.picture().to_vec();
                 let started = std::time::Instant::now();
                 for _ in 0..FRAMES {
                     yuv.read_rgb(&crop).expect("its own picture");
@@ -727,63 +637,28 @@ mod tests {
         assert_eq!(mirror.size(), (1919, 1079), "a client is told the real desktop");
         assert_eq!(mirror.coded(), (1920, 1080), "an encoder is given even sides");
         assert_eq!(mirror.len(), 1920 * 1080 * 3);
-        assert_eq!(mirror.rect(), rect(0, 0, 1919, 1079), "a record header carries the true size");
-    }
-
-    /// The geometry theorem [`coded_rect`] rests on, from both sides: an interior region
-    /// is even because the cell grid is, and a region at an odd desktop's edge finds the
-    /// pad already there.
-    #[test]
-    fn a_region_at_the_desktops_odd_edge_grows_into_the_mirrors_pad() {
-        let mirror = Mirror::new(1919, 1079).expect("an odd-sized mirror");
-        // The bottom-right region of a 1919x1079 desktop: cells from (64*25, 64*16) to
-        // the edge, so 319 wide and 55 tall — odd on both axes, and the only way a
-        // region can be.
-        let edge = Rect { left: 1600, top: 1024, right: 1918, bottom: 1078 };
-        assert_eq!((edge.w() % 2, edge.h() % 2), (1, 1), "this test wants the odd case");
-        let grown = coded_rect(edge, mirror.coded())
-            .expect("a region at the edge of an odd desktop had nowhere to grow");
-        assert_eq!((grown.w() % 2, grown.h() % 2), (0, 0), "it was not grown to even sides");
-        // An interior region is even without help, whatever cells it covers.
-        let inside = Rect { left: 320, top: 64, right: 959, bottom: 191 };
-        assert_eq!((inside.w() % 2, inside.h() % 2), (0, 0));
-        assert_eq!(coded_rect(inside, mirror.coded()).expect("an interior region"), inside);
-        // The rule from both sides, at the very edge: a single-pixel-wide rectangle one
-        // column short of the mirror's width grows into the padding and is fine, and the
-        // same rectangle one column further right has nowhere to grow and is refused
-        // rather than reaching an encoder's assertion.
-        let ragged = Rect { left: 1918, top: 0, right: 1918, bottom: 63 };
-        assert!(
-            coded_rect(ragged, (1920, 1080)).is_ok(),
-            "growing right is inside a padded mirror"
-        );
-        let past = Rect { left: 1919, top: 0, right: 1919, bottom: 63 };
-        assert!(
-            coded_rect(past, (1920, 1080)).is_err(),
-            "a region with nowhere left to grow was accepted"
-        );
     }
 
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
-        // Straight to `coded_rect` with the mirror's size rather than through a 44 MB
-        // allocation: a mirror will hold whatever it is asked to, and the refusal being
-        // tested is the encoders'.
-        let Err(refused) = coded_rect(rect(0, 0, 5120, 2880), (5120, 2880)) else {
+        // Straight to `check_picture` rather than through a 44 MB allocation: a mirror
+        // will hold whatever it is asked to, and the refusal being tested is the
+        // encoder's.
+        let Err(refused) = check_picture((5120, 2880)) else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
-        assert!(message.contains("webp"), "the message does not say what to do instead");
+        assert!(message.contains("resize"), "the message does not say what to do instead");
         // Both 4K panels are pictures: the 16:9 one and the 16:10 one a 1920×1200 laptop
         // is at 2x.
-        assert!(coded_rect(rect(0, 0, 3840, 2160), (3840, 2160)).is_ok(), "16:9 4K was refused");
-        assert!(coded_rect(rect(0, 0, 3840, 2400), (3840, 2400)).is_ok(), "16:10 4K was refused");
+        assert!(check_picture((3840, 2160)).is_ok(), "16:9 4K was refused");
+        assert!(check_picture((3840, 2400)).is_ok(), "16:10 4K was refused");
         // The limit is on the picture, not on width: turning a legal desktop on its side
         // does not make it illegal.
         assert!(
-            coded_rect(rect(0, 0, 2400, 3840), (2400, 3840)).is_ok(),
+            check_picture((2400, 3840)).is_ok(),
             "a portrait 4K desktop was refused"
         );
         assert!(Mirror::new(0, 1080).is_err(), "a desktop with no pixels was accepted");
@@ -803,8 +678,7 @@ mod tests {
             let held = fit_ceiling(size);
             assert!(within_ceiling(held), "{size:?} held to {held:?} is still over it");
             assert!(
-                coded_rect(rect(0, 0, held.0 as u16, held.1 as u16), (held.0 as u16, held.1 as u16))
-                    .is_ok(),
+                check_picture((held.0 as u16, held.1 as u16)).is_ok(),
                 "the encoder refuses the {held:?} the engine was told to ask for"
             );
         }

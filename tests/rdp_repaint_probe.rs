@@ -115,7 +115,7 @@ async fn full_desktop_repaints_against_a_real_host() {
                 Ok(Some(Ok(Message::Binary(frame)))) => {
                     frames += 1;
                     bytes += frame.len() as u64;
-                    records += common::batch_records(&frame).len();
+                    records += common::batch_units(&frame).len();
                     last = tokio::time::Instant::now();
                 }
                 Ok(Some(Ok(_))) => {}

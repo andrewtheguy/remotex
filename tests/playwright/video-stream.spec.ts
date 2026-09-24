@@ -1,6 +1,6 @@
-// What a `render_type = "video"` target puts on the session socket. Video is VP9
-// only, so everything here is decidable without asking the browser anything: the
-// gateway announces `videoFormat` before a stream's first access unit. Nothing here
+// What a target puts on the session socket: the whole desktop as one VP9 stream, so
+// everything here is decidable without asking the browser anything: the gateway
+// announces `videoFormat` before the stream's first access unit. Nothing here
 // looks at a pixel; a VIDEO record is a header this file parses for itself.
 //
 // It needs a gateway whose local config hard-codes the targets. Keep that
@@ -18,9 +18,8 @@ import { expect, type Page, test } from "@playwright/test";
 import { leaveSession, logInAndConnectTo } from "./support";
 
 /// The opt-in, and the target name in one — the same bargain the audio spec makes.
-/// Its presence is the claim that this gateway has a target which streams video;
-/// without one the spec would be asserting against a picture that never
-/// arrives, and would pass for the wrong reason.
+/// Its presence is the claim that this gateway has a live target to stream; without
+/// one the spec would be asserting against a picture that never arrives.
 const VIDEO_TARGET = process.env.REMOTEX_PLAYWRIGHT_VIDEO_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA: this spec
@@ -28,26 +27,13 @@ const VIDEO_TARGET = process.env.REMOTEX_PLAYWRIGHT_VIDEO_TARGET;
 /// client's own parser to decide that would be asking the accused.
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
-const OP_TILE = 0x01;
-const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
-const TILE_HEADER_LEN = 16;
-const TILE_REF_LEN = 7;
-const VIDEO_HEADER_LEN = 15;
+const VIDEO_HEADER_LEN = 10;
 const VIDEO_KEYFRAME = 0x01;
-/// `batch::MAX_STREAMS` — the range the wire's `stream` byte may name. Deliberately
-/// not `regions::MAX_STREAMS` (4), which bounds how many streams are *live* at once
-/// and not which ids they get: a retune holds the outgoing and incoming sets in hand
-/// together, so a stream built during one can be handed an id above the live cap and
-/// keep it for its whole life.
-const WIRE_STREAMS = 16;
 
 interface VideoRecord {
-  stream: number;
   flags: number;
   keyframe: boolean;
-  x: number;
-  y: number;
   w: number;
   h: number;
   payloadLen: number;
@@ -57,8 +43,6 @@ interface Batch {
   flags: number;
   count: number;
   sequence: number;
-  /** Every record, video or not — the count is the header's claim to check. */
-  records: number;
   video: VideoRecord[];
   /** Whether the records exactly filled the frame. */
   exact: boolean;
@@ -66,102 +50,64 @@ interface Batch {
   badOp?: number;
 }
 
-/// Parse a batch frame, knowing all three ops. A `video` target sends VIDEO records
-/// and, when a stream's rectangle shrinks, TILE records cleaning up what it no longer
-/// covers — so a parser that knew only one of them would stop at the other and report
-/// it as a truncated frame.
 function parseBatch(payload: Buffer): Batch {
   const count = payload.readUInt16LE(2);
   const video: VideoRecord[] = [];
-  let records = 0;
   let at = BATCH_HEADER_LEN;
   let exact = true;
   let badOp: number | undefined;
   while (at < payload.length) {
     const op = payload.readUInt8(at);
-    if (op === OP_TILE_REF) {
-      if (at + TILE_REF_LEN > payload.length) {
-        exact = false;
-        break;
-      }
-      records += 1;
-      at += TILE_REF_LEN;
-      continue;
+    if (op !== OP_VIDEO) {
+      // An op this parser does not know stops it here, which is where the bad byte
+      // is. Reading on would take a length out of somebody else's bytes and fail
+      // further along, looking like truncation instead.
+      badOp = op;
+      exact = false;
+      break;
     }
-    if (op === OP_TILE) {
-      if (at + TILE_HEADER_LEN > payload.length) {
-        exact = false;
-        break;
-      }
-      records += 1;
-      at += TILE_HEADER_LEN + payload.readUInt32LE(at + 12);
-      continue;
+    if (at + VIDEO_HEADER_LEN > payload.length) {
+      exact = false;
+      break;
     }
-    if (op === OP_VIDEO) {
-      if (at + VIDEO_HEADER_LEN > payload.length) {
-        exact = false;
-        break;
-      }
-      const flags = payload.readUInt8(at + 2);
-      const payloadLen = payload.readUInt32LE(at + 11);
-      video.push({
-        stream: payload.readUInt8(at + 1),
-        flags,
-        keyframe: (flags & VIDEO_KEYFRAME) !== 0,
-        x: payload.readUInt16LE(at + 3),
-        y: payload.readUInt16LE(at + 5),
-        w: payload.readUInt16LE(at + 7),
-        h: payload.readUInt16LE(at + 9),
-        payloadLen,
-      });
-      records += 1;
-      at += VIDEO_HEADER_LEN + payloadLen;
-      continue;
-    }
-    // An op this parser does not know stops it here, which is where the bad byte is.
-    // Reading on as if it were something else would take a length out of somebody
-    // else's bytes and fail further along, looking like truncation instead.
-    badOp = op;
-    exact = false;
-    break;
+    const flags = payload.readUInt8(at + 1);
+    const payloadLen = payload.readUInt32LE(at + 6);
+    video.push({
+      flags,
+      keyframe: (flags & VIDEO_KEYFRAME) !== 0,
+      w: payload.readUInt16LE(at + 2),
+      h: payload.readUInt16LE(at + 4),
+      payloadLen,
+    });
+    at += VIDEO_HEADER_LEN + payloadLen;
   }
   return {
     flags: payload.readUInt8(1),
     count,
     sequence: payload.readUInt32LE(4),
-    records,
     video,
     exact: exact && at === payload.length,
     badOp,
   };
 }
 
-interface VideoFormat {
-  stream: number;
-  decode: string;
-}
-
 interface Session {
   /** Every control message's `type`, in arrival order. */
   controlTypes: string[];
   connected?: { render: string };
-  formats: VideoFormat[];
-  /**
-   * Stream ids the gateway has said are over, in arrival order. A `render_type =
-   * "video"` target never ends its one stream, so this is empty there; under
-   * `render_motion = true` it is how a client learns it may let a decoder
-   * — and the platform decode session behind it — go.
-   */
-  ends: number[];
+  formats: string[];
+  /** The last `resize`, which every unit after it must match. */
+  resize?: { w: number; h: number };
   batches: Batch[];
   /** Binary frames that were not batches — audio has a socket of its own. */
   badKinds: number[];
   /**
-   * Streams whose first access unit arrived before the format that says how to decode
-   * it. A decoder configured afterwards has already thrown the frame away, so this
-   * must stay empty.
+   * Units that arrived before any format said how to decode them. A decoder
+   * configured afterwards has already thrown the frame away, so this must stay 0.
    */
-  unannounced: number[];
+  unannounced: number;
+  /** Units whose size was not the desktop the last `resize` announced. */
+  missized: number;
 }
 
 /// Watch the session socket. Registered before navigation, so nothing is missed.
@@ -169,10 +115,10 @@ function watchSession(page: Page): Session {
   const seen: Session = {
     controlTypes: [],
     formats: [],
-    ends: [],
     batches: [],
     badKinds: [],
-    unannounced: [],
+    unannounced: 0,
+    missized: 0,
   };
   page.on("websocket", (ws) => {
     if (new URL(ws.url()).pathname !== "/ws") {
@@ -189,20 +135,10 @@ function watchSession(page: Page): Session {
           seen.connected = { render: message.render };
         }
         if (message.type === "videoFormat") {
-          seen.formats.push({
-            stream: message.stream,
-            decode: message.decode,
-          });
+          seen.formats.push(message.decode);
         }
-        if (message.type === "videoEnd") {
-          // Forgotten, which is what makes `unannounced` below an assertion about
-          // `videoEnd` too: the id is free from here, and the next region to be given
-          // it must announce a format of its own before its first unit — a client
-          // that took this message at its word has no decoder left on it.
-          seen.formats = seen.formats.filter(
-            (format) => format.stream !== message.stream,
-          );
-          seen.ends.push(message.stream);
+        if (message.type === "resize") {
+          seen.resize = { w: message.w, h: message.h };
         }
         return;
       }
@@ -213,8 +149,15 @@ function watchSession(page: Page): Session {
       }
       const batch = parseBatch(payload);
       for (const unit of batch.video) {
-        if (!seen.formats.some((f) => f.stream === unit.stream)) {
-          seen.unannounced.push(unit.stream);
+        if (seen.formats.length === 0) {
+          seen.unannounced += 1;
+        }
+        if (
+          !seen.resize ||
+          unit.w !== seen.resize.w ||
+          unit.h !== seen.resize.h
+        ) {
+          seen.missized += 1;
         }
       }
       seen.batches.push(batch);
@@ -226,13 +169,17 @@ function watchSession(page: Page): Session {
 const units = (seen: Session): VideoRecord[] =>
   seen.batches.flatMap((b) => b.video);
 
-/// Every assertion that holds for any video stream.
+/// Every assertion that holds for the stream.
 function assertTheEnvelopeHolds(seen: Session): void {
   expect(seen.badKinds, "binary frames that were not batches").toEqual([]);
   expect(
     seen.unannounced,
-    "streams whose first access unit arrived before its videoFormat",
-  ).toEqual([]);
+    "units that arrived before any videoFormat",
+  ).toBe(0);
+  expect(
+    seen.missized,
+    "units that were not the desktop the last resize announced",
+  ).toBe(0);
 
   for (const batch of seen.batches) {
     expect(batch.flags, "reserved frame flags must be zero").toBe(0);
@@ -241,7 +188,7 @@ function assertTheEnvelopeHolds(seen: Session): void {
     );
     expect(batch.exact, "records must exactly fill the frame").toBe(true);
     expect(
-      batch.records,
+      batch.video.length,
       "the header's record count must match the records present",
     ).toBe(batch.count);
   }
@@ -250,35 +197,21 @@ function assertTheEnvelopeHolds(seen: Session): void {
     "screen batch sequences must increase in socket order",
   ).toEqual(seen.batches.map((_, index) => index + 1));
 
-  const first = new Map<number, VideoRecord>();
   for (const unit of units(seen)) {
     expect(unit.flags & ~VIDEO_KEYFRAME, "undefined record flag bits").toBe(0);
-    expect(unit.stream).toBeLessThan(WIRE_STREAMS);
     expect(unit.payloadLen).toBeGreaterThan(0);
-    // The coded rectangle is grown to even sides before it reaches an encoder, and
-    // src/video.rs calls that a theorem rather than a hope. The wire is where it is
-    // observable from outside the gateway.
-    expect(unit.w % 2, `stream ${unit.stream} width ${unit.w} is odd`).toBe(0);
-    expect(unit.h % 2, `stream ${unit.stream} height ${unit.h} is odd`).toBe(0);
-    expect(unit.x % 2).toBe(0);
-    expect(unit.y % 2).toBe(0);
-    if (!first.has(unit.stream)) {
-      first.set(unit.stream, unit);
-    }
   }
-  for (const [stream, unit] of first) {
-    // Nothing before it to decode from: a stream that opened on a delta frame is a
-    // region that never paints, whatever the decoder does.
-    expect(unit.keyframe, `stream ${stream} opened without a keyframe`).toBe(
-      true,
-    );
-  }
+  // Nothing before it to decode from: a stream that opened on a delta frame is a
+  // desktop that never paints, whatever the decoder does.
+  expect(units(seen)[0]?.keyframe, "the stream opened without a keyframe").toBe(
+    true,
+  );
 }
 
 test.describe("a video target", () => {
   test.skip(
     !VIDEO_TARGET,
-    "set REMOTEX_PLAYWRIGHT_VIDEO_TARGET=<target> against a gateway with a video target",
+    "set REMOTEX_PLAYWRIGHT_VIDEO_TARGET=<target> against a gateway with a live target",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -301,12 +234,8 @@ test.describe("a video target", () => {
     for (const format of seen.formats) {
       // The exact WebCodecs string, whose level comes from the picture size — which
       // is why the gateway sends it and the client does not derive it.
-      expect(format.decode).toMatch(/^vp09\.\d{2}\.\d{2}\.\d{2}(\.\d{2}){5}$/);
+      expect(format).toMatch(/^vp09\.\d{2}\.\d{2}\.\d{2}(\.\d{2}){5}$/);
     }
     assertTheEnvelopeHolds(seen);
-
-    // One stream for the whole desktop is what this dial *is*: `video` sends no
-    // per-region streams, so a second id here would mean the motion dial ran.
-    expect(new Set(units(seen).map((u) => u.stream))).toEqual(new Set([0]));
   });
 });

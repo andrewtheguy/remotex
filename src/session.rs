@@ -20,43 +20,16 @@ use crate::{rdp, vnc};
 
 /// Capacity of the engine→client frame channels. Bounded so a slow browser
 /// link backpressures the engine instead of buffering unboundedly.
-const FRAME_BUFFER: usize = 64;
-
-/// The same capacity for a target on `render_type = "video"`, where a message is not
-/// the same size of thing.
 ///
-/// Sixty-four was chosen for *tiles*: [`crate::tiles::Rect::bands`] cuts damage by
-/// height alone, so a full 1080p repaint is around seventeen records and sixty-four
-/// of them is a few repaints' worth of slack. Under video one message is an entire
-/// frame, so the same number — and there are two of these queues in series — would be
-/// seconds of buffered picture before an engine felt anything at all. A session that
-/// far behind its remote is unusable however good the picture is, and the delay would
-/// also make the congestion signal in [`crate::encode`] arrive long after the fact.
+/// One message is an entire frame, and there are two of these queues in series, so
+/// a deep one would be seconds of buffered picture before an engine felt anything
+/// at all. A session that far behind its remote is unusable however good the picture
+/// is, and the delay would also make the congestion signal in [`crate::encode`]
+/// arrive long after the fact.
 ///
 /// Four rather than one: a little slack absorbs an ordinary encode landing while the
 /// socket is mid-write, without letting a backlog become latency.
-const VIDEO_FRAME_BUFFER: usize = 4;
-
-/// How deep this target's outbound queue should be. See [`VIDEO_FRAME_BUFFER`].
-///
-/// `render_motion = true` keeps the tile depth, deliberately, even though
-/// it produces access units too: the same queue carries its still tiles, and a
-/// repaint is dozens of them, so four would stall the engine on the ordinary path to
-/// sharpen a signal about the streaming one. Its regions are also a fraction of a
-/// desktop apiece, so sixty-four records is nowhere near sixty-four frames. The
-/// congestion loop is correspondingly less sharp there, which is a thing to know when
-/// reading `coarsened` in the `encode totals` line.
-///
-/// Matches the config axis rather than asking for a [`crate::config::RenderPlan`],
-/// because this is called from [`SessionManager::attach`] over targets nobody has
-/// connected to. The two say the same thing: `render_type = "video"` is the only
-/// value that produces a plan with no tiles in it.
-fn frame_buffer(target: &TargetConfig) -> usize {
-    match target.render_type {
-        crate::config::RenderType::Video => VIDEO_FRAME_BUFFER,
-        _ => FRAME_BUFFER,
-    }
-}
+const FRAME_BUFFER: usize = 4;
 
 /// How deep the audio socket's outbound queue is, in wave buffers.
 ///
@@ -96,7 +69,7 @@ pub const ENGINE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_sec
 /// What an attached WebSocket receives from the session.
 #[derive(Debug)]
 pub enum AttachEvent {
-    /// A message from the engine (tiles, resize, error).
+    /// A message from the engine (video, resize, error).
     Msg(ServerMsg),
     /// Another browser took the slot; close the WebSocket (code 4001).
     Evicted,
@@ -172,8 +145,8 @@ pub struct Attachment {
 /// One audio WebSocket's live handle on the session, returned by
 /// [`SessionManager::attach_audio`].
 ///
-/// Audio has its own socket because it had no business sharing the other one: on a
-/// `render_type = "video"` target that queue is four deep, and an audio pump waiting
+/// Audio has its own socket because it had no business sharing the other one: the
+/// session socket's queue is four deep, and an audio pump waiting
 /// behind a video backlog stops draining the bridge, which then drops wave buffers.
 /// Every reference client this was checked against — Myrtille, FreeRDP, Guacamole —
 /// keeps sound off the path that carries pictures.
@@ -596,7 +569,7 @@ pub struct SessionManager {
     /// The slot's one link-feedback handle, shared between whichever ws bridge is
     /// attached (writer) and whichever engine is running (reader). One rather than
     /// one per attachment because the engine outlives attachments: the handle's
-    /// identity has to survive a reattach for the running [`crate::encode::TileSink`]
+    /// identity has to survive a reattach for the running [`crate::encode::VideoSink`]
     /// to keep reading it, and [`LinkFeedback::reset`] on every attachment change is
     /// what keeps its *contents* from outliving the browser they measured.
     feedback: Arc<LinkFeedback>,
@@ -793,22 +766,7 @@ impl SessionManager {
         // this socket, so a browser that dropped and came back is still listening —
         // which is the whole point of giving it a socket of its own.
 
-        // Sized for whatever is selected, because both queues are in series between
-        // the engine and the socket: leaving this one deep would put the buffering
-        // back that the engine's own shallow queue was meant to remove.
-        //
-        // With nothing selected, sized for the shallowest thing that *could* be picked
-        // next — which is the ordinary case, not an edge one: the first attach always
-        // lands on the picker, and `connect` builds a new engine channel but not a new
-        // attachment. Sizing this for tiles and then connecting to a video target
-        // would leave 64 whole frames of slack in front of the engine's 4, which is
-        // the backpressure `Congestion` reads to notice a link falling behind. A
-        // gateway with no video target keeps 64 exactly as before.
-        let depth = st.selected.as_ref().map_or_else(
-            || self.targets.iter().map(frame_buffer).min().unwrap_or(FRAME_BUFFER),
-            frame_buffer,
-        );
-        let (event_tx, events) = mpsc::channel(depth);
+        let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
         st.next_attach_id += 1;
         let id = st.next_attach_id;
         st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
@@ -846,7 +804,6 @@ impl SessionManager {
                     camera: target.camera,
                     microphone: target.microphone,
                     render: engine.plan.describe(),
-                    grid_debug: target.render_grid_debug,
                 })
             }
             // A target with no engine is a claim change's teardown, and nothing
@@ -1279,7 +1236,7 @@ impl SessionManager {
             };
             let status = self.start_engine(&mut st, target, display, chroma);
             // try_send is ordered here: this runs under the state lock before the
-            // just-spawned pump can acquire it, so Connected lands before any tile.
+            // just-spawned pump can acquire it, so Connected lands before any frame.
             // It can fail only behind frames the *previous* engine left queued,
             // and the status then goes out behind them instead — the browser
             // clears the desktop on `connected`, so whatever it paints of the
@@ -1340,7 +1297,7 @@ impl SessionManager {
         let render = plan.describe();
         info!("session: connecting to target {:?} ({render})", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
-        let (frame_tx, frame_rx) = mpsc::channel(frame_buffer(&target));
+        let (frame_tx, frame_rx) = mpsc::channel(FRAME_BUFFER);
         st.next_generation += 1;
         let generation = st.next_generation;
         // Audio travels on neither `frame_tx` nor the socket it feeds: that queue is
@@ -1400,7 +1357,6 @@ impl SessionManager {
             camera: target.camera,
             microphone: target.microphone,
             render,
-            grid_debug: target.render_grid_debug,
         };
         let index = self.targets.iter().position(|t| t.name == target.name);
         st.select(target, index);
@@ -1783,15 +1739,8 @@ mod tests {
             audio_codec: meta.audio_codec,
             camera: meta.camera,
             microphone: meta.microphone,
-            render_type: crate::config::RenderType::Tiles,
-            render_subtype: None,
-            image_quality: None,
             video_quality: None,
-            render_motion: false,
-            render_motion_debug: false,
             render_chroma: None,
-            render_classify_debug: false,
-            render_grid_debug: false,
             render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,
@@ -1803,7 +1752,6 @@ mod tests {
     /// A target that streams the whole desktop as video.
     fn video_target(name: &str) -> TargetConfig {
         TargetConfig {
-            render_type: crate::config::RenderType::Video,
             video_quality: Some(60),
             ..fake_target(name)
         }
@@ -1903,7 +1851,6 @@ mod tests {
                 camera: got_camera,
                 microphone: got_microphone,
                 render: _,
-                grid_debug: _,
             }) => {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
@@ -2194,7 +2141,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan::Video { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: want },
+                RenderPlan { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: want },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2239,7 +2186,7 @@ mod tests {
         mgr.connect(att.id, "video-auto", None).await.unwrap();
         assert!(matches!(
             hook_rx.try_recv(),
-            Ok(RenderPlan::Video { chroma: Chroma::Full, .. })
+            Ok(RenderPlan { chroma: Chroma::Full, .. })
         ));
         expect_connected(&mut att.events, "video-auto").await;
 
@@ -2250,7 +2197,7 @@ mod tests {
         let mut taken = mgr.attach(&second, None, Chroma::Subsampled).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("the takeover reconnects the selected target"),
-            RenderPlan::Video { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled },
+            RenderPlan { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled },
             "the reconnect must follow the browser that took over"
         );
         expect_connected(&mut taken.events, "video-auto").await;
@@ -2289,7 +2236,7 @@ mod tests {
         mgr.connect(att.id, "video-auto", None).await.unwrap();
         assert!(matches!(
             hook_rx.try_recv(),
-            Ok(RenderPlan::Video { chroma: Chroma::Full, .. })
+            Ok(RenderPlan { chroma: Chroma::Full, .. })
         ));
         expect_connected(&mut att.events, "video-auto").await;
 
@@ -2304,7 +2251,7 @@ mod tests {
         let mut changed = mgr.attach(&token, None, Chroma::Subsampled).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan::Video { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled },
+            RenderPlan { quality: 60, adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN), chroma: Chroma::Subsampled },
             "the rebuilt stream must follow the browser that came back"
         );
         expect_connected(&mut changed.events, "video-auto").await;

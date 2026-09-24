@@ -1,14 +1,14 @@
 // The worker half of the desktop paint path.
 //
 // The page transfers each binary frame here, and this module runs
-// `createTilePainter` — slot table, decoded bitmap cache, `VideoDecoder` table,
-// batch draw loop — against an `OffscreenCanvas` handed over once.
+// `createFramePainter` — the `VideoDecoder` and the batch draw loop — against an
+// `OffscreenCanvas` handed over once.
 //
-// **What the boundary buys is not the decoding.** `createImageBitmap` and
-// `VideoDecoder` hand their work to the browser's own threads wherever they are
-// called from, so moving them here makes them no faster and takes nothing off the
-// main thread that was ever really on it. What does move is the batch parse, the
-// ordering glue, and a batch's worth of `drawImage` calls — and, the part that
+// **What the boundary buys is not the decoding.** `VideoDecoder` hands its work to
+// the browser's own threads wherever it is called from, so moving it here makes it
+// no faster and takes nothing off the main thread that was ever really on it. What
+// does move is the batch parse, the ordering glue, and a batch's `drawImage` calls
+// — and, the part that
 // earns the boundary, presentation: a transferred canvas commits from this thread,
 // so a frame reaches the screen without the main thread being scheduled at all.
 // That thread carries input and React, and a remote desktop is largely how quickly
@@ -31,9 +31,10 @@
 // the painter's own generation drops the decodes already in flight inside it. It is
 // also the cure and not only the escape — closing the decoders settles every access
 // unit the stuck draw is holding, so the chain it abandoned unwedges behind it.
+
+import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { binaryFrameKind } from "./protocol.ts";
-import { createTilePainter, type TilePainter } from "./tilePainter.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
@@ -76,16 +77,14 @@ export type PainterCommand =
    * Echoed as `resized` like a resize.
    */
   | { type: "view"; view: MosaicView | null; seq: number }
-  | { type: "videoFormat"; stream: number; format: VideoFormat }
-  | { type: "videoEnd"; stream: number }
-  /** The attachment boundary: wipe the bitmap, the caches and the decoders. */
+  | { type: "videoFormat"; format: VideoFormat }
+  /** The attachment boundary: wipe the bitmap and the decoder. */
   | { type: "clear" };
 
 /** What the worker sends back: the painter's callbacks and the resize echo. */
 export type PainterEvent =
-  | { type: "cacheReset" }
   | { type: "videoError"; reason: string | null }
-  /** A stream's decoder was thrown away, and needs a keyframe to resume. */
+  /** The decoder was thrown away, and needs a keyframe to resume. */
   | { type: "videoNeedsKeyframe"; reason: string }
   | {
       type: "painted";
@@ -107,12 +106,12 @@ export interface PainterHost {
  */
 export function createPainterWorker(
   post: (event: PainterEvent) => void,
-  makePainter: typeof createTilePainter = createTilePainter,
+  makePainter: typeof createFramePainter = createFramePainter,
   now: () => number = () => performance.now(),
 ): PainterHost {
   let canvas: OffscreenCanvas | null = null;
   let ctx: OffscreenCanvasRenderingContext2D | null = null;
-  let painter: TilePainter | null = null;
+  let painter: FramePainter | null = null;
   // While a composition is set, the framebuffer the painter draws into, off
   // screen; the canvas then shows `view` drawn from it. Null otherwise, when the
   // painter draws straight onto the canvas.
@@ -213,7 +212,6 @@ export function createPainterWorker(
           ctx = canvas.getContext("2d", { alpha: false });
           painter = makePainter({
             context: () => (framebuffer ? framebufferCtx : ctx),
-            onCacheReset: () => post({ type: "cacheReset" }),
             onVideoError: (reason) => post({ type: "videoError", reason }),
             onVideoNeedsKeyframe: (reason) =>
               post({ type: "videoNeedsKeyframe", reason }),
@@ -226,12 +224,16 @@ export function createPainterWorker(
           const born = epoch;
           // The kind is still read rather than assumed: a batch parser handed
           // anything else would spend its way through the bytes looking for
-          // tile records. Only a real batch earns an acknowledgment.
+          // records. Only a real batch earns an acknowledgment.
           queued(async () => {
             if (binaryFrameKind(command.data) !== "batch") {
               return;
             }
             const startedAt = now();
+            // A batch the painter dropped as malformed is acknowledged too. The
+            // acknowledgment is the gateway's send window, not a claim that pixels
+            // landed — withholding it would hold that window shut — and the painter
+            // has already asked for the keyframe that repairs the stream.
             await painter?.draw(command.data);
             if (born === epoch) {
               compose();
@@ -286,13 +288,7 @@ export function createPainterWorker(
           });
           break;
         case "videoFormat":
-          queued(() => painter?.setVideoFormat(command.stream, command.format));
-          break;
-        case "videoEnd":
-          // Queued behind the frames already posted, like a format is: the units
-          // still in the chain belong to the stream this ends and must decode
-          // before its decoder goes.
-          queued(() => painter?.endVideoStream(command.stream));
+          queued(() => painter?.setVideoFormat(command.format));
           break;
         case "clear":
           // Out of the chain, and starting a new one — see the module comment.

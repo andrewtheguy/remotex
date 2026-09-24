@@ -142,11 +142,9 @@ pub struct Framebuffer {
 /// **Not a bounding box over everything**, which is what this used to do and what
 /// the graphics pipeline cannot afford. EGFX reports a frame as disjoint 64x64
 /// tiles, so a box round a video in one corner and a clock in the other is most of
-/// the desktop; the gateway then cuts that box into full-width bands, and
-/// `render_subtype = "classify"` judges each band as one tile. Text swept in beside
-/// a moving picture reads as photographic and goes out lossy — and, being
-/// unchanged from then on, is never sent again. Merging the cheapest pair keeps the
-/// list bounded *and* the damage the shape the host drew it.
+/// the desktop, every pixel of it repacked into the stream's mirror for nothing.
+/// Merging the cheapest pair keeps the list bounded *and* the damage the shape the
+/// host drew it.
 pub(super) fn stage(pending: &mut Vec<Rect>, rect: Rect, cap: usize) {
     debug_assert!(cap > 0, "a cap of zero has nowhere to put a rectangle");
     if let Some(waiting) = pending.iter_mut().find(|waiting| waiting.overlaps(&rect)) {

@@ -10,7 +10,7 @@ which is the only client.
 ```text
 browser SPA over loopback or the network
    │  /api: authentication, targets, session claim
-   │  /ws: JSON control/input, binary image batches
+   │  /ws: JSON control/input, binary video batches
    │  /ws/audio: the audio format, then binary audio frames
    │  /ws/camera: the camera format and H.264 samples up, start/stop down
    ▼
@@ -19,9 +19,9 @@ axum server ── single session slot ── protocol engine
                                          └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
-RDP and VNC frames are decoded in the gateway and sent as independent image tiles
-or as VP9 streams, according to the target's render plan. Tiles are lossless
-PNG by default, with WebP available at fixed quality. A Mac is reached
+RDP and VNC frames are decoded in the gateway and sent as one VP9 stream of the
+whole desktop, at the quality and chroma the target's render plan resolves to. A
+Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the
 `ard-high-performance` RFB 003.889 path. Remote audio is either encoded as
@@ -48,12 +48,12 @@ see [Camera frames](#camera-frames).
 | `server.rs`, `auth.rs` | HTTP routes, SPA serving, login sessions |
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
-| `rdp.rs` | RDP engine: damage, tiles, input, cursor, resize, clipboard, over `rdp_client` |
+| `rdp.rs` | RDP engine: damage, input, cursor, resize, clipboard, over `rdp_client` |
 | `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
-| `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
-| `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
+| `shadow.rs` | change detection: what the client already has |
+| `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | libvpx — the video codec |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
@@ -62,412 +62,68 @@ Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
 RDP and VNC pass dirty pixels through the ordered encoder before reaching that
 boundary.
 
-Ordering is a correctness requirement throughout the frame path. Tiles replace
-rectangles without delta state, and a resize changes their coordinate space.
-The encoding and outbound queues therefore keep tiles, resizes, and cursor
-updates in source order even when individual tile encodes finish concurrently.
+Ordering is a correctness requirement throughout the frame path. Every access unit
+is a change from the one before it, and a resize changes the picture that follows.
+The encoding and outbound queues therefore keep access units, resizes, and cursor
+updates in source order even though each encode runs off the engine's own task.
 
-### The render dial
+### The video stream
 
-How a target's pixels reach a client is a per-target choice on two flat axes, plus a
-quality: `render_type` is the *transport* — what kind of thing goes on the wire —
-and `render_subtype` the codec of the base tiles, with `image_quality` (1–100) the
-fixed quality of that codec's lossy side. Two axes rather than one flat mode list
-because transport and codec vary independently: the tiles transport takes every
-base codec. The legal
-pairings are validated at config-load time in `ConfigFile::parse_with`:
+Every target reaches the browser the same way: the whole framebuffer as one
+inter-frame VP9 stream, for the whole session.
 
-`render_type`, the transport:
+> **There is no tile transport any more.** Earlier releases also sent each changed
+> region as an independent PNG or WebP still (`render_type = "tiles"`, with
+> `render_subtype`, `image_quality`, a per-tile photographic classifier, a
+> `render_motion` switch that streamed only the moving regions, a slot cache,
+> `COPY` records and the `render_grid_debug` overlay). All of it was removed after
+> **v0.0.253**; `git checkout v0.0.253` recovers it, including the classifier's
+> research notes in `docs/still-image-classification-research.md`.
 
-- `tiles` — every changed region as an independent still image at the base codec.
-  The default; with the default subtype and no `render_motion` it is byte-identical
-  to the PNG-only gateway that preceded the dial.
-- `video` — the whole desktop as one video stream at `video_quality`.
+A target's stream keys are per target, and every one has a default:
 
-`render_subtype`, the base codec — any of the three under `tiles`:
+- `video_quality` (1–100, default 90) is the ceiling the stream holds to.
+- `render_chroma` (`"auto"`, the default, or `"420"` / `"444"`) is how much colour
+  the stream carries per pixel. A target that writes nothing resolves it per
+  browser; the two fixed answers are selections no decoder can overrule. See
+  [the codec](#the-codec) for why it, and not the quality, is where a desktop
+  stream's picture goes, and [choosing a chroma](#choosing-a-chroma) for when to
+  take the decision away from the browser.
+- `render_adaptive` (on unless a target writes `false`) lets the quality track the
+  measured link down to `render_adaptive_min` (default 20, or the dial itself where
+  that is lower) — see [what the link will bear](#choosing-a-chroma) for the signal
+  and the walk. Turned off, the walk is the pressure-only one floored at 1.
 
-- `png` — lossless, no quality key. The default, and the only lossless answer
-  there is: the choice this axis offers is how much of the screen goes lossy.
-- `webp` — every base tile WebP at `image_quality`.
-- `classify` — per tile, what its own pixels are: photographic content WebP at
-  `image_quality`, flat UI and text lossless PNG.
-
-Lossy is WebP and only WebP: it is fewer bytes than the alternatives at a matched
-quality, every client this gateway has decodes it natively, and one encoder is one
-thing for the operator to reason about. Its measured place — smaller output, a
-slower encode — is in
-[Still-image classification in remote desktop implementations](still-image-classification-research.md#webp-the-one-lossy-still).
-
-`video` is the one transport with nothing on the subtype axis, and refuses it: it
-sends no tiles at all — one fixed region, the whole desktop, for the whole session
-— so there is no per-tile codec left to name.
-
-`render_motion = true` is a switch on `tiles`, not a third transport: it adds a
-video stream per coalesced region of the cells changing fast (`video_quality`), and
-re-sends each cell at the base encode once it settles. It
-changes nothing about what a tile is or how one travels
-— the base codec is still the base codec, because the base encode is still a still
-image; only what is moving becomes a stream. It is refused under `video`, which
-streams the whole desktop already and has no settled cells left to discount.
-
-**Nothing on this dial names a video codec, because video is VP9 only** — see
-[the codec](#the-codec).
-
-No classifier runs under the `webp` subtype: it sends *every* tile
-lossy, so flat UI and text soften along with photographic content. That is the
-honest trade of a single fixed knob. `classify` is that trade removed for a little
-CPU: a picture classifier (`src/classify.rs`) reads each tile on the encode worker
-— a palette gate, then the shape of neighbour-to-neighbour deltas — and only what
-reads as photographic takes the lossy encode; PNG is the verdict for everything flat,
-sharp, too small to hold a palette, or ambiguous, because a photo sent lossless only costs bytes while
-text sent lossy costs legibility until that region next changes. The decision is
-per tile and stateless, so the same window answers differently as content scrolls
-through it. Under `render_motion` it composes: a settled cell is classified, a
-moving one takes the motion encode (a cell changing fast is not worth classifying).
-`render_classify_debug = true` outlines the tiles sent
-lossy in yellow — drawn on the copy handed to the encoder, never on the pixels
-the shadow records, so the mark lives exactly as long as the lossy tile it
-describes, and a colour of its own so it stays readable beside the motion marks.
-The classifier's cross-project source review and measurement candidates live in
-[Still-image classification in remote desktop implementations](still-image-classification-research.md).
-
-Three more keys sit across the whole dial rather than on either axis.
-`render_chroma` (`"auto"`, the default, or `"420"` / `"444"`) is how much colour a
-*stream* carries per pixel — every stream the target has, `video` and a
-`render_motion` region alike — and is refused on a target that streams nothing. A
-target that writes nothing resolves it per browser; the two fixed answers are
-selections no decoder can overrule. See [the codec](#the-codec) for why it, and not
-the quality, is where a desktop stream's picture goes, and
-[choosing a chroma](#choosing-a-chroma) for when to take the decision away from the
-browser.
-`video_quality` (default 90) is the ceiling every stream holds to, and
-`render_adaptive` lets it track the measured link down to `render_adaptive_min`
-(default 20, or the dial itself where that is lower) — see [what the link will bear](#the-codec) for the signal and the walk.
-The walk is on unless a target writes `render_adaptive = false`, which leaves the
-pressure-only walk floored at 1 that the streams had before the key existed. All
-three are a stream's keys, refused on a target that streams nothing whichever way
-they are set, and `image_quality` never moves, lossy base or not. A stream that fell
-below its dial is sharpened by its own next frame, and a region that stops is owed a
-cleanup whatever quality it ran at. A still is sent once: one the link coarsened
-would keep that picture until its pixels next changed, and coming back for it means
-encoding again something that was never going to be sent twice.
-
-`render_grid_debug = true` is the third QA aid and the one the *client* draws: the
-gateway's tile lattice, dashed, over the desktop. It is refused on
-`render_type = "video"`, which sends no tiles and so has no boundary to draw, and
-it changes nothing about the encode — no key of `RenderPlan` carries it, because no
-encoder needs to know. The switch reaches the browser on `ServerMsg::Connected`
-(`gridDebug`); the pitch rides every `ServerMsg::Resize` (`tileGrid`), because it
-follows the framebuffer's density — 64 points, so 64 pixels at 1x and 128 at 2x —
-and the browser draws it on a canvas of its own over the framebuffer
-(`frontend/src/tileGrid.ts`). That split is forced rather
-than chosen: the other two aids mark a decision made about one tile and so belong
-in that tile's pixels, while the lattice is fixed to the framebuffer and the pixels
-are not — a `COPY` slides them sideways, a cached tile is one bitmap redrawn
-wherever the server names it, and a corner nothing has touched since the last
-repaint is never sent again. Baked into tiles the grid would shear off with the
-first scroll and never reach the still parts at all.
-
-The still dial costs no wire change. A tile record's first byte is already its format
-(`Tile::FORMAT_PNG` / `FORMAT_WEBP`) and the client decodes either of
-them through `createImageBitmap` from a MIME type. What streams costs one: a
-`VIDEO` record, described under the client protocol below.
-
-The engines never see the config enums. The axes and the qualities collapse to one
-`RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
-the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug }` and
-`Video { quality, adaptive, chroma }` —
-rather than a struct with a flag, because the two share no code path worth sharing
-and the compiler is what stops a consumer handling only the first. The plan's `motion` is an
-`Option<MotionEncode>`, and the `Option` is the switch that keeps the whole motion
-path off: a target that does not ask for it does not pay for it. The adaptive floor
-sits beside each stream's quality — on `Video` and on `MotionEncode` — so a plan
-with no stream has nowhere to put one.
+The engines never see the config keys. They collapse to one `RenderPlan`
+(`quality`, `adaptive`, `chroma`) at the config boundary in
+`TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
+`VideoSink` in `src/encode.rs`:
 
 ```text
-render_type / render_subtype / image_quality / video_quality / render_motion*
-  → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
-  → TileSink::new(engine, frame_tx, plan)
-  → Tile::from_rgb / from_rgb_webp
+video_quality / render_chroma / render_adaptive*
+  → TargetConfig::render_plan(browser chroma) → RenderPlan → vnc::run / rdp::run
+  → VideoSink::new(engine, frame_tx, plan) → DesktopStream (src/stream.rs) → vp9::Stream
 ```
 
-`TileCodec` is the resolved answer — `Png`, `Webp { quality }` or
-`Classify { quality, debug }` — so which tiles reach a lossy encode stays the
-classifier's question and the quality stays the one number the operator wrote.
+Every size an engine asks a remote for is held under the stream's picture ceiling
+(`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a pinned
+`width`/`height` past it is refused at config load.
 
-Because `TileSink` is shared, RDP and VNC get every codec from one implementation,
-and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
-`encode_webp` wraps `libwebp`, which its sys crate compiles with `cc` — no CMake,
-no system library, and libwebp picks its own SIMD kernels at run time, which keeps
-the baseline CPU floor packaging/README.md requires.
-
-#### `render_motion`: a discount on what is too busy to notice
-
-`render_motion` is not a second way to encode every tile, which is why it is a
-switch on `tiles` rather than a `render_type` of its own. It builds on the base
-encode a target already has and changes nothing about it — the base is read from
-`render_subtype` and `image_quality`, exactly as it is without the switch — and
-hands the cells currently changing fast to a video stream per coalesced moving
-region instead. A lossless base is the configuration a fixed quality cannot express
-at all, and the interesting one: text and flat UI stay perfect and are never
-re-encoded, and only what moves goes to a stream.
-
-```toml
-[[targets]]
-render_subtype = "png"    # base: what a settled cell gets
-render_motion  = true
-video_quality  = 10       # moving regions: as cheap as it takes
-```
-
-The moving encode has its own quality because it is not a cheaper version of the
-base: what a settled cell gets is a still picture, and what is moving is not one at
-all. There is no codec key beside it — a moving region is a VP9 stream, the same
-way `render_type = "video"` is, and the only per-target choice inside it is
-`render_chroma`.
-
-The switch is protocol-independent and has no subtype restrictions: every engine
-normalizes its damage before it reaches the shared sink that detects and encodes
-motion.
-
-Detection is in `src/encode.rs`, owned by the sink both engines already funnel
-their damage through:
-
-- **Cell identity.** `Shadow` is pixel-exact and has no stable cell identity, so
-  churn is keyed to the tile grid (`TileGrid`): 64 *points* (`CELL_POINTS`) on
-  each axis, which is 64 pixels on a 1x framebuffer and 128 on a 2x one
-  (`TileGrid::at` the announced scale). Points rather than pixels because the
-  grid is a unit of work, and a fixed pixel pitch would give a Retina desktop four
-  times the cells — four times the hashes, keys, copy-search probes and tile
-  records — for the same window doing the same thing. Every consumer learns the
-  grid from the same `ServerMsg::Resize` that states the size: the engine's
-  shadow, the sink, the regions and the copy search, so no two can disagree.
-  `Rect::cells` cuts a rectangle at the grid lines on both axes, and
-  `Rect::cell_key` names the piece.
-  Cutting rather than snapping outward matters: RDP and VNC describe the same
-  moving region with different rectangles from frame to frame, and a key that moved
-  with them would count no churn, but snapping outward would ship pixels that did
-  not change — and VNC could not reach them anyway, since it crops from the
-  rectangle it just read.
-- **What counts as change.** `Shadow::accept` returns a `Changed`: one bounding box
-  round everything that differs, *and* the grid cells that actually differ. The two
-  are not the same, and conflating them was a real fault — a video at one end of the
-  screen and an animated banner at the other put every cell between them inside one
-  box, and four reports like that inside the churn window read as the whole screen in
-  motion, which is how a still sidebar, a menu bar and a Windows taskbar ended up at
-  quality 10. The box still decides what is *sent*, because those pixels are correct
-  and only redundant; the cell list decides what is *counted*. A cell only along for
-  the ride is left at the base encode and settled — its pixels are going out anyway,
-  so exact costs only bytes, and exact is what discharges a debt.
-- **Churn → encode.** Each cell keeps an 8-bit shift register of which of the last
-  `CHURN_WINDOW` slots of `CHURN_SLOT` wall time changed it — 4 of the last 8
-  hundred-millisecond slots at `CHURN_MOVING`, at which the cell is in motion and
-  takes the motion codec. A hard switch rather than a ramp, because the switch is
-  what a measurement can read.
-
-  Slots of time rather than frames, because neither engine has a frame worth
-  counting. RDP's outer loop turns once per PDU received, most of which redraw
-  nothing, so a counter driven by it races ahead of the repaints and a cell's
-  history ages out between its own changes. VNC's turns once per
-  `FramebufferUpdate`, which is damage-driven and so much closer, but its rate is
-  set by the update-request loop rather than by the remote: a cell changing in every
-  update reads the same whether that is sixty times a second or twice. Several
-  changes inside one slot count once, so an engine that reports one change as ten
-  rectangles does not read as ten times as busy, and "in motion" stays one statement
-  about the remote rather than two about the transports.
-- **Splitting only where it matters.** A band whose cells are all quiet is sent
-  whole and at the base encode, so a target with nothing moving is byte-for-byte
-  what the same target sends without `render_motion` at all. Only a band containing a
-  streamed cell is cut at the grid — which is what makes a video in a window cost
-  its own cells their quality and cost the text beside it nothing. A cell a live
-  stream carries is not sent as a tile at all: its pixels reach the client through
-  that stream, and sending them twice would discharge a debt the stream has not paid.
-- **Cleanup.** The mirror the streams encode from already holds the exact current
-  source for every pixel, so a cleanup is a crop of it and is the newest truth by
-  construction. The debt is two words — which cell, and when a unit last carried it
-  — and a cell a live stream still covers is never due, so a cleanup can never
-  overtake a stream that is still running. A `CLEANUP_TICK` interval in `order_loop`
-  re-sends cells idle past `CLEANUP_IDLE` at the *base* encode,
-  `MAX_CLEANUPS_PER_TICK` at a time, oldest first and row by row among cells of one
-  age, so a paused screen sharpens on its own, a whole stripe per tick, without a
-  client repaint. The timer has to be its own, because the case it
-  exists for is a remote that has stopped sending frames — which is also the only
-  thing that will ever notice a stream has gone quiet. On a `render_adaptive` target
-  a client that is behind holds the cleanups back, since a tickful of stills into a
-  link the streams are being coarsened to fit costs the live motion its quality —
-  but only for `CLEANUP_HELD` (5 s): the streams beside a stopped cell may never
-  stop, and a cell left at a stream's quality for good is the worse failure.
-- **Resets.** Motion state is cleared on resize, where the keys no longer name the
-  same pixels, and on reattach, where the repaint re-sends every pixel at the base
-  encode anyway.
-- **`render_motion_debug`.** A QA aid, off unless asked for, that outlines every
-  piece a split region emits in the pixels themselves: magenta for the motion
-  encode, cyan for a quiet cell beside it, green for a cleanup. It exists because
-  the alternative is inferring the decision from how blurry something looks, and
-  the two failures that produces look alike from a screenshot: motion armed on
-  something that is not moving, and a stale lossy region nothing is going to
-  replace. Under the overlay they are distinct — the first is magenta, the second
-  carries no mark at all, since an unmarked region was sent whole at the base
-  encode. The mark goes on the copy handed to the encoder — on the crop a region
-  stream encodes rather than on the mirror — never on the pixels the shadow
-  recorded, so a cleanup erases the outline it replaces rather than restoring it.
-
-Cleanups ride the wire as ordinary tiles; nothing about the record changed. What it
-cost is in the `encode totals` line, where `unit` and `cleanup` are read together:
-every cleanup is a region sent again as a still, so a scheme paying more in re-sends
-than it saves in streaming shows up as a cleanup byte count rivalling the saving.
-
-##### The streams themselves
-
-What the detection hands the moving cells to is an inter-frame video stream per
-coalesced region (`src/regions.rs`, encoding through `src/vp9.rs`), with the base
-codec carrying every cell outside one.
-
-- **Which regions.** `components` and `merge` in `src/regions.rs` — together
-  `coalesce`, the pure pair the tests exercise — take the cells in motion, group
-  them into 4-connected components, and take each component's bounding box.
-  A component of fewer than `MIN_STREAM_CELLS` (5) moving cells — a 2×2 block, the
-  most a spinner up to a cell wide can touch — is not a video and goes to the still
-  codecs before anything else is decided: a spinner in one corner while a video
-  plays in the other stays on `render_subtype`, where it costs a few kilobytes a
-  change, rather than paying for an encoder, a keyframe, a decoder at the far end
-  and a cleanup every time it stops and starts. It counts neither towards the cap
-  nor as a merge partner, so it cannot pull a larger region's box out to meet it;
-  its cells inside some larger region's box are carried by that stream regardless.
-  Over `MAX_STREAMS` (4) it merges the pair whose merged box adds the fewest cells;
-  a merge that would cover more than twice the cells actually moving inside it is
-  refused, and the smallest region goes to the still codecs instead. That last rule
-  is `Changed::cells`' fault one level up: a banner ad in one corner must not put the
-  screen in a stream because a video is playing in the other.
-- **When one starts and stops.** While a stream is live, geometry moves at most once
-  per `RETUNE` (500 ms); while none is, the first region streams at the frame it
-  qualifies on, since there is nothing a wait could save and every frame of it
-  meanwhile is lossless tiles.
-  A region that shrinks keeps its stream — the idle margin codes as skipped
-  macroblocks, where a restart costs an encoder and a keyframe — and one that grows
-  past its rectangle gets a new stream, because an inter-frame stream means nothing
-  if its rectangle moves. A region with nothing worth a stream moving in it for
-  `STREAM_IDLE` (1 s, well clear of `RETUNE` plus a cleanup tick, so the tick cannot
-  end a stream between the retune that saw it moving and the next) ends — the same `MIN_STREAM_CELLS` gate that starts a stream is
-  what keeps one alive, so a video pausing under a buffering spinner ends its
-  stream and sharpens exactly as a pause with no spinner does.
-  A screen that has stopped changing produces no frame boundary at all, so the
-  cleanup tick expires idle streams itself; it may only *end* them, never start one,
-  which is what keeps a cell from being delivered twice.
-- **Where a stream's rectangle is.** A stream is built over exactly the region's
-  cell bounding box, and nothing around it. The still pixels beside a moving region
-  keep whatever crisp tile last painted them and are owed nothing; only the cells
-  inside a stream are streamed lossily and cleaned up afterwards. A stream a region
-  has shrunk inside is the exception: it keeps its whole rectangle, and every cell of
-  it — the margin included — stays covered and owed until it ends. The trade is on
-  the far end: a
-  decoder is configured for one picture size, a unit at another is a different
-  picture, so a region that grows replaces its decoder — and a *hardware* decoder
-  answers that by tearing down a platform decode session and asking for another.
-  What keeps that affordable is that a shrinking region keeps its stream, that
-  geometry moves at most once per `RETUNE`, and that `VideoEnd` hands finished
-  sessions back rather than leaving them held.
-
-  Two components' cells cannot overlap, but their bounding boxes can — a cell tucked
-  into an L's corner is its own region inside the L's box, or two L's interlock — and
-  a cell in two live regions is a cell two streams both carry, so `merge` joins
-  an overlapping pair into its union. A union that adds no cell is always taken; one
-  past the `MERGE_WASTE` veto is refused, and the component with fewer moving cells
-  goes to the still codecs instead.
-- **A stream's end is said, not guessed.** `ServerMsg::VideoEnd { stream }` — the
-  counterpart of `VideoFormat`, and about the resource rather than the picture. A
-  client keys its decoders by stream id and is otherwise never told one is finished;
-  an id simply goes quiet, indistinguishable from a region that is merely still, so a
-  browser accumulated a decoder per id it had ever seen and held them for the session.
-  The gateway drains the ended ids on the ordered path — `retune` before the round it
-  took them from, `expire` inside the task the units go out on — because ids are
-  reused, and an end that overtook the next stream's units would close a decoder that
-  had just been built. An id a retune both frees and hands straight back is not an end
-  at all: the decoder on it is still the right decoder for that id.
-
-  A resize ends streams too, and says so. `forget` drops every live stream, but a
-  resize is not an attachment boundary on the client: the worker's `resize` command
-  reallocates the bitmap and touches nothing else, and only `clear` — a repaint or a
-  reattach — empties the decoder table. So the ids `forget` drops are recorded as ends
-  like any other, and the round that was out on a worker when the resize landed —
-  which `take_round` had already taken the live table for — records its own in
-  `put_back`'s stale-epoch branch, the last place that knows a client is holding a
-  decoder for them. Under `Policy::Whole` neither records anything: that dial rebuilds
-  its one stream on the same id and never drains this.
-
-  What the client does with it is *retire*, not close. In the same 98-retune replay the
-  gateway ended a stream 88 times, and most of those ids went straight back to another
-  region at the same picture size — which an open decoder decodes from the next
-  keyframe without being rebuilt. Closing on the spot turned 37 decoder builds into 97,
-  so `videoDecoder.ts` starts a four-second clock instead (`RETIRE_MS`) and any unit on
-  the id cancels it: 39 builds, and the session still comes back.
-- **The debt is a cell key, not a picture.** Every cell a stream covers is owed a
-  crisp re-send from the moment it is streamed, moving or not — the stream codes
-  them lossily either way and nothing else will send them. When the stream ends they
-  come due, and the cleanup crops them out of the **mirror**, which holds the exact
-  current source for every pixel — so there is no way to restore a frame that has
-  been overtaken. A crisp send discharges a cell only if it covered that cell in full.
-- **One mirror, several encoders.** `damage` blits every rectangle into the whole-
-  framebuffer mirror whether or not anything is streaming it, which is what lets a
-  stream start mid-session with correct pixels for its whole rectangle. A round takes
-  the mirror and every stream to one blocking worker: their rectangles are disjoint
-  and bounded by the desktop, so a round costs what one whole-desktop frame costs.
-- **A region is even, or the desktop's own edge is odd.** A region is a union of
-  whole grid cells and both sides of the grid are even (64 or 128), so an odd side can only come
-  from the clip at the desktop's right or bottom edge — where the mirror's own
-  padding is already the column or row the encoder needs. That is why `Stream::new`
-  can assert its geometry rather than pad defensively.
-
-One measurement, so that the shape of the trade is on the record rather than assumed
-— 25 s of the same driven motion on a 1280×800 RDP desktop, release build, with the
-grid cut at 320×64 pixels, the cell of the time (a still per moving cell is now a
-still per 64×64 cell, so that row's tile count and per-tile overhead differ today):
-
-| encode | to the client | encode CPU |
-|---|---|---|
-| a JPEG still per moving cell, quality 10 (JPEG being the lossy still of the time; WebP is smaller) | 4.5 MB | 0.17 s |
-| `render_motion` (a stream per region) at 30 | 0.70 MB | 1.39 s |
-| `video` 60 | 0.45 MB | 5.48 s |
-
-So the regions cost about a sixth of what a still per moving cell costs in bytes,
-with the settled parts left lossless, and a quarter of whole-desktop `video`'s CPU —
-because only what moved was coded, rather than 1280×800 every frame. What it buys
-over `video` is exactness everywhere else; what it costs is bytes. The first row is
-the reason the gateway carries one motion encode rather than two: paying more than
-six times the bytes to save CPU is not a trade a desktop link wants, and a still
-per cell has no way to spend that CPU on anything else.
-
-Both dials that stream share `Congestion`, one verdict for one link: the quality dial
-walks down when a round's push blocks and back up to `video_quality`, never past it.
-Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
-because the same queue carries its still tiles — so `coarsened` in the totals is a
-less sharp signal, which is worth knowing when reading it.
-
-#### `video`: a different transport, not a fourth codec
-
-`render_type = "video"` sends the whole framebuffer as one inter-frame video stream
-for the session — the degenerate case of the region streams above, and it runs the
-same code: one region, fixed at the whole desktop, never retuned (`Policy::Whole` in
-`src/regions.rs`). It is on the `render_type` axis and refuses
-`render_subtype` because an access unit is not the same kind of thing as a tile: a tile is an independent picture — reorderable, cacheable,
-droppable once something covers it — and an access unit is one link in a chain,
-where losing any link decodes wrongly until the next keyframe. `RenderPlan` being an
-enum is that distinction made structural.
-
-Five consequences, each of which is a rule somewhere — and every one of them holds
-for the region streams above too, which is why they run the same code:
+Five rules hold the stream up, and each is a rule somewhere:
 
 - **`Shadow::accept` is a promise.** It records source pixels as delivered the
   moment it accepts them, and nothing re-sends them, so the encoder may never drop a
-  frame (`skip_frames(false)`) and an encode that yields no bitstream leaves the
-  mirror dirty for the next frame to carry rather than clearing it.
-- **The stream is fed rectangles, not frames.** `damage` is called once per damage
-  *rectangle*, and VNC's pixels can only be cropped out of the rect just decoded, so
-  the stream keeps its own whole-framebuffer RGB copy — the mirror — to blit into.
-  `TileSink::frame` encodes it, called at RDP's outputs-loop end (and its `Refresh`
-  arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end. It is a
-  no-op when nothing was blitted, because RDP's loop turns once per PDU and most
-  redraw nothing.
+  frame (`rc_dropframe_thresh = 0`) and an encode that yields no bitstream leaves the
+  stream dirty for the next frame to carry rather than clearing it. The shadow earns
+  its keep all the same: RDP repaints regions that did not change, and a VNC server
+  re-sends unchanged pixels, and those never reach the mirror at all.
+- **The stream is fed rectangles, not frames.** `VideoSink::damage` is called once
+  per damage *rectangle*, and VNC's pixels can only be cropped out of the rect just
+  decoded, so the stream keeps its own whole-framebuffer RGB copy — the mirror — to
+  blit into. `VideoSink::frame` encodes it, called at RDP's outputs-loop end (and its
+  `Refresh` arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end.
+  It is a no-op when nothing was blitted, because RDP's loop turns once per PDU and
+  most redraw nothing. VNC's CopyRect is read back out of the shadow as pixels.
 - **A frame boundary is a proposal, not a frame rate.** Those boundaries occur at
   whatever rate the remote reports damage — 126 a second, measured, on a busy RDP
   desktop against a 30 Hz stream and a 60 Hz screen — and every one of them used to
@@ -477,22 +133,22 @@ for the region streams above too, which is why they run the same code:
   is cheaper than coding the same movement four times over. A forced keyframe skips
   the cap, because a repaint, reattach, takeover or resize is a client with nothing
   on screen. And because a deferral leaves pixels the shadow has already promised,
-  `TileSink::due_at` tells the engines when to come back for them whether or not
+  `VideoSink::due_at` tells the engines when to come back for them whether or not
   more damage arrives — RDP in a `select!` arm beside its layout retry, VNC raced
   against its next message read, at a message boundary so a flush cannot split a
   `FramebufferUpdate`.
-- **`src/wire.rs` must leave an access unit alone.** Never cached into a slot, never
-  a `TILE_REF`, and outside the coverage relation in both directions. Coverage is
-  sound reasoning about pixels nobody could have seen; under `video` every record
-  covers the whole framebuffer, so each covers its predecessor exactly. That is not
-  enforced by a check but by the record kinds: a `VIDEO` record never reaches the
-  cache or the coverage test, so neither has to know about it.
-- **The picture may be a pixel larger than the region.** The 4:2:0 conversion needs
-  even sides — VP9 itself does not, nor 4:4:4, and both are held to them anyway — so the mirror is
-  padded up with its edge repeated (black would be a seam the encoder paid for every
-  frame). The record header carries the *true* rectangle and the
-  client crops — reporting the padded size would push a paint past the framebuffer,
-  which the renderer drops outright rather than clamps.
+- **The encode is pipelined, and serial.** A round takes the mirror and the encoder
+  to a blocking worker; the spare mirror takes the blits meanwhile and the order task
+  puts the round back when it lands, signalling `round_returned` if pixels arrived
+  while it was away. At most one round is out, because two encoders on one chain of
+  frames would decode wrongly. A resize while a round is out drops that round on its
+  return (its epoch is stale), and the pixels the new desktop blitted meanwhile are
+  owed a stream of their own.
+- **The picture may be a pixel larger than the desktop.** The 4:2:0 conversion
+  needs even sides — VP9 itself does not, nor 4:4:4, and both are held to them
+  anyway — so the mirror is padded up with its edge repeated (black would be a seam
+  the encoder paid for every frame). The record header carries the *true* desktop
+  size and the client crops.
 
 `video_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
 0–63 (the floor is where screen content goes visually lossless — mapping past it
@@ -599,7 +255,7 @@ encoder rather than rebuilding it: a rebuild would force a keyframe per adjustme
 spending a few hundred KB exactly when bytes are scarce.
 
 `render_adaptive` gives the same walk a second signal and an operator's
-floor, on every streaming target that has not turned it off. The signal is the client's own lag: the paint window already tracks how
+floor, on every target that has not turned it off. The signal is the client's own lag: the paint window already tracks how
 long the oldest unacknowledged batch has been owed, and `LinkFeedback`
 (`src/feedback.rs`) publishes that age minus a baseline — the smallest recent
 end-to-end time, so distance never reads as queueing; RustDesk and Guacamole
@@ -608,16 +264,12 @@ a behind frame even when nothing local blocked, which is exactly the case the
 paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
 flight while every queue stayed shallow. The walk's floor moves from 1 to
 `render_adaptive_min`. Under `render_adaptive = false` the walk is pressure-only.
-With or without it a tile's quality is fixed: Guacamole scales a still's quality
-with the same lag, but a still sent coarse has nothing coming back for it, and on a motion plan a
-quiet band also discharges what its cells were owed — a debt a coarse copy has not
-paid.
 
-The walk only runs when a round is taken, and under `video` a round is only
-taken when something changed, so a desktop that stops moving right after the link
-coarsened it would keep that picture, and the walk would stay below the dial, until
-something changed again. The order task's cleanup tick is what comes back for it.
-Once the stream has been idle `CLEANUP_IDLE` since a round that went out below the
+The walk only runs when a round is taken, and a round is only taken when something
+changed, so a desktop that stops moving right after the link coarsened it would keep
+that picture, and the walk would stay below the dial, until something changed again.
+The order task's settle tick is what comes back for it. Once the stream has been
+idle `SETTLE_IDLE` since a round that went out below the
 dial, and on a `render_adaptive` target the lag has cleared, it takes the dial back
 and marks the unchanged mirror dirty. The engine encodes that as one inter frame.
 libvpx codes the residual of unchanged blocks at the finer quantizer, so the frame
@@ -625,23 +277,21 @@ sharpens the whole desktop without a keyframe; the vp9 test
 `a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards that. A
 stream that went out at the dial owes nothing and sends nothing when it goes quiet.
 
-That signal only works because those queues are shallow. `FRAME_BUFFER` is 64, sized
-for tiles — a 1080p repaint is ~17 bands — but under `video` one message is a whole
-frame, and 64 of them in each of two queues in series is seconds of buffered
-picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
+That signal only works because those queues are shallow. One message is a whole
+frame, and a deep queue at each of two hops in series is seconds of buffered
+picture, so `FRAME_BUFFER` is 4 at both.
 
 Shallow in messages is not shallow in time, and time is what a person at the
-keyboard feels: a message is whatever a tile compressed to, so on a link that
+keyboard feels: a message is whatever a frame compressed to, so on a link that
 slows down the counts bound nothing. Against a throttled link and a busy desktop
 the queues held 30 MB, which at 4 Mbit/s is a picture 63 s behind its desktop —
 input reaches the remote and its effect arrives a minute later, which reads as a
 session that stopped responding until a fresh engine throws the queues away. So
 the path is bounded in bytes as well. `QUEUE_BUDGET` in `src/encode.rs` (512 KiB,
-two full batches) is taken by the *engine* before a tile or a round is encoded, at
-an estimate the order task settles once the size is known, and the share travels
-inside the payload (`Held` in `src/protocol.rs`) so that every way out of the
-queues returns it: superseded in a batch, sent as a seven-byte cache reference
-instead of a payload, dropped while nobody is attached, left in a channel an ended
+two full batches) is taken by the *engine* before a round is encoded, at the size of
+the last round, which the order task settles once the size is known, and the share
+travels inside the unit (`Held` in `src/protocol.rs`) so that every way out of the
+queues returns it: dropped while nobody is attached, left in a channel an ended
 engine took with it — or delivered. With the budget spent the
 engine waits and stops reading its remote, which is the backpressure the message
 counts were meant to be. The order task never waits on it, because everything
@@ -649,13 +299,7 @@ queued behind the order task holds a share only the order task can move. The wai
 also counts towards the walk's blocked time, which is where a link that is behind
 holds the engine instead of at a full queue.
 
-Two things beside the engine touch the budget. The cleanup tick runs on the order
-task, so it takes its tickful's room without waiting and *before* it takes the
-debts — at what recent cleanups compressed to — and takes only as many cells as
-that room covers: a debt is removed by being taken, and a still queued past the
-budget is the stale picture the budget exists to prevent. A budget the engine keeps
-full leaves those debts standing until the link lets go of some of it. And a socket
-replaced by its own browser's next attach gives everything back at once. Such a
+One thing beside the engine touches the budget: a socket replaced by its own browser's next attach gives everything back at once. Such a
 socket is usually one parked on a link that stopped, the engine lives on into the
 replacement, and eviction queued behind the socket's events would leave the shares
 — and the pump, waiting on that full channel — held until its heartbeat ran out. So
@@ -664,35 +308,30 @@ task races it: the queue is dropped, the shares of batches in flight are let go,
 and the close goes out last.
 
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
-`frontend/src/videoDecoder.ts` and driven from `tilePainter.ts` — the shared batch
-loop, which keys a decoder per `stream` id and replaces one whose region has
-restarted on a different size. **Which decoder is the platform's choice**: the
+`frontend/src/videoDecoder.ts` and driven from `framePainter.ts` — the batch loop,
+which replaces the decoder when the stream restarts on a different size. **Which decoder is the platform's choice**: the
 configuration states no `hardwareAcceleration`. A `prefer-software` hint was tried
 and removed, because it bought one platform's decoder at most — WebKit honours it
 only on macOS (the clause routing it to a local software decoder is compiled
 `#if PLATFORM(MAC)`), Firefox disregards it, and iOS has no software VP9 decoder to
 route to at all, so VP9 there is VideoToolbox or nothing (measured against WebKit
-main, 2026-08-21). What makes a hardware decoder safe on the region dial is the
-gateway rather than a hint: a stream restarted only when its region outgrows it and
-`VideoEnd` handing finished decode sessions back, above. Verified by fast touchscreen
-scrolling on the region dial and whole-desktop `video` on a Mac and an iPad with no
-decode errors. The stall backstop in `createVideoStream` — silence where a decode
+main, 2026-08-21). What makes a hardware decoder safe is the gateway rather than a
+hint: the stream is rebuilt only by a resize, so decode sessions are not churned.
+Verified by fast touchscreen scrolling on a Mac and an iPad with no decode errors. The stall backstop in `createVideoStream` — silence where a decode
 error belongs, then a failed end-of-stream flush, which is how a GPU-process decoder
 fails — stands whatever ends up decoding. That whole loop — parse, decode, paint, and the
 decoders with it — runs in a dedicated worker drawing on an `OffscreenCanvas`
 (`desktopPainterWorker.ts`, handled from the page by `desktopPainter.ts`); each
 binary frame is transferred there, not copied. What that boundary buys is narrower
-than it looks — `createImageBitmap` and `VideoDecoder` were never doing their work
-on the main thread anyway — and is mostly presentation: a transferred canvas commits
+than it looks — `VideoDecoder` was never doing its work on the main thread anyway — and is mostly presentation: a transferred canvas commits
 from the worker, so a frame reaches the screen without the thread carrying input and
 React being scheduled for it.
 
 A browser without `VideoDecoder` never reaches this code — the preflight gate turns
 it away before React mounts (`preflight.ts`). What survives is the narrower failure:
-a decoder that exists and refuses this *configuration*, which no keyframe and no
-neighbouring region repairs. That is *said* rather than logged, because a video
-target sends no still tiles and the alternative is a desktop that never paints and
-never explains itself: a banner that stays up, naming the configuration the browser
+a decoder that exists and refuses this *configuration*, which no keyframe repairs.
+That is *said* rather than logged, because the stream is all a target sends and the
+alternative is a desktop that never paints and never explains itself: a banner that stays up, naming the configuration the browser
 would not take.
 
 #### The codec
@@ -706,8 +345,8 @@ reports nonsense, because the RGB→YUV conversion it also times is scalar Rust 
 66× slower unoptimised.
 
 Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
-`regions.rs` and the wire carry access units, a keyframe bit and a configuration
-string, and `vp9.rs` is reachable only from `regions.rs`.
+`stream.rs` and the wire carry access units, a keyframe bit and a configuration
+string, and `vp9.rs` is reachable only from `stream.rs`.
 
 **The browser is asked one question, and never asked to justify itself.** The
 client used to probe for the codec: `/api/config` published the gateway's ordered
@@ -794,16 +433,16 @@ audio format, and errors. The `connected` message includes `resize`,
 `clipboard`, and `audio` capability flags so clients expose only supported
 controls.
 
-It also carries three things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial; `video`, the codec family or null; and
-`subtype`, the target's `ard` or `ard-high-performance` where it has one. The
+It also carries two things a client cannot work out and nothing else reveals:
+`render`, the resolved render dial, and `subtype`, the target's `ard` or
+`ard-high-performance` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server, a Mac
 in Standard mode and a Mac in High Performance mode all say `vnc`, and they
 differ in whether resize is offered and whether the path beneath is the
 reverse-engineered one (a display list is no longer the difference: wlshare sends
-one over a plain `vnc` target). All three appear on the
-client's session card, which `frontend/src/connectionLabel.ts` and
-`videoLabel.ts` word.
+one over a plain `vnc` target). Both appear on the client's session card, which
+`frontend/src/connectionLabel.ts` words, beside the video decoder's configuration
+(`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
@@ -818,19 +457,14 @@ Screen updates use little-endian binary frames:
 ```text
 u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
-TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
-                  | u32 len | payload[len]
-TILE_REF op 0x02: u16 slot | u16 x | u16 y
-VIDEO    op 0x03: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
-                  | u32 len | payload[len]
-COPY     op 0x04: u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
+VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 ```
 
-Tile formats are PNG (`1`) and WebP (`2`). One frame carries multiple ready updates so a
-repaint does not require one WebSocket event per tile. Receivers reject unknown
-operations, truncated records, and unsupported formats, and reject a nonzero frame
-flags byte. A `VIDEO` record's own flags byte is `0x01` for a keyframe and nothing
-else — any other bit is rejected the same way.
+`VIDEO` is the only record. One frame carries every unit ready at once, so a backlog
+does not cost one WebSocket event per unit. Receivers reject unknown operations and
+truncated records, and reject a nonzero frame flags byte. A `VIDEO` record's own
+flags byte is `0x01` for a keyframe and nothing else — any other bit is rejected
+the same way.
 
 `sequence` starts at one and increases for the lifetime of one session-socket
 attachment. After the paint worker has finished the batch's ordered
@@ -843,9 +477,9 @@ measurement contract for application-level backpressure, and the gateway acts on
 it three times: the paint window in `ws.rs` holds the next batch when too many are
 owed or the oldest is owed too long, on a `render_adaptive` target the same
 measurement — published through `LinkFeedback` — moves a stream's quality before
-the window ever parks, and it decides when a batch's share of `QUEUE_BUDGET` (under
-[`video`](#video-a-different-transport-not-a-fourth-codec), where the queues are
-sized) goes back to the engine.
+the window ever parks, and it decides when a batch's share of `QUEUE_BUDGET` (see
+[choosing a chroma](#choosing-a-chroma), where the queues are sized) goes back to
+the engine.
 Nothing is dropped in any of them; an access unit's dependency order is untouched.
 
 The window is pacing and must not be a way to wedge a session, so a batch parked
@@ -871,42 +505,12 @@ has only moved from a queue into the send buffer. Measured with an incompressibl
 12 Mbit/s of damage, that holds the picture 0.6 s behind at 4 Mbit/s and 4 s at
 1 Mbit/s (23 s without), and the link's return to full speed is immediate.
 
-`TILE` draws a payload and optionally stores it in a gateway-selected cache
-slot. `TILE_REF` redraws the encoded payload already stored in that slot.
-`NO_SLOT` means the payload must not be retained. Clients keep a fixed
-`SLOT_COUNT` array and never choose eviction themselves.
-
-`VIDEO` carries one VP9 access unit for one region,
-and is a separate record rather than a fourth tile format because it is not the same
-kind of thing: a tile is a self-contained picture and an access unit is one link in a
-chain. Making it its own record is what keeps the cache and coverage rules above from
-ever having to ask whether they apply — they see tiles only. `stream` names which
-decoder it belongs to, since a session may run several at once, and its keyframe bit
-comes from the encoder rather than from parsing the payload — VP9 carries no parameter
-sets to read one out of. The rectangle is the region's true one, and the decoded picture
-may exceed it by a pixel on either axis (see the render dial).
-
-`COPY` moves pixels the client already holds from `(sx, sy)` to `(x, y)`, both
-`w`x`h`: RFB's CopyRect carried through to the browser instead of stopping at the
-gateway, which used to read the source out of its shadow and re-encode it. Thirteen
-bytes whatever the rectangle, which for a scrolling window is most of a desktop.
-The client blits its own canvas, so an overlapping copy moves the original pixels.
-
-A copy *reads* the canvas at its place in the order, which is one more constraint
-than the other records carry: everything before it in the batch has to have been
-drawn, so `wire.rs` will not drop a tile that precedes one — coverage reaches back
-only as far as the last `COPY`. A copy is never itself dropped, cached or
-referenced; it is an instruction and not a picture. Only a target whose canvas is
-made entirely of tiles is sent them (`TileSink::copies`): under either streaming
-plan the client's pixels come from a decoder rather than from tiles, and the mirror
-— not the canvas — is what a region is encoded from, so there is nothing on the
-client to copy from that the next access unit will not overwrite anyway. It falls
-back to reading the source out of the shadow.
-
-A client that cannot decode a cached tile or receives a reference to a missing
-slot sends `cacheReset`. This clears the outbound slot table and requests a
-repaint. A normal `refresh` alone cannot repair a cache disagreement because it
-does not reset the table.
+`VIDEO` carries one VP9 access unit of the desktop. Its keyframe bit comes from the
+encoder rather than from parsing the payload — VP9 carries no parameter sets to read
+one out of. `(w, h)` is the desktop's true size, and the decoded picture may exceed
+it by a pixel on either axis (see [the video stream](#the-video-stream)); a size that
+differs from the last unit's is a stream that started over, preceded by a fresh
+`videoFormat`.
 
 ### Audio frames
 
@@ -919,10 +523,9 @@ own. **Opening
 sound on, and closing the socket is the only way to stop.
 
 The separation is the point. Sound and pictures used to share the session socket and
-the bounded queue behind it, which is four frames deep on `render_type = "video"`; an
-audio pump waiting behind a video backlog stops draining the bridge, and what the
-bridge then drops is wave buffers. A lost tile is replaced by the next repaint, and a
-lost wave buffer is a hole. The dedicated socket removes that picture-induced loss
+the bounded queue behind it, which is four frames deep; an audio pump waiting behind
+a video backlog stops draining the bridge, and what the bridge then drops is wave
+buffers. A lost wave buffer is a hole. The dedicated socket removes that picture-induced loss
 path entirely.
 
 The socket is bound to the *claim*, not to an attachment, so it survives a session
@@ -1148,7 +751,7 @@ decoded PCM between them. See
 ### Display geometry
 
 Client JSON messages cover pointer, wheel, keyboard, clipboard, display
-selection, viewport size, refresh, cache reset, and session control. Pointer
+selection, viewport size, refresh, and session control. Pointer
 motion is coalesced while the socket has queued bytes; any non-motion input
 flushes the latest held position first.
 
@@ -1211,13 +814,13 @@ What is engine-specific is the mechanism:
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
 | RDP | applies a requested size, and the client's reported display density |
 
-A target that streams video is also held under the gateway's 3840-pixel long
+Every desktop is also held under the gateway's 3840-pixel long
 side by 2400-pixel short side ceiling at the negotiated density. RDP opening and
 layout sizes and generic VNC `SetDesktopSize` requests all pass through
 `video::fit_ceiling`; High Performance separately keeps its native 3840×2160
 backing ceiling. This changes what the remote is asked to render, not how the
 browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
-the remainder bare. Tile targets are not capped. A pinned streaming size already
+the remainder bare. A pinned size already
 over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still reach the encoder's refusal because the gateway
 cannot ask it for a smaller desktop.
@@ -1362,11 +965,11 @@ requires, the codec and damage path, resize and density, the clipboard, and soun
 ### VNC
 
 The built-in client speaks two dialects, chosen by the target's `subtype`, that
-share everything below the handshake — one read loop, one input path, one tile
+share everything below the handshake — one read loop, one input path, one video
 path. Both force the same 32-bit true-color BGRX pixel format rather than
 negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encodings.rs`
-decodes whichever encoding a server picks into the packed RGB888 the tile path
-takes, so nothing above it knows which was chosen.
+decodes whichever encoding a server picks into the packed RGB888 the shadow and the
+mirror take, so nothing above it knows which was chosen.
 
 **RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
 (`subtype = "ard"`). It supports None, classic VNC authentication, RealVNC's
@@ -1401,14 +1004,11 @@ Generic `vnc` advertises the standard lossless encodings in preference order —
 CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first it
 supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
 moves. Tight, TightPNG, JPEG and H.264 are deliberately absent: vendor or lossy,
-and this gateway re-encodes every tile for the browser anyway. CopyRect names a
-source region rather than carrying pixels, and where the client's canvas is made
-entirely of tiles that carries straight through as a `COPY` record: the shadow
-moves its own copy of the pixels and the browser blits its own canvas, so a scroll
-costs thirteen bytes on both links instead of an encode on the second. Where it
-does not — a motion or streaming plan — the pixels are read back out of the shadow
-as before. Either way a source the shadow does not know costs one non-incremental
-repaint rather than an invented picture.
+and this gateway re-encodes every frame for the browser anyway. CopyRect names a
+source region rather than carrying pixels, so its source is read back out of the
+shadow — the VNC link still carries no pixels for a scroll — and a source the
+shadow does not know costs one non-incremental repaint rather than an invented
+picture.
 
 Generic `vnc` asked for `audio` also advertises wlshare's **audio**
 pseudo-encoding (`WLSF`). `src/vnc_audio.rs` is that wire: the server announces
@@ -1512,8 +1112,8 @@ data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 
 ### Browser SPA
 
-The React SPA has login, target picker, and remote desktop states. It renders
-tiles to a canvas, applies incoming frames serially, and overlays mouse,
+The React SPA has login, target picker, and remote desktop states. It decodes
+the desktop's video stream onto a canvas, applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
 
 **It refuses to start without a secure context and both WebCodecs decoders**
@@ -1525,8 +1125,8 @@ one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `
 any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
 plain `http://` is the case this refuses,
 by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
-alone, because audio is a target's choice and video is a render dial's: a browser
-with one and not the other would play some targets and not others, which is the
+alone, because audio is a target's choice and every target streams video: a
+browser with one and not the other would play some targets' sound and not others, which is the
 half-working session the gate exists to prevent. What remains reportable mid-session
 is a *codec* a decoder refuses, which is a different sentence and arrives from the
 decoder itself.

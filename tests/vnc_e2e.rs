@@ -6,7 +6,7 @@
 //! canvas paint timing or pixels (see CLAUDE.md). Xtigervnc
 //! serves its root window with no session behind it, so the first
 //! non-incremental update request drives real pixels through the whole
-//! pipeline: RFB handshake + DES auth -> `ServerMsg::Tile` -> the same
+//! pipeline: RFB handshake + DES auth -> the video stream -> the same
 //! binary WS frames the engines emit.
 //!
 //! This is also the ZRLE test of record — but only because the container paints a
@@ -30,10 +30,6 @@ use remotex::config::{AppConfig, Protocol, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
-
-/// `Tile::FORMAT_PNG`, spelled out rather than imported: this test is a
-/// stand-in for a client, and a client only has the number.
-const TILE_FORMAT_PNG: u8 = 1;
 
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
@@ -104,15 +100,8 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             audio_codec: None,
             camera: false,
             microphone: false,
-            render_type: remotex::config::RenderType::Tiles,
-            render_subtype: None,
-            image_quality: None,
             video_quality: None,
-            render_motion: false,
-            render_motion_debug: false,
             render_chroma: None,
-            render_classify_debug: false,
-            render_grid_debug: false,
             render_adaptive: None,
             render_adaptive_min: None,
             audio_bitrate: None,
@@ -129,61 +118,28 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary batch frame against the desktop bounds and return the
-/// pixel area of every tile in it.
-fn check_tile_frame(
-    stream: &mut common::TileStream,
-    frame: &[u8],
-    desktop_w: u32,
-    desktop_h: u32,
-) -> u64 {
-    let painted = stream.paint(frame);
-    assert!(!painted.is_empty(), "a batch frame that paints nothing");
-    let mut area = 0u64;
-    for record in painted {
-        let (x, y, w, h) = record.rect();
-        assert!(w > 0 && h > 0, "empty rectangle {w}x{h}");
-        assert!(
-            u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
-            "rectangle {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
-        );
-        area += u64::from(w) * u64::from(h);
-        // A copy carries no payload — that is the whole of what it saves — so its
-        // geometry above is everything there is to check. Its *source* is checked
-        // too: a copy naming pixels off the desktop is one the client cannot read.
-        if let common::Painted::Copy { sx, sy, .. } = record {
-            assert!(
-                u32::from(sx) + u32::from(w) <= desktop_w
-                    && u32::from(sy) + u32::from(h) <= desktop_h,
-                "copy source {w}x{h}+{sx}+{sy} exceeds the {desktop_w}x{desktop_h} desktop"
-            );
-            continue;
-        }
-        let common::Painted::Tile(tile) = record else {
-            unreachable!("a copy was handled above");
-        };
-        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
-        // Length first: a malformed payload is exactly what these markers are here
-        // to catch, and slicing a short one would panic on the index instead of
-        // reporting what was wrong.
-        assert!(
-            tile.payload.len() >= 8,
-            "payload is {} bytes, too short to be a PNG",
-            tile.payload.len()
-        );
+/// Validate one binary batch frame against the desktop it arrived under, and say
+/// whether it carried a keyframe — the picture a decoder that has seen nothing
+/// before it paints the whole desktop from.
+fn check_unit_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> bool {
+    let units = common::batch_units(frame);
+    assert!(!units.is_empty(), "a batch frame that carries nothing");
+    let mut keyframe = false;
+    for unit in units {
         assert_eq!(
-            &tile.payload[..8],
-            b"\x89PNG\r\n\x1a\n",
-            "payload is not a PNG stream"
+            (u32::from(unit.w), u32::from(unit.h)),
+            (desktop_w, desktop_h),
+            "an access unit that is not the {desktop_w}x{desktop_h} desktop"
         );
+        assert!(!unit.payload.is_empty(), "an empty access unit");
+        keyframe |= unit.keyframe;
     }
-    area
+    keyframe
 }
 
 /// A `resize` control message names the desktop the client is to show: its
 /// pixels, and the density they are labelled with, which generic VNC never
-/// has, so `scale` is 1x. The tile grid that travels beside them is the
-/// renderer's business and not asserted here.
+/// has, so `scale` is 1x.
 fn assert_resize(text: &str, w: u32, h: u32, what: &str) {
     let msg: serde_json::Value = serde_json::from_str(text).expect("resize message is JSON");
     assert_eq!(msg["w"], w, "{what}: {text}");
@@ -234,7 +190,7 @@ fn check_cursor_msg(text: &str) {
 
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
-async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
+async fn vnc_session_streams_the_full_desktop_and_resizes() {
     common::init_logging();
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
@@ -250,19 +206,15 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
 
     let mut got_resize = false;
     let mut pinned = false;
-    let mut covered: u64 = 0;
+    let mut painted = false;
     let mut cursor: Option<String> = None;
-    // Resolves cache references, so `covered` counts pixels *painted* rather than
-    // pixels that happened to travel. One per socket, because the gateway's slot
-    // table lives exactly as long as one attachment.
-    let mut stream = common::TileStream::new();
 
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     // The only text frames are control messages; the session
-                    // must not fail, and resize must precede any tile.
+                    // must not fail, and resize must precede any frame.
                     assert!(
                         !text.contains(r#""type":"error""#),
                         "session failed: {text}"
@@ -273,9 +225,9 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                             // SetDesktopSize support; its repaint starts afresh.
                             assert_resize(&text, DEFAULT_W, DEFAULT_H, "the pinned size");
                             pinned = true;
-                            covered = 0;
+                            painted = false;
                         } else {
-                            assert_eq!(covered, 0, "resize arrived after tiles");
+                            assert!(!painted, "resize arrived after frames");
                             // The first size announced must be the VNC server's
                             // actual desktop, before the pin is asked for.
                             assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
@@ -288,24 +240,21 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     }
                 }
                 Message::Binary(frame) => {
-                    assert!(got_resize, "tile arrived before resize");
+                    assert!(got_resize, "a frame arrived before resize");
                     let (w, h) = if pinned { (DEFAULT_W, DEFAULT_H) } else { (DESKTOP_W, DESKTOP_H) };
-                    covered += check_tile_frame(&mut stream, &frame, w, h);
-                    // The desktop at the pinned size must be repainted whole;
-                    // once that much area has arrived, the raw->tile path is
+                    painted |= check_unit_frame(&frame, w, h);
+                    // The desktop at the pinned size must start a stream of its
+                    // own; once its keyframe has arrived, the raw->video path is
                     // proven. The Cursor pseudo-encoding rides the opening
                     // update, so wait for the pointer shape too.
-                    if pinned
-                        && covered >= u64::from(DEFAULT_W) * u64::from(DEFAULT_H)
-                        && cursor.is_some()
-                    {
+                    if pinned && painted && cursor.is_some() {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed after {covered} px of tiles without a full paint");
+        panic!("websocket closed without a keyframe at the pinned size");
     })
     .await
     .expect("timed out waiting for the full-desktop paint and pointer shape");
@@ -324,9 +273,6 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     .unwrap();
 
     let mut resized = false;
-    let mut covered: u64 = 0;
-    // Same socket, so the same stream: a resize does not empty the slot table, and
-    // a repaint at the new size is exactly when references start paying off.
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -347,15 +293,14 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !resized {
                         continue;
                     }
-                    covered += check_tile_frame(&mut stream, &frame, VIEWPORT_W, VIEWPORT_H);
-                    if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H) {
+                    if check_unit_frame(&frame, VIEWPORT_W, VIEWPORT_H) {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed after {covered} px of resized tiles");
+        panic!("websocket closed without a keyframe at the resized size");
     })
     .await
     .expect("timed out waiting for the resize + repaint");
@@ -371,7 +316,6 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
         .unwrap();
 
     let mut restored = false;
-    let mut covered: u64 = 0;
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -389,15 +333,14 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !restored {
                         continue;
                     }
-                    covered += check_tile_frame(&mut stream, &frame, DEFAULT_W, DEFAULT_H);
-                    if covered >= u64::from(DEFAULT_W) * u64::from(DEFAULT_H) {
+                    if check_unit_frame(&frame, DEFAULT_W, DEFAULT_H) {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed after {covered} px of restored tiles");
+        panic!("websocket closed without a keyframe at the restored size");
     })
     .await
     .expect("timed out waiting for the defaultSize resize + repaint");
@@ -421,9 +364,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
 
     let mut reannounced = false;
     let mut replayed_cursor = false;
-    let mut covered: u64 = 0;
-    // A new socket is a new attachment, so the gateway starts from an empty table.
-    let mut stream = common::TileStream::new();
+    let mut repainted = false;
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -447,19 +388,19 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                 Message::Binary(frame) => {
                     // An update already in flight when the slot was reattached
                     // may land before the Refresh-triggered resize; only count
-                    // repaint tiles from the announcement on.
+                    // repaint frames from the announcement on.
                     if !reannounced {
                         continue;
                     }
-                    covered += check_tile_frame(&mut stream, &frame, DEFAULT_W, DEFAULT_H);
-                    if covered >= u64::from(DEFAULT_W) * u64::from(DEFAULT_H) && replayed_cursor {
+                    repainted |= check_unit_frame(&frame, DEFAULT_W, DEFAULT_H);
+                    if repainted && replayed_cursor {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed after {covered} px of reattach tiles");
+        panic!("websocket closed without the reattach keyframe");
     })
     .await
     .expect("timed out waiting for the reattach repaint and pointer replay");

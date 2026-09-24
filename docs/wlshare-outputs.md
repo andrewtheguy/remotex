@@ -113,7 +113,7 @@ That first frame is asked for outright rather than waiting on damage, and taken
 whole rather than by the rectangles the compositor reports. Both matter to a
 gateway: a screencopy that waits for damage is answered only when the new output
 changes, and the second monitor of an idle desk may not change for minutes, so
-the switch would produce no rectangle, no resize and no tiles until somebody
+the switch would produce no rectangle, no resize and no frames until somebody
 moved the mouse — and damage reported against the previous frame would fill only
 the parts that happened to be moving, leaving the rest of the new screen black.
 
@@ -172,7 +172,7 @@ displays  active=0x32               HDMI-A-1 1920×1080, LVDS-1 1280×800
 -> selectDisplay 0x34
 displays  active=0x34               the checkmark moves when the server says it moved
 resize  1280x800   scale=1.0        the ExtendedDesktopSize rect for the new output
-                                    then the tiles of the new screen
+                                    then the frames of the new screen
 ```
 
 The ids are the `wl_output` globals, `0x32` and `0x34` here. Switching back runs
@@ -186,7 +186,7 @@ client is looking at rather than on the one it left.
 
 Three more, measured the same way:
 
-- **The output already shared.** Answered with the list, no resize, and the tiles
+- **The output already shared.** Answered with the list, no resize, and the frames
   keep coming: a second click on the checkmark costs a message and nothing else.
 - **An id the list does not have.** Dropped by the engine before the wire — the
   gateway logs `ignoring a selection of unknown display 153` — so the server is
@@ -198,11 +198,11 @@ Three more, measured the same way:
   its life.
 
 A switch on an idle desk arrives without input. Measured by reconstructing the
-canvas from the gateway's tile batches, with no pointer movement at all: after
+canvas from the gateway's batches, with no pointer movement at all: after
 `selectDisplay`, the new output's `resize` and a fully painted screen — nothing
 unpainted, nothing black — land inside five seconds. Against a wlshare built
 before its capture took a blank framebuffer whole, the same probe on the same
-desk got no resize and no tiles at all: the canvas stayed at the old output's
+desk got no resize and no frames at all: the canvas stayed at the old output's
 size showing the old output's picture, and the new screen only arrived once the
 pointer was nudged. It is worth knowing which side that fault sat on, because it
 looks exactly like a gateway that dropped a repaint: the gateway asks for its

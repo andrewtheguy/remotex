@@ -3,7 +3,7 @@
 //! No container stands in here: the client speaks NLA to a current Windows host and
 //! nothing else, and what this exercises — the graphics pipeline's surfaces and
 //! codecs and a graphics reset, or bitmap updates at the opening size — is that
-//! host's behaviour. So, like `classify_render_e2e`, it
+//! host's behaviour. So it
 //! borrows a target from the operator's `tmp/test_uat.toml`, named by
 //! [`TARGET_ENV`] rather than written here, and drives [`remotex::rdp_client`]
 //! directly with no gateway in front of it.
