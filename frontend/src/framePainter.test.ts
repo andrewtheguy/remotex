@@ -92,6 +92,10 @@ let closes = 0;
 let poison: number | null = null;
 /** Like `poison`, but the browser refusing the configuration rather than failing. */
 let refused: number | null = null;
+/** Like `poison`, but `decode()` itself throwing rather than the error callback. */
+let rejected: number | null = null;
+/** The configurations the decoders were built with. */
+let configured: string[] = [];
 
 class FakeVideoDecoder {
   private readonly output: (frame: unknown) => void;
@@ -107,12 +111,16 @@ class FakeVideoDecoder {
     decoders += 1;
   }
 
-  configure() {
+  configure(config: { codec: string }) {
+    configured.push(config.codec);
     this.state = "configured";
   }
 
   decode(chunk: { type: string; data?: Uint8Array }) {
     const last = chunk.data?.[chunk.data.length - 1];
+    if (rejected !== null && last === rejected) {
+      throw new TypeError("this chunk is not acceptable");
+    }
     if (poison !== null && last === poison) {
       this.fail(new Error("this decoder gave up"));
       return;
@@ -156,6 +164,8 @@ beforeEach(() => {
   closes = 0;
   poison = null;
   refused = null;
+  rejected = null;
+  configured = [];
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
     type: string;
@@ -361,4 +371,76 @@ test("every decoded frame is closed, even with nowhere to draw it", async () => 
     decoded.every((frame) => frame.closed),
     "a frame that is never drawn still has to be released",
   );
+});
+
+test("a malformed batch cuts the chain: the decoder restarts and a keyframe is asked for", async () => {
+  // Every unit is part of one chain, so the deltas after a dropped batch name a picture
+  // this decoder never made.
+  const p = announced();
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  const frame = batchFrame([{ w: 64, h: 64, payload: [1], keyframe: false }]);
+  await p.draw(frame.slice(0, frame.byteLength - 1));
+  assert.equal(videoKeyframeAsks.length, 1);
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: [2], keyframe: false }]));
+  assert.deepEqual(chunkTypes, ["key"], "a delta was fed past the cut");
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.deepEqual(chunkTypes, ["key", "key"]);
+  assert.equal(decoders, 2, "the cut chain kept its decoder");
+});
+
+test("a unit decode() throws on cuts the chain without misplacing a frame", async () => {
+  // The unit was never consumed, so every delta after it is against a missing picture.
+  rejected = 0xbd;
+  const p = announced();
+  await p.draw(
+    batchFrame([
+      { w: 64, h: 64, payload: KEYFRAME },
+      { w: 64, h: 64, payload: [1, 0xbd], keyframe: false },
+      { w: 64, h: 64, payload: [2], keyframe: false },
+    ]),
+  );
+  assert.equal(videoKeyframeAsks.length, 1, "no keyframe was asked for");
+  // Raised, then taken down again by the keyframe decoded ahead of the cut, which
+  // still paints.
+  assert.ok(
+    videoErrors.some((error) => error?.includes("refused a frame")),
+    String(videoErrors),
+  );
+  assert.deepEqual(chunkTypes, ["key"], "a delta was fed past the cut");
+  assert.ok(decoded.every((frame) => frame.closed));
+
+  rejected = null;
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.equal(videoErrors.at(-1), null, "the stream did not recover");
+});
+
+test("a refusal gives way to a configuration the browser takes", async () => {
+  // The announced VP9 level follows the desktop's size, so a browser that refused a
+  // large picture may decode the smaller one a resize brings.
+  refused = 0xbd;
+  const p = painter();
+  p.setVideoFormat({ decode: "vp09.01.51.08" });
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: [...KEYFRAME, 0xbd] }]));
+  assert.match(String(videoErrors.at(-1)), /cannot decode/);
+
+  // The same configuration again changes nothing.
+  p.setVideoFormat({ decode: "vp09.01.51.08" });
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: [3], keyframe: false }]));
+  assert.match(String(videoErrors.at(-1)), /cannot decode/);
+
+  refused = null;
+  p.setVideoFormat({ decode: "vp09.01.40.08" });
+  assert.match(
+    String(videoErrors.at(-1)),
+    /cannot decode/,
+    "the banner came down before anything painted",
+  );
+  await p.draw(batchFrame([{ w: 32, h: 32, payload: KEYFRAME }]));
+  assert.equal(cropped.length, 1);
+  assert.equal(
+    videoErrors.at(-1),
+    null,
+    "the refusal outlived its configuration",
+  );
+  assert.equal(configured.at(-1), "vp09.01.40.08");
 });

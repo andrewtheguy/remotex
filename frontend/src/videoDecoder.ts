@@ -66,6 +66,11 @@ export interface DesktopVideo {
     data: Uint8Array,
     keyframe: boolean,
   ) => Promise<VideoFrame | null>;
+  /**
+   * Cut the chain: drop the decoder but keep the format, so the next unit builds a
+   * fresh one that waits for a keyframe.
+   */
+  restart: () => void;
   /** Drop the decoder. Everything still pending resolves to null. */
   close: () => void;
 }
@@ -119,14 +124,14 @@ export function createDesktopVideo(
     // browsers on, so the decoder is replaced rather than reused.
     dropDecoder();
     let entry: Live | undefined;
-    const failed = (reason: string, recoverable: boolean) => {
+    const failed = (reason: string, recoverable: boolean, decode: string) => {
       // Only if this entry is still the live one: a stream that restarted on a new
       // size has already replaced it, and dropping the newer decoder because the older
       // one errored would lose a chain that is decoding fine.
       if (live === entry) {
         live = null;
       }
-      handlers.onError(reason, recoverable);
+      handlers.onError(reason, recoverable, decode);
       if (recoverable) {
         // Asked for, exactly as a stall is. The next unit builds a fresh decoder,
         // and a fresh decoder can start at nothing but a keyframe — so without this
@@ -159,6 +164,7 @@ export function createDesktopVideo(
         e instanceof Error ? e.message : "This browser cannot decode video.",
         // A runtime with no decoder at all. No keyframe repairs that either.
         false,
+        format.decode,
       );
       return null;
     }
@@ -199,6 +205,9 @@ export function createDesktopVideo(
       held.timestamp += VIDEO_FRAME_US;
       return held.stream.decode(data, held.timestamp, keyframe);
     },
+    restart() {
+      dropDecoder();
+    },
     close() {
       dropDecoder();
       format = null;
@@ -234,8 +243,11 @@ export interface VideoHandlers {
    * is not a cut chain but a standing fact: the next decoder is refused exactly as
    * this one was, so nothing is asked for and the banner stays up, which is the one
    * case it is meant for.
+   *
+   * `decode` is the configuration the failing decoder ran, which is what a refusal
+   * is a fact about: a later `videoFormat` naming another one may well be taken.
    */
-  onError: (reason: string, recoverable: boolean) => void;
+  onError: (reason: string, recoverable: boolean, decode: string) => void;
   /**
    * The stream's chain has been cut and it cannot pick up again until a keyframe
    * arrives. Both ways of cutting it come here — a decoder that went quiet and one
@@ -332,6 +344,17 @@ export function createVideoStream(
     }
   };
 
+  // Ends this decoder: everything it owes settles to null, in order, and `close()`
+  // rules out an output after it.
+  const shut = () => {
+    closed = true;
+    disarm();
+    drain();
+    if (decoder.state !== "closed") {
+      decoder.close();
+    }
+  };
+
   // The decoder owes frames it is not going to produce. Everything it owes is settled
   // to null — an unpainted desktop for as long as it takes a keyframe to arrive, where
   // leaving them pending is the whole session, permanently — and the decoder goes with
@@ -384,6 +407,7 @@ export function createVideoStream(
           ? `This browser cannot decode the video this target sends (${format.decode}).`
           : `This browser's video decoder failed (${e.name}: ${e.message}).`,
         !refused,
+        format.decode,
       );
     },
   });
@@ -439,20 +463,23 @@ export function createVideoStream(
             data: data as Uint8Array<ArrayBuffer>,
           }),
         );
-      } catch {
-        // A chunk the decoder refused outright produces no output, so the entry it
-        // just pushed has to be settled here or it never will be.
-        settle(null);
+      } catch (e) {
+        // A chunk the decoder refused outright was never consumed, so the chain is cut
+        // here exactly as an error cuts it: every later delta names this frame. Settling
+        // one entry would also be wrong with others in flight — `settle` resolves the
+        // oldest, whose output may still come and would land on this one's promise. So
+        // the decoder goes, `drain` settles every entry in order, and `close()` rules
+        // out a late output; the error asks for the keyframe a fresh decoder needs.
+        shut();
+        const name = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        handlers.onError(
+          `This browser's video decoder refused a frame (${name}).`,
+          true,
+          format.decode,
+        );
       }
       return frame;
     },
-    close() {
-      closed = true;
-      disarm();
-      drain();
-      if (decoder.state !== "closed") {
-        decoder.close();
-      }
-    },
+    close: shut,
   };
 }

@@ -19,7 +19,7 @@ export type PaintContext =
 export interface FramePainter {
   /**
    * Decode one binary batch frame and paint it, in wire order. Malformed framing
-   * drops the batch.
+   * drops the batch, which cuts the stream's chain, so it also asks for a keyframe.
    */
   draw(frame: ArrayBuffer): Promise<void>;
   /**
@@ -71,17 +71,27 @@ export function createFramePainter(options: {
   //
   // A decoder giving up is answered by a painted frame: what the banner says is that
   // this client is showing nothing, so a frame is it ceasing to be true. A refusal is
-  // not: the browser will not take that configuration, and nothing it paints says
-  // otherwise — the banner stays until the attachment ends.
+  // not: the browser will not take that configuration, and nothing painted under it
+  // says otherwise — the banner stays until the attachment ends or the gateway
+  // announces a different configuration. That can happen: the announced VP9 level
+  // follows the desktop's size, so a browser that refused a large picture may take
+  // the smaller one a resize brings, and then its first painted frame is the answer.
   let videoComplained = false;
-  let videoRefused = false;
+  // The configuration that was refused, or null.
+  let refused: string | null = null;
 
-  const complainAboutVideo = (reason: string, recoverable: boolean) => {
-    if (videoRefused && recoverable) {
+  const complainAboutVideo = (
+    reason: string,
+    recoverable: boolean,
+    decode: string,
+  ) => {
+    if (refused !== null && recoverable) {
       // The standing fact is the more useful sentence and it is already up.
       return;
     }
-    videoRefused = videoRefused || !recoverable;
+    if (!recoverable) {
+      refused = decode;
+    }
     videoComplained = recoverable;
     options.onVideoError(reason);
   };
@@ -90,7 +100,7 @@ export function createFramePainter(options: {
     video?.close();
     video = null;
     videoComplained = false;
-    videoRefused = false;
+    refused = null;
     // Retracted, and not merely forgotten. This is the attachment boundary: the
     // decoder that said it is gone, the next attachment may be a different target
     // through a different origin, and the page clears its own copy on the way back to
@@ -113,10 +123,21 @@ export function createFramePainter(options: {
     return video;
   };
 
+  // Every unit is part of one chain, so a dropped batch cuts it: the deltas after it
+  // name a picture this decoder never made. Restarted rather than fed them, and a
+  // keyframe asked for, exactly as a failed decoder is.
+  const dropMalformed = () => {
+    if (video) {
+      video.restart();
+      options.onVideoNeedsKeyframe("a malformed batch was dropped");
+    }
+  };
+
   return {
     async draw(frame: ArrayBuffer) {
       const units = decodeBatchFrame(frame);
       if (!units) {
+        dropMalformed();
         return;
       }
       const born = generation;
@@ -162,6 +183,12 @@ export function createFramePainter(options: {
       releaseVideo();
     },
     setVideoFormat(format) {
+      if (refused !== null && format.decode !== refused) {
+        // Not the configuration that was refused, so the refusal no longer stands —
+        // but the banner stays until a frame paints, as any other complaint's does.
+        refused = null;
+        videoComplained = true;
+      }
       desktopVideo().setFormat(format);
     },
   };

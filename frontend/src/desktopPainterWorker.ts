@@ -230,6 +230,10 @@ export function createPainterWorker(
               return;
             }
             const startedAt = now();
+            // A batch the painter dropped as malformed is acknowledged too. The
+            // acknowledgment is the gateway's send window, not a claim that pixels
+            // landed — withholding it would hold that window shut — and the painter
+            // has already asked for the keyframe that repairs the stream.
             await painter?.draw(command.data);
             if (born === epoch) {
               compose();
