@@ -23,7 +23,7 @@ mod crypto;
 mod rtp;
 mod rtsp;
 
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use log::{debug, info, warn};
-use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceDaemon, ServiceInfo};
+use mdns_sd::{DaemonEvent, IfKind, IfPredicate, RecvTimeoutError, ServiceDaemon, ServiceInfo};
 use tokio::sync::watch;
 
 use crate::audio::AudioBridge;
@@ -232,6 +232,17 @@ fn hw_addr(name: &str, config_path: &Path) -> [u8; 6] {
 /// Register `_raop._tcp` as `<hw addr>@<name>`, the instance name AirPlay 1 uses.
 fn advertise(config: &AirPlayConfig, port: u16, hw_addr: [u8; 6]) -> anyhow::Result<ServiceDaemon> {
     let mdns = ServiceDaemon::new().context("starting the mDNS responder for AirPlay")?;
+    // mdns-sd answers on an interface with every address in that interface's
+    // subnet, and every link-local address is in fe80::/64: a host with many
+    // interfaces, such as a Kubernetes node with a veth per pod, would hand the
+    // Mac a link-local address for each, scoped to the Mac's own link, where only
+    // one of them answers. The Mac picks one and cannot connect. The routable
+    // addresses reach it without them.
+    mdns.disable_interface(IfKind::Predicate(IfPredicate::new(|intf| match intf.ip() {
+        IpAddr::V6(ip) => ip.is_unicast_link_local(),
+        IpAddr::V4(_) => false,
+    })))
+    .context("leaving link-local addresses out of the AirPlay advertisement")?;
     let hw: String = hw_addr.iter().map(|b| format!("{b:02X}")).collect();
     let instance = format!("{hw}@{}", config.name);
     // shairport-sync's classic record without metadata: a password-protected
