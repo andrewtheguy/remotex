@@ -390,6 +390,10 @@ const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
 const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
 /// ServerInit's size, before the display configuration is applied.
 const MAC_DESKTOP: u16 = 32;
+/// The client messages the enhanced ServerInit says the Mac accepts, one bit each,
+/// most significant first: macvm's (macOS 26.6.2), which lists
+/// `SetDisplayConfiguration` (`0x1d`, byte 3's `0x04`).
+const MAC_COMMANDS: [u8; 16] = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /// The fake client's screen, named in its `connect`. With no pinned config
 /// size, this is what the virtual display opens at — the unified opening rule.
 const MAC_SCREEN_WIDTH: u16 = 64;
@@ -428,13 +432,25 @@ async fn spawn_fake_mac() -> (
     mpsc::UnboundedSender<MacAction>,
     tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
 ) {
+    spawn_fake_mac_accepting(MAC_COMMANDS).await
+}
+
+/// [`spawn_fake_mac`], with the command bitmap its ServerInit sends.
+async fn spawn_fake_mac_accepting(
+    commands: [u8; 16],
+) -> (
+    u16,
+    mpsc::UnboundedReceiver<MacRequest>,
+    mpsc::UnboundedSender<MacAction>,
+    tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = mpsc::unbounded_channel();
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        serve_fake_mac(stream, tx, action_rx).await
+        serve_fake_mac(stream, commands, tx, action_rx).await
     });
     (port, rx, action_tx, task)
 }
@@ -686,6 +702,7 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), refuse: bool) -> Vec<u8> {
 
 async fn serve_fake_mac(
     mut stream: TcpStream,
+    commands: [u8; 16],
     requests: mpsc::UnboundedSender<MacRequest>,
     mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
@@ -711,12 +728,19 @@ async fn serve_fake_mac(
     // with a session picker to offer.
     assert_eq!(client_init[0], 0x81, "Apple's ClientInit byte is 0x81");
 
+    // The enhanced name field: a zero word, the flags (macvm's `0x52`: control,
+    // the display count present, up to two virtual displays), the command bitmap,
+    // then the name.
+    let mut name = vec![0u8, 0];
+    name.extend_from_slice(&0x52u32.to_be_bytes());
+    name.extend_from_slice(&commands);
+    name.extend_from_slice(b"mac");
     let mut server_init = Vec::new();
     server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
     server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
     server_init.extend_from_slice(&[0u8; 16]);
-    server_init.extend_from_slice(&3u32.to_be_bytes());
-    server_init.extend_from_slice(b"mac");
+    server_init.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    server_init.extend_from_slice(&name);
     stream.write_all(&server_init).await?;
 
     // The measured native cleartext control prelude. ViewerInfo's body is fixed
@@ -1801,6 +1825,44 @@ async fn expect_displays(ws: &mut Ws) -> serde_json::Value {
 /// and so cannot be used where the scale is the thing under test.
 async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
     expect_control(ws, "resize").await
+}
+
+/// A Mac whose ServerInit does not list `SetDisplayConfiguration` has no virtual
+/// display to give. Apple's viewer connects it in Standard mode after asking; the
+/// gateway, with no one to ask, refuses the session before sending it anything.
+#[tokio::test]
+async fn high_performance_refuses_a_mac_without_a_virtual_display() {
+    let mut commands = MAC_COMMANDS;
+    commands[3] &= !0x04;
+    let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac_accepting(commands).await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+
+    let error = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            if let Ok(Message::Text(text)) = msg
+                && text.contains(r#""type":"error""#)
+            {
+                return text.to_string();
+            }
+        }
+        panic!("the socket closed without an error");
+    })
+    .await
+    .expect("timed out waiting for the refusal");
+    assert!(error.contains("does not offer High Performance"), "{error}");
+
+    // The prelude never went out: the fake read end-of-stream where it expected
+    // ViewerInfo, and saw no request.
+    let served = fake_mac.await.unwrap();
+    assert_eq!(
+        served.unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+    assert!(requests.try_recv().is_err(), "the gateway sent a request");
 }
 
 /// The whole `ard-high-performance` RFB wire, end to end: authentication, record setup,

@@ -1653,6 +1653,9 @@ struct Connected {
 struct ServerInit {
     width: u16,
     height: u16,
+    /// The client messages a Mac's enhanced ServerInit says it accepts, or `None`
+    /// from any other server. See [`apple_commands`].
+    apple_commands: Option<[u8; 16]>,
 }
 
 impl ServerInit {
@@ -1835,7 +1838,7 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
     let name = read_bytes(reader).await?;
     debug!("vnc: server desktop {}", describe_desktop(&name));
     anyhow::ensure!(width > 0 && height > 0, "server reported a {width}x{height} desktop");
-    Ok(ServerInit { width, height })
+    Ok(ServerInit { width, height, apple_commands: apple_commands(&name) })
 }
 
 /// Describe ServerInit's name field, which on Apple's revision is not a name.
@@ -1849,7 +1852,7 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
 /// Anything that is not shaped like that is a name, which is what every other
 /// server sends.
 fn describe_desktop(field: &[u8]) -> String {
-    if field.len() < 22 || field[0] != 0 {
+    if !is_enhanced_desktop(field) {
         return format!("{:?}", String::from_utf8_lossy(field));
     }
     let flags = u32::from_be_bytes(field[2..6].try_into().expect("four bytes of flags"));
@@ -1869,6 +1872,18 @@ fn describe_desktop(field: &[u8]) -> String {
         named.join(", "),
         flags >> 5
     )
+}
+
+/// Whether a ServerInit name field has the 22 bytes of structure a Mac's enhanced
+/// ServerInit puts before the name. See [`describe_desktop`].
+fn is_enhanced_desktop(field: &[u8]) -> bool {
+    field.len() >= 22 && field[0] == 0
+}
+
+/// The capability bitmap of a Mac's enhanced ServerInit: the client messages it
+/// accepts, one bit each ([`vnc_apple::holds_high_performance`] reads it).
+fn apple_commands(field: &[u8]) -> Option<[u8; 16]> {
+    is_enhanced_desktop(field).then(|| field[6..22].try_into().expect("sixteen bytes"))
 }
 
 /// Name an encoding in the log the way the documentation names it. Apple's own
@@ -2060,6 +2075,16 @@ async fn apple_preface(
     display: Option<HostDisplay>,
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
 ) -> anyhow::Result<Connected> {
+    // Apple's viewer checks this before it sends a byte of the session, and turns a
+    // Mac without it into a Standard session after asking. With no one to ask, it is
+    // refused here rather than run on the physical display over zlib, a combination
+    // Apple's viewer never makes.
+    anyhow::ensure!(
+        server.apple_commands.as_ref().is_some_and(vnc_apple::holds_high_performance),
+        "this Mac does not offer High Performance Screen Sharing: its ServerInit does not \
+         list SetDisplayConfiguration, without which there is no virtual display. Apple's \
+         viewer connects it in Standard mode; use subtype = \"ard\""
+    );
     // With clipboard enabled, the native control prelude is written back to back
     // before encryption. The server emits the rekey as soon as encryption starts,
     // so anything that waited for a reply in between would risk writing cleartext
@@ -5905,6 +5930,23 @@ mod tests {
         assert_eq!(Dialect::Apple889.banner(), b"RFB 003.889\n");
         assert_eq!(Dialect::Rfb38.client_init(), 1);
         assert_eq!(Dialect::Apple889.client_init(), 0x81);
+    }
+
+    /// macvm's enhanced name field (macOS 26.6.2), read as a bitmap, and a plain
+    /// name, which has none.
+    #[test]
+    fn the_command_bitmap_comes_from_the_enhanced_name_field() {
+        let mut field = vec![0, 0, 0, 0, 0, 0x52];
+        field.extend_from_slice(&[0xbf, 0xf6, 0xe7, 0x2f, 0xec]);
+        field.extend_from_slice(&[0; 11]);
+        field.extend_from_slice(b"mac");
+        let commands = apple_commands(&field).expect("an enhanced field");
+        assert_eq!(commands[..5], [0xbf, 0xf6, 0xe7, 0x2f, 0xec]);
+        assert!(vnc_apple::holds_high_performance(&commands));
+        assert!(describe_desktop(&field).contains("up to 2 virtual displays"));
+
+        assert_eq!(apple_commands(b"a desktop named at length"), None);
+        assert_eq!(apple_commands(&field[..21]), None);
     }
 
     #[test]

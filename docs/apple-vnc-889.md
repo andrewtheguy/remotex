@@ -71,9 +71,47 @@ RSA, a preauthorized connection, Kerberos and SRP. Only type 30 has been
 exercised, and only type 30 supplies the key the High Performance record layer
 starts from, so remotex offers nothing else.
 
+## The two modes in Apple's viewer
+
+Apple's viewer calls High Performance "ProMode". Its connection sheet offers
+**Standard**, with a choice of Adaptive or Full quality, or **High Performance**,
+with one or two virtual displays. The choice is made after ServerInit; the
+handshake before it is the same in both modes (see
+[Connecting](#connecting)).
+
+| | Standard | High Performance |
+|---|---|---|
+| Encodings | Adaptive: Apple's private `0x3f3` and `0x3ea`, then zlib and ZRLE. Full: zlib, then ZRLE. | The media stream (1010), then as Adaptive. |
+| Displays | The physical ones, selected with `SetDisplay`, scaled with `SetServerScaling`. | One or two virtual displays from `SetDisplayConfiguration`, 60 Hz unless a preference says otherwise. |
+| Quality menu | Adaptive or Full. | Disabled while the media stream runs. |
+| Refused beside it | A virtual display, dynamic resolution, HDR. | No virtual display, or a screen other than the virtual ones. |
+
+- **A Mac without High Performance.** Apple's viewer offers the mode only when the
+  Mac's ServerInit lists `SetDisplayConfiguration` and the viewer's own `ProMode`
+  feature flag is on. Otherwise it asks whether to continue, then connects in
+  Standard mode with no virtual display. It never runs High Performance on the
+  physical displays. `ard-high-performance` has no one to ask, so it refuses the
+  session and names `ard`.
+- **A media-stream failure.** An error from the Mac (message 3) makes Apple's
+  viewer show an alert and close the session, and 16 missed receiver-report
+  intervals on any leg disconnect it. It has no fallback to RFB pixels.
+
+Remotex matches the split: `ard` shares the physical displays, refuses `resize`
+and never creates a virtual display, and `ard-high-performance` creates exactly
+one, the "1 Virtual Display" choice, and never selects a physical screen or sends
+`SetServerScaling`. It departs in three places:
+- **The handshake.** Apple's viewer answers `RFB 003.889` to every Mac, while `ard`
+  answers `RFB 003.008`.
+- **Standard's picture.** `ard` asks for zlib, Apple's Full quality, where Adaptive
+  asks first for the private codecs remotex cannot decode.
+- **A failed media stream.** `ard-high-performance` returns the picture to zlib
+  rather than ending the session (see [The media stream](#the-media-stream-high-performances-picture-and-sound)).
+
 ## Connecting
 
 1. **Version.** `RFB 003.889` for High Performance, `RFB 003.008` for Standard.
+   Apple's viewer sends `003.889` in both modes, and `003.003` to a server that is
+   not a Mac.
 2. **Type 30.** A Diffie-Hellman exchange. `MD5(shared secret)` is the AES-128 key
    that encrypts the 128-byte credential block (username at 0, password at 64) in
    **ECB** mode, not the CBC a published description gives. It is also the first
@@ -82,7 +120,8 @@ starts from, so remotex offers nothing else.
    ServerInit, and `0x40`, never set, would ask for a session-select exchange
    remotex does not implement. Standard sends the ordinary shared flag.
 4. **ServerInit** (extended on High Performance; see below), then
-   `SetPixelFormat` and `SetEncodings`.
+   `SetPixelFormat` and `SetEncodings`. High Performance ends here, before sending
+   anything, when the Mac does not list `SetDisplayConfiguration`.
 5. **High Performance only:** a cleartext prelude (`ViewerInfo`, `SetMode(control)`,
    `AutoPasteboard(start)` when clipboard is on), then `SetEncryption` commands 1
    and 2. The Mac answers with the rekey, and everything after it travels in
@@ -92,7 +131,17 @@ starts from, so remotex offers nothing else.
 
 In the extended ServerInit, the "name" is 22 bytes of structure and then the
 UTF-8 name: a zero `u16`, a `u32` of server flags, a 16-byte capability bitmap,
-the name. Read as a name, it prints as mojibake. The flags:
+the name. Read as a name, it prints as mojibake.
+
+The bitmap lists the client message types the Mac accepts, one bit each, most
+significant bit first: type `t` is bit `7 − t % 8` of byte `t / 8`. The measured
+Mac sends `bf f6 e7 2f ec` and zeros, which lists `SetDisplayConfiguration`
+(`0x1d`), the media stream's `0x1c`, `SetEncryption` (`0x12`) and `ViewerInfo`
+(`0x21`) among others. Apple's viewer offers High Performance only to a Mac that
+lists `0x1d`, and `ard-high-performance` refuses the session on one that does not
+(see [The two modes in Apple's viewer](#the-two-modes-in-apples-viewer)).
+
+The flags:
 
 | Bit | Meaning |
 |---|---|

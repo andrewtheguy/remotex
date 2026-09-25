@@ -357,7 +357,28 @@ pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
     debug_assert_eq!(display.len(), descriptor);
 
     body.extend_from_slice(&display);
-    message(0x1d, &body)
+    message(SET_DISPLAY_CONFIGURATION, &body)
+}
+
+/// [`set_display_configuration`]'s message type.
+const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
+
+/// Whether a Mac can hold a High Performance session: the command bitmap of its
+/// enhanced ServerInit lists [`set_display_configuration`], without which there is
+/// no virtual display. Apple's viewer asks exactly this before it configures one
+/// (`-[SSSession doesServerSupportProMode]`), and a Mac that fails it is connected in
+/// Standard mode, after asking the user. See docs/apple-vnc-889.md, "ServerInit's
+/// name field is not a name".
+pub fn holds_high_performance(commands: &[u8; 16]) -> bool {
+    accepts(commands, SET_DISPLAY_CONFIGURATION)
+}
+
+/// Whether the command bitmap lists client message `kind`, most significant bit
+/// first, as the viewer's `RFBServerCommandSupported` reads it.
+fn accepts(commands: &[u8; 16], kind: u8) -> bool {
+    commands
+        .get(usize::from(kind >> 3))
+        .is_some_and(|byte| byte >> (7 - (kind & 7)) & 1 == 1)
 }
 
 /// An Apple control message: type, a reserved byte, then the body's length and
@@ -968,6 +989,22 @@ mod tests {
         bitmap[10] = 0x40;
         assert_eq!(info[34..], bitmap);
         assert_eq!(set_mode_control(), [0x0a, 0, 0, 1]);
+    }
+
+    /// macvm's bitmap (macOS 26.6.2), which lists `SetDisplayConfiguration`, and the
+    /// same with only that bit cleared.
+    #[test]
+    fn high_performance_needs_the_mac_to_accept_set_display_configuration() {
+        let macvm = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(holds_high_performance(&macvm));
+        assert!(accepts(&macvm, 0x1c), "the media stream's configuration");
+        assert!(!accepts(&macvm, 0x01), "a message type no Mac takes");
+
+        let mut without = macvm;
+        without[3] &= !0x04;
+        assert!(!holds_high_performance(&without));
+        assert!(!holds_high_performance(&[0; 16]));
+        assert!(!accepts(&[0xff; 16], 0x80), "past the bitmap");
     }
 
     #[test]
