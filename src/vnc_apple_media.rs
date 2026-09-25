@@ -1,21 +1,33 @@
-//! Apple High Performance's picture, the way Apple's viewer takes it: HEVC over the
-//! media stream, not zlib over RFB.
+//! Apple High Performance's picture and sound, the way Apple's viewer takes them:
+//! HEVC and AAC-ELD over the media stream, not zlib over RFB and not AirPlay.
 //!
 //! A High Performance viewer that advertises encoding **1010**
 //! ([`ENCODING_MEDIA_STREAM`]) and sends message **`0x1c`**
-//! (`RFBMediaStreamServerConfiguration`, [`configuration`]) gets its screen from
-//! `ScreensharingAgent`'s AVConference sender: HEVC in RTP, SRTP-protected, over
-//! UDP straight to this side. RFB carries only the negotiation — the Mac answers in
-//! encoding-1010 rectangles ([`MediaReply`]) — and, once the stream is up, no
-//! pixels at all while nothing asks it for them. None of it is documented by Apple;
-//! every rule here was measured against macOS 26.6 and is recorded in
-//! `docs/apple-vnc-889.md` ("The media stream: High Performance's picture").
+//! (`RFBMediaStreamServerConfiguration`, [`configuration`]) gets its screen and its
+//! sound from `ScreensharingAgent`'s AVConference sender: two RTP streams,
+//! SRTP-protected, over UDP straight to this side. RFB carries only the
+//! negotiation — the Mac answers in encoding-1010 rectangles ([`MediaReply`]) —
+//! and, once the stream is up, no pixels at all while nothing asks it for them.
+//! None of it is documented by Apple; every rule here was measured against macOS
+//! 26.6 and is recorded in `docs/apple-vnc-889.md` ("The media stream: High
+//! Performance's picture and sound").
+//!
+//! A target takes this path with `media_stream = true`, and only in a build with
+//! the `apple-hp-media` feature: the wire half of this module — offers, replies,
+//! SRTP, depacketizing — is always compiled and tested, and the feature adds the
+//! two decoders and the receiver that feeds them. A build without it refuses the
+//! key at config parse, so nothing here runs in it.
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
-//! audio one is not optional: the Mac refuses a configuration without it (`unable to
-//! create audio config`), so the audio leg is negotiated, kept alive with RTCP, and
-//! its packets are dropped. A Mac's sound reaches remotex over AirPlay instead.
+//! Mac refuses a configuration without either, so the two legs go together: the
+//! picture comes from one and the sound from the other, and while the sound leg
+//! runs the Mac mutes its own output, as it does for Apple's viewer.
+//!
+//! Every packet in is authenticated before it is decrypted — AES-256 counter mode
+//! with an HMAC-SHA1-80 tag, RFC 3711 keys from the masters this side put in the
+//! offer ([`SrtpReceiver`]) — and every report out is SRTCP under this side's own
+//! keys ([`SrtcpSender`]). A packet whose tag does not match is dropped.
 //!
 //! Three fields of the offer differ from Apple's, each measured:
 //!
@@ -35,6 +47,7 @@
 
 use std::io::Write as _;
 
+#[cfg(feature = "apple-hp-media")]
 use anyhow::Context as _;
 
 use aes::Aes256;
@@ -42,12 +55,22 @@ use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
 use hmac::{Hmac, Mac as _};
 use sha1::Sha1;
 
+use crate::audio::PcmFormat;
 use crate::vnc_apple;
 
 /// Encoding 1010 (`0x3f2`), `kSSVideoEncoding_AVCMediaStream`: the viewer takes its
 /// picture from the media stream, and the Mac's media-stream replies arrive as
 /// rectangles of it.
 pub const ENCODING_MEDIA_STREAM: i32 = 1010;
+
+/// What the sound leg decodes to: AAC-ELD's 48 kHz stereo as 16-bit PCM. The
+/// counterpart of [`crate::audio::PCM_CD_QUALITY`] for this source, and the format
+/// the session builds its encoder for before the stream has come up.
+pub const AUDIO_FORMAT: PcmFormat = PcmFormat {
+    channels: 2,
+    sample_rate: 48_000,
+    bits_per_sample: 16,
+};
 
 /// The second `SetEncodings`, sent once the first layout has arrived: the opening
 /// list with the media stream appended.
@@ -887,12 +910,15 @@ pub struct Picture {
 }
 
 /// libde265, one context for the session: HEVC access units in, pictures out.
+#[cfg(feature = "apple-hp-media")]
 struct Hevc(*mut de265_sys::de265_decoder_context);
 
 // SAFETY: the context is created, used and freed on one thread at a time — the
 // decoder thread that owns this value — and libde265 keeps no thread-local state.
+#[cfg(feature = "apple-hp-media")]
 unsafe impl Send for Hevc {}
 
+#[cfg(feature = "apple-hp-media")]
 impl Hevc {
     fn new() -> anyhow::Result<Self> {
         // SAFETY: no arguments; a null return is checked.
@@ -936,6 +962,7 @@ impl Hevc {
     }
 }
 
+#[cfg(feature = "apple-hp-media")]
 impl Drop for Hevc {
     fn drop(&mut self) {
         // SAFETY: freed exactly once, here.
@@ -945,6 +972,7 @@ impl Drop for Hevc {
     }
 }
 
+#[cfg(feature = "apple-hp-media")]
 fn text(err: de265_sys::de265_error) -> String {
     // SAFETY: libde265 returns a pointer to a static string for every code.
     unsafe { std::ffi::CStr::from_ptr(de265_sys::de265_get_error_text(err)) }
@@ -958,6 +986,7 @@ fn text(err: de265_sys::de265_error) -> String {
 /// # Safety
 ///
 /// `img` must be a picture libde265 just returned and has not yet invalidated.
+#[cfg(feature = "apple-hp-media")]
 unsafe fn to_rgb(img: &de265_sys::de265_image) -> anyhow::Result<Picture> {
     use de265_sys::*;
     use yuv::{YuvPlanarImage, YuvRange, YuvStandardMatrix};
@@ -1020,9 +1049,11 @@ pub type Pictures = tokio::sync::watch::Receiver<Option<std::sync::Arc<Picture>>
 pub struct MediaStream {
     offers: Offers,
     /// The Mac, as the TCP session reached it: where the streams come from and RTCP
-    /// goes.
+    /// goes. Read by the receiver alone, which only a build with the decoders has.
+    #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
     peer: std::net::IpAddr,
     /// This side's address on that connection, which the UDP sockets bind.
+    #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
     local: std::net::IpAddr,
     /// Whether the encodings naming the media stream have gone out.
     asked: bool,
@@ -1034,6 +1065,10 @@ pub struct MediaStream {
     /// The ports the receiver is bound to, and the receiver.
     receiver: Option<((u16, u16), tokio::task::JoinHandle<()>)>,
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
+    /// Where the sound leg's decoded PCM goes: the session's audio bridge, when
+    /// the browser can be sent sound. `None` drains the leg unread.
+    #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
+    sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
 
 impl MediaStream {
@@ -1048,8 +1083,15 @@ impl MediaStream {
             offered: None,
             receiver: None,
             pictures,
+            sound: None,
         };
         (media, rx)
+    }
+
+    /// Carry the sound leg to `bridge`, the session's, for every stream from here.
+    pub fn with_sound(mut self, bridge: Option<std::sync::Arc<crate::audio::AudioBridge>>) -> Self {
+        self.sound = bridge;
+        self
     }
 
     /// What to send to offer the stream for a display of `size` backing pixels,
@@ -1105,10 +1147,9 @@ impl MediaStream {
                 }
                 log::info!(
                     "vnc: the Mac opened its media streams: screen video at UDP {video_port}, \
-                     audio (dropped) at {audio_port}"
+                     sound at {audio_port}"
                 );
-                let receiver = Receiver::bind(self, ports)?;
-                self.receiver = Some((ports, tokio::spawn(receiver.run())));
+                self.receiver = Some((ports, self.receive(ports)?));
             }
             MediaReply::Answer => {
                 log::debug!("vnc: the Mac accepted the media-stream offer");
@@ -1128,6 +1169,19 @@ impl MediaStream {
         }
         Ok(false)
     }
+
+    /// Bind the ports the Mac named and start receiving on them.
+    #[cfg(feature = "apple-hp-media")]
+    fn receive(&self, ports: (u16, u16)) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+        Ok(tokio::spawn(Receiver::bind(self, ports)?.run()))
+    }
+
+    /// Without the decoders there is nothing to receive into, and the config
+    /// refuses `media_stream` in such a build, so no offer ever went out.
+    #[cfg(not(feature = "apple-hp-media"))]
+    fn receive(&self, _: (u16, u16)) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+        anyhow::bail!("this remotex was built without the apple-hp-media feature, so it cannot receive the media stream")
+    }
 }
 
 impl Drop for MediaStream {
@@ -1142,33 +1196,52 @@ impl Drop for MediaStream {
 /// back. The Mac answers in under a second.
 const OFFER_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Access units the decoder thread may be behind by. Reaching it drops the unit,
-/// which costs a keyframe: every later picture predicts from it.
+/// Access units the HEVC decoder thread may be behind by. Reaching it drops the
+/// unit, which costs a keyframe: every later picture predicts from it.
+#[cfg(feature = "apple-hp-media")]
 const DECODE_QUEUE: usize = 8;
+
+/// AAC-ELD units the sound's decoder thread may be behind by. A unit costs tens of
+/// microseconds to decode, so this is a ceiling rather than a working depth, and
+/// reaching it drops the newest unit: 10 ms of sound, and nothing after it
+/// depends on it.
+#[cfg(feature = "apple-hp-media")]
+const SOUND_QUEUE: usize = 64;
+
+/// Access units per wave buffer handed to the bridge: two 10 ms units, one Opus
+/// packet's worth, so the encoder downstream completes a packet per buffer.
+#[cfg(feature = "apple-hp-media")]
+const UNITS_PER_WAVE: usize = 2;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
 /// milliseconds; this keeps a burst of losses from asking for one per packet.
+#[cfg(feature = "apple-hp-media")]
 const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long the Mac may name its ports without a packet arriving before that is
 /// said. A firewall or NAT between it and this gateway's UDP ports is what that
 /// looks like; the picture stays on zlib meanwhile.
+#[cfg(feature = "apple-hp-media")]
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The UDP side: RTCP out on both legs once a second, video in and depacketized,
-/// audio in and dropped.
+/// sound in and decoded.
+#[cfg(feature = "apple-hp-media")]
 struct Receiver {
     audio: tokio::net::UdpSocket,
     video: tokio::net::UdpSocket,
     video_port: u16,
-    srtp: SrtpReceiver,
+    video_srtp: SrtpReceiver,
+    audio_srtp: SrtpReceiver,
     audio_rtcp: SrtcpSender,
     video_rtcp: SrtcpSender,
     audio_ssrc: u32,
     video_ssrc: u32,
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
+    sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
 
+#[cfg(feature = "apple-hp-media")]
 impl Receiver {
     /// The two sockets, bound to the port numbers the Mac named and connected to
     /// the Mac's. Every Mac names the same ones (its RFB port and the next), so a
@@ -1198,18 +1271,21 @@ impl Receiver {
             audio: bind(audio_port)?,
             video: bind(video_port)?,
             video_port,
-            srtp: SrtpReceiver::new(&media.offers.video_keys.1),
+            video_srtp: SrtpReceiver::new(&media.offers.video_keys.1),
+            audio_srtp: SrtpReceiver::new(&media.offers.audio_keys.1),
             audio_rtcp: SrtcpSender::new(&media.offers.audio_keys.0),
             video_rtcp: SrtcpSender::new(&media.offers.video_keys.0),
             audio_ssrc: media.offers.audio_ssrc,
             video_ssrc: media.offers.video_ssrc,
             pictures: media.pictures.clone(),
+            sound: media.sound.clone(),
         })
     }
 
     async fn run(mut self) {
         let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let units = spawn_decoder(self.pictures.clone(), std::sync::Arc::clone(&keyframe));
+        let mut sound = self.sound.take().map(Sound::start);
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
         let started = tokio::time::Instant::now();
@@ -1219,7 +1295,7 @@ impl Receiver {
         let mut forged: u64 = 0;
         let mut warned_silent = false;
         let mut datagram = vec![0u8; 65_536];
-        let mut discard = vec![0u8; 2048];
+        let mut sound_datagram = vec![0u8; 2048];
         loop {
             let mut want_keyframe = false;
             tokio::select! {
@@ -1239,9 +1315,23 @@ impl Receiver {
                         );
                     }
                 }
-                received = self.audio.recv(&mut discard) => {
-                    if let Err(e) = received {
-                        log::debug!("vnc: the media stream's audio socket: {e}");
+                received = self.audio.recv(&mut sound_datagram) => {
+                    let len = match received {
+                        Ok(len) => len,
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                        Err(e) => {
+                            log::warn!("vnc: the Mac's sound socket failed: {e}");
+                            break;
+                        }
+                    };
+                    let Some(sound) = sound.as_mut() else {
+                        continue;
+                    };
+                    let data = &mut sound_datagram[..len];
+                    match self.audio_srtp.unprotect(data) {
+                        Ok(header) => sound.push(&header, &data[header.payload.0..header.payload.1]),
+                        Err(SrtpError::Forged) => sound.forged(),
+                        Err(_) => {}
                     }
                 }
                 received = self.video.recv(&mut datagram) => {
@@ -1256,7 +1346,7 @@ impl Receiver {
                         }
                     };
                     let data = &mut datagram[..len];
-                    let header = match self.srtp.unprotect(data) {
+                    let header = match self.video_srtp.unprotect(data) {
                         Ok(header) => header,
                         Err(SrtpError::Forged) => {
                             forged += 1;
@@ -1311,6 +1401,7 @@ impl Receiver {
 /// sender is the handle, and the thread ends when the receive task drops it.
 /// `keyframe` is how it says a unit failed to decode, which the receive task turns
 /// into a PLI.
+#[cfg(feature = "apple-hp-media")]
 fn spawn_decoder(
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1342,6 +1433,117 @@ fn spawn_decoder(
         }
     });
     units
+}
+
+/// The sound leg on the receive task's side: authenticated, decrypted access units
+/// out to a decoder thread of their own, which hands the bridge its PCM.
+///
+/// Fraunhofer's Rust decoder holds `Rc`s, so it is not `Send` and cannot sit in
+/// the receive task; a thread of its own is the whole accommodation. The thread
+/// ends when this is dropped — which aborting the receive task does — and `stale`
+/// makes it stop at once rather than after draining its queue into a bridge the
+/// next stream may already be filling. Dropping this also withdraws the format the
+/// thread announced, since no more sound will follow it.
+#[cfg(feature = "apple-hp-media")]
+struct Sound {
+    units: std::sync::mpsc::SyncSender<Vec<u8>>,
+    stale: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    bridge: std::sync::Arc<crate::audio::AudioBridge>,
+    packets: u64,
+    overrun: u64,
+    forged: u64,
+}
+
+#[cfg(feature = "apple-hp-media")]
+impl Sound {
+    fn start(bridge: std::sync::Arc<crate::audio::AudioBridge>) -> Self {
+        use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
+
+        let (units, inbox) = std::sync::mpsc::sync_channel::<Vec<u8>>(SOUND_QUEUE);
+        let stale = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (thread_bridge, thread_stale) = (std::sync::Arc::clone(&bridge), std::sync::Arc::clone(&stale));
+        std::thread::spawn(move || {
+            let mut decoder = match EldDecoder::new() {
+                Ok(decoder) => decoder,
+                Err(e) => {
+                    log::warn!("vnc: no AAC-ELD decoder, so no sound from the Mac: {e:#}");
+                    return;
+                }
+            };
+            // Announced only once a decoder exists: an encoder built for a stream
+            // that never produces anything would wait on it for the session.
+            thread_bridge.publish_format(AUDIO_FORMAT);
+            let wave_bytes = UNITS_PER_WAVE * FRAME_SAMPLES * CHANNELS * 2;
+            let mut pending: Vec<u8> = Vec::with_capacity(wave_bytes);
+            let (mut decoded, mut concealed, mut undecodable) = (0u64, 0u64, 0u64);
+            while let Ok(unit) = inbox.recv() {
+                if thread_stale.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                decoded += 1;
+                match decoder.decode(&unit, &mut pending) {
+                    Ok(false) => {}
+                    Ok(true) => concealed += 1,
+                    Err(e) => {
+                        undecodable += 1;
+                        if undecodable <= 3 {
+                            log::warn!("vnc: dropped a sound unit: {e:#}");
+                        }
+                    }
+                }
+                if pending.len() >= wave_bytes {
+                    thread_bridge.wave(std::mem::take(&mut pending));
+                    pending.reserve(wave_bytes);
+                }
+                if decoded.is_multiple_of(1000) {
+                    log::debug!(
+                        "vnc: {decoded} sound units decoded, {concealed} concealed, {undecodable} undecodable"
+                    );
+                }
+            }
+        });
+        Self { units, stale, bridge, packets: 0, overrun: 0, forged: 0 }
+    }
+
+    /// One authenticated, decrypted RTP packet of the sound leg: one AAC-ELD
+    /// access unit, 10 ms of 48 kHz stereo.
+    fn push(&mut self, header: &RtpHeader, unit: &[u8]) {
+        self.packets += 1;
+        if self.packets == 1 {
+            log::info!(
+                "vnc: the Mac's sound is flowing: RTP payload type {}, {} bytes per unit, SSRC {:#x}",
+                header.payload_type,
+                unit.len(),
+                header.ssrc
+            );
+        }
+        match self.units.try_send(unit.to_vec()) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                self.overrun += 1;
+                if self.overrun <= 3 {
+                    log::warn!("vnc: the AAC-ELD decoder is {SOUND_QUEUE} units behind; dropping one");
+                }
+            }
+            // The decoder never opened, which it said: drain the leg quietly.
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    fn forged(&mut self) {
+        self.forged += 1;
+        if self.forged <= 3 {
+            log::warn!("vnc: dropped a sound packet whose SRTP tag did not match");
+        }
+    }
+}
+
+#[cfg(feature = "apple-hp-media")]
+impl Drop for Sound {
+    fn drop(&mut self) {
+        self.stale.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.bridge.clear_format();
+    }
 }
 
 #[cfg(test)]
@@ -1633,6 +1835,7 @@ mod tests {
     /// pixels of its last picture as ffmpeg converts them. The two conversions
     /// round differently, by a step at most.
     #[test]
+    #[cfg(feature = "apple-hp-media")]
     fn libde265_decodes_a_444_stream_to_the_colours_ffmpeg_does() {
         let stream = include_bytes!("../tests/fixtures/hevc-444-64x48.h265");
         let mut nals: Vec<Vec<u8>> = Vec::new();

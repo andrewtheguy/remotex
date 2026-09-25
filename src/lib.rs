@@ -8,6 +8,8 @@ pub mod airplay;
 #[cfg(not(feature = "airplay"))]
 #[path = "airplay/disabled.rs"]
 pub mod airplay;
+#[cfg(feature = "apple-hp-media")]
+pub mod aac_eld;
 pub mod assets;
 pub mod audio;
 pub mod auth;
