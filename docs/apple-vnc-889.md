@@ -19,29 +19,27 @@ The implementation is `src/vnc_record.rs` (the 003.889 record layer),
 (High Performance's media stream), `src/aac_eld.rs` (its sound's decoder) and
 the two Apple paths in `src/vnc.rs`.
 
-"High Performance" below is Apple's mode: RFB 003.889 and a virtual display. Two
-subtypes speak it, and differ in where the picture and sound come from:
+"High Performance" below is Apple's mode: RFB 003.889 and a virtual display.
 
 | Subtype | Wire | Picture | Sound |
 |---|---|---|---|
 | `ard` | Standard mode, RFB 3.8, the physical displays | zlib | AirPlay workaround |
-| `ard-virtual-display` | High Performance, RFB 003.889, one virtual display | zlib | AirPlay workaround |
-| `ard-high-performance` | the same as `ard-virtual-display` | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
+| `ard-high-performance` | High Performance, RFB 003.889, one virtual display | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
 
-`ard-virtual-display` is Standard mode's picture on High Performance's protocol,
-which is what remotex's High Performance was before it took the media stream.
 `ard-high-performance` is High Performance as Apple's viewer has it, and needs a
-gateway built with the `apple-hp-media` feature.
+gateway built with the `apple-hp-media` feature. Remotex does not pair High
+Performance's protocol with Standard mode's picture and AirPlay sound: Apple's
+viewer never offers that combination.
 
 ## Summary
 
 | | |
 |---|---|
-| Three subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `ard-virtual-display` and `ard-high-performance` are High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
+| Two subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `ard-high-performance` is High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are High Performance's pointer buttons and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` and `ard-virtual-display` are zlib throughout, and their sound reaches remotex through its AirPlay receiver. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
+| Picture and sound | `ard` is zlib throughout, and its sound reaches remotex through its AirPlay receiver. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -311,8 +309,7 @@ next layout confirms it.
 The mode itself holds:
 - a backing size;
 - a logical ("scaled") size;
-- a refresh rate: 30 Hz for `ard-high-performance`, 60 Hz for
-  `ard-virtual-display` (see the media stream's rate below);
+- a refresh rate: 30 Hz (see the media stream's rate below);
 - flags (bit 0 HDR).
 
 A backing size twice the logical one makes a 2x display.
@@ -498,7 +495,7 @@ from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
-(`src/vnc_apple_media.rs`); `ard-virtual-display` never offers. Zlib carries the
+(`src/vnc_apple_media.rs`). Zlib carries the
 picture only until the stream delivers, across display changes, and when the Mac
 refuses the stream or the gateway's receiver stops. Five seconds without an
 authenticated video packet after the stream has begun stops that receiver and

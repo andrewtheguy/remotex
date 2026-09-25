@@ -10,7 +10,7 @@ The main reason this exists is the client: it is a browser, so anything with one
 reaches every target — RDP, VNC and Macs alike — with nothing to install per
 platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
-for rather than scaled on the client; plain `vnc`, a virtual-display Mac and
+for rather than scaled on the client; plain `vnc`, a High Performance Mac and
 `rdp` can all be handed the window. On RDP a resize is a graphics reset of the
 default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 
@@ -23,13 +23,11 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
-  `subtype = "ard-virtual-display"` speaks its High Performance mode's RFB
-  003.889 with Standard mode's zlib picture — one virtual display holding every
-  remote window. `subtype = "ard-high-performance"` is High Performance as
-  Apple's viewer has it: the same session, with the picture as HEVC and the sound
-  as AAC-ELD over the Mac's SRTP media stream, in a gateway built with the
-  `apple-hp-media` feature. Only these two accept `resize = true`. Both are
-  reverse engineered, having no specification.
+  `subtype = "ard-high-performance"` is its High Performance mode as Apple's
+  viewer has it: RFB 003.889 on one virtual display holding every remote window,
+  with the picture as HEVC and the sound as AAC-ELD over the Mac's SRTP media
+  stream, in a gateway built with the `apple-hp-media` feature. Only it accepts
+  `resize = true`. It is reverse engineered, having no specification.
   A wlroots-based Wayland desktop behind
   [wlshare](https://github.com/andrewtheguy/wlshare) is a plain `vnc` target:
   that server carries pixel density over one private RFB extension the gateway
@@ -177,25 +175,22 @@ with the same authentication error as incorrect credentials. See
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 at full fidelity, and supports the native Apple pasteboard. Every Apple subtype
-asks the Mac for zlib rectangles from the start. The virtual-display subtype
-(`ard-virtual-display`), High Performance's protocol with Standard mode's
-picture, takes the same credentials, requests one virtual display at the pinned `width` and `height` when
-both are set, or at the full resolution and density of the client's screen
-otherwise. Once connected, it disables the remote Mac's physical displays and
-puts all of the remote Mac's windows on that virtual display. It carries the same
-zlib rectangles over Apple's encrypted record-layer revision (around fifty times
-fewer bytes than raw on a static desktop).
-Apple's official macOS Screen Sharing client can instead choose up to two virtual
-displays.
+asks the Mac for zlib rectangles from the start (around fifty times fewer bytes
+than raw on a static desktop).
 
-High Performance (`ard-high-performance`) is that session with the picture and
-sound Apple's own viewer takes. After the first layout the gateway offers the
-Mac's media stream, and the Mac then sends the screen as HEVC 4:4:4 and its
-sound as AAC-ELD, over UDP with SRTP, to the gateway's ports 5900 and 5901. The
-gateway authenticates and decrypts every packet, decodes both, and sends them on
-as the VP9 and Opus every target uses; zlib carries the picture only until the
-stream does. A playing video no longer delays the Mac's reading of the input,
-which zlib's deflate did. The Mac refuses the picture without the sound, and
+High Performance (`ard-high-performance`) takes the same credentials and speaks
+Apple's encrypted record-layer revision. It requests one virtual display at the
+pinned `width` and `height` when both are set, or at the full resolution and
+density of the client's screen otherwise. Once connected, it disables the remote
+Mac's physical displays and puts all of the remote Mac's windows on that virtual
+display. Apple's official macOS Screen Sharing client can instead choose up to
+two virtual displays. It takes the picture and sound Apple's own viewer takes:
+after the first layout the gateway offers the Mac's media stream, and the Mac
+then sends the screen as HEVC 4:4:4 and its sound as AAC-ELD, over UDP with
+SRTP, to the gateway's ports 5900 and 5901. The gateway authenticates and
+decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
+target uses; zlib carries the picture only until the stream does. A playing
+video does not delay the Mac's reading of the input, as zlib's deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound and
 never uses AirPlay. It is **experimental** and needs a gateway built with
 `--features apple-hp-media`, which links FFmpeg's HEVC decoder (LGPL) and Fraunhofer's
@@ -203,8 +198,8 @@ AAC-ELD decoder (licence not OSI-approved); no release artifact carries it. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =
-true`. With `resize = true`, the window continuously drives the virtual display
-of either virtual-display subtype, using Apple's
+true`. With `resize = true`, the window continuously drives High Performance's
+virtual display, using Apple's
 dynamic-resolution feature to replace its mode from client viewport reports.
 There is no client-side control for resizing the remote: no auto-resize toggle or
 one-shot remote-resize button. The local app-window sizing control described above
@@ -234,7 +229,7 @@ speak it — wayvnc, TigerVNC, x11vnc, QEMU — gives the desktop and no sound. 
 
 On a Mac, audio is **experimental**. An `ard-high-performance` target receives
 it from Screen Sharing itself, beside the picture (above). No such path has been
-measured in Standard mode, so for `ard` and `ard-virtual-display` the gateway is
+measured in Standard mode, so for `ard` the gateway is
 instead an AirPlay 1 speaker on the LAN, named after its branding with ` - remotex` after it, turned on for every Mac
 by the gateway-wide `[airplay]` table and protected by its password; no Mac target
 takes an `audio` key. The Mac picks the speaker once from its Sound menu, and what
@@ -269,8 +264,7 @@ Remote Desktop Session Host role. The picture is verified by hand there, where
 remote audio (`audio = true`) and the rest of the RDP feature set are exercised on
 every test run. Expect to re-check it by hand after a change.
 
-High Performance's protocol revision, which both virtual-display subtypes speak,
-is the one part of remotex built entirely without a specification: Apple
+High Performance's protocol revision is the one part of remotex built entirely without a specification: Apple
 documents none of it — the revision, its record layer, its control messages, its
 virtual display handling or its media stream — so all of it is reverse engineered and only as correct as the Macs it has been measured
 against. A macOS update is free to change any of it. The dynamic-resolution
@@ -355,10 +349,9 @@ password = "change-me"
 
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
-physical displays, `"ard-virtual-display"` for one virtual display containing
-all of its windows, with its physical displays disabled for the connection, or
-`"ard-high-performance"` for that display's picture and sound over the Mac's
-media stream — each with the Mac account's username and password. Keep the config mode `0600`; target
+physical displays, or `"ard-high-performance"` for one virtual display
+containing all of its windows, with its physical displays disabled for the
+connection and its picture and sound over the Mac's media stream — each with the Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

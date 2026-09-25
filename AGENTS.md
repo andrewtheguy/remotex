@@ -114,7 +114,7 @@ documentation.
   take raw PCM from the RFB connection, add a second codec to it, or add a
   configuration key naming the server. See
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
-- A Mac's audio on `ard` and `ard-virtual-display` is the gateway's AirPlay 1
+- A Mac's audio on `ard` is the gateway's AirPlay 1
   speaker (`src/airplay/`): one gateway-wide receiver, advertised over mDNS, that
   requires the `[airplay]` password and feeds the running Apple session's bridge.
   The table is the switch for those Macs' audio. It is experimental. Do not add
@@ -126,8 +126,9 @@ documentation.
   as SRTCP. The Mac refuses one leg without the other, so the target always
   carries sound, takes no `audio` key, and never uses AirPlay. Its two decoders
   are the non-default `apple-hp-media` feature, which no release artifact
-  enables; a build without it refuses the subtype. `ard-virtual-display` is the
-  same protocol with zlib and AirPlay, and never offers the stream. See
+  enables; a build without it refuses the subtype. Zlib is only its fallback
+  until the stream is up; do not add a High Performance subtype without the
+  stream, a combination Apple's viewer never offers. See
   [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own

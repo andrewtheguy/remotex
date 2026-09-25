@@ -1,13 +1,14 @@
 # A Mac's sound over AirPlay
 
 **Experimental.** This is a workaround for the Macs whose sound Screen Sharing
-does not carry to remotex: `ard`, whose Standard mode has no measured audio path,
-and `ard-virtual-display`, which does not negotiate High Performance's media
-stream. Those Macs send their sound the way they send it to any speaker: the
+does not carry to remotex: `ard`, whose Standard mode has no measured audio path.
+Those Macs send their sound the way they send it to any speaker: the
 gateway is an AirPlay 1 speaker on the LAN, the Mac picks it from its Sound output
 menu, and what it plays reaches the browser like any other target's sound. An
 `ard-high-performance` target never uses it: its sound comes with its picture on
-the media stream, which mutes the Mac's own output while it runs. See
+the media stream, which mutes the Mac's own output while it runs, and so leaves
+nothing to play through AirPlay — confirmed on a physical Mac, where AirPlay is
+available. See
 [Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 The speaker is `src/airplay/`. It began as a standalone proof of concept that was
@@ -27,14 +28,14 @@ password = "choose one"
 [[targets]]
 name = "mac"
 protocol = "vnc"
-subtype = "ard"          # or "ard-virtual-display"
+subtype = "ard"
 host = "mac.local"
 username = "me"
 password = "…"
 ```
 
 The speaker is gateway-wide, and so is the switch: with `[airplay]`, every `ard`
-and `ard-virtual-display` target carries audio, and without it none does. Every
+target carries audio, and without it none does. Every
 Apple target refuses the `audio` key, and `[airplay]` with no Mac target at all
 is refused. Beside an `ard-high-performance` target the table still loads, and
 that target's sound still comes over its media stream. The

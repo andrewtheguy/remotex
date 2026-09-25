@@ -24,9 +24,8 @@ whole desktop, at the quality and chroma the target's render plan resolves to. A
 Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or over its High Performance RFB 003.889
-with `ard-virtual-display` (Standard mode's zlib picture on a virtual display)
-or `ard-high-performance` (that display's picture and sound over the Mac's media
-stream, as Apple's viewer takes them). Remote audio is either encoded as
+with `ard-high-performance` (a virtual display, with its picture and sound over
+the Mac's media stream, as Apple's viewer takes them). Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -442,10 +441,10 @@ audio format, and errors. The `connected` message includes `resize`,
 controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial, and `subtype`, the target's `ard`,
-`ard-virtual-display` or `ard-high-performance` where it has one. The
+`render`, the resolved render dial, and `subtype`, the target's `ard` or
+`ard-high-performance` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server and a
-Mac on any of the three all say `vnc`, and they differ in whether resize is
+Mac on either subtype all say `vnc`, and they differ in whether resize is
 offered, where the picture and sound come from, and whether the path beneath is
 the reverse-engineered one (a display list is no longer the difference: wlshare sends
 one over a plain `vnc` target). Both appear on the client's session card, which
@@ -655,9 +654,8 @@ when the decoder opens and withdrawn when the receiver ends. The target takes no
 output while it streams. See
 [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
-An audio-enabled **`ard` or `ard-virtual-display`** engine receives no sound
-from its Screen Sharing connection: Standard has no measured audio path, and
-`ard-virtual-display` does not negotiate the media stream. The session attaches
+An audio-enabled **`ard`** engine receives no sound from its Screen Sharing
+connection: Standard has no measured audio path. The session attaches
 the engine's bridge to the gateway's AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1
 receiver that the Mac picks from its Sound menu once and keeps. What reaches the
 bridge is the Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo
@@ -1087,7 +1085,7 @@ pointer positions back through the same regions (`frontend/src/mosaic.ts`). It i
 the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 
-**RFB 003.889** (`subtype = "ard-virtual-display"` and `"ard-high-performance"`) is Apple's own protocol
+**RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every
 claim in this section is measurement or a reading of Apple's binaries rather than
 specification, holding for the Macs in [apple-vnc-889.md](apple-vnc-889.md) rather
@@ -1114,10 +1112,8 @@ every fresh session. With `resize = true`, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
 display layout sets the actual framebuffer geometry. There is no client-side
-resize mode or one-shot button. On `ard-virtual-display` the picture is zlib
-rectangles over the 003.889 record transport throughout. On
-`ard-high-performance` the Mac supplies that virtual display the way it does to
-Apple's viewer: as HEVC over its media stream, offered once the display has
+resize mode or one-shot button. The Mac supplies that virtual display the way
+it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
 gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
 picture until the stream delivers, across every display change, and
