@@ -833,8 +833,8 @@ pub enum ServerMsg {
     Connected {
         name: String,
         protocol: &'static str,
-        /// The target's `subtype`, where it has one — `ard`,
-        /// `ard-virtual-display` or `ard-high-performance` — and `None` for plain
+        /// The target's `subtype`, where it has one — `ard` or
+        /// `ard-high-performance` — and `None` for plain
         /// RDP and plain VNC.
         ///
         /// Carried for the same reason as [`Self::Connected::render`]: it is a

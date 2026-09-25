@@ -22,11 +22,10 @@ axum server ── single session slot ── protocol engine
 RDP and VNC frames are decoded in the gateway and sent as one VP9 stream of the
 whole desktop, at the quality and chroma the target's render plan resolves to. A
 Mac is reached
-with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
-Apple Remote Desktop authentication, or over its High Performance RFB 003.889
-with `ard-virtual-display` (Standard mode's zlib picture on a virtual display)
-or `ard-high-performance` (that display's picture and sound over the Mac's media
-stream, as Apple's viewer takes them). Remote audio is either encoded as
+over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
+Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
+or in High Performance with `ard-high-performance` (a virtual display, with its
+picture and sound over the Mac's media stream, as Apple's viewer takes them). Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -442,10 +441,10 @@ audio format, and errors. The `connected` message includes `resize`,
 controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial, and `subtype`, the target's `ard`,
-`ard-virtual-display` or `ard-high-performance` where it has one. The
+`render`, the resolved render dial, and `subtype`, the target's `ard` or
+`ard-high-performance` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server and a
-Mac on any of the three all say `vnc`, and they differ in whether resize is
+Mac on either subtype all say `vnc`, and they differ in whether resize is
 offered, where the picture and sound come from, and whether the path beneath is
 the reverse-engineered one (a display list is no longer the difference: wlshare sends
 one over a plain `vnc` target). Both appear on the client's session card, which
@@ -655,9 +654,8 @@ when the decoder opens and withdrawn when the receiver ends. The target takes no
 output while it streams. See
 [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
-An audio-enabled **`ard` or `ard-virtual-display`** engine receives no sound
-from its Screen Sharing connection: Standard has no measured audio path, and
-`ard-virtual-display` does not negotiate the media stream. The session attaches
+An audio-enabled **`ard`** engine receives no sound from its Screen Sharing
+connection: Standard has no measured audio path. The session attaches
 the engine's bridge to the gateway's AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1
 receiver that the Mac picks from its Sound menu once and keeps. What reaches the
 bridge is the Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo
@@ -998,24 +996,20 @@ negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encod
 decodes whichever encoding a server picks into the packed RGB888 the shadow and the
 mirror take, so nothing above it knows which was chosen.
 
-**RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
-(`subtype = "ard"`). It supports None, classic VNC authentication, RealVNC's
-RSA-AES security types (5 and 129), and Apple's Diffie-Hellman security, plus the
-Cursor pseudo-encoding and, on generic `vnc`, Cursor With Alpha — the same shape
+**RFB 3.8** is used by generic `vnc`. It supports None, classic VNC
+authentication and RealVNC's RSA-AES security types (5 and 129), plus the
+Cursor pseudo-encoding and Cursor With Alpha — the same shape
 with its alpha, so a shadow and antialiased edges survive where Cursor's 1-bit
 mask cuts them away. Only its Raw form is read, which is what TigerVNC, QEMU and
 wlshare send; QEMU's pixels are in its native `B, G, R, A` rather than the
-spec's `R, G, B, A`, which a greyscale guest pointer does not show. `ard` selects Apple's authentication and physical-display
-metadata and requires the macOS account username and password. Plain VNC carries
+spec's `R, G, B, A`, which a greyscale guest pointer does not show. Plain VNC carries
 `vnc_password` for classic `VncAuth`, and `username` and `password` for RSA-AES —
 the account a server such as wayvnc (`enable_auth`) or RealVNC checks — taking
 whichever the server offers and the encrypted one when it offers both.
 `src/vnc_rsa_aes.rs` is that exchange and the AES-EAX framed transport every byte
 of such a session then rides in, exposed to the engine the way Apple's record
 layer is: an `AsyncRead` and a per-message sink. The server's RSA key is logged
-by fingerprint, not verified. The explicit subtype prevents an anonymous macOS
-Screen Sharing connection from landing at a separate login-window session rather
-than the user's screen.
+by fingerprint, not verified.
 
 Apple Standard mode maps X11 modifiers by its own table. Measured on macOS 26,
 `Alt_L`/`Alt_R` and `Super_L`/`Super_R` all arrive as Command,
@@ -1064,10 +1058,9 @@ the display layout.
 The client advertises DesktopSize and ExtendedDesktopSize on every generic
 target, so a server can always say its size changed; `resize = true` decides only
 whether the window asks it to change, with `SetDesktopSize`. Generic VNC clipboard support uses Extended Clipboard when the server
-advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple subtype
-also negotiates Apple's display metadata, display picker and native pasteboard on
-the ordinary byte stream, and asks for zlib in its first `SetEncodings` exactly as
-High Performance does.
+advertises it and falls back to Latin-1 `ServerCutText` otherwise. Both Apple
+subtypes negotiate Apple's display metadata and native pasteboard instead, and ask
+for zlib in their first `SetEncodings`.
 
 **Apple Standard mode remains fixed-size.** It rejects `resize = true`, shares the
 Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
@@ -1087,19 +1080,25 @@ pointer positions back through the same regions (`frontend/src/mosaic.ts`). It i
 the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 
-**RFB 003.889** (`subtype = "ard-virtual-display"` and `"ard-high-performance"`) is Apple's own protocol
-revision: none of it is documented by Apple, so every
-claim in this section is measurement or a reading of Apple's binaries rather than
-specification, holding for the Macs in [apple-vnc-889.md](apple-vnc-889.md) rather
-than for the protocol. The
+**RFB 003.889** is Apple's own protocol revision, and both Apple subtypes speak
+it, as Apple's viewer answers every Mac before choosing a mode after ServerInit.
+None of it is documented by Apple, so every claim in this section is measurement
+or a reading of Apple's binaries rather than specification, holding for the Macs
+in [apple-vnc-889.md](apple-vnc-889.md) rather than for the protocol. The
 dynamic-resolution path behind `resize = true` remains reverse engineered. It
-authenticates identically — the same security type 30 — and then
-differs in three places and nowhere else: the version banner, the `0x81` ClientInit
-byte (the enhanced ServerInit, without the session-select exchange `0x40` asks for), and a cleartext `SetEncryption` prelude after which every byte in both
-directions rides inside an AES-128-CBC record layer keyed by a rekey message the
-server delivers, of all places, inside a framebuffer rectangle. `src/vnc_record.rs`
-is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` and
-a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it.
+authenticates with Apple's Diffie-Hellman security, type 30, with the macOS
+account's username and password: named, the connection shares that user's screen,
+where an anonymous one lands at a separate login-window session. It then differs
+from RFB 3.8 in three places and nowhere else: the version banner, the `0x81`
+ClientInit byte (the enhanced ServerInit, without the session-select exchange
+`0x40` asks for), and a cleartext `SetEncryption` prelude after which every byte in
+both directions rides inside an AES-128-CBC record layer keyed by a rekey message
+the server delivers, of all places, inside a framebuffer rectangle. Apple's viewer
+asks for that layer only under a preference that is off by default; remotex always
+does. `src/vnc_record.rs` is that transport, exposed to the rest of the engine as
+an ordinary `AsyncRead` and a per-message sink; `src/vnc_apple.rs` is the message
+and payload layer above it. The Mac reads the pointer mask positionally on this
+revision, so right and middle swap bits for both subtypes.
 
 **High Performance mode is a virtual-display mode.** The gateway sends
 `SetDisplayConfiguration` (`0x1d`) during setup, with one mode built from the
@@ -1114,15 +1113,14 @@ every fresh session. With `resize = true`, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
 display layout sets the actual framebuffer geometry. There is no client-side
-resize mode or one-shot button. On `ard-virtual-display` the picture is zlib
-rectangles over the 003.889 record transport throughout. On
-`ard-high-performance` the Mac supplies that virtual display the way it does to
-Apple's viewer: as HEVC over its media stream, offered once the display has
+resize mode or one-shot button. The Mac supplies that virtual display the way
+it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
 gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
-picture until the stream delivers, across every display change, and
-when the Mac refuses the stream or the receiver stops; while it runs, polling holds to one pixel, which
-still brings cursor shapes and layouts. Apple's virtual-display-count and
+picture until the stream delivers and across every display change. A stream the
+Mac refuses, that brings no picture or no sound, or that stops ends the session,
+as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
+cursor shapes and layouts. Apple's virtual-display-count and
 resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: `SetEncodings` must list both

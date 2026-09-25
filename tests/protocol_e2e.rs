@@ -354,10 +354,15 @@ async fn serve_scrolling_vnc(
 
 // ── Apple Screen Sharing (RFB 003.889), scripted ────────────────────────────
 //
-// The `ard-virtual-display` subtype's whole wire, played from the server side:
-// Apple's version banner, its DH authentication, the `0x81` ClientInit, the
-// cleartext prelude, the rekey that switches on the record layer, and then a
-// display layout and a framebuffer update *inside* that record layer.
+// The Apple subtypes' RFB wire, played from the server side: Apple's version
+// banner, its DH authentication, the `0x81` ClientInit, the cleartext prelude,
+// the rekey that switches on the record layer, and then a display layout — the
+// virtual display once one is configured, the physical screen otherwise — and a
+// framebuffer update *inside* that record layer. The fake accepts the media
+// stream the gateway offers and names no ports for it, which keeps the picture on
+// zlib for the gateway's first-picture allowance: the stream's own packets are
+// UDP, and `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which
+// ends the session.
 //
 // This is the only automated test that can reach any of it. There is no
 // containerisable Apple server — `tests/vnc-dummy` is Xtigervnc and speaks none of
@@ -386,8 +391,15 @@ const MAC_USER: &str = "andrew";
 const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
 /// The id assigned to the fake virtual display.
 const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
-/// ServerInit's size, before the display configuration is applied.
+/// The id of the fake Mac's one physical screen, which a Standard session shares.
+const MAC_PHYSICAL_DISPLAY: u32 = 1;
+/// ServerInit's size, before the display configuration is applied, and the size of
+/// the physical screen.
 const MAC_DESKTOP: u16 = 32;
+/// The client messages the enhanced ServerInit says the Mac accepts, one bit each,
+/// most significant first: macvm's (macOS 26.6.2), which lists
+/// `SetDisplayConfiguration` (`0x1d`, byte 3's `0x04`).
+const MAC_COMMANDS: [u8; 16] = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /// The fake client's screen, named in its `connect`. With no pinned config
 /// size, this is what the virtual display opens at — the unified opening rule.
 const MAC_SCREEN_WIDTH: u16 = 64;
@@ -410,6 +422,8 @@ enum MacRequest {
     Fence { flags: u32, payload: Vec<u8> },
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
+    /// A PointerEvent's button mask.
+    Pointer(u8),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -417,10 +431,34 @@ enum MacAction {
     CompleteClipboardFetch,
 }
 
-/// A scripted High Performance Screen Sharing server. Returns the port, a channel
+/// A scripted Screen Sharing server, in either mode. Returns the port, a channel
 /// reporting display-control requests in wire order, and the task that records
 /// every display configuration.
 async fn spawn_fake_mac() -> (
+    u16,
+    mpsc::UnboundedReceiver<MacRequest>,
+    mpsc::UnboundedSender<MacAction>,
+    tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
+) {
+    spawn_fake_mac_with(MAC_COMMANDS, MacStream::Accept).await
+}
+
+/// How the fake Mac answers a media-stream offer.
+#[derive(Clone, Copy, Debug)]
+enum MacStream {
+    /// With AVConference's answer and no ports, so no packet is ever owed.
+    Accept,
+    /// With error message 3 of type 2, what a Mac sends for an offer it cannot
+    /// build a configuration from.
+    Refuse,
+}
+
+/// [`spawn_fake_mac`], with the command bitmap its ServerInit sends and its answer
+/// to a media-stream offer.
+async fn spawn_fake_mac_with(
+    commands: [u8; 16],
+    answer: MacStream,
+) -> (
     u16,
     mpsc::UnboundedReceiver<MacRequest>,
     mpsc::UnboundedSender<MacAction>,
@@ -432,7 +470,7 @@ async fn spawn_fake_mac() -> (
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        serve_fake_mac(stream, tx, action_rx).await
+        serve_fake_mac(stream, commands, answer, tx, action_rx).await
     });
     (port, rx, action_tx, task)
 }
@@ -494,14 +532,14 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
     Ok(key)
 }
 
-/// The `AppleDisplayLayout` payload for the configured virtual display, with the
-/// `u16` length that counts the bytes after itself.
+/// The `AppleDisplayLayout` payload for one screen — the configured virtual display,
+/// or the physical one — with the `u16` length that counts the bytes after itself.
 ///
 /// Built here from the wire format rather than by calling the gateway, which only
 /// parses this, so the offsets are asserted from both ends: the layout
 /// `ScreensharingAgent` builds, a scale factor as a big-endian `f64`, and both
 /// bounds rects as `(top, left, bottom, right)` rather than `(x, y, w, h)`.
-fn fake_mac_layout((w, h): (u16, u16), density: u16) -> Vec<u8> {
+fn fake_mac_layout(id: u32, (w, h): (u16, u16), density: u16) -> Vec<u8> {
     const RECORD: usize = 0x38;
     const HEAD: usize = 0x14;
     // The Mac states the density twice — as a double and as the backing rect's
@@ -515,14 +553,14 @@ fn fake_mac_layout((w, h): (u16, u16), density: u16) -> Vec<u8> {
     p[6..8].copy_from_slice(&h.to_be_bytes());
     p[8..10].copy_from_slice(&bw.to_be_bytes());
     p[10..12].copy_from_slice(&bh.to_be_bytes());
-    p[12..16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
+    p[12..16].copy_from_slice(&id.to_be_bytes());
     p[16..20].copy_from_slice(&4u32.to_be_bytes()); // on console
     p[20..22].copy_from_slice(&1u16.to_be_bytes()); // one display
 
     let mut record = vec![0u8; RECORD];
     record[0x00..0x08].copy_from_slice(&f64::from(density).to_be_bytes());
     record[0x08..0x10].copy_from_slice(&1.0f64.to_be_bytes());
-    record[0x10..0x14].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
+    record[0x10..0x14].copy_from_slice(&id.to_be_bytes());
     record[0x18..0x1a].copy_from_slice(&h.to_be_bytes()); // logical rect
     record[0x1a..0x1c].copy_from_slice(&w.to_be_bytes());
     record[0x20..0x22].copy_from_slice(&bh.to_be_bytes()); // backing rect
@@ -578,7 +616,7 @@ fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16) {
         u32::from(points.1) * u32::from(density),
         "pixel height states the same density as the width"
     );
-    assert_eq!(&body[mode + 16..mode + 24], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(&body[mode + 16..mode + 24], &30.0f64.to_be_bytes(), "30 Hz");
     assert_eq!(be32(mode + 24), 0, "mode flags");
     (points, density)
 }
@@ -651,10 +689,14 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
 /// never mistaken for one repeat. Capped to a corner of the desktop: a dirty rect
 /// need not cover it, and the raw pixels of the 3840×2160 opening display a
 /// resizable session now asks for would not fit one record.
-fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
+///
+/// With `answer`, a second rect answers the media-stream offer the gateway made
+/// ([`fake_mac_answer`]). It rides an update the fake sends anyway, so the answer
+/// adds no update, and no poll, to the order the tests assert.
+fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> Vec<u8> {
     let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
-    update.extend_from_slice(&1u16.to_be_bytes()); // one rect
+    update.extend_from_slice(&(1 + u16::from(answer.is_some())).to_be_bytes());
     update.extend_from_slice(&0u16.to_be_bytes()); // x
     update.extend_from_slice(&0u16.to_be_bytes()); // y
     update.extend_from_slice(&w.to_be_bytes());
@@ -664,11 +706,42 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
         shade;
         usize::from(w) * usize::from(h) * 4
     ]);
+    if let Some(answer) = answer {
+        update.extend_from_slice(&fake_mac_answer(answer));
+    }
     update
+}
+
+/// The rect that answers a media-stream offer, in encoding 1010: [`MacStream`]'s
+/// message 2 or 3.
+fn fake_mac_answer(answer: MacStream) -> Vec<u8> {
+    let mut rect = vec![0u8; 8]; // x, y, w, h
+    rect.extend_from_slice(&1010i32.to_be_bytes());
+    match answer {
+        MacStream::Accept => {
+            rect.extend_from_slice(&18u16.to_be_bytes());
+            rect.extend_from_slice(&2u16.to_be_bytes()); // AVConference's answer
+            rect.extend_from_slice(&3u16.to_be_bytes()); // version
+            rect.extend_from_slice(&0u32.to_be_bytes()); // flags
+            rect.extend_from_slice(&[0u8; 6]); // audio, video 1, video 2: empty
+            rect.extend_from_slice(&0u32.to_be_bytes());
+        }
+        MacStream::Refuse => {
+            rect.extend_from_slice(&16u16.to_be_bytes());
+            rect.extend_from_slice(&3u16.to_be_bytes()); // an error
+            rect.extend_from_slice(&3u16.to_be_bytes()); // version
+            rect.extend_from_slice(&0u32.to_be_bytes()); // flags
+            rect.extend_from_slice(&2u32.to_be_bytes()); // type
+            rect.extend_from_slice(&0u32.to_be_bytes()); // sub-code
+        }
+    }
+    rect
 }
 
 async fn serve_fake_mac(
     mut stream: TcpStream,
+    commands: [u8; 16],
+    answer: MacStream,
     requests: mpsc::UnboundedSender<MacRequest>,
     mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
@@ -694,12 +767,19 @@ async fn serve_fake_mac(
     // with a session picker to offer.
     assert_eq!(client_init[0], 0x81, "Apple's ClientInit byte is 0x81");
 
+    // The enhanced name field: a zero word, the flags (macvm's `0x52`: control,
+    // the display count present, up to two virtual displays), the command bitmap,
+    // then the name.
+    let mut name = vec![0u8, 0];
+    name.extend_from_slice(&0x52u32.to_be_bytes());
+    name.extend_from_slice(&commands);
+    name.extend_from_slice(b"mac");
     let mut server_init = Vec::new();
     server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
     server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
     server_init.extend_from_slice(&[0u8; 16]);
-    server_init.extend_from_slice(&3u32.to_be_bytes());
-    server_init.extend_from_slice(b"mac");
+    server_init.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    server_init.extend_from_slice(&name);
     stream.write_all(&server_init).await?;
 
     // The measured native cleartext control prelude. ViewerInfo's body is fixed
@@ -787,6 +867,7 @@ async fn serve_fake_mac(
         records,
         write_half,
         writer,
+        answer,
         requests,
         &mut actions,
         &mut configurations,
@@ -811,6 +892,7 @@ async fn serve_fake_mac_records(
     mut records: remotex::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     mut writer: remotex::vnc_record::RecordWriter,
+    answer: MacStream,
     requests: mpsc::UnboundedSender<MacRequest>,
     actions: &mut mpsc::UnboundedReceiver<MacAction>,
     configurations: &mut Vec<((u16, u16), u16)>,
@@ -821,6 +903,7 @@ async fn serve_fake_mac_records(
     let mut sent_layout = false;
     let mut sent_clipboard_status = false;
     let mut clipboard_fetch_pending = false;
+    let mut offer_pending = false;
 
     loop {
         let mut kind = [0u8; 1];
@@ -874,22 +957,26 @@ async fn serve_fake_mac_records(
                     });
                     continue;
                 }
-                let (points, density) = configurations
-                    .last()
-                    .copied()
-                    .expect("the display configuration precedes updates");
+                // The virtual display once one was configured, as High Performance
+                // does before its first request; the physical screen otherwise,
+                // which is Standard's.
+                let (display, (points, density)) = match configurations.last() {
+                    Some(&configured) => (MAC_VIRTUAL_DISPLAY, configured),
+                    None => (MAC_PHYSICAL_DISPLAY, ((MAC_DESKTOP, MAC_DESKTOP), 1)),
+                };
                 if !std::mem::replace(&mut sent_layout, true) {
                     let mut rect = vec![0u8, 0];
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(points, density));
+                    rect.extend_from_slice(&fake_mac_layout(display, points, density));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
                 shade = shade.wrapping_add(0x10);
                 let pixels = (points.0 * density, points.1 * density);
+                let answered = std::mem::take(&mut offer_pending).then_some(answer);
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels, answered)).unwrap())
                     .await?;
             }
             // KeyEvent
@@ -898,7 +985,15 @@ async fn serve_fake_mac_records(
             }
             // PointerEvent
             5 => {
-                records.read_exact(&mut [0u8; 5]).await?;
+                let mut body = [0u8; 5];
+                records.read_exact(&mut body).await?;
+                let _ = requests.send(MacRequest::Pointer(body[0]));
+            }
+            // SetServerScaling: a reserved byte and a big-endian `f64`, which the
+            // Standard session asks for whenever its density differs from the
+            // screen's.
+            0x08 => {
+                records.read_exact(&mut [0u8; 9]).await?;
             }
             // AutoFrameBufferUpdate: the arming. The paired non-incremental
             // request drives pixels in this fake, as on the measured Mac.
@@ -979,8 +1074,29 @@ async fn serve_fake_mac_records(
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(points, density));
+                    rect.extend_from_slice(&fake_mac_layout(MAC_VIRTUAL_DISPLAY, points, density));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                }
+            }
+            // RFBMediaStreamServerConfiguration: the media-stream offer, accepted in
+            // the next update, or refused at once in an update of its own. One offer
+            // at a time, as the Mac requires.
+            0x1c => {
+                let mut head = [0u8; 3];
+                records.read_exact(&mut head).await?;
+                let size = usize::from(u16::from_be_bytes([head[1], head[2]]));
+                let mut body = vec![0u8; size];
+                records.read_exact(&mut body).await?;
+                assert_eq!(&body[..2], &3u16.to_be_bytes(), "media-stream configuration version");
+                assert!(!offer_pending, "a second media-stream offer while one was out");
+                match answer {
+                    MacStream::Accept => offer_pending = true,
+                    MacStream::Refuse => {
+                        let mut update = vec![0u8, 0];
+                        update.extend_from_slice(&1u16.to_be_bytes());
+                        update.extend_from_slice(&fake_mac_answer(answer));
+                        write_half.write_all(writer.frame(&update).unwrap()).await?;
+                    }
                 }
             }
             // ClipboardSend: independently inflate and parse what the browser put
@@ -1073,10 +1189,12 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
 }
 
 /// A target for the fake Mac: the high-performance subtype, with the account the
-/// fake Mac checks the credentials against.
+/// fake Mac checks the credentials against. Built rather than parsed, so a build
+/// without the `apple-hp-media` decoders drives it too: the fake names no ports for
+/// the stream, and nothing needs decoding.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdVirtualDisplay),
+        subtype: Some(remotex::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
         // Unpinned: the virtual display opens at the screen the connect names.
@@ -1770,7 +1888,168 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
     expect_control(ws, "resize").await
 }
 
-/// The whole `ard-virtual-display` wire, end to end: authentication, record setup,
+/// A Mac whose ServerInit does not list `SetDisplayConfiguration` has no virtual
+/// display to give. Apple's viewer connects it in Standard mode after asking; the
+/// gateway, with no one to ask, refuses the session before sending it anything.
+#[tokio::test]
+async fn high_performance_refuses_a_mac_without_a_virtual_display() {
+    let mut commands = MAC_COMMANDS;
+    commands[3] &= !0x04;
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(commands, MacStream::Accept).await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+
+    let error = expect_error(&mut ws).await;
+    assert!(error.contains("does not offer High Performance"), "{error}");
+
+    // The prelude never went out: the fake read end-of-stream where it expected
+    // ViewerInfo, and saw no request.
+    let served = fake_mac.await.unwrap();
+    assert_eq!(
+        served.unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+    assert!(requests.try_recv().is_err(), "the gateway sent a request");
+}
+
+/// A Mac that refuses the media stream ends the session, as it ends Apple's
+/// viewer's: High Performance does not go on over zlib alone.
+#[tokio::test]
+async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
+    let (mac_port, _requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    let error = expect_error(&mut ws).await;
+    assert!(
+        error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
+        "{error}"
+    );
+    // The gateway hung up on the fake, which reads that as the end of its session.
+    fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+}
+
+/// An offer that brings no picture ends the session once the first one is overdue:
+/// the fake accepts offers only in an update it would send anyway, and on a still
+/// session nothing asks for one, so this offer goes unanswered.
+#[tokio::test]
+async fn high_performance_ends_when_the_offer_brings_no_picture() {
+    let (mac_port, _requests, _actions, fake_mac) = spawn_fake_mac().await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = expect_error(&mut ws).await;
+    assert!(error.contains("did not answer the media-stream offer within 10s"), "{error}");
+    assert!(started.elapsed() >= Duration::from_secs(9), "ended early: {:?}", started.elapsed());
+    fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+}
+
+/// Read until an `error` control message arrives, and hand back its line.
+async fn expect_error(ws: &mut Ws) -> String {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = ws.next().await {
+            if let Ok(Message::Text(text)) = msg
+                && text.contains(r#""type":"error""#)
+            {
+                return text.to_string();
+            }
+        }
+        panic!("the socket closed without an error");
+    })
+    .await
+    .expect("timed out waiting for an error")
+}
+
+/// `ard` on the wire Apple's viewer uses for every Mac: its revision, and the same
+/// cleartext prelude and record layer as High Performance, with no virtual display
+/// asked for — the session is the Mac's own screen, and arms the Mac's sender only
+/// once the screen's layout has come. A right-click rides the bit a Mac reads as
+/// its right button on this revision.
+#[tokio::test]
+async fn standard_speaks_apples_revision_on_the_physical_screen() {
+    let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac().await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::Ard),
+        resize: false,
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // The prelude's pasteboard enable, then straight to the arming that answers
+    // the screen's layout: no display configuration in between.
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoPasteboard(true)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
+    expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+    expect_frame(&mut ws).await;
+
+    for (button, bit) in [("right", 0x02), ("middle", 0x04)] {
+        for pressed in [true, false] {
+            ws.send(Message::text(format!(
+                r#"{{"type":"mouseButton","button":"{button}","pressed":{pressed},"clicks":1}}"#
+            )))
+            .await
+            .unwrap();
+            let mask = loop {
+                match next_mac_request(&mut requests).await {
+                    MacRequest::IncrementalFramebuffer => {}
+                    MacRequest::Pointer(mask) => break mask,
+                    other => panic!("expected the {button} button, got {other:?}"),
+                }
+            };
+            assert_eq!(mask, if pressed { bit } else { 0 }, "{button} pressed={pressed}");
+        }
+    }
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert!(configurations.is_empty(), "Standard asked for a virtual display: {configurations:?}");
+}
+
+/// The whole `ard-high-performance` RFB wire, end to end: authentication, record setup,
 /// initial and dynamic virtual-display configurations, pixels, and native Apple
 /// pasteboard messages in both directions.
 #[tokio::test]

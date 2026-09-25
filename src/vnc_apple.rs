@@ -1,8 +1,7 @@
-//! Apple's Screen Sharing messages and encodings. `ard` is Standard mode over
-//! RFB 3.8 and uses the display, cursor, and pasteboard pieces for the Mac's
-//! physical displays. Every subtype switches to zlib after its first display
-//! layout. `ard-virtual-display` and `ard-high-performance` additionally use
-//! Apple's record layer in [`crate::vnc_record`] and request a virtual display.
+//! Apple's Screen Sharing messages and encodings. Both Apple subtypes speak RFB
+//! 003.889 inside Apple's record layer ([`crate::vnc_record`]). `ard` is Standard
+//! mode and uses the display, cursor, and pasteboard pieces for the Mac's physical
+//! displays. `ard-high-performance` also requests a virtual display.
 //!
 //! Everything here is either a message this client builds or a rectangle payload
 //! it parses. The transport is [`crate::vnc_record`]'s and the session loop is
@@ -39,14 +38,15 @@
 //!
 //! ## What is otherwise absent
 //!
-//! Standard `ard` refuses resize because it shares physical displays; the other
-//! two can resize their virtual display. `ard-high-performance` takes its picture
-//! and sound from the media stream once it is up ([`crate::vnc_apple_media`]):
-//! zlib rectangles carry the picture only until then. The other two keep their
-//! picture on zlib, and their sound arrives over the AirPlay workaround.
-//! Every Apple subtype uses Apple's native pasteboard protocol; RFB 003.889
-//! enables monitoring before the rekey and carries fetches and clipboard data
-//! inside the encrypted transport.
+//! Standard `ard` refuses resize because it shares physical displays;
+//! `ard-high-performance` can resize its virtual display. `ard-high-performance`
+//! takes its picture and sound from the media stream once it is up
+//! ([`crate::vnc_apple_media`]): zlib rectangles carry the picture only until
+//! then. `ard` keeps its picture on zlib, and its sound arrives over the AirPlay
+//! workaround.
+//! Every Apple subtype uses Apple's native pasteboard protocol, enabling
+//! monitoring before the rekey and carrying fetches and clipboard data inside the
+//! encrypted transport.
 //!
 //! ## Reading the offsets in here
 //!
@@ -298,13 +298,15 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
     VirtualMode { pixels: (wp, hp), scaled: (ws, hs) }
 }
 
-/// The virtual display's refresh rate, in hertz, where nothing asks for less.
-/// The Mac composites the display at it. High Performance's media stream asks
-/// for [`crate::vnc_apple_media::DISPLAY_HZ`].
-pub const DISPLAY_HZ: u8 = 60;
+/// The virtual display's refresh rate, in hertz, which is what bounds the media
+/// stream's picture rate ([`crate::vnc_apple_media`]): its 60 fps flag does not.
+/// Under a full-screen animation the Mac sent about 57 pictures a second at 60 Hz,
+/// with or without the flag, and 30.0 at 30 Hz. The browser is sent 30 frames a
+/// second ([`crate::encode`]), so a faster display only doubles the HEVC decoding.
+pub const DISPLAY_HZ: u8 = 30;
 
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
-/// mode is `mode`, refreshed `refresh_hz` times a second.
+/// mode is `mode`, refreshed [`DISPLAY_HZ`] times a second.
 ///
 /// This is sent while establishing a virtual-display session and again for
 /// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
@@ -316,7 +318,7 @@ pub const DISPLAY_HZ: u8 = 60;
 /// mode's leading dimensions are the render (pixel) resolution, the scaled pair
 /// the logical resolution, and the physical millimetres follow the logical size —
 /// a denser screen has more pixels, not more glass.
-pub fn set_display_configuration(mode: VirtualMode, refresh_hz: u8) -> Vec<u8> {
+pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
     let VirtualMode { pixels, scaled } = mode;
     let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
     let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor);
@@ -350,12 +352,32 @@ pub fn set_display_configuration(mode: VirtualMode, refresh_hz: u8) -> Vec<u8> {
     for value in [pixels.0, pixels.1, scaled.0, scaled.1] {
         display.extend_from_slice(&u32::from(value).to_be_bytes());
     }
-    display.extend_from_slice(&f64::from(refresh_hz).to_be_bytes()); // refresh_rate_hz
+    display.extend_from_slice(&f64::from(DISPLAY_HZ).to_be_bytes()); // refresh_rate_hz
     display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
     debug_assert_eq!(display.len(), descriptor);
 
     body.extend_from_slice(&display);
-    message(0x1d, &body)
+    message(SET_DISPLAY_CONFIGURATION, &body)
+}
+
+/// [`set_display_configuration`]'s message type.
+const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
+
+/// Whether a Mac can hold a High Performance session: the command bitmap of its
+/// enhanced ServerInit lists [`set_display_configuration`], without which there is
+/// no virtual display. Apple's viewer asks exactly this before it configures one,
+/// and a Mac that fails it is connected in Standard mode, after asking the user.
+/// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
+pub fn holds_high_performance(commands: &[u8; 16]) -> bool {
+    accepts(commands, SET_DISPLAY_CONFIGURATION)
+}
+
+/// Whether the command bitmap lists client message `kind`, most significant bit
+/// first, as Apple's viewer reads it.
+fn accepts(commands: &[u8; 16], kind: u8) -> bool {
+    commands
+        .get(usize::from(kind >> 3))
+        .is_some_and(|byte| byte >> (7 - (kind & 7)) & 1 == 1)
 }
 
 /// An Apple control message: type, a reserved byte, then the body's length and
@@ -968,6 +990,22 @@ mod tests {
         assert_eq!(set_mode_control(), [0x0a, 0, 0, 1]);
     }
 
+    /// macvm's bitmap (macOS 26.6.2), which lists `SetDisplayConfiguration`, and the
+    /// same with only that bit cleared.
+    #[test]
+    fn high_performance_needs_the_mac_to_accept_set_display_configuration() {
+        let macvm = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(holds_high_performance(&macvm));
+        assert!(accepts(&macvm, 0x1c), "the media stream's configuration");
+        assert!(!accepts(&macvm, 0x01), "a message type no Mac takes");
+
+        let mut without = macvm;
+        without[3] &= !0x04;
+        assert!(!holds_high_performance(&without));
+        assert!(!holds_high_performance(&[0; 16]));
+        assert!(!accepts(&[0xff; 16], 0x80), "past the bitmap");
+    }
+
     #[test]
     fn set_encryption_is_the_observed_bytes() {
         assert_eq!(
@@ -982,7 +1020,7 @@ mod tests {
 
     #[test]
     fn a_virtual_display_configuration_has_one_mode_under_the_fixed_dynamic_ceiling() {
-        let msg = set_display_configuration(virtual_display_mode((1600, 1000), 1.0), DISPLAY_HZ);
+        let msg = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
         assert_eq!(msg[0], 0x1d);
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
         assert_eq!(msg.len(), CONFIG_HEAD + DESCRIPTOR_HEAD + MODE_ENTRY);
@@ -1003,17 +1041,14 @@ mod tests {
         assert_eq!(be32(display, 0xa0), 1000);
         assert_eq!(be32(display, 0xa4), 1600, "1x scaled width");
         assert_eq!(be32(display, 0xa8), 1000, "1x scaled height");
-        assert_eq!(&display[0xac..0xb4], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0], "60 Hz");
+        assert_eq!(&display[0xac..0xb4], &[0x40, 0x3e, 0, 0, 0, 0, 0, 0], "30 Hz");
         assert_eq!(be32(display, 0xb4), 0, "mode flags");
 
         // The ceiling is a capability of the virtual display, not another copy of
         // its mode. If the initial 1280x800 request put 1280x800 here, the live Mac
         // would reject an otherwise valid 1281x600 steady-state configuration and
         // answer with the old layout.
-        let thirty = set_display_configuration(virtual_display_mode((1600, 1000), 1.0), 30);
-        assert_eq!(&thirty[CONFIG_HEAD..][0xac..0xb4], &30.0f64.to_be_bytes(), "30 Hz");
-
-        let smaller = set_display_configuration(virtual_display_mode((1280, 800), 1.0), DISPLAY_HZ);
+        let smaller = set_display_configuration(virtual_display_mode((1280, 800), 1.0));
         let display = &smaller[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH);
         assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT);
@@ -1024,7 +1059,7 @@ mod tests {
         let mode = virtual_display_mode((1600, 1000), 2.0);
         assert_eq!(mode, VirtualMode { pixels: (3200, 2000), scaled: (1600, 1000) });
 
-        let msg = set_display_configuration(mode, DISPLAY_HZ);
+        let msg = set_display_configuration(mode);
         let display = &msg[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x9c), 3200, "render width");
         assert_eq!(be32(display, 0xa0), 2000, "render height");
@@ -1032,7 +1067,7 @@ mod tests {
         assert_eq!(be32(display, 0xa8), 1000, "scaled height");
         // The glass does not grow with the density: physical millimetres follow
         // the logical size, so 1x and 2x modes of the same points agree here.
-        let one_x = set_display_configuration(virtual_display_mode((1600, 1000), 1.0), DISPLAY_HZ);
+        let one_x = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
         assert_eq!(display[0x82..0x8a], one_x[CONFIG_HEAD..][0x82..0x8a]);
     }
 
