@@ -114,14 +114,22 @@ binary's global CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt`, `libvpx-prebuilt` and `libde265-prebuilt`
-(High Performance's HEVC decoder). Their sys crates download static archives
-instead of building vendored C and C++, so this project needs no CMake,
-assembler, pkg-config, libclang, vcpkg, or system copies of those libraries.
-libde265 is LGPL-3.0-or-later and linked statically, which obliges a distributor
-of a binary to let its recipient relink it against a modified libde265; see that
-repository's README. `LIBDE265_PREBUILT_DIR` selects a locally built archive, as
-`LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` do. Do not restore
+Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
+download static archives instead of building vendored C and C++, so this project
+needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
+those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
+built archives.
+
+The non-default `apple-hp-media` feature, which `ard-high-performance` targets
+need, adds two decoders and is in no release artifact because of their
+licences. `libde265-prebuilt` (the HEVC picture) downloads a static archive the
+same way, selected locally with `LIBDE265_PREBUILT_DIR`; libde265 is
+LGPL-3.0-or-later and linked statically, which obliges a distributor of a
+binary to let its recipient relink it against a modified libde265 (see that
+repository's README). `fdk-aac-rust` (the AAC-ELD sound) is pure Rust and needs
+nothing prebuilt, but carries the Fraunhofer FDK AAC licence, which is not
+OSI-approved and grants no patents. Build it with
+`cargo build --release --features apple-hp-media`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built

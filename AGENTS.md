@@ -10,7 +10,8 @@ documentation.
 - Do not run `cargo fmt`.
 - No squash merges
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
-  `cargo test`.
+  `cargo test`, and both again with `--features apple-hp-media` when the change
+  reaches the Apple engine or the media stream.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
 - Before browser QA of a frontend change, rebuild the gateway and say so: the
   frontend bundle is compiled into the binary, so a running `remotex serve`
@@ -113,15 +114,21 @@ documentation.
   take raw PCM from the RFB connection, add a second codec to it, or add a
   configuration key naming the server. See
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
-- The current implementation of a Mac's audio, on either Apple subtype, is the
-  gateway's AirPlay 1 speaker (`src/airplay/`): one gateway-wide receiver,
-  advertised over mDNS, that requires the `[airplay]` password and feeds the
-  running Apple session's bridge. The table is the switch for every Mac's audio.
-  It is experimental. Do not add AirPlay 2 pairing, a second decoder beside ALAC,
-  a per-target speaker, or a per-target audio key. See
-  [A Mac's sound over AirPlay](docs/airplay-audio.md) and, for High Performance's
-  own audio stream,
-  [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture).
+- A Mac's audio on `ard` and `ard-virtual-display` is the gateway's AirPlay 1
+  speaker (`src/airplay/`): one gateway-wide receiver, advertised over mDNS, that
+  requires the `[airplay]` password and feeds the running Apple session's bridge.
+  The table is the switch for those Macs' audio. It is experimental. Do not add
+  AirPlay 2 pairing, a second decoder beside ALAC, a per-target speaker, or a
+  per-target audio key. See [A Mac's sound over AirPlay](docs/airplay-audio.md).
+- `ard-high-performance` takes the Mac's picture and sound together from High
+  Performance's media stream (`src/vnc_apple_media.rs`): HEVC and AAC-ELD over
+  SRTP, every packet authenticated before it is decrypted and every report sent
+  as SRTCP. The Mac refuses one leg without the other, so the target always
+  carries sound, takes no `audio` key, and never uses AirPlay. Its two decoders
+  are the non-default `apple-hp-media` feature, which no release artifact
+  enables; a build without it refuses the subtype. `ard-virtual-display` is the
+  same protocol with zlib and AirPlay, and never offers the stream. See
+  [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and

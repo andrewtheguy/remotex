@@ -131,13 +131,6 @@ has an answer rather than being rediscovered.
   browser untouched, would remove upstream bytes and a transcode — for a target
   where the operator has already accepted lossy, the transcode is pure loss. The
   cost is a decoder this repo would then own.
-- **Apple High Performance native system audio.** The media stream now carries
-  High Performance's picture, and its audio leg is already negotiated — the Mac
-  refuses the stream without it — and dropped. Taking the sound from it is what
-  remains: the leg is AAC-ELD over the same SRTP, v0.0.249 decoded it, and
-  portable AAC-ELD decode brings the non-OSI-approved Fraunhofer dependency. It
-  would also replace AirPlay for a Mac whose output the running leg mutes. See
-  [`apple-vnc-889.md`](apple-vnc-889.md#the-media-stream-high-performances-picture).
 
 ### A virtual-display remote session for sway
 
