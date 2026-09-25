@@ -203,7 +203,19 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
-/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates.
+/// The least time between two updates the Mac pushes unasked once
+/// [`auto_framebuffer_update`] has armed it, in microseconds.
+///
+/// Zero lets it push every frame it captures while the screen changes — a playing
+/// video drew 60–90 updates a second. Its sender holds the viewer's lock while it
+/// writes each one, and reading this client's next message needs the same lock, so
+/// a gateway that drains more slowly than the Mac pushes has its clicks, keys and
+/// display changes left unread for as long as the video plays. Pixels come from
+/// polling instead; this leaves the push path at one update a second.
+const AUTO_UPDATE_INTERVAL_US: u32 = 1_000_000;
+
+/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, paced by
+/// `AUTO_UPDATE_INTERVAL_US`.
 ///
 /// Cursor shapes above all depend on this arming across a login, lock or
 /// fast-user-switch, so it is re-sent for the full framebuffer whenever the
@@ -213,9 +225,9 @@ pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
     msg.push(0x09);
     msg.push(0);
     msg.extend_from_slice(&1u16.to_be_bytes()); // version
-    // Update interval, zero for the server default. This is not a display id:
-    // `SetDisplayMessage` is the one and only place a screen is selected.
-    msg.extend_from_slice(&0u32.to_be_bytes());
+    // The update interval. This is not a display id: `SetDisplayMessage` is the
+    // one and only place a screen is selected.
+    msg.extend_from_slice(&AUTO_UPDATE_INTERVAL_US.to_be_bytes());
     for value in [0, 0, w, h] {
         msg.extend_from_slice(&value.to_be_bytes());
     }
@@ -1036,7 +1048,7 @@ mod tests {
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);
-        assert_eq!(be32(&arm, 4), 0, "server-default update interval");
+        assert_eq!(be32(&arm, 4), 1_000_000, "one unasked update a second at most");
         assert_eq!(be16(&arm, 12), 3840);
         assert_eq!(be16(&arm, 14), 2160);
 
