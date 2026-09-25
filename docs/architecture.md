@@ -859,7 +859,8 @@ browser that reattaches mid-resize is told again. No other engine sends
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only with
-`resize`: RDP quantizes it to 1x or 2x at a midpoint, a High Performance virtual
+`resize`: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
+screen `connect` names), a High Performance virtual
 display re-renders the same points at it; the resulting density travels back as
 the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
 Other engines ignore the message. Generic VNC, whose wire carries no density, is

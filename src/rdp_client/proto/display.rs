@@ -42,7 +42,7 @@ pub const MAX_SCALE: u32 = 500;
 
 /// The device scale factor, which has three permitted values and is pinned to the
 /// first: this client has no display of its own to have been built for.
-const DEVICE_SCALE: u32 = 100;
+pub const DEVICE_SCALE: u32 = 100;
 
 /// `DISPLAYCONTROL_HEADER` types.
 const CAPABILITIES: u32 = 0x0000_0005;

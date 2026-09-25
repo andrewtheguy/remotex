@@ -69,6 +69,7 @@ fn connect() -> (Session, Receiver<Event>) {
         domain: target.domain.clone(),
         width: SIZE.0,
         height: SIZE.1,
+        scale_percent: 0,
         resize: target.resize,
         egfx: target.egfx(),
         clipboard: target.clipboard,

@@ -155,6 +155,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     let conference = ConferenceCreateRequest {
         width: narrow(config.width),
         height: narrow(config.height),
+        scale_percent: config.scale_percent,
         client_name: "remotex",
         keyboard_layout: KEYBOARD_LAYOUT,
         selected_protocol: protocol.bits(),

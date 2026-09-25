@@ -146,6 +146,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         let conference = ConferenceCreateRequest {
             width: DESKTOP.0,
             height: DESKTOP.1,
+            scale_percent: 0,
             client_name: "remotex",
             keyboard_layout: KEYBOARD_LAYOUT,
             selected_protocol: protocol.bits(),
