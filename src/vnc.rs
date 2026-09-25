@@ -545,6 +545,8 @@ struct DesktopState {
     /// what the *remote* granted; the two disagree exactly while a density change
     /// is in flight.
     host_density: f32,
+    /// The refresh rate a High Performance resize asks for — see [`display_hz`].
+    display_hz: u8,
     /// First screen of the server's layout. `Some` only once the server has
     /// sent an ExtendedDesktopSize rect — its declaration that SetDesktopSize
     /// is supported; nothing is requested before that.
@@ -952,7 +954,7 @@ impl DesktopState {
             want.0, want.1, self.host_density,
         );
         let mode = vnc_apple::virtual_display_mode(want, self.host_density);
-        Some(vnc_apple::set_display_configuration(mode))
+        Some(vnc_apple::set_display_configuration(mode, self.display_hz))
     }
 
     /// The region a pixel request asks for: the desktop, or while a High
@@ -2020,6 +2022,12 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, 
     encodings
 }
 
+/// The refresh rate a virtual-display session asks the Mac for: the media
+/// stream's slower one where the picture comes from it.
+fn display_hz(media_stream: bool) -> u8 {
+    if media_stream { vnc_apple_media::DISPLAY_HZ } else { vnc_apple::DISPLAY_HZ }
+}
+
 /// The virtual display a High Performance session opens with.
 ///
 /// The points come from [`TargetConfig::opening_size`] — the pinned config
@@ -2089,7 +2097,7 @@ async fn apple_preface(
     // viewport reports and screen changes; its dynamic-resolution flag is set here
     // regardless, so every fresh session restores the Mac's checkbox to on.
     uplink
-        .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
+        .send(&vnc_apple::set_display_configuration(opening_mode(config, display), display_hz(config.media_stream())))
         .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
@@ -2219,6 +2227,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         size,
         scale: UNSCALED,
         host_density,
+        display_hz: display_hz(media.is_some()),
         screen: None,
         // A pinned size is seeded as a held request: nothing can be asked for
         // before the server declares SetDesktopSize support, and the hold is
@@ -7498,6 +7507,7 @@ mod tests {
             size,
             scale: UNSCALED,
             host_density: 1.0,
+            display_hz: vnc_apple::DISPLAY_HZ,
             screen,
             pending,
             viewport: None,
@@ -7882,7 +7892,7 @@ mod tests {
 
     /// The configuration asked for `points` at `density`.
     fn hp_config(points: (u16, u16), density: f32) -> Vec<u8> {
-        vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(points, density))
+        vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(points, density), vnc_apple::DISPLAY_HZ)
     }
 
     #[tokio::test(start_paused = true)]

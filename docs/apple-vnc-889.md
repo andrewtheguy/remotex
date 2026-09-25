@@ -311,7 +311,8 @@ next layout confirms it.
 The mode itself holds:
 - a backing size;
 - a logical ("scaled") size;
-- a refresh rate (60 Hz);
+- a refresh rate: 30 Hz for `ard-high-performance`, 60 Hz for
+  `ard-virtual-display` (see the media stream's rate below);
 - flags (bit 0 HDR).
 
 A backing size twice the logical one makes a 2x display.
@@ -543,7 +544,7 @@ three fields:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
-| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2. |
+| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
 | `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
 | bitrate entries (codec list, `f1 = 0`) | up to 100 Mbit/s | capped at 12 Mbit/s | A sender with no feedback pads out to what it was offered: an animating lock screen came at 19 Mbit/s uncapped and about 7 under an 8 Mbit/s cap. |
 
@@ -577,10 +578,15 @@ treating it as lost.
   four worker threads. Replaying captured pictures at 60 a second with the VP9
   encoder running beside it, that took about 13 ms a picture and dropped none,
   where one thread fell eight behind within seconds.
-- **Rate.** A picture goes out when the screen changes. An idle desktop sent about
-  two a second and an animation about 45. Clearing the 60 fps flag changed
-  neither. Those are the virtual Mac's rates; the receiver's debug log reports
-  the pictures a second every 10 seconds, which is how a physical Mac's is read.
+- **Rate.** A picture goes out when the screen changes, at most once per refresh
+  of the virtual display. Under a full-screen animation, a 60 Hz display sent
+  about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the
+  Mac logged `viewer set refreshRate 60` and `encode frame rate 60` either way.
+  A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
+  Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
+  every picture has to be decoded whether it is shown or not. An idle desktop
+  sends about two. The receiver's debug log reports the pictures a second every
+  10 seconds.
 - **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
   the 46-byte masters in the offer. Received packets use the server-to-viewer
   key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP

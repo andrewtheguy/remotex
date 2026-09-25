@@ -298,8 +298,13 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
     VirtualMode { pixels: (wp, hp), scaled: (ws, hs) }
 }
 
+/// The virtual display's refresh rate, in hertz, where nothing asks for less.
+/// The Mac composites the display at it. High Performance's media stream asks
+/// for [`crate::vnc_apple_media::DISPLAY_HZ`].
+pub const DISPLAY_HZ: u8 = 60;
+
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
-/// mode is `mode`.
+/// mode is `mode`, refreshed `refresh_hz` times a second.
 ///
 /// This is sent while establishing a virtual-display session and again for
 /// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
@@ -311,7 +316,7 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
 /// mode's leading dimensions are the render (pixel) resolution, the scaled pair
 /// the logical resolution, and the physical millimetres follow the logical size —
 /// a denser screen has more pixels, not more glass.
-pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
+pub fn set_display_configuration(mode: VirtualMode, refresh_hz: u8) -> Vec<u8> {
     let VirtualMode { pixels, scaled } = mode;
     let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
     let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor);
@@ -345,7 +350,7 @@ pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
     for value in [pixels.0, pixels.1, scaled.0, scaled.1] {
         display.extend_from_slice(&u32::from(value).to_be_bytes());
     }
-    display.extend_from_slice(&60.0f64.to_be_bytes()); // refresh_rate_hz
+    display.extend_from_slice(&f64::from(refresh_hz).to_be_bytes()); // refresh_rate_hz
     display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
     debug_assert_eq!(display.len(), descriptor);
 
@@ -977,7 +982,7 @@ mod tests {
 
     #[test]
     fn a_virtual_display_configuration_has_one_mode_under_the_fixed_dynamic_ceiling() {
-        let msg = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
+        let msg = set_display_configuration(virtual_display_mode((1600, 1000), 1.0), DISPLAY_HZ);
         assert_eq!(msg[0], 0x1d);
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
         assert_eq!(msg.len(), CONFIG_HEAD + DESCRIPTOR_HEAD + MODE_ENTRY);
@@ -998,14 +1003,17 @@ mod tests {
         assert_eq!(be32(display, 0xa0), 1000);
         assert_eq!(be32(display, 0xa4), 1600, "1x scaled width");
         assert_eq!(be32(display, 0xa8), 1000, "1x scaled height");
-        assert_eq!(&display[0xac..0xb4], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&display[0xac..0xb4], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0], "60 Hz");
         assert_eq!(be32(display, 0xb4), 0, "mode flags");
 
         // The ceiling is a capability of the virtual display, not another copy of
         // its mode. If the initial 1280x800 request put 1280x800 here, the live Mac
         // would reject an otherwise valid 1281x600 steady-state configuration and
         // answer with the old layout.
-        let smaller = set_display_configuration(virtual_display_mode((1280, 800), 1.0));
+        let thirty = set_display_configuration(virtual_display_mode((1600, 1000), 1.0), 30);
+        assert_eq!(&thirty[CONFIG_HEAD..][0xac..0xb4], &30.0f64.to_be_bytes(), "30 Hz");
+
+        let smaller = set_display_configuration(virtual_display_mode((1280, 800), 1.0), DISPLAY_HZ);
         let display = &smaller[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH);
         assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT);
@@ -1016,7 +1024,7 @@ mod tests {
         let mode = virtual_display_mode((1600, 1000), 2.0);
         assert_eq!(mode, VirtualMode { pixels: (3200, 2000), scaled: (1600, 1000) });
 
-        let msg = set_display_configuration(mode);
+        let msg = set_display_configuration(mode, DISPLAY_HZ);
         let display = &msg[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x9c), 3200, "render width");
         assert_eq!(be32(display, 0xa0), 2000, "render height");
@@ -1024,7 +1032,7 @@ mod tests {
         assert_eq!(be32(display, 0xa8), 1000, "scaled height");
         // The glass does not grow with the density: physical millimetres follow
         // the logical size, so 1x and 2x modes of the same points agree here.
-        let one_x = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
+        let one_x = set_display_configuration(virtual_display_mode((1600, 1000), 1.0), DISPLAY_HZ);
         assert_eq!(display[0x82..0x8a], one_x[CONFIG_HEAD..][0x82..0x8a]);
     }
 

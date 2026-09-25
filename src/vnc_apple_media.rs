@@ -90,6 +90,13 @@ pub const FLAG_NO_CURSOR: u32 = 0x4;
 /// The flags this viewer sends.
 pub const FLAGS: u32 = FLAG_60FPS | FLAG_NO_CURSOR;
 
+/// The refresh rate a media-stream session asks for its virtual display, which
+/// is what bounds the Mac's picture rate: the 60 fps flag above does not. Under a
+/// full-screen animation the Mac sent about 57 pictures a second at 60 Hz, with or
+/// without the flag, and 30.0 at 30 Hz. The browser is sent 30 frames a second
+/// ([`crate::encode`]), so a faster display only doubles the HEVC decoding.
+pub const DISPLAY_HZ: u8 = 30;
+
 /// The ceiling put on every bitrate entry of the negotiation blobs, in bits per
 /// second. Apple's entries run to 100 Mbit/s, and a sender with no feedback from its
 /// receiver fills what it was offered: an animating lock screen came at
