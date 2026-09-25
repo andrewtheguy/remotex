@@ -162,4 +162,42 @@ test.describe("the audio socket", () => {
     expect(only(traffic, "/ws").closed).toBe(false);
     await expect(page.getByRole("button", { name: "Enable audio" })).toBeVisible();
   });
+
+  // Headless Chromium is not WebKit, so the choice is remembered and a reload —
+  // which reattaches this tab to its session with no click at all — must ask for
+  // the sound again by itself rather than come back silent.
+  test("stays on across a reload", async ({ page }) => {
+    const traffic = watchSockets(page);
+    await logInAndConnect(page);
+
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await page.getByRole("button", { name: "Enable audio" }).click();
+    await expect
+      .poll(() => traffic.filter((t) => t.url === "/ws/audio").length, {
+        timeout: 20_000,
+      })
+      .toBe(1);
+
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+
+    // The reattach opens a second audio socket, and the format arriving on it is
+    // the gateway's answer to that subscription. The second one by position: the
+    // page that opened the first is gone, and its socket is not always reported
+    // closed.
+    await expect
+      .poll(
+        () =>
+          traffic.filter((t) => t.url === "/ws/audio")[1]?.controlTypes ?? [],
+        { timeout: 20_000 },
+      )
+      .toContain("audioFormat");
+    expect(traffic.filter((t) => t.url === "/ws/audio")).toHaveLength(2);
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await expect(
+      page.getByRole("button", { name: "Disable audio" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
 });

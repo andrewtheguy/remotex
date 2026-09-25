@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { altAsCommand } from "./altAsCommand.ts";
 import {
+  AUDIO_NEEDS_GESTURE,
   type AudioPlayer,
   createAudioContext,
   createAudioPlayer,
@@ -112,7 +113,10 @@ const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
 // Mac-keys one, and for the same reason: a lasting choice, not per-tab session
 // state. Applied to a new connection only where the target carries audio, and
 // toggling the live control in the desktop menu writes the same value back, so
-// there is one setting with two places to set it.
+// there is one setting with two places to set it. Not in a browser that needs a
+// gesture for every AudioContext (AUDIO_NEEDS_GESTURE): nothing there can honour a
+// remembered choice, so there is none — no picker checkbox, nothing read or written,
+// and sound is a click on Audio after every connect and every reload.
 const AUDIO_KEY = "remotex.audioByDefault";
 // The touchscreen preference: fingers forwarded to the remote as touch contacts
 // rather than read as trackpad gestures. Remembered like the Mac-keys one, and
@@ -449,10 +453,11 @@ export function useRemoteDesktop(
   const [canClipboard, setCanClipboard] = useState(false);
   // Whether this target offers remote audio; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
-  // Whether this browser has asked for the sound. Per attachment and never
-  // remembered: it starts off on every connect and reconnect, because enabling it
-  // has to happen inside a click — that is what makes an AudioContext playable
-  // without an autoplay policy's permission.
+  // Whether this browser has asked for the sound, per attachment. Every connect and
+  // reattach seeds it from the remembered default where the target carries audio
+  // (`seedAudioForAttachment`), except in a browser that needs a click for every
+  // AudioContext, where it starts off each time and only the Audio toggle turns it
+  // on.
   const [audioEnabled, setAudioEnabled] = useState(false);
   // Why there is no sound, when there should be. One string, and what is behind it is
   // a decoder that refused or failed — this browser having no WebCodecs at all is not
@@ -558,8 +563,8 @@ export function useRemoteDesktop(
   // from the desktop menu alike (see AUDIO_KEY). Applied to a compatible
   // connection in `handleConnected`, and read there through a ref so the
   // connection effect never re-subscribes when it changes.
-  const [audioByDefault, setAudioByDefault] = useState(() =>
-    readOnByKey(AUDIO_KEY),
+  const [audioByDefault, setAudioByDefault] = useState(
+    () => !AUDIO_NEEDS_GESTURE && readOnByKey(AUDIO_KEY),
   );
   const audioByDefaultRef = useRef(audioByDefault);
   // All three conditions, which the toolbar shows and the input effect obeys: a
@@ -641,6 +646,9 @@ export function useRemoteDesktop(
   // desktop menu's live control.
   useEffect(() => {
     audioByDefaultRef.current = audioByDefault;
+    if (AUDIO_NEEDS_GESTURE) {
+      return;
+    }
     try {
       localStorage.setItem(AUDIO_KEY, audioByDefault ? "on" : "off");
     } catch {
@@ -1291,9 +1299,11 @@ export function useRemoteDesktop(
         releaseAudio();
       }
       // The click's context when there is one, which is the first format after the
-      // toggle. Otherwise a fresh one, which is only safe because this socket was
-      // opened by a click in the first place: the page has certainly been interacted
-      // with by the time a second format arrives, so the context resumes.
+      // toggle. Otherwise a fresh one: either a second format on a socket a click
+      // opened, when the page has certainly been interacted with, or a remembered
+      // choice reapplied with no click at all, which `seedAudioForAttachment` only
+      // does where the browser lets a context start without one — and which
+      // `createAudioContext` resumes on the page's next interaction if it has to.
       const context = audioContextRef.current ?? createAudioContext();
       audioContextRef.current = context;
       try {
@@ -1454,16 +1464,18 @@ export function useRemoteDesktop(
     };
 
     // Audio belongs to one attachment: whatever was playing was on a socket that
-    // is gone, so a subscription has to be asked for again, and that ask needs a
-    // click's gesture for the AudioContext to be allowed to play. So the only way
-    // sound comes up already on is when the user wants it by default *and* this
-    // connect carried a gesture — `connect` primed a context inside the picker
-    // click, which is the only place `audioContextRef` is set — *and* the target
-    // actually carries audio. Anything else (a reattach with no gesture, a target
-    // with no sound, the default off) starts silent.
+    // is gone, so a subscription has to be asked for again. Sound comes up already
+    // on when the user wants it by default and the target actually carries audio —
+    // on a picker connect, a reattach after a dropped socket and a reload alike, so
+    // the choice is not lost to whichever of them happened. Where `connect` primed
+    // a context inside the picker click, `startAudio` adopts it; otherwise it
+    // builds one with no gesture, which is why a browser that needs a gesture for
+    // every context never gets here with the default on (AUDIO_NEEDS_GESTURE) and
+    // always starts silent. Anything else (a target with no sound, the default
+    // off) starts silent too.
     const seedAudioForAttachment = (hasAudio: boolean) => {
       setAudioError(null);
-      if (audioByDefaultRef.current && hasAudio && audioContextRef.current) {
+      if (audioByDefaultRef.current && hasAudio) {
         setAudioEnabled(true);
         openAudioSocket();
       } else {
@@ -1884,11 +1896,15 @@ export function useRemoteDesktop(
   const setAudio = useCallback(
     (enabled: boolean) => {
       // The live control also writes the remembered default, so a choice made
-      // mid-session is the one the next connect starts from — the same single value
-      // the picker's toggle edits. Recorded as the intent whether or not this
-      // browser can decode: the picker's checkbox then honestly reflects what was
-      // asked for, and a capable browser later in the same profile obeys it.
-      setAudioByDefault(enabled);
+      // mid-session is the one the next connect, reattach or reload starts from —
+      // the same single value the picker's toggle edits. Recorded as the intent
+      // whether or not this browser can decode: the picker's checkbox then honestly
+      // reflects what was asked for, and a capable browser later in the same
+      // profile obeys it. Never where every context needs its own click: there is
+      // no default there to follow.
+      if (!AUDIO_NEEDS_GESTURE) {
+        setAudioByDefault(enabled);
+      }
       setAudioError(null);
       setAudioEnabled(enabled);
       releaseAudio();

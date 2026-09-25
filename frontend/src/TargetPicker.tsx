@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AppVersion } from "./AppVersion.tsx";
+import { AUDIO_NEEDS_GESTURE } from "./audioPlayer.ts";
 import { airplayShortLabel, connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
@@ -148,17 +149,21 @@ export default function TargetPicker({
         </ul>
         {/* The remembered default, applied to whatever is picked above only
             where the target supports it — hence "if compatible", a fixed caption
-            rather than a per-target check the picker has no way to make. */}
-        <div className="picker-defaults">
-          <label className="picker-default">
-            <input
-              type="checkbox"
-              checked={audioByDefault}
-              onChange={(e) => onAudioByDefaultChange(e.target.checked)}
-            />
-            <span>Play the remote's sound, if compatible</span>
-          </label>
-        </div>
+            rather than a per-target check the picker has no way to make. Absent
+            where every AudioContext needs a click of its own: sound there is the
+            Audio toggle after each connect and reload, never a default. */}
+        {!AUDIO_NEEDS_GESTURE && (
+          <div className="picker-defaults">
+            <label className="picker-default">
+              <input
+                type="checkbox"
+                checked={audioByDefault}
+                onChange={(e) => onAudioByDefaultChange(e.target.checked)}
+              />
+              <span>Play the remote's sound, if compatible</span>
+            </label>
+          </div>
+        )}
         {throughputAvailable && (
           <button
             type="button"
