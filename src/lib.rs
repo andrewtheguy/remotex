@@ -3,11 +3,6 @@
 //! The library exposes the pieces the binary wires together and that the
 //! integration tests exercise at the protocol level. See docs/architecture.md.
 
-#[cfg(feature = "airplay")]
-pub mod airplay;
-#[cfg(not(feature = "airplay"))]
-#[path = "airplay/disabled.rs"]
-pub mod airplay;
 #[cfg(feature = "apple-hp-media")]
 pub mod aac_eld;
 pub mod assets;

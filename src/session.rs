@@ -251,10 +251,6 @@ struct EngineSlot {
     /// Where the mic socket's packets go, for a microphone target, with the camera's
     /// survival rule.
     microphone: Option<Arc<MicBridge>>,
-    /// A Mac's hold on the gateway's AirPlay speaker, for an Apple target with
-    /// audio. Here so that every way an engine ends drops it, which hangs up on
-    /// the Mac streaming into this session.
-    _airplay: Option<crate::airplay::Attached>,
     /// Resolves when this engine has ended: its pump holds the other half and
     /// drops it when the frame channel closes, which is the engine's own exit.
     /// [`State::take_engine`] keeps it as [`State::ending`], so the next engine
@@ -575,16 +571,13 @@ pub struct SessionManager {
     feedback: Arc<LinkFeedback>,
     /// The state's [`State::selected_index`], shared so it is read without the lock.
     selected_index: Arc<std::sync::atomic::AtomicUsize>,
-    /// The gateway's AirPlay speaker, when an Apple target carries audio: each such
-    /// engine's bridge is attached to it as the engine starts ([`crate::airplay`]).
-    airplay: Option<Arc<crate::airplay::AirPlay>>,
     // std Mutex: every critical section is short and never held across an await.
     state: Mutex<State>,
 }
 
 impl SessionManager {
-    pub fn new(targets: Vec<TargetConfig>, airplay: Option<Arc<crate::airplay::AirPlay>>) -> Self {
-        Self { airplay, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
+    pub fn new(targets: Vec<TargetConfig>) -> Self {
+        Self::with_spawner(targets, Box::new(spawn_engine))
     }
 
     /// The selected target's position in the `[[targets]]` list, `None` on the picker.
@@ -601,7 +594,6 @@ impl SessionManager {
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
             selected_index: Arc::clone(&state.selected_index),
-            airplay: None,
             state: Mutex::new(state),
         }
     }
@@ -800,7 +792,6 @@ impl SessionManager {
                     resize: target.resize,
                     clipboard: target.clipboard,
                     audio: target.audio,
-                    airplay: target.receives_airplay().then_some(target.audio),
                     camera: target.camera,
                     microphone: target.microphone,
                     render: engine.plan.describe(),
@@ -1307,13 +1298,6 @@ impl SessionManager {
         // queue of its own, which [`Self::arm_audio`] reads (see [`crate::audio`]), and
         // a socket of its own beyond that.
         let audio = target.audio.then(|| Arc::new(AudioBridge::new()));
-        // A Mac's sound comes from the AirPlay speaker, not from the engine, which
-        // leaves the bridge alone. The slot holds the attachment, so the engine
-        // ending is what stops the feed and hangs up on the Mac.
-        let airplay = match (&audio, &self.airplay) {
-            (Some(bridge), Some(airplay)) if target.receives_airplay() => Some(airplay.attach(bridge)),
-            _ => None,
-        };
         // The camera bridge is per-engine, like the engine's own audio half — and
         // there is no arm/re-arm machinery beside it: the camera socket that would
         // use it does not exist yet, because every engine end closed the previous
@@ -1330,7 +1314,6 @@ impl SessionManager {
             audio: audio.clone(),
             camera: uplinks.camera.clone(),
             microphone: uplinks.microphone.clone(),
-            _airplay: airplay,
             ended,
             held: HeldInput::default(),
         });
@@ -1353,7 +1336,6 @@ impl SessionManager {
             resize: target.resize,
             clipboard: target.clipboard,
             audio: target.audio,
-            airplay: target.receives_airplay().then_some(target.audio),
             camera: target.camera,
             microphone: target.microphone,
             render,
@@ -1588,9 +1570,8 @@ impl SessionManager {
 /// (single user, one active session at a time; see CLAUDE.md).
 /// `audio` is `Some` only when the target opted in, which the config file has
 /// already confined to the paths that can carry it: RDP's MS-RDPEA, wlshare's audio
-/// extension a generic VNC target asks a server for, and on either Apple subtype
-/// the AirPlay speaker, which [`SessionManager::start_engine`] attaches the bridge
-/// to instead of the engine. Each of the `uplinks` is
+/// extension a generic VNC target asks a server for, and High Performance's media
+/// stream on `ard-high-performance`. Each of the `uplinks` is
 /// `Some` only for an RDP target with its key.
 // Eight positional handoffs — the engine's whole input surface — rather than a
 // parameter struct that would exist only to be destructured at the one call site.
@@ -1847,7 +1828,6 @@ mod tests {
                 resize: got_resize,
                 clipboard: got_clipboard,
                 audio: got_audio,
-                airplay: None,
                 camera: got_camera,
                 microphone: got_microphone,
                 render: _,
@@ -2710,53 +2690,6 @@ mod tests {
         })
         .await
         .unwrap();
-    }
-
-    /// A Mac's sound comes from the gateway's AirPlay speaker, so connecting to a
-    /// Mac with audio attaches the engine's bridge to it, and the engine ending is
-    /// what detaches it — at once, while the engine still holds its bridge.
-    #[cfg(feature = "airplay")]
-    #[tokio::test]
-    async fn a_mac_with_audio_is_fed_by_the_airplay_speaker_while_its_engine_runs() {
-        let (hook_tx, hooks) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(
-            move |_target, _plan, _display, input_rx, frame_tx, audio, uplinks, _feedback| {
-                hook_tx.send((input_rx, frame_tx, audio, uplinks)).unwrap();
-            },
-        );
-        let mac = TargetConfig {
-            subtype: Some(Subtype::Ard),
-            ..fake_target_with("mac-audio", Meta::of(Protocol::Vnc).audio())
-        };
-        let airplay = crate::airplay::AirPlay::start_unadvertised(&crate::config::AirPlayConfig {
-            name: "test".into(),
-            password: "sesame".into(),
-        })
-        .unwrap();
-        let mgr = Arc::new(SessionManager {
-            airplay: Some(Arc::clone(&airplay)),
-            ..SessionManager::with_spawner(vec![mac, fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).audio())], spawner)
-        });
-
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
-        expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "mac-audio", None).await.unwrap();
-        let mac_engine: EngineEnds = hooks.try_recv().unwrap();
-        let bridge = mac_engine.2.clone().expect("a Mac with audio is given a bridge");
-        let attached = airplay.attached().expect("the speaker feeds the Mac's session");
-        assert!(Arc::ptr_eq(&attached, &bridge));
-        drop(attached);
-
-        // Another target's sound is its own engine's: the speaker is left alone,
-        // and once the Mac's engine is gone it has nothing to feed.
-        mgr.disconnect(att.id);
-        assert!(airplay.attached().is_none(), "the speaker outlived the Mac's session");
-        drop(mac_engine);
-        mgr.connect(att.id, "rdp-audio", None).await.unwrap();
-        let _rdp_engine = hooks.try_recv().unwrap();
-        assert!(airplay.attached().is_none(), "another target's session attached the speaker");
-        drop(bridge);
     }
 
     /// A connected `rdp-audio` session, with the queue the engine was handed.

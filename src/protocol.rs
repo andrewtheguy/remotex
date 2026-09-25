@@ -848,10 +848,6 @@ pub enum ServerMsg {
         resize: bool,
         clipboard: bool,
         audio: bool,
-        /// On a Mac, whether the gateway's AirPlay speaker is on — which, there, is
-        /// what `audio` follows; `None` on every other target, whose sound is its
-        /// own connection's.
-        airplay: Option<bool>,
         /// Whether this target redirects the browser's camera to the remote.
         /// Capability only, like `audio` — enabling is the client's move, made
         /// afresh each session by opening `/ws/camera`, and never remembered.
@@ -1050,7 +1046,6 @@ enum ControlMsg<'a> {
         resize: bool,
         clipboard: bool,
         audio: bool,
-        airplay: Option<bool>,
         camera: bool,
         microphone: bool,
         render: &'a str,
@@ -1157,7 +1152,6 @@ impl ServerMsg {
                 resize,
                 clipboard,
                 audio,
-                airplay,
                 camera,
                 microphone,
                 render,
@@ -1168,7 +1162,6 @@ impl ServerMsg {
                 resize: *resize,
                 clipboard: *clipboard,
                 audio: *audio,
-                airplay: *airplay,
                 camera: *camera,
                 microphone: *microphone,
                 render,
@@ -1570,7 +1563,6 @@ mod tests {
             resize: false,
             clipboard: true,
             audio: false,
-            airplay: Some(false),
             camera: false,
             microphone: false,
             render: "video q90 4:4:4 · adaptive ≥20".to_owned(),
@@ -1579,7 +1571,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"airplay":false,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive ≥20"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive ≥20"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1592,17 +1584,13 @@ mod tests {
             resize: true,
             clipboard: false,
             audio: false,
-            airplay: None,
             camera: false,
             microphone: false,
             render: "video q60".to_owned(),
         })
         .text_frame()
         {
-            Some(json) => {
-                assert!(json.contains(r#""subtype":null"#), "{json}");
-                assert!(json.contains(r#""airplay":null"#), "{json}");
-            }
+            Some(json) => assert!(json.contains(r#""subtype":null"#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         // How to decode the stream, which is the message a client cannot work out for

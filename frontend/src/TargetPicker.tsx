@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AppVersion } from "./AppVersion.tsx";
 import { AUDIO_NEEDS_GESTURE } from "./audioPlayer.ts";
-import { airplayShortLabel, connectionShortLabel } from "./connectionLabel.ts";
+import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 
@@ -27,9 +27,6 @@ interface TargetInfo {
   subtype: string | null;
   host: string;
   port: number;
-  // On a Mac, whether the gateway's AirPlay speaker is on — whether its sound can
-  // reach this browser at all; null on every other target.
-  airplay: boolean | null;
 }
 
 export default function TargetPicker({
@@ -137,10 +134,7 @@ export default function TargetPicker({
                       : [
                           connectionShortLabel(t.protocol, t.subtype),
                           `${t.host}:${t.port}`,
-                          airplayShortLabel(t.airplay),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+                        ].join(" · ")}
                   </span>
                 </button>
               </li>

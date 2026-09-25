@@ -115,7 +115,7 @@ REMOTEX_SOURCE_DIR="$source" REMOTEX_CONTAINER_FEATURES="$features" \
 # Which libavcodec that binary linked, as cargo recorded it: the same build again
 # is a no-op that replays each build script's link paths. The build script had
 # already held the archive to its release's checksums and to its own MANIFEST.
-linked="$(cd "$source" && cargo build --release --no-default-features --features "airplay $features" \
+linked="$(cd "$source" && cargo build --release --no-default-features --features "$features" \
   --message-format=json 2>/dev/null \
   | jq -r 'select(.reason == "build-script-executed" and (.package_id | contains("libavcodec-hevc-prebuilt-sys"))) | .linked_paths[]')"
 expected="native=${CARGO_HOME:-$HOME/.cargo}/libavcodec-hevc-prebuilt/${hevc_release}/linux-x86_64/lib"

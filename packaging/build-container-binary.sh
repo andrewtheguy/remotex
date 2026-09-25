@@ -7,7 +7,7 @@
 # since a tag holds whatever script it was cut with.
 #
 # REMOTEX_CONTAINER_FEATURES names the non-default features an operator's own
-# image adds beside airplay (`apple-hp-media`); release CI leaves it unset.
+# image adds (`apple-hp-media`); release CI leaves it unset.
 # Whatever it names, the checks below still refuse a binary that carries the
 # managed-instance surface, or lacks a feature it was asked for.
 set -euo pipefail
@@ -16,10 +16,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 output="$(realpath -m "${1:-tmp/container-bin/remotex}")"
 cd "${REMOTEX_SOURCE_DIR:-$repo_root}"
-features="airplay${REMOTEX_CONTAINER_FEATURES:+ $REMOTEX_CONTAINER_FEATURES}"
+features="${REMOTEX_CONTAINER_FEATURES:-}"
 
-echo ">> building container gateway without default features, but with ${features}"
-cargo build --release --no-default-features --features "$features"
+echo ">> building container gateway without default features${features:+, but with ${features}}"
+cargo build --release --no-default-features ${features:+--features "$features"}
 
 binary="${CARGO_TARGET_DIR:-target}/release/remotex"
 case "$("$binary" --help)" in

@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.264"
+version = "0.0.265"
 
 [package]
 name = "remotex"
@@ -26,13 +26,9 @@ edition = "2024"
 [features]
 # Native builds include the local TUI control plane. Container artifacts
 # explicitly disable default features: a remotely deployed gateway must not
-# expose process supervision or its private worker surface. They turn `airplay`
-# back on, so every released artifact carries the Mac's AirPlay speaker.
-default = ["embedded-gateway", "airplay"]
+# expose process supervision or its private worker surface.
+default = ["embedded-gateway"]
 embedded-gateway = ["dep:crossterm", "dep:libc"]
-# A Mac's sound, received as an AirPlay 1 speaker (src/airplay/). Without it, the
-# config refuses `[airplay]` and `audio` on a Mac.
-airplay = ["dep:alac", "dep:mdns-sd", "dep:gethostname"]
 # Apple High Performance's media stream (src/vnc_apple_media.rs, src/aac_eld.rs):
 # the Mac's picture as HEVC and its sound as AAC-ELD, both over SRTP, which a
 # target turns on with `subtype = "ard-high-performance"`. The two decoders are
@@ -151,8 +147,6 @@ symphonia-core = "0.6"
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
 rubato = "4"
-# A stable hash of the AirPlay speaker's identity (src/airplay/mod.rs).
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cursor shapes ride the JSON control channel as base64 PNG (see
 # src/protocol.rs) — small and rare enough not to warrant a binary frame kind.
 base64 = "0.22"
@@ -240,16 +234,6 @@ sha2 = "0.11"
 # SRTP's and SRTCP's HMAC-SHA1-80 tags on the High Performance media stream
 # (src/vnc_apple_media.rs), over the `sha1` above.
 hmac = "0.13"
-# A Mac's sound, received as an AirPlay 1 speaker (src/airplay/): the Mac streams
-# Apple Lossless, which this pure-Rust decoder takes packet by packet from the
-# SDP's own parameters, and finds the speaker by DNS-SD, which `mdns-sd` answers
-# and announces from inside the process — no avahi or Bonjour on the host, and no
-# async runtime of its own. The RSA, AES and MD5 the protocol asks for are the
-# crates above. The host's name, with the branding, is what keeps two gateways'
-# speakers distinct.
-alac = { version = "0.5", optional = true }
-mdns-sd = { version = "0.21", optional = true }
-gethostname = { version = "1", optional = true }
 
 [build-dependencies]
 anyhow = "1"
@@ -274,9 +258,6 @@ name = "tui_control_plane_e2e"
 required-features = ["embedded-gateway"]
 
 [dev-dependencies]
-# Apple Lossless packets for the AirPlay receiver's test, made by Apple's own
-# encoder ported to Rust, which shares nothing with the decoder above.
-alac-encoder = "0.3"
 # FLAC frames for the audio decoder's tests, made the way wlshare makes them and
 # by an encoder that shares nothing with symphonia.
 flacenc = { version = "0.5", default-features = false }

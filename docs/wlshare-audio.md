@@ -38,8 +38,8 @@ wayvnc, TigerVNC or x11vnc gets a desktop and no sound, which is what those
 servers have to give. So does QEMU, whose own audio extension carries raw
 samples and is not asked for. On the gateway side `audio = true` is accepted on any
 plain `vnc` target. A target of either Apple subtype is never asked for the
-extension — its sound arrives over AirPlay ([`airplay-audio.md`](airplay-audio.md)) —
-but a Mac configured as a plain `vnc` target with `audio = true` is asked like
+extension — `ard` carries no sound, and `ard-high-performance` takes its sound
+from the media stream — but a Mac configured as a plain `vnc` target with `audio = true` is asked like
 any other server, and lists the pseudo-encoding in its `SetEncodings`.
 
 wlshare's own `audio` key (default `false`) is the server's side of the same

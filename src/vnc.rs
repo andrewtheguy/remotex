@@ -863,9 +863,9 @@ enum Density {
 /// speaks the extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Audio {
-    /// The target asked for no sound, or this is an Apple dialect, whose audio
-    /// bridge is fed by AirPlay or, on `ard-high-performance`, by the media
-    /// stream's sound leg.
+    /// The target asked for no sound, or this is an Apple dialect: `ard` leaves
+    /// the Mac's sound alone, and `ard-high-performance`'s bridge is fed by the
+    /// media stream's sound leg.
     Off,
     /// Listed in `SetEncodings`, with nothing announced yet.
     Asked,
@@ -1515,8 +1515,8 @@ async fn session(
     let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
     // A generic server is asked for wlshare's audio extension on the connection
     // itself ([`vnc_audio`]). High Performance's media stream carries the Mac's
-    // sound beside its picture ([`vnc_apple_media`]). Any other Mac's arrives at
-    // the gateway's AirPlay speaker, which the session attached this bridge to.
+    // sound beside its picture ([`vnc_apple_media`]). Standard mode never touches
+    // the Mac's sound.
     let (media, wlshare_audio) = match media {
         Some((stream, pictures)) => (Some((stream.with_sound(audio), pictures)), None),
         None => (None, audio.filter(|_| !apple)),
@@ -6364,9 +6364,9 @@ mod tests {
     }
 
     /// Both Apple modes ask for the display layout and zlib, and for none of the
-    /// generic extensions: the pasteboard is Apple's own protocol, the sound is
-    /// AirPlay's or the media stream's, and a Mac reports its densities and screens
-    /// in the layout.
+    /// generic extensions: the pasteboard is Apple's own protocol, the only sound
+    /// is the media stream's, and a Mac reports its densities and screens in the
+    /// layout.
     #[test]
     fn a_mac_is_asked_for_its_layout_and_zlib_and_no_generic_extension() {
         let encodings = vnc_apple::ENCODINGS;
