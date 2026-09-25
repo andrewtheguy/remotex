@@ -590,7 +590,8 @@ treating it as lost.
 - **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
   the 46-byte masters in the offer. Received packets use the server-to-viewer
   key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP
-  under its key.
+  under its key. An authentic packet no newer than one already received, a
+  duplicate or a straggler, is dropped on both legs.
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
   FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
   a stream starts without an IDR (the first packets can arrive before the socket

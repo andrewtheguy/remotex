@@ -27,7 +27,8 @@
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode
 //! with an HMAC-SHA1-80 tag, RFC 3711 keys from the masters this side put in the
 //! offer ([`SrtpReceiver`]) — and every report out is SRTCP under this side's own
-//! keys ([`SrtcpSender`]). A packet whose tag does not match is dropped.
+//! keys ([`SrtcpSender`]). A packet whose tag does not match is dropped, and so is
+//! an authentic one no newer than a packet already received.
 //!
 //! Three fields of the offer differ from Apple's, each measured:
 //!
@@ -599,6 +600,8 @@ pub enum SrtpError {
     Rtcp,
     #[error("the authentication tag does not match")]
     Forged,
+    #[error("a duplicate, or older than a packet already received")]
+    Stale,
 }
 
 /// An RTP packet's header fields, and where its payload sits in the datagram.
@@ -677,6 +680,11 @@ impl SrtpReceiver {
 
     /// Authenticate and decrypt one datagram in place, returning its header; the
     /// payload is then `data[header.payload.0..header.payload.1]` in the clear.
+    ///
+    /// An authentic packet no newer than the newest already received is refused
+    /// as [`SrtpError::Stale`]: a duplicate, or one overtaken on the way. The sound
+    /// decoder keeps state from unit to unit, and the depacketizer has no use for
+    /// either, so neither leg takes them.
     pub fn unprotect(&mut self, data: &mut [u8]) -> Result<RtpHeader, SrtpError> {
         let header = rtp_header(data)?;
         let roc = self.guess_roc(header.ssrc, header.sequence);
@@ -686,18 +694,16 @@ impl SrtpReceiver {
             return Err(SrtpError::Forged);
         }
         let index = (u64::from(roc) << 16) | u64::from(header.sequence);
-        let iv = self.keys.iv(header.ssrc, index);
-        aes_ctr_xor(&self.keys.cipher, iv, &mut data[header.payload.0..end]);
         let newer = match self.last {
-            Some((ssrc, seq, last_roc)) if ssrc == header.ssrc => {
-                (u64::from(roc) << 16 | u64::from(header.sequence))
-                    > (u64::from(last_roc) << 16 | u64::from(seq))
-            }
+            Some((ssrc, seq, last_roc)) if ssrc == header.ssrc => index > (u64::from(last_roc) << 16 | u64::from(seq)),
             _ => true,
         };
-        if newer {
-            self.last = Some((header.ssrc, header.sequence, roc));
+        if !newer {
+            return Err(SrtpError::Stale);
         }
+        let iv = self.keys.iv(header.ssrc, index);
+        aes_ctr_xor(&self.keys.cipher, iv, &mut data[header.payload.0..end]);
+        self.last = Some((header.ssrc, header.sequence, roc));
         Ok(header)
     }
 }
@@ -1819,6 +1825,18 @@ mod tests {
             unhex("80c900010102030480000001bcb6f8d4262f3495b496"),
             "the index counts up"
         );
+    }
+
+    #[test]
+    fn srtp_refuses_a_duplicate_and_a_straggler() {
+        let packet = unhex("80e412340a0b0c0dcafebabe610005049285d9955b8928769900c5323d679c04bbccbf");
+        let mut srtp = SrtpReceiver::new(&master());
+        assert!(srtp.unprotect(&mut packet.clone()).is_ok());
+        assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "a duplicate");
+        srtp.last = Some((0xcafe_babe, 0x1235, 0));
+        assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "overtaken");
+        srtp.last = Some((0x0102_0304, 0x1235, 0));
+        assert!(srtp.unprotect(&mut packet.clone()).is_ok(), "a new stream starts over");
     }
 
     #[test]
