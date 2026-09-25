@@ -313,6 +313,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         domain: target.domain.clone(),
         width: OPENING.0,
         height: OPENING.1,
+        scale_percent: 0,
         // A resize is the pipeline's graphics reset; the bitmap path has none.
         resize: egfx(),
         egfx: egfx(),

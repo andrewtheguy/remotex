@@ -21,7 +21,7 @@
 //! layout, so the server has nothing to answer about them.
 
 use super::wire::{Malformed, Reader, Writer};
-use super::{channel, per};
+use super::{channel, display, per};
 
 /// `ConnectData` up to the connectPDU length, which never varies: a CHOICE selecting
 /// the object-identifier form of the key, and the identifier itself — T.124 (02/98),
@@ -187,6 +187,9 @@ impl Channel {
 pub struct ConferenceCreateRequest<'a> {
     pub width: u16,
     pub height: u16,
+    /// The desktop scale factor to open at, as a percentage: 200 for a 2x desktop.
+    /// Written only when inside the 100 to 500 a server reads; zero states none.
+    pub scale_percent: u32,
     /// The gateway's own host name, as the server will show it in session lists.
     pub client_name: &'a str,
     /// A Windows keyboard layout identifier — `0x0409` for US English.
@@ -256,14 +259,17 @@ impl ConferenceCreateRequest<'_> {
         w.u8(CONNECTION_TYPE_LAN);
         w.u8(0); // pad1octet
         w.u32_le(self.selected_protocol);
-        // The physical size and scale of the client's screen, which would let the
-        // server pick a DPI. Zero means it has not been measured, and the gateway
-        // does not measure it: a browser reports density, not millimetres.
+        // The physical size of the client's screen is not measured — a browser
+        // reports density, not millimetres — and zero is ignored on its own. The
+        // scale factors are read apart from it, as a pair: the desktop's only
+        // beside a device scale of 100, 140 or 180 ([MS-RDPBCGR] 2.2.1.3.2), and
+        // 100 is the one this client, with no display of its own, has.
+        let scale = (display::MIN_SCALE..=display::MAX_SCALE).contains(&self.scale_percent);
         w.u32_le(0); // desktopPhysicalWidth
         w.u32_le(0); // desktopPhysicalHeight
         w.u16_le(0); // desktopOrientation
-        w.u32_le(0); // desktopScaleFactor
-        w.u32_le(0); // deviceScaleFactor
+        w.u32_le(if scale { self.scale_percent } else { 0 }); // desktopScaleFactor
+        w.u32_le(if scale { display::DEVICE_SCALE } else { 0 }); // deviceScaleFactor
     }
 
     fn network(&self, w: &mut Writer) {
@@ -452,6 +458,7 @@ mod tests {
         ConferenceCreateRequest {
             width: 1920,
             height: 1080,
+            scale_percent: 0,
             client_name: "gateway",
             keyboard_layout: 0x0409,
             selected_protocol: 2,
@@ -482,6 +489,24 @@ mod tests {
         assert_eq!(early_capabilities(&without), EARLY_CAPABILITIES);
         let with = ConferenceCreateRequest { graphics: true, ..request() };
         assert_eq!(early_capabilities(&with), EARLY_CAPABILITIES | 0x0100);
+    }
+
+    /// `desktopScaleFactor` and `deviceScaleFactor`, the last two fields of `CS_CORE`.
+    fn scale_factors(request: &ConferenceCreateRequest<'_>) -> (u32, u32) {
+        let bytes = request.blocks();
+        let end = usize::from(u16::from_le_bytes([bytes[2], bytes[3]]));
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        (u32_at(end - 8), u32_at(end - 4))
+    }
+
+    /// A stated scale goes out as the pair a server reads, and anything it would
+    /// throw away — no scale, or one outside 100 to 500 — goes out as none at all.
+    #[test]
+    fn an_opening_scale_rides_the_core_data_with_a_device_scale_of_100() {
+        assert_eq!(scale_factors(&request()), (0, 0));
+        assert_eq!(scale_factors(&ConferenceCreateRequest { scale_percent: 200, ..request() }), (200, 100));
+        assert_eq!(scale_factors(&ConferenceCreateRequest { scale_percent: 100, ..request() }), (100, 100));
+        assert_eq!(scale_factors(&ConferenceCreateRequest { scale_percent: 600, ..request() }), (0, 0));
     }
 
     #[test]

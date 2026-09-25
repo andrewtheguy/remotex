@@ -202,7 +202,8 @@ async fn session(
     uplinks: Uplinks,
     sink: &VideoSink,
 ) {
-    let (session, mut events) = Session::start(connect_config(&config, display, audio, &uplinks));
+    let opening = opening_layout(&config, display);
+    let (session, mut events) = Session::start(connect_config(&config, opening, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -216,16 +217,19 @@ async fn session(
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
         return;
     };
-    info!("rdp: connected, desktop {width}x{height}");
+    // The opening density counts as applied only when the desktop came back at the
+    // size that asked for it — the same proof a mid-session layout needs (see
+    // `confirms`). A server that opened something else is taken to be at 1x, and
+    // the attachment's `HostDisplay` asks again through Display Control.
+    let applied = if (u32::from(width), u32::from(height)) == opening.adjusted().size() {
+        opening.density
+    } else {
+        Density::One
+    };
+    info!("rdp: connected, desktop {width}x{height} at {}x", applied.percent() / 100);
 
-    // 1x, always: the opening handshake uses the point-sized geometry above, and
-    // the attached client's density is applied through `HostDisplay` after
-    // `ServerMsg::Connected`. A Retina client is therefore one layout change away
-    // from where it wants to be: a graphics reset. Keeping density mid-session also
-    // lets a later attachment state its own screen instead of inheriting the first
-    // one's.
     if sink
-        .msg(ServerMsg::Resize { w: width, h: height, scale: Density::One.scale() })
+        .msg(ServerMsg::Resize { w: width, h: height, scale: applied.scale() })
         .await
         .is_err()
     {
@@ -245,6 +249,7 @@ async fn session(
             default_size: config.default_size(),
         },
         (width, height),
+        applied,
         input_rx,
         sink,
     )
@@ -323,32 +328,49 @@ async fn await_desktop(
     }
 }
 
+/// The layout a session opens at: the pinned config size, else the full
+/// resolution of the client's own screen — the same rule every engine resolves —
+/// in points, carried up to the client's density and held under the video
+/// stream's ceiling as every later layout is (see `Layout::held`).
+///
+/// At the client's density from the handshake rather than 1x and a Display
+/// Control layout after `ServerMsg::Connected`, because a Windows host applies a
+/// later layout's size and scale factor as two separate steps: in between, the
+/// desktop is drawn at 2x pixels and 100% scaling, every window half its final
+/// size. Opened at the final layout, the logon — or the reconnection of a session
+/// left at another size — is drawn at it from the start.
+///
+/// 1x without `resize`, where a density is not this end's to change: the target
+/// then keeps its size and scaling as the operator set them.
+fn opening_layout(config: &TargetConfig, display: Option<HostDisplay>) -> Layout {
+    let (width, height) = config.opening_size(display);
+    let density = display
+        .filter(|_| config.resize)
+        .map_or(Density::One, |screen| Density::from_host(screen.scale));
+    Layout { w: u32::from(width), h: u32::from(height), density: Density::One }
+        .at_density(density)
+        .held()
+}
+
 /// Everything the RDP client needs to open this target's session.
 fn connect_config(
     config: &TargetConfig,
-    display: Option<HostDisplay>,
+    opening: Layout,
     audio: Option<Arc<AudioBridge>>,
     uplinks: &Uplinks,
 ) -> Connect {
-    // The opening size, in points at 1x: the pinned config size, else the full
-    // resolution of the client's own screen — the same rule every engine
-    // resolves. The density this session ends up at remains the client's to
-    // state mid-session; see `Density`. At 1x the points are the pixels, so a
-    // screen the video encoder would refuse is held under its ceiling here, as
-    // every later layout is — see `Layout::held`.
-    let (width, height) = config.opening_size(display);
-    let (width, height) =
-        Layout { w: u32::from(width), h: u32::from(height), density: Density::One }
-            .held()
-            .size();
     Connect {
         host: config.host.clone(),
         port: config.port,
         username: config.username.clone(),
         password: config.password.clone(),
         domain: config.domain.clone(),
-        width,
-        height,
+        width: opening.w,
+        height: opening.h,
+        // Stated only on a target whose density is this end's to set, where 1x is
+        // a statement too: a session left at 2x reconnects at 100%. Without
+        // `resize` the host keeps whatever scaling it was configured with.
+        scale_percent: if config.resize { opening.density.percent() } else { 0 },
         resize: config.resize,
         egfx: config.egfx(),
         clipboard: config.clipboard,
@@ -849,6 +871,7 @@ async fn active_loop(
     mut events: mpsc::Receiver<Event>,
     flags: Flags,
     connected_at: (u16, u16),
+    connected_density: Density,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
@@ -878,7 +901,7 @@ async fn active_loop(
     // announced `scale` 2.0 for a 1x framebuffer, which a client presents at half
     // size. Nothing acknowledges a layout on this protocol, so the absence of a
     // resize is the only evidence there is, and it has to be the evidence used.
-    let mut applied = Density::One;
+    let mut applied = connected_density;
     // Whether the remote has offered DisplayControl. Until it has, a layout has
     // nowhere to go — the RDP client would hold it, but holding it there loses
     // the retry ladder below, which is what a Windows host actually needs.
@@ -2270,6 +2293,41 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    fn rdp_target(extra: &str) -> TargetConfig {
+        let passwd = crate::auth::generate("admin", "hunter2", 4).unwrap();
+        let text = format!(
+            "[server]\nsite_passwd = \"{passwd}\"\n\n[[targets]]\nname = \"win\"\n\
+             protocol = \"rdp\"\nhost = \"10.0.0.5\"\nusername = \"u\"\npassword = \"p\"\n{extra}\n"
+        );
+        crate::config::ConfigFile::parse(&text).unwrap().targets.remove(0)
+    }
+
+    /// A session opens at the layout it will stay at: a phone's 3x screen is the
+    /// default size at 2x from the handshake, not a 1x desktop waiting for a
+    /// Display Control layout that a Windows host applies in two visible steps.
+    /// Without `resize` the density is not this end's, and it opens at 1x.
+    #[test]
+    fn a_session_opens_at_the_clients_density_when_it_may_set_one() {
+        let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
+        let (w, h) = crate::config::DEFAULT_SIZE;
+        let (w, h) = (u32::from(w), u32::from(h));
+
+        let resizable = rdp_target("resize = true");
+        assert_eq!(
+            opening_layout(&resizable, Some(phone)),
+            Layout { w: w * 2, h: h * 2, density: Density::Two }
+        );
+        let retina = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
+        assert_eq!(
+            opening_layout(&resizable, Some(retina)),
+            Layout { w: 3456, h: 2234, density: Density::Two }
+        );
+        assert_eq!(opening_layout(&resizable, None), Layout { w, h, density: Density::One });
+
+        let fixed = rdp_target("");
+        assert_eq!(opening_layout(&fixed, Some(phone)), Layout { w, h, density: Density::One });
     }
 
     #[test]

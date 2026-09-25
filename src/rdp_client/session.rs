@@ -41,6 +41,11 @@ pub struct Connect {
     /// which arrives as [`Event::Connected`] and, later, as [`Event::Resize`].
     pub width: u32,
     pub height: u32,
+    /// The desktop scale factor to open at, as a percentage — 100 for an ordinary
+    /// desktop, 200 for a 2x one — sent in the core data so the server logs on at
+    /// it. Unlike a later [`Input::resize`] it needs no Display Control. Zero, or
+    /// anything outside the 100 to 500 a server reads, states none.
+    pub scale_percent: u32,
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
