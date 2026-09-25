@@ -104,7 +104,10 @@ body {
 
 /* Centered connection-state readout, shown until the desktop is streaming.
    A solid background fully hides any stale canvas content behind the readout
-   (reconnecting, eviction, waiting) — a plain interstitial, no see-through. */
+   (reconnecting, eviction, waiting) — a plain interstitial, no see-through.
+   It takes the pointer, as .view-only does: the input overlay beneath hides the
+   browser's own cursor for a desktop that draws its own, and with no desktop on
+   screen — connecting, a connection error — that left no pointer at all. */
 .status-overlay {
   position: fixed;
   inset: 0;
@@ -114,7 +117,7 @@ body {
   align-items: center;
   justify-content: center;
   text-align: center;
-  pointer-events: none;
+  cursor: default;
   font-size: 0.95rem;
   background: #0d1117;
 }
@@ -150,7 +153,7 @@ body {
 
 /* A settling High Performance resize: the last frame dimmed and blurred under a
    label, over the desktop but under the menu (z-index 900 and up), and
-   transparent to input like the status overlay. */
+   transparent to input: the desktop is still on screen under it. */
 .resize-overlay {
   position: fixed;
   inset: 0;
@@ -195,7 +198,6 @@ body {
 /* The overlay itself must not eat input aimed at the desktop, but its action
    buttons (take over / take back) obviously must be clickable. */
 .status-action {
-  pointer-events: auto;
   margin-top: 0.5rem;
   padding: 0.45rem 1.2rem;
   font: inherit;

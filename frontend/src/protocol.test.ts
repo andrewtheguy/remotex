@@ -10,6 +10,7 @@ import { test } from "node:test";
 import {
   batchFrameSequence,
   clickCount,
+  mouseButtonBit,
   mouseButtonFromEvent,
   wheelUnitFromEvent,
 } from "./protocol.ts";
@@ -65,6 +66,14 @@ test("the side buttons of a five-button mouse are named, not dropped", () => {
   assert.equal(mouseButtonFromEvent(4), "forward");
   // Past forward nothing has an agreed meaning on any platform.
   assert.equal(mouseButtonFromEvent(5), null);
+});
+
+test("a button's held bit follows MouseEvent.buttons, not MouseEvent.button", () => {
+  assert.equal(mouseButtonBit("left"), 1);
+  assert.equal(mouseButtonBit("right"), 2);
+  assert.equal(mouseButtonBit("middle"), 4);
+  assert.equal(mouseButtonBit("back"), 8);
+  assert.equal(mouseButtonBit("forward"), 16);
 });
 
 test("a wheel delta says which unit it is in", () => {
