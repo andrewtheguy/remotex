@@ -175,6 +175,13 @@ documentation.
 - Do not use AppleScript, synthetic clicks, or screenshot loops to inspect a
   browser. Ask the client through deterministic interfaces, and ask the user for
   observations only eyes can provide.
+- A virtual Mac (an Apple Virtualization guest) is for smoke tests only: that
+  a session connects, shows its picture, starts its sound and survives a
+  resize. It lags whenever it plays sound, and its High Performance sound goes
+  distorted and then silent after a minute or so, under Apple's own viewer too.
+  Judge performance, sound quality and long sessions on a physical Mac, or
+  against Apple's viewer on the same machine first. See
+  [The sound](docs/apple-vnc-889.md#the-sound).
 - Do not infer GUI or network capabilities from an SSH attachment. A tmux server
   retains the environment and access of the user that started it. Test a
   capability once and read its error; being able to drive the GUI is still not
