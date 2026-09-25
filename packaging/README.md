@@ -3,8 +3,7 @@
 Native packages are the release install contract. Linux ships both `.deb` and
 `.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout input
 for native package and container builds. Containers replace its native binary
-with a build that excludes the `embedded-gateway` default feature and keeps the
-`airplay` one.
+with a build that excludes the `embedded-gateway` default feature.
 
 Every artifact carries one gateway binary with the web client compiled into it
 (`src/assets.rs` embeds the bundle from Cargo's private output directory at build
@@ -60,7 +59,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
-| `build-container-binary.sh` | build and verify a gateway with default features disabled but `airplay`, plus any `REMOTEX_CONTAINER_FEATURES` |
+| `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
 | `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |

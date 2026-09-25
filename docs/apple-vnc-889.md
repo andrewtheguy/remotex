@@ -25,13 +25,13 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | zlib | AirPlay workaround |
+| `ard` | Standard, the physical displays | zlib | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
 
 `ard-high-performance` is High Performance as Apple's viewer has it, and needs a
-gateway built with the `apple-hp-media` feature. Remotex does not pair a virtual
-display with Standard mode's picture and AirPlay sound: Apple's viewer never offers
-that combination.
+gateway built with the `apple-hp-media` feature. Remotex does not offer a
+virtual display without the media stream: Apple's viewer never offers that
+combination.
 
 ## Summary
 
@@ -41,7 +41,7 @@ that combination.
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is zlib throughout, and its sound reaches remotex through its AirPlay receiver. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
+| Picture and sound | `ard` is zlib throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -615,8 +615,11 @@ offer is refused (`unable to create audio config`, error type 2), and one with a
 empty video offer (`unable to create video config`, the same type). While the
 audio leg runs, the Mac mutes its own sound output: the daemon's log shows the
 output device muted as the stream starts, and the Mac's speakers were measured
-silent. So an `ard-high-performance` target always carries sound, takes no
-`audio` key, and never uses the AirPlay workaround, whose Mac would be muted.
+silent. So an `ard-high-performance` target always carries sound and takes no
+`audio` key. The stream takes over the Mac's sound, AirPlay included. Standard
+mode never touches the sound output, so a Mac there plays to its speakers or to
+an AirPlay receiver outside remotex as usual; in a High Performance session it
+plays nothing to one, which was confirmed on a physical Mac.
 
 **One offer at a time.** A second `0x1c` sent while the first one's capture was
 still starting left the capture failed (`didStart: 0 error: 32000`). When the

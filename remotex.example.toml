@@ -80,21 +80,6 @@
 #database = "meter.sqlite3"
 #max_records = 10080
 
-# The AirPlay speaker a Mac's sound arrives at — EXPERIMENTAL. Gateway-wide:
-# with it, every "ard" target carries audio, and
-# without it none does; refused when there is no Mac target at all. An
-# "ard-high-performance" target never uses it, since its sound comes with its
-# picture, but a table beside one still loads.
-# The gateway announces itself over mDNS as an AirPlay 1 speaker named
-# "<[branding].text> - remotex". The Mac picks it once in Control Center →
-# Sound and is asked for this password, which it then remembers. The Mac must
-# share the gateway's link (mDNS does not cross a router), a container needs the host's
-# network, and the ports it uses are ephemeral TCP and UDP. See
-# docs/airplay-audio.md.
-#
-#[airplay]
-#password = "choose one"
-
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
 # because it is one decision — a host without a port is half an answer.
@@ -251,9 +236,9 @@ password = "change-me"
 # "vnc" target asks the server for wlshare's audio extension, and one that never
 # announces it gives a silent session. On every Apple subtype the key is refused.
 # An "ard-high-performance" target always carries sound, which the Mac sends
-# beside its picture; an "ard" target's comes from the gateway's AirPlay speaker
-# instead, which the [airplay] table above turns on for every such Mac —
-# EXPERIMENTAL.
+# beside its picture — EXPERIMENTAL. An "ard" target carries none: Standard mode
+# leaves the Mac's sound output alone, playing on the Mac or to whatever AirPlay
+# receiver it picks.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
@@ -262,8 +247,8 @@ password = "change-me"
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound works wherever the target carries it — an "rdp" target,
-# a plain "vnc" server that speaks wlshare's extension, an "ard-high-performance"
-# Mac, or a Mac playing to the AirPlay speaker.
+# a plain "vnc" server that speaks wlshare's extension, or an
+# "ard-high-performance" Mac.
 #
 # Off leaves the remote's sound where it is.
 #audio = false
@@ -424,7 +409,8 @@ password = "change-me"
 #
 # The picture and the sound go together: the Mac refuses one without the other,
 # and mutes its own speakers while it streams. So the target always carries
-# sound, takes no `audio` key, and never uses the AirPlay speaker.
+# sound and takes no `audio` key, and an AirPlay speaker the Mac plays to hears
+# nothing.
 #
 # EXPERIMENTAL, and only in a gateway built with `--features apple-hp-media`, which
 # links the two decoders — FFmpeg's HEVC decoder (LGPL) and Fraunhofer's AAC-ELD decoder, whose

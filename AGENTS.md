@@ -114,17 +114,16 @@ documentation.
   take raw PCM from the RFB connection, add a second codec to it, or add a
   configuration key naming the server. See
   [Desktop audio over VNC with wlshare](docs/wlshare-audio.md).
-- A Mac's audio on `ard` is the gateway's AirPlay 1
-  speaker (`src/airplay/`): one gateway-wide receiver, advertised over mDNS, that
-  requires the `[airplay]` password and feeds the running Apple session's bridge.
-  The table is the switch for those Macs' audio. It is experimental. Do not add
-  AirPlay 2 pairing, a second decoder beside ALAC, a per-target speaker, or a
-  per-target audio key. See [A Mac's sound over AirPlay](docs/airplay-audio.md).
+- `ard` carries no sound and takes no `audio` key. Standard mode never touches
+  the Mac's sound output, which keeps playing where the Mac sends it — its own
+  speakers, or an AirPlay receiver that runs outside remotex. Do not add an
+  AirPlay receiver or any other sound path for it to the gateway.
 - `ard-high-performance` takes the Mac's picture and sound together from High
   Performance's media stream (`src/vnc_apple_media.rs`): HEVC and AAC-ELD over
   SRTP, every packet authenticated before it is decrypted and every report sent
   as SRTCP. The Mac refuses one leg without the other, so the target always
-  carries sound, takes no `audio` key, and never uses AirPlay. Its two decoders
+  carries sound and takes no `audio` key. While the sound leg runs the Mac mutes
+  its own output, so it plays nothing to an AirPlay speaker. Its two decoders
   are the non-default `apple-hp-media` feature, which no release artifact
   enables; a build without it refuses the subtype. Zlib carries its picture only
   until the stream is up and across display changes, and a stream that fails
@@ -158,8 +157,7 @@ documentation.
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the Unix-only `remotex tui` control
   plane and its hidden `serve-embedded` workers. Containers must be built through
-  `packaging/build-container-binary.sh`, with default features disabled except
-  `airplay`, and must
+  `packaging/build-container-binary.sh`, with default features disabled, and must
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
 - Windows ships only `serve`, `check-config`, and `gen-passwd` in the MSI. Build
   it with `packaging/build-windows-msi.ps1` on `windows-ci-build` through
@@ -184,9 +182,7 @@ documentation.
   distorted and then silent after a minute or so, under Apple's own viewer too.
   Judge performance, sound quality and long sessions on a physical Mac, or
   against Apple's viewer on the same machine first. See
-  [The sound](docs/apple-vnc-889.md#the-sound). AirPlay cannot be tested on a
-  virtual Mac at all: the speaker is tested only with a physical Mac and real
-  devices. See [A Mac's sound over AirPlay](docs/airplay-audio.md#testing).
+  [The sound](docs/apple-vnc-889.md#the-sound).
 - Do not infer GUI or network capabilities from an SSH attachment. A tmux server
   retains the environment and access of the user that started it. Test a
   capability once and read its error; being able to drive the GUI is still not

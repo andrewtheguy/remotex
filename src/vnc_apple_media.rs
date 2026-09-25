@@ -1,5 +1,5 @@
 //! Apple High Performance's picture and sound, the way Apple's viewer takes them:
-//! HEVC and AAC-ELD over the media stream, not zlib over RFB and not AirPlay.
+//! HEVC and AAC-ELD over the media stream, not zlib over RFB.
 //!
 //! A High Performance viewer that advertises encoding **1010**
 //! ([`ENCODING_MEDIA_STREAM`]) and sends message **`0x1c`**

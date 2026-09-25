@@ -42,8 +42,7 @@
 //! `ard-high-performance` can resize its virtual display. `ard-high-performance`
 //! takes its picture and sound from the media stream once it is up
 //! ([`crate::vnc_apple_media`]): zlib rectangles carry the picture only until
-//! then. `ard` keeps its picture on zlib, and its sound arrives over the AirPlay
-//! workaround.
+//! then. `ard` keeps its picture on zlib and carries no sound.
 //! Every Apple subtype uses Apple's native pasteboard protocol, enabling
 //! monitoring before the rekey and carrying fetches and clipboard data inside the
 //! encrypted transport.

@@ -2,9 +2,8 @@
 #
 # The build context starts as an extracted release tarball (see
 # build-tarball.sh), but its binary must be replaced with the output of
-# build-container-binary.sh. That binary is built with no default features but
-# `airplay`, so the image has the deployed gateway, its AirPlay speaker, and
-# never the managed-instance substrate.
+# build-container-binary.sh. That binary is built with no default features, so
+# the image has the deployed gateway and never the managed-instance substrate.
 # The Docker build verifies that boundary below instead of trusting its context.
 # .github/workflows/release.yml wires this up; to do it by hand:
 #

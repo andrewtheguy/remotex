@@ -193,8 +193,8 @@ decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
 target uses; zlib carries the picture only until the stream does, and a stream
 that fails ends the session, as it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as zlib's deflate does. The Mac refuses the picture without the sound, and
-mutes its own speakers while it streams, so the target always carries sound and
-never uses AirPlay. It is **experimental** and needs a gateway built with
+mutes its own speakers while it streams, so the target always carries sound, and
+nothing reaches an AirPlay speaker the Mac plays to. It is **experimental** and needs a gateway built with
 `--features apple-hp-media`, which links FFmpeg's HEVC decoder (LGPL) and Fraunhofer's
 AAC-ELD decoder (licence not OSI-approved); no release artifact carries it. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
@@ -231,14 +231,10 @@ speak it — wayvnc, TigerVNC, x11vnc, QEMU — gives the desktop and no sound. 
 
 On a Mac, audio is **experimental**. An `ard-high-performance` target receives
 it from Screen Sharing itself, beside the picture (above). No such path has been
-measured in Standard mode, so for `ard` the gateway is
-instead an AirPlay 1 speaker on the LAN, named after its branding with ` - remotex` after it, turned on for every Mac
-by the gateway-wide `[airplay]` table and protected by its password; no Mac target
-takes an `audio` key. The Mac picks the speaker once from its Sound menu, and what
-it plays reaches whichever Mac session is running. The Mac must share the
-gateway's link, since it finds the speaker by mDNS, and a video playing on the Mac
-is heard about two seconds before it is seen. See
-[`docs/airplay-audio.md`](docs/airplay-audio.md).
+measured in Standard mode, so an `ard` target carries no sound; no Mac target
+takes an `audio` key. Standard mode never touches the Mac's sound output, so the
+Mac keeps playing where it did — its own speakers, or an AirPlay receiver that
+runs outside remotex, on Linux or Windows.
 
 Two redirections send this browser's own media the other way and are
 **experimental**, for lack of tests: `camera = true` offers the remote a virtual

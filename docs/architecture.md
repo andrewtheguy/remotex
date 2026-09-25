@@ -428,9 +428,7 @@ logins.
 `src/protocol.rs` and `frontend/src/protocol.ts` define the client contract.
 `GET /api/config` publishes the deployment branding before authentication —
 the display name, and whether `GET /api/logo` (equally public) serves an icon
-the page then sets as its favicon — and whether the `[airplay]` table is set,
-which the page prints as `(airplay)` after its own version wherever it shows
-one. There
+the page then sets as its favicon. There
 is no client/server version negotiation: the gateway serves the matching SPA from
 the same build, and no second client is supported.
 
@@ -522,10 +520,8 @@ differs from the last unit's is a stream that started over, preceded by a fresh
 ### Audio frames
 
 Remote audio is opt-in — `audio = true` on an `rdp` or a plain `vnc` target,
-and the gateway-wide `[airplay]` table for every target of either Apple subtype,
-whose sound arrives at the gateway's AirPlay speaker
-([A Mac's sound over AirPlay](airplay-audio.md)) — and it has a socket of its
-own. **Opening
+and always on for `ard-high-performance`, whose sound comes with its picture;
+`ard` carries none — and it has a socket of its own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.
 
@@ -556,7 +552,7 @@ band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
 | `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
 |---|---|---|---|---|---|
 | `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`, default 32 | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP and AirPlay, 48 000 for wlshare | 0 (self-describing) | empty |
+| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP, 48 000 for wlshare | 0 (self-describing) | empty |
 
 Opus is encoded in `Application::Audio` mode under constrained VBR, set
 explicitly in `src/opus_stream.rs`: `audio_bitrate` is the average the encoder
@@ -654,15 +650,10 @@ when the decoder opens and withdrawn when the receiver ends. The target takes no
 output while it streams. See
 [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
-An audio-enabled **`ard`** engine receives no sound from its Screen Sharing
-connection: Standard has no measured audio path. The session attaches
-the engine's bridge to the gateway's AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1
-receiver that the Mac picks from its Sound menu once and keeps. What reaches the
-bridge is the Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo
-in 24 ms wave buffers, from whichever Mac is playing to the speaker while that
-session runs. The speaker holds the bridge weakly, so the engine ending is what
-detaches it. It asks every sender for the `[airplay]` password, since it answers
-the whole LAN. See [A Mac's sound over AirPlay](airplay-audio.md).
+An **`ard`** engine carries no sound: Standard has no measured audio path, so
+the target has no audio bridge and takes no `audio` key. Standard mode never
+touches the Mac's sound output either, which keeps playing where the Mac sends it
+— its speakers, or an AirPlay receiver outside remotex.
 
 An audio-enabled **generic VNC** engine has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
@@ -1130,9 +1121,8 @@ display count ahead of the records. The byte layouts and protocol corrections ar
 in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
 Deliberately absent: Apple's own still-image codecs. The media stream's sound
-leg comes with its picture on `ard-high-performance`; the other two subtypes'
-sound arrives over AirPlay ([A Mac's sound over AirPlay](airplay-audio.md)). The
-transport's measurements are in
+leg comes with its picture on `ard-high-performance`; `ard` carries no sound.
+The transport's measurements are in
 [Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 The native Apple pasteboard works on every
 subtype; 003.889 enables monitoring before the rekey and carries the fetch and
@@ -1315,7 +1305,7 @@ The entire substrate is behind the default `embedded-gateway` Cargo feature:
 the module, token authentication, config audience, CLI commands, and their
 `check-config --embedded` validation mode compile out together. Native packages
 retain it. Container artifacts are built separately with
-`--no-default-features --features airplay`; the build script and Dockerfile reject a
+`--no-default-features`; the build script and Dockerfile reject a
 binary that exposes any embedded CLI surface.
 
 There is still no separate native client: every instance is the same SPA loaded

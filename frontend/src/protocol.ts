@@ -224,9 +224,6 @@ export type ControlMsg =
       resize: boolean;
       clipboard: boolean;
       audio: boolean;
-      // On a Mac, whether the gateway's AirPlay speaker is on, which is what
-      // `audio` follows there; null on every other target.
-      airplay: boolean | null;
       // Whether this target redirects the browser's camera to the remote.
       // Capability only, like `audio` — enabling is this client's move, made
       // afresh each session by opening /ws/camera, never persisted.
