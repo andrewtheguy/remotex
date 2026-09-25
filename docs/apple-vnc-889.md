@@ -335,7 +335,9 @@ Three behaviours of the Mac shape how remotex resizes:
   lock while it compresses and sends a rectangle. A client that drains a
   multi-megabyte repaint slowly therefore leaves its own messages unread until the
   repaint is through. A debug-build gateway saw 20–30 s stalls; a release build
-  sees changes answered in about 2.5 s.
+  sees changes answered in about 2.5 s. Updates the Mac pushes unasked hold the
+  same lock, which is why remotex paces them (see
+  [Other messages](#other-messages)).
 
 ## Input
 
@@ -380,13 +382,32 @@ compensation.
 
 ## Other messages
 
-**`AutoFrameBufferUpdate` (`0x09`) does not make the Mac stream.** Contrary to the
-published description, macOS 26 sends nothing unrequested, armed or not. A client
-that stops polling paints one frame and freezes, so remotex keeps polling. Arming
-the full framebuffer at setup and after every layout is still required, because
-it keeps cursor updates alive across logins and locks. Its rectangle is not a
-flow-control knob: changing it mid-session corrupts later updates, except for the
-one-pixel arming around a High Performance resize.
+**`AutoFrameBufferUpdate` (`0x09`) makes the Mac push while the screen changes.**
+Its body is a `u16` version (1), a `u32` interval in microseconds and the armed
+rectangle.
+- **A still screen gets nothing unrequested,** armed or not, so a client that stops
+  polling paints one frame and freezes. Remotex keeps polling.
+- **A changing screen is pushed as fast as the Mac captures it** when the interval
+  is 0. A YouTube video playing on a 1920×1080 virtual display drew 60–90 updates
+  a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
+  nothing after the update asked for.
+- **The interval paces the pushes.** At 1,000,000 the Mac pushed about one update
+  a second, which is what remotex arms with.
+
+Unpaced pushes cost a client its input. The Mac
+[reads nothing while it writes an update](#resizing-a-high-performance-display-as-measured),
+and pushed updates follow one another for as long as the screen changes. A client
+that drains the connection more slowly than the Mac captures — a busy gateway, a
+slow link — has its clicks, keys and display changes left unread for the length of
+the video. On a Mac playing one, input went unread for 35–104 s at a time and then
+arrived as hundreds of queued events in one second. Apple's viewer never meets
+this: in High Performance mode it takes the picture from the media stream
+(encoding `0x3f2`), and the daemon's framebuffer sender skips such a viewer.
+
+Arming the full framebuffer at setup and after every layout is still required,
+because it keeps cursor updates alive across logins and locks. Its rectangle is
+not a flow-control knob: changing it mid-session corrupts later updates, except
+for the one-pixel arming around a High Performance resize.
 
 **`ViewerInfo` (`0x21`) is 66 bytes of numbers.** The published description
 implies version strings; the body is two numeric version triples:
@@ -497,8 +518,7 @@ blob, which a client without AVConference has to build byte for byte.
 - **Cases the test Mac could not show:**
   - a non-console user;
   - hardware mirroring;
-  - a display record whose density is 0.0;
-  - whether the Mac's unrequested update path ever fires.
+  - a display record whose density is 0.0.
 
 ## Reproducing any of this
 

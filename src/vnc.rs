@@ -617,10 +617,10 @@ const HP_RESIZE_STUCK: Duration = Duration::from_secs(30);
 /// served just after a shrinking change is a `memcpy` past the end of the surface
 /// in the agent's screen-read call, and the agent dies with the
 /// session's display, audio and input. Two regions are live: a pixel request's,
-/// and the one `AutoFrameBufferUpdate` armed, which the Mac serves on every
-/// captured frame and so also on the first after the change. Both are narrowed to
-/// this before a change goes out, and polling holds to it until the answering
-/// layout, which arrives inside an update.
+/// and the one `AutoFrameBufferUpdate` armed, which the Mac serves on any captured
+/// frame once its interval has passed, the first after the change included. Both
+/// are narrowed to this before a change goes out, and polling holds to it until
+/// the answering layout, which arrives inside an update.
 const HP_HOLD_REQUEST: (u16, u16) = (1, 1);
 
 
