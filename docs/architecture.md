@@ -24,7 +24,7 @@ whole desktop, at the quality and chroma the target's render plan resolves to. A
 Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
 Apple Remote Desktop authentication, or with the
-`ard-high-performance` RFB 003.889 path. Remote audio is either encoded as
+`ard-virtual-display` RFB 003.889 path. Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -440,7 +440,7 @@ controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
 `render`, the resolved render dial, and `subtype`, the target's `ard` or
-`ard-high-performance` where it has one. The
+`ard-virtual-display` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server, a Mac
 in Standard mode and a Mac in High Performance mode all say `vnc`, and they
 differ in whether resize is offered and whether the path beneath is the
@@ -1076,7 +1076,7 @@ pointer positions back through the same regions (`frontend/src/mosaic.ts`). It i
 the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 
-**RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
+**RFB 003.889** (`subtype = "ard-virtual-display"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every
 claim in this section is measurement or a reading of Apple's binaries rather than
 specification, holding for the Macs in [apple-vnc-889.md](apple-vnc-889.md) rather

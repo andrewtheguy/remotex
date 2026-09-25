@@ -7,7 +7,7 @@
 //! request switches the rectangles from raw to zlib.
 //!
 //! **RFB 003.889**, Apple's own revision, under `subtype =
-//! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
+//! "ard-virtual-display"`: the same RFB messages carried inside an AES-128-CBC
 //! record layer ([`crate::vnc_record`]), alongside Apple's control messages
 //! ([`crate::vnc_apple`]). This mode requests one virtual display at the target's
 //! pinned `width` and `height`, or at the connecting client's screen resolution
@@ -207,7 +207,7 @@ enum Dialect {
 impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
-            Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
+            Some(Subtype::ArdVirtualDisplay) => Dialect::Apple889,
             Some(Subtype::Ard) | None => Dialect::Rfb38,
         }
     }
@@ -5861,12 +5861,12 @@ mod tests {
         // above it differs, the security type does not — and names itself when the
         // server cannot answer.
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "pw", "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::ArdVirtualDisplay), "pw", "").unwrap(),
             SECURITY_ARD
         );
-        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "pw", "")
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdVirtualDisplay), "pw", "")
             .unwrap_err();
-        assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
+        assert!(format!("{err:#}").contains("\"ard-virtual-display\""), "{err:#}");
     }
 
     #[test]
@@ -5874,7 +5874,7 @@ mod tests {
         assert_eq!(Dialect::of(None), Dialect::Rfb38);
         assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
         assert_eq!(
-            Dialect::of(Some(Subtype::ArdHighPerformance)),
+            Dialect::of(Some(Subtype::ArdVirtualDisplay)),
             Dialect::Apple889
         );
         // The two bytes that are the whole visible difference on the wire.
@@ -7902,7 +7902,7 @@ mod tests {
     fn a_session_opens_at_the_pinned_size_or_the_clients_own_screen() {
         let target = |size: &str| -> TargetConfig {
             toml::from_str(&format!(
-                "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
+                "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-virtual-display\"\n\
                  host = \"h\"\n{size}"
             ))
             .unwrap()

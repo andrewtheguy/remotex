@@ -73,7 +73,7 @@ pub enum Subtype {
     /// transport when `clipboard` is enabled. With `resize`, viewport reports
     /// replace the virtual display's one advertised mode and the Mac answers with
     /// its new layout. See docs/apple-vnc-889.md.
-    ArdHighPerformance,
+    ArdVirtualDisplay,
 }
 
 impl Subtype {
@@ -81,7 +81,7 @@ impl Subtype {
     pub fn name(self) -> &'static str {
         match self {
             Subtype::Ard => "ard",
-            Subtype::ArdHighPerformance => "ard-high-performance",
+            Subtype::ArdVirtualDisplay => "ard-virtual-display",
         }
     }
 
@@ -90,7 +90,7 @@ impl Subtype {
     /// does. What makes the credentials a macOS account's.
     pub fn apple_authentication(self) -> bool {
         match self {
-            Subtype::Ard | Subtype::ArdHighPerformance => true,
+            Subtype::Ard | Subtype::ArdVirtualDisplay => true,
         }
     }
 }
@@ -446,7 +446,7 @@ pub struct TargetConfig {
     /// density entirely. An RDP resize is the graphics pipeline's, so the key is
     /// refused beside `egfx = false`.
     ///
-    /// On `ard-high-performance` the setup descriptor always enables the Mac's
+    /// On `ard-virtual-display` the setup descriptor always enables the Mac's
     /// dynamic geometry; this flag decides only whether the window keeps
     /// driving it after the open. Standard `ard` refuses the option because it
     /// exposes physical displays.
@@ -781,7 +781,7 @@ impl TargetConfig {
     /// speaker rather than over its own connection: either Apple subtype.
     pub fn receives_airplay(&self) -> bool {
         match (self.protocol, self.subtype) {
-            (Protocol::Vnc, Some(Subtype::Ard | Subtype::ArdHighPerformance)) => true,
+            (Protocol::Vnc, Some(Subtype::Ard | Subtype::ArdVirtualDisplay)) => true,
             (Protocol::Vnc, None) | (Protocol::Rdp, _) => false,
         }
     }
@@ -1273,7 +1273,7 @@ impl ConfigFile {
             );
             anyhow::ensure!(
                 config.targets.iter().any(TargetConfig::receives_airplay),
-                "[airplay] is set, and there is no ard or ard-high-performance target, so \
+                "[airplay] is set, and there is no ard or ard-virtual-display target, so \
                  nothing would play through the speaker. Remove the table, or add a Mac"
             );
             anyhow::ensure!(
@@ -1463,7 +1463,7 @@ impl ConfigFile {
             // credential is refused where it cannot be used rather than quietly
             // ignored, which is how a password ends up authenticating nobody.
             match (target.protocol, target.subtype) {
-                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
+                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdVirtualDisplay))) => {
                     let name = subtype.name();
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
@@ -2920,24 +2920,24 @@ mod tests {
     fn the_high_performance_subtype_accepts_clipboard_and_resize() {
         let hp = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!(
-                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+                "subtype = \"ard-virtual-display\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
 
         let target = &hp("width = 1600\nheight = 1000\nresize = true\nclipboard = true")
             .unwrap()
             .targets[0];
-        assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
+        assert_eq!(target.subtype, Some(Subtype::ArdVirtualDisplay));
         assert_eq!(target.pinned_size(), Some((1600, 1000)));
         assert!(target.resize);
         assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
-        assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
+        assert_eq!(target.subtype.unwrap().name(), "ard-virtual-display");
 
         // The credential rules are the ones `ard` has, shared rather than restated.
         let err = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
+            "subtype = \"ard-virtual-display\"\nvnc_password = \"other\"",
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
@@ -2991,7 +2991,7 @@ mod tests {
     #[test]
     fn a_pinned_size_requires_nonzero_dimensions() {
         for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
-            for subtype in ["", "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
+            for subtype in ["", "subtype = \"ard-virtual-display\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
                 let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}{dimensions}")))
                     .unwrap_err();
                 assert!(
@@ -3026,7 +3026,7 @@ mod tests {
 
     #[test]
     fn a_domain_on_a_vnc_target_is_rejected() {
-        for subtype in ["", "subtype = \"ard\"\n", "subtype = \"ard-high-performance\"\n"] {
+        for subtype in ["", "subtype = \"ard\"\n", "subtype = \"ard-virtual-display\"\n"] {
             let err = ConfigFile::parse(&vnc_toml(&format!(
                 "{subtype}username = \"u\"\npassword = \"p\"\ndomain = \"CORP\""
             )))
@@ -3143,7 +3143,7 @@ mod tests {
     /// such extension.
     #[test]
     fn camera_rides_rdp_and_generic_vnc_and_is_refused_on_a_mac() {
-        for subtype in ["ard", "ard-high-performance"] {
+        for subtype in ["ard", "ard-virtual-display"] {
             let err = ConfigFile::parse(&format!(
                 r#"
                 [server]
@@ -3215,7 +3215,7 @@ mod tests {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
         };
-        for subtype in ["ard", "ard-high-performance"] {
+        for subtype in ["ard", "ard-virtual-display"] {
             let mac = parse(&format!(
                 "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\nmicrophone = true"
             ))
@@ -3314,7 +3314,7 @@ mod tests {
     #[cfg(feature = "airplay")]
     #[test]
     fn a_macs_audio_follows_the_airplay_table() {
-        for subtype in ["ard", "ard-high-performance"] {
+        for subtype in ["ard", "ard-virtual-display"] {
             let target = format!(
                 "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\n\
                  host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n"

@@ -1,7 +1,7 @@
 //! Apple's record layer: the AES-128-CBC framed transport every byte of an RFB
 //! 003.889 session rides inside once the server has handed over a key.
 //!
-//! Used by the `ard-high-performance` subtype (see [`crate::vnc`] and
+//! Used by the `ard-virtual-display` subtype (see [`crate::vnc`] and
 //! [`crate::vnc_apple`]). Nothing here knows what a rectangle is — it is a
 //! transport, and the RFB above it is unchanged.
 //!

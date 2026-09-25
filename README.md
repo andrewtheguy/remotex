@@ -23,7 +23,7 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
-  `subtype = "ard-high-performance"` selects its High Performance mode over RFB
+  `subtype = "ard-virtual-display"` selects its High Performance mode over RFB
   003.889 — one virtual display holding every remote window, and the only Apple
   path that accepts `resize = true`. It is reverse engineered, having no
   specification.
@@ -175,7 +175,7 @@ Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 at full fidelity, and supports the native Apple pasteboard. Both Apple modes ask
 the Mac for zlib rectangles from the start. Apple Screen Sharing High
-Performance mode (`ard-high-performance`) takes the same
+Performance mode (`ard-virtual-display`) takes the same
 credentials, requests one virtual display at the pinned `width` and `height` when
 both are set, or at the full resolution and density of the client's screen
 otherwise. Once connected, it disables the remote Mac's physical displays and
@@ -338,7 +338,7 @@ password = "change-me"
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
 physical displays, or
-`"ard-high-performance"` for one virtual display
+`"ard-virtual-display"` for one virtual display
 containing all of its windows, with its physical displays disabled for the
 connection, and the Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.

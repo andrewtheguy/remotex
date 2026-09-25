@@ -28,8 +28,8 @@ test("the two Apple modes say which one they are, in the config's own spelling",
     "VNC · Apple Screen Sharing, Standard mode (ard)",
   );
   assert.equal(
-    connectionLabel("vnc", "ard-high-performance"),
-    "VNC · Apple Screen Sharing, High Performance (ard-high-performance)",
+    connectionLabel("vnc", "ard-virtual-display"),
+    "VNC · Apple Screen Sharing, High Performance (ard-virtual-display)",
   );
 });
 
@@ -40,8 +40,8 @@ test("the picker's row keeps the spelling and drops the prose", () => {
   assert.equal(connectionShortLabel("rdp", null), "RDP");
   assert.equal(connectionShortLabel("vnc", "ard"), "VNC · ard");
   assert.equal(
-    connectionShortLabel("vnc", "ard-high-performance"),
-    "VNC · ard-high-performance",
+    connectionShortLabel("vnc", "ard-virtual-display"),
+    "VNC · ard-virtual-display",
   );
 });
 

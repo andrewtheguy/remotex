@@ -1396,7 +1396,7 @@ mod tests {
         let mac = serde_json::to_string(&TargetInfo {
             name: "mac".to_owned(),
             protocol: "vnc",
-            subtype: Some("ard-high-performance"),
+            subtype: Some("ard-virtual-display"),
             host: "192.0.2.10".to_owned(),
             port: 5900,
             airplay: Some(true),
@@ -1404,7 +1404,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             mac,
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard-high-performance","host":"192.0.2.10","port":5900,"airplay":true}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard-virtual-display","host":"192.0.2.10","port":5900,"airplay":true}"#
         );
 
         let win = serde_json::to_string(&TargetInfo {

@@ -1,7 +1,7 @@
 //! Apple's Screen Sharing messages and encodings. `ard` is Standard mode over
 //! RFB 3.8 and uses the display, cursor, and pasteboard pieces for the Mac's
 //! physical displays. Both subtypes switch to zlib after their first display
-//! layout. The `ard-high-performance` subtype additionally uses Apple's record
+//! layout. The `ard-virtual-display` subtype additionally uses Apple's record
 //! layer in [`crate::vnc_record`] and requests a virtual display.
 //!
 //! Everything here is either a message this client builds or a rectangle payload
@@ -301,7 +301,7 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
 /// mode is `mode`.
 ///
-/// This is sent while establishing an `ard-high-performance` session and again for
+/// This is sent while establishing an `ard-virtual-display` session and again for
 /// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
 /// it is deliberately set even for the initial configured size, so reconnecting
 /// restores the Mac's Dynamic resolution checkbox to on if it was changed there.

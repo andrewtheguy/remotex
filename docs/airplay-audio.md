@@ -30,7 +30,7 @@ password = "choose one"
 [[targets]]
 name = "mac"
 protocol = "vnc"
-subtype = "ard"          # or "ard-high-performance"
+subtype = "ard"          # or "ard-virtual-display"
 host = "mac.local"
 username = "me"
 password = "…"

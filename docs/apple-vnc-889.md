@@ -22,7 +22,7 @@ The implementation is `src/vnc_record.rs` (the 003.889 record layer),
 
 | | |
 |---|---|
-| Two subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `subtype = "ard-high-performance"` is High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
+| Two subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `subtype = "ard-virtual-display"` is High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are High Performance's pointer buttons and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
