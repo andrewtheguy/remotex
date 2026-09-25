@@ -35,8 +35,9 @@ password = "…"
 
 The speaker is gateway-wide, and so is the switch: with `[airplay]`, every `ard`
 and `ard-virtual-display` target carries audio, and without it none does. Every
-Apple target refuses the `audio` key, and `[airplay]` with no such target is
-refused. The
+Apple target refuses the `audio` key, and `[airplay]` with no Mac target at all
+is refused. Beside an `ard-high-performance` target the table still loads, and
+that target's sound still comes over its media stream. The
 picker and the session's Info card say whether AirPlay is on for a Mac, and the
 menu's **Enable AirPlay audio** button is shown only when it is. The table is top-level, like
 `[branding]` and `[meter]`, so a `remotex tui` instance config may set it too. The

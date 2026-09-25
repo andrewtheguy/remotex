@@ -82,8 +82,9 @@
 
 # The AirPlay speaker a Mac's sound arrives at — EXPERIMENTAL. Gateway-wide:
 # with it, every "ard" and "ard-virtual-display" target carries audio, and
-# without it none does; refused when there is no such target. An
-# "ard-high-performance" target never uses it: its sound comes with its picture.
+# without it none does; refused when there is no Mac target at all. An
+# "ard-high-performance" target never uses it, since its sound comes with its
+# picture, but a table beside one still loads.
 # The gateway announces itself over mDNS as an AirPlay 1 speaker named
 # "<[branding].text> - remotex". The Mac picks it once in Control Center →
 # Sound and is asked for this password, which it then remembers. The Mac must

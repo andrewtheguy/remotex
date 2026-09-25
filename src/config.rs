@@ -1316,8 +1316,8 @@ impl ConfigFile {
             );
             anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
         }
-        // Every Mac's sound arrives at the gateway's AirPlay speaker, which the
-        // `[airplay]` table turns on and which asks every sender for its password:
+        // An `ard` or `ard-virtual-display` Mac's sound arrives at the gateway's
+        // AirPlay speaker, which the `[airplay]` table turns on and which asks every sender for its password:
         // the speaker answers the whole LAN. A table with no Mac to play through it
         // is refused rather than started.
         if let Some(airplay) = &config.airplay {
@@ -1325,10 +1325,14 @@ impl ConfigFile {
                 cfg!(feature = "airplay"),
                 "[airplay] is set, and this remotex was built without the airplay feature"
             );
+            // Any Mac keeps the table, `ard-high-performance` included, though
+            // that one's sound comes over its media stream instead: a config that
+            // switches a Mac between subtypes does not have to move the table too.
             anyhow::ensure!(
-                config.targets.iter().any(TargetConfig::receives_airplay),
-                "[airplay] is set, and there is no ard or ard-virtual-display target, so \
-                 nothing would play through the speaker. Remove the table, or add a Mac"
+                config.targets.iter().any(|t| t.protocol == Protocol::Vnc
+                    && t.subtype.is_some_and(Subtype::apple_authentication)),
+                "[airplay] is set, and there is no Mac target, so nothing would play \
+                 through the speaker. Remove the table, or add a Mac"
             );
             anyhow::ensure!(
                 !airplay.password.trim().is_empty(),
@@ -3447,15 +3451,19 @@ mod tests {
         .unwrap();
         assert_eq!(pcm.targets[0].audio_plan().codec, AudioCodec::Pcm);
 
-        // No Mac plays through the speaker, so a table for it is refused.
+        // An [airplay] table beside it still loads, and still leaves its sound
+        // to the media stream.
         #[cfg(feature = "airplay")]
         {
-            let err = ConfigFile::parse(&format!(
+            let config = ConfigFile::parse(&format!(
                 "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{target}",
                 site_passwd_line()
             ))
-            .unwrap_err();
-            assert!(format!("{err:#}").contains("nothing would play through the speaker"), "{err:#}");
+            .unwrap()
+            .resolve()
+            .unwrap();
+            assert!(config.airplay.is_some());
+            assert!(config.targets[0].audio && !config.targets[0].receives_airplay());
         }
     }
 
