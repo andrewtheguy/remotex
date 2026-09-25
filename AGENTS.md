@@ -126,9 +126,11 @@ documentation.
   as SRTCP. The Mac refuses one leg without the other, so the target always
   carries sound, takes no `audio` key, and never uses AirPlay. Its two decoders
   are the non-default `apple-hp-media` feature, which no release artifact
-  enables; a build without it refuses the subtype. Zlib is only its fallback
-  until the stream is up; do not add a High Performance subtype without the
-  stream, a combination Apple's viewer never offers. See
+  enables; a build without it refuses the subtype. Zlib carries its picture only
+  until the stream is up and across display changes, and a stream that fails
+  ends the session, as in Apple's viewer. Do not add a High Performance subtype
+  without the stream or a fallback to zlib from a failed one, combinations
+  Apple's viewer never offers. See
   [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own

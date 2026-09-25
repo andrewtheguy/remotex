@@ -59,8 +59,8 @@ pub enum Subtype {
     /// HEVC and the sound as AAC-ELD over the media
     /// stream Screen Sharing negotiates on the RFB connection and sends over UDP
     /// with SRTP ([`crate::vnc_apple_media`]). Zlib rectangles carry the picture
-    /// only until the stream does, across display changes, and when the Mac
-    /// refuses it.
+    /// only until the stream does and across display changes; a stream that fails
+    /// ends the session, as it ends Apple's viewer's.
     ///
     /// None of this is documented by Apple: the revision, its record layer and its
     /// control messages, which it shares with [`Subtype::Ard`], its virtual display

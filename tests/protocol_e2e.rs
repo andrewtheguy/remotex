@@ -358,9 +358,11 @@ async fn serve_scrolling_vnc(
 // banner, its DH authentication, the `0x81` ClientInit, the cleartext prelude,
 // the rekey that switches on the record layer, and then a display layout — the
 // virtual display once one is configured, the physical screen otherwise — and a
-// framebuffer update *inside* that record layer. The fake
-// refuses the media stream the gateway offers, which keeps the picture on zlib:
-// the stream's own packets are UDP, and `src/vnc_apple_media.rs` tests them.
+// framebuffer update *inside* that record layer. The fake accepts the media
+// stream the gateway offers and names no ports for it, which keeps the picture on
+// zlib for the gateway's first-picture allowance: the stream's own packets are
+// UDP, and `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which
+// ends the session.
 //
 // This is the only automated test that can reach any of it. There is no
 // containerisable Apple server — `tests/vnc-dummy` is Xtigervnc and speaks none of
@@ -438,12 +440,24 @@ async fn spawn_fake_mac() -> (
     mpsc::UnboundedSender<MacAction>,
     tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
 ) {
-    spawn_fake_mac_accepting(MAC_COMMANDS).await
+    spawn_fake_mac_with(MAC_COMMANDS, MacStream::Accept).await
 }
 
-/// [`spawn_fake_mac`], with the command bitmap its ServerInit sends.
-async fn spawn_fake_mac_accepting(
+/// How the fake Mac answers a media-stream offer.
+#[derive(Clone, Copy, Debug)]
+enum MacStream {
+    /// With AVConference's answer and no ports, so no packet is ever owed.
+    Accept,
+    /// With error message 3 of type 2, what a Mac sends for an offer it cannot
+    /// build a configuration from.
+    Refuse,
+}
+
+/// [`spawn_fake_mac`], with the command bitmap its ServerInit sends and its answer
+/// to a media-stream offer.
+async fn spawn_fake_mac_with(
     commands: [u8; 16],
+    answer: MacStream,
 ) -> (
     u16,
     mpsc::UnboundedReceiver<MacRequest>,
@@ -456,7 +470,7 @@ async fn spawn_fake_mac_accepting(
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        serve_fake_mac(stream, commands, tx, action_rx).await
+        serve_fake_mac(stream, commands, answer, tx, action_rx).await
     });
     (port, rx, action_tx, task)
 }
@@ -676,14 +690,13 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
 /// need not cover it, and the raw pixels of the 3840×2160 opening display a
 /// resizable session now asks for would not fit one record.
 ///
-/// With `refuse`, a second rect refuses the media-stream offer the gateway made:
-/// encoding 1010, then error message 3 of type 2 — what a Mac sends for an offer it
-/// cannot build a configuration from. It rides an update the fake sends anyway, so
-/// the refusal adds no update, and no poll, to the order the tests assert.
-fn fake_mac_update(shade: u8, (w, h): (u16, u16), refuse: bool) -> Vec<u8> {
+/// With `answer`, a second rect answers the media-stream offer the gateway made
+/// ([`fake_mac_answer`]). It rides an update the fake sends anyway, so the answer
+/// adds no update, and no poll, to the order the tests assert.
+fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> Vec<u8> {
     let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
-    update.extend_from_slice(&(1 + u16::from(refuse)).to_be_bytes());
+    update.extend_from_slice(&(1 + u16::from(answer.is_some())).to_be_bytes());
     update.extend_from_slice(&0u16.to_be_bytes()); // x
     update.extend_from_slice(&0u16.to_be_bytes()); // y
     update.extend_from_slice(&w.to_be_bytes());
@@ -693,22 +706,42 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), refuse: bool) -> Vec<u8> {
         shade;
         usize::from(w) * usize::from(h) * 4
     ]);
-    if refuse {
-        update.extend_from_slice(&[0u8; 8]); // x, y, w, h
-        update.extend_from_slice(&1010i32.to_be_bytes());
-        update.extend_from_slice(&16u16.to_be_bytes());
-        update.extend_from_slice(&3u16.to_be_bytes()); // an error
-        update.extend_from_slice(&3u16.to_be_bytes()); // version
-        update.extend_from_slice(&0u32.to_be_bytes()); // flags
-        update.extend_from_slice(&2u32.to_be_bytes()); // type
-        update.extend_from_slice(&0u32.to_be_bytes()); // sub-code
+    if let Some(answer) = answer {
+        update.extend_from_slice(&fake_mac_answer(answer));
     }
     update
+}
+
+/// The rect that answers a media-stream offer, in encoding 1010: [`MacStream`]'s
+/// message 2 or 3.
+fn fake_mac_answer(answer: MacStream) -> Vec<u8> {
+    let mut rect = vec![0u8; 8]; // x, y, w, h
+    rect.extend_from_slice(&1010i32.to_be_bytes());
+    match answer {
+        MacStream::Accept => {
+            rect.extend_from_slice(&18u16.to_be_bytes());
+            rect.extend_from_slice(&2u16.to_be_bytes()); // AVConference's answer
+            rect.extend_from_slice(&3u16.to_be_bytes()); // version
+            rect.extend_from_slice(&0u32.to_be_bytes()); // flags
+            rect.extend_from_slice(&[0u8; 6]); // audio, video 1, video 2: empty
+            rect.extend_from_slice(&0u32.to_be_bytes());
+        }
+        MacStream::Refuse => {
+            rect.extend_from_slice(&16u16.to_be_bytes());
+            rect.extend_from_slice(&3u16.to_be_bytes()); // an error
+            rect.extend_from_slice(&3u16.to_be_bytes()); // version
+            rect.extend_from_slice(&0u32.to_be_bytes()); // flags
+            rect.extend_from_slice(&2u32.to_be_bytes()); // type
+            rect.extend_from_slice(&0u32.to_be_bytes()); // sub-code
+        }
+    }
+    rect
 }
 
 async fn serve_fake_mac(
     mut stream: TcpStream,
     commands: [u8; 16],
+    answer: MacStream,
     requests: mpsc::UnboundedSender<MacRequest>,
     mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
@@ -834,6 +867,7 @@ async fn serve_fake_mac(
         records,
         write_half,
         writer,
+        answer,
         requests,
         &mut actions,
         &mut configurations,
@@ -858,6 +892,7 @@ async fn serve_fake_mac_records(
     mut records: remotex::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     mut writer: remotex::vnc_record::RecordWriter,
+    answer: MacStream,
     requests: mpsc::UnboundedSender<MacRequest>,
     actions: &mut mpsc::UnboundedReceiver<MacAction>,
     configurations: &mut Vec<((u16, u16), u16)>,
@@ -939,9 +974,9 @@ async fn serve_fake_mac_records(
                 }
                 shade = shade.wrapping_add(0x10);
                 let pixels = (points.0 * density, points.1 * density);
-                let refuse = std::mem::take(&mut offer_pending);
+                let answered = std::mem::take(&mut offer_pending).then_some(answer);
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels, refuse)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels, answered)).unwrap())
                     .await?;
             }
             // KeyEvent
@@ -1043,8 +1078,9 @@ async fn serve_fake_mac_records(
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
             }
-            // RFBMediaStreamServerConfiguration: the media-stream offer, refused in
-            // the next update. One offer at a time, as the Mac requires.
+            // RFBMediaStreamServerConfiguration: the media-stream offer, accepted in
+            // the next update, or refused at once in an update of its own. One offer
+            // at a time, as the Mac requires.
             0x1c => {
                 let mut head = [0u8; 3];
                 records.read_exact(&mut head).await?;
@@ -1053,7 +1089,15 @@ async fn serve_fake_mac_records(
                 records.read_exact(&mut body).await?;
                 assert_eq!(&body[..2], &3u16.to_be_bytes(), "media-stream configuration version");
                 assert!(!offer_pending, "a second media-stream offer while one was out");
-                offer_pending = true;
+                match answer {
+                    MacStream::Accept => offer_pending = true,
+                    MacStream::Refuse => {
+                        let mut update = vec![0u8, 0];
+                        update.extend_from_slice(&1u16.to_be_bytes());
+                        update.extend_from_slice(&fake_mac_answer(answer));
+                        write_half.write_all(writer.frame(&update).unwrap()).await?;
+                    }
+                }
             }
             // ClipboardSend: independently inflate and parse what the browser put
             // on the fake Mac's pasteboard.
@@ -1146,8 +1190,8 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
 
 /// A target for the fake Mac: the high-performance subtype, with the account the
 /// fake Mac checks the credentials against. Built rather than parsed, so a build
-/// without the `apple-hp-media` decoders drives it too: the fake refuses the
-/// stream, and nothing needs decoding.
+/// without the `apple-hp-media` decoders drives it too: the fake names no ports for
+/// the stream, and nothing needs decoding.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
         subtype: Some(remotex::config::Subtype::ArdHighPerformance),
@@ -1851,25 +1895,15 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
 async fn high_performance_refuses_a_mac_without_a_virtual_display() {
     let mut commands = MAC_COMMANDS;
     commands[3] &= !0x04;
-    let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac_accepting(commands).await;
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(commands, MacStream::Accept).await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
 
-    let error = tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
-            if let Ok(Message::Text(text)) = msg
-                && text.contains(r#""type":"error""#)
-            {
-                return text.to_string();
-            }
-        }
-        panic!("the socket closed without an error");
-    })
-    .await
-    .expect("timed out waiting for the refusal");
+    let error = expect_error(&mut ws).await;
     assert!(error.contains("does not offer High Performance"), "{error}");
 
     // The prelude never went out: the fake read end-of-stream where it expected
@@ -1880,6 +1914,76 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
         std::io::ErrorKind::UnexpectedEof
     );
     assert!(requests.try_recv().is_err(), "the gateway sent a request");
+}
+
+/// A Mac that refuses the media stream ends the session, as it ends Apple's
+/// viewer's: High Performance does not go on over zlib alone.
+#[tokio::test]
+async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
+    let (mac_port, _requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    let error = expect_error(&mut ws).await;
+    assert!(
+        error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
+        "{error}"
+    );
+    // The gateway hung up on the fake, which reads that as the end of its session.
+    fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+}
+
+/// An offer that brings no picture ends the session once the first one is overdue:
+/// the fake accepts offers only in an update it would send anyway, and on a still
+/// session nothing asks for one, so this offer goes unanswered.
+#[tokio::test]
+async fn high_performance_ends_when_the_offer_brings_no_picture() {
+    let (mac_port, _requests, _actions, fake_mac) = spawn_fake_mac().await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = expect_error(&mut ws).await;
+    assert!(error.contains("did not answer the media-stream offer within 10s"), "{error}");
+    assert!(started.elapsed() >= Duration::from_secs(9), "ended early: {:?}", started.elapsed());
+    fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+}
+
+/// Read until an `error` control message arrives, and hand back its line.
+async fn expect_error(ws: &mut Ws) -> String {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = ws.next().await {
+            if let Ok(Message::Text(text)) = msg
+                && text.contains(r#""type":"error""#)
+            {
+                return text.to_string();
+            }
+        }
+        panic!("the socket closed without an error");
+    })
+    .await
+    .expect("timed out waiting for an error")
 }
 
 /// `ard` on the wire Apple's viewer uses for every Mac: its revision, and the same

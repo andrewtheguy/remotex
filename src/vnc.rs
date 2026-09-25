@@ -3065,6 +3065,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // take over again.
     let mut continuous = false;
     let mut continuous_supported = false;
+    // High Performance's signal that an offer went out — see [`MediaStream::offered`].
+    let offers = media.as_ref().map(|m| m.lock().unwrap().offered());
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -3093,33 +3095,58 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 None => std::future::pending().await,
             }
         };
+        // When High Performance's media stream is next overdue — see
+        // [`MediaStream::overdue`]. Read here, once a turn, like the deadline above,
+        // and read again at an offer, which may come from the input loop while this
+        // one waits behind a still screen.
+        let media_deadline = media.as_ref().and_then(|m| m.lock().unwrap().deadline());
+        let media_due = async {
+            match media_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+        let media_offered = async {
+            match &offers {
+                Some(offers) => offers.notified().await,
+                None => std::future::pending().await,
+            }
+        };
         let read = tokio::select! {
             byte = reader.read_u8() => byte,
 
             picture = next_picture(&mut apple) => {
                 match picture {
-                    Some(picture) => show_picture(&shared, &picture, &sink).await?,
-                    // The receiver stopped under a live picture: zlib takes it back,
-                    // the whole desktop at once and every change after, until a
-                    // display change offers the stream again.
-                    None => {
-                        let size = {
-                            let mut d = desktop.lock().unwrap();
-                            std::mem::take(&mut d.media_live).then_some(d.size)
-                        };
-                        if let Some(size) = size {
-                            info!("vnc: the Mac's media stream stopped; the picture is back on zlib");
-                            full_repaint = Some(FullRepaint::new(display.lock().unwrap().repaint_pixels));
-                            send_all(
-                                uplink,
-                                &[vnc_apple::auto_framebuffer_update(size), update_request(false, size).to_vec()],
-                            )
-                            .await?;
+                    Some(picture) => {
+                        if let Some(media) = media {
+                            media.lock().unwrap().pictured(picture.size);
                         }
+                        show_picture(&shared, &picture, &sink).await?;
+                    }
+                    // The receiver failed. Apple's viewer has no way back to RFB
+                    // pixels from a failed stream and ends the session, and so does
+                    // this one.
+                    None => {
+                        let failure = media.as_ref().map_or_else(
+                            || anyhow::anyhow!("its receiver stopped"),
+                            |m| m.lock().unwrap().failure(),
+                        );
+                        return Err(failure.context("the Mac's media stream stopped"));
                     }
                 }
                 continue;
             }
+
+            () = media_due => {
+                let overdue = media
+                    .as_ref()
+                    .and_then(|m| m.lock().unwrap().overdue(std::time::Instant::now()));
+                if let Some(overdue) = overdue {
+                    return Err(overdue);
+                }
+                continue;
+            }
+            () = media_offered => continue,
 
             () = video_flush => {
                 sink.frame().await?;
@@ -4257,21 +4284,16 @@ async fn read_rect<R: AsyncRead + Unpin>(
             anyhow::bail!("the server re-keyed mid-session, which this client never requests")
         }
         // The Mac's replies to a media-stream offer ([`vnc_apple_media`]): a `u16`
-        // saying how much follows, then the reply. A stream that goes down hands the
-        // picture back to zlib, which has sent nothing while it ran, so the
-        // whole desktop is asked for.
+        // saying how much follows, then the reply. A refusal ends the session, as it
+        // ends Apple's viewer's. A stream the Mac took down with a display change of
+        // its own hands the picture to zlib until the next offer, and zlib has sent
+        // nothing while the stream ran, so the whole desktop is asked for.
         vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {
             let len = reader.read_u16().await?;
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
             let media = shared.media.as_ref().expect("guarded");
-            let down = match media.lock().unwrap().on_reply(&body) {
-                Ok(down) => down,
-                Err(e) => {
-                    warn!("vnc: ignoring a media-stream reply: {e:#}");
-                    false
-                }
-            };
+            let down = media.lock().unwrap().on_reply(&body)?;
             let was_live = down && std::mem::take(&mut desktop.lock().unwrap().media_live);
             return Ok(if was_live { RectEffect::FULL_REPAINT } else { RectEffect::NOTHING });
         }

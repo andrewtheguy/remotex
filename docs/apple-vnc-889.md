@@ -75,11 +75,10 @@ remotex offers nothing else.
 
 ## The two modes in Apple's viewer
 
-Apple's viewer calls High Performance "ProMode". Its connection sheet offers
-**Standard**, with a choice of Adaptive or Full quality, or **High Performance**,
-with one or two virtual displays. The choice is made after ServerInit; the
-handshake before it is the same in both modes (see
-[Connecting](#connecting)).
+Apple's viewer's connection sheet offers **Standard**, with a choice of Adaptive
+or Full quality, or **High Performance**, with one or two virtual displays. The
+choice is made after ServerInit; the handshake before it is the same in both
+modes (see [Connecting](#connecting)).
 
 | | Standard | High Performance |
 |---|---|---|
@@ -89,19 +88,22 @@ handshake before it is the same in both modes (see
 | Refused beside it | A virtual display, dynamic resolution, HDR. | No virtual display, or a screen other than the virtual ones. |
 
 - **A Mac without High Performance.** Apple's viewer offers the mode only when the
-  Mac's ServerInit lists `SetDisplayConfiguration` and the viewer's own `ProMode`
-  feature flag is on. Otherwise it asks whether to continue, then connects in
+  Mac's ServerInit lists `SetDisplayConfiguration` and a feature flag of the
+  viewer's own is on. Otherwise it asks whether to continue, then connects in
   Standard mode with no virtual display. It never runs High Performance on the
   physical displays. `ard-high-performance` has no one to ask, so it refuses the
   session and names `ard`.
 - **A media-stream failure.** An error from the Mac (message 3) makes Apple's
-  viewer show an alert and close the session, and 16 missed receiver-report
-  intervals on any leg disconnect it. It has no fallback to RFB pixels.
+  viewer show an alert and close the session. So does a stream that has not
+  started after three RTCP timeouts on a leg, and one that has run and then
+  reaches 16, and the media stack sets that timeout to 3 s for screen sharing.
+  It has no fallback to RFB pixels, and `ard-high-performance` has none either (see
+  [Liveness](#the-stream)).
 
 Remotex matches the split, on the same handshake: `ard` shares the physical
 displays, refuses `resize` and never creates a virtual display, and
 `ard-high-performance` creates exactly one, the "1 Virtual Display" choice, and
-never selects a physical screen or sends `SetServerScaling`. It departs in three
+never selects a physical screen or sends `SetServerScaling`. It departs in two
 places:
 - **Encryption.** Apple's viewer asks for the record layer only when its
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
@@ -109,8 +111,6 @@ places:
   keys included. Remotex always asks, in both modes.
 - **Standard's picture.** `ard` asks for zlib, Apple's Full quality, where Adaptive
   asks first for the private codecs remotex cannot decode.
-- **A failed media stream.** `ard-high-performance` returns the picture to zlib
-  rather than ending the session (see [The media stream](#the-media-stream-high-performances-picture-and-sound)).
 
 ## Connecting
 
@@ -550,11 +550,10 @@ from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
-(`src/vnc_apple_media.rs`). Zlib carries the
-picture only until the stream delivers, across display changes, and when the Mac
-refuses the stream or the gateway's receiver stops. Five seconds without an
-authenticated video packet after the stream has begun stops that receiver and
-hands the picture back to zlib; the next display change offers the stream again.
+(`src/vnc_apple_media.rs`). Zlib carries the picture only until the stream
+delivers and across display changes. A stream that fails ends the session, as it
+ends Apple's viewer's: one the Mac refuses, one that brings no picture, and one
+that stops (see [Liveness](#the-stream)).
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
@@ -623,9 +622,9 @@ silent. So an `ard-high-performance` target always carries sound, takes no
 still starting left the capture failed (`didStart: 0 error: 32000`). When the
 virtual display was deallocated at the end of that session, WindowServer aborted
 in `WSSelectiveSharingUpdateDisplayStreamSurface` and logged the console user
-out. Remotex therefore has one offer out at a time. It sends no display change
-while an offer is unanswered, and gives an unanswered offer 10 seconds before
-treating it as lost.
+out. Remotex therefore has one offer out at a time, and sends no display change
+while an offer is unanswered. An offer left unanswered ends the session with the
+other failures (see [Liveness](#the-stream)).
 
 ### The stream
 
@@ -661,11 +660,14 @@ treating it as lost.
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
   about. Apple's viewer's rate feedback is not reproduced.
-- **Liveness.** If no authenticated video packet arrives in the first five
-  seconds, remotex logs the likely firewall or NAT problem and keeps listening
-  while zlib remains visible. Once video has flowed, five seconds without an
-  authenticated video packet ends the receiver and returns the picture to zlib.
-  The next display change, rather than the unchanged layout, offers a new stream.
+- **Liveness.** Every offer owes its display's first picture within 10 s, and
+  the running stream a picture every 48 s, 16 of Apple's 3-second timeouts; an
+  idle desktop sends about two a second. Past either, the session ends, as it
+  does when the Mac refuses the offer (message 3) and when the receiver fails,
+  on a socket error or a decoder that cannot start. A display change stops the
+  stream and owes nothing until its own offer. When the Mac names its ports and
+  nothing arrives within 5 s, the log names the port and the likely firewall or
+  NAT.
 
 ### The sound
 
@@ -738,8 +740,8 @@ ports every second, which opens a port-preserving NAT's mapping. Every Mac uses 
 same port numbers, so remotex binds them with address and port reuse and connects
 each socket to its Mac. Several gateways on one host can then share the numbers,
 unless one of them bound without reuse, as v0.0.249 did. Nothing arriving within
-5 s of message 1 is logged, and the picture stays on zlib. If an established
-video leg later goes silent for 5 s, the media receiver ends and zlib takes over.
+5 s of message 1 is logged, and the session ends when the offer's first picture
+is 10 s overdue.
 
 ## Still unknown
 

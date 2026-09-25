@@ -179,8 +179,8 @@ at full fidelity, and supports the native Apple pasteboard. Every Apple subtype
 asks the Mac for zlib rectangles from the start (around fifty times fewer bytes
 than raw on a static desktop).
 
-High Performance (`ard-high-performance`) takes the same credentials and speaks
-Apple's encrypted record-layer revision. It requests one virtual display at the
+High Performance (`ard-high-performance`) takes the same credentials and the same
+encrypted protocol revision. It requests one virtual display at the
 pinned `width` and `height` when both are set, or at the full resolution and
 density of the client's screen otherwise. Once connected, it disables the remote
 Mac's physical displays and puts all of the remote Mac's windows on that virtual
@@ -190,7 +190,8 @@ after the first layout the gateway offers the Mac's media stream, and the Mac
 then sends the screen as HEVC 4:4:4 and its sound as AAC-ELD, over UDP with
 SRTP, to the gateway's ports 5900 and 5901. The gateway authenticates and
 decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
-target uses; zlib carries the picture only until the stream does. A playing
+target uses; zlib carries the picture only until the stream does, and a stream
+that fails ends the session, as it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as zlib's deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound and
 never uses AirPlay. It is **experimental** and needs a gateway built with

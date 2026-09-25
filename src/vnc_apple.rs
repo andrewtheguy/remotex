@@ -365,16 +365,15 @@ const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
 
 /// Whether a Mac can hold a High Performance session: the command bitmap of its
 /// enhanced ServerInit lists [`set_display_configuration`], without which there is
-/// no virtual display. Apple's viewer asks exactly this before it configures one
-/// (`-[SSSession doesServerSupportProMode]`), and a Mac that fails it is connected in
-/// Standard mode, after asking the user. See docs/apple-vnc-889.md, "ServerInit's
-/// name field is not a name".
+/// no virtual display. Apple's viewer asks exactly this before it configures one,
+/// and a Mac that fails it is connected in Standard mode, after asking the user.
+/// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
 pub fn holds_high_performance(commands: &[u8; 16]) -> bool {
     accepts(commands, SET_DISPLAY_CONFIGURATION)
 }
 
 /// Whether the command bitmap lists client message `kind`, most significant bit
-/// first, as the viewer's `RFBServerCommandSupported` reads it.
+/// first, as Apple's viewer reads it.
 fn accepts(commands: &[u8; 16], kind: u8) -> bool {
     commands
         .get(usize::from(kind >> 3))

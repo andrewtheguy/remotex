@@ -417,8 +417,10 @@ password = "change-me"
 # Mac negotiates on the RFB connection and then sends over UDP with SRTP — the
 # picture at up to 30 frames a second, without zlib's deflate holding up the
 # Mac's reading of your input. Zlib carries the picture only until the stream
-# does. The Mac sends to this gateway's address on UDP 5900 and 5901, so a
-# firewall or NAT between them must let that through.
+# does, and a stream that fails ends the session, as it does in Apple's viewer.
+# The Mac sends to this gateway's address on UDP 5900 and 5901, so a firewall or
+# NAT between them must let that through, or the session ends 10 seconds after
+# the stream is offered.
 #
 # The picture and the sound go together: the Mac refuses one without the other,
 # and mutes its own speakers while it streams. So the target always carries
