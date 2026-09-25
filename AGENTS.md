@@ -181,7 +181,9 @@ documentation.
   distorted and then silent after a minute or so, under Apple's own viewer too.
   Judge performance, sound quality and long sessions on a physical Mac, or
   against Apple's viewer on the same machine first. See
-  [The sound](docs/apple-vnc-889.md#the-sound).
+  [The sound](docs/apple-vnc-889.md#the-sound). AirPlay cannot be tested on a
+  virtual Mac at all: the speaker is tested only with a physical Mac and real
+  devices. See [A Mac's sound over AirPlay](docs/airplay-audio.md#testing).
 - Do not infer GUI or network capabilities from an SSH attachment. A tmux server
   retains the environment and access of the user that started it. Test a
   capability once and read its error; being able to drive the GUI is still not

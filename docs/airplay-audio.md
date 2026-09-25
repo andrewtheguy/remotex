@@ -89,6 +89,12 @@ on any other target.
 - **Follow the Mac's volume.** An AirPlay 1 sender leaves volume to the speaker,
   and this one leaves it to the browser.
 
+## Testing
+
+The speaker can only be tested with a physical Mac and real devices. The
+virtual Mac the rest of the Apple path is smoke-tested on cannot exercise it,
+so a change here is checked by hand on a physical Mac.
+
 ## Network
 
 - **The Mac must be on the gateway's link.** mDNS is link-local multicast, and
