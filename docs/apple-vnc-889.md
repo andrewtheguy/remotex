@@ -570,20 +570,26 @@ treating it as lost.
   remotex ignores it. The marker bit ends a picture. RFC 7798 packetization:
   single NAL units, aggregation packets, fragmentation units.
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
-  transfer, Display P3 primaries. The prebuilt libde265 1.1.3 decodes it
-  bit-exact with ffmpeg, in about 17 ms for a 1600×1000 picture on one core of an
-  i5-8500T.
+  transfer, Display P3 primaries, with wavefront parallel processing
+  (`entropy_coding_sync_enabled_flag`) and no tiles. The prebuilt libde265 1.1.3
+  decodes it bit-exact with ffmpeg. On one core of an i5-8500T a 1600×1000
+  picture takes 15–23 ms, too slow for 60 a second. Remotex gives the decoder
+  four worker threads. Replaying captured pictures at 60 a second with the VP9
+  encoder running beside it, that took about 13 ms a picture and dropped none,
+  where one thread fell eight behind within seconds.
 - **Rate.** A picture goes out when the screen changes. An idle desktop sent about
   two a second and an animation about 45. Clearing the 60 fps flag changed
-  neither.
+  neither. Those are the virtual Mac's rates; the receiver's debug log reports
+  the pictures a second every 10 seconds, which is how a physical Mac's is read.
 - **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
   the 46-byte masters in the offer. Received packets use the server-to-viewer
   key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP
   under its key.
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
-  FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, and when
-  a stream starts without an IDR: the first packets can arrive before the socket
-  is bound. Apple's viewer's rate feedback is not reproduced.
+  FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
+  a stream starts without an IDR (the first packets can arrive before the socket
+  is bound), and when the decoder falls eight pictures behind, which it warns
+  about. Apple's viewer's rate feedback is not reproduced.
 
 ### The sound
 

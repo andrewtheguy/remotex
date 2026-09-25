@@ -909,6 +909,15 @@ pub struct Picture {
     pub rgb: Vec<u8>,
 }
 
+/// libde265's worker threads. The Mac's stream sets
+/// `entropy_coding_sync_enabled_flag`, so a picture's CTU rows decode in parallel.
+/// Replaying captured 1600×1000 pictures at 60 a second on a six-core host with a
+/// VP9 encoder running beside them, one thread fell behind and dropped units, two
+/// kept up at 91% busy, and three to five took about 13 ms a picture. Four, since
+/// a larger display has more rows to share out.
+#[cfg(feature = "apple-hp-media")]
+const DECODE_THREADS: std::os::raw::c_int = 4;
+
 /// libde265, one context for the session: HEVC access units in, pictures out.
 #[cfg(feature = "apple-hp-media")]
 struct Hevc(*mut de265_sys::de265_decoder_context);
@@ -924,7 +933,17 @@ impl Hevc {
         // SAFETY: no arguments; a null return is checked.
         let ctx = unsafe { de265_sys::de265_new_decoder() };
         anyhow::ensure!(!ctx.is_null(), "libde265 could not allocate a decoder");
-        Ok(Self(ctx))
+        let decoder = Self(ctx);
+        // The Mac codes with wavefront parallel processing, so its rows decode on
+        // worker threads. See DECODE_THREADS.
+        // SAFETY: a live context, before anything was pushed into it.
+        let err = unsafe { de265_sys::de265_start_worker_threads(decoder.0, DECODE_THREADS) };
+        anyhow::ensure!(
+            err == de265_sys::de265_error_DE265_OK,
+            "libde265 could not start its worker threads: {}",
+            text(err)
+        );
+        Ok(decoder)
     }
 
     /// Decode one access unit, returning the picture it completed, if any.
@@ -1218,6 +1237,11 @@ const UNITS_PER_WAVE: usize = 2;
 #[cfg(feature = "apple-hp-media")]
 const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Seconds between the debug log's picture rates: what the Mac actually sends,
+/// which its 60 fps flag does not settle.
+#[cfg(feature = "apple-hp-media")]
+const RATE_REPORT: u32 = 10;
+
 /// How long the Mac may name its ports without a packet arriving before that is
 /// said. A firewall or NAT between it and this gateway's UDP ports is what that
 /// looks like; the picture stays on zlib meanwhile.
@@ -1293,6 +1317,8 @@ impl Receiver {
         let mut media_ssrc = 0u32;
         let mut packets: u64 = 0;
         let mut forged: u64 = 0;
+        let mut behind: u64 = 0;
+        let (mut ticks, mut pictures, mut plis) = (0u32, 0u64, 0u64);
         let mut warned_silent = false;
         let mut datagram = vec![0u8; 65_536];
         let mut sound_datagram = vec![0u8; 2048];
@@ -1304,6 +1330,15 @@ impl Receiver {
                     let video = self.video_rtcp.protect(&rtcp_receiver_report(self.video_ssrc));
                     let _ = self.audio.send(&audio).await;
                     let _ = self.video.send(&video).await;
+                    ticks += 1;
+                    if ticks % RATE_REPORT == 0 && pictures > 0 {
+                        log::debug!(
+                            "vnc: {:.1} pictures a second from the Mac over the last {RATE_REPORT}s, \
+                             {behind} dropped behind the decoder so far, {plis} keyframes asked for",
+                            pictures as f64 / f64::from(RATE_REPORT)
+                        );
+                        pictures = 0;
+                    }
                     if packets == 0 && !warned_silent && started.elapsed() >= SILENT_START {
                         warned_silent = true;
                         log::warn!(
@@ -1367,9 +1402,15 @@ impl Receiver {
                         Depacketized::Pending => {}
                         Depacketized::Lost => want_keyframe = true,
                         Depacketized::Unit(unit) => match units.try_send(unit) {
-                            Ok(()) => {}
+                            Ok(()) => pictures += 1,
                             Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                log::debug!("vnc: the HEVC decoder is {DECODE_QUEUE} pictures behind; resyncing");
+                                behind += 1;
+                                if behind <= 3 {
+                                    log::warn!(
+                                        "vnc: the HEVC decoder fell {DECODE_QUEUE} pictures behind the Mac; \
+                                         dropping to its next keyframe"
+                                    );
+                                }
                                 depacketizer.resync();
                                 want_keyframe = true;
                             }
@@ -1390,6 +1431,7 @@ impl Receiver {
                 && last_pli.is_none_or(|at| at.elapsed() >= PLI_INTERVAL)
             {
                 last_pli = Some(tokio::time::Instant::now());
+                plis += 1;
                 let pli = self.video_rtcp.protect(&rtcp_pli(self.video_ssrc, media_ssrc));
                 let _ = self.video.send(&pli).await;
             }
