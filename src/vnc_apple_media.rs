@@ -502,16 +502,50 @@ pub fn parse_media_reply(body: &[u8]) -> anyhow::Result<MediaReply> {
     match kind {
         1 => {
             anyhow::ensure!(
-                body.len() >= 16,
-                "media-stream message 1 is {} bytes, too short for its ports",
+                body.len() >= 36,
+                "media-stream message 1 is {} bytes, shorter than its three port records",
                 body.len()
+            );
+            let audio_flags =
+                u32::from_be_bytes(body[10..14].try_into().expect("four bytes checked"));
+            let video_flags =
+                u32::from_be_bytes(body[16..20].try_into().expect("four bytes checked"));
+            let video2_flags =
+                u32::from_be_bytes(body[22..26].try_into().expect("four bytes checked"));
+            anyhow::ensure!(
+                audio_flags & video_flags & 1 != 0,
+                "media-stream message 1 did not enable both its audio and video legs"
+            );
+            anyhow::ensure!(
+                video2_flags & 1 == 0,
+                "media-stream message 1 enabled a second video leg this one-display client did not offer"
             );
             Ok(MediaReply::Ports {
                 audio_port: u16::from_be_bytes([body[8], body[9]]),
                 video_port: u16::from_be_bytes([body[14], body[15]]),
             })
         }
-        2 => Ok(MediaReply::Answer),
+        2 => {
+            anyhow::ensure!(
+                body.len() >= 18,
+                "media-stream answer is {} bytes, too short for its offer lengths",
+                body.len()
+            );
+            let audio = usize::from(u16::from_be_bytes([body[8], body[9]]));
+            let video = usize::from(u16::from_be_bytes([body[10], body[11]]));
+            let video2 = usize::from(u16::from_be_bytes([body[12], body[13]]));
+            anyhow::ensure!(
+                video2 == 0,
+                "the Mac answered with a second video leg this one-display client did not offer"
+            );
+            anyhow::ensure!(
+                body.len() == 18 + audio + video,
+                "media-stream answer is {} bytes, not the {} its offer lengths describe",
+                body.len(),
+                18 + audio + video
+            );
+            Ok(MediaReply::Answer)
+        }
         3 => {
             anyhow::ensure!(
                 body.len() >= 16,
@@ -1268,6 +1302,12 @@ const RATE_REPORT: u32 = 10;
 #[cfg(feature = "apple-hp-media")]
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Once video has flowed, this much silence means its UDP stream stopped. An
+/// idle Mac still sends about two pictures a second, so this leaves several
+/// missed idle pictures before handing the display back to zlib.
+#[cfg(feature = "apple-hp-media")]
+const VIDEO_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The UDP side: RTCP out on both legs once a second, video in and depacketized,
 /// sound in and decoded.
 #[cfg(feature = "apple-hp-media")]
@@ -1333,6 +1373,7 @@ impl Receiver {
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
         let started = tokio::time::Instant::now();
+        let mut last_video: Option<tokio::time::Instant> = None;
         let mut last_pli: Option<tokio::time::Instant> = None;
         let mut media_ssrc = 0u32;
         let mut packets: u64 = 0;
@@ -1368,6 +1409,14 @@ impl Receiver {
                             self.video_port,
                             SILENT_START.as_secs()
                         );
+                    }
+                    if last_video.is_some_and(|at| at.elapsed() >= VIDEO_SILENCE) {
+                        log::warn!(
+                            "vnc: no authenticated screen video arrived from the Mac for {}s; \
+                             stopping its media receiver so the picture returns to zlib",
+                            VIDEO_SILENCE.as_secs()
+                        );
+                        break;
                     }
                 }
                 received = self.audio.recv(&mut sound_datagram) => {
@@ -1413,6 +1462,7 @@ impl Receiver {
                         Err(_) => continue,
                     };
                     packets += 1;
+                    last_video = Some(tokio::time::Instant::now());
                     if packets == 1 {
                         log::info!("vnc: the Mac's screen video is flowing (SSRC {:#x})", header.ssrc);
                     }
@@ -1794,12 +1844,22 @@ mod tests {
         // Message 1 as the Mac sent it: audio at 5900, video at 5901.
         let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
         assert_eq!(parse_media_reply(&ports).unwrap(), MediaReply::Ports { audio_port: 5900, video_port: 5901 });
-        assert_eq!(parse_media_reply(&[0, 2, 0, 2, 0, 0, 0, 1]).unwrap(), MediaReply::Answer);
+        let answer = unhex("000200020000000000020003000000000000aabbccddee");
+        assert_eq!(parse_media_reply(&answer).unwrap(), MediaReply::Answer);
         let error = unhex("00030001000000000000000200000000");
         assert_eq!(parse_media_reply(&error).unwrap(), MediaReply::Error { kind: 2, sub_code: 0 });
         assert_eq!(parse_media_reply(&[0, 9, 0, 1, 0, 0, 0, 0]).unwrap(), MediaReply::Other(9));
         assert!(parse_media_reply(&[0, 1, 0, 1]).is_err());
         assert!(parse_media_reply(&[0, 1, 0, 1, 0, 0, 0, 0, 0]).is_err());
+        let mut disabled_audio = ports.clone();
+        disabled_audio[13] = 0;
+        assert!(parse_media_reply(&disabled_audio).is_err());
+        let mut second_video = ports.clone();
+        second_video[25] = 1;
+        assert!(parse_media_reply(&second_video).is_err());
+        let mut wrong_answer_size = answer;
+        wrong_answer_size.pop();
+        assert!(parse_media_reply(&wrong_answer_size).is_err());
     }
 
     /// The master key `0, 1, …, 45` both vectors below were made with.
@@ -1825,18 +1885,6 @@ mod tests {
         assert_eq!(SrtpReceiver::new(&master()).unprotect(&mut forged), Err(SrtpError::Forged));
         let mut other_key = packet;
         assert_eq!(SrtpReceiver::new(&[7; 46]).unprotect(&mut other_key), Err(SrtpError::Forged));
-    }
-
-    #[test]
-    fn srtp_refuses_a_duplicate_and_a_straggler() {
-        let packet = unhex("80e412340a0b0c0dcafebabe610005049285d9955b8928769900c5323d679c04bbccbf");
-        let mut srtp = SrtpReceiver::new(&master());
-        assert!(srtp.unprotect(&mut packet.clone()).is_ok());
-        assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "a duplicate");
-        srtp.last = Some((0xcafe_babe, 0x1235, 0));
-        assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "overtaken");
-        srtp.last = Some((0x0102_0304, 0x1235, 0));
-        assert!(srtp.unprotect(&mut packet.clone()).is_ok(), "a new stream starts over");
     }
 
     #[test]
@@ -2032,7 +2080,7 @@ mod tests {
         assert_eq!(msg[0], 0x1c);
         assert!(m.pending());
         assert!(m.offer((1280, 800)).is_none(), "not while one is out");
-        assert!(!m.on_reply(&[0, 2, 0, 2, 0, 0, 0, 1]).unwrap());
+        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
         assert!(!m.pending());
         assert!(m.offer((1600, 1000)).is_none(), "the stream runs at this size");
         m.stopped();

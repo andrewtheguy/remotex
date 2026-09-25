@@ -500,8 +500,9 @@ AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with 
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`); `ard-virtual-display` never offers. Zlib carries the
 picture only until the stream delivers, across display changes, and when the Mac
-refuses the stream or the gateway's receiver stops; after a stop, until the next
-display change offers the stream again.
+refuses the stream or the gateway's receiver stops. Five seconds without an
+authenticated video packet after the stream has begun stops that receiver and
+hands the picture back to zlib; the next display change offers the stream again.
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: libde265 for the picture (LGPL-3.0-or-later, linked
@@ -533,11 +534,20 @@ with encoding 1010 (`0x3f2`) appended, then message `0x1c`
 ```
 
 The Mac answers with rectangles of encoding 1010, a `u16` size and then:
-- **message 1**, the ports: `u16` type, `u16` version, `u32` flags, then the audio
-  port at `+8` and the video port at `+14`. Measured, they were always 5900 and
-  5901, the RFB port and the next. The viewer receives on the same numbers.
-- **message 2**, AVConference's answer. It sometimes comes twice for one offer.
-- **message 3**, an error: `u32` type and `u32` sub-code.
+
+- **message 1**, a 36-byte body: `u16` type, `u16` version, `u32` flags, then a
+  `u16` port and `u32` flags for audio at `+8`/`+10`, video 1 at `+14`/`+16`,
+  and video 2 at `+20`/`+22`, followed by ten reserved zero bytes. Bit 0 enables
+  a leg. Apple's viewer requires it on audio and video 1; remotex also requires
+  video 2 off because it offered one display. The measured ports were always
+  5900 and 5901, the RFB port and the next. The viewer receives on the same
+  numbers.
+- **message 2**, AVConference's answer: the common eight-byte header, `u16`
+  lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
+  those blobs. Remotex checks that their lengths describe the whole body and
+  that video 2 is empty. The answer sometimes comes twice for one offer.
+- **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
+  sub-code.
 
 Each offer is a binary property list of four keys around a deflated
 AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
@@ -598,6 +608,11 @@ treating it as lost.
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
   about. Apple's viewer's rate feedback is not reproduced.
+- **Liveness.** If no authenticated video packet arrives in the first five
+  seconds, remotex logs the likely firewall or NAT problem and keeps listening
+  while zlib remains visible. Once video has flowed, five seconds without an
+  authenticated video packet ends the receiver and returns the picture to zlib.
+  The next display change, rather than the unchanged layout, offers a new stream.
 
 ### The sound
 
@@ -670,7 +685,8 @@ ports every second, which opens a port-preserving NAT's mapping. Every Mac uses 
 same port numbers, so remotex binds them with address and port reuse and connects
 each socket to its Mac. Several gateways on one host can then share the numbers,
 unless one of them bound without reuse, as v0.0.249 did. Nothing arriving within
-5 s of message 1 is logged, and the picture stays on zlib.
+5 s of message 1 is logged, and the picture stays on zlib. If an established
+video leg later goes silent for 5 s, the media receiver ends and zlib takes over.
 
 ## Still unknown
 
