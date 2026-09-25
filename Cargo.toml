@@ -35,11 +35,12 @@ embedded-gateway = ["dep:crossterm", "dep:libc"]
 airplay = ["dep:alac", "dep:mdns-sd", "dep:gethostname"]
 # Apple High Performance's media stream (src/vnc_apple_media.rs, src/aac_eld.rs):
 # the Mac's picture as HEVC and its sound as AAC-ELD, both over SRTP, which a
-# target turns on with `media_stream = true`. The two decoders are the feature:
-# libde265 (LGPL, linked statically) and Fraunhofer's AAC-ELD decoder, whose
-# licence is not OSI-approved. So it is off by default and in no release
-# artifact; an operator builds `cargo build --release --features apple-hp-media`,
-# and any other build refuses a config that sets the key.
+# target turns on with `subtype = "ard-high-performance"`. The two decoders are
+# the feature: libde265 (LGPL, linked statically) and Fraunhofer's AAC-ELD
+# decoder, whose licence is not OSI-approved. So it is off by default and in no
+# release artifact; an operator builds
+# `cargo build --release --features apple-hp-media`, and any other build refuses
+# that subtype.
 apple-hp-media = ["dep:de265-sys", "dep:aac"]
 
 [dependencies]

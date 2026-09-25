@@ -12,11 +12,11 @@
 //! 26.6 and is recorded in `docs/apple-vnc-889.md` ("The media stream: High
 //! Performance's picture and sound").
 //!
-//! A target takes this path with `media_stream = true`, and only in a build with
-//! the `apple-hp-media` feature: the wire half of this module — offers, replies,
-//! SRTP, depacketizing — is always compiled and tested, and the feature adds the
-//! two decoders and the receiver that feeds them. A build without it refuses the
-//! key at config parse, so nothing here runs in it.
+//! A target takes this path with `subtype = "ard-high-performance"`, and only in a
+//! build with the `apple-hp-media` feature: the wire half of this module — offers,
+//! replies, SRTP, depacketizing — is always compiled and tested, and the feature
+//! adds the two decoders and the receiver that feeds them. A build without it
+//! refuses that subtype at config parse, so nothing here runs in it.
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
