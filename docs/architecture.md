@@ -1118,8 +1118,8 @@ it does to Apple's viewer: as HEVC over its media stream, offered once the displ
 settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
 gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
 picture until the stream delivers and across every display change. A stream the
-Mac refuses, that brings no picture or that stops ends the session, as it ends
-Apple's viewer's. While it runs, polling holds to one pixel, which still brings
+Mac refuses, that brings no picture or no sound, or that stops ends the session,
+as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
 cursor shapes and layouts. Apple's virtual-display-count and
 resolution-preset controls remain unimplemented.
 

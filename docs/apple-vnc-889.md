@@ -552,8 +552,8 @@ AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with 
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`). Zlib carries the picture only until the stream
 delivers and across display changes. A stream that fails ends the session, as it
-ends Apple's viewer's: one the Mac refuses, one that brings no picture, and one
-that stops (see [Liveness](#the-stream)).
+ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
+sound, and one that stops (see [Liveness](#the-stream)).
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
@@ -660,14 +660,17 @@ other failures (see [Liveness](#the-stream)).
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
   about. Apple's viewer's rate feedback is not reproduced.
-- **Liveness.** Every offer owes its display's first picture within 10 s, and
-  the running stream a picture every 48 s, 16 of Apple's 3-second timeouts; an
-  idle desktop sends about two a second. Past either, the session ends, as it
-  does when the Mac refuses the offer (message 3) and when the receiver fails,
-  on a socket error or a decoder that cannot start. A display change stops the
-  stream and owes nothing until its own offer. When the Mac names its ports and
-  nothing arrives within 5 s, the log names the port and the likely firewall or
-  NAT.
+- **Liveness.** Every offer owes its answer, its display's first picture and
+  the first sound packet within 10 s, and the running stream a picture and a
+  sound packet every 48 s, 16 of Apple's 3-second timeouts, which Apple's viewer
+  counts on each leg. An idle desktop sends about two pictures a second, and the
+  sound leg a packet every 10 ms whether or not anything plays. Past any of
+  them, the session ends, as it does when the Mac refuses the offer (message 3)
+  and when the receiver fails, on a socket error or a decoder, HEVC or AAC-ELD,
+  that cannot start or stops. A display change stops the stream and owes nothing
+  until its own offer, except the answer to an offer still out. When the Mac
+  names its ports and nothing arrives within 5 s, the log names the port and the
+  likely firewall or NAT.
 
 ### The sound
 

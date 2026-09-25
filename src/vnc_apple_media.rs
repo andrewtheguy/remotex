@@ -25,9 +25,10 @@
 //! runs the Mac mutes its own output, as it does for Apple's viewer.
 //!
 //! A stream that fails ends the session, as it ends Apple's viewer's, which has no
-//! way back to RFB pixels: one the Mac refuses, one that brings no picture within
-//! [`FIRST_PICTURE`] of its offer, one that sends none for [`STREAM_SILENCE`], and
-//! one whose receiver fails ([`MediaStream::overdue`], [`MediaStream::failure`]).
+//! way back to RFB pixels: one the Mac refuses, one that brings no picture or no
+//! sound within [`STREAM_START`] of its offer, one that sends neither for
+//! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
+//! [`MediaStream::failure`]).
 //! Zlib rectangles carry the picture only until the first one and across display
 //! changes, which stop the stream until the next offer.
 //!
@@ -1181,26 +1182,45 @@ pub struct MediaStream {
     /// Why the receiver stopped, which it leaves here before the `None` that says
     /// so — see [`MediaStream::failure`].
     failed: Failure,
+    /// When the sound leg last brought an authentic packet, which the receiver
+    /// notes — see [`MediaStream::overdue`].
+    heard: Heard,
     /// Where the sound leg's decoded PCM goes: the session's audio bridge, when
     /// the browser can be sent sound. `None` drains the leg unread.
     #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
 
-/// Where the receiver and its decoder thread leave the first reason they stopped.
+/// Where the receiver and its decoder threads leave the first reason they stopped.
 type Failure = std::sync::Arc<std::sync::Mutex<Option<anyhow::Error>>>;
 
-/// What the stream owes the session: a picture of the display it was offered for,
-/// or, once one has come, the next. Either is a deadline the session ends at.
+/// When the sound leg last brought an authentic packet. The Mac sends one every
+/// 10 ms whether or not anything plays.
+type Heard = std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
+/// What the stream owes the session, each a deadline the session ends at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Owed {
     /// Nothing: no stream is offered, as before the first display and across a
     /// display change.
     Nothing,
-    /// The first picture, for the offer that went at this instant.
-    First(std::time::Instant),
-    /// Another picture, the last having come at this instant.
-    Next(std::time::Instant),
+    /// An answer to the offer that went at this instant, for a display that has
+    /// changed since. No other offer can go out until it comes.
+    Answer(std::time::Instant),
+    /// Both legs, for the offer that went at `offered`: the first picture of its
+    /// display and the first sound within [`STREAM_START`] of it, and each after
+    /// within [`STREAM_SILENCE`] of the last. `pictured` is when the latest
+    /// picture of that display came.
+    Stream { offered: std::time::Instant, pictured: Option<std::time::Instant> },
+}
+
+/// When a leg is overdue on the offer made at `offered`, the leg having last
+/// delivered at `last`.
+fn leg_due(offered: std::time::Instant, last: Option<std::time::Instant>) -> std::time::Instant {
+    match last {
+        Some(at) => at + STREAM_SILENCE,
+        None => offered + STREAM_START,
+    }
 }
 
 impl MediaStream {
@@ -1218,6 +1238,7 @@ impl MediaStream {
             receiver: None,
             pictures,
             failed: Failure::default(),
+            heard: Heard::default(),
             sound: None,
         };
         (media, rx)
@@ -1239,7 +1260,7 @@ impl MediaStream {
         }
         self.pending = true;
         self.offered = Some(size);
-        self.owed = Owed::First(std::time::Instant::now());
+        self.owed = Owed::Stream { offered: std::time::Instant::now(), pictured: None };
         self.offer_made.notify_one();
         let first = !std::mem::replace(&mut self.asked, true);
         Some((first, self.offers.configuration(size)))
@@ -1251,27 +1272,37 @@ impl MediaStream {
     }
 
     /// Whether an offer is out that the Mac has not answered: no display change may
-    /// go out meanwhile. One left unanswered ends the session at [`FIRST_PICTURE`].
+    /// go out meanwhile. One left unanswered ends the session at [`STREAM_START`].
     pub fn pending(&self) -> bool {
         self.pending
     }
 
-    /// A display change went out. The Mac stops both streams for it and starts
-    /// them again only on an offer, which the settled layout gets; until then the
-    /// stream owes nothing.
+    /// The display changed. The Mac stops both streams for it and starts them
+    /// again only on an offer, which the settled layout gets; until then the stream
+    /// owes nothing but an answer to an offer still out, which holds back that one.
     pub fn stopped(&mut self) {
         self.offered = None;
-        self.owed = Owed::Nothing;
+        self.owed = match self.owed {
+            Owed::Stream { offered, .. } | Owed::Answer(offered) if self.pending => Owed::Answer(offered),
+            _ => Owed::Nothing,
+        };
     }
 
-    /// A picture of `size` came from the receiver. The first of the display the
-    /// stream was offered for settles the offer, and each one after puts the next
-    /// deadline off; a picture of another display, the old one's last, does
-    /// neither.
+    /// A picture of `size` came from the receiver. Each one of the display the
+    /// stream was offered for puts the picture's deadline off; one of another
+    /// display, the old one's last, does not.
     pub fn pictured(&mut self, size: (u16, u16)) {
-        if self.owed != Owed::Nothing && self.offered == Some(size) {
-            self.owed = Owed::Next(std::time::Instant::now());
+        if let Owed::Stream { pictured, .. } = &mut self.owed
+            && self.offered == Some(size)
+        {
+            *pictured = Some(std::time::Instant::now());
         }
+    }
+
+    /// When the sound leg last brought a packet, if it has since the offer at
+    /// `offered`.
+    fn heard_since(&self, offered: std::time::Instant) -> Option<std::time::Instant> {
+        self.heard.lock().unwrap().filter(|&at| at >= offered)
     }
 
     /// Signalled at every offer, which sets a new [`deadline`](Self::deadline): an
@@ -1285,38 +1316,56 @@ impl MediaStream {
     pub fn deadline(&self) -> Option<std::time::Instant> {
         match self.owed {
             Owed::Nothing => None,
-            Owed::First(at) => Some(at + FIRST_PICTURE),
-            Owed::Next(at) => Some(at + STREAM_SILENCE),
+            Owed::Answer(offered) => Some(offered + STREAM_START),
+            Owed::Stream { offered, pictured } => {
+                Some(leg_due(offered, pictured).min(leg_due(offered, self.heard_since(offered))))
+            }
         }
     }
 
     /// The error the session ends with when the stream is overdue at `now`: its
-    /// offer has brought no picture in [`FIRST_PICTURE`], or the running stream
-    /// none in [`STREAM_SILENCE`]. Apple's viewer ends its session on the same
-    /// failures, counted in RTCP timeouts, and never falls back to RFB pixels.
+    /// offer has gone unanswered, or brought no picture or no sound, in
+    /// [`STREAM_START`], or the running stream has sent neither for
+    /// [`STREAM_SILENCE`]. Apple's viewer ends its session on the same failures,
+    /// counted in RTCP timeouts on each leg, and never falls back to RFB pixels.
     pub fn overdue(&self, now: std::time::Instant) -> Option<anyhow::Error> {
-        if self.deadline().is_none_or(|due| now < due) {
-            return None;
+        let first = STREAM_START.as_secs();
+        let silence = STREAM_SILENCE.as_secs();
+        let unanswered = || anyhow::anyhow!("the Mac did not answer the media-stream offer within {first}s");
+        let portless = || {
+            anyhow::anyhow!("the Mac accepted the media stream but named no ports for it within {first}s")
+        };
+        let firewalled = |what: &str, port: u16| {
+            anyhow::anyhow!(
+                "no {what} came over the Mac's media stream within {first}s of its offer; if \
+                 nothing reached UDP {port}, a firewall or NAT between the Mac and this gateway \
+                 is what that looks like"
+            )
+        };
+        let ports = self.receiver.as_ref().map(|(ports, _)| *ports);
+        let (offered, pictured) = match self.owed {
+            Owed::Nothing => return None,
+            Owed::Answer(offered) => return (now >= offered + STREAM_START).then(unanswered),
+            Owed::Stream { offered, pictured } => (offered, pictured),
+        };
+        if now >= leg_due(offered, pictured) {
+            return Some(match (pictured, ports) {
+                (None, _) if self.pending => unanswered(),
+                (None, None) => portless(),
+                (None, Some((_, video_port))) => firewalled("picture", video_port),
+                (Some(_), _) => anyhow::anyhow!("the Mac's media stream sent no picture for {silence}s"),
+            });
         }
-        let first = FIRST_PICTURE.as_secs();
-        Some(match (self.owed, &self.receiver) {
-            (Owed::Nothing, _) => return None,
-            (Owed::First(_), _) if self.pending => {
-                anyhow::anyhow!("the Mac did not answer the media-stream offer within {first}s")
-            }
-            (Owed::First(_), None) => anyhow::anyhow!(
-                "the Mac accepted the media stream but named no ports for it within {first}s"
-            ),
-            (Owed::First(_), Some(((_, video_port), _))) => anyhow::anyhow!(
-                "no picture came over the Mac's media stream within {first}s of its offer; if \
-                 nothing reached UDP {video_port}, a firewall or NAT between the Mac and this \
-                 gateway is what that looks like"
-            ),
-            (Owed::Next(_), _) => anyhow::anyhow!(
-                "the Mac's media stream sent no picture for {}s",
-                STREAM_SILENCE.as_secs()
-            ),
-        })
+        let heard = self.heard_since(offered);
+        if now >= leg_due(offered, heard) {
+            return Some(match (heard, ports) {
+                (None, _) if self.pending => unanswered(),
+                (None, None) => portless(),
+                (None, Some((audio_port, _))) => firewalled("sound", audio_port),
+                (Some(_), _) => anyhow::anyhow!("the Mac's media stream sent no sound for {silence}s"),
+            });
+        }
+        None
     }
 
     /// Why the receiver stopped, once it has said so with a `None` picture.
@@ -1361,6 +1410,11 @@ impl MediaStream {
             MediaReply::Answer => {
                 log::debug!("vnc: the Mac accepted the media-stream offer");
                 self.pending = false;
+                // The display it was for has gone, and the new one's offer can
+                // go out now.
+                if matches!(self.owed, Owed::Answer(_)) {
+                    self.owed = Owed::Nothing;
+                }
             }
             MediaReply::Error { kind, sub_code } => anyhow::bail!(
                 "the Mac refused the media stream (error type {kind}, sub-code {sub_code})"
@@ -1392,16 +1446,17 @@ impl Drop for MediaStream {
     }
 }
 
-/// How long an offer has to bring its display's first picture before the session
-/// ends. The Mac answers in under a second and the first picture follows within
-/// one more. Apple's viewer gives up on a stream that has not started after three
-/// of its 3-second RTCP timeouts on a leg.
-pub const FIRST_PICTURE: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long an offer has to be answered, and to bring its display's first picture
+/// and the first sound, before the session ends. The Mac answers in under a second
+/// and both legs follow within one more. Apple's viewer gives up on a stream that
+/// has not started after three of its 3-second RTCP timeouts on a leg.
+pub const STREAM_START: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How long a running stream may send no picture before the session ends: 16 of
-/// Apple's 3-second RTCP timeouts, the count at which its viewer disconnects. An
-/// idle Mac still sends about two pictures a second, and a display change, which
-/// stops the stream, owes nothing until its offer.
+/// How long a running stream may send no picture, or no sound, before the session
+/// ends: 16 of Apple's 3-second RTCP timeouts on a leg, the count at which its
+/// viewer disconnects. An idle Mac still sends about two pictures and a hundred
+/// sound packets a second, and a display change, which stops the stream, owes
+/// nothing until its offer.
 pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(48);
 
 /// Access units the HEVC decoder thread may be behind by. Reaching it drops the
@@ -1433,7 +1488,7 @@ const RATE_REPORT: u32 = 10;
 
 /// How long the Mac may name its ports without a packet arriving before the log
 /// says so, naming the port. A firewall or NAT between it and this gateway's UDP
-/// ports is what that looks like, and the session ends at [`FIRST_PICTURE`].
+/// ports is what that looks like, and the session ends at [`STREAM_START`].
 #[cfg(feature = "apple-hp-media")]
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1453,6 +1508,7 @@ struct Receiver {
     video_ssrc: u32,
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
     failed: Failure,
+    heard: Heard,
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
 
@@ -1494,6 +1550,7 @@ impl Receiver {
             video_ssrc: media.offers.video_ssrc,
             pictures: media.pictures.clone(),
             failed: std::sync::Arc::clone(&media.failed),
+            heard: std::sync::Arc::clone(&media.heard),
             sound: media.sound.clone(),
         })
     }
@@ -1505,7 +1562,7 @@ impl Receiver {
             std::sync::Arc::clone(&keyframe),
             std::sync::Arc::clone(&self.failed),
         );
-        let mut sound = self.sound.take().map(Sound::start);
+        let mut sound = self.sound.take().map(|bridge| Sound::start(bridge, std::sync::Arc::clone(&self.failed)));
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
         let started = tokio::time::Instant::now();
@@ -1552,14 +1609,18 @@ impl Receiver {
                         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
                         Err(e) => break anyhow::Error::new(e).context("the Mac's sound socket failed"),
                     };
-                    let Some(sound) = sound.as_mut() else {
-                        continue;
-                    };
                     let data = &mut sound_datagram[..len];
-                    match self.audio_srtp.unprotect(data) {
-                        Ok(header) => sound.push(&header, &data[header.payload.0..header.payload.1]),
-                        Err(SrtpError::Forged) => sound.forged(),
-                        Err(_) => {}
+                    match (self.audio_srtp.unprotect(data), sound.as_mut()) {
+                        (Ok(header), sound) => {
+                            *self.heard.lock().unwrap() = Some(std::time::Instant::now());
+                            if let Some(sound) = sound
+                                && let Err(e) = sound.push(&header, &data[header.payload.0..header.payload.1])
+                            {
+                                break e;
+                            }
+                        }
+                        (Err(SrtpError::Forged), Some(sound)) => sound.forged(),
+                        (Err(_), _) => {}
                     }
                 }
                 received = self.video.recv(&mut datagram) => {
@@ -1638,7 +1699,7 @@ impl Receiver {
     }
 }
 
-/// Leave `error` as why the stream stopped, unless an earlier reason is there: the
+/// Leave `error` as why the stream stopped, unless an earlier reason is there: a
 /// decoder thread's own, which the receive task's is only the consequence of.
 #[cfg(feature = "apple-hp-media")]
 fn fail(failed: &Failure, error: anyhow::Error) {
@@ -1693,7 +1754,8 @@ fn spawn_decoder(
 /// ends when this is dropped — which aborting the receive task does — and `stale`
 /// makes it stop at once rather than after draining its queue into a bridge the
 /// next stream may already be filling. Dropping this also withdraws the format the
-/// thread announced, since no more sound will follow it.
+/// thread announced, since no more sound will follow it. A decoder that cannot be
+/// opened leaves why in `failed`, and the next unit ends the stream.
 #[cfg(feature = "apple-hp-media")]
 struct Sound {
     units: std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -1706,7 +1768,7 @@ struct Sound {
 
 #[cfg(feature = "apple-hp-media")]
 impl Sound {
-    fn start(bridge: std::sync::Arc<crate::audio::AudioBridge>) -> Self {
+    fn start(bridge: std::sync::Arc<crate::audio::AudioBridge>, failed: Failure) -> Self {
         use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
 
         let (units, inbox) = std::sync::mpsc::sync_channel::<Vec<u8>>(SOUND_QUEUE);
@@ -1715,10 +1777,7 @@ impl Sound {
         std::thread::spawn(move || {
             let mut decoder = match EldDecoder::new() {
                 Ok(decoder) => decoder,
-                Err(e) => {
-                    log::warn!("vnc: no AAC-ELD decoder, so no sound from the Mac: {e:#}");
-                    return;
-                }
+                Err(e) => return fail(&failed, e.context("no AAC-ELD decoder")),
             };
             // Announced only once a decoder exists: an encoder built for a stream
             // that never produces anything would wait on it for the session.
@@ -1765,8 +1824,8 @@ impl Sound {
     }
 
     /// One authenticated, decrypted RTP packet of the sound leg: one AAC-ELD
-    /// access unit, 10 ms of 48 kHz stereo.
-    fn push(&mut self, header: &RtpHeader, unit: &[u8]) {
+    /// access unit, 10 ms of 48 kHz stereo. An error is a decoder that has stopped.
+    fn push(&mut self, header: &RtpHeader, unit: &[u8]) -> anyhow::Result<()> {
         self.packets += 1;
         if self.packets == 1 {
             log::info!(
@@ -1784,9 +1843,11 @@ impl Sound {
                     log::warn!("vnc: the AAC-ELD decoder is {SOUND_QUEUE} units behind; dropping one");
                 }
             }
-            // The decoder never opened, which it said: drain the leg quietly.
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("the AAC-ELD decoder stopped")
+            }
         }
+        Ok(())
     }
 
     fn forged(&mut self) {
@@ -2238,18 +2299,20 @@ mod tests {
         assert!(m.offer((1600, 1000)).is_some());
     }
 
-    /// An offer owes its display's first picture within [`FIRST_PICTURE`], and the
-    /// running stream a picture every [`STREAM_SILENCE`]; past either the session
-    /// ends. A picture of another display, the old one's last, pays neither, and a
-    /// display change owes nothing until its own offer.
+    /// An offer owes its display's first picture and the first sound within
+    /// [`STREAM_START`], and the running stream both every [`STREAM_SILENCE`]; past
+    /// any of them the session ends. A picture of another display, the old one's
+    /// last, pays nothing, nor does sound from before the offer, and a display
+    /// change owes nothing until its own offer.
     #[test]
-    fn a_stream_without_pictures_is_overdue_but_not_across_a_display_change() {
+    fn a_stream_without_pictures_or_sound_is_overdue_but_not_across_a_display_change() {
         let mut m = media();
         assert_eq!(m.deadline(), None, "nothing is owed before an offer");
+        *m.heard.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         let offered = std::time::Instant::now();
         m.offer((1600, 1000)).unwrap();
-        let first = m.deadline().expect("an offer owes a picture");
-        assert!(first >= offered + FIRST_PICTURE);
+        let first = m.deadline().expect("an offer owes a picture and sound");
+        assert!(first >= offered + STREAM_START);
         assert!(m.overdue(first - std::time::Duration::from_millis(1)).is_none());
         let unanswered = m.overdue(first).expect("overdue at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
@@ -2261,18 +2324,53 @@ mod tests {
         m.pictured((1280, 800));
         assert_eq!(m.deadline(), Some(first), "another display's picture settles nothing");
 
-        let pictured = std::time::Instant::now();
         m.pictured((1600, 1000));
-        let next = m.deadline().expect("a running stream owes the next picture");
+        let Owed::Stream { pictured: Some(pictured), .. } = m.owed else {
+            panic!("the picture was not noted: {:?}", m.owed)
+        };
+        assert_eq!(m.deadline(), Some(first), "the first sound is still owed, none since the offer");
+        assert!(m.overdue(first).is_some(), "and overdue without it");
+
+        *m.heard.lock().unwrap() = Some(pictured);
+        let next = m.deadline().expect("a running stream owes the next picture and sound");
         assert!(next >= pictured + STREAM_SILENCE);
-        assert!(m.overdue(first).is_none(), "the first picture settled the offer");
+        assert!(m.overdue(first).is_none(), "the first picture and sound settled the offer");
         let silent = m.overdue(next).expect("overdue after the silence");
         assert!(silent.to_string().contains("sent no picture for 48s"), "{silent}");
+
+        let later = pictured + std::time::Duration::from_secs(1);
+        if let Owed::Stream { pictured, .. } = &mut m.owed {
+            *pictured = Some(later);
+        }
+        let quiet = m.overdue(next).expect("pictures without sound are overdue too");
+        assert!(quiet.to_string().contains("sent no sound for 48s"), "{quiet}");
 
         m.stopped();
         assert_eq!(m.deadline(), None, "a display change owes nothing");
         assert!(m.overdue(next + STREAM_SILENCE).is_none());
         m.offer((1280, 800)).unwrap();
         assert!(m.deadline().is_some(), "until its own offer");
+    }
+
+    /// A display change while an offer is out still owes that offer's answer by
+    /// [`STREAM_START`], and the offer goes on holding back the next display's
+    /// until it comes.
+    #[test]
+    fn an_offer_out_across_a_display_change_still_owes_its_answer() {
+        let mut m = media();
+        m.offer((1600, 1000)).unwrap();
+        let first = m.deadline().unwrap();
+        m.stopped();
+        m.stopped();
+        assert!(m.pending());
+        assert!(m.offer((1280, 800)).is_none(), "not while the first is out");
+        assert_eq!(m.deadline(), Some(first), "the answer is still owed");
+        assert!(m.overdue(first - std::time::Duration::from_millis(1)).is_none());
+        let unanswered = m.overdue(first).expect("unanswered at the deadline");
+        assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
+
+        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert_eq!(m.deadline(), None, "answered, for a display that has gone");
+        assert!(m.offer((1280, 800)).is_some(), "the new display's offer goes out");
     }
 }
