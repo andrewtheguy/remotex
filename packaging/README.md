@@ -123,13 +123,19 @@ built archives.
 
 The non-default `apple-hp-media` feature, which `ard-high-performance` targets
 need, adds two decoders and is in no release artifact because of their
-licences. `libde265-prebuilt` (the HEVC picture) downloads a static archive the
-same way, selected locally with `LIBDE265_PREBUILT_DIR`; libde265 is
-LGPL-3.0-or-later and linked statically, which obliges a distributor of a
-binary to let its recipient relink it against a modified libde265 (see that
-repository's README). `fdk-aac-rust` (the AAC-ELD sound) is pure Rust and needs
-nothing prebuilt, but carries the Fraunhofer FDK AAC licence, which is not
-OSI-approved and grants no patents. Build it with
+licences. `libavcodec-hevc-prebuilt` (the HEVC picture) links static archives of
+FFmpeg's libavcodec and libavutil, configured down to the HEVC decoder and
+parser. Its archives are private: its build script downloads the latest release
+of `andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, so a build
+needs `gh` logged in to an account that can read it, or
+`LIBAVCODEC_HEVC_PREBUILT_DIR` pointing at archives built locally.
+`publish-full-image.sh` refuses that override and checks that the image linked
+the current release's archive. This FFmpeg is LGPL-2.1-or-later and linked
+statically, which obliges a distributor of a binary to let its recipient
+relink it against a modified FFmpeg (see that repository's README).
+`fdk-aac-rust` (the AAC-ELD sound) is pure Rust and needs nothing prebuilt, but
+carries the Fraunhofer FDK AAC licence, which is not OSI-approved and grants no
+patents. Build it with
 `cargo build --release --features apple-hp-media`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
