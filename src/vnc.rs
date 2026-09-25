@@ -7,15 +7,14 @@
 //! request switches the rectangles from raw to zlib.
 //!
 //! **RFB 003.889**, Apple's own revision, under `subtype =
-//! "ard-virtual-display"` and `"ard-high-performance"`: the same RFB messages
-//! carried inside an AES-128-CBC record layer ([`crate::vnc_record`]), alongside
-//! Apple's control messages ([`crate::vnc_apple`]). Both request one virtual
-//! display at the target's pinned `width` and `height`, or at the connecting
-//! client's screen resolution when no size is pinned. Its pasteboard is a
-//! separate Apple protocol rather than RFB Extended Clipboard. The two differ in
-//! the picture and sound alone: `ard-virtual-display` keeps the zlib rectangles,
-//! and `ard-high-performance` takes both from the Mac's media stream
-//! ([`crate::vnc_apple_media`]). See docs/apple-vnc-889.md.
+//! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
+//! record layer ([`crate::vnc_record`]), alongside Apple's control messages
+//! ([`crate::vnc_apple`]). It requests one virtual display at the target's pinned
+//! `width` and `height`, or at the connecting client's screen resolution when no
+//! size is pinned. Its pasteboard is a separate Apple protocol rather than RFB
+//! Extended Clipboard. The picture and sound come from the Mac's media stream
+//! ([`crate::vnc_apple_media`]), and zlib rectangles carry the picture until it is
+//! up. See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
 //! `Dialect` (which banner and ClientInit byte), the two preface functions after
@@ -210,7 +209,7 @@ enum Dialect {
 impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
-            Some(Subtype::ArdVirtualDisplay | Subtype::ArdHighPerformance) => Dialect::Apple889,
+            Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
             Some(Subtype::Ard) | None => Dialect::Rfb38,
         }
     }
@@ -545,8 +544,6 @@ struct DesktopState {
     /// what the *remote* granted; the two disagree exactly while a density change
     /// is in flight.
     host_density: f32,
-    /// The refresh rate a High Performance resize asks for — see [`display_hz`].
-    display_hz: u8,
     /// First screen of the server's layout. `Some` only once the server has
     /// sent an ExtendedDesktopSize rect — its declaration that SetDesktopSize
     /// is supported; nothing is requested before that.
@@ -954,7 +951,7 @@ impl DesktopState {
             want.0, want.1, self.host_density,
         );
         let mode = vnc_apple::virtual_display_mode(want, self.host_density);
-        Some(vnc_apple::set_display_configuration(mode, self.display_hz))
+        Some(vnc_apple::set_display_configuration(mode))
     }
 
     /// The region a pixel request asks for: the desktop, or while a High
@@ -1647,9 +1644,8 @@ struct Connected {
     /// request so it cannot be buried behind another framebuffer response.
     poll: bool,
     /// High Performance's media stream, which the picture comes from once it is
-    /// up ([`vnc_apple_media`]), and the pictures it decodes: `ard-high-performance`
-    /// alone. `None` on every other subtype, `ard-virtual-display` included, which
-    /// speaks the same RFB but keeps its picture on zlib.
+    /// up ([`vnc_apple_media`]), and the pictures it decodes: every RFB 003.889
+    /// session has one, and every RFB 3.8 session `None`.
     media: Option<(MediaStream, Pictures)>,
 }
 
@@ -2022,12 +2018,6 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, 
     encodings
 }
 
-/// The refresh rate a virtual-display session asks the Mac for: the media
-/// stream's slower one where the picture comes from it.
-fn display_hz(media_stream: bool) -> u8 {
-    if media_stream { vnc_apple_media::DISPLAY_HZ } else { vnc_apple::DISPLAY_HZ }
-}
-
 /// The virtual display a High Performance session opens with.
 ///
 /// The points come from [`TargetConfig::opening_size`] — the pinned config
@@ -2097,7 +2087,7 @@ async fn apple_preface(
     // viewport reports and screen changes; its dynamic-resolution flag is set here
     // regardless, so every fresh session restores the Mac's checkbox to on.
     uplink
-        .send(&vnc_apple::set_display_configuration(opening_mode(config, display), display_hz(config.media_stream())))
+        .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
         .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
@@ -2115,7 +2105,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: config.media_stream().then(|| MediaStream::new(peer, local)),
+        media: Some(MediaStream::new(peer, local)),
     })
 }
 
@@ -2227,7 +2217,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         size,
         scale: UNSCALED,
         host_density,
-        display_hz: display_hz(media.is_some()),
         screen: None,
         // A pinned size is seeded as a held request: nothing can be asked for
         // before the server declares SetDesktopSize support, and the hold is
@@ -5895,12 +5884,12 @@ mod tests {
         // above it differs, the security type does not — and names itself when the
         // server cannot answer.
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::ArdVirtualDisplay), "pw", "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "pw", "").unwrap(),
             SECURITY_ARD
         );
-        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdVirtualDisplay), "pw", "")
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "pw", "")
             .unwrap_err();
-        assert!(format!("{err:#}").contains("\"ard-virtual-display\""), "{err:#}");
+        assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
     }
 
     #[test]
@@ -5908,7 +5897,7 @@ mod tests {
         assert_eq!(Dialect::of(None), Dialect::Rfb38);
         assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
         assert_eq!(
-            Dialect::of(Some(Subtype::ArdVirtualDisplay)),
+            Dialect::of(Some(Subtype::ArdHighPerformance)),
             Dialect::Apple889
         );
         // The two bytes that are the whole visible difference on the wire.
@@ -7525,7 +7514,6 @@ mod tests {
             size,
             scale: UNSCALED,
             host_density: 1.0,
-            display_hz: vnc_apple::DISPLAY_HZ,
             screen,
             pending,
             viewport: None,
@@ -7910,7 +7898,7 @@ mod tests {
 
     /// The configuration asked for `points` at `density`.
     fn hp_config(points: (u16, u16), density: f32) -> Vec<u8> {
-        vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(points, density), vnc_apple::DISPLAY_HZ)
+        vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(points, density))
     }
 
     #[tokio::test(start_paused = true)]
@@ -7937,7 +7925,7 @@ mod tests {
     fn a_session_opens_at_the_pinned_size_or_the_clients_own_screen() {
         let target = |size: &str| -> TargetConfig {
             toml::from_str(&format!(
-                "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-virtual-display\"\n\
+                "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
                  host = \"h\"\n{size}"
             ))
             .unwrap()

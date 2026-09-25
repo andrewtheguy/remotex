@@ -354,10 +354,12 @@ async fn serve_scrolling_vnc(
 
 // ── Apple Screen Sharing (RFB 003.889), scripted ────────────────────────────
 //
-// The `ard-virtual-display` subtype's whole wire, played from the server side:
+// The `ard-high-performance` subtype's RFB wire, played from the server side:
 // Apple's version banner, its DH authentication, the `0x81` ClientInit, the
 // cleartext prelude, the rekey that switches on the record layer, and then a
-// display layout and a framebuffer update *inside* that record layer.
+// display layout and a framebuffer update *inside* that record layer. The fake
+// refuses the media stream the gateway offers, which keeps the picture on zlib:
+// the stream's own packets are UDP, and `src/vnc_apple_media.rs` tests them.
 //
 // This is the only automated test that can reach any of it. There is no
 // containerisable Apple server — `tests/vnc-dummy` is Xtigervnc and speaks none of
@@ -578,7 +580,7 @@ fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16) {
         u32::from(points.1) * u32::from(density),
         "pixel height states the same density as the width"
     );
-    assert_eq!(&body[mode + 16..mode + 24], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(&body[mode + 16..mode + 24], &30.0f64.to_be_bytes(), "30 Hz");
     assert_eq!(be32(mode + 24), 0, "mode flags");
     (points, density)
 }
@@ -651,10 +653,15 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
 /// never mistaken for one repeat. Capped to a corner of the desktop: a dirty rect
 /// need not cover it, and the raw pixels of the 3840×2160 opening display a
 /// resizable session now asks for would not fit one record.
-fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
+///
+/// With `refuse`, a second rect refuses the media-stream offer the gateway made:
+/// encoding 1010, then error message 3 of type 2 — what a Mac sends for an offer it
+/// cannot build a configuration from. It rides an update the fake sends anyway, so
+/// the refusal adds no update, and no poll, to the order the tests assert.
+fn fake_mac_update(shade: u8, (w, h): (u16, u16), refuse: bool) -> Vec<u8> {
     let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
-    update.extend_from_slice(&1u16.to_be_bytes()); // one rect
+    update.extend_from_slice(&(1 + u16::from(refuse)).to_be_bytes());
     update.extend_from_slice(&0u16.to_be_bytes()); // x
     update.extend_from_slice(&0u16.to_be_bytes()); // y
     update.extend_from_slice(&w.to_be_bytes());
@@ -664,6 +671,16 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
         shade;
         usize::from(w) * usize::from(h) * 4
     ]);
+    if refuse {
+        update.extend_from_slice(&[0u8; 8]); // x, y, w, h
+        update.extend_from_slice(&1010i32.to_be_bytes());
+        update.extend_from_slice(&16u16.to_be_bytes());
+        update.extend_from_slice(&3u16.to_be_bytes()); // an error
+        update.extend_from_slice(&3u16.to_be_bytes()); // version
+        update.extend_from_slice(&0u32.to_be_bytes()); // flags
+        update.extend_from_slice(&2u32.to_be_bytes()); // type
+        update.extend_from_slice(&0u32.to_be_bytes()); // sub-code
+    }
     update
 }
 
@@ -821,6 +838,7 @@ async fn serve_fake_mac_records(
     let mut sent_layout = false;
     let mut sent_clipboard_status = false;
     let mut clipboard_fetch_pending = false;
+    let mut offer_pending = false;
 
     loop {
         let mut kind = [0u8; 1];
@@ -888,8 +906,9 @@ async fn serve_fake_mac_records(
                 }
                 shade = shade.wrapping_add(0x10);
                 let pixels = (points.0 * density, points.1 * density);
+                let refuse = std::mem::take(&mut offer_pending);
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels, refuse)).unwrap())
                     .await?;
             }
             // KeyEvent
@@ -983,6 +1002,18 @@ async fn serve_fake_mac_records(
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
             }
+            // RFBMediaStreamServerConfiguration: the media-stream offer, refused in
+            // the next update. One offer at a time, as the Mac requires.
+            0x1c => {
+                let mut head = [0u8; 3];
+                records.read_exact(&mut head).await?;
+                let size = usize::from(u16::from_be_bytes([head[1], head[2]]));
+                let mut body = vec![0u8; size];
+                records.read_exact(&mut body).await?;
+                assert_eq!(&body[..2], &3u16.to_be_bytes(), "media-stream configuration version");
+                assert!(!offer_pending, "a second media-stream offer while one was out");
+                offer_pending = true;
+            }
             // ClipboardSend: independently inflate and parse what the browser put
             // on the fake Mac's pasteboard.
             0x1f => {
@@ -1073,10 +1104,12 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
 }
 
 /// A target for the fake Mac: the high-performance subtype, with the account the
-/// fake Mac checks the credentials against.
+/// fake Mac checks the credentials against. Built rather than parsed, so a build
+/// without the `apple-hp-media` decoders drives it too: the fake refuses the
+/// stream, and nothing needs decoding.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdVirtualDisplay),
+        subtype: Some(remotex::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
         // Unpinned: the virtual display opens at the screen the connect names.
@@ -1770,7 +1803,7 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
     expect_control(ws, "resize").await
 }
 
-/// The whole `ard-virtual-display` wire, end to end: authentication, record setup,
+/// The whole `ard-high-performance` RFB wire, end to end: authentication, record setup,
 /// initial and dynamic virtual-display configurations, pixels, and native Apple
 /// pasteboard messages in both directions.
 #[tokio::test]

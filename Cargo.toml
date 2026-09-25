@@ -177,7 +177,7 @@ md-5 = "0.11"
 aes = "0.9"
 rand = "0.10"
 # Integrity trailer on Apple's record layer (src/vnc_record.rs), which the
-# `ard-virtual-display` and `ard-high-performance` subtypes speak: plain SHA-1 over the record's sequence
+# `ard-high-performance` subtype speaks: plain SHA-1 over the record's sequence
 # number and plaintext, not HMAC. The VNC path's own. CBC is *not* a dependency: the `cbc` crate in the tree
 # is on `cipher` 0.4 while `aes` above is on 0.5, and chaining eight lines by hand
 # keeps "one context per direction, never reset" a visible field rather than a
