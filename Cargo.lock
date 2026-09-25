@@ -1662,15 +1662,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "libavcodec-hevc-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260925183729-7b0476b#7b0476b5622ed770d0db7e3f9880422a48909dd6"
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-
-[[package]]
-name = "libde265-prebuilt-sys"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libde265-prebuilt?tag=v1.1.3-20260925063936-02ceb6b#02ceb6ba79cf6be1555fe48a172b649c1d72f69b"
 
 [[package]]
 name = "libopus-prebuilt-sys"
@@ -2437,8 +2437,8 @@ dependencies = [
  "futures-util",
  "gethostname",
  "hmac",
+ "libavcodec-hevc-prebuilt-sys",
  "libc",
- "libde265-prebuilt-sys",
  "libvpx-prebuilt-sys",
  "log",
  "md-5 0.11.0",

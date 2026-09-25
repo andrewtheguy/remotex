@@ -442,7 +442,7 @@ password = "change-me"
 # sound, takes no `audio` key, and never uses the AirPlay speaker.
 #
 # EXPERIMENTAL, and only in a gateway built with `--features apple-hp-media`, which
-# links the two decoders — libde265 (LGPL) and Fraunhofer's AAC-ELD decoder, whose
+# links the two decoders — FFmpeg's HEVC decoder (LGPL) and Fraunhofer's AAC-ELD decoder, whose
 # licence is not OSI-approved — and is therefore in no release artifact. Any other
 # build refuses the subtype. See docs/apple-vnc-889.md, "The media stream".
 # [[targets]]

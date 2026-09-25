@@ -1118,7 +1118,7 @@ resize mode or one-shot button. On `ard-virtual-display` the picture is zlib
 rectangles over the 003.889 record transport throughout. On
 `ard-high-performance` the Mac supplies that virtual display the way it does to
 Apple's viewer: as HEVC over its media stream, offered once the display has
-settled and decoded in the gateway by libde265 (`src/vnc_apple_media.rs`), in a
+settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
 gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
 picture until the stream delivers, across every display change, and
 when the Mac refuses the stream or the receiver stops; while it runs, polling holds to one pixel, which
