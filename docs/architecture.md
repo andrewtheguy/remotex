@@ -23,8 +23,10 @@ RDP and VNC frames are decoded in the gateway and sent as one VP9 stream of the
 whole desktop, at the quality and chroma the target's render plan resolves to. A
 Mac is reached
 with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8 with
-Apple Remote Desktop authentication, or with the
-`ard-high-performance` RFB 003.889 path. Remote audio is either encoded as
+Apple Remote Desktop authentication, or over its High Performance RFB 003.889
+with `ard-virtual-display` (Standard mode's zlib picture on a virtual display)
+or `ard-high-performance` (that display's picture and sound over the Mac's media
+stream, as Apple's viewer takes them). Remote audio is either encoded as
 Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -52,6 +54,8 @@ see [Camera frames](#camera-frames).
 | `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
+| `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding, and the sound's receiver |
+| `aac_eld.rs` | the AAC-ELD decoder for that stream's sound |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | libvpx — the video codec |
@@ -438,12 +442,12 @@ audio format, and errors. The `connected` message includes `resize`,
 controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial, and `subtype`, the target's `ard` or
-`ard-high-performance` where it has one. The
-last is there because `protocol` is not an answer on VNC — a plain server, a Mac
-in Standard mode and a Mac in High Performance mode all say `vnc`, and they
-differ in whether resize is offered and whether the path beneath is the
-reverse-engineered one (a display list is no longer the difference: wlshare sends
+`render`, the resolved render dial, and `subtype`, the target's `ard`,
+`ard-virtual-display` or `ard-high-performance` where it has one. The
+last is there because `protocol` is not an answer on VNC — a plain server and a
+Mac on any of the three all say `vnc`, and they differ in whether resize is
+offered, where the picture and sound come from, and whether the path beneath is
+the reverse-engineered one (a display list is no longer the difference: wlshare sends
 one over a plain `vnc` target). Both appear on the client's session card, which
 `frontend/src/connectionLabel.ts` words, beside the video decoder's configuration
 (`mediaLabel.ts`).
@@ -642,11 +646,19 @@ not take surfaces as a decoder error naming it rather than as silence. A
 `pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
 `AudioBuffer` and schedules it directly.
 
-An audio-enabled **Apple** engine receives no sound from its Screen Sharing
-connection. High Performance has a measured private AAC-ELD-over-SRTP media
-stream, but this engine deliberately does not negotiate it; Standard has no
-measured equivalent path. The session attaches the engine's bridge to the
-gateway's AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1
+An **`ard-high-performance`** engine always carries sound, from the Mac's media
+stream: AAC-ELD at 48 kHz stereo over SRTP, authenticated and decrypted per
+packet, decoded by Fraunhofer's decoder on a thread of its own (`src/aac_eld.rs`)
+and handed to the bridge as 16-bit PCM, 20 ms at a time. The format is announced
+when the decoder opens and withdrawn when the receiver ends. The target takes no
+`audio` key: the Mac refuses the picture without the sound, and mutes its own
+output while it streams. See
+[The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
+
+An audio-enabled **`ard` or `ard-virtual-display`** engine receives no sound
+from its Screen Sharing connection: Standard has no measured audio path, and
+`ard-virtual-display` does not negotiate the media stream. The session attaches
+the engine's bridge to the gateway's AirPlay speaker instead (`src/airplay/`), a gateway-wide AirPlay 1
 receiver that the Mac picks from its Sound menu once and keeps. What reaches the
 bridge is the Apple Lossless the Mac streams, decoded to 44.1 kHz 16-bit stereo
 in 24 ms wave buffers, from whichever Mac is playing to the speaker while that
@@ -1075,7 +1087,7 @@ pointer positions back through the same regions (`frontend/src/mosaic.ts`). It i
 the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 
-**RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
+**RFB 003.889** (`subtype = "ard-virtual-display"` and `"ard-high-performance"`) is Apple's own protocol
 revision: none of it is documented by Apple, so every
 claim in this section is measurement or a reading of Apple's binaries rather than
 specification, holding for the Macs in [apple-vnc-889.md](apple-vnc-889.md) rather
@@ -1102,9 +1114,16 @@ every fresh session. With `resize = true`, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
 display layout sets the actual framebuffer geometry. There is no client-side
-resize mode or one-shot button. The Mac supplies that virtual display over the
-003.889 record transport, with zlib rectangles instead of raw pixels. Apple's
-virtual-display-count and resolution-preset controls remain unimplemented.
+resize mode or one-shot button. On `ard-virtual-display` the picture is zlib
+rectangles over the 003.889 record transport throughout. On
+`ard-high-performance` the Mac supplies that virtual display the way it does to
+Apple's viewer: as HEVC over its media stream, offered once the display has
+settled and decoded in the gateway by libde265 (`src/vnc_apple_media.rs`), in a
+gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
+picture until the stream delivers, across every display change, and
+when the Mac refuses the stream or the receiver stops; while it runs, polling holds to one pixel, which
+still brings cursor shapes and layouts. Apple's virtual-display-count and
+resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: `SetEncodings` must list both
 `DisplayInfo` (`0x44d`) and the layout (`0x451`), in any order, or the Mac reports
@@ -1112,15 +1131,13 @@ no layout; and a layout's `u16` length counts the bytes after itself, with a `u1
 display count ahead of the records. The byte layouts and protocol corrections are
 in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
-Deliberately absent: Apple's own still-image codecs and the Adaptive media
-transport (`0x1c`, HEVC video and AAC-ELD audio over SRTP); the zlib rectangles
-are the only picture path. High Performance's native system-audio path is
-measured but not implemented, and a Mac's sound arrives over AirPlay instead
-([A Mac's sound over AirPlay](airplay-audio.md)). The
+Deliberately absent: Apple's own still-image codecs. The media stream's sound
+leg comes with its picture on `ard-high-performance`; the other two subtypes'
+sound arrives over AirPlay ([A Mac's sound over AirPlay](airplay-audio.md)). The
 transport's measurements are in
-[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio).
-The native Apple pasteboard works on both
-subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
+[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
+The native Apple pasteboard works on every
+subtype; 003.889 enables monitoring before the rekey and carries the fetch and
 data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 
 ## Clients

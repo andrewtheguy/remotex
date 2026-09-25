@@ -37,7 +37,7 @@ pub enum Protocol {
 /// Generic by design — a protocol with more than one flavour of server names
 /// which one it is talking to here, rather than each protocol growing a key of
 /// its own. Which subtypes a protocol accepts is [`ConfigFile::parse`]'s
-/// business; both current subtypes are `vnc`'s, and both describe the same Mac.
+/// business; all three current subtypes are `vnc`'s, and all describe the same Mac.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Subtype {
@@ -52,9 +52,12 @@ pub enum Subtype {
     /// one or their combined desktop, and supplies each display's pixel density.
     /// Apple's native pasteboard is available, and the rectangles are zlib.
     Ard,
-    /// The same Mac over Apple's own protocol revision, RFB 003.889: an
-    /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
-    /// control messages (see [`crate::vnc_apple`]).
+    /// The same Mac over High Performance Screen Sharing's protocol revision, RFB
+    /// 003.889 — an AES-128-CBC record layer (see [`crate::vnc_record`]) carrying
+    /// Apple's control messages (see [`crate::vnc_apple`]) — with Standard mode's
+    /// picture: zlib rectangles of a virtual display. Its sound uses the AirPlay
+    /// workaround. [`Subtype::ArdHighPerformance`] is the same session with the
+    /// picture and sound Apple's viewer takes.
     ///
     /// Alone among the subtypes, none of this is documented by
     /// Apple: the revision, its record layer, its control messages and its virtual
@@ -73,6 +76,18 @@ pub enum Subtype {
     /// transport when `clipboard` is enabled. With `resize`, viewport reports
     /// replace the virtual display's one advertised mode and the Mac answers with
     /// its new layout. See docs/apple-vnc-889.md.
+    ArdVirtualDisplay,
+    /// High Performance as Apple's viewer has it: everything
+    /// [`Subtype::ArdVirtualDisplay`] is, but the picture comes as HEVC and the
+    /// sound as AAC-ELD over the media stream Screen Sharing negotiates on the RFB
+    /// connection and sends over UDP with SRTP ([`crate::vnc_apple_media`]). Zlib
+    /// carries the picture only until the stream does.
+    ///
+    /// The picture and the sound go together — the Mac refuses one without the
+    /// other, and mutes its own output while the sound leg runs — so the target
+    /// always carries sound, takes no `audio` key and never uses AirPlay. Only a
+    /// build with the `apple-hp-media` feature has the two decoders; any other
+    /// refuses the subtype.
     ArdHighPerformance,
 }
 
@@ -81,7 +96,25 @@ impl Subtype {
     pub fn name(self) -> &'static str {
         match self {
             Subtype::Ard => "ard",
+            Subtype::ArdVirtualDisplay => "ard-virtual-display",
             Subtype::ArdHighPerformance => "ard-high-performance",
+        }
+    }
+
+    /// Whether this subtype speaks High Performance's RFB 003.889 and opens a
+    /// virtual display — every Apple subtype but Standard's.
+    pub fn virtual_display(self) -> bool {
+        match self {
+            Subtype::Ard => false,
+            Subtype::ArdVirtualDisplay | Subtype::ArdHighPerformance => true,
+        }
+    }
+
+    /// Whether the picture and sound come over the media stream.
+    pub fn media_stream(self) -> bool {
+        match self {
+            Subtype::Ard | Subtype::ArdVirtualDisplay => false,
+            Subtype::ArdHighPerformance => true,
         }
     }
 
@@ -90,7 +123,7 @@ impl Subtype {
     /// does. What makes the credentials a macOS account's.
     pub fn apple_authentication(self) -> bool {
         match self {
-            Subtype::Ard | Subtype::ArdHighPerformance => true,
+            Subtype::Ard | Subtype::ArdVirtualDisplay | Subtype::ArdHighPerformance => true,
         }
     }
 }
@@ -446,8 +479,8 @@ pub struct TargetConfig {
     /// density entirely. An RDP resize is the graphics pipeline's, so the key is
     /// refused beside `egfx = false`.
     ///
-    /// On `ard-high-performance` the setup descriptor always enables the Mac's
-    /// dynamic geometry; this flag decides only whether the window keeps
+    /// On `ard-virtual-display` and `ard-high-performance` the setup descriptor
+    /// always enables the Mac's dynamic geometry; this flag decides only whether the window keeps
     /// driving it after the open. Standard `ard` refuses the option because it
     /// exposes physical displays.
     #[serde(default)]
@@ -478,18 +511,20 @@ pub struct TargetConfig {
     #[serde(default)]
     pub clipboard: bool,
     /// The `audio` key as written, which [`ConfigFile::parse`] resolves into
-    /// [`Self::audio`]. Refused on either Apple subtype, whose external AirPlay
-    /// workaround the gateway-wide `[airplay]` table decides.
+    /// [`Self::audio`]. Refused on every Apple subtype: the gateway-wide
+    /// `[airplay]` table decides a Mac's sound, and `ard-high-performance` always
+    /// carries its media stream's.
     #[serde(default, rename = "audio")]
     pub audio_key: Option<bool>,
     /// Carry the remote's sound. Packets are sent only while the attached client
     /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
     /// asks a generic server for wlshare's audio extension, FLAC on the RFB
     /// connection, and is answered by wlshare — see [`crate::vnc_audio`]. Both
-    /// opt in with `audio = true`. For either Apple subtype this flag instead
-    /// enables the bridge exactly when the gateway-wide `[airplay]` table is set:
-    /// the Mac sends its sound separately to the gateway's AirPlay speaker — see
-    /// [`crate::airplay`].
+    /// opt in with `audio = true`. For `ard` and `ard-virtual-display` this flag
+    /// instead enables the bridge exactly when the gateway-wide `[airplay]` table
+    /// is set: the Mac sends its sound separately to the gateway's AirPlay speaker
+    /// — see [`crate::airplay`]. An `ard-high-performance` target always carries
+    /// sound, its media stream's ([`crate::vnc_apple_media`]).
     #[serde(skip)]
     pub audio: bool,
     /// Which codec [`Self::audio`] encodes with; `None` reads as
@@ -761,7 +796,8 @@ impl TargetConfig {
     /// The one PCM format this target's wave buffers can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
     /// ([`crate::audio::PCM_CD_QUALITY`]), what AirPlay carries from a Mac (the
-    /// same), or what a generic VNC server
+    /// same), what a Mac's media stream decodes to
+    /// ([`crate::vnc_apple_media::AUDIO_FORMAT`]), or what a generic VNC server
     /// is asked to send over wlshare's audio extension
     /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
@@ -772,18 +808,25 @@ impl TargetConfig {
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
+            Protocol::Vnc if self.media_stream() => crate::vnc_apple_media::AUDIO_FORMAT,
             Protocol::Vnc if self.receives_airplay() => crate::audio::PCM_CD_QUALITY,
             Protocol::Vnc => crate::vnc_audio::SOURCE_FORMAT,
         }
     }
 
     /// Whether this target's sound, when it has any, arrives at the gateway's AirPlay
-    /// speaker rather than over its own connection: either Apple subtype.
+    /// speaker rather than over its own connection: `ard` and `ard-virtual-display`.
     pub fn receives_airplay(&self) -> bool {
         match (self.protocol, self.subtype) {
-            (Protocol::Vnc, Some(Subtype::Ard | Subtype::ArdHighPerformance)) => true,
-            (Protocol::Vnc, None) | (Protocol::Rdp, _) => false,
+            (Protocol::Vnc, Some(Subtype::Ard | Subtype::ArdVirtualDisplay)) => true,
+            (Protocol::Vnc, Some(Subtype::ArdHighPerformance) | None) | (Protocol::Rdp, _) => false,
         }
+    }
+
+    /// Whether this target's picture and sound come over the Mac's media stream:
+    /// `ard-high-performance` ([`crate::vnc_apple_media`]).
+    pub fn media_stream(&self) -> bool {
+        self.protocol == Protocol::Vnc && self.subtype.is_some_and(Subtype::media_stream)
     }
 }
 
@@ -1209,18 +1252,29 @@ impl ConfigFile {
             if target.port == 0 {
                 target.port = target.protocol.default_port();
             }
-            // A Mac's sound uses the gateway's external AirPlay workaround, which
-            // is not the target's to turn on or off: the `[airplay]` table is, for
-            // every Mac.
+            // The media stream's decoders are the `apple-hp-media` feature's.
             anyhow::ensure!(
-                !(target.receives_airplay() && target.audio_key.is_some()),
-                "target {:?} sets audio on an {} target, whose sound uses the gateway's \
-                 AirPlay workaround — the [airplay] table enables that for every Mac. \
+                !target.media_stream() || cfg!(feature = "apple-hp-media"),
+                "target {:?} is subtype \"ard-high-performance\", and this remotex was built \
+                 without the apple-hp-media feature, which has its decoders. Build with \
+                 `--features apple-hp-media`, or use subtype \"ard-virtual-display\".",
+                target.name
+            );
+            // A Mac's sound is not the target's to turn on or off: the `[airplay]`
+            // table decides the AirPlay workaround for every Mac, and High
+            // Performance's media stream always carries its own.
+            anyhow::ensure!(
+                !((target.receives_airplay() || target.media_stream()) && target.audio_key.is_some()),
+                "target {:?} sets audio on an {} target, whose sound is not the target's to \
+                 switch: the [airplay] table enables the gateway's AirPlay workaround for \
+                 every Mac, and ard-high-performance always carries the Mac's sound itself. \
                  Remove the key.",
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
             );
-            target.audio = if target.receives_airplay() {
+            target.audio = if target.media_stream() {
+                true
+            } else if target.receives_airplay() {
                 airplay
             } else {
                 target.audio_key.unwrap_or(false)
@@ -1262,8 +1316,8 @@ impl ConfigFile {
             );
             anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
         }
-        // Every Mac's sound arrives at the gateway's AirPlay speaker, which the
-        // `[airplay]` table turns on and which asks every sender for its password:
+        // An `ard` or `ard-virtual-display` Mac's sound arrives at the gateway's
+        // AirPlay speaker, which the `[airplay]` table turns on and which asks every sender for its password:
         // the speaker answers the whole LAN. A table with no Mac to play through it
         // is refused rather than started.
         if let Some(airplay) = &config.airplay {
@@ -1271,10 +1325,14 @@ impl ConfigFile {
                 cfg!(feature = "airplay"),
                 "[airplay] is set, and this remotex was built without the airplay feature"
             );
+            // Any Mac keeps the table, `ard-high-performance` included, though
+            // that one's sound comes over its media stream instead: a config that
+            // switches a Mac between subtypes does not have to move the table too.
             anyhow::ensure!(
-                config.targets.iter().any(TargetConfig::receives_airplay),
-                "[airplay] is set, and there is no ard or ard-high-performance target, so \
-                 nothing would play through the speaker. Remove the table, or add a Mac"
+                config.targets.iter().any(|t| t.protocol == Protocol::Vnc
+                    && t.subtype.is_some_and(Subtype::apple_authentication)),
+                "[airplay] is set, and there is no Mac target, so nothing would play \
+                 through the speaker. Remove the table, or add a Mac"
             );
             anyhow::ensure!(
                 !airplay.password.trim().is_empty(),
@@ -1361,12 +1419,12 @@ impl ConfigFile {
                  through the graphics pipeline alone. Remove one of the two keys.",
                 target.name
             );
-            // Audio is carried three ways: MS-RDPEA on RDP, wlshare's audio
-            // extension on a generic VNC target ([`crate::vnc_audio`]), and the
-            // gateway's AirPlay speaker for either Apple subtype. The current
-            // Apple engine deliberately does not negotiate High Performance's
-            // private media stream; AirPlay is its workaround ([`crate::airplay`]).
-            // The last is checked with the `[airplay]` table above.
+            // Audio is carried four ways: MS-RDPEA on RDP, wlshare's audio
+            // extension on a generic VNC target ([`crate::vnc_audio`]), High
+            // Performance's media stream on `ard-high-performance`
+            // ([`crate::vnc_apple_media`]), and the gateway's AirPlay speaker, the
+            // workaround, for `ard` and `ard-virtual-display` ([`crate::airplay`]).
+            // The last two are checked above.
             //
             // A generic VNC target is *asked* rather than assumed: the extension is
             // discovered on the connection, and a server that never announces it —
@@ -1463,7 +1521,7 @@ impl ConfigFile {
             // credential is refused where it cannot be used rather than quietly
             // ignored, which is how a password ends up authenticating nobody.
             match (target.protocol, target.subtype) {
-                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
+                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdVirtualDisplay | Subtype::ArdHighPerformance))) => {
                     let name = subtype.name();
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
@@ -2920,24 +2978,24 @@ mod tests {
     fn the_high_performance_subtype_accepts_clipboard_and_resize() {
         let hp = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!(
-                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+                "subtype = \"ard-virtual-display\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
 
         let target = &hp("width = 1600\nheight = 1000\nresize = true\nclipboard = true")
             .unwrap()
             .targets[0];
-        assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
+        assert_eq!(target.subtype, Some(Subtype::ArdVirtualDisplay));
         assert_eq!(target.pinned_size(), Some((1600, 1000)));
         assert!(target.resize);
         assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
-        assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
+        assert_eq!(target.subtype.unwrap().name(), "ard-virtual-display");
 
         // The credential rules are the ones `ard` has, shared rather than restated.
         let err = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
+            "subtype = \"ard-virtual-display\"\nvnc_password = \"other\"",
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
@@ -2991,7 +3049,7 @@ mod tests {
     #[test]
     fn a_pinned_size_requires_nonzero_dimensions() {
         for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
-            for subtype in ["", "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
+            for subtype in ["", "subtype = \"ard-virtual-display\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
                 let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}{dimensions}")))
                     .unwrap_err();
                 assert!(
@@ -3026,7 +3084,7 @@ mod tests {
 
     #[test]
     fn a_domain_on_a_vnc_target_is_rejected() {
-        for subtype in ["", "subtype = \"ard\"\n", "subtype = \"ard-high-performance\"\n"] {
+        for subtype in ["", "subtype = \"ard\"\n", "subtype = \"ard-virtual-display\"\n"] {
             let err = ConfigFile::parse(&vnc_toml(&format!(
                 "{subtype}username = \"u\"\npassword = \"p\"\ndomain = \"CORP\""
             )))
@@ -3143,7 +3201,7 @@ mod tests {
     /// such extension.
     #[test]
     fn camera_rides_rdp_and_generic_vnc_and_is_refused_on_a_mac() {
-        for subtype in ["ard", "ard-high-performance"] {
+        for subtype in ["ard", "ard-virtual-display"] {
             let err = ConfigFile::parse(&format!(
                 r#"
                 [server]
@@ -3215,7 +3273,7 @@ mod tests {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
         };
-        for subtype in ["ard", "ard-high-performance"] {
+        for subtype in ["ard", "ard-virtual-display"] {
             let mac = parse(&format!(
                 "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\nmicrophone = true"
             ))
@@ -3314,7 +3372,7 @@ mod tests {
     #[cfg(feature = "airplay")]
     #[test]
     fn a_macs_audio_follows_the_airplay_table() {
-        for subtype in ["ard", "ard-high-performance"] {
+        for subtype in ["ard", "ard-virtual-display"] {
             let target = format!(
                 "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\n\
                  host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n"
@@ -3358,6 +3416,69 @@ mod tests {
             .unwrap_err();
             assert!(format!("{empty:#}").contains("[airplay].password is empty"), "{empty:#}");
         }
+    }
+
+    /// High Performance brings the Mac's sound on its own media stream, beside the
+    /// picture: always on, never AirPlay's, and not the target's to switch.
+    #[cfg(feature = "apple-hp-media")]
+    #[test]
+    fn high_performance_carries_its_media_streams_sound() {
+        let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
+                      host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n";
+        let config = ConfigFile::parse(&format!("[server]\n{}\n{target}", site_passwd_line()))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        let mac = &config.targets[0];
+        assert_eq!(mac.subtype, Some(Subtype::ArdHighPerformance));
+        assert!(mac.media_stream());
+        assert!(mac.audio, "the sound leg comes with the picture");
+        assert!(!mac.receives_airplay());
+        assert_eq!(mac.audio_source_format(), crate::vnc_apple_media::AUDIO_FORMAT);
+
+        for key in ["audio = true", "audio = false"] {
+            let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
+                .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("sets audio on an ard-high-performance target"), "{rendered}");
+        }
+
+        // Its codec keys are the ones any target with sound takes.
+        let pcm = ConfigFile::parse(&format!(
+            "[server]\n{}\n{target}audio_codec = \"pcm\"\n",
+            site_passwd_line()
+        ))
+        .unwrap();
+        assert_eq!(pcm.targets[0].audio_plan().codec, AudioCodec::Pcm);
+
+        // An [airplay] table beside it still loads, and still leaves its sound
+        // to the media stream.
+        #[cfg(feature = "airplay")]
+        {
+            let config = ConfigFile::parse(&format!(
+                "[server]\n{}\n[airplay]\npassword = \"sesame\"\n{target}",
+                site_passwd_line()
+            ))
+            .unwrap()
+            .resolve()
+            .unwrap();
+            assert!(config.airplay.is_some());
+            assert!(config.targets[0].audio && !config.targets[0].receives_airplay());
+        }
+    }
+
+    /// A build without the decoders refuses High Performance by name, and says
+    /// what to build or use instead.
+    #[cfg(not(feature = "apple-hp-media"))]
+    #[test]
+    fn a_build_without_the_decoders_refuses_high_performance() {
+        let err = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"",
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("without the apple-hp-media feature"), "{rendered}");
+        assert!(rendered.contains("ard-virtual-display"), "{rendered}");
     }
 
     /// A speaker no Mac could play through is refused rather than started.

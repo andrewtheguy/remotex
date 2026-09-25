@@ -8,6 +8,8 @@ pub mod airplay;
 #[cfg(not(feature = "airplay"))]
 #[path = "airplay/disabled.rs"]
 pub mod airplay;
+#[cfg(feature = "apple-hp-media")]
+pub mod aac_eld;
 pub mod assets;
 pub mod audio;
 pub mod auth;
@@ -42,6 +44,7 @@ pub mod video;
 pub mod vnc;
 pub mod vnc_apple;
 pub mod vnc_apple_clipboard;
+pub mod vnc_apple_media;
 pub mod vnc_audio;
 pub mod vnc_camera;
 pub mod vnc_clipboard;

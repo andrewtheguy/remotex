@@ -15,18 +15,34 @@ evidence behind it is archived outside the repository, in
 - a copy of this document's earlier, fully detailed revision.
 
 The implementation is `src/vnc_record.rs` (the 003.889 record layer),
-`src/vnc_apple.rs` (Apple's messages and encodings) and the two Apple paths in
-`src/vnc.rs`.
+`src/vnc_apple.rs` (Apple's messages and encodings), `src/vnc_apple_media.rs`
+(High Performance's media stream), `src/aac_eld.rs` (its sound's decoder) and
+the two Apple paths in `src/vnc.rs`.
+
+"High Performance" below is Apple's mode: RFB 003.889 and a virtual display. Two
+subtypes speak it, and differ in where the picture and sound come from:
+
+| Subtype | Wire | Picture | Sound |
+|---|---|---|---|
+| `ard` | Standard mode, RFB 3.8, the physical displays | zlib | AirPlay workaround |
+| `ard-virtual-display` | High Performance, RFB 003.889, one virtual display | zlib | AirPlay workaround |
+| `ard-high-performance` | the same as `ard-virtual-display` | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
+
+`ard-virtual-display` is Standard mode's picture on High Performance's protocol,
+which is what remotex's High Performance was before it took the media stream.
+`ard-high-performance` is High Performance as Apple's viewer has it, and needs a
+gateway built with the `apple-hp-media` feature.
 
 ## Summary
 
 | | |
 |---|---|
-| Two subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `subtype = "ard-high-performance"` is High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
+| Three subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `ard-virtual-display` and `ard-high-performance` are High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are High Performance's pointer buttons and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Not implemented | High Performance's own system-audio stream and its HEVC video leg; Apple's controls for two virtual displays and fixed presets; authentication types other than 30. A Mac's sound reaches remotex through its AirPlay receiver instead. |
+| Picture and sound | `ard` and `ard-virtual-display` are zlib throughout, and their sound reaches remotex through its AirPlay receiver. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
+| Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
 
@@ -295,7 +311,8 @@ next layout confirms it.
 The mode itself holds:
 - a backing size;
 - a logical ("scaled") size;
-- a refresh rate (60 Hz);
+- a refresh rate: 30 Hz for `ard-high-performance`, 60 Hz for
+  `ard-virtual-display` (see the media stream's rate below);
 - flags (bit 0 HDR).
 
 A backing size twice the logical one makes a 2x display.
@@ -319,8 +336,8 @@ A backing size twice the logical one makes a 2x display.
 Three behaviours of the Mac shape how remotex resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
-  it is offered again. That matters to a client of the audio stream below, which
-  remotex does not use.
+  it is offered again, so the picture is zlib's until the new display's stream
+  delivers — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
   The session then loses its virtual display, and often its connection. The update
@@ -403,11 +420,14 @@ the video. On a Mac playing one, input went unread for 35–104 s at a time and 
 arrived as hundreds of queued events in one second. Apple's viewer never meets
 this: in High Performance mode it takes the picture from the media stream
 (encoding `0x3f2`), and the daemon's framebuffer sender skips such a viewer.
+Remotex does too once the stream is up, and then arms and polls one pixel —
+see [RFB while the stream runs](#rfb-while-the-stream-runs).
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is
 not a flow-control knob: changing it mid-session corrupts later updates, except
-for the one-pixel arming around a High Performance resize.
+for the one-pixel arming around a High Performance resize and while the media
+stream carries the picture.
 
 **`ViewerInfo` (`0x21`) is 66 bytes of numbers.** The published description
 implies version strings; the body is two numeric version triples:
@@ -461,7 +481,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | vendor keysyms | `0x453` | 1107 | |
 | keyboard source | `0x455` | 1109 | |
 | `DeviceInfo` | `0x456` | 1110 | not advertised |
-| media stream | `0x3f2` | 1010 | not advertised |
+| media stream | `0x3f2` | 1010 | in a second `SetEncodings` |
 | zlib | `0x06` | 6 | standard RFB |
 | Raw | `0x00` | 0 | standard RFB |
 | `DesktopSize` | — | −223 | pseudo-encoding |
@@ -471,50 +491,211 @@ Message types: `MiscStatus` `0x14`, `AutoFrameBufferUpdate` `0x09`, `ViewerInfo`
 `0x21`, `SetDisplayConfiguration` `0x1d`, `SetDisplay` `0x0d`, `SetServerScaling`
 `0x08`, and the media-stream negotiation `0x1c`.
 
-## The media stream: High Performance system audio
+## The media stream: High Performance's picture and sound
 
-> **Current remotex does not speak this stream.** A Mac's sound reaches remotex
-> through the gateway's AirPlay receiver, for both Apple subtypes. The
-> implementation described here — `src/vnc_apple_audio.rs`, `src/aac_eld.rs` and
-> `tests/hp_audio_probe.py` — was removed after **v0.0.249**; `git checkout
-> v0.0.249` recovers it. Its wire formats, captures and the decoder evaluation are
-> in the archived detailed revision of this document.
+In High Performance mode Apple's viewer takes neither its picture nor its sound
+from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
+`ScreensharingAgent` then sends the screen and the system audio through
+AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
+straight to the viewer. Remotex does the same on an `ard-high-performance` target
+(`src/vnc_apple_media.rs`); `ard-virtual-display` never offers. Zlib carries the
+picture only until the stream delivers, across display changes, and when the Mac
+refuses the stream or the gateway's receiver stops. Five seconds without an
+authenticated video packet after the stream has begun stops that receiver and
+hands the picture back to zlib; the next display change offers the stream again.
 
-High Performance carries the Mac's system audio, but not over RFB. RFB only
-negotiates it: the client sends an offer in message `0x1c`, and the Mac answers
-with the UDP ports and its own answer as framebuffer rectangles (encoding 1010).
-The audio itself then flows as an AVConference stream — the FaceTime media stack —
-over UDP with SRTP, directly to the client.
+The two decoders are the `apple-hp-media` Cargo feature, off by default and in
+no release artifact: libde265 for the picture (LGPL-3.0-or-later, linked
+statically) and Fraunhofer's AAC-ELD decoder for the sound (a licence that is not
+OSI-approved). A build without the feature refuses `ard-high-performance` when
+it reads the config. The wire half of the module — the offers, the replies,
+SRTP and the depacketizer — is compiled and tested in every build.
 
-The facts a new implementation would have to meet:
+### Negotiation
 
-- **The codec is fixed.** The Mac always sends AAC-ELD: 48 kHz stereo, 480-sample
-  frames (10 ms), AudioSpecificConfig `F8 E6 50 00`. It does so whatever codec
-  the negotiation agrees on; an offer of only AMR-NB and EVS was accepted and
-  answered with AAC-ELD all the same. Neither browsers' WebCodecs nor FFmpeg's
-  native decoder decode AAC-ELD. Apple's AudioToolbox does, on macOS only, and
-  elsewhere it takes Fraunhofer's decoder, whose licence is not OSI-approved.
-- **Audio needs video.** An offer without a valid screen-video offer beside it
-  negotiates and is then torn down. The video leg is HEVC, and remotex never
-  received or decoded it.
-- **SRTP is AES-256 counter mode with an HMAC-SHA1-80 tag,** keyed from 46-byte
-  masters the client sends in the offer. A receiver must verify the tag, and must
-  send RTCP at least every few seconds or the Mac stops the stream. The removed
-  implementation stripped the tag unverified and sent clear RTCP reports; do not
-  copy either shortcut.
-- **Every display change stops the stream.** The client must offer again once the
-  change has settled.
+After the first layout the viewer sends a second `SetEncodings`, the opening list
+with encoding 1010 (`0x3f2`) appended, then message `0x1c`
+(`RFBMediaStreamServerConfiguration`, version 3):
 
-The offer itself is a binary plist around AVConference's protobuf negotiation
-blob, which a client without AVConference has to build byte for byte.
+```text
++0x00 u8   0x1c
++0x01 u8   pad
++0x02 u16  body length (everything after this field)
++0x04 u16  version = 3
++0x06 u32  flags
++0x0a u16  audio offer length
++0x0c u16  video1 offer length
++0x0e u16  video2 offer length
++0x10 u32  zero
++0x14 16B  session UUID
++0x24 46B  audio SRTP master key, viewer -> server
++0x52 46B  audio SRTP master key, server -> viewer
++0x80      audio offer, then the video1 keys (46B v->s, 46B s->v) and offer
+```
+
+The Mac answers with rectangles of encoding 1010, a `u16` size and then:
+
+- **message 1**, a 36-byte body: `u16` type, `u16` version, `u32` flags, then a
+  `u16` port and `u32` flags for audio at `+8`/`+10`, video 1 at `+14`/`+16`,
+  and video 2 at `+20`/`+22`, followed by ten reserved zero bytes. Bit 0 enables
+  a leg. Apple's viewer requires it on audio and video 1; remotex also requires
+  video 2 off because it offered one display. The measured ports were always
+  5900 and 5901, the RFB port and the next. The viewer receives on the same
+  numbers.
+- **message 2**, AVConference's answer: the common eight-byte header, `u16`
+  lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
+  those blobs. Remotex checks that their lengths describe the whole body and
+  that video 2 is empty. The answer sometimes comes twice for one offer.
+- **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
+  sub-code.
+
+Each offer is a binary property list of four keys around a deflated
+AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
+three fields:
+
+| Field | Apple's viewer | Remotex | Why |
+|---|---|---|---|
+| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
+| `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
+| bitrate entries (codec list, `f1 = 0`) | up to 100 Mbit/s | capped at 12 Mbit/s | A sender with no feedback pads out to what it was offered: an animating lock screen came at 19 Mbit/s uncapped and about 7 under an 8 Mbit/s cap. |
+
+**The picture and the sound go together.** A configuration with an empty audio
+offer is refused (`unable to create audio config`, error type 2), and one with an
+empty video offer (`unable to create video config`, the same type). While the
+audio leg runs, the Mac mutes its own sound output: the daemon's log shows the
+output device muted as the stream starts, and the Mac's speakers were measured
+silent. So an `ard-high-performance` target always carries sound, takes no
+`audio` key, and never uses the AirPlay workaround, whose Mac would be muted.
+
+**One offer at a time.** A second `0x1c` sent while the first one's capture was
+still starting left the capture failed (`didStart: 0 error: 32000`). When the
+virtual display was deallocated at the end of that session, WindowServer aborted
+in `WSSelectiveSharingUpdateDisplayStreamSurface` and logged the console user
+out. Remotex therefore has one offer out at a time. It sends no display change
+while an offer is unanswered, and gives an unanswered offer 10 seconds before
+treating it as lost.
+
+### The stream
+
+- **RTP.** Payload type 100, with a one-word header extension under profile
+  `0x9311` or `0x9301` holding the picture's packet count and a frame counter;
+  remotex ignores it. The marker bit ends a picture. RFC 7798 packetization:
+  single NAL units, aggregation packets, fragmentation units.
+- **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
+  transfer, Display P3 primaries, with wavefront parallel processing
+  (`entropy_coding_sync_enabled_flag`) and no tiles. The prebuilt libde265 1.1.3
+  decodes it bit-exact with ffmpeg. On one core of an i5-8500T a 1600×1000
+  picture takes 15–23 ms, too slow for 60 a second. Remotex gives the decoder
+  four worker threads. Replaying captured pictures at 60 a second with the VP9
+  encoder running beside it, that took about 13 ms a picture and dropped none,
+  where one thread fell eight behind within seconds.
+- **Rate.** A picture goes out when the screen changes, at most once per refresh
+  of the virtual display. Under a full-screen animation, a 60 Hz display sent
+  about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the
+  Mac logged `viewer set refreshRate 60` and `encode frame rate 60` either way.
+  A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
+  Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
+  every picture has to be decoded whether it is shown or not. An idle desktop
+  sends about two. The receiver's debug log reports the pictures a second every
+  10 seconds.
+- **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
+  the 46-byte masters in the offer. Received packets use the server-to-viewer
+  key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP
+  under its key. An authentic packet no newer than one already received, a
+  duplicate or a straggler, is dropped on both legs.
+- **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
+  FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
+  a stream starts without an IDR (the first packets can arrive before the socket
+  is bound), and when the decoder falls eight pictures behind, which it warns
+  about. Apple's viewer's rate feedback is not reproduced.
+- **Liveness.** If no authenticated video packet arrives in the first five
+  seconds, remotex logs the likely firewall or NAT problem and keeps listening
+  while zlib remains visible. Once video has flowed, five seconds without an
+  authenticated video packet ends the receiver and returns the picture to zlib.
+  The next display change, rather than the unchanged layout, offers a new stream.
+
+### The sound
+
+- **Codec.** AAC-ELD (MPEG-4 object type 39), whatever the offer lists: an
+  offer with AAC-ELD removed was agreed and streamed AAC-ELD anyway. 48 kHz
+  stereo, one 480-sample access unit per RTP packet (10 ms), payload type 101,
+  about 320 kbit/s. The decoder is configured out of band with
+  AudioSpecificConfig `F8 E6 50 00`: object type 39, 48 kHz, stereo, 480-sample
+  frames, no SBR, no resilience tools.
+- **Decoder.** Neither a browser's WebCodecs nor FFmpeg's native `aac` decodes
+  AAC-ELD, so the gateway does (`src/aac_eld.rs`). It uses the pure-Rust port of
+  Fraunhofer's fdk-aac decoder that AOSP ships as `platform/external/aac`,
+  `rust/`, cut down to raw AAC-ELD access units
+  ([fdk-aac-rust](https://github.com/andrewtheguy/fdk-aac-rust)). Against
+  AudioToolbox's own AAC-ELD (`afconvert -d "aace@48000#480"`), it decoded every
+  packet and matched the fixed-point C decoder to 86 dB SNR, at about 31 µs per
+  10 ms unit. Fed 200 000 corrupted units with overflow checks on, it concealed
+  or refused them and never panicked, which matters because the gateway aborts
+  on panic. Its instance holds `Rc`s, so it runs on a thread of its own behind a
+  64-unit queue.
+- **Onward.** The decoder's 16-bit PCM goes to the session's audio bridge two
+  units at a time, one Opus packet's worth, and from there the same way every
+  target's sound goes: Opus or PCM passthrough on `/ws/audio`. The format is
+  announced when the decoder opens and withdrawn when the receiver ends.
+- **Authentication.** Every packet is authenticated with its leg's own
+  server-to-viewer key before it is decrypted, and the reports that keep the leg
+  alive go out as SRTCP, as on the picture's leg. v0.0.249, which also decoded
+  this sound, stripped the tag unread and sent plain RTCP.
+- **Display changes.** A change stops the sound with the picture, and the next
+  offer restarts both under new SSRCs on the same ports. The receiver, and with
+  it the decoder, carries on across it.
+- **The virtual Mac's sound fails on its own.** On the Apple Virtualization guest,
+  a looping tone at a 2x display went distorted after about a minute and then
+  silent, and it did the same under Apple's own viewer. Remotex decoded it as it
+  came: 100 units a second, none concealed, the RMS falling while the peak held,
+  then exact digital silence. That guest is laggy whenever it plays sound, so
+  judge sound quality and performance on a physical Mac. The receiver's debug log
+  reports the decoded level every second, which shows whether the Mac sent a
+  fault.
+
+### RFB while the stream runs
+
+The Mac keeps answering `FramebufferUpdateRequest`s with zlib for the region asked
+for, and pushes unrequested zlib inside the armed `AutoFrameBufferUpdate` region.
+Once a picture of the current size has arrived, remotex polls and arms one pixel.
+That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
+moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
+zlib screen unasked, which is decoded to keep the deflate stream in step and not
+shown.
+
+This also ends the input freeze behind a playing video. With the gateway capped at
+15% of a core, the Mac's receive queue of our input was empty in 64 of 68
+one-second samples and never above 3.5 KB. Over zlib under the same cap, input
+went unread for 5–19 s at a time
+([Other messages](#other-messages)).
+
+### Display changes
+
+Every display change stops both legs, so the sound drops out with the picture
+until the new stream starts. The Mac then re-sends message 1 on its own,
+with no stream behind it. A new offer after the new layout starts a new stream on
+the same ports, under a new SSRC, with an IDR at the new size. Remotex offers once
+the resize's cover comes down, and zlib shows the new display until then.
+
+### Reaching the gateway
+
+The Mac sends from its own address to the viewer's address on the TCP connection,
+so a NAT between them has to pass it. The viewer's reports go out from the same
+ports every second, which opens a port-preserving NAT's mapping. Every Mac uses the
+same port numbers, so remotex binds them with address and port reuse and connects
+each socket to its Mac. Several gateways on one host can then share the numbers,
+unless one of them bound without reuse, as v0.0.249 did. Nothing arriving within
+5 s of message 1 is logged, and the picture stays on zlib. If an established
+video leg later goes silent for 5 s, the media receiver ends and zlib takes over.
 
 ## Still unknown
 
 - **Apple's private framebuffer codecs**, `0x3ea` and `0x3f3`: an adaptive,
   tile-based, JPEG-like codec among them. Neither is advertised.
-- **The media stream's HEVC video leg.**
 - **Authentication types 31–36 on the wire.**
-- **The native viewer's protected RTCP reports.**
+- **Apple's viewer's RTCP feedback**: what it reports that keeps its sender from
+  padding the stream out to the offered bitrate, and how it places a strip of a
+  four-tile frame.
 - **Cases the test Mac could not show:**
   - a non-console user;
   - hardware mirroring;

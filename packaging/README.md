@@ -60,7 +60,8 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
-| `build-container-binary.sh` | build and verify a gateway with default features disabled but `airplay` |
+| `build-container-binary.sh` | build and verify a gateway with default features disabled but `airplay`, plus any `REMOTEX_CONTAINER_FEATURES` |
+| `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -115,9 +116,21 @@ binary's global CPU floor.
 ## Prebuilt native dependencies
 
 Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
-download static archives instead of
-building vendored C, so this project needs no CMake, assembler, pkg-config,
-libclang, vcpkg, or system copies of those libraries. Do not restore
+download static archives instead of building vendored C and C++, so this project
+needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
+those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
+built archives.
+
+The non-default `apple-hp-media` feature, which `ard-high-performance` targets
+need, adds two decoders and is in no release artifact because of their
+licences. `libde265-prebuilt` (the HEVC picture) downloads a static archive the
+same way, selected locally with `LIBDE265_PREBUILT_DIR`; libde265 is
+LGPL-3.0-or-later and linked statically, which obliges a distributor of a
+binary to let its recipient relink it against a modified libde265 (see that
+repository's README). `fdk-aac-rust` (the AAC-ELD sound) is pure Rust and needs
+nothing prebuilt, but carries the Fraunhofer FDK AAC licence, which is not
+OSI-approved and grants no patents. Build it with
+`cargo build --release --features apple-hp-media`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built

@@ -81,8 +81,11 @@
 #max_records = 10080
 
 # The AirPlay speaker a Mac's sound arrives at — EXPERIMENTAL. Gateway-wide:
-# with it, every "ard" and "ard-high-performance" target carries audio, and
-# without it none does; refused when there is no such target. The gateway announces itself over mDNS as an AirPlay 1 speaker named
+# with it, every "ard" and "ard-virtual-display" target carries audio, and
+# without it none does; refused when there is no Mac target at all. An
+# "ard-high-performance" target never uses it, since its sound comes with its
+# picture, but a table beside one still loads.
+# The gateway announces itself over mDNS as an AirPlay 1 speaker named
 # "<[branding].text> - remotex". The Mac picks it once in Control Center →
 # Sound and is asked for this password, which it then remembers. The Mac must
 # share the gateway's link (mDNS does not cross a router), a container needs the host's
@@ -158,8 +161,8 @@ site_passwd = ""
 name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"
 # Which flavour of that protocol the far end is, where a protocol has more than
-# one. Only "vnc" has any, and both are macOS Screen Sharing: "ard" and
-# "ard-high-performance" (see the two Mac targets below).
+# one. Only "vnc" has any, and all three are macOS Screen Sharing: "ard",
+# "ard-virtual-display" and "ard-high-performance" (see the Mac targets below).
 #subtype = "ard"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc).
@@ -177,25 +180,25 @@ password = "change-me"
 
 # Optional pinned opening size. Set both keys or neither.
 #
-# RDP connects at the pinned size, `subtype = "ard-high-performance"` creates its
-# virtual display at it, and a generic VNC server is asked for it once, as soon as
-# it declares SetDesktopSize support. With neither key, RDP and High Performance
-# instead open at the full resolution of the connecting client's own screen,
+# RDP connects at the pinned size, "ard-virtual-display" and
+# "ard-high-performance" create their virtual display at it, and a generic VNC
+# server is asked for it once, as soon as it declares SetDesktopSize support. With
+# neither key, RDP and a virtual-display Mac instead open at the full resolution of the connecting client's own screen,
 # falling back to 1440×900 only when the client supplies no screen; an unpinned
 # generic VNC server is asked for no size at all and keeps its own.
 #
 # This is independent of `resize` below, which decides only whether the browser
 # window drives the size afterwards. Pinned alone stays at the pin. Pinned with
-# `resize = true` opens at the pin and then follows the window on RDP and High
-# Performance, which name a size at connect; a generic VNC server is asked only
+# `resize = true` opens at the pin and then follows the window on RDP and a
+# virtual-display Mac, which name a size at connect; a generic VNC server is asked only
 # for the window, because the browser reports it before the server can declare
 # SetDesktopSize support and the newer size supersedes the pin. `subtype = "ard"`
 # is the exception — it exposes the Mac's physical displays, which this gateway
 # never resizes, so there these keys only answer a later default-size request.
 #
 # These are points, not backing pixels. RDP opens at 1x and, with `resize`, a
-# Retina client then asks for twice the pixels. High Performance opens at the
-# connecting client's density even when its point size is pinned.
+# Retina client then asks for twice the pixels. A virtual-display Mac opens at
+# the connecting client's density even when its point size is pinned.
 #width = 1920
 #height = 1080
 
@@ -207,7 +210,8 @@ password = "change-me"
 # One narrowing that is not the client's to make either: generic VNC needs a
 # server that accepts SetDesktopSize — the TigerVNC family — and Standard Apple
 # `ard` refuses resize outright because it shares physical displays. Apple
-# `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
+# `ard-virtual-display` and `ard-high-performance` use Apple's dynamic-resolution
+# feature to replace its
 # one virtual display's configuration with arbitrary viewport sizes within its
 # fixed 3840×2160 backing ceiling.
 #
@@ -236,8 +240,9 @@ password = "change-me"
 # VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
-# Both Apple subtypes use the Mac's native UTF-8 pasteboard protocol; High
-# Performance carries its fetches and data inside the encrypted record transport.
+# Every Apple subtype uses the Mac's native UTF-8 pasteboard protocol; the two
+# virtual-display ones carry its fetches and data inside the encrypted record
+# transport.
 #clipboard = false
 
 # Remote audio: carry this target's sound when the client asks for it, with the
@@ -246,9 +251,11 @@ password = "change-me"
 # host's own audio settings are left untouched and the session has no audio device.
 # A Windows host sends nothing on the channel until something plays. A plain
 # "vnc" target asks the server for wlshare's audio extension, and one that never
-# announces it gives a silent session. On "ard" and "ard-high-performance" the
-# key is refused: a Mac's sound comes from the gateway's AirPlay speaker instead,
-# which the [airplay] table above turns on for every Mac — EXPERIMENTAL.
+# announces it gives a silent session. On every Apple subtype the key is refused.
+# An "ard-high-performance" target always carries sound, which the Mac sends
+# beside its picture; an "ard" or "ard-virtual-display" target's comes from the
+# gateway's AirPlay speaker instead, which the [airplay] table above turns on for
+# every such Mac — EXPERIMENTAL.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
@@ -257,8 +264,8 @@ password = "change-me"
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound works wherever the target carries it — an "rdp" target,
-# a plain "vnc" server that speaks wlshare's extension, or a Mac playing to the
-# AirPlay speaker.
+# a plain "vnc" server that speaks wlshare's extension, an "ard-high-performance"
+# Mac, or a Mac playing to the AirPlay speaker.
 #
 # Off leaves the remote's sound where it is.
 #audio = false
@@ -323,7 +330,7 @@ password = "change-me"
 # when that client closes it, the session changes hands, or the engine ends. The
 # browser encodes H.264 and the gateway passes it through untranscoded, so there
 # is no codec key beside this one. Apple's Screen Sharing has nowhere to put a
-# camera, so an "ard" or "ard-high-performance" target refuses the key rather than
+# camera, so an Apple target refuses the key rather than
 # ignoring it. A Windows Server without the
 # RDSH role never creates the enumeration channel, so an enabled camera against
 # one is simply never asked for a frame.
@@ -338,8 +345,7 @@ password = "change-me"
 # per session, never remembered. The browser sends mono speech Opus at a fixed
 # low bitrate and the gateway decodes it to the PCM the host records in, so there
 # is no codec or quality key beside this one. The host starts recording only
-# once an application on it does. An "ard" or "ard-high-performance" target
-# refuses the key.
+# once an application on it does. An Apple target refuses the key.
 #microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is
@@ -371,12 +377,12 @@ password = "change-me"
 # additional software — say so with a subtype, and give it an *account* rather than
 # the Screen Sharing password. Apple's DH authentication is the only way to tell a
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
-# new login window on a virtual display instead of sharing its screen. So both
-# subtypes require username and password (that account's) and take no
+# new login window on a virtual display instead of sharing its screen. So every
+# Apple subtype requires username and password (that account's) and takes no
 # vnc_password. Resize is where they part: `ard` is refused outright — a config
 # setting it does not load — because it shares the Mac's physical displays, while
-# `ard-high-performance` takes it for the one virtual display it makes, as the
-# second example below does. A third-party VNC server that happens to run on a
+# the other two take it for the one virtual display they make, as the examples
+# below do. A third-party VNC server that happens to run on a
 # Mac is not this: it is a plain "vnc" target.
 #
 # `subtype = "ard"` is standard screen sharing on the ordinary RFB wire: the Mac's
@@ -390,14 +396,15 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 
-# Alone among the subtypes, nothing this one speaks is documented by Apple: the
+# Alone among the subtypes, nothing these two speak is documented by Apple: the
 # protocol revision, its record layer, its control messages and its virtual
 # display handling were all reverse engineered, and are only as correct as the
 # Macs they have been measured against. A macOS update is free to change any of
 # it. The dynamic-resolution descriptor has been measured across arbitrary sizes
 # and a burst of viewport reports but remains reverse engineered.
 #
-# `subtype = "ard-high-performance"` requests one virtual display instead of the
+# `subtype = "ard-virtual-display"` is High Performance's protocol revision with
+# Standard mode's picture. It requests one virtual display instead of the
 # Mac's physical displays. It opens at the pinned `width` and `height` when both
 # are set, or at the full resolution of the client's screen otherwise, at that
 # screen's density. Once connected, the Mac's physical displays are disabled and
@@ -413,12 +420,38 @@ password = "change-me"
 # [[targets]]
 # name = "mac-virtual-display"
 # protocol = "vnc"
-# subtype = "ard-high-performance"
+# subtype = "ard-virtual-display"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"
 # width = 1600
 # height = 1000
+# clipboard = true
+# resize = true
+
+# `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
+# it: everything "ard-virtual-display" is, but the picture comes as HEVC and the
+# sound as AAC-ELD, over the media stream the Mac negotiates on the RFB connection
+# and then sends over UDP with SRTP — the picture at up to 60 frames a second,
+# without zlib's deflate holding up the Mac's reading of your input. Zlib carries
+# the picture only until the stream does. The Mac sends to this gateway's address
+# on UDP 5900 and 5901, so a firewall or NAT between them must let that through.
+#
+# The picture and the sound go together: the Mac refuses one without the other,
+# and mutes its own speakers while it streams. So the target always carries
+# sound, takes no `audio` key, and never uses the AirPlay speaker.
+#
+# EXPERIMENTAL, and only in a gateway built with `--features apple-hp-media`, which
+# links the two decoders — libde265 (LGPL) and Fraunhofer's AAC-ELD decoder, whose
+# licence is not OSI-approved — and is therefore in no release artifact. Any other
+# build refuses the subtype. See docs/apple-vnc-889.md, "The media stream".
+# [[targets]]
+# name = "mac-high-performance"
+# protocol = "vnc"
+# subtype = "ard-high-performance"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
 # clipboard = true
 # resize = true
 

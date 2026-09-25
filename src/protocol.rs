@@ -833,15 +833,17 @@ pub enum ServerMsg {
     Connected {
         name: String,
         protocol: &'static str,
-        /// The target's `subtype`, where it has one — `ard` or
-        /// `ard-high-performance` — and `None` for plain RDP and plain VNC.
+        /// The target's `subtype`, where it has one — `ard`,
+        /// `ard-virtual-display` or `ard-high-performance` — and `None` for plain
+        /// RDP and plain VNC.
         ///
         /// Carried for the same reason as [`Self::Connected::render`]: it is a
         /// property of the session that decides what the client can expect and
-        /// that nothing on the wire said. The two Apple subtypes differ in what
-        /// they share (physical displays against one virtual one), whether resize
-        /// is offered at all, and how settled the path is — and a client showing
-        /// "VNC" for all three cannot tell somebody which of them they are on.
+        /// that nothing on the wire said. The Apple subtypes differ in what they
+        /// share (physical displays against one virtual one), whether resize is
+        /// offered at all, where the picture and sound come from, and how settled
+        /// the path is — and a client showing "VNC" for all four cannot tell
+        /// somebody which of them they are on.
         subtype: Option<&'static str>,
         resize: bool,
         clipboard: bool,

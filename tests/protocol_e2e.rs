@@ -354,7 +354,7 @@ async fn serve_scrolling_vnc(
 
 // ── Apple Screen Sharing (RFB 003.889), scripted ────────────────────────────
 //
-// The `ard-high-performance` subtype's whole wire, played from the server side:
+// The `ard-virtual-display` subtype's whole wire, played from the server side:
 // Apple's version banner, its DH authentication, the `0x81` ClientInit, the
 // cleartext prelude, the rekey that switches on the record layer, and then a
 // display layout and a framebuffer update *inside* that record layer.
@@ -1076,7 +1076,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
 /// fake Mac checks the credentials against.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdHighPerformance),
+        subtype: Some(remotex::config::Subtype::ArdVirtualDisplay),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
         // Unpinned: the virtual display opens at the screen the connect names.
@@ -1770,7 +1770,7 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
     expect_control(ws, "resize").await
 }
 
-/// The whole `ard-high-performance` wire, end to end: authentication, record setup,
+/// The whole `ard-virtual-display` wire, end to end: authentication, record setup,
 /// initial and dynamic virtual-display configurations, pixels, and native Apple
 /// pasteboard messages in both directions.
 #[tokio::test]

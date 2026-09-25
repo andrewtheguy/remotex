@@ -13,13 +13,16 @@ use clap::{Parser, Subcommand};
 
 /// The optional cargo features this binary was built with, for `--help` and the log
 /// of a starting gateway: which of them a binary carries decides what it accepts —
-/// `tui` — and nothing else about it says. Not in `--version`, which packaging
+/// `tui`, `[airplay]`, an `ard-high-performance` target — and nothing else about it
+/// says. Not in `--version`, which packaging
 /// compares to the release's.
 pub const FEATURES: &[&str] = &[
     #[cfg(feature = "embedded-gateway")]
     "embedded-gateway",
     #[cfg(feature = "airplay")]
     "airplay",
+    #[cfg(feature = "apple-hp-media")]
+    "apple-hp-media",
 ];
 
 /// [`FEATURES`] as a terminal and the log spell them.
@@ -129,6 +132,7 @@ mod tests {
         assert!(help.trim_end().ends_with(&format!("Features: {}", features_line())), "{help}");
         assert_eq!(FEATURES.contains(&"embedded-gateway"), cfg!(feature = "embedded-gateway"));
         assert_eq!(FEATURES.contains(&"airplay"), cfg!(feature = "airplay"));
+        assert_eq!(FEATURES.contains(&"apple-hp-media"), cfg!(feature = "apple-hp-media"));
         assert_eq!(
             command.render_version(),
             format!("remotex {}\n", env!("CARGO_PKG_VERSION"))
