@@ -99,3 +99,9 @@ on any other target.
   the gateway on TCP and UDP from the LAN.
 - **A container needs the host's network** (`--network host`) for both the
   multicast and those ports. A bridged container's speaker is never seen.
+- **Only routable addresses are advertised.** Every link-local IPv6 address is
+  in `fe80::/64`, so a host with many interfaces — a Kubernetes node's veth per
+  pod — would otherwise hand the Mac one per interface, scoped to the Mac's own
+  link, where only one answers; the Mac tries one and reports it could not
+  connect. The speaker leaves them out, so the gateway's link needs an IPv4
+  address or a routable IPv6 prefix.
