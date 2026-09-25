@@ -1,20 +1,19 @@
 //! VNC client, in two dialects that share everything below the handshake.
 //!
-//! **RFB 3.8**, which is every VNC server including a Mac's under `subtype =
-//! "ard"`: classic or Apple DH authentication. A Mac also accepts Apple's
-//! metadata and pasteboard messages on this transport, exposing the Mac's physical
-//! display list, selection and density. After the first layout, a second encoding
-//! request switches the rectangles from raw to zlib.
+//! **RFB 3.8**, for every server a target names no subtype for: classic VNC,
+//! RSA-AES or no authentication, and the extensions a generic server announces.
 //!
-//! **RFB 003.889**, Apple's own revision, under `subtype =
-//! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
-//! record layer ([`crate::vnc_record`]), alongside Apple's control messages
-//! ([`crate::vnc_apple`]). It requests one virtual display at the target's pinned
-//! `width` and `height`, or at the connecting client's screen resolution when no
-//! size is pinned. Its pasteboard is a separate Apple protocol rather than RFB
-//! Extended Clipboard. The picture and sound come from the Mac's media stream
-//! ([`crate::vnc_apple_media`]), and zlib rectangles carry the picture until it is
-//! up. See docs/apple-vnc-889.md.
+//! **RFB 003.889**, Apple's own revision, which both Apple subtypes speak, as
+//! Apple's viewer does: Apple's DH authentication, then the same RFB messages
+//! carried inside an AES-128-CBC record layer ([`crate::vnc_record`]), alongside
+//! Apple's control messages ([`crate::vnc_apple`]) and its pasteboard protocol.
+//! The mode follows ServerInit, as it does there. `subtype = "ard"` is Standard
+//! mode: the Mac's physical displays, with their list, selection and density, in
+//! zlib rectangles. `subtype = "ard-high-performance"` is High Performance mode:
+//! one virtual display at the target's pinned `width` and `height`, or at the
+//! connecting client's screen resolution when no size is pinned, with the picture
+//! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) and zlib
+//! rectangles carrying the picture until it is up. See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
 //! `Dialect` (which banner and ClientInit byte), the two preface functions after
@@ -199,18 +198,20 @@ type Reader = BufReader<OwnedReadHalf>;
 /// decided by which preface function ran, not by re-asking this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Dialect {
-    /// RFB 3.8, used by generic VNC and Apple Screen Sharing Standard mode
-    /// (`subtype = "ard"`). Apple authentication and metadata are layered above.
+    /// RFB 3.8, used by generic VNC.
     Rfb38,
-    /// Apple's RFB 003.889 and the record layer that goes up after ServerInit.
+    /// Apple's RFB 003.889 and the record layer that goes up after ServerInit,
+    /// used by both Apple subtypes. Apple's viewer answers every Mac with this
+    /// revision and chooses between Standard and High Performance after
+    /// ServerInit, which is where [`apple_preface`] makes the same choice.
     Apple889,
 }
 
 impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
-            Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
-            Some(Subtype::Ard) | None => Dialect::Rfb38,
+            Some(Subtype::Ard | Subtype::ArdHighPerformance) => Dialect::Apple889,
+            None => Dialect::Rfb38,
         }
     }
 
@@ -1511,7 +1512,7 @@ async fn session(
         return; // browser already gone
     }
 
-    let high_performance = Dialect::of(config.subtype) == Dialect::Apple889;
+    let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
     // A generic server is asked for wlshare's audio extension on the connection
     // itself ([`vnc_audio`]). High Performance's media stream carries the Mac's
     // sound beside its picture ([`vnc_apple_media`]). Any other Mac's arrives at
@@ -1581,13 +1582,13 @@ struct Flags {
     /// left. A client that reports no window at all (a phone) leaves the pin to
     /// go out on the declaration.
     ///
-    /// `None` on both Apple dialects, where a pin is either spent by
+    /// `None` on both Apple subtypes, where a pin is either spent by
     /// [`opening_mode`] at connect (High Performance) or refused by the config
     /// file (Standard `ard` exposes physical displays).
     pinned: Option<(u16, u16)>,
-    /// Whether Apple's metadata encodings were negotiated, giving the read loop
-    /// its zlib stream, cursor cache and display list to report. Both Apple
-    /// subtypes negotiate them; only one uses the 003.889 record transport.
+    /// Whether this is Apple's revision, 003.889, with the metadata encodings both
+    /// Apple subtypes negotiate: the read loop's zlib stream, cursor cache and
+    /// display list, and the Mac's reading of the pointer mask.
     apple: bool,
     /// Whether this is Apple's High Performance mode. It requests a virtual display
     /// during setup; plain `ard` does not.
@@ -1640,12 +1641,12 @@ struct Connected {
     apple: bool,
     /// Whether the client drives the update cycle: one request, one update, repeat.
     ///
-    /// True on both Apple dialects. A pending pasteboard fetch pauses the next
+    /// True on both Apple subtypes. A pending pasteboard fetch pauses the next
     /// request so it cannot be buried behind another framebuffer response.
     poll: bool,
     /// High Performance's media stream, which the picture comes from once it is
-    /// up ([`vnc_apple_media`]), and the pictures it decodes: every RFB 003.889
-    /// session has one, and every RFB 3.8 session `None`.
+    /// up ([`vnc_apple_media`]), and the pictures it decodes: every High
+    /// Performance session has one, and every other session `None`.
     media: Option<(MediaStream, Pictures)>,
 }
 
@@ -1668,8 +1669,7 @@ impl ServerInit {
 /// preface, on a connected socket.
 ///
 /// Reads as the sequence it is, with the one branch at the end: everything above
-/// that point is common to both dialects, including Apple's authentication, which
-/// plain `subtype = "ard"` uses on the 3.8 wire.
+/// that point is common to both dialects.
 ///
 /// The TCP connect happens in [`run`] (see [`engine::connect_and_handshake`]) so
 /// its deadline and this handshake's are sequential rather than nested. The
@@ -1775,10 +1775,9 @@ async fn read_security_types<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Re
 enum Secured {
     /// Nothing: the wire stays as it was.
     Plain,
-    /// The record layer's initial wrap key, which only Apple's DH branch
-    /// produces and only the 003.889 dialect goes on to use. It is `MD5(shared)`
-    /// — the very digest that encrypted the credentials — so on the 3.8 wire it
-    /// is computed and thrown away.
+    /// The record layer's initial wrap key, which Apple's DH branch produces for
+    /// the 003.889 dialect: `MD5(shared)`, the very digest that encrypted the
+    /// credentials.
     Apple([u8; 16]),
     /// RSA-AES's two ciphers: every byte from here on, SecurityResult included,
     /// rides inside their frames.
@@ -1903,27 +1902,15 @@ async fn rfb38_preface(
     macos: bool,
     config: &TargetConfig,
 ) -> anyhow::Result<Connected> {
-    let apple = config.subtype == Some(Subtype::Ard);
-    if apple {
-        // Native Standard announces itself and its control mode before enabling
-        // pasteboard monitoring. Without this prelude the Mac accepts writes and
-        // explicit fetches but does not emit clipboard-change status messages.
-        uplink.send(&vnc_apple::viewer_info()).await?;
-        uplink.send(&vnc_apple::set_mode_control()).await?;
-    }
     uplink.send(&set_pixel_format()).await?;
     uplink
         .send(&set_encodings(&rfb38_encoding_list(
-            apple,
             config.clipboard,
             config.audio,
             config.camera,
             config.microphone,
         )))
         .await?;
-    if apple && config.clipboard {
-        uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
-    }
 
     Ok(Connected {
         downlink,
@@ -1931,20 +1918,13 @@ async fn rfb38_preface(
         width: server.width,
         height: server.height,
         macos,
-        apple,
+        apple: false,
         poll: true,
         media: None,
     })
 }
 
-fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
-    if apple {
-        // A Mac sends the same display layout and accepts the same display picker
-        // on its downgraded 3.8 wire, and the native pasteboard is negotiated by
-        // `AutoPasteboard`, not an RFB encoding.
-        return vnc_apple::ENCODINGS.to_vec();
-    }
-
+fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
     // A preference order, because a server reads it as one: it encodes with the
     // first entry it supports and keeps that choice for the session.
     //
@@ -2019,17 +1999,15 @@ fn rfb38_encoding_list(apple: bool, clipboard: bool, audio: bool, camera: bool, 
         // microphone, the same way. See [`crate::vnc_mic`].
         encodings.push(vnc_mic::ENCODING);
     }
-    if !apple {
-        // The density request, asked of every generic server and last so it
-        // never weighs on encoding preference. Its answer, when it comes, is the
-        // scale every framebuffer from then on is labelled with; a Mac reports
-        // its densities in its display layout and is not asked.
-        encodings.push(ENCODING_WLSHARE_DENSITY);
-        // The output list, on the same terms and for the same reason: a Mac
-        // sends its screens in that layout, and this is the one way a generic
-        // server says it has more than one to offer.
-        encodings.push(ENCODING_WLSHARE_OUTPUTS);
-    }
+    // The density request, asked of every generic server and last so it never
+    // weighs on encoding preference. Its answer, when it comes, is the scale every
+    // framebuffer from then on is labelled with; a Mac reports its densities in
+    // its display layout and is not asked.
+    encodings.push(ENCODING_WLSHARE_DENSITY);
+    // The output list, on the same terms and for the same reason: a Mac sends its
+    // screens in that layout, and this is the one way a generic server says it has
+    // more than one to offer.
+    encodings.push(ENCODING_WLSHARE_OUTPUTS);
     encodings
 }
 
@@ -2053,8 +2031,15 @@ fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_appl
     )
 }
 
-/// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
-/// the encrypted preface and the arming sent beside the measured polling cycle.
+/// The RFB 003.889 tail, in either of Apple's modes: the cleartext prelude, the
+/// wait for the rekey, then the encrypted preface of the mode the subtype names —
+/// a virtual display and the arming sent beside the measured polling cycle for
+/// High Performance, the Mac's own displays for Standard.
+///
+/// Both modes encrypt. Apple's viewer asks for the record layer only when its
+/// `encryptionLevel` preference is 2 and leaves the session in cleartext by
+/// default; remotex always asks, so neither the account's keystrokes nor the
+/// media stream's keys cross the network in the clear.
 ///
 /// The one function in this file that knows the record layer is switched on here,
 /// which is deliberate: it runs before [`Connected`] exists, so there is no input
@@ -2075,29 +2060,32 @@ async fn apple_preface(
     display: Option<HostDisplay>,
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
 ) -> anyhow::Result<Connected> {
+    let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
     // Apple's viewer checks this before it sends a byte of the session, and turns a
     // Mac without it into a Standard session after asking. With no one to ask, it is
     // refused here rather than run on the physical display over zlib, a combination
     // Apple's viewer never makes.
     anyhow::ensure!(
-        server.apple_commands.as_ref().is_some_and(vnc_apple::holds_high_performance),
+        !high_performance
+            || server.apple_commands.as_ref().is_some_and(vnc_apple::holds_high_performance),
         "this Mac does not offer High Performance Screen Sharing: its ServerInit does not \
          list SetDisplayConfiguration, without which there is no virtual display. Apple's \
          viewer connects it in Standard mode; use subtype = \"ard\""
     );
-    // With clipboard enabled, the native control prelude is written back to back
-    // before encryption. The server emits the rekey as soon as encryption starts,
-    // so anything that waited for a reply in between would risk writing cleartext
-    // to a server that had already switched. ViewerInfo's body is the measured
-    // fixed numeric form, not the mis-sized string form in the reverse-engineered
-    // reference.
-    // ViewerInfo + SetMode are required for automatic pasteboard notifications on
-    // the live High Performance server, just as they are in Standard mode. The
-    // AutoPasteboard enable itself must also be cleartext: sending it as the first
-    // encrypted record is accepted without error but produces no status or data.
+    // The native control prelude, written back to back before encryption. The
+    // server emits the rekey as soon as encryption starts, so anything that waited
+    // for a reply in between would risk writing cleartext to a server that had
+    // already switched. ViewerInfo's body is the measured fixed numeric form, not
+    // the mis-sized string form in the reverse-engineered reference; Apple's viewer
+    // sends it and SetMode to every Mac.
+    //
+    // Both are also required for automatic pasteboard notifications, in either
+    // mode. The AutoPasteboard enable itself must be cleartext: sending it as the
+    // first encrypted record is accepted without error but produces no status or
+    // data.
+    sock.write_all(&vnc_apple::viewer_info()).await?;
+    sock.write_all(&vnc_apple::set_mode_control()).await?;
     if config.clipboard {
-        sock.write_all(&vnc_apple::viewer_info()).await?;
-        sock.write_all(&vnc_apple::set_mode_control()).await?;
         sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     sock.write_all(&vnc_apple::set_encryption_start()).await?;
@@ -2107,20 +2095,28 @@ async fn apple_preface(
     info!("vnc: Apple record layer active");
 
     let mut uplink = Uplink::records(sock, keys);
-    // High Performance mode is a virtual-display session. Request its mode before
-    // the pixel format and encoding list. The same message is resent for later
-    // viewport reports and screen changes; its dynamic-resolution flag is set here
-    // regardless, so every fresh session restores the Mac's checkbox to on.
-    uplink
-        .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
-        .await?;
+    if high_performance {
+        // High Performance mode is a virtual-display session. Request its mode
+        // before the pixel format and encoding list. The same message is resent for
+        // later viewport reports and screen changes; its dynamic-resolution flag is
+        // set here regardless, so every fresh session restores the Mac's checkbox
+        // to on.
+        uplink
+            .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
+            .await?;
+    }
     uplink.send(&set_pixel_format()).await?;
+    // The same list in both modes: the display layout that names the Mac's screens,
+    // or the one virtual display, and zlib for their pixels.
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
-    // Arm the server's sender. Cursor shapes above all depend on it across a login
-    // or lock, which is why the full region is re-sent on every layout too.
-    uplink
-        .send(&vnc_apple::auto_framebuffer_update(server.size()))
-        .await?;
+    if high_performance {
+        // Arm the server's sender. Cursor shapes above all depend on it across a
+        // login or lock, which is why the full region is re-sent on every layout
+        // too, and which is when Standard first arms it.
+        uplink
+            .send(&vnc_apple::auto_framebuffer_update(server.size()))
+            .await?;
+    }
 
     Ok(Connected {
         downlink: Downlink::Records(Box::new(RecordReader::new(reader, keys))),
@@ -2130,7 +2126,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: Some(MediaStream::new(peer, local)),
+        media: high_performance.then(|| MediaStream::new(peer, local)),
     })
 }
 
@@ -2327,7 +2323,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // state (see [`ClientMsg::Key`]).
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
     let mut wheel = Wheel::new(apple);
-    let buttons = Buttons::new(high_performance);
+    let buttons = Buttons::new(apple);
     let mut held = HeldMotion::default();
 
     let result = loop {
@@ -5106,25 +5102,25 @@ impl Wheel {
 /// The pointer-mask bit each mouse button sets, by server dialect.
 ///
 /// RFB's convention is bit 1 = left, bit 2 = middle, bit 3 = right, and every
-/// server here honours it — including Apple's Standard mode, measured on macOS
-/// 26.6 by holding each button through a live session and reading
-/// `CGEventSource.buttonState` on the Mac. High Performance mode's agent reads
-/// the same mask positionally instead, as CGMouseButton numbers: bit 2 =
-/// *right*, bit 3 = *middle*. A right-click sent by the book therefore lands on
-/// the virtual display as a middle-click — the button macOS does nothing with —
-/// which is what a dead right button in that mode was. The two bits are swapped
-/// for that subtype alone. See docs/apple-vnc-889.md.
+/// generic server honours it. A Mac's agent reads the same mask positionally
+/// instead, as CGMouseButton numbers: bit 2 = *right*, bit 3 = *middle*.
+/// `screensharingd` swaps the two bits back for every viewer except one that
+/// answered 3.888 or 3.889, so on Apple's revision a right-click sent by the book
+/// lands as a middle-click — the button macOS does nothing with — which is what a
+/// dead right button in High Performance was. Measured on macOS 26.6 by holding
+/// each button through a live session and reading `CGEventSource.buttonState` on
+/// the Mac. See docs/apple-vnc-889.md.
 enum Buttons {
     /// The RFB convention: bit 2 = middle, bit 3 = right.
     Rfb,
-    /// Apple High Performance's positional reading: bit 2 = right, bit 3 = middle.
-    HighPerformance,
+    /// A Mac's positional reading on 003.889: bit 2 = right, bit 3 = middle.
+    Apple,
 }
 
 impl Buttons {
-    fn new(high_performance: bool) -> Self {
-        if high_performance {
-            Self::HighPerformance
+    fn new(apple: bool) -> Self {
+        if apple {
+            Self::Apple
         } else {
             Self::Rfb
         }
@@ -5140,8 +5136,8 @@ impl Buttons {
             (_, MouseButton::Left) => Some(0x01),
             (Self::Rfb, MouseButton::Middle) => Some(0x02),
             (Self::Rfb, MouseButton::Right) => Some(0x04),
-            (Self::HighPerformance, MouseButton::Middle) => Some(0x04),
-            (Self::HighPerformance, MouseButton::Right) => Some(0x02),
+            (Self::Apple, MouseButton::Middle) => Some(0x04),
+            (Self::Apple, MouseButton::Right) => Some(0x02),
             (_, MouseButton::Back | MouseButton::Forward) => None,
         }
     }
@@ -5917,10 +5913,12 @@ mod tests {
         assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
     }
 
+    /// Both Apple subtypes speak Apple's revision, as Apple's viewer does to every
+    /// Mac whichever mode it then opens; only a generic target speaks RFB 3.8.
     #[test]
     fn the_dialect_follows_the_subtype() {
         assert_eq!(Dialect::of(None), Dialect::Rfb38);
-        assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
+        assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Apple889);
         assert_eq!(
             Dialect::of(Some(Subtype::ArdHighPerformance)),
             Dialect::Apple889
@@ -6277,7 +6275,7 @@ mod tests {
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
         assert_eq!(
-            rfb38_encoding_list(false, false, false, false, false),
+            rfb38_encoding_list(false, false, false, false),
             vec![
                 ENCODING_COPY_RECT,
                 ENCODING_ZRLE,
@@ -6307,7 +6305,7 @@ mod tests {
         // ServerCutText, the density report and the output list as their own
         // messages, and the audio announcement is an empty rectangle with no
         // pixels behind it.
-        let pixel_encodings = rfb38_encoding_list(false, true, true, true, true)
+        let pixel_encodings = rfb38_encoding_list(true, true, true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
@@ -6343,13 +6341,25 @@ mod tests {
         }
     }
 
+    /// Both Apple modes ask for the display layout and zlib, and for none of the
+    /// generic extensions: the pasteboard is Apple's own protocol, the sound is
+    /// AirPlay's or the media stream's, and a Mac reports its densities and screens
+    /// in the layout.
     #[test]
-    fn standard_ard_uses_the_apple_metadata_list_with_zlib() {
-        let encodings = rfb38_encoding_list(true, true, true, false, false);
-        assert_eq!(encodings, vnc_apple::ENCODINGS);
+    fn a_mac_is_asked_for_its_layout_and_zlib_and_no_generic_extension() {
+        let encodings = vnc_apple::ENCODINGS;
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
         assert!(encodings.contains(&ENCODING_ZLIB));
-        assert!(!encodings.contains(&vnc_clipboard::ENCODING));
+        for generic in [
+            vnc_clipboard::ENCODING,
+            vnc_audio::ENCODING,
+            vnc_camera::ENCODING,
+            vnc_mic::ENCODING,
+            ENCODING_WLSHARE_DENSITY,
+            ENCODING_WLSHARE_OUTPUTS,
+        ] {
+            assert!(!encodings.contains(&generic), "{generic:#x}");
+        }
     }
 
     // ── Cursor pseudo-encoding ──────────────────────────────────────────────
@@ -6576,17 +6586,15 @@ mod tests {
     /// The two wlshare requests, checked byte by byte against
     /// docs/wlshare-density.md and docs/wlshare-outputs.md rather than through
     /// the encoder's own eyes. Both are asked of every generic server, after
-    /// every encoding that decides pixels, and of no Mac.
+    /// every encoding that decides pixels, and of no Mac (see
+    /// `a_mac_is_asked_for_its_layout_and_zlib_and_no_generic_extension`).
     #[test]
-    fn the_wlshare_extensions_are_asked_of_every_generic_server_and_no_mac() {
+    fn the_wlshare_extensions_are_asked_of_every_generic_server() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
         for clipboard in [false, true] {
-            let generic = rfb38_encoding_list(false, clipboard, false, false, false);
+            let generic = rfb38_encoding_list(clipboard, false, false, false);
             assert_eq!(&generic[generic.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            let apple = rfb38_encoding_list(true, clipboard, false, false, false);
-            assert!(!apple.contains(&ENCODING_WLSHARE_DENSITY));
-            assert!(!apple.contains(&ENCODING_WLSHARE_OUTPUTS));
         }
     }
 
@@ -6983,14 +6991,13 @@ mod tests {
         (written(&sent), bridge, listener)
     }
 
-    /// The pseudo-encoding is asked for only where the target asked for sound,
-    /// and never of a Mac — whose audio arrives over AirPlay, not this. QEMU's
-    /// own, which promises raw samples, is never asked.
+    /// The pseudo-encoding is asked of a generic server only where the target
+    /// asked for sound. QEMU's own, which promises raw samples, is never asked.
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_audio::ENCODING.to_be_bytes(), *b"WLSF");
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(false, clipboard, true, false, false);
+            let asked = rfb38_encoding_list(clipboard, true, false, false);
             assert!(asked.contains(&vnc_audio::ENCODING));
             assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
             assert_eq!(
@@ -6999,14 +7006,9 @@ mod tests {
                 "the wlshare requests stay last, so audio never weighs on encoding preference"
             );
             assert!(
-                !rfb38_encoding_list(false, clipboard, false, false, false)
+                !rfb38_encoding_list(clipboard, false, false, false)
                     .contains(&vnc_audio::ENCODING),
                 "a target without audio does not ask"
-            );
-            assert!(
-                !rfb38_encoding_list(true, clipboard, true, false, false)
-                    .contains(&vnc_audio::ENCODING),
-                "no Mac is asked"
             );
         }
     }
@@ -7017,24 +7019,23 @@ mod tests {
     #[test]
     fn the_camera_extension_is_asked_only_where_a_camera_is_carried() {
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(false, clipboard, true, true, false);
+            let asked = rfb38_encoding_list(clipboard, true, true, false);
             assert!(asked.contains(&vnc_camera::ENCODING));
             assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!rfb38_encoding_list(false, clipboard, true, false, false).contains(&vnc_camera::ENCODING));
+            assert!(!rfb38_encoding_list(clipboard, true, false, false).contains(&vnc_camera::ENCODING));
         }
     }
 
     /// The microphone extension on the same terms: asked of a generic server exactly
-    /// where the target carries a microphone, of no Mac, and never ahead of the density
-    /// and outputs requests.
+    /// where the target carries a microphone, and never ahead of the density and
+    /// outputs requests.
     #[test]
     fn the_microphone_extension_is_asked_only_where_a_microphone_is_carried() {
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(false, clipboard, true, true, true);
+            let asked = rfb38_encoding_list(clipboard, true, true, true);
             assert!(asked.contains(&vnc_mic::ENCODING));
             assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!rfb38_encoding_list(false, clipboard, true, true, false).contains(&vnc_mic::ENCODING));
-            assert!(!rfb38_encoding_list(true, clipboard, false, false, true).contains(&vnc_mic::ENCODING));
+            assert!(!rfb38_encoding_list(clipboard, true, true, false).contains(&vnc_mic::ENCODING));
         }
     }
 
@@ -7319,14 +7320,14 @@ mod tests {
         assert_eq!(bytes, vec![pointer_event(0x00, (30, 40)).to_vec()]);
     }
 
-    /// High Performance mode's agent reads the mask as CGMouseButton numbers,
-    /// so right and middle ride each other's RFB bits there — and only there.
-    /// Measured on macOS 26.6: see [`Buttons`].
+    /// A Mac on Apple's revision reads the mask as CGMouseButton numbers, so right
+    /// and middle ride each other's RFB bits there — and only there. Measured on
+    /// macOS 26.6: see [`Buttons`].
     #[test]
-    fn high_performance_swaps_the_middle_and_right_mask_bits() {
+    fn apples_revision_swaps_the_middle_and_right_mask_bits() {
         for (buttons, right_bit, middle_bit) in [
             (Buttons::Rfb, 0x04u8, 0x02u8),
-            (Buttons::HighPerformance, 0x02, 0x04),
+            (Buttons::Apple, 0x02, 0x04),
         ] {
             for (button, bit) in [
                 (MouseButton::Right, right_bit),

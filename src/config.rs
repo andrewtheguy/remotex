@@ -23,7 +23,7 @@ use crate::throughput::MeterConfig;
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
 /// client (src/rdp.rs over src/rdp_client), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
-/// with `subtype = "ard"`, Apple Screen Sharing Standard mode over RFB 3.8.
+/// with an Apple [`Subtype`], over Apple's own RFB 003.889.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
@@ -41,32 +41,33 @@ pub enum Protocol {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Subtype {
-    /// macOS Screen Sharing on the standard RFB 3.8 wire, authenticated the way
-    /// Apple Remote Desktop does: the credentials are a *macOS account's* and the
-    /// connection is named to the Mac, which is what makes it share the screen
-    /// rather than a login window of its own (see [`crate::vnc`]). A third-party
-    /// VNC server that happens to run on a Mac is not this — it is a plain `vnc`
-    /// target.
+    /// macOS Screen Sharing in Standard mode, on the wire Apple's viewer uses for
+    /// every Mac: RFB 003.889, its AES-128-CBC record layer (see
+    /// [`crate::vnc_record`]) and Apple's control messages (see
+    /// [`crate::vnc_apple`]), authenticated the way Apple Remote Desktop does: the
+    /// credentials are a *macOS account's* and the connection is named to the Mac,
+    /// which is what makes it share the screen rather than a login window of its
+    /// own (see [`crate::vnc`]). A third-party VNC server that happens to run on a
+    /// Mac is not this — it is a plain `vnc` target.
     ///
     /// The Mac's metadata extension lists every attached display, permits selecting
     /// one or their combined desktop, and supplies each display's pixel density.
     /// Apple's native pasteboard is available, and the rectangles are zlib.
     Ard,
     /// The same Mac in High Performance Screen Sharing, as Apple's viewer has it:
-    /// RFB 003.889 — an AES-128-CBC record layer (see [`crate::vnc_record`])
-    /// carrying Apple's control messages (see [`crate::vnc_apple`]) — on a virtual
-    /// display, with the picture as HEVC and the sound as AAC-ELD over the media
+    /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
+    /// HEVC and the sound as AAC-ELD over the media
     /// stream Screen Sharing negotiates on the RFB connection and sends over UDP
     /// with SRTP ([`crate::vnc_apple_media`]). Zlib rectangles carry the picture
     /// only until the stream does, across display changes, and when the Mac
     /// refuses it.
     ///
-    /// Alone among the subtypes, none of this is documented by
-    /// Apple: the revision, its record layer, its control messages, its virtual
-    /// display handling and its media stream were all reverse engineered, and are
-    /// only as correct as the Macs they have been measured against —
-    /// docs/apple-vnc-889.md records which, and what is still inferred. A macOS
-    /// update is free to change any of it.
+    /// None of this is documented by Apple: the revision, its record layer and its
+    /// control messages, which it shares with [`Subtype::Ard`], its virtual display
+    /// handling and its media stream were all reverse engineered, and are only as
+    /// correct as the Macs they have been measured against — docs/apple-vnc-889.md
+    /// records which, and what is still inferred. A macOS update is free to change
+    /// any of it.
     ///
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the

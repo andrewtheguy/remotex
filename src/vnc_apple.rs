@@ -1,7 +1,7 @@
-//! Apple's Screen Sharing messages and encodings. `ard` is Standard mode over
-//! RFB 3.8 and uses the display, cursor, and pasteboard pieces for the Mac's
-//! physical displays. `ard-high-performance` additionally uses Apple's record
-//! layer in [`crate::vnc_record`] and requests a virtual display.
+//! Apple's Screen Sharing messages and encodings. Both Apple subtypes speak RFB
+//! 003.889 inside Apple's record layer ([`crate::vnc_record`]). `ard` is Standard
+//! mode and uses the display, cursor, and pasteboard pieces for the Mac's physical
+//! displays. `ard-high-performance` also requests a virtual display.
 //!
 //! Everything here is either a message this client builds or a rectangle payload
 //! it parses. The transport is [`crate::vnc_record`]'s and the session loop is
@@ -44,9 +44,9 @@
 //! ([`crate::vnc_apple_media`]): zlib rectangles carry the picture only until
 //! then. `ard` keeps its picture on zlib, and its sound arrives over the AirPlay
 //! workaround.
-//! Every Apple subtype uses Apple's native pasteboard protocol; RFB 003.889
-//! enables monitoring before the rekey and carries fetches and clipboard data
-//! inside the encrypted transport.
+//! Every Apple subtype uses Apple's native pasteboard protocol, enabling
+//! monitoring before the rekey and carrying fetches and clipboard data inside the
+//! encrypted transport.
 //!
 //! ## Reading the offsets in here
 //!

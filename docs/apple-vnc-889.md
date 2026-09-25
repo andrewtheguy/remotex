@@ -19,25 +19,27 @@ The implementation is `src/vnc_record.rs` (the 003.889 record layer),
 (High Performance's media stream), `src/aac_eld.rs` (its sound's decoder) and
 the two Apple paths in `src/vnc.rs`.
 
-"High Performance" below is Apple's mode: RFB 003.889 and a virtual display.
+"High Performance" below is Apple's mode: a virtual display and the media stream.
+Both modes speak RFB 003.889, Apple's own revision, inside its encrypted record
+layer.
 
-| Subtype | Wire | Picture | Sound |
+| Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard mode, RFB 3.8, the physical displays | zlib | AirPlay workaround |
-| `ard-high-performance` | High Performance, RFB 003.889, one virtual display | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
+| `ard` | Standard, the physical displays | zlib | AirPlay workaround |
+| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
 
 `ard-high-performance` is High Performance as Apple's viewer has it, and needs a
-gateway built with the `apple-hp-media` feature. Remotex does not pair High
-Performance's protocol with Standard mode's picture and AirPlay sound: Apple's
-viewer never offers that combination.
+gateway built with the `apple-hp-media` feature. Remotex does not pair a virtual
+display with Standard mode's picture and AirPlay sound: Apple's viewer never offers
+that combination.
 
 ## Summary
 
 | | |
 |---|---|
-| Two subtypes | `subtype = "ard"` is Standard mode: RFB 3.8, sharing the Mac's physical displays, at a fixed size. `ard-high-performance` is High Performance mode: RFB 003.889 with an encrypted record layer, sharing one virtual display the Mac creates at the size the client asks for. |
+| Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib, the cursor cache, the display layout and the metadata framing. |
-| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are High Performance's pointer buttons and the wheel. Each is covered below. |
+| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
 | Picture and sound | `ard` is zlib throughout, and its sound reaches remotex through its AirPlay receiver. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
@@ -68,8 +70,8 @@ need that setting.
 
 Apple's viewer also knows private security types 31–36: Diffie-Hellman variants,
 RSA, a preauthorized connection, Kerberos and SRP. Only type 30 has been
-exercised, and only type 30 supplies the key the High Performance record layer
-starts from, so remotex offers nothing else.
+exercised, and only type 30 supplies the key the record layer starts from, so
+remotex offers nothing else.
 
 ## The two modes in Apple's viewer
 
@@ -96,12 +98,15 @@ handshake before it is the same in both modes (see
   viewer show an alert and close the session, and 16 missed receiver-report
   intervals on any leg disconnect it. It has no fallback to RFB pixels.
 
-Remotex matches the split: `ard` shares the physical displays, refuses `resize`
-and never creates a virtual display, and `ard-high-performance` creates exactly
-one, the "1 Virtual Display" choice, and never selects a physical screen or sends
-`SetServerScaling`. It departs in three places:
-- **The handshake.** Apple's viewer answers `RFB 003.889` to every Mac, while `ard`
-  answers `RFB 003.008`.
+Remotex matches the split, on the same handshake: `ard` shares the physical
+displays, refuses `resize` and never creates a virtual display, and
+`ard-high-performance` creates exactly one, the "1 Virtual Display" choice, and
+never selects a physical screen or sends `SetServerScaling`. It departs in three
+places:
+- **Encryption.** Apple's viewer asks for the record layer only when its
+  `encryptionLevel` preference is 2. The default is 0, which leaves the whole
+  session in cleartext after authentication, keystrokes and the media stream's
+  keys included. Remotex always asks, in both modes.
 - **Standard's picture.** `ard` asks for zlib, Apple's Full quality, where Adaptive
   asks first for the private codecs remotex cannot decode.
 - **A failed media stream.** `ard-high-performance` returns the picture to zlib
@@ -109,23 +114,26 @@ one, the "1 Virtual Display" choice, and never selects a physical screen or send
 
 ## Connecting
 
-1. **Version.** `RFB 003.889` for High Performance, `RFB 003.008` for Standard.
-   Apple's viewer sends `003.889` in both modes, and `003.003` to a server that is
-   not a Mac.
+Both modes connect the same way until the record layer is up.
+
+1. **Version.** `RFB 003.889`, as Apple's viewer answers every Mac. It sends
+   `003.003` to a server that is not a Mac.
 2. **Type 30.** A Diffie-Hellman exchange. `MD5(shared secret)` is the AES-128 key
    that encrypts the 128-byte credential block (username at 0, password at 64) in
    **ECB** mode, not the CBC a published description gives. It is also the first
    key the record layer's rekey is wrapped under.
-3. **ClientInit.** High Performance sends `0x81`: `0x80` asks for Apple's extended
-   ServerInit, and `0x40`, never set, would ask for a session-select exchange
-   remotex does not implement. Standard sends the ordinary shared flag.
-4. **ServerInit** (extended on High Performance; see below), then
-   `SetPixelFormat` and `SetEncodings`. High Performance ends here, before sending
+3. **ClientInit** `0x81`: `0x80` asks for Apple's extended ServerInit, and `0x40`,
+   never set, would ask for a session-select exchange remotex does not implement.
+4. **ServerInit**, extended (see below). High Performance ends here, before sending
    anything, when the Mac does not list `SetDisplayConfiguration`.
-5. **High Performance only:** a cleartext prelude (`ViewerInfo`, `SetMode(control)`,
-   `AutoPasteboard(start)` when clipboard is on), then `SetEncryption` commands 1
+5. **A cleartext prelude:** `ViewerInfo`, `SetMode(control)`, and
+   `AutoPasteboard(start)` when clipboard is on, then `SetEncryption` commands 1
    and 2. The Mac answers with the rekey, and everything after it travels in
    records.
+6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
+   `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
+   `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
+   screen being sent.
 
 ### ServerInit's name field is not a name
 
@@ -172,7 +180,7 @@ steppable. `CursorPos` (`0x44c`) has no payload. `DisplayInfo` is 10 bytes of
 header, then `0x1c` bytes per screen. The other metadata encodings each start with
 a `u16` giving how much follows.
 
-## The High Performance record layer
+## The record layer
 
 Every message after the rekey, in both directions, is a record:
 
@@ -205,8 +213,7 @@ client must step over it.
 
 **zlib** (`0x06`) is one deflate stream for the life of the connection. Each
 rectangle is a `u32` length and a chunk of that stream, inflating to exactly
-`w × h × 4`. On a static desktop it is roughly 50:1, and Standard mode compresses
-on the same terms.
+`w × h × 4`. On a static desktop it is roughly 50:1, in either mode.
 
 **The cursor cache** (`0x450`) stores a shape when its compressed length is nonzero
 and selects a stored one when it is zero. A shape is a `w·h·4` BGRA pixmap followed
@@ -404,14 +411,13 @@ Three behaviours of the Mac shape how remotex resizes:
 
 ## Input
 
-### High Performance reads the pointer mask as CGMouseButton numbers
+### Apple's revision reads the pointer mask as CGMouseButton numbers
 
-RFB's mask is bit 1 left, bit 2 middle, bit 3 right, and Standard mode honours it.
-The Mac swaps bits 2 and 3 for every protocol version except 3.888 and 3.889, and
-its agent reads the mask as macOS button numbers (left, right, center). So a
-by-the-book right-click reaches a High Performance session as a middle-click,
-which macOS does nothing visible with. `Buttons` in `src/vnc.rs` swaps the two
-bits for that subtype.
+RFB's mask is bit 1 left, bit 2 middle, bit 3 right. The Mac swaps bits 2 and 3
+for every protocol version except 3.888 and 3.889, and its agent reads the mask as
+macOS button numbers (left, right, center). So on 003.889 a by-the-book
+right-click arrives as a middle-click, which macOS does nothing visible with, in
+either mode. `Buttons` in `src/vnc.rs` swaps the two bits for both Apple subtypes.
 
 ### A Mac scrolls only on a lone wheel bit
 
@@ -490,9 +496,9 @@ A mis-sized body makes the Mac swallow the next message and hang silently. The
 capability bitmap gates whether the Mac sends `MiscStatus` at all.
 
 **The pasteboard.** Change notifications need `ViewerInfo`, `SetMode(control)`
-and `AutoPasteboard(start)`, in that order. High Performance sends them in the
-cleartext prelude, and repeats `AutoPasteboard(start)` after the virtual display's
-layout. The Mac then signals with `MiscStatus`:
+and `AutoPasteboard(start)`, in that order. Both modes send them in the cleartext
+prelude, and High Performance repeats `AutoPasteboard(start)` after the virtual
+display's layout. The Mac then signals with `MiscStatus`:
 - command 2: its pasteboard changed;
 - command 3: it needs data for a promised flavor.
 

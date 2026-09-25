@@ -239,9 +239,8 @@ password = "change-me"
 # VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
-# Every Apple subtype uses the Mac's native UTF-8 pasteboard protocol;
-# "ard-high-performance" carries its fetches and data inside the encrypted record
-# transport.
+# Every Apple subtype uses the Mac's native UTF-8 pasteboard protocol, carrying
+# its fetches and data inside the encrypted record transport.
 #clipboard = false
 
 # Remote audio: carry this target's sound when the client asks for it, with the
@@ -384,9 +383,14 @@ password = "change-me"
 # example below does. A third-party VNC server that happens to run on a
 # Mac is not this: it is a plain "vnc" target.
 #
-# `subtype = "ard"` is standard screen sharing on the ordinary RFB wire: the Mac's
-# physical display list and native pasteboard, with one framebuffer holding every
-# attached display at once, sent as zlib rectangles.
+# Both speak the protocol revision Apple's own viewer answers every Mac with, and
+# nothing in it is documented by Apple: the revision, its record layer and its
+# control messages were all reverse engineered, and are only as correct as the
+# Macs they have been measured against. A macOS update is free to change any of it.
+#
+# `subtype = "ard"` is Standard screen sharing: the Mac's physical display list and
+# native pasteboard, with one framebuffer holding every attached display at once,
+# sent as zlib rectangles.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
@@ -396,11 +400,8 @@ password = "change-me"
 # password = "the-account-password"
 
 # `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
-# it. Alone among the subtypes, nothing it speaks is documented by Apple: the
-# protocol revision, its record layer, its control messages, its virtual display
-# handling and its media stream were all reverse engineered, and are only as
-# correct as the Macs they have been measured against. A macOS update is free to
-# change any of it.
+# it. Its virtual display handling and its media stream were reverse engineered
+# too.
 #
 # It requests one virtual display instead of the Mac's physical displays. It opens
 # at the pinned `width` and `height` when both are set, or at the full resolution

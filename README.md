@@ -20,14 +20,15 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
   not on older Windows or xrdp. It carries the clipboard and
   sound (MS-RDPEA), and does not carry touch. See
   [`docs/rdp-client.md`](docs/rdp-client.md).
-- VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
-  `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
-  with Apple Remote Desktop authentication.
+- VNC uses a built-in RFB client and connects directly to macOS Screen Sharing,
+  over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
+  Apple's viewer does. `subtype = "ard"` selects Screen Sharing's Standard mode,
+  on the Mac's own displays.
   `subtype = "ard-high-performance"` is its High Performance mode as Apple's
-  viewer has it: RFB 003.889 on one virtual display holding every remote window,
+  viewer has it: one virtual display holding every remote window,
   with the picture as HEVC and the sound as AAC-ELD over the Mac's SRTP media
   stream, in a gateway built with the `apple-hp-media` feature. Only it accepts
-  `resize = true`. It is reverse engineered, having no specification.
+  `resize = true`. Both are reverse engineered, having no specification.
   A wlroots-based Wayland desktop behind
   [wlshare](https://github.com/andrewtheguy/wlshare) is a plain `vnc` target:
   that server carries pixel density over one private RFB extension the gateway
@@ -264,9 +265,9 @@ Remote Desktop Session Host role. The picture is verified by hand there, where
 remote audio (`audio = true`) and the rest of the RDP feature set are exercised on
 every test run. Expect to re-check it by hand after a change.
 
-High Performance's protocol revision is the one part of remotex built entirely without a specification: Apple
-documents none of it — the revision, its record layer, its control messages, its
-virtual display handling or its media stream — so all of it is reverse engineered and only as correct as the Macs it has been measured
+Apple's protocol revision is the one part of remotex built entirely without a specification: Apple
+documents none of it — the revision, its record layer, its control messages, High
+Performance's virtual display handling or its media stream — so all of it is reverse engineered and only as correct as the Macs it has been measured
 against. A macOS update is free to change any of it. The dynamic-resolution
 descriptor has been measured across its arbitrary-size boundary and a burst of
 viewport reports, but remains reverse engineered.
