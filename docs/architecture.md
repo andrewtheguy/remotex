@@ -1121,7 +1121,7 @@ Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by libde265 (`src/vnc_apple_media.rs`), in a
 gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
 picture until the stream delivers, across every display change, and
-when the Mac refuses the stream; while it runs, polling holds to one pixel, which
+when the Mac refuses the stream or the receiver stops; while it runs, polling holds to one pixel, which
 still brings cursor shapes and layouts. Apple's virtual-display-count and
 resolution-preset controls remain unimplemented.
 

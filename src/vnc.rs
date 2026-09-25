@@ -2943,7 +2943,7 @@ async fn blit_picture(
 }
 
 /// The next picture the media stream decoded, on a session that has one;
-/// otherwise never.
+/// otherwise never. `None` is the stream's receiver saying it has stopped.
 async fn next_picture(apple: &mut Option<Apple>) -> Option<Arc<vnc_apple_media::Picture>> {
     let Some(pictures) = apple.as_mut().and_then(|a| a.pictures.as_mut()) else {
         return std::future::pending().await;
@@ -3087,8 +3087,26 @@ async fn read_loop<R: AsyncRead + Unpin>(
             byte = reader.read_u8() => byte,
 
             picture = next_picture(&mut apple) => {
-                if let Some(picture) = picture {
-                    show_picture(&shared, &picture, &sink).await?;
+                match picture {
+                    Some(picture) => show_picture(&shared, &picture, &sink).await?,
+                    // The receiver stopped under a live picture: zlib takes it back,
+                    // the whole desktop at once and every change after, until a
+                    // display change offers the stream again.
+                    None => {
+                        let size = {
+                            let mut d = desktop.lock().unwrap();
+                            std::mem::take(&mut d.media_live).then_some(d.size)
+                        };
+                        if let Some(size) = size {
+                            info!("vnc: the Mac's media stream stopped; the picture is back on zlib");
+                            full_repaint = Some(FullRepaint::new(display.lock().unwrap().repaint_pixels));
+                            send_all(
+                                uplink,
+                                &[vnc_apple::auto_framebuffer_update(size), update_request(false, size).to_vec()],
+                            )
+                            .await?;
+                        }
+                    }
                 }
                 continue;
             }

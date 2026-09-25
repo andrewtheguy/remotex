@@ -1069,7 +1069,8 @@ unsafe fn to_rgb(img: &de265_sys::de265_image) -> anyhow::Result<Picture> {
 // ---------------------------------------------------------------------------
 
 /// The newest decoded picture, for the read loop to show. A picture is the whole
-/// display, so an unshown one is simply replaced.
+/// display, so an unshown one is simply replaced. `None` after a picture means
+/// the receiver has stopped.
 pub type Pictures = tokio::sync::watch::Receiver<Option<std::sync::Arc<Picture>>>;
 
 /// One session's media stream: its offers, and once the Mac names its ports, the
@@ -1171,7 +1172,13 @@ impl MediaStream {
                     return Ok(true);
                 }
                 let ports = (audio_port, video_port);
-                if self.receiver.as_ref().is_some_and(|(bound, _)| *bound == ports) {
+                // The Mac names the same ports every time, so a receiver that has
+                // stopped is replaced rather than kept for them.
+                if self
+                    .receiver
+                    .as_ref()
+                    .is_some_and(|(bound, receiver)| *bound == ports && !receiver.is_finished())
+                {
                     return Ok(false);
                 }
                 if let Some((_, receiver)) = self.receiver.take() {
@@ -1321,7 +1328,7 @@ impl Receiver {
 
     async fn run(mut self) {
         let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let units = spawn_decoder(self.pictures.clone(), std::sync::Arc::clone(&keyframe));
+        let (units, decoder) = spawn_decoder(self.pictures.clone(), std::sync::Arc::clone(&keyframe));
         let mut sound = self.sound.take().map(Sound::start);
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1449,20 +1456,27 @@ impl Receiver {
                 let _ = self.video.send(&pli).await;
             }
         }
+        // The stream has stopped here while the RFB session goes on. `None` tells
+        // the read loop, which hands the picture back to zlib; it goes after the
+        // decoder's last picture, or that picture would take it over again.
+        drop(units);
+        let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
+        self.pictures.send_replace(None);
     }
 }
 
 /// The decoder thread: access units in, pictures out to the watch. Its queue's
-/// sender is the handle, and the thread ends when the receive task drops it.
+/// sender is the handle, and the thread, whose own handle comes with it, ends when
+/// the receive task drops it.
 /// `keyframe` is how it says a unit failed to decode, which the receive task turns
 /// into a PLI.
 #[cfg(feature = "apple-hp-media")]
 fn spawn_decoder(
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::sync::mpsc::SyncSender<AccessUnit> {
+) -> (std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>) {
     let (units, inbox) = std::sync::mpsc::sync_channel::<AccessUnit>(DECODE_QUEUE);
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let mut decoder = match Hevc::new() {
             Ok(decoder) => decoder,
             Err(e) => {
@@ -1487,7 +1501,7 @@ fn spawn_decoder(
             }
         }
     });
-    units
+    (units, thread)
 }
 
 /// The sound leg on the receive task's side: authenticated, decrypted access units
@@ -1811,6 +1825,18 @@ mod tests {
         assert_eq!(SrtpReceiver::new(&master()).unprotect(&mut forged), Err(SrtpError::Forged));
         let mut other_key = packet;
         assert_eq!(SrtpReceiver::new(&[7; 46]).unprotect(&mut other_key), Err(SrtpError::Forged));
+    }
+
+    #[test]
+    fn srtp_refuses_a_duplicate_and_a_straggler() {
+        let packet = unhex("80e412340a0b0c0dcafebabe610005049285d9955b8928769900c5323d679c04bbccbf");
+        let mut srtp = SrtpReceiver::new(&master());
+        assert!(srtp.unprotect(&mut packet.clone()).is_ok());
+        assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "a duplicate");
+        srtp.last = Some((0xcafe_babe, 0x1235, 0));
+        assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "overtaken");
+        srtp.last = Some((0x0102_0304, 0x1235, 0));
+        assert!(srtp.unprotect(&mut packet.clone()).is_ok(), "a new stream starts over");
     }
 
     #[test]

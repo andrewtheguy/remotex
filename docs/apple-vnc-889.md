@@ -500,7 +500,8 @@ AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with 
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`); `ard-virtual-display` never offers. Zlib carries the
 picture only until the stream delivers, across display changes, and when the Mac
-refuses the stream.
+refuses the stream or the gateway's receiver stops; after a stop, until the next
+display change offers the stream again.
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: libde265 for the picture (LGPL-3.0-or-later, linked
