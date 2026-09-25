@@ -13,7 +13,9 @@
 # because of its decoders' licences, and a public package is a release artifact.
 # The first push creates it `internal` — readable by the organization — and only
 # the package's settings page on GitHub can make it private; there is no API for
-# it. Every push, this script stops if an anonymous client can read the image.
+# it. This script asks ghcr whether an anonymous client can pull the package, and
+# does not push unless the answer is no or there is no package yet, and fails
+# unless it is no after the push.
 #
 # It builds a tag and nothing else, from `git archive` of that tag in this
 # checkout, and only one GitHub also has at the same commit: neither an untagged
@@ -106,19 +108,37 @@ podman build \
   -t "${image}:${tag}" \
   "$context"
 
+# What ghcr tells a client with no credentials that asks to pull the package, as
+# measured: a token for a public package, 401 UNAUTHORIZED for a private one, and
+# 403 DENIED for one that does not exist. Anything else says nothing.
+anonymous_access() {
+  local response body code
+  response="$(curl -sS -w '\n%{http_code}' "https://${registry}/token?scope=repository:${package}:pull")" \
+    || { echo "unreachable"; return; }
+  body="${response%$'\n'*}"
+  code="${response##*$'\n'}"
+  case "$code" in
+    200) grep -q '"token":"[^"]' <<<"$body" && echo public || echo "HTTP 200 without a token" ;;
+    401) grep -q '"code":"UNAUTHORIZED"' <<<"$body" && echo private || echo "HTTP 401: ${body}" ;;
+    403) grep -q '"code":"DENIED"' <<<"$body" && echo missing || echo "HTTP 403: ${body}" ;;
+    *) echo "HTTP ${code}: ${body}" ;;
+  esac
+}
+
+# Before a layer goes up. A package that does not exist yet is the first push,
+# which the check after it covers.
+access="$(anonymous_access)"
+case "$access" in
+  private | missing) ;;
+  public) echo "${image} is public: make the package private before pushing to it" >&2; exit 1 ;;
+  *) echo "could not tell whether ${image} is private (${access}); not pushing" >&2; exit 1 ;;
+esac
+
 echo ">> pushing ${image}:${tag}"
 podman push "${image}:${tag}"
 
-# What a client with no credentials is told: a token that can pull means the
-# package is public.
-anonymous="$(curl -sS "https://${registry}/token?scope=repository:${package}:pull" \
-  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
-status="$(curl -s -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer ${anonymous}" \
-  -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
-  -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-  "https://${registry}/v2/${package}/manifests/${tag}")"
-[ "$status" != 200 ] \
-  || { echo "${image} is public: anyone can pull ${tag}. Make the package private" >&2; exit 1; }
+access="$(anonymous_access)"
+[ "$access" = private ] \
+  || { echo "${image} is not confirmed private after the push (${access}): anyone may pull ${tag}. Make the package private" >&2; exit 1; }
 
-echo ">> pushed ${image}:${tag} (${commit}); anonymous pull: HTTP ${status}"
+echo ">> pushed ${image}:${tag} (${commit}); anonymous pull refused"
