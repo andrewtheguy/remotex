@@ -561,6 +561,23 @@ export function wheelUnitFromEvent(deltaMode: number): WheelUnit {
   }
 }
 
+// The bit a button holds in DOM `MouseEvent.buttons`, which numbers them
+// differently from `MouseEvent.button`: right is 2 and middle 4 there.
+export function mouseButtonBit(button: MouseButton): number {
+  switch (button) {
+    case "left":
+      return 1;
+    case "right":
+      return 2;
+    case "middle":
+      return 4;
+    case "back":
+      return 8;
+    case "forward":
+      return 16;
+  }
+}
+
 // Map DOM MouseEvent.button to the protocol button name. 3 and 4 are the back
 // and forward buttons; anything past them has no agreed meaning on any platform.
 export function mouseButtonFromEvent(button: number): MouseButton | null {

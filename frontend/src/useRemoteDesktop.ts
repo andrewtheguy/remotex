@@ -46,6 +46,7 @@ import {
   MAX_CLIPBOARD_BYTES,
   type MosaicRegion,
   type MouseButton,
+  mouseButtonBit,
   mouseButtonFromEvent,
   type RemoteClipboard,
   wheelUnitFromEvent,
@@ -2314,12 +2315,27 @@ export function useRemoteDesktop(
       send({ type: "mouseMove", x, y });
     };
 
+    // A button held on the remote that this event reports up. Its mouseup went
+    // elsewhere: a system window can take the release without the page losing
+    // focus, so neither the window's mouseup nor the overlay's blur saw it.
+    // Released before the event that exposed it, as a lapsed modifier is.
+    const releaseLiftedButtons = (e: MouseEvent) => {
+      for (const button of pressedButtons) {
+        if ((e.buttons & mouseButtonBit(button)) === 0) {
+          pressedButtons.delete(button);
+          send({ type: "mouseButton", button, pressed: false, clicks: 1 });
+        }
+      }
+    };
+
     const onMouseMove = (e: MouseEvent) => {
+      releaseLiftedButtons(e);
       releaseLapsedPointer(e);
       moveTo(e);
     };
     const onMouseDown = (e: MouseEvent) => {
       el.focus(); // take keyboard focus on pointer interaction
+      releaseLiftedButtons(e);
       releaseLapsedPointer(e);
       const button = mouseButtonFromEvent(e.button);
       if (!button) {
@@ -2351,6 +2367,7 @@ export function useRemoteDesktop(
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      releaseLiftedButtons(e);
       releaseLapsedPointer(e);
       moveTo(e);
       send({
