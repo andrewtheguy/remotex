@@ -121,7 +121,7 @@ documentation.
   a per-target speaker, or a per-target audio key. See
   [A Mac's sound over AirPlay](docs/airplay-audio.md) and, for High Performance's
   own audio stream,
-  [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performance-system-audio).
+  [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and

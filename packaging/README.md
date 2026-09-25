@@ -114,10 +114,14 @@ binary's global CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
-download static archives instead of
-building vendored C, so this project needs no CMake, assembler, pkg-config,
-libclang, vcpkg, or system copies of those libraries. Do not restore
+Release builds link `opus-prebuilt`, `libvpx-prebuilt` and `libde265-prebuilt`
+(High Performance's HEVC decoder). Their sys crates download static archives
+instead of building vendored C and C++, so this project needs no CMake,
+assembler, pkg-config, libclang, vcpkg, or system copies of those libraries.
+libde265 is LGPL-3.0-or-later and linked statically, which obliges a distributor
+of a binary to let its recipient relink it against a modified libde265; see that
+repository's README. `LIBDE265_PREBUILT_DIR` selects a locally built archive, as
+`LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` do. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built

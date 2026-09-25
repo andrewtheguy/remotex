@@ -131,25 +131,13 @@ has an answer rather than being rediscovered.
   browser untouched, would remove upstream bytes and a transcode — for a target
   where the operator has already accepted lossy, the transcode is pure loss. The
   cost is a decoder this repo would then own.
-- **Apple High Performance native system audio.** The private Adaptive media
-  stream is real and was usable through v0.0.249; current remotex deliberately
-  uses the AirPlay workaround instead. Restoring it is not blocked by whether
-  Apple sends audio: the archived wire and binary audit settle AAC-ELD over
-  AES-256 SRTP with a ten-byte HMAC-SHA1 tag. It remains a large private-protocol
-  commitment: audio requires a valid but otherwise unused HEVC offer, every
-  display change tears down the sender, a complete receiver must verify SRTP and
-  protect SRTCP rather than repeat the old shortcuts, and portable AAC-ELD decode
-  brings the non-OSI-approved Fraunhofer dependency. See
-  [`apple-vnc-889.md`](apple-vnc-889.md#the-media-stream-high-performance-system-audio).
-- **Apple High Performance screen video (HEVC).** High Performance supplies its
-  virtual display over zlib rectangles today. The media stream whose audio leg
-  remotex implemented through v0.0.249 can also carry the screen as an HEVC
-  stream over SRTP, which would remove the zlib transcode on that subtype. Only
-  the audio leg was reverse-engineered; the video leg's offer had to be sent
-  because the Mac refuses audio without it, but its payload was never received —
-  see [`apple-vnc-889.md`](apple-vnc-889.md#the-media-stream-high-performance-system-audio). It is the larger,
-  less certain half, and widening standard `ard` still comes before deepening
-  this subtype.
+- **Apple High Performance native system audio.** The media stream now carries
+  High Performance's picture, and its audio leg is already negotiated — the Mac
+  refuses the stream without it — and dropped. Taking the sound from it is what
+  remains: the leg is AAC-ELD over the same SRTP, v0.0.249 decoded it, and
+  portable AAC-ELD decode brings the non-OSI-approved Fraunhofer dependency. It
+  would also replace AirPlay for a Mac whose output the running leg mutes. See
+  [`apple-vnc-889.md`](apple-vnc-889.md#the-media-stream-high-performances-picture).
 
 ### A virtual-display remote session for sway
 

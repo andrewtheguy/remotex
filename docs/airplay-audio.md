@@ -3,12 +3,15 @@
 **Experimental.** This is a workaround for the Screen Sharing audio path current
 remotex does not implement. High Performance Screen Sharing has a measured
 private AAC-ELD-over-SRTP system-audio stream; Standard mode has no measured
-equivalent. Neither path supplies audio to the current Apple engine. Instead, a
+equivalent. Remotex takes High Performance's picture from that stream and drops
+its audio leg, which it has to negotiate all the same — and while that leg runs,
+the Mac mutes its own output, which may silence this speaker too; that was not
+measured. Instead, a
 Mac on either subtype sends its sound the way it sends it to any speaker: the
 gateway is an AirPlay 1 speaker on the LAN, the Mac picks it from its Sound output
 menu, and what it plays reaches the browser like any other target's sound. See
-[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio)
-for the native High Performance path and why it remains deliberately absent.
+[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performances-picture)
+for the native High Performance path.
 
 The speaker is `src/airplay/`. It began as a standalone proof of concept that was
 measured against a physical Mac before any of it was wired in.

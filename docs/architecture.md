@@ -52,6 +52,7 @@ see [Camera frames](#camera-frames).
 | `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
+| `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | libvpx — the video codec |
@@ -1102,9 +1103,14 @@ every fresh session. With `resize = true`, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
 display layout sets the actual framebuffer geometry. There is no client-side
-resize mode or one-shot button. The Mac supplies that virtual display over the
-003.889 record transport, with zlib rectangles instead of raw pixels. Apple's
-virtual-display-count and resolution-preset controls remain unimplemented.
+resize mode or one-shot button. The Mac supplies that virtual display the way it
+does to Apple's viewer: as HEVC over its media stream, offered once the display
+has settled and decoded in the gateway by libde265
+(`src/vnc_apple_media.rs`). Zlib rectangles over the 003.889 record transport
+carry the picture until the stream delivers, across every display change, and
+when the Mac refuses the stream; while it runs, polling holds to one pixel, which
+still brings cursor shapes and layouts. Apple's virtual-display-count and
+resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: `SetEncodings` must list both
 `DisplayInfo` (`0x44d`) and the layout (`0x451`), in any order, or the Mac reports
@@ -1112,13 +1118,12 @@ no layout; and a layout's `u16` length counts the bytes after itself, with a `u1
 display count ahead of the records. The byte layouts and protocol corrections are
 in [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
-Deliberately absent: Apple's own still-image codecs and the Adaptive media
-transport (`0x1c`, HEVC video and AAC-ELD audio over SRTP); the zlib rectangles
-are the only picture path. High Performance's native system-audio path is
-measured but not implemented, and a Mac's sound arrives over AirPlay instead
+Deliberately absent: Apple's own still-image codecs. The media stream's audio
+leg is negotiated, because the Mac refuses the stream without it, and dropped; a
+Mac's sound arrives over AirPlay instead
 ([A Mac's sound over AirPlay](airplay-audio.md)). The
 transport's measurements are in
-[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performance-system-audio).
+[Apple RFB 003.889](apple-vnc-889.md#the-media-stream-high-performances-picture).
 The native Apple pasteboard works on both
 subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
 data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).

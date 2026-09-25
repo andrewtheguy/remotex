@@ -9,7 +9,7 @@
 //! encoding-1010 rectangles ([`MediaReply`]) — and, once the stream is up, no
 //! pixels at all while nothing asks it for them. None of it is documented by Apple;
 //! every rule here was measured against macOS 26.6 and is recorded in
-//! `docs/apple-vnc-889.md` ("The media stream").
+//! `docs/apple-vnc-889.md` ("The media stream: High Performance's picture").
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
