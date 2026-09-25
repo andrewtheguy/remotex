@@ -615,6 +615,14 @@ treating it as lost.
 - **Display changes.** A change stops the sound with the picture, and the next
   offer restarts both under new SSRCs on the same ports. The receiver, and with
   it the decoder, carries on across it.
+- **The virtual Mac's sound fails on its own.** On the Apple Virtualization guest,
+  a looping tone at a 2x display went distorted after about a minute and then
+  silent, and it did the same under Apple's own viewer. Remotex decoded it as it
+  came: 100 units a second, none concealed, the RMS falling while the peak held,
+  then exact digital silence. That guest is laggy whenever it plays sound, so
+  judge sound quality and performance on a physical Mac. The receiver's debug log
+  reports the decoded level every second, which shows whether the Mac sent a
+  fault.
 
 ### RFB while the stream runs
 

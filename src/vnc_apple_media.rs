@@ -1476,12 +1476,19 @@ impl Sound {
             let wave_bytes = UNITS_PER_WAVE * FRAME_SAMPLES * CHANNELS * 2;
             let mut pending: Vec<u8> = Vec::with_capacity(wave_bytes);
             let (mut decoded, mut concealed, mut undecodable) = (0u64, 0u64, 0u64);
+            // The level decoded over the last second, for the debug log: the Mac
+            // sends a unit every 10 ms whether or not anything plays, so a count
+            // of units says nothing about whether there was sound.
+            let mut level = Level::default();
             while let Ok(unit) = inbox.recv() {
                 if thread_stale.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
                 decoded += 1;
-                match decoder.decode(&unit, &mut pending) {
+                let from = pending.len();
+                let result = decoder.decode(&unit, &mut pending);
+                level.add(&pending[from..]);
+                match result {
                     Ok(false) => {}
                     Ok(true) => concealed += 1,
                     Err(e) => {
@@ -1495,9 +1502,11 @@ impl Sound {
                     thread_bridge.wave(std::mem::take(&mut pending));
                     pending.reserve(wave_bytes);
                 }
-                if decoded.is_multiple_of(1000) {
+                if decoded.is_multiple_of(100) {
                     log::debug!(
-                        "vnc: {decoded} sound units decoded, {concealed} concealed, {undecodable} undecodable"
+                        "vnc: {decoded} sound units decoded, {concealed} concealed, {undecodable} \
+                         undecodable; last second {}",
+                        level.take()
                     );
                 }
             }
@@ -1535,6 +1544,37 @@ impl Sound {
         if self.forged <= 3 {
             log::warn!("vnc: dropped a sound packet whose SRTP tag did not match");
         }
+    }
+}
+
+/// Peak and RMS of 16-bit PCM, accumulated until taken.
+#[cfg(feature = "apple-hp-media")]
+#[derive(Default)]
+struct Level {
+    peak: u16,
+    squares: f64,
+    samples: u64,
+}
+
+#[cfg(feature = "apple-hp-media")]
+impl Level {
+    fn add(&mut self, pcm: &[u8]) {
+        for sample in pcm.as_chunks::<2>().0.iter().map(|s| i16::from_le_bytes(*s)) {
+            self.peak = self.peak.max(sample.unsigned_abs());
+            self.squares += f64::from(sample) * f64::from(sample);
+            self.samples += 1;
+        }
+    }
+
+    /// The level so far, as dBFS, and a fresh start.
+    fn take(&mut self) -> String {
+        let dbfs = |value: f64| {
+            if value > 0.0 { format!("{:.1} dBFS", 20.0 * (value / 32768.0).log10()) } else { "silence".to_owned() }
+        };
+        let rms = if self.samples == 0 { 0.0 } else { (self.squares / self.samples as f64).sqrt() };
+        let text = format!("peak {}, rms {}", dbfs(f64::from(self.peak)), dbfs(rms));
+        *self = Self::default();
+        text
     }
 }
 
