@@ -35,11 +35,6 @@ jobs:
               sys.exit(f"invalid version in Cargo.toml: {version!r}")
           print(version)
           ')
-          # A beta version is built locally and pushed only to the private image
-          # (packaging/publish-full-image.sh).
-          case "$VERSION" in
-            *-beta.*) echo "::error::${VERSION} is a beta version, which GitHub never builds"; exit 1 ;;
-          esac
           TAG="v${VERSION}"
           echo "Release tag: ${TAG}"
           IS_PRERELEASE="false"

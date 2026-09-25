@@ -2,12 +2,11 @@
 # Build the image release CI never publishes — remotex with `apple-hp-media`, the
 # feature an `ard-high-performance` target needs and a release artifact may not
 # carry — and push it to the operator's private registry,
-# ghcr.io/andrewtheguy/remotex-full, under the tag's own name
-# (v0.0.262-beta.1).
+# ghcr.io/andrewtheguy/remotex-full, under the tag's own name (v0.0.262).
 #
-# The tags it builds are the beta tags of a branch one version ahead of main:
-# pushed to GitHub by hand, with no GitHub release and no workflow run, so this
-# script is the only build they get.
+# The tags it builds are release tags: the release workflow builds every public
+# artifact of one without the feature, and this script is the only build of it
+# that has the feature.
 #
 # The package must stay private: the feature is kept out of release artifacts
 # because of its decoders' licences, and a public package is a release artifact.
@@ -29,7 +28,7 @@
 #
 #   packaging/publish-full-image.sh TAG
 #
-#   TAG  the tag to build, e.g. v0.0.262-beta.1
+#   TAG  the tag to build, e.g. v0.0.262
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
