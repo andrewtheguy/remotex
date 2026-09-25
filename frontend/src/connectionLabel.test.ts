@@ -20,7 +20,7 @@ test("a target with no subtype is just its protocol", () => {
   assert.equal(connectionLabel("vnc", null), "VNC");
 });
 
-test("the two Apple modes say which one they are, in the config's own spelling", () => {
+test("the three Apple modes say which one they are, in the config's own spelling", () => {
   // The spelling is kept so the line can be found in `remotex.toml`, and the
   // description because "ard" says nothing to anybody who did not write it.
   assert.equal(
@@ -29,7 +29,11 @@ test("the two Apple modes say which one they are, in the config's own spelling",
   );
   assert.equal(
     connectionLabel("vnc", "ard-virtual-display"),
-    "VNC · Apple Screen Sharing, High Performance (ard-virtual-display)",
+    "VNC · Apple Screen Sharing, virtual display (ard-virtual-display)",
+  );
+  assert.equal(
+    connectionLabel("vnc", "ard-high-performance"),
+    "VNC · Apple Screen Sharing, High Performance (ard-high-performance)",
   );
 });
 

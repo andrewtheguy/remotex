@@ -7,12 +7,15 @@
 //! request switches the rectangles from raw to zlib.
 //!
 //! **RFB 003.889**, Apple's own revision, under `subtype =
-//! "ard-virtual-display"`: the same RFB messages carried inside an AES-128-CBC
-//! record layer ([`crate::vnc_record`]), alongside Apple's control messages
-//! ([`crate::vnc_apple`]). This mode requests one virtual display at the target's
-//! pinned `width` and `height`, or at the connecting client's screen resolution
-//! when no size is pinned. Its pasteboard is a separate Apple protocol rather than
-//! RFB Extended Clipboard. See docs/apple-vnc-889.md.
+//! "ard-virtual-display"` and `"ard-high-performance"`: the same RFB messages
+//! carried inside an AES-128-CBC record layer ([`crate::vnc_record`]), alongside
+//! Apple's control messages ([`crate::vnc_apple`]). Both request one virtual
+//! display at the target's pinned `width` and `height`, or at the connecting
+//! client's screen resolution when no size is pinned. Its pasteboard is a
+//! separate Apple protocol rather than RFB Extended Clipboard. The two differ in
+//! the picture and sound alone: `ard-virtual-display` keeps the zlib rectangles,
+//! and `ard-high-performance` takes both from the Mac's media stream
+//! ([`crate::vnc_apple_media`]). See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
 //! `Dialect` (which banner and ClientInit byte), the two preface functions after
@@ -207,7 +210,7 @@ enum Dialect {
 impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
-            Some(Subtype::ArdVirtualDisplay) => Dialect::Apple889,
+            Some(Subtype::ArdVirtualDisplay | Subtype::ArdHighPerformance) => Dialect::Apple889,
             Some(Subtype::Ard) | None => Dialect::Rfb38,
         }
     }
@@ -861,8 +864,8 @@ enum Density {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Audio {
     /// The target asked for no sound, or this is an Apple dialect, whose audio
-    /// bridge is fed by AirPlay; High Performance's media stream is taken for its
-    /// picture alone.
+    /// bridge is fed by AirPlay or, on `ard-high-performance`, by the media
+    /// stream's sound leg.
     Off,
     /// Listed in `SetEncodings`, with nothing announced yet.
     Asked,
@@ -1325,7 +1328,7 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
-    /// The media stream's decoded pictures, on High Performance.
+    /// The media stream's decoded pictures, on `ard-high-performance`.
     pictures: Option<Pictures>,
 }
 
@@ -1511,10 +1514,13 @@ async fn session(
 
     let high_performance = Dialect::of(config.subtype) == Dialect::Apple889;
     // A generic server is asked for wlshare's audio extension on the connection
-    // itself ([`vnc_audio`]). A Mac's sound arrives at the gateway's AirPlay
-    // speaker, which the session attached this bridge to; High Performance's
-    // media stream is taken for its picture and its audio leg dropped.
-    let wlshare_audio = audio.filter(|_| !apple);
+    // itself ([`vnc_audio`]). High Performance's media stream carries the Mac's
+    // sound beside its picture ([`vnc_apple_media`]). Any other Mac's arrives at
+    // the gateway's AirPlay speaker, which the session attached this bridge to.
+    let (media, wlshare_audio) = match media {
+        Some((stream, pictures)) => (Some((stream.with_sound(audio), pictures)), None),
+        None => (None, audio.filter(|_| !apple)),
+    };
     if let Err(e) = active_loop(
         downlink,
         uplink,
@@ -1639,8 +1645,9 @@ struct Connected {
     /// request so it cannot be buried behind another framebuffer response.
     poll: bool,
     /// High Performance's media stream, which the picture comes from once it is
-    /// up ([`vnc_apple_media`]), and the pictures it decodes. `None` on every
-    /// other dialect.
+    /// up ([`vnc_apple_media`]), and the pictures it decodes: `ard-high-performance`
+    /// alone. `None` on every other subtype, `ard-virtual-display` included, which
+    /// speaks the same RFB but keeps its picture on zlib.
     media: Option<(MediaStream, Pictures)>,
 }
 
@@ -2100,7 +2107,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: Some(MediaStream::new(peer, local)),
+        media: config.media_stream().then(|| MediaStream::new(peer, local)),
     })
 }
 

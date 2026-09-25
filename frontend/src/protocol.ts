@@ -214,11 +214,12 @@ export type ControlMsg =
       type: "connected";
       name: string;
       protocol: string;
-      // The target's `subtype` where it has one — `ard`, `ard-virtual-display` —
-      // and null for plain RDP and plain VNC. Three targets say `vnc` and only this
-      // tells them apart, which is what the session card's Connection row is for:
-      // whether there is a display list, whether resize is offered, and whether the
-      // path under it is the reverse-engineered one. See connectionLabel.ts.
+      // The target's `subtype` where it has one — `ard`, `ard-virtual-display`,
+      // `ard-high-performance` — and null for plain RDP and plain VNC. Four
+      // targets say `vnc` and only this tells them apart, which is what the
+      // session card's Connection row is for: whether there is a display list,
+      // whether resize is offered, and whether the path under it is the
+      // reverse-engineered one. See connectionLabel.ts.
       subtype: string | null;
       resize: boolean;
       clipboard: boolean;

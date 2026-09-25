@@ -1,8 +1,8 @@
 //! Apple's Screen Sharing messages and encodings. `ard` is Standard mode over
 //! RFB 3.8 and uses the display, cursor, and pasteboard pieces for the Mac's
-//! physical displays. Both subtypes switch to zlib after their first display
-//! layout. The `ard-virtual-display` subtype additionally uses Apple's record
-//! layer in [`crate::vnc_record`] and requests a virtual display.
+//! physical displays. Every subtype switches to zlib after its first display
+//! layout. `ard-virtual-display` and `ard-high-performance` additionally use
+//! Apple's record layer in [`crate::vnc_record`] and request a virtual display.
 //!
 //! Everything here is either a message this client builds or a rectangle payload
 //! it parses. The transport is [`crate::vnc_record`]'s and the session loop is
@@ -39,14 +39,14 @@
 //!
 //! ## What is otherwise absent
 //!
-//! Standard `ard` refuses resize because it shares physical displays; High
-//! Performance can resize its virtual display, and takes its picture from the
-//! media stream once it is up ([`crate::vnc_apple_media`]): zlib rectangles carry
-//! it only until then. A Mac's sound arrives over the AirPlay workaround.
-//! Both Apple subtypes
-//! use Apple's native pasteboard protocol; High Performance enables monitoring
-//! before the rekey and carries fetches and clipboard data inside the encrypted
-//! transport.
+//! Standard `ard` refuses resize because it shares physical displays; the other
+//! two can resize their virtual display. `ard-high-performance` takes its picture
+//! and sound from the media stream once it is up ([`crate::vnc_apple_media`]):
+//! zlib rectangles carry the picture only until then. The other two keep their
+//! picture on zlib, and their sound arrives over the AirPlay workaround.
+//! Every Apple subtype uses Apple's native pasteboard protocol; RFB 003.889
+//! enables monitoring before the rekey and carries fetches and clipboard data
+//! inside the encrypted transport.
 //!
 //! ## Reading the offsets in here
 //!
@@ -301,7 +301,7 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
 /// mode is `mode`.
 ///
-/// This is sent while establishing an `ard-virtual-display` session and again for
+/// This is sent while establishing a virtual-display session and again for
 /// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
 /// it is deliberately set even for the initial configured size, so reconnecting
 /// restores the Mac's Dynamic resolution checkbox to on if it was changed there.
