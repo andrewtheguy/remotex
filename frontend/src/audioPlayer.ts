@@ -4,7 +4,8 @@
 // a passthrough packet is already samples. The scheduling half below is the same
 // either way and is where the interesting behaviour is.
 //
-// AudioContext creation stays in the enabling click. That WebCodecs exists at all is
+// AudioContext creation stays in the enabling click wherever the browser needs one
+// (AUDIO_NEEDS_GESTURE). That WebCodecs exists at all is
 // not a question asked here: it is the client's entry condition (preflight.ts).
 
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
@@ -77,7 +78,8 @@ export interface AudioPlayer {
    * Stop playing, and release the decoder **and the context** — the player takes
    * ownership of the context it was handed, so a caller needs one call rather than
    * two and cannot leave the audio hardware held open. Getting sound back means a
-   * fresh context, which is no imposition: that only happens on a click.
+   * fresh context: a click's, or one built for a remembered choice where the
+   * browser lets it start without one.
    */
   close(): void;
 }
@@ -85,10 +87,10 @@ export interface AudioPlayer {
 /**
  * The rate the context is built at, before anything is known about the stream.
  *
- * A guess, and it has to be one: the context must exist inside the enabling
- * click, and `audioFormat` arrives a round trip later. 48 kHz is the rate the
- * gateway encodes at (src/pcm48.rs) and what most output hardware runs at, so
- * the common case resamples nothing. A passthrough stream at 44.1 kHz does get
+ * A guess, and it has to be one: the context may have to exist inside the
+ * enabling click, and `audioFormat` arrives a round trip later. 48 kHz is the
+ * rate the gateway encodes at (src/pcm48.rs) and what most output hardware runs
+ * at, so the common case resamples nothing. A passthrough stream at 44.1 kHz does get
  * resampled here — by Web Audio, on playback, exactly as it would be by the OS
  * mixer for any buffer whose rate is not the device's. Nothing about the samples
  * that crossed the network changed.
@@ -114,13 +116,44 @@ function packetDurationUs(format: AudioFormat): number {
 }
 
 /**
- * The audio context, built **inside the click** that enables audio.
+ * Whether this browser starts an AudioContext only inside the gesture that creates
+ * or resumes it.
+ *
+ * WebKit does — Safari on every Apple platform, and every browser on iOS and iPadOS,
+ * which are all WebKit underneath. A context it builds outside a gesture stays
+ * suspended until a `resume()` made inside one, so sound there can never come up on
+ * its own after a reload or a reattach: it is always a click on Audio. Chromium and
+ * Firefox let a context start once the page has seen any interaction at all, and
+ * sooner where their autoplay policy already allows it, so there a remembered
+ * choice can be honoured without a click of its own (see
+ * {@link createAudioContext}).
+ *
+ * `GestureEvent` is WebKit's alone, which is what makes it the test: no other engine
+ * defines it, and every WebKit does.
+ */
+export const AUDIO_NEEDS_GESTURE = "GestureEvent" in globalThis;
+
+/**
+ * The interactions that grant a page user activation — the moment a suspended
+ * context is allowed to start in a browser that is not {@link AUDIO_NEEDS_GESTURE}.
+ */
+const ACTIVATION_EVENTS = ["pointerdown", "pointerup", "keydown", "touchend"];
+
+/**
+ * The audio context, built inside the click that enables audio wherever there is
+ * one.
  *
  * Separate from the player because of *when* rather than what: the format needed to
  * configure a decoder arrives a round trip later, and by then the gesture is over.
  * Safari will hand back a suspended context and refuse to resume one outside a user
  * gesture, so the context has to be created here and the decoder wrapped around it
  * when the format lands.
+ *
+ * A context built with no gesture — a remembered choice reapplied after a reload
+ * or a reattach, never in an {@link AUDIO_NEEDS_GESTURE} browser — may come up
+ * suspended when the page has not been interacted with yet. It is resumed on the
+ * page's next interaction, so the sound that was asked for starts at the first click
+ * or key on the desktop instead of waiting for Audio to be toggled again.
  */
 export function createAudioContext(): AudioContext {
   const context = new AudioContext({
@@ -129,7 +162,23 @@ export function createAudioContext(): AudioContext {
     sampleRate: STREAM_RATE,
     latencyHint: "interactive",
   });
-  void context.resume();
+  const resume = () => {
+    void context.resume();
+  };
+  const settle = () => {
+    if (context.state === "suspended") {
+      return;
+    }
+    for (const type of ACTIVATION_EVENTS) {
+      window.removeEventListener(type, resume, true);
+    }
+    context.removeEventListener("statechange", settle);
+  };
+  for (const type of ACTIVATION_EVENTS) {
+    window.addEventListener(type, resume, true);
+  }
+  context.addEventListener("statechange", settle);
+  resume();
   return context;
 }
 
