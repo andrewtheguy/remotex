@@ -198,7 +198,7 @@ stream does. A playing video no longer delays the Mac's reading of the input,
 which zlib's deflate did. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound and
 never uses AirPlay. It is **experimental** and needs a gateway built with
-`--features apple-hp-media`, which links libde265 (LGPL) and Fraunhofer's
+`--features apple-hp-media`, which links FFmpeg's HEVC decoder (LGPL) and Fraunhofer's
 AAC-ELD decoder (licence not OSI-approved); no release artifact carries it. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 

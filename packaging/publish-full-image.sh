@@ -26,6 +26,12 @@
 #
 #   podman login ghcr.io
 #
+# and to gh, with an account that can read the private
+# andrewtheguy/libavcodec-hevc-prebuilt-archives, whose latest release's libavcodec
+# archive the image links; the script checks after the build that it did:
+#
+#   gh auth login
+#
 #   packaging/publish-full-image.sh TAG
 #
 #   TAG  the tag to build, e.g. v0.0.262
@@ -59,6 +65,16 @@ remote_commit="$(git rev-parse --verify --quiet "${remote}^{commit}" 2>/dev/null
 podman login --get-login "$registry" >/dev/null 2>&1 \
   || { echo "not logged in to ${registry}: podman login ${registry}" >&2; exit 1; }
 
+# The HEVC decoder is the private release's libavcodec archive and nothing else:
+# not a prefix built by hand, which the override would link, and not an older
+# cached release, which its build script falls back to without a word when it
+# cannot ask which release is current. It asks through `gh`.
+[ -z "${LIBAVCODEC_HEVC_PREBUILT_DIR+set}" ] \
+  || { echo "LIBAVCODEC_HEVC_PREBUILT_DIR is set: the image links the released archive, so unset it" >&2; exit 1; }
+hevc_archives=andrewtheguy/libavcodec-hevc-prebuilt-archives
+hevc_release="$(gh release view --repo "$hevc_archives" --json tagName --jq .tagName)" \
+  || { echo "gh cannot read the latest release of ${hevc_archives}: gh auth login, with an account that can" >&2; exit 1; }
+
 work="$repo_root/tmp/full-image"
 source="$work/source"
 context="$work/context"
@@ -88,8 +104,24 @@ git archive "$commit" | tar -x -C "$source"
 # This checkout's build-container-binary.sh, not the tag's: a tag cut before that
 # script took features would ignore them and yield an image its name misdescribes.
 export CARGO_TARGET_DIR="$repo_root/target/full-image"
+# Cargo reruns a build script only when its inputs change, and a new archive
+# release is not one of them: a kept libavcodec build would still link whichever
+# release was current when it ran. Cleaning that one crate makes its build script
+# ask again.
+(cd "$source" && cargo clean --release -p libavcodec-hevc-prebuilt-sys)
 REMOTEX_SOURCE_DIR="$source" REMOTEX_CONTAINER_FEATURES="$features" \
   bash packaging/build-container-binary.sh "$context/bin/remotex"
+
+# Which libavcodec that binary linked, as cargo recorded it: the same build again
+# is a no-op that replays each build script's link paths. The build script had
+# already held the archive to its release's checksums and to its own MANIFEST.
+linked="$(cd "$source" && cargo build --release --no-default-features --features "airplay $features" \
+  --message-format=json 2>/dev/null \
+  | jq -r 'select(.reason == "build-script-executed" and (.package_id | contains("libavcodec-hevc-prebuilt-sys"))) | .linked_paths[]')"
+expected="native=${CARGO_HOME:-$HOME/.cargo}/libavcodec-hevc-prebuilt/${hevc_release}/linux-x86_64/lib"
+[ "$linked" = "$expected" ] \
+  || { echo "libavcodec was linked from '${linked}', not from ${hevc_archives} ${hevc_release} (${expected#native=})" >&2; exit 1; }
+echo ">> libavcodec: ${hevc_archives} ${hevc_release}"
 
 mkdir -p "$context/share/doc/remotex"
 cp "$source/remotex.example.toml" "$context/share/doc/remotex/remotex.example.toml"

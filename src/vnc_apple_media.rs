@@ -956,72 +956,101 @@ pub struct Picture {
     pub rgb: Vec<u8>,
 }
 
-/// libde265's worker threads. The Mac's stream sets
+/// The decoder's slice threads. The Mac's stream sets
 /// `entropy_coding_sync_enabled_flag`, so a picture's CTU rows decode in parallel.
-/// Replaying captured 1600×1000 pictures at 60 a second on a six-core host with a
-/// VP9 encoder running beside them, one thread fell behind and dropped units, two
-/// kept up at 91% busy, and three to five took about 13 ms a picture. Four, since
-/// a larger display has more rows to share out.
+/// Replaying captured 1600×1000 pictures on a six-core host, one thread took
+/// 14–23 ms a picture, too slow for 60 a second, and four took 7–14 ms. Four,
+/// since a larger display has more rows to share out. Frame threads would hold
+/// each picture back by one per thread, so there are none.
 #[cfg(feature = "apple-hp-media")]
 const DECODE_THREADS: std::os::raw::c_int = 4;
 
-/// libde265, one context for the session: HEVC access units in, pictures out.
+/// FFmpeg's HEVC decoder, one context for the session: HEVC access units in,
+/// pictures out.
 #[cfg(feature = "apple-hp-media")]
-struct Hevc(*mut de265_sys::de265_decoder_context);
+struct Hevc {
+    ctx: *mut avcodec_hevc_sys::AVCodecContext,
+    packet: *mut avcodec_hevc_sys::AVPacket,
+    frame: *mut avcodec_hevc_sys::AVFrame,
+    /// The access unit as an Annex B byte stream, kept between units.
+    stream: Vec<u8>,
+}
 
-// SAFETY: the context is created, used and freed on one thread at a time — the
-// decoder thread that owns this value — and libde265 keeps no thread-local state.
+// SAFETY: the context, packet and frame are created, used and freed on one thread
+// at a time — the decoder thread that owns this value. libavcodec's slice threads
+// work only inside a call to it.
 #[cfg(feature = "apple-hp-media")]
 unsafe impl Send for Hevc {}
 
 #[cfg(feature = "apple-hp-media")]
 impl Hevc {
     fn new() -> anyhow::Result<Self> {
-        // SAFETY: no arguments; a null return is checked.
-        let ctx = unsafe { de265_sys::de265_new_decoder() };
-        anyhow::ensure!(!ctx.is_null(), "libde265 could not allocate a decoder");
-        let decoder = Self(ctx);
-        // The Mac codes with wavefront parallel processing, so its rows decode on
-        // worker threads. See DECODE_THREADS.
-        // SAFETY: a live context, before anything was pushed into it.
-        let err = unsafe { de265_sys::de265_start_worker_threads(decoder.0, DECODE_THREADS) };
-        anyhow::ensure!(
-            err == de265_sys::de265_error_DE265_OK,
-            "libde265 could not start its worker threads: {}",
-            text(err)
-        );
-        Ok(decoder)
+        use avcodec_hevc_sys::*;
+        use std::os::raw::c_int;
+
+        // SAFETY: every allocation is checked before use, and `Drop` frees each of
+        // them, taking null for any that failed.
+        unsafe {
+            // FFmpeg would print its complaints about a damaged unit to stderr,
+            // outside the gateway's log. The failed call is reported instead.
+            av_log_set_level(AV_LOG_QUIET);
+            let codec = avcodec_find_decoder(AVCodecID_AV_CODEC_ID_HEVC);
+            anyhow::ensure!(!codec.is_null(), "libavcodec has no HEVC decoder");
+            let decoder = Self {
+                ctx: avcodec_alloc_context3(codec),
+                packet: av_packet_alloc(),
+                frame: av_frame_alloc(),
+                stream: Vec::new(),
+            };
+            anyhow::ensure!(
+                !decoder.ctx.is_null() && !decoder.packet.is_null() && !decoder.frame.is_null(),
+                "libavcodec could not allocate a decoder"
+            );
+            // The Mac codes with wavefront parallel processing, so its rows decode
+            // on slice threads. See DECODE_THREADS.
+            (*decoder.ctx).thread_count = DECODE_THREADS;
+            (*decoder.ctx).thread_type = FF_THREAD_SLICE as c_int;
+            // A unit that does not decode fails its call rather than being skipped
+            // in silence, so the receive task asks for a keyframe.
+            (*decoder.ctx).err_recognition |= AV_EF_EXPLODE as c_int;
+            let err = avcodec_open2(decoder.ctx, codec, std::ptr::null_mut());
+            anyhow::ensure!(err >= 0, "libavcodec could not open the HEVC decoder: {}", text(err));
+            Ok(decoder)
+        }
     }
 
     /// Decode one access unit, returning the picture it completed, if any.
     fn decode(&mut self, unit: &AccessUnit) -> anyhow::Result<Option<Picture>> {
-        use de265_sys::*;
+        use avcodec_hevc_sys::*;
         use std::os::raw::c_int;
 
-        // SAFETY: `self.0` is a live context; `de265_push_NAL` copies each unit, so
-        // the slices need not outlive the call.
+        self.stream.clear();
+        for nal in unit {
+            self.stream.extend_from_slice(&[0, 0, 0, 1]);
+            self.stream.extend_from_slice(nal);
+        }
+        let size = c_int::try_from(self.stream.len()).context("an access unit too large to decode")?;
+        // SAFETY: a live context, packet and frame. The packet owns no buffer, so
+        // `avcodec_send_packet` copies the stream, padded, before it returns.
         unsafe {
-            for nal in unit {
-                let err = de265_push_NAL(self.0, nal.as_ptr().cast(), nal.len() as c_int, 0, std::ptr::null_mut());
-                anyhow::ensure!(err == de265_error_DE265_OK, "libde265 refused a NAL unit: {}", text(err));
-            }
-            de265_push_end_of_frame(self.0);
+            (*self.packet).data = self.stream.as_mut_ptr();
+            (*self.packet).size = size;
+            let err = avcodec_send_packet(self.ctx, self.packet);
+            (*self.packet).data = std::ptr::null_mut();
+            (*self.packet).size = 0;
+            anyhow::ensure!(err >= 0, "libavcodec refused an access unit: {}", text(err));
             let mut picture = None;
             loop {
-                let mut more: c_int = 0;
-                let err = de265_decode(self.0, &mut more);
-                let flow = err == de265_error_DE265_ERROR_WAITING_FOR_INPUT_DATA
-                    || err == de265_error_DE265_ERROR_IMAGE_BUFFER_FULL;
-                anyhow::ensure!(err == de265_error_DE265_OK || flow, "libde265: {}", text(err));
-                let img = de265_get_next_picture(self.0);
-                if !img.is_null() {
-                    // A later picture of the same unit replaces an earlier one: only
-                    // the newest is shown.
-                    picture = Some(to_rgb(&*img)?);
-                }
-                if err == de265_error_DE265_ERROR_WAITING_FOR_INPUT_DATA || (more == 0 && img.is_null()) {
+                let err = avcodec_receive_frame(self.ctx, self.frame);
+                if err == AVERROR_EAGAIN {
                     break;
                 }
+                anyhow::ensure!(err >= 0, "libavcodec: {}", text(err));
+                // A later picture of the same unit replaces an earlier one: only
+                // the newest is shown.
+                let rgb = to_rgb(&*self.frame);
+                av_frame_unref(self.frame);
+                picture = Some(rgb?);
             }
             Ok(picture)
         }
@@ -1031,19 +1060,27 @@ impl Hevc {
 #[cfg(feature = "apple-hp-media")]
 impl Drop for Hevc {
     fn drop(&mut self) {
-        // SAFETY: freed exactly once, here.
+        use avcodec_hevc_sys::*;
+
+        // SAFETY: freed exactly once, here; each call takes null and nulls its
+        // pointer.
         unsafe {
-            de265_sys::de265_free_decoder(self.0);
+            avcodec_free_context(&mut self.ctx);
+            av_packet_free(&mut self.packet);
+            av_frame_free(&mut self.frame);
         }
     }
 }
 
 #[cfg(feature = "apple-hp-media")]
-fn text(err: de265_sys::de265_error) -> String {
-    // SAFETY: libde265 returns a pointer to a static string for every code.
-    unsafe { std::ffi::CStr::from_ptr(de265_sys::de265_get_error_text(err)) }
-        .to_string_lossy()
-        .into_owned()
+fn text(err: std::os::raw::c_int) -> String {
+    let mut text = [0 as std::os::raw::c_char; avcodec_hevc_sys::AV_ERROR_MAX_STRING_SIZE as usize];
+    // SAFETY: `av_strerror` writes a NUL-terminated description of any code, known
+    // or not, within the length it is given.
+    unsafe {
+        avcodec_hevc_sys::av_strerror(err, text.as_mut_ptr(), text.len());
+        std::ffi::CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned()
+    }
 }
 
 /// A decoded picture as packed RGB888. The Mac sends full-range BT.709, 8-bit, at
@@ -1051,51 +1088,56 @@ fn text(err: de265_sys::de265_error) -> String {
 ///
 /// # Safety
 ///
-/// `img` must be a picture libde265 just returned and has not yet invalidated.
+/// `frame` must be a picture libavcodec just returned and has not yet been
+/// unreferenced.
 #[cfg(feature = "apple-hp-media")]
-unsafe fn to_rgb(img: &de265_sys::de265_image) -> anyhow::Result<Picture> {
-    use de265_sys::*;
+unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame) -> anyhow::Result<Picture> {
+    use avcodec_hevc_sys::*;
     use yuv::{YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
-    // SAFETY: per this function's contract, every call below reads a live image.
-    unsafe {
-        let bits = de265_get_bits_per_pixel(img, 0);
-        anyhow::ensure!(bits == 8, "the Mac sent {bits}-bit video, and only 8-bit is read");
-        let width = de265_get_image_width(img, 0);
-        let height = de265_get_image_height(img, 0);
-        let plane = |channel: i32| {
-            let mut stride = 0;
-            let data = de265_get_image_plane(img, channel, &mut stride);
-            let rows = de265_get_image_height(img, channel) as usize;
-            (std::slice::from_raw_parts(data, stride as usize * rows), stride as u32)
-        };
-        let (y_plane, y_stride) = plane(0);
-        let (u_plane, u_stride) = plane(1);
-        let (v_plane, v_stride) = plane(2);
-        let image = YuvPlanarImage {
-            y_plane,
-            y_stride,
-            u_plane,
-            u_stride,
-            v_plane,
-            v_stride,
-            width: width as u32,
-            height: height as u32,
-        };
-        let range =
-            if de265_get_image_full_range_flag(img) != 0 { YuvRange::Full } else { YuvRange::Limited };
-        let mut rgb = vec![0u8; width as usize * height as usize * 3];
-        let stride = width as u32 * 3;
-        let chroma = de265_get_chroma_format(img);
-        if chroma == de265_chroma_de265_chroma_444 {
-            yuv::yuv444_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
-        } else if chroma == de265_chroma_de265_chroma_420 {
-            yuv::yuv420_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+    let full = frame.format == AVPixelFormat_AV_PIX_FMT_YUV444P;
+    let half = frame.format == AVPixelFormat_AV_PIX_FMT_YUV420P;
+    if !full && !half {
+        // SAFETY: a static string for any known format, and null for any other.
+        let name = unsafe { av_get_pix_fmt_name(frame.format) };
+        let name = if name.is_null() {
+            format!("pixel format {}", frame.format)
         } else {
-            anyhow::bail!("the Mac sent video in chroma format {chroma}, which is not read");
-        }
-        Ok(Picture { size: (width as u16, height as u16), rgb })
+            // SAFETY: non-null, so one of libavutil's static names.
+            unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned()
+        };
+        anyhow::bail!("the Mac sent video as {name}, and only 8-bit 4:4:4 and 4:2:0 are read");
     }
+    let (width, height) = (frame.width as usize, frame.height as usize);
+    let chroma_rows = if full { height } else { height.div_ceil(2) };
+    let plane = |channel: usize, rows: usize| {
+        let stride = frame.linesize[channel] as usize;
+        // SAFETY: per this function's contract, a decoded plane of `rows` rows of
+        // `stride` bytes each.
+        (unsafe { std::slice::from_raw_parts(frame.data[channel], stride * rows) }, stride as u32)
+    };
+    let (y_plane, y_stride) = plane(0, height);
+    let (u_plane, u_stride) = plane(1, chroma_rows);
+    let (v_plane, v_stride) = plane(2, chroma_rows);
+    let image = YuvPlanarImage {
+        y_plane,
+        y_stride,
+        u_plane,
+        u_stride,
+        v_plane,
+        v_stride,
+        width: width as u32,
+        height: height as u32,
+    };
+    let range = if frame.color_range == AVColorRange_AVCOL_RANGE_JPEG { YuvRange::Full } else { YuvRange::Limited };
+    let mut rgb = vec![0u8; width * height * 3];
+    let stride = width as u32 * 3;
+    if full {
+        yuv::yuv444_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+    } else {
+        yuv::yuv420_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+    }
+    Ok(Picture { size: (width as u16, height as u16), rgb })
 }
 
 // ---------------------------------------------------------------------------
@@ -2017,7 +2059,7 @@ mod tests {
     /// round differently, by a step at most.
     #[test]
     #[cfg(feature = "apple-hp-media")]
-    fn libde265_decodes_a_444_stream_to_the_colours_ffmpeg_does() {
+    fn a_444_stream_decodes_to_the_colours_ffmpeg_converts_it_to() {
         let stream = include_bytes!("../tests/fixtures/hevc-444-64x48.h265");
         let mut nals: Vec<Vec<u8>> = Vec::new();
         let mut rest = &stream[..];

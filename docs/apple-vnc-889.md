@@ -505,9 +505,9 @@ authenticated video packet after the stream has begun stops that receiver and
 hands the picture back to zlib; the next display change offers the stream again.
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
-no release artifact: libde265 for the picture (LGPL-3.0-or-later, linked
-statically) and Fraunhofer's AAC-ELD decoder for the sound (a licence that is not
-OSI-approved). A build without the feature refuses `ard-high-performance` when
+no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
+LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
+sound (a licence that is not OSI-approved). A build without the feature refuses `ard-high-performance` when
 it reads the config. The wire half of the module — the offers, the replies,
 SRTP and the depacketizer — is compiled and tested in every build.
 
@@ -583,12 +583,13 @@ treating it as lost.
   single NAL units, aggregation packets, fragmentation units.
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
-  (`entropy_coding_sync_enabled_flag`) and no tiles. The prebuilt libde265 1.1.3
-  decodes it bit-exact with ffmpeg. On one core of an i5-8500T a 1600×1000
-  picture takes 15–23 ms, too slow for 60 a second. Remotex gives the decoder
-  four worker threads. Replaying captured pictures at 60 a second with the VP9
-  encoder running beside it, that took about 13 ms a picture and dropped none,
-  where one thread fell eight behind within seconds.
+  (`entropy_coding_sync_enabled_flag`) and no tiles. The prebuilt libavcodec
+  (FFmpeg 9.0.2, configured down to the HEVC decoder) decodes it. On one
+  core of an i5-8500T a 1600×1000 picture takes 14–23 ms, too slow for 60 a
+  second. Remotex gives the decoder four slice threads, which decode a
+  picture's rows in parallel and took 7–14 ms; frame threads would hold each
+  picture back. A unit that fails to decode is an error, not a skipped picture,
+  and brings a keyframe request.
 - **Rate.** A picture goes out when the screen changes, at most once per refresh
   of the virtual display. Under a full-screen animation, a 60 Hz display sent
   about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the
