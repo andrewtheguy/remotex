@@ -1363,9 +1363,9 @@ impl ConfigFile {
             );
             // Audio is carried three ways: MS-RDPEA on RDP, wlshare's audio
             // extension on a generic VNC target ([`crate::vnc_audio`]), and the
-            // gateway's AirPlay speaker for either Apple subtype. The current
-            // Apple engine deliberately does not negotiate High Performance's
-            // private media stream; AirPlay is its workaround ([`crate::airplay`]).
+            // gateway's AirPlay speaker for either Apple subtype. High
+            // Performance's media stream carries its picture, and its audio leg
+            // is dropped; AirPlay is the sound's workaround ([`crate::airplay`]).
             // The last is checked with the `[airplay]` table above.
             //
             // A generic VNC target is *asked* rather than assumed: the extension is

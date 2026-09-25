@@ -939,6 +939,15 @@ async fn serve_fake_mac_records(
                 fence.extend_from_slice(b"clip");
                 write_half.write_all(writer.frame(&fence).unwrap()).await?;
             }
+            // RFBMediaStreamServerConfiguration: the media-stream offer. Read and
+            // left unanswered, as by a Mac whose stream never starts, so the
+            // picture stays on zlib.
+            0x1c => {
+                let mut head = [0u8; 3];
+                records.read_exact(&mut head).await?;
+                let mut body = vec![0u8; usize::from(u16::from_be_bytes([head[1], head[2]]))];
+                records.read_exact(&mut body).await?;
+            }
             // SetDisplayMessage, reported so a later request can order assertions
             // without relying on a timeout.
             0x0d => {

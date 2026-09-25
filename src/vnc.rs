@@ -46,6 +46,7 @@ use crate::protocol::{
 };
 use crate::shadow::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
+use crate::vnc_apple_media::{self, MediaStream, Pictures};
 use crate::vnc_audio::{self, FrameDecoder, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
@@ -588,6 +589,14 @@ struct DesktopState {
     repaint_owed: bool,
     /// A High Performance session's window-driven resizes — see [`HpResize`].
     hp: HpResize,
+    /// A High Performance layout has arrived: the virtual display the session
+    /// asked for exists, and a media-stream offer can name its size.
+    laid_out: bool,
+    /// The picture comes from the media stream ([`vnc_apple_media`]): a decoded
+    /// picture of the current size has been shown since the last display change.
+    /// Pixel polling then holds to [`HP_HOLD_REQUEST`], which still brings the
+    /// cursor shapes and layouts, and zlib pixels are decoded but not shown.
+    media_live: bool,
 }
 
 /// How long a High Performance viewport has to hold still before the Mac is
@@ -742,6 +751,12 @@ impl HpResize {
         self.phase != HpPhase::Idle
     }
 
+    /// Whether nothing is pending, out or covered — the Mac is not about to change
+    /// the display, so a media-stream offer made now is not torn down by one.
+    fn settled(&self) -> bool {
+        !self.shown && !self.awaiting_layout && self.phase == HpPhase::Idle && self.want.is_none()
+    }
+
     /// The points due to go out, taken at an update boundary; the request is in
     /// flight from here.
     fn take_due(&mut self, now: tokio::time::Instant) -> Option<(u16, u16)> {
@@ -845,9 +860,9 @@ enum Density {
 /// speaks the extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Audio {
-    /// The target asked for no sound, or this is an Apple dialect. The current
-    /// Apple engine does not negotiate High Performance's separate media stream;
-    /// its audio bridge is fed by AirPlay instead.
+    /// The target asked for no sound, or this is an Apple dialect, whose audio
+    /// bridge is fed by AirPlay; High Performance's media stream is taken for its
+    /// picture alone.
     Off,
     /// Listed in `SetEncodings`, with nothing announced yet.
     Asked,
@@ -938,9 +953,16 @@ impl DesktopState {
     }
 
     /// The region a pixel request asks for: the desktop, or while a High
-    /// Performance display change is out, [`HP_HOLD_REQUEST`].
+    /// Performance display change is out or the media stream carries the
+    /// picture, [`HP_HOLD_REQUEST`].
     fn poll_size(&self) -> (u16, u16) {
-        if self.hp.holds_pixels() { HP_HOLD_REQUEST } else { self.size }
+        if self.hp.holds_pixels() || self.media_live { HP_HOLD_REQUEST } else { self.size }
+    }
+
+    /// Whether the media stream may be offered for the current display: one
+    /// exists, and nothing is pending, out or covered.
+    fn media_offerable(&self) -> bool {
+        self.laid_out && self.hp.settled()
     }
 
     fn generic_resize(&mut self, points: (u16, u16)) -> Option<[u8; 24]> {
@@ -1303,17 +1325,24 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
+    /// The media stream's decoded pictures, on High Performance.
+    pictures: Option<Pictures>,
 }
 
 impl Apple {
     /// The read loop's starting state for either Apple subtype.
-    fn new(high_performance: bool) -> Self {
+    fn new(high_performance: bool, pictures: Option<Pictures>) -> Self {
         Self {
             virtual_display: high_performance,
+            pictures,
             ..Self::default()
         }
     }
 }
+
+/// High Performance's media stream, shared by the engine's two loops, which both
+/// offer it. Locked after [`SharedDesktop`] where both are held.
+type SharedMedia = Arc<std::sync::Mutex<MediaStream>>;
 
 /// The pixels the browser has already been sent, so an update carrying none of
 /// them costs nothing and one carrying a few is sent as those few.
@@ -1463,7 +1492,7 @@ async fn session(
         return;
     };
 
-    let Connected { downlink, uplink, width, height, macos, apple, poll } = connected;
+    let Connected { downlink, uplink, width, height, macos, apple, poll, media } = connected;
     info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -1482,9 +1511,9 @@ async fn session(
 
     let high_performance = Dialect::of(config.subtype) == Dialect::Apple889;
     // A generic server is asked for wlshare's audio extension on the connection
-    // itself ([`vnc_audio`]). The current Apple engine does not negotiate High
-    // Performance's RFB-controlled UDP media stream; a Mac's sound arrives at the
-    // gateway's AirPlay speaker, which the session attached this bridge to.
+    // itself ([`vnc_audio`]). A Mac's sound arrives at the gateway's AirPlay
+    // speaker, which the session attached this bridge to; High Performance's
+    // media stream is taken for its picture and its audio leg dropped.
     let wlshare_audio = audio.filter(|_| !apple);
     if let Err(e) = active_loop(
         downlink,
@@ -1503,6 +1532,7 @@ async fn session(
             microphone,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
+            media,
         },
         input_rx,
         sink.clone(),
@@ -1579,6 +1609,8 @@ struct Flags {
     host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
+    /// High Performance's media stream — see [`Connected::media`].
+    media: Option<(MediaStream, Pictures)>,
 }
 
 /// What the read loop needs to know about the dialect it is reading. Two bools
@@ -1606,6 +1638,10 @@ struct Connected {
     /// True on both Apple dialects. A pending pasteboard fetch pauses the next
     /// request so it cannot be buried behind another framebuffer response.
     poll: bool,
+    /// High Performance's media stream, which the picture comes from once it is
+    /// up ([`vnc_apple_media`]), and the pictures it decodes. `None` on every
+    /// other dialect.
+    media: Option<(MediaStream, Pictures)>,
 }
 
 /// ServerInit, as much of it as anything here uses.
@@ -1638,6 +1674,9 @@ async fn connect(
     stream: tokio::net::TcpStream,
 ) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
+    // Where the connection runs, for High Performance's media stream: the Mac
+    // sends it from its own address to this side's, on UDP.
+    let addresses = (stream.peer_addr()?, stream.local_addr()?);
     let (read_half, mut sock) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
@@ -1690,7 +1729,7 @@ async fn connect(
             read_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            apple_preface(reader, sock, server, macos, wrap_key, config, display).await
+            apple_preface(reader, sock, server, macos, wrap_key, config, display, addresses).await
         }
     }
 }
@@ -1874,6 +1913,7 @@ async fn rfb38_preface(
         macos,
         apple,
         poll: true,
+        media: None,
     })
 }
 
@@ -2004,6 +2044,7 @@ fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_appl
 /// in the window before this side catches up goes out in cleartext to a server
 /// that is already decrypting, and the session is unrecoverable. Doing it here
 /// makes that structurally impossible rather than unlikely.
+#[allow(clippy::too_many_arguments)]
 async fn apple_preface(
     mut reader: Reader,
     mut sock: OwnedWriteHalf,
@@ -2012,6 +2053,7 @@ async fn apple_preface(
     wrap_key: [u8; 16],
     config: &TargetConfig,
     display: Option<HostDisplay>,
+    (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
 ) -> anyhow::Result<Connected> {
     // With clipboard enabled, the native control prelude is written back to back
     // before encryption. The server emits the rekey as soon as encryption starts,
@@ -2058,6 +2100,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
+        media: Some(MediaStream::new(peer, local)),
     })
 }
 
@@ -2152,7 +2195,12 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         microphone,
         host_density,
         poll,
+        media,
     } = flags;
+    let (media, pictures) = match media {
+        Some((media, pictures)) => (Some(Arc::new(std::sync::Mutex::new(media))), Some(pictures)),
+        None => (None, None),
+    };
     // The uplink is shared: the read loop answers the server (update requests,
     // re-arming), the input side sends pointer/key/display messages. Neither
     // writes to the socket itself from here on — see [`Uplink::queued`].
@@ -2177,6 +2225,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         declared: None,
         repaint_owed: false,
         hp,
+        laid_out: false,
+        media_live: false,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -2213,6 +2263,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         audio: wlshare_audio,
         camera: camera.clone(),
         microphone: microphone.clone(),
+        media: media.clone(),
     };
 
     // A resizing High Performance session opens covered — see [`HpResize::opening`].
@@ -2231,7 +2282,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(|| Apple::new(high_performance)),
+        apple.then(|| Apple::new(high_performance, pictures)),
         sink.clone(),
     ));
 
@@ -2290,7 +2341,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             }
             // A High Performance resize has something due — see [`HpResize`].
             () = hp_resize_due(&desktop, &hp_wake), if high_performance && resize => {
-                if let Err(e) = hp_resize_step(&uplink, &desktop, &sink).await {
+                if let Err(e) = hp_resize_step(&uplink, &desktop, media.as_ref(), &sink).await {
                     break Err(e);
                 }
             }
@@ -2482,6 +2533,23 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     let resizing = desktop.lock().unwrap().hp.shown;
                     if resizing
                         && let Err(e) = sink.msg(ServerMsg::Resizing { active: true }).await
+                    {
+                        break Err(e);
+                    }
+                    // While the media stream carries the picture, the request below
+                    // is for one pixel, and the repaint is its newest picture: the
+                    // Mac sends one whenever its screen changes, so the newest is
+                    // the screen as it is.
+                    let latest = {
+                        let d = desktop.lock().unwrap();
+                        media
+                            .as_ref()
+                            .filter(|_| d.media_live)
+                            .and_then(|m| m.lock().unwrap().latest())
+                            .filter(|picture| picture.size == d.size)
+                    };
+                    if let Some(picture) = latest
+                        && let Err(e) = blit_picture(&shadow, &picture, &sink).await
                     {
                         break Err(e);
                     }
@@ -2744,6 +2812,7 @@ async fn request_resize(
 async fn hp_resize_step(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
+    media: Option<&SharedMedia>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
     loop {
@@ -2751,7 +2820,12 @@ async fn hp_resize_step(
         match step {
             None => return Ok(()),
             Some(HpStep::Show) => sink.msg(ServerMsg::Resizing { active: true }).await?,
-            Some(HpStep::Hide) => sink.msg(ServerMsg::Resizing { active: false }).await?,
+            // The display has settled, which is what the media stream waits for:
+            // offered mid-change, it is torn down by the change anyway.
+            Some(HpStep::Hide) => {
+                sink.msg(ServerMsg::Resizing { active: false }).await?;
+                offer_media(uplink, desktop, media).await?;
+            }
             // A full request answers at once even on a still desktop, so the
             // boundary the read loop waits for comes now rather than at the next
             // change on screen; the one pixel it asks for is in every mode.
@@ -2771,6 +2845,97 @@ async fn hp_resize_step(
             }
         }
     }
+}
+
+/// Offer High Performance's media stream for the current display, when there is
+/// one to offer it for and nothing is about to change it — see
+/// [`DesktopState::media_offerable`] and [`MediaStream::offer`]. The session's
+/// first offer goes out behind the `SetEncodings` that names the stream.
+async fn offer_media(
+    uplink: &SharedUplink,
+    desktop: &SharedDesktop,
+    media: Option<&SharedMedia>,
+) -> anyhow::Result<()> {
+    let Some(media) = media else {
+        return Ok(());
+    };
+    let (size, offer) = {
+        let d = desktop.lock().unwrap();
+        if !d.media_offerable() {
+            return Ok(());
+        }
+        (d.size, media.lock().unwrap().offer(d.size))
+    };
+    let Some((first, configuration)) = offer else {
+        return Ok(());
+    };
+    info!("vnc: offering the Mac's media stream for its {}x{} display", size.0, size.1);
+    let mut msgs = Vec::with_capacity(2);
+    if first {
+        msgs.push(set_encodings(&vnc_apple_media::encodings_with_media_stream()));
+    }
+    msgs.push(configuration);
+    send_all(uplink, &msgs).await
+}
+
+/// Show a picture the media stream decoded: the whole display, through the shadow
+/// like any rectangle, so only what changed reaches the browser. A picture of
+/// another size is the old display's last or the new one's before its layout, and
+/// is dropped. The first one of a display takes the picture over from zlib —
+/// see [`DesktopState::media_live`].
+async fn show_picture(
+    shared: &Shared,
+    picture: &vnc_apple_media::Picture,
+    sink: &VideoSink,
+) -> anyhow::Result<()> {
+    let first = {
+        let mut d = shared.desktop.lock().unwrap();
+        if picture.size != d.size || d.hp.holds_pixels() {
+            return Ok(());
+        }
+        !std::mem::replace(&mut d.media_live, true)
+    };
+    if first {
+        info!("vnc: the picture now comes from the Mac's HEVC media stream");
+        // The armed region too, or the Mac would go on pushing zlib for every
+        // change on screen — and it reads nothing from this side while it writes.
+        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
+    }
+    blit_picture(&shared.shadow, picture, sink).await
+}
+
+/// A whole-display picture into the stream, as much of it as the browser lacks.
+async fn blit_picture(
+    shadow: &SharedShadow,
+    picture: &vnc_apple_media::Picture,
+    sink: &VideoSink,
+) -> anyhow::Result<()> {
+    let Some(rect) = Rect::from_size(0, 0, picture.size.0, picture.size.1) else {
+        return Ok(());
+    };
+    let changed = shadow.lock().unwrap().accept(rect, &picture.rgb);
+    if let Some(changed) = changed {
+        if changed == rect {
+            sink.damage(rect, &picture.rgb).await?;
+        } else {
+            let mut pixels = Vec::new();
+            shadow::crop(&picture.rgb, rect, changed, &mut pixels);
+            sink.damage(changed, &pixels).await?;
+        }
+    }
+    sink.frame().await
+}
+
+/// The next picture the media stream decoded, on a session that has one;
+/// otherwise never.
+async fn next_picture(apple: &mut Option<Apple>) -> Option<Arc<vnc_apple_media::Picture>> {
+    let Some(pictures) = apple.as_mut().and_then(|a| a.pictures.as_mut()) else {
+        return std::future::pending().await;
+    };
+    if pictures.changed().await.is_err() {
+        return std::future::pending().await;
+    }
+    pictures.borrow_and_update().clone()
 }
 
 /// Resolves when a High Performance resize has something due — at
@@ -2830,6 +2995,10 @@ struct Shared {
     /// The browser's microphone — see [`Flags::microphone`]. `None` is a session with no
     /// microphone to lend, and the extension is then neither advertised nor read.
     microphone: Option<Arc<vnc_mic::Link>>,
+    /// High Performance's media stream — see [`Connected::media`]. Both loops
+    /// offer it: the read loop at an update boundary, the input loop when a
+    /// resize's cover comes down.
+    media: Option<SharedMedia>,
 }
 
 /// Read server messages forever, forwarding framebuffer updates as tiles.
@@ -2844,8 +3013,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
     sink: VideoSink,
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
-    let Shared { uplink, desktop, clipboard, display, hp_wake, audio, camera, microphone, .. } =
-        &shared;
+    let Shared {
+        uplink, desktop, clipboard, display, hp_wake, audio, camera, microphone, media, ..
+    } = &shared;
     // Where the audio extension stands here. `Off` on a session with no bridge
     // to feed, which is also a session that never listed the encoding, so
     // neither the announcement nor a frame can arrive.
@@ -2899,6 +3069,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
         };
         let read = tokio::select! {
             byte = reader.read_u8() => byte,
+
+            picture = next_picture(&mut apple) => {
+                if let Some(picture) = picture {
+                    show_picture(&shared, &picture, &sink).await?;
+                }
+                continue;
+            }
 
             () = video_flush => {
                 sink.frame().await?;
@@ -3046,13 +3223,25 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // because this is where no full-size pixel request is outstanding;
                 // polling then holds to one pixel until the answering layout — see
                 // [`HP_HOLD_REQUEST`].
+                //
+                // Nor while a media-stream offer is out: the Mac is starting a capture
+                // of the display the change would replace. The answer ends an update
+                // too, and the change goes out at that one.
                 let hp_holding = if apple.as_ref().is_some_and(|a| a.virtual_display) {
                     let (request, drained, holding) = {
                         let mut d = desktop.lock().unwrap();
                         let draining = matches!(d.hp.phase, HpPhase::Draining(_));
-                        let request = d.hp_take_request(tokio::time::Instant::now());
+                        let offer_out = media.as_ref().is_some_and(|m| m.lock().unwrap().pending());
+                        let request =
+                            if offer_out { None } else { d.hp_take_request(tokio::time::Instant::now()) };
+                        if request.is_some() {
+                            d.media_live = false;
+                            if let Some(media) = media {
+                                media.lock().unwrap().stopped();
+                            }
+                        }
                         let drained = draining && !matches!(d.hp.phase, HpPhase::Draining(_));
-                        (request, drained, d.hp.holds_pixels())
+                        (request, drained, d.hp.holds_pixels() || d.media_live)
                     };
                     if let Some(msg) = request {
                         send_all(uplink, &[vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST), msg])
@@ -3061,6 +3250,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     if drained {
                         hp_wake.notify_one();
                     }
+                    offer_media(uplink, desktop, media.as_ref()).await?;
                     holding
                 } else {
                     false
@@ -4022,6 +4212,25 @@ async fn read_rect<R: AsyncRead + Unpin>(
         vnc_apple::ENCODING_REKEY if apple.is_some() => {
             anyhow::bail!("the server re-keyed mid-session, which this client never requests")
         }
+        // The Mac's replies to a media-stream offer ([`vnc_apple_media`]): a `u16`
+        // saying how much follows, then the reply. A stream that goes down hands the
+        // picture back to zlib, which has sent nothing while it ran, so the
+        // whole desktop is asked for.
+        vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {
+            let len = reader.read_u16().await?;
+            let mut body = vec![0u8; usize::from(len)];
+            reader.read_exact(&mut body).await?;
+            let media = shared.media.as_ref().expect("guarded");
+            let down = match media.lock().unwrap().on_reply(&body) {
+                Ok(down) => down,
+                Err(e) => {
+                    warn!("vnc: ignoring a media-stream reply: {e:#}");
+                    false
+                }
+            };
+            let was_live = down && std::mem::take(&mut desktop.lock().unwrap().media_live);
+            return Ok(if was_live { RectEffect::FULL_REPAINT } else { RectEffect::NOTHING });
+        }
         other => {
             let label = encoding_label(other);
             anyhow::bail!("server sent encoding {label}, which was not advertised")
@@ -4056,6 +4265,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // one full request makes the source known instead.
         Decoded::Unavailable => return Ok(RectEffect::FULL_REPAINT),
     };
+    // While the media stream carries the picture, zlib is decoded only to keep its
+    // deflate stream in step: the Mac still answers the one-pixel polls, and pushes
+    // a whole screen on its own at a login.
+    if desktop.lock().unwrap().media_live {
+        return Ok(RectEffect::pixels(rect));
+    }
 
     // What of this rect the browser does not already have. A server that
     // re-sends unchanged pixels — and they do, on a cursor crossing a window
@@ -4640,7 +4855,18 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     }
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
-        desktop.lock().unwrap().hp.layout(resized, tokio::time::Instant::now());
+        let mut d = desktop.lock().unwrap();
+        d.hp.layout(resized, tokio::time::Instant::now());
+        d.laid_out = true;
+        // A new display stopped the media stream, whoever asked for it: the
+        // picture is zlib's until the stream is offered for it and delivers.
+        if resized {
+            d.media_live = false;
+            if let Some(media) = &shared.media {
+                media.lock().unwrap().stopped();
+            }
+        }
+        drop(d);
         hp_wake.notify_one();
     }
 
@@ -7275,6 +7501,8 @@ mod tests {
             declared: None,
             repaint_owed: false,
             hp: HpResize::default(),
+            laid_out: false,
+            media_live: false,
         }))
     }
 
@@ -7292,6 +7520,7 @@ mod tests {
             audio: None,
             camera: None,
             microphone: None,
+            media: None,
         }
     }
 
@@ -7640,7 +7869,7 @@ mod tests {
         sink: &VideoSink,
     ) -> Option<Vec<u8>> {
         tokio::time::advance(HP_RESIZE_SETTLE).await;
-        hp_resize_step(uplink, desktop, sink).await.unwrap();
+        hp_resize_step(uplink, desktop, None, sink).await.unwrap();
         desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now())
     }
 
@@ -7656,7 +7885,7 @@ mod tests {
         let desktop = shared_desktop((1024, 768), None, None);
 
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
-        hp_resize_step(&uplink, &desktop, &sink).await.unwrap();
+        hp_resize_step(&uplink, &desktop, None, &sink).await.unwrap();
         assert!(written(&wire).is_empty(), "nothing goes out before the window settles");
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
@@ -7763,7 +7992,7 @@ mod tests {
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
         assert_eq!(hp_settle(&uplink, &desktop, &sink).await, None, "one request in flight at a time");
         desktop.lock().unwrap().hp.layout(true, tokio::time::Instant::now());
-        hp_resize_step(&uplink, &desktop, &sink).await.unwrap();
+        hp_resize_step(&uplink, &desktop, None, &sink).await.unwrap();
         assert_eq!(
             desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()),
             Some(hp_config((1600, 1200), 2.0))

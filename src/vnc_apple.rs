@@ -40,9 +40,9 @@
 //! ## What is otherwise absent
 //!
 //! Standard `ard` refuses resize because it shares physical displays; High
-//! Performance can resize its virtual display. The measured Adaptive media path
-//! (HEVC/AAC-ELD over SRTP) is deliberately not spoken: the screen stays on zlib
-//! rectangles, and a Mac's sound arrives over the AirPlay workaround instead.
+//! Performance can resize its virtual display, and takes its picture from the
+//! media stream once it is up ([`crate::vnc_apple_media`]): zlib rectangles carry
+//! it only until then. A Mac's sound arrives over the AirPlay workaround.
 //! Both Apple subtypes
 //! use Apple's native pasteboard protocol; High Performance enables monitoring
 //! before the rekey and carries fetches and clipboard data inside the encrypted
@@ -111,8 +111,9 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// here. That is why Apple's own private framebuffer codecs are absent — the
 /// reference leaves their payload formats unresolved, so advertising them would
 /// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
-/// absent because advertising it starts the separate Adaptive HEVC/AAC-ELD
-/// transport, which this engine deliberately does not implement.
+/// absent from the opening list: High Performance adds it in a second
+/// `SetEncodings` once the display it offers the stream for exists
+/// ([`crate::vnc_apple_media::encodings_with_media_stream`]).
 pub const ENCODINGS: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
@@ -1068,11 +1069,11 @@ mod tests {
     /// Dropping `DisplayInfo` or the layout from the list costs the display
     /// information silently, with a session that still connects and paints.
     #[test]
-    fn the_list_asks_for_displays_and_zlib_but_not_adaptive_media() {
+    fn the_list_asks_for_displays_and_zlib_but_not_the_media_stream() {
         for encoding in [ENCODING_DISPLAY_INFO, ENCODING_DISPLAY_LAYOUT, ENCODING_ZLIB] {
             assert!(ENCODINGS.contains(&encoding), "{encoding:#x}");
         }
-        assert!(!ENCODINGS.contains(&0x3f2), "the unimplemented Adaptive media transport");
+        assert!(!ENCODINGS.contains(&0x3f2), "the media stream is asked for once a display exists");
     }
 
     /// The `AppleDisplayLayout` a macOS 26 VM sent for its two real screens, off
