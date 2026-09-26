@@ -1822,6 +1822,10 @@ impl Receiver {
                     .set_recv_buffer_size(buffer)
                     .with_context(|| format!("size UDP {at}'s receive buffer"))?;
                 let granted = socket.recv_buffer_size()?;
+                // Linux reads back twice what it grants, the half beside the
+                // payload being its own bookkeeping.
+                #[cfg(target_os = "linux")]
+                let granted = granted / 2;
                 if granted < buffer {
                     log::warn!(
                         "vnc: UDP {port} was given a {granted}-byte receive buffer of the \
