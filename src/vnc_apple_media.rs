@@ -776,13 +776,15 @@ impl SrtcpSender {
 /// authenticated for liveness and never decrypted, since nothing reads them.
 pub struct SrtcpReceiver {
     keys: SessionKeys,
-    /// The sender's SSRC and the highest SRTCP index authenticated from it.
-    last: Option<(u32, u32)>,
+    /// The highest SRTCP index authenticated from each sender SSRC, kept for as
+    /// long as the keys: every offer starts a stream with a new SSRC under the
+    /// same keys, and an earlier stream's reports must not come back.
+    last: std::collections::HashMap<u32, u32>,
 }
 
 impl SrtcpReceiver {
     pub fn new(master: &MasterKey) -> Self {
-        Self { keys: SessionKeys::derive(master, 3), last: None }
+        Self { keys: SessionKeys::derive(master, 3), last: std::collections::HashMap::new() }
     }
 
     /// Whether `data` is an authentic report newer than any already received:
@@ -797,10 +799,10 @@ impl SrtcpReceiver {
         }
         let ssrc = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let index = u32::from_be_bytes([data[end - 4], data[end - 3], data[end - 2], data[end - 1]]) & 0x7fff_ffff;
-        if self.last.is_some_and(|(last_ssrc, last)| last_ssrc == ssrc && index <= last) {
+        if self.last.get(&ssrc).is_some_and(|&last| index <= last) {
             return Err(SrtpError::Stale);
         }
-        self.last = Some((ssrc, index));
+        self.last.insert(ssrc, index);
         Ok(())
     }
 }
@@ -1220,6 +1222,9 @@ pub struct MediaStream {
     /// — see [`MediaStream::overdue`].
     picture_heard: Heard,
     sound_heard: Heard,
+    /// When the sound leg last brought sound, an SRTP packet: what the offer's
+    /// first sound is, which a report cannot stand in for.
+    sounded: Heard,
     /// Where the sound leg's decoded PCM goes: the session's audio bridge, when
     /// the browser can be sent sound. `None` drains the leg unread.
     #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
@@ -1282,6 +1287,7 @@ impl MediaStream {
             failed: Failure::default(),
             picture_heard: Heard::default(),
             sound_heard: Heard::default(),
+            sounded: Heard::default(),
             sound: None,
         };
         (media, rx)
@@ -1350,6 +1356,13 @@ impl MediaStream {
         Some(heard_since(&self.picture_heard, pictured).unwrap_or(pictured))
     }
 
+    /// When the sound leg last delivered: its latest packet, once sound has come
+    /// since the offer at `offered`, which a report before it cannot stand in for.
+    fn sound_last(&self, offered: std::time::Instant) -> Option<std::time::Instant> {
+        let sounded = heard_since(&self.sounded, offered)?;
+        Some(heard_since(&self.sound_heard, sounded).unwrap_or(sounded))
+    }
+
     /// Signalled at every offer, which sets a new [`deadline`](Self::deadline): an
     /// offer can go out from either of the engine's loops, and the one that waits
     /// for the deadline may be idle behind a still screen when the other sends it.
@@ -1363,8 +1376,8 @@ impl MediaStream {
             Owed::Nothing => None,
             Owed::Answer(offered) => Some(offered + STREAM_START),
             Owed::Stream { offered, pictured } => {
-                let sound = heard_since(&self.sound_heard, offered);
-                Some(leg_due(offered, self.picture_last(pictured)).min(leg_due(offered, sound)))
+                let picture = leg_due(offered, self.picture_last(pictured));
+                Some(picture.min(leg_due(offered, self.sound_last(offered))))
             }
         }
     }
@@ -1404,7 +1417,7 @@ impl MediaStream {
                 }
             });
         }
-        let heard = heard_since(&self.sound_heard, offered);
+        let heard = self.sound_last(offered);
         if now >= leg_due(offered, heard) {
             return Some(match (heard, ports) {
                 (None, _) if self.pending => unanswered(),
@@ -1562,6 +1575,7 @@ struct Receiver {
     failed: Failure,
     picture_heard: Heard,
     sound_heard: Heard,
+    sounded: Heard,
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
 
@@ -1607,6 +1621,7 @@ impl Receiver {
             failed: std::sync::Arc::clone(&media.failed),
             picture_heard: std::sync::Arc::clone(&media.picture_heard),
             sound_heard: std::sync::Arc::clone(&media.sound_heard),
+            sounded: std::sync::Arc::clone(&media.sounded),
             sound: media.sound.clone(),
         })
     }
@@ -1668,7 +1683,9 @@ impl Receiver {
                     let data = &mut sound_datagram[..len];
                     match (self.audio_srtp.unprotect(data), sound.as_mut()) {
                         (Ok(header), sound) => {
-                            *self.sound_heard.lock().unwrap() = Some(std::time::Instant::now());
+                            let now = Some(std::time::Instant::now());
+                            *self.sounded.lock().unwrap() = now;
+                            *self.sound_heard.lock().unwrap() = now;
                             if let Some(sound) = sound
                                 && let Err(e) = sound.push(&header, &data[header.payload.0..header.payload.1])
                             {
@@ -2183,6 +2200,7 @@ mod tests {
 
         let other = SrtcpSender::new(&master()).protect(&rtcp_receiver_report(0x0506_0708));
         assert_eq!(reports.authenticate(&other), Ok(()), "a new stream starts over");
+        assert_eq!(reports.authenticate(&second), Err(SrtpError::Stale), "an earlier stream's stays spent");
     }
 
     #[test]
@@ -2395,13 +2413,13 @@ mod tests {
     /// [`STREAM_START`], and the running stream a packet on each leg every
     /// [`STREAM_SILENCE`]; past any of them the session ends. A picture of another
     /// display, the old one's last, pays nothing, nor does sound from before the
-    /// offer, nor a report before the first picture, and a display change owes
-    /// nothing until its own offer.
+    /// offer, nor a report before the first picture or the first sound, and a
+    /// display change owes nothing until its own offer.
     #[test]
     fn a_stream_without_pictures_or_sound_is_overdue_but_not_across_a_display_change() {
         let mut m = media();
         assert_eq!(m.deadline(), None, "nothing is owed before an offer");
-        *m.sound_heard.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        *m.sounded.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         let offered = std::time::Instant::now();
         m.offer((1600, 1000)).unwrap();
         let first = m.deadline().expect("an offer owes a picture and sound");
@@ -2427,6 +2445,9 @@ mod tests {
         assert!(m.overdue(first).is_some(), "and overdue without it");
 
         *m.sound_heard.lock().unwrap() = Some(pictured);
+        assert_eq!(m.deadline(), Some(first), "a report is not the first sound");
+        assert!(m.overdue(first).is_some(), "and overdue without it");
+        *m.sounded.lock().unwrap() = Some(pictured);
         *m.picture_heard.lock().unwrap() = Some(pictured);
         let next = m.deadline().expect("a running stream owes a packet on each leg");
         assert_eq!(next, pictured + STREAM_SILENCE);
