@@ -257,15 +257,17 @@ the browser as it came: no ZRLE on either side, and no encode here.
 
 - **Listed when the plan is 4:4:4.** `render_chroma` resolving to `444`, by the
   browser's answer or the target's, puts the encoding at the head of a generic
-  server's `SetEncodings`; `420` never lists it, and that browser is sent the stream
+  server's `SetEncodings` for a desktop within the ceiling; `420` never lists it, and that browser is sent the stream
   encoded here from ZRLE as before. The plan is fixed for an engine, and a takeover
   by a browser that resolves otherwise rebuilds the engine
   ([choosing a chroma](#choosing-a-chroma)), so a session never changes carriage
   mid-stream. wlshare announces nothing: it sends the encoding in place of ZRLE, and
   any other server ignores it and sends what it always did.
 - **Passed as it came** (`VideoSink::pass`). The frame's opening bits are read for
-  its profile, which must be 1, and whether it is a keyframe; the configuration
-  announced ahead of it is the 4:4:4 string for its size. Its bytes take their share
+  its profile, which must be 1, and whether it is a keyframe; its size is held to the
+  ceiling a stream encoded here is; the configuration announced ahead of it is the
+  4:4:4 string for its size, its level figured at 60 frames a second, wlshare's
+  default `max_fps`, since wlshare rather than the gateway paces it. Its bytes take their share
   of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
   the rounds, the interval, the quality walk and the settle do not run: wlshare
   paces, codes, walks and settles its stream itself.
@@ -278,21 +280,24 @@ the browser as it came: no ZRLE on either side, and no encode here.
   fresh `VideoFormat`.
 - **The fence carries the browser's queue.** wlshare keeps one frame in flight and
   walks its quality by each fence's round trip. Echoed at once, as for any other
-  server, it would time the hop to this gateway alone, which is never behind; on a
-  session that may be sent the encoding each echo instead waits until everything
+  server, it would time the hop to this gateway alone, which is never behind; while
+  the picture is the passed stream each echo instead waits until everything
   queued towards the browser has given its budget back (`VideoSink::drained`) —
   immediately on a link with room, and once the browser has taken it on one that is
   behind — so the queueing is inside the round trip wlshare reads. Echoes wait in
   one queue, in order, raced against the next server message rather than in front of
-  it, and none waits longer than 500 ms (`FENCE_HOLD_LIMIT`), the grace a window
+  it — except behind a fence asking for BlockAfter, where the reading waits for the
+  echo — and none waits longer than 500 ms (`FENCE_HOLD_LIMIT`), the grace a window
   that is not drawing gets: such a window acknowledges nothing, its budget comes
   back only with a pong, and wlshare, which sends nothing until the echo, would
   otherwise run at one frame a heartbeat.
 - **Past the ceiling it is tiles.** A frame is the whole desktop, which past the
-  ceiling is not video: on a target without `resize` a frame at such a size is
-  dropped and the encoding taken off the list, which wlshare answers with the whole
-  desktop in ZRLE for [tiles](#tiles-past-the-ceiling); back within it, the encoding
-  is listed again and wlshare starts over at a keyframe.
+  ceiling is not video: a desktop past it is not listed the encoding, and one that a
+  resize takes there has it taken off the list, which wlshare answers with the whole
+  desktop in ZRLE — for [tiles](#tiles-past-the-ceiling) on a target without
+  `resize`, where a frame already on its way is dropped, and for the ceiling's
+  refusal on one with it. Back within the ceiling, the encoding is listed again and
+  wlshare starts over at a keyframe.
 
 The target's quality keys do not reach a passed stream, which is coded at wlshare's
 `vp9_quality` and `vp9_quality_min` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).

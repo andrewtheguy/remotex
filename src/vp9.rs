@@ -74,13 +74,14 @@ const Q_COARSEST: u32 = 63;
 /// `video::measure_the_encoders`, which sweeps it.
 const CPU_USED: c_int = 7;
 
-/// The frame rate the level calculation assumes.
+/// The frame rate the level of a stream this gateway encodes is figured at.
 ///
 /// Nothing paces frames to it — the remote decides when a frame happens — but a VP9 level is
 /// defined over a *sample rate*, so a number is needed to turn a picture size into one. 30 is
 /// what `VIDEO_FRAME_INTERVAL` in [`crate::encode`] paces access units to, so it is the rate a
-/// stream cannot exceed rather than a guess.
-const NOMINAL_FPS: u64 = 30;
+/// stream cannot exceed rather than a guess. A passed stream is paced by its server and figured
+/// at its own rate ([`crate::stream::pass_444`]).
+pub const ENCODED_FPS: u64 = 30;
 
 /// The 1–100 quality dial as a VP9 quantizer.
 ///
@@ -132,7 +133,7 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// 4:2:0 is not a profile 1 picture, and omitted colour fields mean BT.709 where the
 /// keyframe header says BT.601 (SMPTE 170M primaries, transfer and matrix — code 6 each,
 /// what Chromium's own VP9 parser maps that header flag to) at studio swing. The level
-/// comes from `LEVELS`. `None` for a picture no VP9 level covers, which
+/// comes from `LEVELS` at `fps` frames a second. `None` for a picture no VP9 level covers, which
 /// [`crate::video::check_picture`] has already refused long before this is reached; it is `Option`
 /// rather than a panic because this runs on the session's own path and the whole module's premise
 /// is that nothing here aborts the process.
@@ -140,13 +141,13 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// This is what `ServerMsg::VideoFormat` carries, and it is derived here rather than in the
 /// client because VP9 has no in-band parameter sets at all: there is nothing in the bitstream for
 /// a client to read a codec string out of.
-pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
+pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> {
     let (profile, sampling) = match chroma {
         Chroma::Subsampled => ("00", "01"),
         Chroma::Full => ("01", "03"),
     };
     let size = u32::from(w) * u32::from(h);
-    let rate = u64::from(size) * NOMINAL_FPS;
+    let rate = u64::from(size) * fps;
     let breadth = w.max(h);
     let (level, ..) = LEVELS
         .iter()
@@ -333,7 +334,7 @@ impl Stream {
             yuv: Yuv::new(coded.0, coded.1, chroma),
             quality: quality.clamp(QUALITY_MIN, QUALITY_MAX),
             keyframe_owed: false,
-            decode: codec_string(coded.0, coded.1, chroma),
+            decode: codec_string(coded.0, coded.1, chroma, ENCODED_FPS),
             started: std::time::Instant::now(),
             #[cfg(test)]
             refusals: 0,
@@ -948,7 +949,7 @@ mod tests {
     /// announcing a higher one narrows the set of decoders that will accept the stream.
     #[test]
     fn the_codec_string_names_the_lowest_level_that_fits() {
-        let codec_string = |w, h| super::codec_string(w, h, Chroma::Subsampled);
+        let codec_string = |w, h| super::codec_string(w, h, Chroma::Subsampled, ENCODED_FPS);
         // 1280x800 at 30: 1_024_000 samples. Level 3.1 allows only 983_040 of them, so this is
         // level 4 — the *picture size* binds here, not the sample rate, which at 30_720_000 is
         // well inside 3.1's 36_864_000. That is the trap in this table: the two limits do not
@@ -977,7 +978,7 @@ mod tests {
             let string = codec_string(w, h).expect("a level for a real desktop");
             assert!(string.starts_with("vp09.00."), "not profile 0: {string}");
             assert!(string.ends_with(".08.01.06.06.06.00"), "not 8-bit 4:2:0 BT.601: {string}");
-            let full = super::codec_string(w, h, Chroma::Full).expect("a level for a real desktop");
+            let full = super::codec_string(w, h, Chroma::Full, ENCODED_FPS).expect("a level for a real desktop");
             assert!(full.ends_with(".08.03.06.06.06.00"), "not 8-bit 4:4:4 BT.601: {full}");
             assert_eq!(
                 full,
@@ -985,6 +986,12 @@ mod tests {
                 "{w}x{h}"
             );
         }
+        // At 60 frames a second the sample rate binds where the picture size did not: 1080p60
+        // is 124_416_000 samples a second, past 4.0's 83_558_400, and 4K60 497_664_000, past
+        // 5.0's 311_951_360.
+        let at_60 = |w, h| super::codec_string(w, h, Chroma::Full, 60);
+        assert_eq!(at_60(1920, 1080).as_deref(), Some("vp09.01.41.08.03.06.06.06.00"));
+        assert_eq!(at_60(3840, 2160).as_deref(), Some("vp09.01.51.08.03.06.06.06.00"));
     }
 
     /// **Where the picture loss on a desktop stream is.** At the dial's finest quantizer
