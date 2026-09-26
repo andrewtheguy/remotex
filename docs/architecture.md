@@ -320,19 +320,21 @@ stream is sent it instead, as the Mac sent it, and the gateway neither decodes n
 encodes a picture of it. It is for a LAN. High Performance always enables its
 own rate controller, between 20 and 60 Mbit/s
 ([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
-behavior, not Standard mode's **Adaptive** quality choice. The current 12 Mbit/s
-offer lies below that controller's floor and the gateway sends it no rate reports,
-so the Mac's controller has no effective range to walk. A passed stream has no
-other quality walk behind it. Unlike wlshare's stream, which is coded for
-adaptation and walks its quality by the fence round trip, the Mac's stream here
-is passed straight: nothing reports the browser's queue back to it.
+behavior, not Standard mode's **Adaptive** quality choice. The gateway offers
+Apple's bitrate entries and sends the rate reports Apple's viewer sends, every
+50 ms, with the one-way delay of the picture packets reaching it, so the Mac
+walks its encoder between those bounds by the link between it and the gateway,
+decoded or passed. That is the only walk a passed stream has. Unlike wlshare's
+stream, which walks its quality by the fence round trip to the browser, the
+delay the Mac hears ends at the gateway: nothing reports the browser's queue
+back to it ([roadmap](roadmap.md#apples-passed-hevc-at-4k)).
 
 Three controls with similar names therefore remain separate:
 
 | Control | Selection | What it reaches |
 |---|---|---|
 | Standard **Adaptive** / **Full** | Apple's viewer, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
-| High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range when reports and the offer leave a range |
+| High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range, by the gateway's reports |
 | `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway: all pictures after local HEVC decoding, or only the VP9 gaps while HEVC passes |
 
 - **The browser selects.** The page asks its `VideoDecoder` once, at load, about
@@ -354,8 +356,8 @@ Three controls with similar names therefore remain separate:
   `src/vnc_apple_media.rs`, per ISO/IEC 14496-15 Annex E: `hev1` for parameter sets
   in band). Its size is held to the ceiling a stream encoded here is, and its bytes
   take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
-  sends goes out, up to the virtual display's 30 a second. The offer is unchanged,
-  capped at 12 Mbit/s: the quality is what the decoded session already shows.
+  sends goes out, up to the virtual display's 30 a second. The offer and the rate
+  reports are a decoded session's: the quality is what that session receives.
 - **A restart is an IDR from the Mac.** A reattach, a takeover and the browser's
   own decoder failing each reset the render, and the gateway asks the Mac for an
   IDR with a PLI, which it answers within tens of milliseconds; until the IDR

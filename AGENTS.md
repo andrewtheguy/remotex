@@ -142,7 +142,10 @@ documentation.
   are the non-default `apple-hp-media` feature, which no release artifact
   enables; a build without it refuses the subtype. Zlib carries its picture only
   until the stream is up and across display changes, and a stream that fails
-  ends the session, as in Apple's viewer. Do not add a High Performance subtype
+  ends the session, as in Apple's viewer. Its offer carries Apple's bitrate
+  entries and the gateway sends Apple's rate reports, with the delay measured to
+  the gateway, so the Mac's own controller sets the rate; do not cap the offer or
+  add a key that turns the reports off. Do not add a High Performance subtype
   without the stream or a fallback to zlib from a failed one, combinations
   Apple's viewer never offers. See
   [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).

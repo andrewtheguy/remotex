@@ -38,15 +38,17 @@
 //! keys ([`SrtcpSender`]). A packet whose tag does not match is dropped, and so is
 //! an authentic one no newer than a packet already received.
 //!
-//! Three fields of the offer differ from Apple's, each measured:
+//! Two fields of the offer differ from Apple's, each measured:
 //!
 //! - the flags word carries [`FLAG_NO_CURSOR`], which makes the agent capture the
 //!   screen without the pointer (`send cursor with video 0`) — the pointer keeps
 //!   arriving as its own shape over RFB;
 //! - `tilesPerFrame` is 1, so each picture is one HEVC picture of the whole
-//!   display; Apple's 4 splits it into strips coded as separate pictures;
-//! - the bitrate entries are capped at [`BITRATE_CAP`]; uncapped, the sender pads
-//!   an animating lock screen out to about 19 Mbit/s.
+//!   display; Apple's 4 splits it into strips coded as separate pictures.
+//!
+//! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
+//! controller walks the picture between 20 and 60 Mbit/s by the one-way delay this
+//! side reports ([`RateFeedback`]), every 50 ms as Apple's viewer does.
 //!
 //! The stream itself is HEVC Range Extensions, 4:4:4, full-range BT.709, RTP payload
 //! type 100 packed as RFC 7798 without DONL: single NAL units, aggregation packets
@@ -98,13 +100,6 @@ pub const FLAG_60FPS: u32 = 0x1;
 pub const FLAG_NO_CURSOR: u32 = 0x4;
 /// The flags this viewer sends.
 pub const FLAGS: u32 = FLAG_60FPS | FLAG_NO_CURSOR;
-
-/// The ceiling put on every bitrate entry of the negotiation blobs, in bits per
-/// second. Apple's entries run to 100 Mbit/s, and a sender with no feedback from its
-/// receiver fills what it was offered: an animating lock screen came at
-/// 19 Mbit/s uncapped and about 7 under an 8 Mbit/s cap, an idle desktop at almost
-/// nothing either way.
-pub const BITRATE_CAP: u64 = 12_000_000;
 
 /// An SRTP master key as the `0x1c` message carries it: 32 bytes of AES-256 key and
 /// 14 bytes of salt.
@@ -198,13 +193,12 @@ fn codec_entry((f1, f2, f3): (u64, u64, Option<u64>)) -> Proto {
 }
 
 /// The tail every blob ends with: the library name, `f8`, the codec list in the
-/// given order with its bitrates capped at `cap`, `f13`, `f14 = 2`, `f16 = 0`.
-fn blob_tail(blob: &mut Proto, codecs: &[(u64, u64, Option<u64>)], cap: u64, f13: u64) {
+/// given order, `f13`, `f14 = 2`, `f16 = 0`.
+fn blob_tail(blob: &mut Proto, codecs: &[(u64, u64, Option<u64>)], f13: u64) {
     blob.bytes(6, VICEROY.as_bytes());
     blob.uint(8, 0);
-    for &(f1, f2, f3) in codecs {
-        let f2 = if f1 == 0 { f2.min(cap) } else { f2 };
-        blob.message(9, codec_entry((f1, f2, f3)));
+    for &entry in codecs {
+        blob.message(9, codec_entry(entry));
     }
     blob.uint(13, f13);
     blob.uint(14, 2);
@@ -213,7 +207,7 @@ fn blob_tail(blob: &mut Proto, codecs: &[(u64, u64, Option<u64>)], cap: u64, f13
 
 /// The audio offer's blob, before compression: `VCMediaNegotiationBlobV2` with one
 /// audio stream whose SSRC is `ssrc`.
-fn audio_offer_blob(ssrc: u32, cap: u64) -> Vec<u8> {
+fn audio_offer_blob(ssrc: u32) -> Vec<u8> {
     let mut blob = Proto::default();
     blob.uint(1, 1);
     blob.uint(2, 1);
@@ -225,7 +219,7 @@ fn audio_offer_blob(ssrc: u32, cap: u64) -> Vec<u8> {
     stream.uint(5, 0);
     stream.uint(6, 0);
     blob.message(3, stream);
-    blob_tail(&mut blob, CODEC_ENTRIES, cap, AUDIO_F13);
+    blob_tail(&mut blob, CODEC_ENTRIES, AUDIO_F13);
     blob.0
 }
 
@@ -254,7 +248,7 @@ fn video_codec(id: u64, levels: &[u64], features: &str, f4: u64) -> Proto {
 /// HEVC (`123`) and H.264 (`100`), `tiles` pictures to a frame. The stream's fields
 /// follow `initWithScreenSSRC:…:customVideoWidth:customVideoHeight:tilesPerFrame:
 /// ltrpEnabled:pixelFormats:…`; the Mac answers with HEVC.
-fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64, cap: u64) -> Vec<u8> {
+fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64) -> Vec<u8> {
     let mut blob = Proto::default();
     blob.uint(1, 1);
     blob.uint(2, 1);
@@ -291,7 +285,7 @@ fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64, cap: u64
     let mut codecs = CODEC_ENTRIES.to_vec();
     let bitrate = codecs.remove(4);
     codecs.insert(0, bitrate);
-    blob_tail(&mut blob, &codecs, cap, VIDEO_F13);
+    blob_tail(&mut blob, &codecs, VIDEO_F13);
     blob.0
 }
 
@@ -463,10 +457,10 @@ impl Offers {
 
     /// The `0x1c` message for a display of `size` backing pixels.
     fn configuration(&self, size: (u16, u16)) -> Vec<u8> {
-        let audio = offer(MODE_AUDIO, &audio_offer_blob(self.audio_ssrc, BITRATE_CAP), &self.call_id);
+        let audio = offer(MODE_AUDIO, &audio_offer_blob(self.audio_ssrc), &self.call_id);
         let video = offer(
             MODE_VIDEO,
-            &video_offer_blob(self.video_ssrc, size, TILES_PER_FRAME, BITRATE_CAP),
+            &video_offer_blob(self.video_ssrc, size, TILES_PER_FRAME),
             &self.call_id,
         );
         configuration_message(
@@ -822,6 +816,125 @@ pub fn rtcp_pli(ssrc: u32, media_ssrc: u32) -> [u8; 12] {
     pli[4..8].copy_from_slice(&ssrc.to_be_bytes());
     pli[8..12].copy_from_slice(&media_ssrc.to_be_bytes());
     pli
+}
+
+/// The picture leg's RTP clock, in ticks a second.
+const VIDEO_CLOCK: f64 = 24_000.0;
+
+/// The bandwidth estimate a rate report carries, in kbit/s: the controller's
+/// 60 Mbit/s ceiling. The Mac's controller moves on the one-way delay alone, and
+/// this side makes no estimate of its own.
+const REPORTED_BANDWIDTH: u16 = 60_000;
+
+/// What the Mac's rate controller hears from this side: the `RCTL` report Apple's
+/// viewer sends every 50 ms on the picture's leg, built from the picture packets
+/// that arrived here and nothing downstream of them. See `docs/apple-vnc-889.md`,
+/// "Rate control", for the layout and what the Mac does with it.
+pub struct RateFeedback {
+    /// Where the report's clock counts from.
+    epoch: std::time::Instant,
+    /// The Mac's SSRC for the stream the rest describes. Each offer starts a stream
+    /// with a new one, and the report starts again with it.
+    ssrc: u32,
+    /// The last picture packet's RTP timestamp, and when it arrived.
+    last: Option<(u32, std::time::Instant)>,
+    /// Picture packets of this stream received, which the report carries mod 4096.
+    received: u32,
+    delay: OneWayDelay,
+}
+
+impl RateFeedback {
+    pub fn new(epoch: std::time::Instant) -> Self {
+        Self { epoch, ssrc: 0, last: None, received: 0, delay: OneWayDelay::default() }
+    }
+
+    /// An authentic picture packet from `ssrc`, stamped `timestamp`, that arrived at
+    /// `at`.
+    pub fn received(&mut self, ssrc: u32, timestamp: u32, at: std::time::Instant) {
+        if ssrc != self.ssrc {
+            *self = Self { ssrc, ..Self::new(self.epoch) };
+        }
+        self.last = Some((timestamp, at));
+        self.received = self.received.wrapping_add(1);
+        self.delay.sample(timestamp, at);
+    }
+
+    /// The one-way delay the next report carries, in seconds.
+    pub fn delay(&self) -> f64 {
+        self.delay.owrd
+    }
+
+    /// The report from `ssrc` at `now`, once a picture packet has arrived to echo.
+    /// The Mac takes it only alone in its datagram.
+    pub fn report(&self, ssrc: u32, now: std::time::Instant) -> Option<[u8; 32]> {
+        let (timestamp, at) = self.last?;
+        let millis = |d: std::time::Duration| d.as_millis().min(0xffff) as u16;
+        let clock = (now.saturating_duration_since(self.epoch).as_secs_f64() * 1024.0) as u64 as u16;
+        let delay = (self.delay.owrd * 8192.0).min(f64::from(u16::MAX)) as u16;
+        let mut report = [0u8; 32];
+        report[..4].copy_from_slice(&[0x80, 204, 0, 7]);
+        report[4..8].copy_from_slice(&ssrc.to_be_bytes());
+        report[8..12].copy_from_slice(b"RCTL");
+        report[12..16].copy_from_slice(&[0x85, 0, 0, 4]);
+        report[16..18].copy_from_slice(&((timestamp >> 8) as u16).to_be_bytes());
+        report[22..24].copy_from_slice(&millis(now.saturating_duration_since(at)).to_be_bytes());
+        report[24..26].copy_from_slice(&clock.to_be_bytes());
+        report[26..28].copy_from_slice(&delay.to_be_bytes());
+        report[28..30].copy_from_slice(&((self.received & 0xfff) as u16).to_be_bytes());
+        report[30..32].copy_from_slice(&REPORTED_BANDWIDTH.to_be_bytes());
+        Some(report)
+    }
+}
+
+/// The one-way relative delay, as Apple's receiver estimates it. Each picture's
+/// first packet gives a lag: its arrival less its RTP timestamp, both counted from
+/// the stream's first picture. A short average follows the lag, a long one settles
+/// on its floor, and the delay is how far the short one stands above it — a queue
+/// building between the Mac and here, with no clock shared between the two.
+#[derive(Default)]
+struct OneWayDelay {
+    /// The first picture's timestamp and arrival, which lags count from.
+    first: Option<(u32, std::time::Instant)>,
+    /// The latest picture's timestamp, and ticks since the first.
+    previous: u32,
+    ticks: u64,
+    short: f64,
+    long: f64,
+    owrd: f64,
+}
+
+/// A lag this far, in seconds, from either average is a clock that jumped rather
+/// than a queue, and the estimate starts again from it.
+const SPURIOUS_LAG: f64 = 30.0;
+
+impl OneWayDelay {
+    fn sample(&mut self, timestamp: u32, at: std::time::Instant) {
+        let Some((_, since)) = self.first else {
+            return self.restart(timestamp, at);
+        };
+        // A later packet of the same picture, or one out of order.
+        let step = timestamp.wrapping_sub(self.previous) as i32;
+        if step <= 0 {
+            return;
+        }
+        self.previous = timestamp;
+        self.ticks += step as u64;
+        let lag = at.saturating_duration_since(since).as_secs_f64() - self.ticks as f64 / VIDEO_CLOCK;
+        if lag - self.short > SPURIOUS_LAG || self.long - lag > SPURIOUS_LAG {
+            return self.restart(timestamp, at);
+        }
+        self.long = 0.9999 * self.long + 0.0001 * lag;
+        self.short = 0.9 * self.short + 0.1 * lag;
+        self.owrd = self.short - self.long;
+        if self.owrd < 0.0 {
+            self.long = self.short;
+            self.owrd = 0.0;
+        }
+    }
+
+    fn restart(&mut self, timestamp: u32, at: std::time::Instant) {
+        *self = Self { first: Some((timestamp, at)), previous: timestamp, ..Self::default() };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1754,6 +1867,11 @@ const UNITS_PER_WAVE: usize = 2;
 #[cfg(feature = "apple-hp-media")]
 const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How often the Mac's rate controller is sent a [`RateFeedback`] report: Apple's
+/// viewer's cadence.
+#[cfg(feature = "apple-hp-media")]
+const RATE_FEEDBACK: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Seconds between the debug log's picture rates: what the Mac actually sends,
 /// which its 60 fps flag does not settle.
 #[cfg(feature = "apple-hp-media")]
@@ -1773,8 +1891,9 @@ const VIDEO_RECEIVE_BUFFER: usize = 4 << 20;
 #[cfg(feature = "apple-hp-media")]
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The UDP side: RTCP out on both legs once a second, video in and depacketized,
-/// sound in and decoded. It runs until the session drops it, and stops early only
+/// The UDP side: RTCP out on both legs once a second and rate reports on the
+/// picture's every [`RATE_FEEDBACK`], video in and depacketized, sound in and
+/// decoded. It runs until the session drops it, and stops early only
 /// on a failure, which it leaves in `failed` and which ends the session.
 #[cfg(feature = "apple-hp-media")]
 struct Receiver {
@@ -1880,6 +1999,9 @@ impl Receiver {
         let mut sound = self.sound.take().map(|bridge| Sound::start(bridge, std::sync::Arc::clone(&self.failed)));
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut rate = tokio::time::interval(RATE_FEEDBACK);
+        rate.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut feedback = RateFeedback::new(std::time::Instant::now());
         let started = tokio::time::Instant::now();
         let mut last_pli: Option<tokio::time::Instant> = None;
         let mut media_ssrc = 0u32;
@@ -1902,9 +2024,11 @@ impl Receiver {
                     if ticks % RATE_REPORT == 0 && pictures > 0 {
                         log::debug!(
                             "vnc: {:.1} pictures a second from the Mac over the last {RATE_REPORT}s, \
-                             {behind} dropped behind {} so far, {plis} keyframes asked for",
+                             {behind} dropped behind {} so far, {plis} keyframes asked for, \
+                             {:.1} ms of one-way delay reported",
                             pictures as f64 / f64::from(RATE_REPORT),
-                            onward.name()
+                            onward.name(),
+                            feedback.delay() * 1000.0
                         );
                         pictures = 0;
                     }
@@ -1917,6 +2041,12 @@ impl Receiver {
                             self.video_port,
                             SILENT_START.as_secs()
                         );
+                    }
+                }
+                _ = rate.tick() => {
+                    if let Some(report) = feedback.report(self.video_ssrc, std::time::Instant::now()) {
+                        let report = self.video_rtcp.protect(&report);
+                        let _ = self.video.send(&report).await;
                     }
                 }
                 received = self.audio.recv(&mut sound_datagram) => {
@@ -1947,6 +2077,7 @@ impl Receiver {
                     }
                 }
                 received = self.video.recv(&mut datagram) => {
+                    let arrived = std::time::Instant::now();
                     let len = match received {
                         Ok(len) => len,
                         // A connected socket's report of an ICMP unreachable, for a
@@ -1976,7 +2107,8 @@ impl Receiver {
                         }
                         Err(_) => continue,
                     };
-                    *self.picture_heard.lock().unwrap() = Some(std::time::Instant::now());
+                    *self.picture_heard.lock().unwrap() = Some(arrived);
+                    feedback.received(header.ssrc, header.timestamp, arrived);
                     packets += 1;
                     if packets == 1 {
                         log::info!("vnc: the Mac's screen video is flowing (SSRC {:#x})", header.ssrc);
@@ -2313,9 +2445,9 @@ mod tests {
 
     #[test]
     fn the_blobs_are_what_apples_negotiator_produces() {
-        assert_eq!(audio_offer_blob(3_606_155_525, u64::MAX), unhex(CAPTURED_AUDIO_BLOB));
+        assert_eq!(audio_offer_blob(3_606_155_525), unhex(CAPTURED_AUDIO_BLOB));
         assert_eq!(
-            video_offer_blob(3_023_179_925, (1600, 1000), 4, u64::MAX),
+            video_offer_blob(3_023_179_925, (1600, 1000), 4),
             unhex(CAPTURED_VIDEO_BLOB)
         );
     }
@@ -2352,11 +2484,11 @@ mod tests {
         out
     }
 
-    /// The two fields this offer changes from Apple's: one tile to a frame, and no
-    /// bitrate entry above the cap. Everything else is the captured offer's.
+    /// One tile to a frame, the field of this blob that differs from Apple's, and
+    /// Apple's bitrate entries, the 40 Mbit/s one first, up to 100 Mbit/s.
     #[test]
-    fn the_video_offer_asks_for_one_picture_a_frame_at_a_capped_bitrate() {
-        let blob = video_offer_blob(7, (1280, 800), TILES_PER_FRAME, BITRATE_CAP);
+    fn the_video_offer_asks_for_one_picture_a_frame_at_apples_bitrates() {
+        let blob = video_offer_blob(7, (1280, 800), TILES_PER_FRAME);
         let top = fields(&blob);
         let stream = top.iter().find_map(|(f, v)| (*f == 5).then(|| v.clone().unwrap_err())).unwrap();
         let stream = fields(&stream);
@@ -2371,16 +2503,17 @@ mod tests {
             .filter(|entry| entry[0] == (1, Ok(0)))
             .map(|entry| *entry[1].1.as_ref().unwrap())
             .collect();
-        assert_eq!(bitrates.len(), 6);
-        assert!(bitrates.iter().all(|&b| b <= BITRATE_CAP), "{bitrates:?}");
-        assert!(bitrates.contains(&6_000_000), "entries under the cap keep their value");
+        assert_eq!(
+            bitrates,
+            [40_000_000, 75_000_000, 20_000_000, 60_000_000, 100_000_000, 6_000_000]
+        );
     }
 
     /// The plist around the blob: header, the dictionary's shape, and a trailer
     /// whose offsets land on the objects they name.
     #[test]
     fn the_offer_is_a_binary_plist_of_four_entries() {
-        let plist = offer(MODE_AUDIO, &audio_offer_blob(1, BITRATE_CAP), "910BCF8F-D1D7-4EB6-B728-E1FDB02DD3B6");
+        let plist = offer(MODE_AUDIO, &audio_offer_blob(1), "910BCF8F-D1D7-4EB6-B728-E1FDB02DD3B6");
         assert_eq!(&plist[..8], b"bplist00");
         assert_eq!(&plist[8..17], &[0xd4, 1, 2, 3, 4, 5, 6, 7, 8]);
         let trailer = &plist[plist.len() - 32..];
@@ -2512,6 +2645,66 @@ mod tests {
         let other = SrtcpSender::new(&master()).protect(&rtcp_receiver_report(0x0506_0708));
         assert_eq!(reports.authenticate(&other), Ok(()), "a new stream starts over");
         assert_eq!(reports.authenticate(&second), Err(SrtpError::Stale), "an earlier stream's stays spent");
+    }
+
+    /// Byte for byte a report the Mac took from the rate-control probe, 5.9 s into
+    /// its stream with 2970 picture packets in: the echo of a timestamp >> 8, no
+    /// hold since it, the clock, no delay, the count and the bandwidth.
+    #[test]
+    fn a_rate_report_is_one_the_mac_took() {
+        let epoch = std::time::Instant::now();
+        let at = epoch + std::time::Duration::from_nanos(5_908_203_200);
+        let mut feedback = RateFeedback::new(epoch);
+        assert_eq!(feedback.report(0x0d96_7839, at), None, "nothing to echo yet");
+        for _ in 0..2970 {
+            feedback.received(0x1234_5678, 0x8042, at);
+        }
+        assert_eq!(
+            feedback.report(0x0d96_7839, at).unwrap()[..],
+            unhex("80cc00070d9678395243544c85000004008000000000000017a200000b9aea60")[..]
+        );
+    }
+
+    /// A lag that holds steady reads as no delay, one that grows as a queue builds
+    /// reads as that queue, and the floor follows the lag back down at once.
+    #[test]
+    fn the_reported_delay_is_a_queue_building_between_the_mac_and_here() {
+        let epoch = std::time::Instant::now();
+        let ms = |n: u64| epoch + std::time::Duration::from_millis(n);
+        let mut feedback = RateFeedback::new(epoch);
+        // 30 pictures a second, 800 ticks of 24 kHz apart, each 5 ms in transit.
+        let picture = |feedback: &mut RateFeedback, n: u64, queued: u64| {
+            feedback.received(9, 0xffff_f000_u32.wrapping_add(n as u32 * 800), ms(n * 100 / 3 + 5 + queued));
+        };
+        for n in 0..300 {
+            picture(&mut feedback, n, 0);
+        }
+        assert!(feedback.delay() < 0.001, "{}", feedback.delay());
+
+        // Later packets of a picture arrive after its first and change nothing.
+        let before = feedback.delay();
+        feedback.received(9, 0xffff_f000_u32.wrapping_add(299 * 800), ms(20_000));
+        assert_eq!(feedback.delay(), before);
+
+        // A queue growing by 10 ms a picture, to 300 ms.
+        for n in 300..330 {
+            picture(&mut feedback, n, (n - 299) * 10);
+        }
+        let queued = feedback.delay();
+        assert!((0.2..0.3).contains(&queued), "{queued}");
+        let report = feedback.report(1, ms(12_000)).unwrap();
+        assert_eq!(u16::from_be_bytes([report[26], report[27]]), (queued * 8192.0) as u16);
+
+        // It drains, and the delay falls with it.
+        for n in 330..400 {
+            picture(&mut feedback, n, 0);
+        }
+        assert!(feedback.delay() < 0.001, "{}", feedback.delay());
+
+        // A new stream is a new SSRC: its count and delay start again.
+        feedback.received(10, 5, ms(20_000));
+        let report = feedback.report(1, ms(20_000)).unwrap();
+        assert_eq!(&report[26..30], &[0, 0, 0, 1]);
     }
 
     #[test]

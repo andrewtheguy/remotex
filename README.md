@@ -187,10 +187,11 @@ display. Apple's official macOS Screen Sharing client can instead choose up to
 two virtual displays. It takes the picture and sound Apple's own viewer takes:
 after the first layout the gateway offers the Mac's media stream, and the Mac
 then sends the screen as HEVC 4:4:4 and its sound as AAC-ELD, over UDP with
-SRTP, to the gateway's ports 5900 and 5901. A Linux gateway needs
-`net.core.rmem_max` of at least 4194304 for the screen's socket, which the log
-warns about when it is lower: the stock 212992 loses keyframes at Retina sizes. The gateway authenticates and
-decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
+SRTP, to the gateway's ports 5900 and 5901, at 20 to 60 Mbit/s as the delay the
+gateway reports to it every 50 ms allows, as Apple's viewer reports. A Linux
+gateway needs `net.core.rmem_max` of at least 4194304 for the screen's socket,
+which the log warns about when it is lower: the stock 212992 loses keyframes at
+Retina sizes. The gateway authenticates and decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
 target uses — or, with `hevc_passthrough = true` and a browser that decodes it
 (Chrome and Safari; not Firefox), sends the HEVC on as the Mac sent it, for a LAN;
 ZRLE carries the picture only until the stream does, and a stream

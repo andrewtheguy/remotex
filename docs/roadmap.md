@@ -131,33 +131,20 @@ rather than ahead of it.
 
 ### Apple's passed HEVC at 4K
 
-A passed High Performance stream
-([Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through)) is
-offered what a decoded one is: every bitrate entry capped at 12 Mbit/s, on a
-virtual display refreshed 30 times a second. That cap sits below the 20 Mbit/s
-floor of the Mac's rate control ([Rate control](apple-vnc-889.md#rate-control)),
-so the offer is the only thing that bounds the stream, and nothing adapts it.
-The Mac still marks rate adaptation enabled: High Performance does that
-unconditionally and has no Adaptive/Full UI setting. Its controller simply has
-no effective range below the floor. Standard mode's **Adaptive** choice is an
-unrelated selection of RFB encodings.
+A High Performance stream is offered Apple's bitrate entries and reported on as
+Apple's viewer reports, so the Mac's rate controller walks it between 20 and
+60 Mbit/s by the delay between the Mac and the gateway
+([Rate control](apple-vnc-889.md#rate-control)).
 
 High Performance is not made for a slow link. Apple's
 [guide](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac)
 asks for high bandwidth and consistently low latency, recommends a wired
 connection, and names 75 Mbit/s for a single 4K display, its virtual display's
-largest (3840×2160, within the gateway's ceiling). So what a passed stream is
-adapted for is resolution: carrying a 4K display, not a link that cannot carry
-the stream. The plan is what Apple's viewer does:
+largest (3840×2160, within the gateway's ceiling). So what a passed stream
+([Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through)) is
+adapted for next is resolution: carrying a 4K display, not a link that cannot
+carry the stream.
 
-- **The offer.** Apple's entries, up to 100 Mbit/s, which the Mac caps at 60. With
-  no rate reports the Mac's always-enabled controller holds at its 20 Mbit/s
-  floor, as measured when no report arrives.
-- **Rate reports.** `RCTL` reports on the picture's leg, with the one-way delay the
-  receiver measures, which take the Mac to about 58 Mbit/s on a clear link and walk
-  it down towards the floor as the delay grows. For a passed stream the delay that
-  matters includes the browser's queue, which the gateway knows from its paint
-  window (`src/feedback.rs`).
 - **60 Hz.** A virtual display refreshed 60 times a second, which a passed stream
   can carry since nothing here decodes it.
 - **The level the browser is asked about.** The page asks its decoder about level
@@ -166,12 +153,14 @@ the stream. The plan is what Apple's viewer does:
   announced 5.1 (`L153`) at 2880×1800 and 30 Hz, and 4K at 60 needs 5.1 anyway. So
   the question is to name the level the Mac announces, measured in Chrome and
   Safari, rather than the one macwork's first capture did.
+- **The browser's queue in the reported delay.** The delay reported to the Mac
+  ends at the gateway's socket. For a passed stream, whose picture nothing here
+  re-encodes, the delay that matters runs on to the browser, which the gateway
+  knows from its paint window (`src/feedback.rs`). Adding it would let the Mac's
+  controller answer a browser link that falls behind, which today drops to the
+  next IDR instead.
 
-None of it has been measured with the raised cap or at 4K.
-
-This would restore the automatic control Apple's High Performance viewer always
-runs; it would not add an Adaptive mode or make `render_adaptive` govern the
-Mac's encoder. That target key remains the gateway's VP9 walk.
+None of it has been measured at 4K.
 
 A slow link is not a passed stream's to answer. A browser on one is served by a
 target without `hevc_passthrough`, whose VP9 the adaptive walk lowers; a passed

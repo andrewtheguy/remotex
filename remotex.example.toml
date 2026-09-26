@@ -402,12 +402,12 @@ password = "change-me"
 # for a LAN of 100 Mbit/s or more, rather than decoding it here and encoding VP9 —
 # every picture the Mac sends, up to 30 a second, at the Mac's own quality, and
 # while the stream is not flowing (before it starts, and across a display change)
-# the Mac's zlib rectangles encoded here as VP9. Nothing adapts the HEVC to the
-# link: High Performance has no Adaptive/Full choice, and although the Mac always
-# enables its own rate controller, this gateway's 12 Mbit/s offer is below that
-# controller's fixed 20 Mbit/s floor and sends it no rate reports. The video keys
-# below reach only VP9 — the gaps, and the whole picture for a browser that cannot
-# take the HEVC. Chrome and Safari, desktop and mobile, were measured taking it;
+# the Mac's zlib rectangles encoded here as VP9. The HEVC is walked between 20 and
+# 60 Mbit/s by the Mac's own rate controller, from the delay this gateway reports
+# as Apple's viewer does, which ends at the gateway: the browser's link does not
+# slow it. High Performance has no Adaptive/Full choice, and the video keys below
+# reach only VP9 — the gaps, and the whole picture for a browser that cannot take
+# the HEVC. Chrome and Safari, desktop and mobile, were measured taking it;
 # Firefox was not. Every other browser is sent VP9 as without the key.
 # [[targets]]
 # name = "mac-high-performance"
