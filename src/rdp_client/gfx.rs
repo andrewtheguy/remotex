@@ -1256,16 +1256,18 @@ mod tests {
         });
         assert!(graphics.surfaces[&1].avc.is_some(), "the surface keeps its decoder");
 
-        let chroma = [metablock((0, 0, 16, 16)), chroma_unit].concat();
+        // A chroma view later, for part of the rectangle the luma view carried.
+        let chroma = [metablock((2, 2, 18, 18)), chroma_unit].concat();
         let updates = receive(&mut graphics, &framebuffer, &[
             start(2),
             wire(1, CODEC_AVC444, (0, 0, 32, 32), &wrap444(None, Some(&chroma))),
             end(2),
         ]);
-        assert_eq!(updates, vec![Update::Paint(Rect { x: 0, y: 0, width: 16, height: 16 }), Update::Frame { id: 2, decoded: 2 }]);
+        assert_eq!(updates, vec![Update::Paint(Rect { x: 2, y: 2, width: 16, height: 16 }), Update::Frame { id: 2, decoded: 2 }]);
         framebuffer.with(|frame| {
-            let px = &frame.pixels[..4];
+            let px = &frame.pixels[(2 * 32 + 2) * 4..][..4];
             assert!(px[..3].iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 8), "{px:?} vs {expected:?}");
+            assert_eq!(&frame.pixels[..4], &[0, 0, 0, 0], "outside every mask is untouched");
         });
 
         // A stream that will not decode costs its rectangles and not the session.

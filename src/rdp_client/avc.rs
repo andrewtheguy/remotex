@@ -152,8 +152,13 @@ impl<'a> View<'a> {
     }
 }
 
-/// A picture of this module's own: the last luma view, kept for the chroma views
-/// that combine with it.
+/// A picture of this module's own: the luma views' rectangles, each as the last
+/// luma view that carried it left it, kept for the chroma views that combine with
+/// them. [MS-RDPEGFX] 3.3.8.3.2 has a chroma rectangle combine with "the last
+/// corresponding rectangle in a luma subframe", so a luma view updates only the
+/// rectangles in its mask: the picture outside them is whatever its encoder left
+/// there, and taking it would overwrite rectangles a later chroma view still
+/// needs.
 struct Planes {
     width: usize,
     height: usize,
@@ -167,17 +172,30 @@ impl Planes {
         Self { width: 0, height: 0, y: Vec::new(), u: Vec::new(), v: Vec::new() }
     }
 
-    fn copy_from(&mut self, view: &View<'_>) {
-        let (width, height) = (view.width, view.height);
-        let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
-        self.width = width;
-        self.height = height;
-        self.y.clear();
-        self.y.extend(view.y.chunks(view.y_stride).take(height).flat_map(|row| &row[..width]));
-        self.u.clear();
-        self.u.extend(view.u.chunks(view.u_stride).take(ch).flat_map(|row| &row[..cw]));
-        self.v.clear();
-        self.v.extend(view.v.chunks(view.v_stride).take(ch).flat_map(|row| &row[..cw]));
+    /// Sized to the picture. A picture of another size starts over, black.
+    fn fit(&mut self, width: usize, height: usize) {
+        if (self.width, self.height) != (width, height) {
+            let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+            self.width = width;
+            self.height = height;
+            self.y = vec![0; width * height];
+            self.u = vec![0; cw * ch];
+            self.v = vec![0; cw * ch];
+        }
+    }
+
+    /// Take one rectangle of the view, with the chroma samples that enclose it.
+    fn keep(&mut self, view: &View<'_>, area: Area) {
+        let cw = self.width.div_ceil(2);
+        for y in area.top..area.bottom {
+            let row = &view.y[y * view.y_stride..][area.left..area.right];
+            self.y[y * self.width..][area.left..area.right].copy_from_slice(row);
+        }
+        for y in area.top / 2..area.bottom.div_ceil(2) {
+            let (left, right) = (area.left / 2, area.right.div_ceil(2));
+            self.u[y * cw..][left..right].copy_from_slice(&view.u[y * view.u_stride..][left..right]);
+            self.v[y * cw..][left..right].copy_from_slice(&view.v[y * view.v_stride..][left..right]);
+        }
     }
 }
 
@@ -238,13 +256,15 @@ impl Avc {
         if let Some(luma) = &stream.luma {
             let picture = decode(&mut self.decoder, luma.bitstream)?;
             let view = View::of(&picture);
-            self.luma.get_or_insert_with(Planes::empty).copy_from(&view);
+            let size = (view.width, view.height);
+            let kept = self.luma.get_or_insert_with(Planes::empty);
+            kept.fit(view.width, view.height);
             let painted_whole = stream.chroma.as_ref().is_some_and(|chroma| same_mask(&chroma.regions, &luma.regions));
-            if !painted_whole {
-                for region in &luma.regions {
-                    if let Some(area) = Area::clip(region.rect, surface, (view.width, view.height)) {
-                        convert_420(&view, area, &mut self.rgb, paint)?;
-                    }
+            for region in &luma.regions {
+                let Some(area) = Area::clip(region.rect, surface, size) else { continue };
+                kept.keep(&view, area);
+                if !painted_whole {
+                    convert_420(&view, area, &mut self.rgb, paint)?;
                 }
             }
         }
@@ -761,8 +781,12 @@ mod tests {
 
             // A luma view alone paints its rectangles at half chroma — the average
             // of the checker — and is kept.
+            // One stream, in the order the decoder will see it: the luma view, a
+            // grey picture, then the chroma view.
+            let grey = [200u8, 128, 128];
             let mut stream = Stream::new();
             let luma_unit = stream.encode(luma_i420.clone(), 32, 32);
+            let grey_unit = stream.encode(flat(32, 32, grey), 32, 32);
             let chroma_unit = stream.encode(chroma_i420.clone(), 32, 32);
             let mut avc = Avc::new().unwrap();
             let mut calls = Vec::new();
@@ -771,13 +795,22 @@ mod tests {
             let mean = |p: u8, q: u8| ((u16::from(p) + u16::from(q)) / 2) as u8;
             let averaged = rgb_of([120, mean(a[1], b[1]), mean(a[2], b[2])]);
             assert!(calls[0].1.iter().all(|px| close(*px, averaged)), "{layout:?}: {:?} vs {averaged:?}", calls[0].1[0]);
-            // Then the chroma view for part of it, in a later stream.
+            // A luma view for another rectangle in between: its picture is a
+            // different one everywhere, but only its rectangle is kept.
+            let elsewhere = Rect16 { left: 24, top: 0, right: 32, bottom: 32 };
+            let between = Avc444 { luma: Some(Avc420 { regions: vec![region(elsewhere)], bitstream: &grey_unit }), chroma: None };
+            avc.draw_444(&between, layout, (32, 32), &mut painted(&mut calls)).unwrap();
+            assert_eq!(calls[1].0, elsewhere);
+            assert!(calls[1].1.iter().all(|px| close(*px, rgb_of(grey))), "{layout:?}: {:?} vs {:?}", calls[1].1[0], rgb_of(grey));
+            // Then the chroma view for part of the first rectangle, in a later
+            // stream: it combines with the luma view that carried that rectangle,
+            // not the grey one that came after.
             let part = Rect16 { left: 4, top: 4, right: 20, bottom: 24 };
             let later = Avc444 { luma: None, chroma: Some(Avc420 { regions: vec![region(part)], bitstream: &chroma_unit }) };
             avc.draw_444(&later, layout, (32, 32), &mut painted(&mut calls)).unwrap();
-            assert_eq!(calls.len(), 2);
-            assert_eq!(calls[1].0, part);
-            for (i, px) in calls[1].1.iter().enumerate() {
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[2].0, part);
+            for (i, px) in calls[2].1.iter().enumerate() {
                 let (x, y) = (4 + i % 16, 4 + i / 16);
                 let expected = if (x + y) % 2 == 0 { ra } else { rb };
                 assert!(close(*px, expected), "{layout:?} later pixel {x},{y}: {px:?} vs {expected:?}");
