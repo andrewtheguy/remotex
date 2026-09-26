@@ -661,25 +661,30 @@ other failures (see [Liveness](#the-stream)).
   Mac logged `viewer set refreshRate 60` and `encode frame rate 60` either way.
   A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
   Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
-  every picture has to be decoded whether it is shown or not. An idle desktop
-  sends about two. The receiver's debug log reports the pictures a second every
-  10 seconds.
+  every picture has to be decoded whether it is shown or not. A still screen
+  sends none for as long as it stays still: 75 s without a picture on macvm,
+  while the Mac's sender reports went on. The receiver's debug log reports the
+  pictures a second every 10 seconds.
 - **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
   the 46-byte masters in the offer. Received packets use the server-to-viewer
   key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP
-  under its key. An authentic packet no newer than one already received, a
-  duplicate or a straggler, is dropped on both legs.
+  under its key: a sender report on each leg about once a second, media or not,
+  authenticated for liveness and never decrypted. An authentic packet no newer
+  than one already received, a duplicate or a straggler, is dropped on both
+  legs.
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
   FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
   about. Apple's viewer's rate feedback is not reproduced.
 - **Liveness.** Every offer owes its answer, its display's first picture and
-  the first sound packet within 10 s, and the running stream a picture and a
-  sound packet every 48 s, 16 of Apple's 3-second timeouts, which Apple's viewer
-  counts on each leg. An idle desktop sends about two pictures a second, and the
-  sound leg a packet every 10 ms whether or not anything plays. Past any of
-  them, the session ends, as it does when the Mac refuses the offer (message 3)
+  the first sound packet within 10 s, and the running stream an authentic
+  packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
+  timeouts. Apple's viewer times each leg from the last RTCP packet it
+  received, not from pictures, which a still screen stops. The Mac's
+  once-a-second reports keep both legs alive, and the sound leg also sends a
+  packet every 10 ms whether or not anything plays. Past any of them, the
+  session ends, as it does when the Mac refuses the offer (message 3)
   and when the receiver fails, on a socket error or a decoder, HEVC or AAC-ELD,
   that cannot start or stops. A display change stops the stream and owes nothing
   until its own offer, except the answer to an offer still out. When the Mac
