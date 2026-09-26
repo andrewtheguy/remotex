@@ -3124,8 +3124,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // came before it ([`VideoSink::drained`]): wlshare holds one frame in flight and
     // walks its quality by the fence's round trip, which an immediate echo would
     // make the round trip to this gateway alone. Every fence waits in the one queue,
-    // so none overtakes another.
-    let mut held_fences: VecDeque<Vec<u8>> = VecDeque::new();
+    // so none overtakes another, and each carries the deadline it was queued with,
+    // [`FENCE_HOLD_LIMIT`] on: the loop turns on every server message, and a limit
+    // measured afresh each turn would never run out on a server that keeps talking.
+    let mut held_fences: VecDeque<(tokio::time::Instant, Vec<u8>)> = VecDeque::new();
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -3171,16 +3173,17 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 None => std::future::pending().await,
             }
         };
+        let fence_deadline = held_fences.front().map(|(deadline, _)| *deadline);
         let fence_due = async {
-            if sink.passing() {
-                let _ = tokio::time::timeout(FENCE_HOLD_LIMIT, sink.drained()).await;
+            if let Some(deadline) = fence_deadline.filter(|_| sink.passing()) {
+                let _ = tokio::time::timeout_at(deadline, sink.drained()).await;
             }
         };
         let read = tokio::select! {
             byte = reader.read_u8() => byte,
 
             () = fence_due, if !held_fences.is_empty() => {
-                let echo = held_fences.pop_front().expect("guarded");
+                let (_, echo) = held_fences.pop_front().expect("guarded");
                 send(uplink, &echo).await?;
                 continue;
             }
@@ -3742,7 +3745,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let flags = flags & (FENCE_BLOCK_BEFORE | FENCE_BLOCK_AFTER);
                 let echo = client_fence(flags, &payload);
                 if passthrough.is_some() {
-                    held_fences.push_back(echo);
+                    held_fences.push_back((tokio::time::Instant::now() + FENCE_HOLD_LIMIT, echo));
                 } else {
                     send(uplink, &echo).await?;
                 }
@@ -10126,6 +10129,43 @@ mod tests {
         .expect("the fence was echoed with the frame still held");
         assert!(started.elapsed() >= FENCE_HOLD_LIMIT, "echoed before the limit");
         task.abort();
+    }
+
+    /// The limit runs from when the fence was queued, not from the loop's last turn:
+    /// a server that keeps talking — here a Bell every 50 ms — turns the loop far more
+    /// often than the limit, and must not hold the echo for as long as it talks.
+    #[tokio::test]
+    async fn a_held_fence_goes_at_its_deadline_while_the_server_keeps_talking() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((64, 32)).await;
+        let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
+        shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
+        let (mut server, client) = tokio::io::duplex(1 << 16);
+        server.write_all(&wlshare_vp9_update(64, 32, 0xa0, b"f1")).await.unwrap();
+        let talking = tokio::spawn(async move {
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                server.write_all(&[2]).await.unwrap(); // Bell
+            }
+            server
+        });
+        let task = tokio::spawn(async move {
+            let _ = read_loop(client, shared, ReadFlags { clipboard: false, poll: false }, None, sink).await;
+        });
+
+        assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
+        let _kept = rx.recv().await;
+        let echo = client_fence(0, b"f1");
+        tokio::time::timeout(FENCE_HOLD_LIMIT * 3, async {
+            while written(&sent) != echo {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the fence waited out the server's talking instead of its deadline");
+        assert!(!talking.is_finished(), "the server had stopped talking before the echo");
+        task.abort();
+        talking.abort();
     }
 
     /// Past the ceiling a frame of the whole desktop is not video: it is dropped, and
