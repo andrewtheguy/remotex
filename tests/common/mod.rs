@@ -187,6 +187,15 @@ pub enum BatchRecord {
 
 /// Parse a server -> client binary frame into its records.
 ///
+/// The acknowledgment a browser's painter sends once it has drawn the batch `frame`,
+/// for a test standing in for a browser: a client that acknowledges nothing is one the
+/// gateway counts as not drawing, and paces as one.
+#[allow(dead_code)]
+pub fn paint_ack(frame: &[u8]) -> String {
+    let sequence = u32::from_le_bytes(frame[4..8].try_into().expect("a batch header"));
+    format!(r#"{{"type":"paintAck","sequence":{sequence},"queuedMs":0,"drawMs":0}}"#)
+}
+
 /// One parser for every test that looks at what was painted, so a wire change is
 /// applied once. Asserts the envelope's own invariants on the way through — kind,
 /// zero flags, a record count that matches the records present, and records that
@@ -438,6 +447,18 @@ impl Container {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8(out.stdout).expect("container exec output is UTF-8")
+    }
+
+    /// What the container's server has written to its stdout and stderr, together:
+    /// how a test asks the server what it chose.
+    #[allow(dead_code)]
+    pub fn logs(&self) -> String {
+        let out = Command::new(self.runtime)
+            .args(["logs", &self.name])
+            .output()
+            .expect("run container logs");
+        assert!(out.status.success(), "container logs failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
     }
 }
 

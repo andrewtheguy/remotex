@@ -146,7 +146,10 @@ impl View {
                 };
                 match msg.expect("websocket receive") {
                     Message::Text(text) => self.control(&text),
-                    Message::Binary(frame) => self.units(&frame),
+                    Message::Binary(frame) => {
+                        self.units(&frame);
+                        ws.send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                    }
                     _ => {}
                 }
             }
@@ -292,6 +295,13 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
         sway_output(&container, "HEADLESS-1"),
         (1600, 1200, 2.0),
         "the output left behind keeps what it was set to"
+    );
+    // The socket states a 4:4:4 decoder, so every access unit above was wlshare's own
+    // VP9 passed through, across a density change, a resize and an output switch.
+    assert!(
+        container.logs().contains("asked for VP9"),
+        "wlshare was not asked for its VP9 encoding:\n{}",
+        container.logs()
     );
 }
 

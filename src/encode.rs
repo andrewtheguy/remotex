@@ -27,7 +27,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
-use crate::protocol::{Held, ServerMsg, Tile};
+use crate::protocol::{Held, ServerMsg, Tile, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -339,6 +339,17 @@ struct Shared {
     /// (or a keyframe) still waiting, so an engine parked on a clean `due_at` finds
     /// out the mirror is dirty again. See [`VideoSink::round_returned`].
     round_returned: Notify,
+    /// Whether the picture is the remote's own stream, passed through
+    /// ([`VideoSink::pass`]) rather than encoded here. Set by the first frame passed,
+    /// cleared when the desktop goes to tiles.
+    passing: AtomicBool,
+    /// The browser must start the passed stream over: drop what is not a keyframe,
+    /// and announce the configuration again ahead of the one that is. Set from the
+    /// start and by [`VideoSink::reset_render`], so a reattach, a takeover and a
+    /// resize each begin where a decoder can.
+    pass_restart: AtomicBool,
+    /// The configuration string last announced for the passed stream.
+    pass_announced: Mutex<Option<String>>,
     /// Set by [`VideoSink::reset_render`], consumed by [`VideoSink::frame`]. An atomic
     /// rather than a field on [`Video`] so that resetting stays synchronous: its call
     /// sites are already awaiting other things, and none of them should have to wait
@@ -397,6 +408,9 @@ impl Shared {
                 coarse_at: None,
             }),
             round_returned: Notify::new(),
+            passing: AtomicBool::new(false),
+            pass_restart: AtomicBool::new(true),
+            pass_announced: Mutex::default(),
             keyframe_owed: AtomicBool::new(false),
             feedback,
             units: AtomicU64::new(0),
@@ -652,6 +666,73 @@ impl VideoSink {
     /// able to start over, which is why the keyframe is armed here.
     pub fn reset_render(&self) {
         self.shared.keyframe_owed.store(true, Ordering::Relaxed);
+        self.shared.pass_restart.store(true, Ordering::Relaxed);
+    }
+
+    /// Queue a `w`×`h` frame the remote encoded itself as the next access unit,
+    /// untouched: wlshare's VP9 encoding, which is the 4:4:4 stream this gateway would
+    /// have encoded from the same pixels ([`crate::stream::pass_444`]).
+    ///
+    /// None of the stream's own machinery applies. There is no mirror, round,
+    /// interval, quality walk or settle: the remote paces, codes and sharpens its
+    /// stream itself, and learns how the browser is keeping up from the fences the
+    /// engine echoes once [`Self::drained`] says so. What is shared is the queue: the
+    /// frame takes its size out of [`QUEUE_BUDGET`] like an encoded unit, and goes out
+    /// in order with the messages around it.
+    ///
+    /// A browser that must start over ([`Self::reset_render`]) is sent nothing until a
+    /// keyframe, which the full update the engine asks for at the same moment brings,
+    /// and the keyframe goes out behind a fresh announcement.
+    pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
+        let passed = crate::stream::pass_444(w, h, &frame)?;
+        self.shared.passing.store(true, Ordering::Relaxed);
+        let restart = if passed.keyframe {
+            self.shared.pass_restart.swap(false, Ordering::Relaxed)
+        } else if self.shared.pass_restart.load(Ordering::Relaxed) {
+            debug!("{}: dropping a passed frame until the keyframe a restart needs", self.engine);
+            return Ok(());
+        } else {
+            false
+        };
+        let announce = {
+            let mut announced = self.shared.pass_announced.lock().unwrap();
+            (restart || announced.as_deref() != Some(passed.decode.as_str())).then(|| {
+                *announced = Some(passed.decode.clone());
+                passed.decode
+            })
+        };
+        let bytes = frame.len();
+        let held = self.hold(bytes).await;
+        self.shared.units.fetch_add(1, Ordering::Relaxed);
+        self.shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        if passed.keyframe {
+            self.shared.keyframes.fetch_add(1, Ordering::Relaxed);
+            self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+        if let Some(decode) = announce {
+            self.push(Pending::Msg(ServerMsg::VideoFormat { decode })).await?;
+        }
+        let unit = VideoUnit { w, h, keyframe: passed.keyframe, data: frame, held };
+        self.push(Pending::Msg(ServerMsg::Video(unit))).await
+    }
+
+    /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
+    pub fn passing(&self) -> bool {
+        self.shared.passing.load(Ordering::Relaxed)
+    }
+
+    /// Wait until everything queued towards the browser has given its share of
+    /// [`QUEUE_BUDGET`] back: written to a socket that keeps up, or received by a
+    /// client that is behind (`ws.rs` decides which). Immediate on a link with room.
+    ///
+    /// What a passed stream's fence waits on before it is echoed. The remote keeps one
+    /// frame in flight and times its fence, so an echo held here puts the browser's
+    /// queueing inside the round trip its quality walk reads, where an immediate echo
+    /// would time only the hop to this gateway.
+    pub async fn drained(&self) {
+        // Every permit at once, handed straight back: nothing is taken, only waited
+        // for. Only a closed semaphore refuses, and nothing closes this one.
+        let _ = self.shared.budget.acquire_many(QUEUE_BUDGET).await;
     }
 
     /// Take `bytes` of [`QUEUE_BUDGET`], waiting for the browser's socket to make
@@ -697,6 +778,7 @@ impl VideoSink {
                 && !video::within_ceiling((u32::from(w), u32::from(h)));
             if self.shared.tiling.swap(tiling, Ordering::Relaxed) != tiling {
                 if tiling {
+                    self.shared.passing.store(false, Ordering::Relaxed);
                     info!(
                         "{}: a {w}x{h} desktop is past what a video stream encodes; \
                          its rectangles go to the browser as tiles",
@@ -1146,6 +1228,89 @@ mod tests {
             "a resize of a source that can tile did not say which carriage follows"
         );
         (sink, frame_rx)
+    }
+
+    /// The opening byte of a profile 1 VP9 frame: `frame_marker` 2, profile 1, not a
+    /// repeat, then `frame_type`. What `pass` reads; the rest is the remote's.
+    fn passed_frame(keyframe: bool, len: usize) -> Vec<u8> {
+        let mut frame = vec![0u8; len];
+        frame[0] = if keyframe { 0xa0 } else { 0xa4 };
+        frame
+    }
+
+    /// A frame the remote encoded goes out as it came, behind the announcement a
+    /// decoder needs, and the ones before the first keyframe are not sent at all.
+    #[tokio::test]
+    async fn a_passed_stream_starts_at_a_keyframe_behind_its_announcement() {
+        let (sink, mut frame_rx) = video_sink(1280, 800).await;
+        assert!(!sink.passing());
+        sink.pass(1280, 800, passed_frame(false, 40)).await.unwrap();
+        sink.pass(1280, 800, passed_frame(true, 900)).await.unwrap();
+        sink.pass(1280, 800, passed_frame(false, 50)).await.unwrap();
+        sink.flush().await;
+        assert!(sink.passing());
+
+        let out = drain(&mut frame_rx, 3).await;
+        assert!(
+            matches!(&out[0], ServerMsg::VideoFormat { decode } if decode == "vp09.01.40.08.03.06.06.06.00"),
+            "{:?}",
+            out[0]
+        );
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data == passed_frame(true, 900)));
+        assert!(matches!(&out[2], ServerMsg::Video(unit) if !unit.keyframe && unit.data.len() == 50));
+        assert!(frame_rx.try_recv().is_err(), "a frame before the first keyframe went out");
+    }
+
+    /// A reset — a reattach, a takeover, a resize — restarts the passed stream the
+    /// way it restarts one coded here: nothing until a keyframe, which is announced
+    /// again for the browser that has never seen the announcement.
+    #[tokio::test]
+    async fn a_reset_passed_stream_waits_for_a_keyframe_and_announces_it_again() {
+        let (sink, mut frame_rx) = video_sink(1280, 800).await;
+        sink.pass(1280, 800, passed_frame(true, 10)).await.unwrap();
+        sink.flush().await;
+        drain(&mut frame_rx, 2).await;
+
+        sink.reset_render();
+        sink.pass(1280, 800, passed_frame(false, 10)).await.unwrap();
+        sink.pass(1280, 800, passed_frame(true, 20)).await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(matches!(&out[0], ServerMsg::VideoFormat { .. }), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 20));
+        assert!(frame_rx.try_recv().is_err());
+    }
+
+    /// Only the 4:4:4 stream the announcement describes is passed.
+    #[tokio::test]
+    async fn a_passed_frame_of_another_profile_is_refused() {
+        let (sink, _frame_rx) = video_sink(1280, 800).await;
+        let mut frame = passed_frame(true, 10);
+        frame[0] = 0x80; // profile 0
+        let error = sink.pass(1280, 800, frame).await.unwrap_err();
+        assert!(format!("{error:#}").contains("profile 0"), "{error:#}");
+    }
+
+    /// `drained` is what a passed stream's fence waits on: done at once with nothing
+    /// queued, and not until the browser's side has let go of a frame that is.
+    #[tokio::test]
+    async fn drained_waits_for_the_frames_queued_towards_the_browser() {
+        let (sink, mut frame_rx) = video_sink(1280, 800).await;
+        tokio::time::timeout(Duration::from_secs(1), sink.drained())
+            .await
+            .expect("an empty queue is drained");
+
+        sink.pass(1280, 800, passed_frame(true, 4096)).await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), sink.drained()).await.is_err(),
+            "drained while the browser's side still held the frame"
+        );
+        drop(out);
+        tokio::time::timeout(Duration::from_secs(1), sink.drained())
+            .await
+            .expect("drained once the frame was let go");
     }
 
     /// Past the ceiling, a source with rectangles has each one sent as it came:

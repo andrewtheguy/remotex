@@ -74,13 +74,14 @@ const Q_COARSEST: u32 = 63;
 /// `video::measure_the_encoders`, which sweeps it.
 const CPU_USED: c_int = 7;
 
-/// The frame rate the level calculation assumes.
+/// The frame rate the level of a stream this gateway encodes is figured at.
 ///
 /// Nothing paces frames to it — the remote decides when a frame happens — but a VP9 level is
 /// defined over a *sample rate*, so a number is needed to turn a picture size into one. 30 is
 /// what `VIDEO_FRAME_INTERVAL` in [`crate::encode`] paces access units to, so it is the rate a
-/// stream cannot exceed rather than a guess.
-const NOMINAL_FPS: u64 = 30;
+/// stream cannot exceed rather than a guess. A passed stream is paced by its server and figured
+/// at its own rate ([`crate::stream::pass_444`]).
+pub const ENCODED_FPS: u64 = 30;
 
 /// The 1–100 quality dial as a VP9 quantizer.
 ///
@@ -132,7 +133,7 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// 4:2:0 is not a profile 1 picture, and omitted colour fields mean BT.709 where the
 /// keyframe header says BT.601 (SMPTE 170M primaries, transfer and matrix — code 6 each,
 /// what Chromium's own VP9 parser maps that header flag to) at studio swing. The level
-/// comes from `LEVELS`. `None` for a picture no VP9 level covers, which
+/// comes from `LEVELS` at `fps` frames a second. `None` for a picture no VP9 level covers, which
 /// [`crate::video::check_picture`] has already refused long before this is reached; it is `Option`
 /// rather than a panic because this runs on the session's own path and the whole module's premise
 /// is that nothing here aborts the process.
@@ -140,13 +141,13 @@ const LEVELS: [(u8, u64, u32, u16); 14] = [
 /// This is what `ServerMsg::VideoFormat` carries, and it is derived here rather than in the
 /// client because VP9 has no in-band parameter sets at all: there is nothing in the bitstream for
 /// a client to read a codec string out of.
-pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
+pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> {
     let (profile, sampling) = match chroma {
         Chroma::Subsampled => ("00", "01"),
         Chroma::Full => ("01", "03"),
     };
     let size = u32::from(w) * u32::from(h);
-    let rate = u64::from(size) * NOMINAL_FPS;
+    let rate = u64::from(size) * fps;
     let breadth = w.max(h);
     let (level, ..) = LEVELS
         .iter()
@@ -155,6 +156,38 @@ pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
         })
         .copied()?;
     Some(format!("vp09.{profile}.{level:02}.08.{sampling}.06.06.06.00"))
+}
+
+/// What the opening bits of a VP9 frame say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    /// 0 for 4:2:0, 1 for 4:4:4 at the eight bits every stream here has.
+    pub profile: u8,
+    /// Whether a decoder that has seen nothing before this frame can start here.
+    pub keyframe: bool,
+}
+
+/// Read the first fields of a frame's uncompressed header (VP9 bitstream §6.2):
+/// `frame_marker` (two bits, always 2), `profile_low_bit`, `profile_high_bit`, a
+/// reserved zero bit on profile 3, `show_existing_frame`, and `frame_type`, where 0 is
+/// a keyframe. A frame that only shows an earlier one is not a keyframe.
+///
+/// For a stream this gateway did not encode, whose keyframe bit is therefore not the
+/// encoder's to report. `None` for bytes that do not start a VP9 frame.
+pub fn frame_header(frame: &[u8]) -> Option<FrameHeader> {
+    let mut bits = frame.iter().take(2).flat_map(|byte| (0..8).rev().map(move |i| byte >> i & 1));
+    let mut bit = || bits.next();
+    if (bit()? << 1 | bit()?) != 2 {
+        return None;
+    }
+    let low = bit()?;
+    let profile = bit()? << 1 | low;
+    if profile == 3 && bit()? != 0 {
+        return None;
+    }
+    let show_existing = bit()? == 1;
+    let keyframe = !show_existing && bit()? == 0;
+    Some(FrameHeader { profile, keyframe })
 }
 
 /// One VP9 stream over a [`Mirror`]'s coded picture.
@@ -245,6 +278,10 @@ impl Stream {
         // No fixed keyframe interval; every keyframe is one somebody asked for — a repaint, a
         // resize, a client coming back.
         cfg.kf_mode = vpx::vpx_kf_mode_VPX_KF_DISABLED;
+        // Disabling them is not enough: libvpx 1.16's one-pass rate control still counts
+        // down `kf_max_dist`, 128 by default, and codes a keyframe when it runs out.
+        // Measured, at frames 128 and 256 of a changing picture. Out of reach instead.
+        cfg.kf_max_dist = i32::MAX as u32;
         // Constant quality with the quantizer pinned top and bottom. `VPX_Q` plus the `CQ_LEVEL`
         // control below is what decides it; min == max is what makes that a guarantee rather
         // than a preference, and it is why nothing here sets a bitrate — the quantizer *is* the
@@ -297,7 +334,7 @@ impl Stream {
             yuv: Yuv::new(coded.0, coded.1, chroma),
             quality: quality.clamp(QUALITY_MIN, QUALITY_MAX),
             keyframe_owed: false,
-            decode: codec_string(coded.0, coded.1, chroma),
+            decode: codec_string(coded.0, coded.1, chroma, ENCODED_FPS),
             started: std::time::Instant::now(),
             #[cfg(test)]
             refusals: 0,
@@ -789,6 +826,44 @@ mod tests {
     /// coarse under congestion would stay coarse until it next changed, and the settle in
     /// [`crate::encode`] would have to spend a keyframe instead.
     #[test]
+    fn no_keyframe_comes_unasked() {
+        let (w, h) = (64u16, 48u16);
+        for chroma in [Chroma::Subsampled, Chroma::Full] {
+            let mut mirror = Mirror::new(w, h).expect("a mirror");
+            let mut stream = Stream::new(mirror.coded(), 60, chroma).expect("a stream");
+            for step in 0..300u32 {
+                let colour = [step as u8, (step * 7) as u8, (step * 13) as u8];
+                mirror.blit(rect(((step * 3) % 48) as u16, 8, 16, 16), &flat(16, 16, colour)).expect("a blit");
+                let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
+                assert_eq!(unit.keyframe, step == 0, "{chroma:?} frame {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_header_says_what_the_encoder_made() {
+        let (w, h) = (320u16, 240u16);
+        for (chroma, profile) in [(Chroma::Subsampled, 0), (Chroma::Full, 1)] {
+            let mut mirror = Mirror::new(w, h).expect("a mirror");
+            let mut stream = Stream::new(mirror.coded(), 60, chroma).expect("a stream");
+            mirror.blit(rect(0, 0, w, h), &flat(w, h, [200, 40, 40])).expect("a blit");
+            let first = stream.encode(&mirror).expect("an encode").expect("a unit");
+            mirror.blit(rect(10, 10, 40, 40), &flat(40, 40, [20, 200, 20])).expect("a blit");
+            let second = stream.encode(&mirror).expect("an encode").expect("a unit");
+            for unit in [&first, &second] {
+                assert_eq!(
+                    frame_header(&unit.data),
+                    Some(FrameHeader { profile, keyframe: unit.keyframe }),
+                    "{chroma:?}"
+                );
+            }
+            assert!(first.keyframe && !second.keyframe);
+        }
+        assert_eq!(frame_header(&[]), None);
+        assert_eq!(frame_header(&[0x00, 0x00]), None, "no frame marker");
+    }
+
+    #[test]
     fn a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe() {
         let (w, h) = (320u16, 240u16);
         // Speckle, so a coarse quantizer has detail to lose.
@@ -874,7 +949,7 @@ mod tests {
     /// announcing a higher one narrows the set of decoders that will accept the stream.
     #[test]
     fn the_codec_string_names_the_lowest_level_that_fits() {
-        let codec_string = |w, h| super::codec_string(w, h, Chroma::Subsampled);
+        let codec_string = |w, h| super::codec_string(w, h, Chroma::Subsampled, ENCODED_FPS);
         // 1280x800 at 30: 1_024_000 samples. Level 3.1 allows only 983_040 of them, so this is
         // level 4 — the *picture size* binds here, not the sample rate, which at 30_720_000 is
         // well inside 3.1's 36_864_000. That is the trap in this table: the two limits do not
@@ -903,7 +978,7 @@ mod tests {
             let string = codec_string(w, h).expect("a level for a real desktop");
             assert!(string.starts_with("vp09.00."), "not profile 0: {string}");
             assert!(string.ends_with(".08.01.06.06.06.00"), "not 8-bit 4:2:0 BT.601: {string}");
-            let full = super::codec_string(w, h, Chroma::Full).expect("a level for a real desktop");
+            let full = super::codec_string(w, h, Chroma::Full, ENCODED_FPS).expect("a level for a real desktop");
             assert!(full.ends_with(".08.03.06.06.06.00"), "not 8-bit 4:4:4 BT.601: {full}");
             assert_eq!(
                 full,
@@ -911,6 +986,12 @@ mod tests {
                 "{w}x{h}"
             );
         }
+        // At 60 frames a second the sample rate binds where the picture size did not: 1080p60
+        // is 124_416_000 samples a second, past 4.0's 83_558_400, and 4K60 497_664_000, past
+        // 5.0's 311_951_360.
+        let at_60 = |w, h| super::codec_string(w, h, Chroma::Full, 60);
+        assert_eq!(at_60(1920, 1080).as_deref(), Some("vp09.01.41.08.03.06.06.06.00"));
+        assert_eq!(at_60(3840, 2160).as_deref(), Some("vp09.01.51.08.03.06.06.06.00"));
     }
 
     /// **Where the picture loss on a desktop stream is.** At the dial's finest quantizer

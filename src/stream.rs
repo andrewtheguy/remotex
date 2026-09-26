@@ -424,9 +424,53 @@ pub struct Produced {
     pub unit: Option<VideoUnit>,
 }
 
+/// An access unit the remote encoded itself, as the browser is told about it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Passed {
+    /// The configuration string a decoder for it is built with.
+    pub decode: String,
+    pub keyframe: bool,
+}
+
+/// The frame rate a passed stream's level is figured at: wlshare's own default ceiling,
+/// `max_fps = 60`, since its server rather than this gateway paces it. A level tells a decoder
+/// the most it will be asked for, so the rate the remote may reach is the one to name.
+const PASSED_FPS: u64 = 60;
+
+/// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the 4:4:4 stream this
+/// gateway would otherwise have encoded from the same pixels: profile 1, BT.601 at
+/// studio swing, declared in its keyframes. The profile is read and held to that, so
+/// the configuration announced for it is the one the frame needs.
+pub fn pass_444(w: u16, h: u16, frame: &[u8]) -> anyhow::Result<Passed> {
+    let header = crate::vp9::frame_header(frame)
+        .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
+    anyhow::ensure!(
+        header.profile == 1,
+        "the server's VP9 frame is profile {}, not the 4:4:4 profile 1 this session announces",
+        header.profile
+    );
+    crate::video::check_picture((w, h))?;
+    let decode = crate::vp9::codec_string(w, h, Chroma::Full, PASSED_FPS)
+        .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
+    Ok(Passed { decode, keyframe: header.keyframe })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A passed picture is held to the ceiling a stream encoded here is, so a desktop
+    /// past it ends on the same refusal whichever end encoded it.
+    #[test]
+    fn a_passed_frame_past_the_ceiling_is_refused() {
+        let keyframe = [0xa0u8, 0, 0, 0];
+        assert!(pass_444(1920, 1080, &keyframe).is_ok());
+        let refused = pass_444(5376, 2288, &keyframe).expect_err("a 5376x2288 frame was passed");
+        assert_eq!(
+            refused.to_string(),
+            crate::video::check_picture((5376, 2288)).unwrap_err().to_string()
+        );
+    }
 
     fn stream(w: u16, h: u16) -> DesktopStream {
         let mut stream = DesktopStream::new(60, Chroma::Subsampled);

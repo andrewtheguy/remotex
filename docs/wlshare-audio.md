@@ -161,7 +161,7 @@ announces late is still taken.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying
 it in band. wlshare drains its capture queue before every framebuffer update, so
-sound is never held behind a ZRLE frame it was ready before; the browser's
+sound is never held behind a ZRLE or VP9 frame it was ready before; the browser's
 300 ms lead clamp absorbs what is left.
 
 ## What wlshare does
