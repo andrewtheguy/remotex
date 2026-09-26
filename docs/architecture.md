@@ -28,7 +28,10 @@ Mac is reached
 over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
 or in High Performance with `ard-high-performance` (a virtual display, with its
-picture and sound over the Mac's media stream, as Apple's viewer takes them). Remote audio is encoded as
+picture and sound over the Mac's media stream, as Apple's viewer takes them),
+whose HEVC a target with `hevc_passthrough` passes to a browser that decodes it
+rather than re-encoding it — see
+[Apple's HEVC, passed through](#apples-hevc-passed-through). Remote audio is encoded as
 Opus and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -76,9 +79,12 @@ updates in source order even though each encode runs off the engine's own task.
 ### The video stream
 
 Every target reaches the browser the same way: the whole framebuffer as one
-inter-frame VP9 stream. The one exception is a VNC desktop past the stream's
-picture ceiling on a target without `resize`, which goes as the server's own
-rectangles instead — see [tiles past the ceiling](#tiles-past-the-ceiling).
+inter-frame VP9 stream. There are two exceptions. A VNC desktop past the stream's
+picture ceiling on a target without `resize` goes as the server's own rectangles
+instead — see [tiles past the ceiling](#tiles-past-the-ceiling). And an
+`ard-high-performance` target with `hevc_passthrough` sends a browser that decodes
+it the Mac's own HEVC — see
+[Apple's HEVC, passed through](#apples-hevc-passed-through).
 
 > **There is no configurable tile transport.** Earlier releases also sent each
 > changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
@@ -99,19 +105,23 @@ A target's stream keys are per target, and every one has a default:
   [the codec](#the-codec) for why it, and not the quality, is where a desktop
   stream's picture goes, and [choosing a chroma](#choosing-a-chroma) for when to
   take the decision away from the browser.
-- `render_adaptive` (on unless a target writes `false`) lets the quality track the
-  measured link down to `render_adaptive_min` (default 20, or the dial itself where
-  that is lower) — see [what the link will bear](#choosing-a-chroma) for the signal
-  and the walk. Turned off, the walk is the pressure-only one floored at 1.
+- `render_adaptive` (on unless a target writes `false`) lets VP9 encoded in the
+  gateway track the measured link down to `render_adaptive_min` (default 20, or
+  the dial itself where that is lower) — see
+  [what the link will bear](#choosing-a-chroma) for the signal and the walk.
+  Turned off, the walk is the pressure-only one floored at 1.
+- `hevc_passthrough` (off unless a target writes `true`, and only on
+  `ard-high-performance`) passes the Mac's HEVC to a browser that takes it, which
+  none of the keys above then reach.
 
 The engines never see the config keys. They collapse to one `RenderPlan`
-(`quality`, `adaptive`, `chroma`) at the config boundary in
+(`quality`, `adaptive`, `chroma`, `apple_hevc`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive*
-  → TargetConfig::render_plan(browser chroma) → RenderPlan → vnc::run / rdp::run
+video_quality / render_chroma / render_adaptive* / hevc_passthrough
+  → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
   → DesktopStream (src/stream.rs) → vp9::Stream
 ```
@@ -302,6 +312,82 @@ the browser as it came: no ZRLE on either side, and no encode here.
 The target's quality keys do not reach a passed stream, which is coded at wlshare's
 `vp9_quality` and `vp9_quality_min` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
 
+#### Apple's HEVC, passed through
+
+`ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
+as VP9. With `hevc_passthrough = true`, a browser whose decoder takes the Mac's
+stream is sent it instead, as the Mac sent it, and the gateway neither decodes nor
+encodes a picture of it. It is for a LAN. High Performance always enables its
+own rate controller, between 20 and 60 Mbit/s
+([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
+behavior, not Standard mode's **Adaptive** quality choice. The gateway offers
+Apple's bitrate entries and sends the rate reports Apple's viewer sends, every
+50 ms, with the one-way delay of the picture packets reaching it, so the Mac
+walks its encoder between those bounds by the link between it and the gateway,
+decoded or passed. That is the only walk a passed stream has. Unlike wlshare's
+stream, which walks its quality by the fence round trip to the browser, the
+delay the Mac hears ends at the gateway: nothing reports the browser's queue
+back to it ([roadmap](roadmap.md#apples-passed-hevc-at-4k)).
+
+Three controls with similar names therefore remain separate:
+
+| Control | Selection | What it reaches |
+|---|---|---|
+| Standard **Adaptive** / **Full** | Apple's viewer, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
+| High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range, by the gateway's reports |
+| `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway: all pictures after local HEVC decoding, or only the VP9 gaps while HEVC passes |
+
+- **The browser selects.** The page asks its `VideoDecoder` once, at load, about
+  the configuration macwork's stream announces, `hev1.4.10.L150.BE.8`
+  (`frontend/src/appleHevc.ts`), and states the answer as `hevc=true|false` on every
+  session socket, beside its chroma. Only a definite "yes" asks for the stream;
+  VP9 is what every browser here decodes, so a "no", an answer with no verdict and
+  an `isConfigSupported` that throws all keep it. Measured, Chrome and Safari,
+  desktop and mobile, decode the stream picture for picture, and Firefox none of it.
+  `render_plan` sets `apple_hevc` for a target with the key and a browser that said
+  yes; any other browser is sent VP9 exactly as without the key, and no session is
+  refused for the answer. The plan is fixed for an engine, and a takeover by a
+  browser that answers otherwise rebuilds it, as a different chroma does.
+- **What passes** (`VideoSink::pass_hevc`). The receiver reassembles access units as
+  it always does, and hands them to the read loop in order rather than to the
+  decoder thread. Each goes out as Annex B, a keyframe where it holds an IRAP
+  picture, behind a `VideoFormat` whose configuration string and size are read from
+  the stream's own sequence parameter set (`parse_sps` in
+  `src/vnc_apple_media.rs`, per ISO/IEC 14496-15 Annex E: `hev1` for parameter sets
+  in band). Its size is held to the ceiling a stream encoded here is, and its bytes
+  take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
+  sends goes out, up to the virtual display's 30 a second. The offer and the rate
+  reports are a decoded session's: the quality is what that session receives.
+- **A restart is an IDR from the Mac.** A reattach, a takeover and the browser's
+  own decoder failing each reset the render, and the gateway asks the Mac for an
+  IDR with a PLI, which it answers within tens of milliseconds; until the IDR
+  arrives the units still predicted from the old picture are dropped. A unit the
+  read loop drops — one of another display, or one that comes while a resize
+  holds the display — restarts the chain the same way, and a unit held back for a
+  keyframe asks the Mac for one, since a still screen would never bring one unasked.
+  A link that cannot carry the stream fills the receiver's queue of 15 units, half
+  a second of the display's refresh; a full queue drops to the next keyframe, as
+  the decoder's queue does.
+- **The gaps are VP9 encoded here.** ZRLE carries the picture until the stream is
+  up and across every display change, and in a passed session its rectangles are
+  encoded as they are in a decoded one: through the shadow into the mirror, and
+  out as VP9 at the target's dial. The two take turns as the picture, and the
+  browser's decoder is replaced at each turn, by the `VideoFormat` that opens it:
+  a rectangle while the stream passes starts VP9 over at a keyframe
+  (`VideoSink::damage`), and the stream coming back starts at an IDR. While the
+  stream passes, nothing is encoded here — a repaint is the Mac's IDR, not a VP9
+  keyframe — and ZRLE is decoded only to keep its deflate stream in step. A display
+  change asks the Mac for the whole desktop, as it does in a decoded session, since
+  the mirror has seen nothing of what the stream showed. The gap costs a VP9
+  keyframe and its deltas, where whole-screen PNG tiles of a playing video came to
+  about 5 MB each on macvm.
+- **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
+  walk govern only VP9: the gaps, and the whole picture of a browser that says no.
+  `render_adaptive` neither enables nor disables the Mac's separate, always-on
+  High Performance controller. The sound is unchanged:
+  it still needs the AAC-ELD decoder, so the key is behind `apple-hp-media` with the
+  subtype.
+
 ### Choosing a chroma
 
 The key takes three answers: the default resolves per browser, and the other two
@@ -370,8 +456,10 @@ answers it. Quality moves through `Stream::set_quality`, which re-tunes the runn
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
-`render_adaptive` gives the same walk a second signal and an operator's
-floor, on every target that has not turned it off. The signal is the client's own lag: the paint window already tracks how
+`render_adaptive` gives the same walk a second signal and an operator's floor on
+every VP9 picture encoded here, unless its target turned the walk off. On a
+decoded High Performance session that is the whole picture; on a passed one it
+is only the VP9 picture between HEVC stretches. The signal is the client's own lag: the paint window already tracks how
 long the oldest unacknowledged batch has been owed, and `LinkFeedback`
 (`src/feedback.rs`) publishes that age minus a baseline — the smallest recent
 end-to-end time, so distance never reads as queueing; RustDesk and Guacamole
@@ -452,7 +540,10 @@ would not take.
 
 #### The codec
 
-Video is **VP9 only** (`src/vp9.rs`), and there is no codec key. VP9 is
+The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
+encoder is one to maintain. The one stream it sends in another codec is one it does
+not encode: a High Performance Mac's own HEVC, passed through for a browser that
+takes it ([Apple's HEVC, passed through](#apples-hevc-passed-through)). VP9 is
 BSD-3-Clause with a patent grant and present in every browser build, the ones that
 carry no proprietary codecs included. On synthetic screen content at 1080p and
 quality 60 it encodes a frame in **4.7 ms** at **18 KB** — measure with
@@ -480,11 +571,12 @@ any fault anywhere near the path — a serde field-name mismatch, for one — su
 as an accusation against the browser and sent the reader to the wrong half of the
 system.
 
-What survives of asking is one question with no power to refuse: how much colour
+What survives of asking is two questions with no power to refuse: how much colour
 this decoder takes, for `render_chroma = "auto"` to resolve against
-([choosing a chroma](#choosing-a-chroma)). It selects between two streams the
-gateway is willing to send, both of them VP9; it never decides whether a session
-may happen. A wrong answer costs a picture, not a desktop.
+([choosing a chroma](#choosing-a-chroma)), and whether it takes a High Performance
+Mac's HEVC, for `hevc_passthrough` to pass it. Each selects between streams the
+gateway is willing to send; neither decides whether a session may happen. A wrong
+answer costs a picture, not a desktop.
 
 The refusal itself stays where it always was: one honest failure at the client's own
 decoder. The gateway announces the configuration in `ServerMsg::VideoFormat` before
@@ -499,11 +591,13 @@ Authentication and desktop ownership are separate:
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
    `409` unless the request reclaims its token or forces takeover.
-3. `/ws?session=<token>&chroma=420|444` attaches to the slot and reports either
-   the target picker or the current connected target. `chroma` is required and
-   names the most colour this browser's video decoder takes; see
-   [Choosing a chroma](#choosing-a-chroma). The media sockets carry the token
-   alone.
+3. `/ws?session=<token>&chroma=420|444&hevc=true|false` attaches to the slot and
+   reports either the target picker or the current connected target. `chroma` and
+   `hevc` are required: the most colour this browser's video decoder takes, and
+   whether it takes a High Performance Mac's HEVC; see
+   [Choosing a chroma](#choosing-a-chroma) and
+   [Apple's HEVC, passed through](#apples-hevc-passed-through). The media sockets
+   carry the token alone.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
 5. Losing the WebSocket detaches the client. The engine remains available for a
@@ -627,9 +721,10 @@ has only moved from a queue into the send buffer. Measured with an incompressibl
 12 Mbit/s of damage, that holds the picture 0.6 s behind at 4 Mbit/s and 4 s at
 1 Mbit/s (23 s without), and the link's return to full speed is immediate.
 
-`VIDEO` carries one VP9 access unit of the desktop. Its keyframe bit comes from the
-encoder rather than from parsing the payload — VP9 carries no parameter sets to read
-one out of. `(w, h)` is the desktop's true size, and the decoded picture may exceed
+`VIDEO` carries one access unit of the desktop: VP9, or a passed High Performance
+Mac's HEVC as Annex B. Its keyframe bit comes from the encoder, or the stream's own
+NAL unit types, rather than from the client parsing the payload — VP9 carries no
+parameter sets to read one out of. `(w, h)` is the desktop's true size, and the decoded picture may exceed
 it by a pixel on either axis (see [the video stream](#the-video-stream)); a size that
 differs from the last unit's is a stream that started over, preceded by a fresh
 `videoFormat`.

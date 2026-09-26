@@ -282,6 +282,31 @@ pub struct RenderPlan {
     pub adaptive: Option<u8>,
     /// [`TargetConfig::render_chroma`], resolved.
     pub chroma: Chroma,
+    /// The picture is the Mac's HEVC passed through rather than VP9 encoded here:
+    /// [`TargetConfig::hevc_passthrough`] set, and a browser that said its decoder
+    /// takes the stream. None of the fields above reach such a picture.
+    pub apple_hevc: bool,
+}
+
+/// What the attached browser said its `VideoDecoder` takes, from its session socket
+/// ([`crate::ws`]): the two questions the page asks once at load and states on every
+/// session socket it opens. Each *selects* a stream and neither refuses a browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decoders {
+    /// The most colour it takes, which resolves [`ChromaChoice::Auto`].
+    pub chroma: Chroma,
+    /// Whether it takes a High Performance Mac's HEVC — Range Extensions 4:4:4 —
+    /// which a [`TargetConfig::hevc_passthrough`] target then passes it.
+    pub apple_hevc: bool,
+}
+
+/// A browser that states `chroma` and takes no HEVC, for tests about everything
+/// else a browser says.
+#[cfg(test)]
+impl From<Chroma> for Decoders {
+    fn from(chroma: Chroma) -> Self {
+        Self { chroma, apple_hevc: false }
+    }
 }
 
 impl RenderPlan {
@@ -300,6 +325,9 @@ impl RenderPlan {
     /// [`ChromaChoice::Auto`] has nothing here to resolve against. See
     /// [`TargetConfig::render_summary`], the only caller that passes anything.
     fn card(&self, chroma_slot: Option<&str>) -> String {
+        if self.apple_hevc {
+            return "the Mac's HEVC, passed through".to_owned();
+        }
         // Always named, because with `auto` the default there is no chroma a card
         // may leave unsaid: an unnamed one would read as 4:2:0 selected on a
         // session that is 4:2:0 only because this browser declined profile 1. What
@@ -575,6 +603,18 @@ pub struct TargetConfig {
     /// Refused beside `render_adaptive = false`.
     #[serde(default)]
     pub render_adaptive_min: Option<u8>,
+    /// Pass a High Performance Mac's HEVC to a browser whose decoder takes it, as the
+    /// Mac sent it, instead of decoding it here and encoding VP9 from its pictures.
+    /// For a LAN: the stream is the Mac's own, with no quality walk behind it, so
+    /// [`Self::video_quality`] and the adaptive keys govern only the VP9 a browser
+    /// that cannot take it is sent. Refused on any subtype but
+    /// `ard-high-performance`, whose media stream is the only HEVC there is.
+    ///
+    /// The browser selects, as it does a chroma: it states on its session socket
+    /// whether its `VideoDecoder` takes the Mac's HEVC, and one that says no is sent
+    /// VP9 as if this key were unset. See [`RenderPlan::apple_hevc`].
+    #[serde(default)]
+    pub hevc_passthrough: bool,
 }
 
 /// The quality floor [`TargetConfig::render_adaptive`] falls back to when
@@ -649,13 +689,14 @@ impl TargetConfig {
     /// The stream keys resolved to the one [`RenderPlan`] the engines see, so
     /// `rdp::run` / `vnc::run` need not know the config enums.
     ///
-    /// `decoder` is the most colour the attached browser said its `VideoDecoder`
-    /// takes, carried on the session socket and held with its attachment
-    /// ([`crate::session::SessionManager::attach`]). It is read by
+    /// `decoders` is what the attached browser said its `VideoDecoder` takes,
+    /// carried on the session socket and held with its attachment
+    /// ([`crate::session::SessionManager::attach`]). Its chroma is read by
     /// [`ChromaChoice::Auto`] and by nothing else: a target that names a profile
     /// gets that profile whatever this says, which is what keeps the explicit key a
-    /// decision no browser can overrule.
-    pub fn render_plan(&self, decoder: Chroma) -> RenderPlan {
+    /// decision no browser can overrule. Its HEVC answer is read only by a
+    /// [`Self::hevc_passthrough`] target.
+    pub fn render_plan(&self, decoders: Decoders) -> RenderPlan {
         let quality = self.video_quality();
         // The floor the walk will hold to, which is never above the ceiling it walks
         // under. Only the *default* floor can sit there — an explicit
@@ -671,9 +712,10 @@ impl TargetConfig {
         let chroma = match self.render_chroma.unwrap_or_default() {
             ChromaChoice::Subsampled => Chroma::Subsampled,
             ChromaChoice::Full => Chroma::Full,
-            ChromaChoice::Auto => decoder,
+            ChromaChoice::Auto => decoders.chroma,
         };
-        RenderPlan { quality, adaptive, chroma }
+        let apple_hevc = self.hevc_passthrough && decoders.apple_hevc;
+        RenderPlan { quality, adaptive, chroma, apple_hevc }
     }
 
     /// The render dial for a reader with no browser in front of it — the TUI's
@@ -689,12 +731,20 @@ impl TargetConfig {
     /// The decoder passed below is read by [`ChromaChoice::Auto`] and by nothing
     /// else, and `auto` is exactly the case whose slot is overwritten — so the
     /// argument reaches no card, and a selected `"420"` or `"444"` prints itself.
+    ///
+    /// A [`Self::hevc_passthrough`] target is the VP9 card with the passthrough
+    /// after it, since which of the two a session gets is the browser's answer.
     pub fn render_summary(&self) -> String {
         let slot = match self.render_chroma.unwrap_or_default() {
             ChromaChoice::Auto => Some("chroma auto"),
             ChromaChoice::Subsampled | ChromaChoice::Full => None,
         };
-        self.render_plan(Chroma::Subsampled).card(slot)
+        let card = self.render_plan(Decoders { chroma: Chroma::Subsampled, apple_hevc: false }).card(slot);
+        if self.hevc_passthrough {
+            format!("{card} · HEVC passed where the browser takes it")
+        } else {
+            card
+        }
     }
 
     /// Whether the Opus bitrate walks with the link — on unless the operator
@@ -1315,6 +1365,14 @@ impl ConfigFile {
                  microphone extension on a generic vnc target. Remove the key.",
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
+            );
+            // The one HEVC there is to pass is High Performance's media stream.
+            anyhow::ensure!(
+                !target.hevc_passthrough || target.media_stream(),
+                "target {:?} sets hevc_passthrough, which passes a High Performance Mac's \
+                 HEVC to the browser, on a target without that stream: only subtype \
+                 \"ard-high-performance\" has one. Remove the key.",
+                target.name
             );
             // The bitrate keys and the adaptive switch tune the Opus encoder, so on a
             // target without sound they are keys that could not do anything, and the
@@ -2521,11 +2579,12 @@ mod tests {
         let cfg = parse_target("").expect("a bare target");
         for decoder in [Chroma::Subsampled, Chroma::Full] {
             assert_eq!(
-                cfg.targets[0].render_plan(decoder),
+                cfg.targets[0].render_plan(decoder.into()),
                 RenderPlan {
                     quality: DEFAULT_VIDEO_QUALITY,
                     adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
                     chroma: decoder,
+                    apple_hevc: false,
                 }
             );
         }
@@ -2535,11 +2594,12 @@ mod tests {
     fn a_video_quality_is_the_streams_dial() {
         let cfg = parse_target("video_quality = 60").expect("a quality");
         assert_eq!(
-            cfg.targets[0].render_plan(Chroma::Subsampled),
+            cfg.targets[0].render_plan(Chroma::Subsampled.into()),
             RenderPlan {
                 quality: 60,
                 adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
-                chroma: Chroma::Subsampled
+                chroma: Chroma::Subsampled,
+                apple_hevc: false,
             }
         );
     }
@@ -2558,14 +2618,15 @@ mod tests {
     /// chroma and leaving it to be resolved.
     #[test]
     fn render_chroma_defaults_to_the_browsers_answer() {
-        let video = |extra: &str, decoder| {
+        let video = |extra: &str, decoder: Chroma| {
             parse_target(&format!("video_quality = 100\n{extra}")).unwrap().targets[0]
-                .render_plan(decoder)
+                .render_plan(decoder.into())
         };
         let stream = |chroma| RenderPlan {
             quality: 100,
             adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
             chroma,
+            apple_hevc: false,
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -2603,8 +2664,8 @@ mod tests {
     /// and the floor where the walk runs.
     #[test]
     fn a_session_card_describes_the_resolved_stream() {
-        let describe = |keys: &str, decoder| {
-            parse_target(keys).unwrap().targets[0].render_plan(decoder).describe()
+        let describe = |keys: &str, decoder: Chroma| {
+            parse_target(keys).unwrap().targets[0].render_plan(decoder.into()).describe()
         };
         assert_eq!(describe("video_quality = 60", Chroma::Subsampled), "video q60 4:2:0 · adaptive ≥20");
         assert_eq!(describe("video_quality = 60", Chroma::Full), "video q60 4:4:4 · adaptive ≥20");
@@ -2833,6 +2894,38 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+    }
+
+    /// `hevc_passthrough` passes the Mac's HEVC only to a browser that said it takes
+    /// it, and every other browser gets the VP9 plan the key leaves untouched. It is
+    /// the media stream's key, refused on any target without one.
+    #[cfg(feature = "apple-hp-media")]
+    #[test]
+    fn hevc_passthrough_is_the_browsers_to_select_on_a_high_performance_target() {
+        let hp = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            )))
+            .unwrap()
+            .targets
+            .remove(0)
+        };
+        let takes = Decoders { chroma: Chroma::Full, apple_hevc: true };
+        let declines = Decoders { chroma: Chroma::Full, apple_hevc: false };
+        let passed = hp("hevc_passthrough = true");
+        assert!(passed.render_plan(takes).apple_hevc);
+        assert_eq!(passed.render_plan(takes).describe(), "the Mac's HEVC, passed through");
+        assert_eq!(passed.render_plan(declines), hp("").render_plan(declines), "VP9 as without the key");
+        assert!(!hp("").render_plan(takes).apple_hevc, "only the key opts in");
+        assert_eq!(
+            passed.render_summary(),
+            "video q90 chroma auto · adaptive ≥20 · HEVC passed where the browser takes it"
+        );
+
+        for subtype in ["", "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}hevc_passthrough = true"))).unwrap_err();
+            assert!(format!("{err:#}").contains("only subtype \"ard-high-performance\""), "{err:#}");
+        }
     }
 
     /// The opening size resolves the same way for every engine: a pinned size
@@ -3347,8 +3440,8 @@ mod tests {
     fn render_adaptive_resolves_a_floor_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true\nrender_adaptive_min = 35")
             .expect("adaptive video");
-        let plan = cfg.targets[0].render_plan(Chroma::Subsampled);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: Some(35), chroma: Chroma::Subsampled });
+        let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: Some(35), chroma: Chroma::Subsampled, apple_hevc: false });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive ≥35");
     }
 
@@ -3362,8 +3455,8 @@ mod tests {
     #[test]
     fn a_dial_below_the_default_floor_is_the_floor() {
         let cfg = parse_target("video_quality = 10").expect("a low dial");
-        let plan = cfg.targets[0].render_plan(Chroma::Subsampled);
-        assert_eq!(plan, RenderPlan { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled });
+        let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
+        assert_eq!(plan, RenderPlan { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled, apple_hevc: false });
         assert_eq!(plan.describe(), "video q10 4:2:0 · adaptive ≥10");
     }
 
@@ -3374,8 +3467,8 @@ mod tests {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         assert_eq!(
-            cfg.targets[0].render_plan(Chroma::Subsampled),
-            RenderPlan { quality: 80, adaptive: None, chroma: Chroma::Subsampled }
+            cfg.targets[0].render_plan(Chroma::Subsampled.into()),
+            RenderPlan { quality: 80, adaptive: None, chroma: Chroma::Subsampled, apple_hevc: false }
         );
     }
 

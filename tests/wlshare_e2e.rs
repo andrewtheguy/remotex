@@ -88,6 +88,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             render_chroma: None,
             render_adaptive: None,
             render_adaptive_min: None,
+            hevc_passthrough: false,
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,

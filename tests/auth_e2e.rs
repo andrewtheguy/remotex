@@ -44,6 +44,7 @@ async fn spawn_app() -> SocketAddr {
             render_chroma: None,
             render_adaptive: None,
             render_adaptive_min: None,
+            hevc_passthrough: false,
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
@@ -152,7 +153,7 @@ async fn login_sets_the_session_cookie_and_grants_access() {
 async fn websocket_upgrade_without_a_login_fails_with_401() {
     let addr = spawn_app().await;
 
-    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session=whatever&chroma=444"))
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session=whatever&chroma=444&hevc=false"))
         .await
         .expect_err("the unauthenticated upgrade must be refused");
     match err {

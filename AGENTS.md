@@ -93,20 +93,23 @@ documentation.
 
 ## Media paths
 
-- Video streams are VP9 only. There is no codec probe, codec key, or codec
-  fallback. `render_chroma` is the only per-target codec choice, and its `"auto"`
-  value is the only thing the browser is asked: the page states which VP9 profile
-  its decoder takes on the session socket, the gateway *selects* between two
-  profiles on it, and no client is ever refused for the answer. Do not grow it into
-  a capability negotiation, a second codec, or a reason to turn a session away.
-  Preserve the announced configuration and color-space behavior described in
+- The gateway encodes video as VP9 only: one encoder to maintain. Do not add a
+  second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
+  selects one. A stream a remote codes itself may be passed to the browser
+  untouched where a rule below allows it; transcoded, it is only ever to VP9. The
+  browser is asked two questions, each once at page load and stated on the session
+  socket: which VP9 profile its decoder takes, for `render_chroma = "auto"`, and
+  whether it takes a High Performance Mac's HEVC, for `hevc_passthrough`. The
+  gateway *selects* on the answers and never refuses a client for them. Do not grow them into a
+  capability negotiation or a reason to turn a session away. Preserve the announced
+  configuration and color-space behavior described in
   [The codec](docs/architecture.md#the-codec) and
   [Choosing a chroma](docs/architecture.md#choosing-a-chroma).
-- The one picture that is not video is PNG tiles, and only for a desktop past the
-  video ceiling on a source that hands over its own rectangles: VNC without
-  `resize`. Each is a rectangle exactly as the server sent it. Do not add a key
-  that selects tiles, use them within the ceiling, cut, merge or cache rectangles
-  in the gateway, or give them to a source with `resize` or without rectangles,
+- The one picture that is not video is PNG tiles: for a desktop past the video
+  ceiling on a source that hands over its own rectangles, VNC without `resize`.
+  Each is a rectangle exactly as the server sent it. Do not add a key that selects tiles, use them
+  within the ceiling on any other session, cut, merge or cache rectangles in the
+  gateway, or give them to any other source with `resize` or without rectangles,
   which still ends on the ceiling's refusal. See
   [Tiles past the ceiling](docs/architecture.md#tiles-past-the-ceiling).
 - A generic VNC target whose plan resolves to 4:4:4 lists wlshare's VP9
@@ -139,10 +142,20 @@ documentation.
   are the non-default `apple-hp-media` feature, which no release artifact
   enables; a build without it refuses the subtype. Zlib carries its picture only
   until the stream is up and across display changes, and a stream that fails
-  ends the session, as in Apple's viewer. Do not add a High Performance subtype
+  ends the session, as in Apple's viewer. Its offer carries Apple's bitrate
+  entries and the gateway sends Apple's rate reports, with the delay measured to
+  the gateway, so the Mac's own controller sets the rate; do not cap the offer or
+  add a key that turns the reports off. Do not add a High Performance subtype
   without the stream or a fallback to zlib from a failed one, combinations
   Apple's viewer never offers. See
   [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
+- `hevc_passthrough` on `ard-high-performance` passes the Mac's HEVC access units,
+  as the Mac sent them, to a browser that said its decoder takes them, for a LAN;
+  every other browser is sent VP9 as without the key. The Mac's ZRLE rectangles
+  fill the stream's gaps as VP9 encoded here, each switch between the two starting
+  at a keyframe, and a PLI is a passed stream's repaint. Keep it
+  to that stream: no other remote's HEVC, and a passed unit is never altered. See
+  [Apple's HEVC, passed through](docs/architecture.md#apples-hevc-passed-through).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and

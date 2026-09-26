@@ -84,8 +84,14 @@ modes (see [Connecting](#connecting)).
 |---|---|---|
 | Encodings | Adaptive: Apple's private `0x3f3` and `0x3ea`, then zlib and ZRLE. Full: zlib, then ZRLE. | The media stream (1010), then as Adaptive. |
 | Displays | The physical ones, selected with `SetDisplay`, scaled with `SetServerScaling`. | One or two virtual displays from `SetDisplayConfiguration`, 60 Hz unless a preference says otherwise. |
-| Quality menu | Adaptive or Full. | Disabled while the media stream runs. |
+| Quality menu | Adaptive or Full, selecting RFB framebuffer encodings. | No choice. The control is disabled while the media stream runs; its separate rate controller is automatic. |
 | Refused beside it | A virtual display, dynamic resolution, HDR. | No virtual display, or a screen other than the virtual ones. |
+
+Standard's **Adaptive** label does not name a High Performance setting. The
+High Performance video profile always enables AVConference's rate adaptation,
+with fixed 20 and 60 Mbit/s bounds, whether or not its reports can make the
+encoder move between them. The viewer exposes no switch for it. See
+[Rate control](#rate-control).
 
 - **A Mac without High Performance.** Apple's viewer offers the mode only when the
   Mac's ServerInit lists `SetDisplayConfiguration` and a feature flag of the
@@ -572,6 +578,12 @@ delivers and across display changes. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
+Remotex decodes the picture and encodes it as VP9, unless the target sets
+`hevc_passthrough` and the browser decodes the Mac's HEVC: then each access unit
+goes to the browser as it came, described by the stream's own sequence parameter
+set, and ZRLE's rectangles fill the gaps as VP9 encoded here. A PLI is its repaint. See
+[Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through).
+
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
 LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
@@ -619,13 +631,12 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
 
 Each offer is a binary property list of four keys around a deflated
 AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
-three fields:
+two fields:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
 | `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
-| bitrate entries (codec list, `f1 = 0`) | up to 100 Mbit/s | capped at 12 Mbit/s | The cap is the ceiling of the Mac's rate control, whose floor is 20 Mbit/s ([Rate control](#rate-control)). Below the floor the encoder runs at the cap: an animating lock screen came at about 7 Mbit/s under an 8 Mbit/s cap. |
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an
@@ -671,6 +682,16 @@ other failures (see [Liveness](#the-stream)).
   sends none for as long as it stays still: 75 s without a picture on macvm,
   while the Mac's sender reports went on. The receiver's debug log reports the
   pictures a second every 10 seconds.
+- **Receiving.** The Mac sends each picture as one burst at the link's speed. On
+  macvm at 3200×2000, over 40 s of video with two display changes, a socket with
+  Linux's default 208 KB receive buffer lost 9% of a passed stream's datagrams and
+  56% of a decoded one's, keyframe fragments among them, until a display never had
+  its first picture and the session ended. A receiver on a thread of its own,
+  apart from the RFB connection's, still lost 16–23% and ended the same way, so
+  the burst outruns the buffer however promptly it is read. Remotex asks for 4 MB
+  on the video's socket, and with it granted the same runs lost none, the receiver
+  sharing the engine's thread. Linux grants no more than `net.core.rmem_max`, and
+  the log warns when it grants less.
 - **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
   the 46-byte masters in the offer. Received packets use the server-to-viewer
   key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP
@@ -682,8 +703,10 @@ other failures (see [Liveness](#the-stream)).
   FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
-  about. It sends none of the rate reports described under
-  [Rate control](#rate-control), because its cap sits below the range they act in.
+  about; for a passed stream, when the browser's link falls 15 behind and when
+  the browser has to start over. It also sends the rate reports described under
+  [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
+  viewer does.
 - **Liveness.** Every offer owes its answer, its display's first picture and
   the first sound packet within 10 s, and the running stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
@@ -700,12 +723,17 @@ other failures (see [Liveness](#the-stream)).
 
 ### Rate control
 
+This is High Performance's automatic media-stream control, not the **Adaptive**
+quality choice in Standard mode. Every measured High Performance video
+configuration, including Apple's viewer's, enables rate adaptation; its audio
+configuration does not. The viewer offers no setting for it.
+
 The Mac's encoder follows a rate controller on the Mac that works from the
 viewer's reports alone. It moves between a floor of 20 Mbit/s and a ceiling of
 the offer's bitrate entries, capped at 60 Mbit/s. The floor and the 60 Mbit/s
-ceiling are the Mac's own settings for screen sharing, and no offer field is known
-to lower the floor. The daemon logs the controller's state every 5 s: target,
-cap, measured bitrate, round-trip time, one-way delay and loss.
+ceiling are fixed by the Mac's screen-sharing video profile, and no offer field
+is known to lower the floor. The daemon logs the controller's state every 5 s:
+target, cap, measured bitrate, round-trip time, one-way delay and loss.
 
 - **The report.** An RTCP APP packet named `RCTL` with a 20-byte payload, sent
   on the picture's leg as SRTCP. It must be the only packet in its datagram: the
@@ -738,16 +766,34 @@ cap, measured bitrate, round-trip time, one-way delay and loss.
   Reported loss of up to 44% for 30 s, and the bandwidth estimate, moved nothing,
   though the controller showed both. A TMMBR asking for 2 Mbit/s changed nothing
   and was not answered.
+- **The receiver's delay.** Apple's receiver takes one sample per picture, from
+  its first packet: the lag is the packet's arrival less its RTP timestamp at
+  24 kHz, both counted from the stream's first picture, so no clock is shared
+  with the Mac. A short average (0.9 of itself, 0.1 of the lag) follows the lag
+  and a long one (0.9999 and 0.0001) settles on its floor; the delay reported is
+  the short less the long, and when that goes negative the long one takes the
+  short one's value and the delay is 0. A lag more than 30 s from either average
+  starts the estimate again. It is the delay of a queue building between the
+  sender and the receiver's socket, and nothing after the socket enters it.
 - **Below the floor.** An offer capped under 20 Mbit/s pins the controller at
-  its floor, and the encoder runs at the cap whatever is reported. Remotex's
-  12 Mbit/s cap is such an offer, so its stream has no rate control at all.
+  its floor, and the encoder runs at the cap whatever is reported: an animating
+  lock screen came at about 7 Mbit/s under an 8 Mbit/s cap.
+- **Remotex.** It offers Apple's entries unchanged and reports as Apple's viewer
+  does: `RCTL` every 50 ms once a picture packet has arrived, the delay
+  estimated as above from when the receiver reads each picture packet, loss 0
+  and a bandwidth estimate of 60000 kbit/s, and the count and the delay starting
+  again with each stream's SSRC. A receiver too busy to read its socket shows as
+  delay too, which lowers the rate as a slow link would. It is the same for a decoded session
+  and a passed one: what the browser's link does, the VP9 walk and the passed
+  stream's queue answer, not the Mac's controller.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
   every 50 ms, and acknowledges each decoded tile picture with a 4-byte APP
   packet for the encoder's long-term references. On a quiet link its target sat
   at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
   so its reports were not read: the layout above comes from AVConference's code
   that builds and parses them, confirmed by a probe whose reports the Mac took as
-  it takes the viewer's.
+  it takes the viewer's. This happens whenever High Performance runs; it is not
+  selected by a quality control.
 
 These are the virtual Mac's measurements, with synthetic reports. A congested
 link to a physical Mac has not been observed.

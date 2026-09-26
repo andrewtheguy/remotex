@@ -3,14 +3,15 @@
 //!
 //! Two endpoints, both presenting the claim token from `POST /api/session`.
 //!
-//! `/ws?session=<token>&chroma=420|444` is the session: it attaches to the single
-//! slot ([`crate::session::SessionManager`]). The URL also names what only this
-//! browser knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values
-//! `connect` carries) and, required, the most colour its `VideoDecoder` takes — so
-//! an attach that finds a target whose engine a claim change ended can reconnect it
-//! for *this* browser rather than for the previous one. `chroma` is required
-//! because that reconnect happens at attach, before any message this client could
-//! send; a socket that does not name one is refused at the upgrade.
+//! `/ws?session=<token>&chroma=420|444&hevc=true|false` is the session: it attaches
+//! to the single slot ([`crate::session::SessionManager`]). The URL also names what
+//! only this browser knows about itself — its screen (`w`/`h`/`scale`/`fit`, the
+//! same values `connect` carries) and, required, what its `VideoDecoder` takes: the
+//! most colour, and whether a High Performance Mac's HEVC — so an attach that finds
+//! a target whose engine a claim change ended can reconnect it for *this* browser
+//! rather than for the previous one. `chroma` and `hevc` are required because that
+//! reconnect happens at attach, before any message this client could send; a socket
+//! that does not name them is refused at the upgrade.
 //! Inbound `ClientMsg` split two ways —
 //! session-control messages (`connect` to pick a target from the post-login picker,
 //! `disconnect` to switch back to it) act on the slot; everything else is engine
@@ -68,7 +69,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
     camera::{CameraFormat, CameraSignal},
-    config::Chroma,
+    config::{Chroma, Decoders},
     feedback::LinkFeedback,
     mic::MicSignal,
     protocol::{self, ClientMsg, Held, ServerMsg, WireFrame},
@@ -671,6 +672,11 @@ pub struct SessionParams {
     /// resolve an unset `render_chroma` against, and the upgrade is refused at the
     /// door rather than answered with a guess.
     chroma: Chroma,
+    /// Whether this browser's `VideoDecoder` takes a High Performance Mac's HEVC,
+    /// asked once at page load like [`Self::chroma`] and required for the same
+    /// reason: an `hevc_passthrough` target passes the stream only to a browser that
+    /// said yes.
+    hevc: bool,
 }
 
 pub async fn handler(
@@ -690,7 +696,7 @@ pub async fn handler(
             state.sessions,
             params.session,
             display,
-            params.chroma,
+            Decoders { chroma: params.chroma, apple_hevc: params.hevc },
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
         )
@@ -1111,12 +1117,12 @@ async fn session(
     sessions: Arc<SessionManager>,
     token: Option<String>,
     display: Option<protocol::HostDisplay>,
-    chroma: Chroma,
+    decoders: Decoders,
     heartbeat_timings: HeartbeatTimings,
     throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = match token {
-        Some(t) => sessions.attach(&t, display, chroma).await.ok(),
+        Some(t) => sessions.attach(&t, display, decoders).await.ok(),
         None => None,
     };
     let Some(attachment) = attachment else {
@@ -1396,35 +1402,38 @@ mod tests {
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
 
-    /// The session socket states the chroma its decoder takes, and one that does not
+    /// The session socket states the chroma its decoder takes and whether it takes the Mac's HEVC, and one that does not
     /// is refused at the upgrade — there is no default to fall back to, because a
     /// gateway guessing at a browser's decoder is exactly what the parameter
     /// replaces for a `render_chroma = "auto"` target. The media sockets are asked
     /// nothing of the kind: they carry the claim and stop there.
     #[test]
-    fn the_session_socket_names_its_chroma_and_the_media_sockets_do_not() {
+    fn the_session_socket_names_its_decoders_and_the_media_sockets_do_not() {
         use axum::extract::Query;
         use axum::http::Uri;
         let parse = |query: &str| -> Result<SessionParams, _> {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&chroma=444").expect("a browser that takes profile 1");
+        let full = parse("session=t&chroma=444&hevc=true").expect("a browser that takes profile 1");
         assert_eq!(full.chroma, Chroma::Full);
+        assert!(full.hevc);
         assert_eq!(full.session.as_deref(), Some("t"));
-        let subsampled = parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420")
+        let subsampled = parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&hevc=false")
             .expect("a browser that does not, naming its screen too");
         assert_eq!(subsampled.chroma, Chroma::Subsampled);
+        assert!(!subsampled.hevc);
         assert_eq!(
             (subsampled.w, subsampled.h, subsampled.scale, subsampled.fit),
             (Some(430), Some(932), Some(300), Some(true))
         );
         assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
+        assert!(parse("session=t&chroma=444").is_err(), "nor one that does not say whether it takes HEVC");
         // `auto` is a *target's* answer, not a browser's: a decoder takes one of two
         // profiles, and a client that named a question would leave the gateway
         // resolving one question with another.
-        assert!(parse("session=t&chroma=auto").is_err(), "the browser answers, it does not ask");
-        assert!(parse("session=t&chroma=422").is_err(), "there are two profiles");
+        assert!(parse("session=t&chroma=auto&hevc=false").is_err(), "the browser answers, it does not ask");
+        assert!(parse("session=t&chroma=422&hevc=false").is_err(), "there are two profiles");
 
         let media = Query::<WsParams>::try_from_uri(&"/ws/audio?session=t".parse::<Uri>().unwrap())
             .expect("the media sockets carry the token alone");
@@ -1869,6 +1878,7 @@ mod tests {
             render_chroma: None,
             render_adaptive: None,
             render_adaptive_min: None,
+            hevc_passthrough: false,
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
@@ -1895,7 +1905,7 @@ mod tests {
                 let throughput = Arc::clone(&served_throughput);
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, HEARTBEAT_TIMINGS, throughput)
+                        session(socket, sessions, Some(token), None, Chroma::Full.into(), HEARTBEAT_TIMINGS, throughput)
                     })
                 }
             }),
@@ -1988,7 +1998,7 @@ mod tests {
                 let token = bridged.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, timings, Arc::default())
+                        session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
                     })
                 }
             }),
@@ -2039,7 +2049,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(budget.available_permits() <= 60_000, "nothing was parked behind the silent client");
 
-        let mut replacement = reattaching.attach(&token, None, Chroma::Full).await.unwrap();
+        let mut replacement = reattaching.attach(&token, None, Chroma::Full.into()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while budget.available_permits() < 100_000 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2085,7 +2095,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, timings, Arc::default())
+                        session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
                     })
                 }
             }),
@@ -2134,7 +2144,7 @@ mod tests {
         let replacement_token = assertions
             .claim(false, None)
             .expect("heartbeat timeout did not release the browser attachment");
-        let mut replacement = assertions.attach(&replacement_token, None, Chroma::Full).await.unwrap();
+        let mut replacement = assertions.attach(&replacement_token, None, Chroma::Full.into()).await.unwrap();
         assert!(matches!(
             replacement.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
@@ -2175,7 +2185,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full, timings, Arc::default())
+                        session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
                     })
                 }
             }),
@@ -2224,7 +2234,7 @@ mod tests {
         let token = sessions.claim(false, None).unwrap();
         // A live desktop, driven in process: this test is about the audio socket, and
         // the session socket only has to exist for `connect` to be legal.
-        let mut att = sessions.attach(&token, None, Chroma::Full).await.unwrap();
+        let mut att = sessions.attach(&token, None, Chroma::Full.into()).await.unwrap();
         assert!(matches!(
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
