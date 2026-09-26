@@ -678,8 +678,10 @@ mod tests {
 
     fn close(actual: [u8; 3], expected: [u8; 3]) -> bool {
         // The chroma filter quadruples the luma view's error at every recovered
-        // sample, so a step or two of coding error can be eight after it.
-        actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 8)
+        // sample, so a few steps of coding error — which differ between the
+        // encoder's x86 and NEON paths — can be a dozen after it. The colours the
+        // tests tell apart are over a hundred apart.
+        actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 16)
     }
 
     /// An AVC420 stream decodes and paints its masked rectangles, and only those, in
