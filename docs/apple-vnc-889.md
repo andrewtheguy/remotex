@@ -625,7 +625,7 @@ three fields:
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
 | `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
-| bitrate entries (codec list, `f1 = 0`) | up to 100 Mbit/s | capped at 12 Mbit/s | A sender with no feedback pads out to what it was offered: an animating lock screen came at 19 Mbit/s uncapped and about 7 under an 8 Mbit/s cap. |
+| bitrate entries (codec list, `f1 = 0`) | up to 100 Mbit/s | capped at 12 Mbit/s | The cap is the ceiling of the Mac's rate control, whose floor is 20 Mbit/s ([Rate control](#rate-control)). Below the floor the encoder runs at the cap: an animating lock screen came at about 7 Mbit/s under an 8 Mbit/s cap. |
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an
@@ -682,7 +682,8 @@ other failures (see [Liveness](#the-stream)).
   FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
-  about. Apple's viewer's rate feedback is not reproduced.
+  about. It sends none of the rate reports described under
+  [Rate control](#rate-control), because its cap sits below the range they act in.
 - **Liveness.** Every offer owes its answer, its display's first picture and
   the first sound packet within 10 s, and the running stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
@@ -696,6 +697,60 @@ other failures (see [Liveness](#the-stream)).
   until its own offer, except the answer to an offer still out. When the Mac
   names its ports and nothing arrives within 5 s, the log names the port and the
   likely firewall or NAT.
+
+### Rate control
+
+The Mac's encoder follows a rate controller on the Mac that works from the
+viewer's reports alone. It moves between a floor of 20 Mbit/s and a ceiling of
+the offer's bitrate entries, capped at 60 Mbit/s. The floor and the 60 Mbit/s
+ceiling are the Mac's own settings for screen sharing, and no offer field is known
+to lower the floor. The daemon logs the controller's state every 5 s: target,
+cap, measured bitrate, round-trip time, one-way delay and loss.
+
+- **The report.** An RTCP APP packet named `RCTL` with a 20-byte payload, sent
+  on the picture's leg as SRTCP. It must be the only packet in its datagram: the
+  Mac rejects one inside a compound packet as a bad APP packet. The payload is
+  big-endian:
+
+  ```text
+  +0  u8   0x85
+  +1  u8   a millisecond figure / 20, meaning unknown; 0 is accepted
+  +2  u16  4, the payload's length in words after this field
+  +4  u16  echo: the last received picture packet's RTP timestamp >> 8
+  +6  u32  zero
+  +10 u16  milliseconds since that packet arrived
+  +12 u16  the viewer's clock, in 1/1024 s
+  +14 u16  one-way relative delay, seconds x 8192, at most 0xffff
+  +16 u16  bursty loss (top 4 bits) | picture packets received mod 4096
+  +18 u16  bandwidth estimate, kbit/s
+  ```
+
+- **The echo.** The Mac keeps a history of what it sent keyed by the picture
+  leg's 24 kHz RTP timestamp shifted right by 8, about 94 entries a second, and
+  takes the round-trip time from the echo and the hold time after it. An echo
+  that matches nothing logs a missing send-history element and leaves the
+  controller without a round-trip time or a measured bitrate. The received count
+  is a running one: a count per report reads as total loss.
+- **What moves it.** The one-way delay alone. With the delay low, the target
+  rose from the floor to near the cap within about 3 s. A delay of 300 ms held
+  it at the floor from the start, and after a clean start walked it from 58.4 to
+  20.8 Mbit/s in steps over about 10 s, with the encoder following each step.
+  Reported loss of up to 44% for 30 s, and the bandwidth estimate, moved nothing,
+  though the controller showed both. A TMMBR asking for 2 Mbit/s changed nothing
+  and was not answered.
+- **Below the floor.** An offer capped under 20 Mbit/s pins the controller at
+  its floor, and the encoder runs at the cap whatever is reported. Remotex's
+  12 Mbit/s cap is such an offer, so its stream has no rate control at all.
+- **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
+  every 50 ms, and acknowledges each decoded tile picture with a 4-byte APP
+  packet for the encoder's long-term references. On a quiet link its target sat
+  at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
+  so its reports were not read: the layout above comes from AVConference's code
+  that builds and parses them, confirmed by a probe whose reports the Mac took as
+  it takes the viewer's.
+
+These are the virtual Mac's measurements, with synthetic reports. A congested
+link to a physical Mac has not been observed.
 
 ### The sound
 
@@ -777,9 +832,10 @@ is 10 s overdue.
 - **Apple's private framebuffer codecs**, `0x3ea` and `0x3f3`: an adaptive,
   tile-based, JPEG-like codec among them. Neither is advertised.
 - **Authentication types 31–36 on the wire.**
-- **Apple's viewer's RTCP feedback**: what it reports that keeps its sender from
-  padding the stream out to the offered bitrate, and how it places a strip of a
-  four-tile frame.
+- **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
+  the target over longer than 30 s, and whether any offer field lowers the
+  20 Mbit/s floor ([Rate control](#rate-control)).
+- **Four-tile frames**: how Apple's viewer places each strip.
 - **Cases the test Mac could not show:**
   - a non-console user;
   - hardware mirroring;

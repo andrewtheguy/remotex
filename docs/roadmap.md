@@ -159,9 +159,14 @@ already has.
   therefore changes codec at those edges, each change behind its own `VideoFormat`
   and keyframe, so the browser reconfigures one decoder rather than holding two.
 - **The dial does not reach it.** As with wlshare's stream, the target's
-  `video_quality` and the adaptive walk govern only the VP9 path. The passed stream
-  is coded at what the Mac's offer asked for, and whether a backlog towards the
-  browser can reach the Mac as a lower bitrate mid-stream is not known yet.
+  `video_quality` and the adaptive walk govern only the VP9 path. The Mac's own
+  rate control can stand in for them between 20 Mbit/s and the offer's cap
+  ([Rate control](apple-vnc-889.md#rate-control)): the gateway would report its
+  backlog towards the browser as the one-way delay in `RCTL`, and the Mac walks
+  down to the floor over about 10 s. That means an offer capped above 20 Mbit/s,
+  where remotex's is 12. Below the floor only the cap governs, and only a new
+  offer, which restarts both legs, changes it, so a browser link slower than
+  20 Mbit/s gets a fixed rate or the VP9 path.
 - **The rules change with it.** AGENTS.md and [The codec](architecture.md#the-codec)
   say video is VP9 only, with no second codec and no fallback, and this is both. They
   are rewritten together with the code, as narrowly as the work: HEVC for
