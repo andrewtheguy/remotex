@@ -125,15 +125,13 @@ The client sets `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in the GCC core data, and
 Windows host answers by opening `Microsoft::Windows::RDS::Graphics` over `drdynvc`
 — the same dynamic channel transport Display Control rides, so `drdynvc` is asked
 for when either key is on. The client accepts the channel and at once advertises
-every capability set from version 8 to 10.4, and 10.7
-(`proto/gfx.rs::caps_advertise`), each with the small cache and none with
-`AVC_DISABLED`, so the host may draw with H.264 in every mode it has; 10.4 is the
-set that lets a host mix H.264 with the other codecs in one frame, which is how
-Windows draws a desktop with video playing on it. 10.5 and 10.6 are left out and
-10.7 carries `SCALEDMAP_DISABLE`: from 10.5 a host may map surfaces to the output
-through the scaled mappings this client ignores, and only 10.7 has a flag to
-refuse them. `THINCLIENT` and `AVC_THINCLIENT` are deliberately not set. The host
-confirms the newest set it knows — a Windows 11 host, 10.7 — and then draws.
+two capability sets (`proto/gfx.rs::caps_advertise`): version 8 with the small
+cache, and version 10 with the small cache and `AVC_DISABLED`, so the host never
+sends H.264. A host that may send it hands the parts of the desktop that move like
+video to it, and a lossy video codec loses detail before the gateway ever encodes
+the picture; the client takes the desktop as the pipeline's other codecs carry it
+instead. `THINCLIENT` is deliberately not set. The host confirms one set and then
+draws.
 
 Every PDU the host sends on the channel is wrapped in RDP 8 bulk compression
 (`proto/zgfx.rs`), a port of FreeRDP's decoder: a fixed Huffman table over
@@ -176,19 +174,7 @@ is refused by name. A region is painted from every tile decoded since its graphi
 frame began, clipped to its rectangles, not from its own tiles alone: [MS-RDPEGFX]
 2.2.4.2.1.5 lets a region's rectangles be covered by tiles an earlier region of the
 frame carried, in an earlier PDU even, and a Windows host relies on it when a
-minimized or dragged window uncovers the desktop. And H.264 (`rdp_client/avc.rs`
-over OpenH264, `proto/avc.rs` for the wire), which a host hands the parts of the
-desktop that move like video: AVC420, whose access unit is a picture the size of
-the surface rounded up to macroblocks and whose metablock names the rectangles of
-it to show, converted from full-range BT.709 as [MS-RDPEGFX] 3.3.8.3.1 has it; and
-AVC444 in both its layouts, the same picture at full chroma carried as a luma view
-and a chroma view through the one decoder, put back together by the tables and
-the chroma filter of 3.3.8.3.2 and 3.3.8.3.3. Each surface a host draws H.264 into
-gets a decoder of its own, made on the first such rectangle and kept with the
-surface, along with the last luma view, since the chroma view for a rectangle may
-come in a later frame. A host does not switch the desktop to H.264 for a client
-that takes it: it goes on drawing text with ClearCodec and Progressive and sends
-the video regions in AVC beside them, unless its own policy says otherwise. The copies and caches that make a desktop cheap are acted on:
+minimized or dragged window uncovers the desktop. The copies and caches that make a desktop cheap are acted on:
 SurfaceToSurface reads its source whole before writing so a scroll over itself does
 not smear, SurfaceToCache and CacheToSurface keep rectangles by slot, SolidFill
 clips to the surface. A rectangle that will not decode is left unpainted with a

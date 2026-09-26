@@ -14,12 +14,13 @@
 //!
 //! Uncompressed rectangles and the planar codec of [`planar`] — the same codec a
 //! bitmap update uses, the rows the right way up this time; ClearCodec and
-//! RemoteFX Progressive; and the H.264 a host draws video with, AVC420 and both
-//! AVC444 shapes, each surface with a decoder of its own ([`Avc`]). Every other
-//! codec a server names is counted and left unpainted, with the first sighting of
-//! each said once in the log: that count is what decides which decoder is written
-//! next, and a codec this client cannot read is a hole in the picture rather than
-//! the end of the session.
+//! RemoteFX Progressive. H.264 is not among them and is not meant to be: the
+//! capability advertise tells the host not to send it, so no part of the desktop
+//! is lost to a video codec before it is encoded here. Every other codec a server
+//! names is counted and left unpainted, with the first sighting of each said once
+//! in the log: that count is what decides which decoder is written next, and a
+//! codec this client cannot read is a hole in the picture rather than the end of
+//! the session.
 //!
 //! [`Graphics::receive`] is the whole of it: one channel PDU in, and out come the
 //! things the session has to act on that the framebuffer cannot show — the output
@@ -30,9 +31,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
 
-use super::avc::{Avc, Layout};
 use super::framebuffer::{Framebuffer, Rect, affordable, stage};
-use super::proto::avc::{avc420, avc444};
 use super::proto::bitmap::MAX_DESKTOP_BYTES;
 use super::proto::gfx::{self, Message, Point16, Rect16};
 use super::proto::wire::Malformed;
@@ -74,10 +73,6 @@ struct Surface {
     mapped: Option<(u32, u32)>,
     /// Rectangles of the surface drawn into since the last EndFrame.
     invalid: Vec<Rect>,
-    /// Its H.264 stream's decoder, made on the first AVC rectangle: every surface
-    /// a host draws H.264 into has a stream of its own, and one that is never
-    /// drawn that way has no decoder.
-    avc: Option<Box<Avc>>,
 }
 
 impl Surface {
@@ -119,23 +114,6 @@ impl Surface {
             width: u32::from(rect.width()),
             height: u32::from(rect.height()),
         });
-    }
-
-    /// Write one rectangle of packed `RGB` rows that start `src_stride` bytes
-    /// apart — what the H.264 conversions produce — widening each pixel to the
-    /// framebuffer's four bytes.
-    fn write_rgb_rows(&mut self, rect: Rect16, rgb: &[u8], src_stride: usize) {
-        let width = usize::from(rect.width());
-        let stride = self.stride();
-        for row in 0..usize::from(rect.height()) {
-            let src = &rgb[row * src_stride..row * src_stride + width * 3];
-            let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 4;
-            let dst = &mut self.pixels[at..at + width * 4];
-            for (out, px) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<3>().0) {
-                *out = [px[0], px[1], px[2], 0];
-            }
-        }
-        self.invalidate(to_rect(rect));
     }
 
     /// Whether an arbitrary rectangle lies inside this surface.
@@ -381,7 +359,6 @@ impl Graphics {
                     pixels: vec![0; bytes],
                     mapped: None,
                     invalid: Vec::new(),
-                    avc: None,
                 };
                 // A server may create a surface under a number still in use; the
                 // new one replaces the old.
@@ -538,12 +515,6 @@ impl Graphics {
                 }
                 return;
             }
-            gfx::CODEC_AVC420 | gfx::CODEC_AVC444 | gfx::CODEC_AVC444_V2 => {
-                // The picture is the surface, masked; the command's rectangle says
-                // nothing the metablock does not.
-                self.draw_avc(surface, codec, data);
-                return;
-            }
             other => {
                 self.tally.unhandled("codec", other, gfx::codec_name(other));
                 return;
@@ -553,46 +524,6 @@ impl Graphics {
             Ok(bgrx) => found.write(rect, bgrx),
             // One rectangle the server will draw again; not the session.
             Err(e) => warn!("rdp: leaving a {width}x{height} {} rectangle unpainted: {e}", gfx::codec_name(codec)),
-        }
-    }
-
-    /// An H.264 stream for a surface: the surface's own decoder takes the access
-    /// unit and paints the rectangles its metablock masks. The decoder is lifted out
-    /// of the surface for the call so the paints can borrow the surface's pixels.
-    ///
-    /// A stream that will not decode costs its rectangles, not the session; a
-    /// decoder that cannot be made costs every AVC rectangle after it, each said.
-    fn draw_avc(&mut self, surface: u16, codec: u16, data: &[u8]) {
-        let Some(found) = self.surfaces.get_mut(&surface) else {
-            warn!("rdp: the host drew into graphics surface {surface}, which does not exist");
-            return;
-        };
-        let mut avc = match found.avc.take() {
-            Some(avc) => avc,
-            None => match Avc::new() {
-                Ok(avc) => Box::new(avc),
-                Err(e) => {
-                    warn!("rdp: leaving a {} stream unpainted: {e:#}", gfx::codec_name(codec));
-                    return;
-                }
-            },
-        };
-        let size = (found.width, found.height);
-        let mut paint = |rect: Rect16, rgb: &[u8], stride: usize| found.write_rgb_rows(rect, rgb, stride);
-        let outcome = match codec {
-            gfx::CODEC_AVC420 => {
-                avc420(data).map_err(anyhow::Error::from).and_then(|stream| avc.draw_420(&stream, size, &mut paint))
-            }
-            _ => {
-                let layout = if codec == gfx::CODEC_AVC444 { Layout::V1 } else { Layout::V2 };
-                avc444(data)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|stream| avc.draw_444(&stream, layout, size, &mut paint))
-            }
-        };
-        found.avc = Some(avc);
-        if let Err(e) = outcome {
-            warn!("rdp: leaving a {} stream's rectangles unpainted: {e:#}", gfx::codec_name(codec));
         }
     }
 
@@ -1203,77 +1134,6 @@ mod tests {
             Update::Paint(Rect { x: 0, y: 0, width: 1, height: 1 }),
             Update::Frame { id: 1, decoded: 1 },
         ]);
-    }
-
-    /// An AVC444 stream on the first wire-to-surface command paints its mask through
-    /// the surface's own decoder, and a second stream on the same surface finds that
-    /// decoder — a chroma view alone combines with the luma view it kept.
-    #[test]
-    fn an_avc444_stream_paints_its_mask_and_the_surface_keeps_its_decoder() {
-        use crate::rdp_client::avc::testing::{Stream, flat, rgb_of};
-        use crate::rdp_client::proto::avc::tests::wrap444;
-        use crate::rdp_client::proto::gfx::CODEC_AVC444;
-
-        let framebuffer = Framebuffer::new();
-        let mut graphics = Graphics::new();
-        receive(&mut graphics, &framebuffer, &[reset(32, 32), create(1, 32, 32), map(1, 0, 0)]);
-        // One flat colour in both views: the chroma view's odd samples equal the
-        // luma view's averages, so the combined picture is the flat colour too.
-        let (yuv, mut stream) = ([100u8, 80, 160], Stream::new());
-        let luma_unit = stream.encode(flat(32, 32, yuv), 32, 32);
-        // Under the first layout each macroblock's top eight rows hold U's odd rows
-        // and its bottom eight V's; the chroma planes hold the odd columns.
-        let aux_luma: Vec<u8> = (0..32).flat_map(|y| [if y & 15 < 8 { yuv[1] } else { yuv[2] }; 32]).collect();
-        let aux = [aux_luma, vec![yuv[1]; 16 * 16], vec![yuv[2]; 16 * 16]].concat();
-        let chroma_unit = stream.encode(aux, 32, 32);
-        let metablock = |rect: (u16, u16, u16, u16)| {
-            let mut w = Writer::new();
-            w.u32_le(1);
-            w.u16_le(rect.0);
-            w.u16_le(rect.1);
-            w.u16_le(rect.2);
-            w.u16_le(rect.3);
-            w.u8(20);
-            w.u8(100);
-            w.finish()
-        };
-        let luma = [metablock((2, 2, 30, 20)), luma_unit].concat();
-        let updates = receive(&mut graphics, &framebuffer, &[
-            start(1),
-            wire(1, CODEC_AVC444, (0, 0, 32, 32), &wrap444(Some(&luma), None)),
-            end(1),
-        ]);
-        let painted = Rect { x: 2, y: 2, width: 28, height: 18 };
-        assert_eq!(updates, vec![Update::Paint(painted), Update::Frame { id: 1, decoded: 1 }]);
-        let expected = rgb_of(yuv);
-        framebuffer.with(|frame| {
-            for row in frame.rows(painted) {
-                for px in row.as_chunks::<4>().0 {
-                    assert!(px[..3].iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 8), "{px:?} vs {expected:?}");
-                }
-            }
-            assert_eq!(&frame.pixels[..4], &[0, 0, 0, 0], "outside the mask is untouched");
-        });
-        assert!(graphics.surfaces[&1].avc.is_some(), "the surface keeps its decoder");
-
-        // A chroma view later, for part of the rectangle the luma view carried.
-        let chroma = [metablock((2, 2, 18, 18)), chroma_unit].concat();
-        let updates = receive(&mut graphics, &framebuffer, &[
-            start(2),
-            wire(1, CODEC_AVC444, (0, 0, 32, 32), &wrap444(None, Some(&chroma))),
-            end(2),
-        ]);
-        assert_eq!(updates, vec![Update::Paint(Rect { x: 2, y: 2, width: 16, height: 16 }), Update::Frame { id: 2, decoded: 2 }]);
-        framebuffer.with(|frame| {
-            let px = &frame.pixels[(2 * 32 + 2) * 4..][..4];
-            assert!(px[..3].iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 8), "{px:?} vs {expected:?}");
-            assert_eq!(&frame.pixels[..4], &[0, 0, 0, 0], "outside every mask is untouched");
-        });
-
-        // A stream that will not decode costs its rectangles and not the session.
-        let bad = [metablock((0, 0, 8, 8)), vec![0, 0, 1, 0x65, 1, 2, 3]].concat();
-        let updates = receive(&mut graphics, &framebuffer, &[start(3), wire(1, CODEC_AVC444, (0, 0, 32, 32), &wrap444(Some(&bad), None)), end(3)]);
-        assert_eq!(updates, vec![Update::Frame { id: 3, decoded: 3 }]);
     }
 
     /// The host's CapsConfirm is the moment the session learns that its frames will

@@ -114,20 +114,11 @@ binary's global CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt`, `libvpx-prebuilt` and `openh264-prebuilt`.
-Their sys crates download static archives instead of building vendored C and
-C++, so this project needs no CMake, pkg-config, libclang, vcpkg, nasm, or system
-copies of those libraries. `LIBVPX_PREBUILT_DIR`, `LIBOPUS_PREBUILT_DIR` and
-`OPENH264_PREBUILT_DIR` select locally built archives.
-
-OpenH264, the RDP client's H.264 decoder, reaches the build through the
-`openh264` wrapper crate from crates.io, whose `openh264-sys2` is patched in
-`Cargo.toml` to `andrewtheguy/openh264-prebuilt`: the same crate with its `cc`
-and `nasm` build replaced by a download of the archive OpenH264's own Makefile
-built, at the commit the crates.io crate vendors. The x86-64 archives keep
-OpenH264's CPUID dispatch, so the floor above holds; arm64 gets NEON. OpenH264 is
-C++, so its sys crate links `c++` on macOS and `stdc++` on Linux, which every
-builder and base image already carries.
+Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
+download static archives instead of building vendored C and C++, so this project
+needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
+those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
+built archives.
 
 The non-default `apple-hp-media` feature, which `ard-high-performance` targets
 need, adds two decoders and is in no release artifact because of their
@@ -150,7 +141,7 @@ libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built
 archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
 
-The one native library built from source is jemalloc, through `tikv-jemallocator`,
+The one C library built from source is jemalloc, through `tikv-jemallocator`,
 the global allocator on every Unix build. It needs only a C compiler and `make`,
 which every Unix builder already has. glibc's malloc is not an option: it keeps
 freed memory in per-thread arenas, and the gateway's per-session threads grew it
