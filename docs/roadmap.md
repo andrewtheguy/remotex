@@ -129,6 +129,45 @@ frame at, which its desktop clients want for their own throughput readout too. I
 is one change to the wire, to be made with the desktop clients' throughput support
 rather than ahead of it.
 
+### Apple's HEVC, passed through, with VP9 behind it
+
+`ard-high-performance` decodes the Mac's HEVC here, on FFmpeg's decoder and a
+conversion to RGB, and encodes every picture again as VP9 for a browser that could
+often take the stream as it comes. The plan is to pass it through to every browser
+that decodes it and keep today's transcode as the fallback for every other, in the
+shape [wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)
+already has.
+
+- **Which browsers take it.** A capture of macwork's stream (`hev1.4.10.L150.BE.8`:
+  Range Extensions 4:4:4, 8-bit, full-range BT.709, 1600×1000, Annex B) was decoded
+  picture for picture by WebCodecs' `VideoDecoder` in current Chrome and Safari,
+  desktop and mobile. Firefox decoded none of it. Chrome on macOS takes it in
+  hardware only: `isConfigSupported` refuses it under `prefer-software`.
+- **Asked the way chroma is asked.** The page states on the session socket whether
+  its decoder takes that configuration, beside the chroma it already states, and the
+  gateway selects between two streams it is willing to send. The answer never
+  refuses a session: a browser that says no is sent VP9 as today. The choice is fixed
+  for an engine, and a takeover by a browser that answers otherwise rebuilds it, as a
+  chroma change does.
+- **What passes.** The depacketized access units, behind a `VideoFormat` naming the
+  stream's configuration and colour space. A lost picture is already a PLI that the
+  Mac answers with an IDR; with no decoder here, dropping to that IDR moves to the
+  queue towards the browser, and the browser's own decode error has to come back as
+  the same PLI.
+- **Zlib stays VP9.** Zlib carries the picture until the stream is up and across
+  every display change, and it is encoded here as it is today. A passed session
+  therefore changes codec at those edges, each change behind its own `VideoFormat`
+  and keyframe, so the browser reconfigures one decoder rather than holding two.
+- **The dial does not reach it.** As with wlshare's stream, the target's
+  `video_quality` and the adaptive walk govern only the VP9 path. The passed stream
+  is coded at what the Mac's offer asked for, and whether a backlog towards the
+  browser can reach the Mac as a lower bitrate mid-stream is not known yet.
+- **The rules change with it.** AGENTS.md and [The codec](architecture.md#the-codec)
+  say video is VP9 only, with no second codec and no fallback, and this is both. They
+  are rewritten together with the code, as narrowly as the work: HEVC for
+  `ard-high-performance`'s media stream alone, passed and never transcoded, with VP9
+  behind it.
+
 ### Source payloads the gateway decodes instead of forwarding
 
 Three places where a remote could hand this gateway something closer to what the
