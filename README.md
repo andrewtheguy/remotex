@@ -27,8 +27,11 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
   `subtype = "ard-high-performance"` is its High Performance mode as Apple's
   viewer has it: one virtual display holding every remote window,
   with the picture as HEVC and the sound as AAC-ELD over the Mac's SRTP media
-  stream, in a gateway built with the `apple-hp-media` feature. Only it accepts
-  `resize = true`. Both are reverse engineered, having no specification.
+  stream, in a gateway built with the `apple-hp-media` feature. `resize = true`
+  needs a virtual display: High Performance's, or the unofficial
+  `virtual_display = true` under `ard`, which puts Standard mode's picture on one
+  and was tested on macOS 26 only. Both modes are reverse engineered, having no
+  specification.
   A wlroots-based Wayland desktop behind
   [wlshare](https://github.com/andrewtheguy/wlshare) is a plain `vnc` target:
   that server carries pixel density over one private RFB extension the gateway
@@ -211,8 +214,17 @@ There is no client-side control for resizing the remote: no auto-resize toggle o
 one-shot remote-resize button. The local app-window sizing control described above
 does not change that policy. The descriptor's fixed 3840×2160 backing ceiling
 permits successive arbitrary sizes within that bound, and every fresh connection
-turns the Mac's Dynamic resolution setting back on. Standard `ard` still refuses
-resize, and the one/two-virtual-display control is not implemented.
+turns the Mac's Dynamic resolution setting back on. Standard `ard` on the Mac's
+physical displays still refuses resize, and the one/two-virtual-display control
+is not implemented.
+
+**Unofficial:** `virtual_display = true` on an `ard` target opens Standard mode on
+one virtual display instead of the Mac's physical ones — the display and the
+resizing above are High Performance's, and the picture stays ZRLE, with no media
+stream offered, no decoders needed and no sound. Apple's viewer never offers this
+combination, so nothing but remotex exercises the Mac's side of it; it was tested
+against macOS 26 only, and a macOS update is free to break it while leaving the
+two official modes alone.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 A plain VNC server has no way to say its pixels are HiDPI — standard RFB carries
@@ -353,7 +365,7 @@ Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
 physical displays, or `"ard-high-performance"` for one virtual display
 containing all of its windows, with its physical displays disabled for the
-connection and its picture and sound over the Mac's media stream — each with the Mac account's username and password. Keep the config mode `0600`; target
+connection and its picture and sound over the Mac's media stream — each with the Mac account's username and password. The unofficial `virtual_display = true` under `subtype = "ard"` opens Standard mode on such a virtual display, tested on macOS 26 only. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

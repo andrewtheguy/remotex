@@ -194,7 +194,8 @@ password = "change-me"
 #
 # One narrowing that is not the client's to make either: generic VNC needs a
 # server that accepts SetDesktopSize — the TigerVNC family — and Standard Apple
-# `ard` refuses resize outright because it shares physical displays. Apple
+# `ard` refuses resize outright because it shares physical displays — unless the
+# unofficial `virtual_display = true` below puts it on a virtual one. Apple
 # `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
 # one virtual display's configuration with arbitrary viewport sizes within its
 # fixed 3840×2160 backing ceiling.
@@ -346,7 +347,8 @@ password = "change-me"
 # vnc_password. Resize is where they part: `ard` is refused outright — a config
 # setting it does not load — because it shares the Mac's physical displays, while
 # "ard-high-performance" takes it for the one virtual display it makes, as the
-# example below does. A third-party VNC server that happens to run on a
+# example below does; the unofficial `virtual_display = true` gives `ard` that
+# display too. A third-party VNC server that happens to run on a
 # Mac is not this: it is a plain "vnc" target.
 #
 # Both speak the protocol revision Apple's own viewer answers every Mac with, and
@@ -364,6 +366,28 @@ password = "change-me"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"
+
+# UNOFFICIAL: `virtual_display = true` opens that same Standard session on one
+# virtual display instead of the Mac's physical ones. The display is High
+# Performance's — created at the pinned `width`/`height` or the client's screen,
+# at its density, the physical displays disabled meanwhile, and with `resize =
+# true` replaced from every viewport report — and everything else is `ard`'s:
+# the ZRLE picture, the native pasteboard, no sound, no media stream offered and
+# no decoders needed, so it runs in every build. Apple's own viewer never offers
+# a virtual display without the media stream, so nothing but remotex has
+# exercised the Mac's side of this; it was tested against macOS 26 only, and a
+# macOS update is free to break it while leaving the two official modes alone.
+# Refused on "ard-high-performance", which always has the display.
+# [[targets]]
+# name = "mac-virtual-display"
+# protocol = "vnc"
+# subtype = "ard"
+# virtual_display = true
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+# clipboard = true
+# resize = true
 
 # `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
 # it. Its virtual display handling and its media stream were reverse engineered

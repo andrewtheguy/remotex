@@ -149,6 +149,13 @@ documentation.
   without the stream or a fallback to zlib from a failed one, combinations
   Apple's viewer never offers. See
   [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
+- `virtual_display = true` on `ard` is the one unofficial combination: Standard
+  mode's ZRLE session, opened on the virtual display High Performance asks for
+  and resized the same way, with no stream offered and no sound. It is `ard`'s
+  key alone, refused on `ard-high-performance` and on every other target, and
+  everything but the display and its resizing follows `ard`. Call it unofficial
+  wherever it is named, and tested with macOS 26 only; do not present it as a
+  mode of Apple's viewer or grow it into a third subtype.
 - `hevc_passthrough` on `ard-high-performance` passes the Mac's HEVC access units,
   as the Mac sent them, to a browser that said its decoder takes them, for a LAN;
   every other browser is sent VP9 as without the key. The Mac's ZRLE rectangles

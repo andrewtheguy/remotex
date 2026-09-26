@@ -13,7 +13,9 @@
 //! one virtual display at the target's pinned `width` and `height`, or at the
 //! connecting client's screen resolution when no size is pinned, with the picture
 //! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) and ZRLE
-//! rectangles carrying the picture until it is up. See docs/apple-vnc-889.md.
+//! rectangles carrying the picture until it is up. The unofficial
+//! `virtual_display = true` gives `ard` High Performance's display and resizing
+//! under its own ZRLE picture, with no stream offered. See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
 //! `Dialect` (which banner and ClientInit byte), the two preface functions after
@@ -1350,9 +1352,9 @@ struct Apple {
 
 impl Apple {
     /// The read loop's starting state for either Apple subtype.
-    fn new(high_performance: bool, pictures: Option<Pictures>) -> Self {
+    fn new(virtual_display: bool, pictures: Option<Pictures>) -> Self {
         Self {
-            virtual_display: high_performance,
+            virtual_display,
             pictures,
             ..Self::default()
         }
@@ -1485,7 +1487,7 @@ pub async fn run(
     // for every size and holds each under the ceiling, and a remote that answers
     // past it is refused. Never High Performance's, whose picture is the media
     // stream's, decoded or passed, with ZRLE's encoded here in its gaps.
-    let tiles = if config.resize || config.subtype == Some(Subtype::ArdHighPerformance) {
+    let tiles = if config.resize || config.media_stream() {
         TileSupport::None
     } else {
         TileSupport::Rects
@@ -1554,11 +1556,11 @@ async fn session(
         return; // browser already gone
     }
 
-    let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
+    let virtual_display = config.has_virtual_display();
     // A generic server is asked for wlshare's audio extension on the connection
     // itself ([`vnc_audio`]). High Performance's media stream carries the Mac's
     // sound beside its picture ([`vnc_apple_media`]). Standard mode never touches
-    // the Mac's sound.
+    // the Mac's sound, on a virtual display or not.
     let (media, wlshare_audio) = match media {
         Some((stream, pictures)) => (Some((stream.with_sound(audio), pictures)), None),
         None => (None, audio.filter(|_| !apple)),
@@ -1574,7 +1576,7 @@ async fn session(
             default_size: config.default_size(),
             pinned: (!apple).then(|| config.pinned_size()).flatten(),
             apple,
-            high_performance,
+            virtual_display,
             wlshare_audio,
             camera,
             microphone,
@@ -1633,9 +1635,11 @@ struct Flags {
     /// Apple subtypes negotiate: the read loop's ZRLE stream, cursor cache and
     /// display list, and the Mac's reading of the pointer mask.
     apple: bool,
-    /// Whether this is Apple's High Performance mode. It requests a virtual display
-    /// during setup; plain `ard` does not.
-    high_performance: bool,
+    /// Whether the session opened one of the Mac's virtual displays during setup —
+    /// High Performance mode, or `ard` with the unofficial `virtual_display` key —
+    /// which is what a resize replaces the mode of. Plain `ard` shares the
+    /// physical displays and has nothing to resize.
+    virtual_display: bool,
     /// The desktop's sound over wlshare's audio extension, when a generic target
     /// asked for it: the queue the read loop feeds the samples a server that
     /// announces the extension then sends ([`vnc_audio`]). `None` on every
@@ -2129,18 +2133,26 @@ async fn apple_preface(
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
     pass_hevc: bool,
 ) -> anyhow::Result<Connected> {
-    let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
+    let virtual_display = config.has_virtual_display();
+    let media_stream = config.media_stream();
     // Apple's viewer checks this before it sends a byte of the session, and turns a
     // Mac without it into a Standard session after asking. With no one to ask, it is
     // refused here rather than run on the physical display over ZRLE, a combination
-    // Apple's viewer never makes.
+    // Apple's viewer never makes. The unofficial virtual display under Standard
+    // mode needs the same message, so it is refused the same way.
     anyhow::ensure!(
-        !high_performance
+        !virtual_display
             || server.apple_commands.as_ref().is_some_and(vnc_apple::holds_high_performance),
         "this Mac does not offer High Performance Screen Sharing: its ServerInit does not \
          list SetDisplayConfiguration, without which there is no virtual display. Apple's \
-         viewer connects it in Standard mode; use subtype = \"ard\""
+         viewer connects it in Standard mode; use subtype = \"ard\" without virtual_display"
     );
+    if virtual_display && !media_stream {
+        info!(
+            "vnc: opening Standard mode on a virtual display (unofficial: a combination \
+             Apple's viewer never offers, tested against macOS 26 only)"
+        );
+    }
     // The native control prelude, written back to back before encryption. The
     // server emits the rekey as soon as encryption starts, so anything that waited
     // for a reply in between would risk writing cleartext to a server that had
@@ -2164,12 +2176,12 @@ async fn apple_preface(
     info!("vnc: Apple record layer active");
 
     let mut uplink = Uplink::records(sock, keys);
-    if high_performance {
-        // High Performance mode is a virtual-display session. Request its mode
-        // before the pixel format and encoding list. The same message is resent for
-        // later viewport reports and screen changes; its dynamic-resolution flag is
-        // set here regardless, so every fresh session restores the Mac's checkbox
-        // to on.
+    if virtual_display {
+        // High Performance mode is a virtual-display session, and Standard's
+        // unofficial one asks the same way. Request its mode before the pixel
+        // format and encoding list. The same message is resent for later viewport
+        // reports and screen changes; its dynamic-resolution flag is set here
+        // regardless, so every fresh session restores the Mac's checkbox to on.
         uplink
             .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
             .await?;
@@ -2178,10 +2190,10 @@ async fn apple_preface(
     // The same list in both modes: the display layout that names the Mac's screens,
     // or the one virtual display, and ZRLE for their pixels.
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
-    if high_performance {
+    if virtual_display {
         // Arm the server's sender. Cursor shapes above all depend on it across a
         // login or lock, which is why the full region is re-sent on every layout
-        // too, and which is when Standard first arms it.
+        // too, and which is when Standard on the physical displays first arms it.
         uplink
             .send(&vnc_apple::auto_framebuffer_update(server.size()))
             .await?;
@@ -2195,7 +2207,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: high_performance.then(|| MediaStream::new(peer, local, pass_hevc)),
+        media: media_stream.then(|| MediaStream::new(peer, local, pass_hevc)),
         passthrough: None,
     })
 }
@@ -2285,7 +2297,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         default_size,
         pinned,
         apple,
-        high_performance,
+        virtual_display,
         wlshare_audio,
         camera,
         microphone,
@@ -2304,7 +2316,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let (uplink, backlog, writer) = uplink.queued();
     let mut write_task = tokio::spawn(writer);
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
-    let hp = if high_performance && resize { HpResize::opening() } else { HpResize::default() };
+    let hp = if virtual_display && resize { HpResize::opening() } else { HpResize::default() };
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
@@ -2380,7 +2392,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(|| Apple::new(high_performance, pictures)),
+        apple.then(|| Apple::new(virtual_display, pictures)),
         sink.clone(),
     ));
 
@@ -2438,7 +2450,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 }
             }
             // A High Performance resize has something due — see [`HpResize`].
-            () = hp_resize_due(&desktop, &hp_wake), if high_performance && resize => {
+            () = hp_resize_due(&desktop, &hp_wake), if virtual_display && resize => {
                 if let Err(e) = hp_resize_step(&uplink, &desktop, media.as_ref(), &sink).await {
                     break Err(e);
                 }
@@ -2536,14 +2548,14 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         }
                         None
                     }
-                    ClientMsg::HostDisplay(screen) if high_performance && resize => {
+                    ClientMsg::HostDisplay(screen) if virtual_display && resize => {
                         let density = crate::protocol::render_density(screen.scale);
                         let mut d = desktop.lock().unwrap();
                         let changed = (d.host_density - density).abs() > 0.005;
                         d.host_density = density;
                         changed.then_some(ResizeAsk::Density)
                     }
-                    ClientMsg::HostDisplay(screen) if apple && !high_performance => {
+                    ClientMsg::HostDisplay(screen) if apple && !virtual_display => {
                         let density = crate::protocol::render_density(screen.scale);
                         desktop.lock().unwrap().host_density = density;
                         // Decided and sent under the uplink lock, as every scale
@@ -2569,7 +2581,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 };
                 let sent = if let Some(ask) = ask {
                     if resize {
-                        request_resize(&uplink, &desktop, ask, high_performance).await
+                        request_resize(&uplink, &desktop, ask, virtual_display).await
                     } else {
                         Ok(())
                     }
@@ -2869,7 +2881,7 @@ async fn request_resize(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     ask: ResizeAsk,
-    high_performance: bool,
+    virtual_display: bool,
 ) -> anyhow::Result<()> {
     // The uplink first, then the decision — see [`send_decided`].
     let mut up = uplink.lock().await;
@@ -2887,7 +2899,7 @@ async fn request_resize(
                 (point(d.size.0), point(d.size.1))
             }),
         };
-        if high_performance {
+        if virtual_display {
             // Recorded, not sent: [`hp_resize_step`] asks the Mac once the window
             // has held still — see [`HpResize`].
             let noop = d.hp_noop(want);

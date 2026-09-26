@@ -1195,6 +1195,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         render_adaptive: None,
         render_adaptive_min: None,
         hevc_passthrough: false,
+        virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
         audio_adaptive_min: None,
@@ -2049,6 +2050,109 @@ async fn expect_error(ws: &mut Ws) -> String {
     })
     .await
     .expect("timed out waiting for an error")
+}
+
+/// The unofficial `virtual_display` under `ard`: High Performance's display
+/// request and resizing, on Standard's ZRLE picture, with no media stream offered.
+/// The fake is set to refuse any offer, which would end the session — so a session
+/// that opens, resizes and disconnects cleanly is one that never made an offer.
+#[tokio::test]
+async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::Ard),
+        virtual_display: true,
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // High Performance's opening: the pasteboard enable, the display configuration
+    // at the client's screen, then the arming.
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
+    expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_SCREEN_WIDTH, "{resize}");
+    assert_eq!(resize["h"], MAC_SCREEN_HEIGHT, "{resize}");
+    let msg = expect_displays(&mut ws).await;
+    assert_eq!(msg["displays"][0]["virtual"], true, "{msg}");
+    // The picture is the Mac's ZRLE, encoded here: a frame arrives with no stream
+    // up, where High Performance would still be waiting on its offer.
+    expect_frame(&mut ws).await;
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
+    );
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::IncrementalFramebuffer);
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::IncrementalFramebuffer);
+
+    // A resize is High Performance's: the narrowed arming, the new configuration,
+    // the held poll, and the Mac's answering layout.
+    ws.send(Message::text(r#"{"type":"viewport","w":24,"h":18}"#)).await.unwrap();
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer((1, 1)));
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::Configuration((24, 18), 1));
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::HeldFramebuffer);
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], 24, "{resize}");
+    assert_eq!(resize["h"], 18, "{resize}");
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer((24, 18)));
+    expect_frame(&mut ws).await;
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert_eq!(
+        configurations,
+        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), ((24, 18), 1)],
+        "unexpected display configurations"
+    );
+}
+
+/// The unofficial virtual display needs the same ServerInit bit High Performance
+/// does, and is refused the same way on a Mac without it.
+#[tokio::test]
+async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
+    let mut commands = MAC_COMMANDS;
+    commands[3] &= !0x04;
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(commands, MacStream::Refuse).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::Ard),
+        virtual_display: true,
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+
+    let error = expect_error(&mut ws).await;
+    assert!(error.contains("without virtual_display"), "{error}");
+    let served = fake_mac.await.unwrap();
+    assert_eq!(served.unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+    assert!(requests.try_recv().is_err(), "the gateway sent a request");
 }
 
 /// `ard` on the wire Apple's viewer uses for every Mac: its revision, and the same
