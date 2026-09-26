@@ -271,8 +271,10 @@ async def main() -> int:
     # Mac's HEVC only with --hevc.
     hevc = "true" if args.hevc else "false"
     url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444&hevc={hevc}"
+    # No cap on a message, as a browser has none: a tile of a whole desktop is one
+    # batch, which a 2x screen puts past the library's 1 MiB default.
     async with websockets.connect(
-        url, additional_headers={"Cookie": f"remotex_session={cookie}"}
+        url, additional_headers={"Cookie": f"remotex_session={cookie}"}, max_size=None
     ) as socket:
         connect = {"type": "connect", "target": args.target}
         if args.display is not None:
