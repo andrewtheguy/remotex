@@ -38,10 +38,12 @@
 //! ## What is otherwise absent
 //!
 //! Standard `ard` refuses resize because it shares physical displays;
-//! `ard-high-performance` can resize its virtual display. `ard-high-performance`
-//! takes its picture and sound from the media stream once it is up
-//! ([`crate::vnc_apple_media`]): ZRLE rectangles carry the picture only until
-//! then. `ard` keeps its picture on ZRLE and carries no sound.
+//! `ard-high-performance` can resize its virtual display, as can `ard` on the
+//! unofficial `virtual_display` key, which asks for one with the same messages.
+//! `ard-high-performance` takes its picture and sound from the media stream once
+//! it is up ([`crate::vnc_apple_media`]): ZRLE rectangles carry the picture only
+//! until then. `ard` keeps its picture on ZRLE and carries no sound, on either
+//! kind of display.
 //! Every Apple subtype uses Apple's native pasteboard protocol, enabling
 //! monitoring before the rekey and carrying fetches and clipboard data inside the
 //! encrypted transport.

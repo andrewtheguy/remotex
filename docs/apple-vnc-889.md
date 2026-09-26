@@ -29,9 +29,15 @@ layer.
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, ZRLE until it is up | AAC-ELD over the media stream |
 
 `ard-high-performance` is High Performance as Apple's viewer has it, and needs a
-gateway built with the `apple-hp-media` feature. Remotex does not offer a
-virtual display without the media stream: Apple's viewer never offers that
-combination.
+gateway built with the `apple-hp-media` feature.
+
+**Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
+picture and sound — ZRLE, none — and takes the display from the other: the same
+`SetDisplayConfiguration` at setup and on every resize, with no media stream
+offered. Apple's viewer never offers a virtual display without the stream, so
+nothing but remotex exercises the Mac's side of this combination. It was tested
+against macOS 26 only, and a macOS update is free to break it while leaving both
+official modes alone.
 
 ## Summary
 
@@ -110,7 +116,9 @@ Remotex matches the split, on the same handshake: `ard` shares the physical
 displays, refuses `resize` and never creates a virtual display, and
 `ard-high-performance` creates exactly one, the "1 Virtual Display" choice, and
 never selects a physical screen or sends `SetServerScaling`. It departs in two
-places:
+places, and a third unofficially — `ard` with `virtual_display = true` creates
+the one virtual display the way High Performance does and then runs Standard's
+ZRLE session on it, a combination the viewer never offers (above):
 - **Encryption.** Apple's viewer asks for the record layer only when its
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
   session in cleartext after authentication, keystrokes and the media stream's
@@ -370,7 +378,10 @@ the full size of the browser's screen and at that screen's density, as Apple's
 client does. The window layout macOS produces depends on that opening size:
 windows squeezed onto a small opening display do not spread out again when it
 grows. With `resize = true`, each viewport report asks for a new size, and the
-next layout confirms it.
+next layout confirms it. Everything in this section and the next holds as well
+for the unofficial `virtual_display = true` under `ard`, which sends the same
+messages; on macOS 26 the Mac answered them the same way with no media stream
+offered, and that is the only macOS it was tried on.
 
 `SetDisplayConfiguration` (`0x1d`) carries one display descriptor and one mode:
 

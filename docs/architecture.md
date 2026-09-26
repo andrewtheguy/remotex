@@ -1284,7 +1284,11 @@ an ordinary `AsyncRead` and a per-message sink; `src/vnc_apple.rs` is the messag
 and payload layer above it. The Mac reads the pointer mask positionally on this
 revision, so right and middle swap bits for both subtypes.
 
-**High Performance mode is a virtual-display mode.** The gateway sends
+**High Performance mode is a virtual-display mode.** (So, unofficially, is `ard`
+with `virtual_display = true`: everything in this paragraph about the display and
+its resizing, with Standard's ZRLE picture, no media stream offered and no sound.
+Apple's viewer never offers that combination; it was tested on macOS 26 only.)
+The gateway sends
 `SetDisplayConfiguration` (`0x1d`) during setup, with one mode built from the
 pinned `width` and `height` when both are set, or from the connecting client's
 screen resolution otherwise, at that screen's density. The mode sits under the

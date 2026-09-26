@@ -53,6 +53,11 @@ pub enum Subtype {
     /// The Mac's metadata extension lists every attached display, permits selecting
     /// one or their combined desktop, and supplies each display's pixel density.
     /// Apple's native pasteboard is available, and the rectangles are ZRLE.
+    ///
+    /// With the unofficial [`TargetConfig::virtual_display`], the same session
+    /// opens on one of the Mac's virtual displays instead — High Performance's
+    /// display and resizing under Standard's picture, a combination Apple's viewer
+    /// never offers and remotex tested against macOS 26 alone.
     Ard,
     /// The same Mac in High Performance Screen Sharing, as Apple's viewer has it:
     /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
@@ -430,7 +435,8 @@ pub struct TargetConfig {
     /// the window and the pin is left answering `DefaultSize`. Standard `ard` is
     /// the exception with nothing to spend a pin on — it exposes the Mac's
     /// physical displays, which this gateway never resizes — and there the keys
-    /// only answer a later default-size request.
+    /// only answer a later default-size request; with [`Self::virtual_display`]
+    /// it opens its virtual display at the pin, as High Performance does.
     ///
     /// Points rather than pixels, because the density can move underneath it:
     /// an RDP connect happens at 1x and a Retina client then asks for twice
@@ -453,12 +459,28 @@ pub struct TargetConfig {
     /// density entirely. An RDP resize is the graphics pipeline's, so the key is
     /// refused beside `egfx = false`.
     ///
-    /// On `ard-high-performance` the setup descriptor
-    /// always enables the Mac's dynamic geometry; this flag decides only whether the window keeps
-    /// driving it after the open. Standard `ard` refuses the option because it
+    /// On a virtual display — `ard-high-performance`, or `ard` with
+    /// [`Self::virtual_display`] — the setup descriptor always enables the Mac's
+    /// dynamic geometry; this flag decides only whether the window keeps driving
+    /// it after the open. Standard `ard` without one refuses the option because it
     /// exposes physical displays.
     #[serde(default)]
     pub resize: bool,
+    /// UNOFFICIAL. Open Standard mode (`subtype = "ard"`) on one virtual display
+    /// instead of the Mac's physical displays: the `SetDisplayConfiguration` High
+    /// Performance sends, with Standard's ZRLE picture and no media stream. The
+    /// display and its resizing are High Performance's, everything else — the
+    /// picture, the absence of sound, the pasteboard — is `ard`'s. It is a
+    /// combination Apple's viewer never offers, so no Apple client exercises the
+    /// Mac's side of it; it was tested against macOS 26 only, and a macOS update
+    /// is free to break it. Refused on `ard-high-performance`, which always has
+    /// the display, and on every target that is not a Mac.
+    ///
+    /// What it is for: a resizable Mac session, at the window's size and density,
+    /// in a gateway without the `apple-hp-media` decoders or on a Mac where the
+    /// media stream cannot reach it.
+    #[serde(default)]
+    pub virtual_display: bool,
     /// RDP's graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host
     /// draws the desktop through the pipeline's surfaces and marks every frame,
     /// and a resize is a graphics reset. Off, the host draws with bitmap updates
@@ -797,6 +819,19 @@ impl TargetConfig {
     /// `ard-high-performance` ([`crate::vnc_apple_media`]).
     pub fn media_stream(&self) -> bool {
         self.protocol == Protocol::Vnc && self.subtype.is_some_and(Subtype::media_stream)
+    }
+
+    /// Whether this target's session opens one virtual display on the Mac rather
+    /// than sharing its physical ones: `ard-high-performance` always, and `ard`
+    /// with the unofficial [`Self::virtual_display`] key. What the VNC engine's
+    /// display geometry and resizing branch on; the picture's source is
+    /// [`Self::media_stream`]'s question.
+    pub fn has_virtual_display(&self) -> bool {
+        match (self.protocol, self.subtype) {
+            (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => true,
+            (Protocol::Vnc, Some(Subtype::Ard)) => self.virtual_display,
+            (Protocol::Vnc, None) | (Protocol::Rdp, _) => false,
+        }
     }
 }
 
@@ -1197,9 +1232,28 @@ impl ConfigFile {
                 !target.media_stream() || cfg!(feature = "apple-hp-media"),
                 "target {:?} is subtype \"ard-high-performance\", and this remotex was built \
                  without the apple-hp-media feature, which has its decoders. Build with \
-                 `--features apple-hp-media`, or use subtype \"ard\".",
+                 `--features apple-hp-media`, or use subtype \"ard\" — with the unofficial \
+                 `virtual_display = true` for a resizable virtual display without the stream.",
                 target.name
             );
+            // The virtual display is Standard mode's one unofficial extra. High
+            // Performance always has one, so the key would say nothing there, and
+            // nothing but a Mac has one to open.
+            match (target.protocol, target.subtype) {
+                _ if !target.virtual_display => {}
+                (Protocol::Vnc, Some(Subtype::Ard)) => {}
+                (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => anyhow::bail!(
+                    "target {:?} sets virtual_display on an ard-high-performance target, which \
+                     always opens a virtual display: the key is subtype \"ard\"'s. Remove it.",
+                    target.name
+                ),
+                (Protocol::Vnc, None) | (Protocol::Rdp, _) => anyhow::bail!(
+                    "target {:?} sets virtual_display, which only subtype \"ard\" takes: it \
+                     opens Standard Screen Sharing on one of the Mac's virtual displays, \
+                     and nothing else here has one to open. Remove the key.",
+                    target.name
+                ),
+            }
             // A Mac's sound is not the target's to turn on or off: Standard mode
             // never touches it, and High Performance's media stream always carries
             // its own.
@@ -1447,12 +1501,15 @@ impl ConfigFile {
                     );
                     // Standard mode shares the Mac's physical displays and has no
                     // virtual display for a viewport to resize. High Performance
-                    // owns one, and may replace its configured mode dynamically.
+                    // owns one, and may replace its configured mode dynamically —
+                    // as does Standard on the unofficial `virtual_display`.
                     anyhow::ensure!(
-                        subtype != Subtype::Ard || !target.resize,
+                        target.has_virtual_display() || !target.resize,
                         "target {:?} is subtype {name:?} and sets resize, which this gateway \
                          does not support: Standard Screen Sharing exposes the Mac's physical \
-                         displays, whose resolution this gateway does not change",
+                         displays, whose resolution this gateway does not change. The \
+                         unofficial `virtual_display = true` opens it on a resizable virtual \
+                         display instead",
                         target.name
                     );
                 }
@@ -2840,6 +2897,7 @@ mod tests {
         let err =
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support"), "{err:#}");
+        assert!(format!("{err:#}").contains("virtual_display = true"), "{err:#}");
 
         // Both Apple subtypes use Apple's native pasteboard messages.
         assert!(ard("username = \"andrew\"\npassword = \"h\"\nclipboard = true").is_ok());
@@ -2863,6 +2921,58 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("only \"vnc\" targets have"), "{msg}");
+    }
+
+    /// The unofficial `virtual_display` opens Standard mode on a virtual display:
+    /// it is `ard`'s key alone, and the one thing that lets `ard` take `resize`.
+    /// A build without the media stream's decoders takes it, which is its point.
+    #[test]
+    fn ard_opens_a_virtual_display_only_when_asked() {
+        let ard = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            )))
+        };
+
+        let plain = &ard("").unwrap().targets[0];
+        assert!(!plain.virtual_display);
+        assert!(!plain.has_virtual_display());
+        assert!(!plain.media_stream(), "no stream, and no sound, on either");
+
+        let target = &ard("virtual_display = true\nresize = true\nwidth = 1600\nheight = 1000")
+            .unwrap()
+            .targets[0];
+        assert_eq!(target.subtype, Some(Subtype::Ard), "still Standard mode");
+        assert!(target.has_virtual_display());
+        assert!(target.resize);
+        assert!(!target.media_stream());
+        assert!(!target.audio, "Standard's virtual display carries no sound either");
+        assert_eq!(target.pinned_size(), Some((1600, 1000)));
+        // Without resize, the display opens at the pin or the client's screen and
+        // stays there, as High Performance does.
+        assert!(ard("virtual_display = true").unwrap().targets[0].has_virtual_display());
+
+        // The key says nothing on High Performance, and nothing else has a virtual
+        // display to open.
+        let refused = [
+            ("subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n", "always opens a virtual display"),
+            ("", "only subtype \"ard\" takes"),
+        ];
+        for (subtype, reason) in refused {
+            if subtype.contains("high-performance") && !cfg!(feature = "apple-hp-media") {
+                continue;
+            }
+            let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}virtual_display = true")))
+                .unwrap_err();
+            assert!(format!("{err:#}").contains(reason), "{err:#}");
+        }
+        let err = ConfigFile::parse(&format!(
+            "[server]\n{}\n\n[[targets]]\nname = \"pc\"\nprotocol = \"rdp\"\nhost = \"10.0.0.5\"\n\
+             username = \"Administrator\"\npassword = \"h\"\nvirtual_display = true\n",
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("only subtype \"ard\" takes"), "{err:#}");
     }
 
     /// The high-performance subtype carries the same account credentials and native
