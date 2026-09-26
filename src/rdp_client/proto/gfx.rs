@@ -295,10 +295,21 @@ impl<'a> Messages<'a> {
             CMD_CAPS_CONFIRM => {
                 let version = r.u32_le()?;
                 let length = r.u32_le()?;
-                if length != 4 {
-                    return Err(r.refuse("a capability data length", length));
-                }
-                Message::CapsConfirm { version, flags: r.u32_le()? }
+                // Version 10.1's capability data is sixteen reserved bytes ([MS-RDPEGFX]
+                // 2.2.3.4); every other set's is four bytes of flags.
+                let flags = if version == CAPVERSION_101 {
+                    if length != 16 {
+                        return Err(r.refuse("a version 10.1 capability data length", length));
+                    }
+                    r.skip(16)?;
+                    0
+                } else {
+                    if length != 4 {
+                        return Err(r.refuse("a capability data length", length));
+                    }
+                    r.u32_le()?
+                };
+                Message::CapsConfirm { version, flags }
             }
             other => Message::Other { command: other, length },
         };
@@ -523,6 +534,13 @@ mod tests {
         assert_eq!(one(&server(CMD_DELETE_SURFACE, &[1, 0])), Message::DeleteSurface { surface: 1 });
         let confirm = server(CMD_CAPS_CONFIRM, &[0x02, 0x00, 0x0A, 0x00, 4, 0, 0, 0, 0x22, 0, 0, 0]);
         assert_eq!(one(&confirm), Message::CapsConfirm { version: CAPVERSION_10, flags: 0x22 });
+        // A host that settles on 10.1 confirms it with the set's sixteen reserved bytes.
+        let mut body = vec![0x00, 0x01, 0x0A, 0x00, 16, 0, 0, 0];
+        body.extend_from_slice(&[0; 16]);
+        assert_eq!(one(&server(CMD_CAPS_CONFIRM, &body)), Message::CapsConfirm { version: CAPVERSION_101, flags: 0 });
+        let short = server(CMD_CAPS_CONFIRM, &[0x00, 0x01, 0x0A, 0x00, 4, 0, 0, 0, 0, 0, 0, 0]);
+        let refused = messages(&short).next().expect("one PDU");
+        assert!(matches!(refused, Err(Malformed::Refused { .. })), "{refused:?}");
     }
 
     #[test]
