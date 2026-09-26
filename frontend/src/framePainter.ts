@@ -1,12 +1,12 @@
-import { decodeBatchFrame } from "./protocol.ts";
+import { type BatchRecord, decodeBatchFrame } from "./protocol.ts";
 import {
   createDesktopVideo,
   type DesktopVideo,
   type VideoFormat,
 } from "./videoDecoder.ts";
 
-// The browser SPA's batch draw loop: each batch's access units decoded in wire order
-// and drawn onto the canvas. The decoder lives here rather than beside each caller:
+// The browser SPA's batch draw loop: each batch's records — access units and tiles —
+// decoded in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
 // The destination's 2D context. A union rather than the element's alone because
@@ -19,7 +19,8 @@ export type PaintContext =
 export interface FramePainter {
   /**
    * Decode one binary batch frame and paint it, in wire order. Malformed framing
-   * drops the batch, which cuts the stream's chain, so it also asks for a keyframe.
+   * drops the batch, which cuts the stream's chain or loses a tile's pixels, so it
+   * also asks for a keyframe — a repaint, for a target that sends tiles.
    */
   draw(frame: ArrayBuffer): Promise<void>;
   /**
@@ -125,33 +126,71 @@ export function createFramePainter(options: {
 
   // Every unit is part of one chain, so a dropped batch cuts it: the deltas after it
   // name a picture this decoder never made. Restarted rather than fed them, and a
-  // keyframe asked for, exactly as a failed decoder is.
+  // keyframe asked for, exactly as a failed decoder is. A dropped tile is pixels
+  // nothing will send again, so it asks the same way: the gateway answers with a
+  // full update from the remote.
   const dropMalformed = () => {
-    if (video) {
-      video.restart();
-      options.onVideoNeedsKeyframe("a malformed batch was dropped");
+    video?.restart();
+    options.onVideoNeedsKeyframe("a malformed batch was dropped");
+  };
+
+  // One record's picture: a decoded frame for a unit, a decoded PNG for a tile.
+  // Null when there is nothing to draw — a decoder that dropped the unit has said so
+  // itself, and a tile that would not decode asks for a repaint here.
+  const decode = (
+    record: BatchRecord,
+  ): Promise<VideoFrame | ImageBitmap | null> => {
+    if (record.kind === "video") {
+      return desktopVideo().decode(
+        { w: record.w, h: record.h },
+        record.data,
+        record.keyframe,
+      );
+    }
+    const png = new Blob([record.data as Uint8Array<ArrayBuffer>], {
+      type: "image/png",
+    });
+    return createImageBitmap(png).catch(() => {
+      options.onVideoNeedsKeyframe("a tile could not be decoded");
+      return null;
+    });
+  };
+
+  const paint = (record: BatchRecord, image: VideoFrame | ImageBitmap) => {
+    const context = options.context();
+    if (record.kind === "tile") {
+      context?.drawImage(image, record.x, record.y);
+      return;
+    }
+    const { w, h } = record;
+    // Cropped by the desktop's size rather than drawn whole: the encoder is held
+    // to even sides and an odd desktop does not have them, so the decoded picture
+    // can be a pixel wider or taller than the desktop.
+    context?.drawImage(image, 0, 0, w, h, 0, 0, w, h);
+    if (videoComplained) {
+      // Video is painting again, so whatever was said about it has stopped being
+      // true. Said here rather than on a timer or behind a dismiss button: the
+      // banner is a statement about the present, and this is the moment the
+      // present changed.
+      videoComplained = false;
+      options.onVideoError(null);
     }
   };
 
   return {
     async draw(frame: ArrayBuffer) {
-      const units = decodeBatchFrame(frame);
-      if (!units) {
+      const records = decodeBatchFrame(frame);
+      if (!records) {
         dropMalformed();
         return;
       }
       const born = generation;
-      // All decodes start at once — `decode` queues them on the decoder in wire
-      // order — and each is drawn as it lands, so a frame is released the moment it
-      // is drawn instead of the whole batch's worth staying alive until the slowest.
-      const decodes = units.map((unit) =>
-        desktopVideo().decode(
-          { w: unit.w, h: unit.h },
-          unit.data,
-          unit.keyframe,
-        ),
-      );
-      for (let i = 0; i < units.length; i += 1) {
+      // All decodes start at once — `decode` queues units on the decoder in wire
+      // order — and each is drawn in wire order as it lands, so a picture is released
+      // the moment it is drawn instead of the whole batch's worth staying alive until
+      // the slowest. Drawing in order is what lets a later tile cover an earlier one.
+      const decodes = records.map(decode);
+      for (let i = 0; i < records.length; i += 1) {
         const image = await decodes[i];
         if (!image) {
           continue;
@@ -162,20 +201,8 @@ export function createFramePainter(options: {
           image.close();
           continue;
         }
-        const { w, h } = units[i];
-        // Cropped by the desktop's size rather than drawn whole: the encoder is held
-        // to even sides and an odd desktop does not have them, so the decoded picture
-        // can be a pixel wider or taller than the desktop.
-        options.context()?.drawImage(image, 0, 0, w, h, 0, 0, w, h);
+        paint(records[i], image);
         image.close();
-        if (videoComplained) {
-          // Video is painting again, so whatever was said about it has stopped being
-          // true. Said here rather than on a timer or behind a dismiss button: the
-          // banner is a statement about the present, and this is the moment the
-          // present changed.
-          videoComplained = false;
-          options.onVideoError(null);
-        }
       }
     },
     clear() {

@@ -96,9 +96,24 @@ export function audioLabel(row: AudioRow): string {
 }
 
 /**
- * The Video row: the exact configuration the decoder was built with, or what the
- * row is waiting for before the stream's format has arrived.
+ * The Render row: the dial this session resolved to, or — while the desktop is past
+ * what a video stream encodes — the tiles that carry it instead.
  */
-export function videoLabel(decode: string | null): string {
+export function renderLabel(plan: string, tiling: boolean): string {
+  if (!plan) {
+    return "Waiting for the target";
+  }
+  return tiling ? "PNG tiles: the desktop is past what video carries" : plan;
+}
+
+/**
+ * The Video row: the exact configuration the decoder was built with, or what the
+ * row is waiting for before the stream's format has arrived. While the picture is
+ * tiles no decoder is in use, whatever one was built before.
+ */
+export function videoLabel(decode: string | null, tiling: boolean): string {
+  if (tiling) {
+    return "Not in use: the picture is PNG tiles";
+  }
   return decode ?? "Waiting for the video format";
 }

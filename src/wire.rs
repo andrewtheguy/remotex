@@ -1,8 +1,8 @@
 //! Per-attachment conversion from [`ServerMsg`] to WebSocket frames. Control
 //! messages flush the pending batch to preserve ordering against the access units
-//! around them, and batches are bounded.
+//! and tiles around them, and batches are bounded.
 
-use crate::protocol::{self, ServerMsg, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, ServerMsg, Tile, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -19,10 +19,10 @@ pub enum WireError {
 
 /// Per-attachment encoder for the server -> client direction.
 pub struct Wire {
-    /// Access units accumulated for the batch currently being built. Every one is
-    /// sent, in order: each is a link in a chain, and a dropped one decodes wrongly
-    /// until the next keyframe.
-    pending: Vec<VideoUnit>,
+    /// Records accumulated for the batch currently being built. Every one is sent,
+    /// in order: an access unit is a link in a chain, and a dropped one decodes
+    /// wrongly until the next keyframe; a tile is pixels nothing else re-sends.
+    pending: Vec<Record>,
     /// What `pending` will serialize to, so the byte cap can be checked without
     /// serializing to find out.
     pending_bytes: usize,
@@ -68,12 +68,17 @@ impl Wire {
                     self.totals.text(json.len());
                     frames.push(WireFrame::Text(json));
                 }
-                // Video and audio are the two without a text encoding. Matched
+                // Pictures and audio are the ones without a text encoding. Matched
                 // rather than assumed: this runs on the socket's own task, so a
                 // variant added later without a `text_frame` arm should cost that
                 // one message, not the whole attachment.
                 None => match msg {
-                    ServerMsg::Video(unit) => self.push(unit, &mut frames)?,
+                    ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
+                    ServerMsg::Tiles(tiles) => {
+                        for tile in tiles {
+                            self.push(Record::Tile(tile), &mut frames)?;
+                        }
+                    }
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current batch.
                     ServerMsg::Audio(packets) => {
@@ -89,8 +94,8 @@ impl Wire {
         Ok(frames)
     }
 
-    fn push(&mut self, unit: VideoUnit, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
-        let len = unit.record_len();
+    fn push(&mut self, record: Record, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
+        let len = record.len();
         if !self.pending.is_empty()
             && (self.pending_bytes + len > MAX_BATCH_BYTES
                 || self.pending.len() >= MAX_BATCH_RECORDS)
@@ -98,7 +103,7 @@ impl Wire {
             self.flush(frames)?;
         }
         self.pending_bytes += len;
-        self.pending.push(unit);
+        self.pending.push(record);
         Ok(())
     }
 
@@ -116,18 +121,42 @@ impl Wire {
         frame.push(0); // flags
         frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
         frame.extend_from_slice(&sequence.to_le_bytes());
-        // Each unit's share of the queue budget moves to the batch, which is where
+        // Each record's share of the queue budget moves to the batch, which is where
         // its bytes are from here on.
         let mut held = Vec::with_capacity(self.pending.len());
-        for unit in self.pending.drain(..) {
-            self.totals.video(unit.record_len());
-            unit.write_record(&mut frame);
-            held.push(unit.held);
+        for record in self.pending.drain(..) {
+            held.push(match record {
+                Record::Video(unit) => {
+                    self.totals.video(unit.record_len());
+                    unit.write_record(&mut frame);
+                    unit.held
+                }
+                Record::Tile(tile) => {
+                    self.totals.tile(tile.record_len());
+                    tile.write_record(&mut frame);
+                    tile.held
+                }
+            });
         }
         self.pending_bytes = 0;
         self.totals.frame(frame.len());
         frames.push(WireFrame::Batch { sequence, bytes: frame, held });
         Ok(())
+    }
+}
+
+/// One record of a batch.
+enum Record {
+    Video(VideoUnit),
+    Tile(Tile),
+}
+
+impl Record {
+    fn len(&self) -> usize {
+        match self {
+            Record::Video(unit) => unit.record_len(),
+            Record::Tile(tile) => tile.record_len(),
+        }
     }
 }
 
@@ -142,6 +171,9 @@ pub struct Totals {
     /// Access units and their record bytes.
     pub video: u64,
     pub video_bytes: u64,
+    /// Tiles and their record bytes.
+    pub tiles: u64,
+    pub tile_bytes: u64,
     /// Audio packets and their binary-frame bytes. On a separate socket, so on any
     /// one `Wire` these and the video counters are mutually exclusive.
     pub audio_frames: u64,
@@ -172,6 +204,11 @@ impl Totals {
         self.video_bytes += len as u64;
     }
 
+    fn tile(&mut self, len: usize) {
+        self.tiles += 1;
+        self.tile_bytes += len as u64;
+    }
+
     fn text(&mut self, len: usize) {
         self.text_frames += 1;
         self.text_bytes += len as u64;
@@ -182,13 +219,15 @@ impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} binary frames / {} bytes carrying {} video records / {} bytes, \
-             {} text frames / {} bytes, largest binary {} bytes, \
+            "{} binary frames / {} bytes carrying {} video records / {} bytes \
+             and {} tile records / {} bytes, {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} opus packets",
             self.binary_frames,
             self.binary_bytes,
             self.video,
             self.video_bytes,
+            self.tiles,
+            self.tile_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
@@ -218,8 +257,11 @@ mod tests {
         ServerMsg::Resize { w: 1600, h: 1000, scale: UNSCALED }
     }
 
-    /// A parsed `VIDEO` record: `(flags, w, h, payload)`.
+    /// A parsed record: `(flags, w, h, payload)` for `VIDEO`, `(TILE, 0, 0, png)` for a tile.
     type Parsed = (u8, u16, u16, Vec<u8>);
+
+    /// The flags a parsed tile is marked with, which no `VIDEO` record can carry.
+    const TILE: u8 = 0xFF;
 
     /// The records of a batch, parsed independently of the writer above — a reader
     /// that shared the writer's arithmetic would agree with it whatever it did.
@@ -230,6 +272,14 @@ mod tests {
         let mut at = batch::HEADER_LEN;
         let mut out = Vec::new();
         while at < frame.len() {
+            if frame[at] == batch::OP_TILE {
+                let len = u32::from_le_bytes([frame[at + 9], frame[at + 10], frame[at + 11], frame[at + 12]])
+                    as usize;
+                let start = at + batch::TILE_HEADER_LEN;
+                out.push((TILE, 0, 0, frame[start..start + len].to_vec()));
+                at = start + len;
+                continue;
+            }
             assert_eq!(frame[at], batch::OP_VIDEO, "unknown record op");
             let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
             let len = u32::from_le_bytes([frame[at + 6], frame[at + 7], frame[at + 8], frame[at + 9]])
@@ -421,6 +471,23 @@ mod tests {
         // A run with nothing in it produces nothing, rather than an empty frame.
         assert!(wire.encode(Vec::new()).unwrap().is_empty());
         assert_eq!(wire.encode(vec![resize()]).unwrap().len(), 1);
+    }
+
+    /// Tiles share batches with the units around them, one record per tile, in order,
+    /// and a control message flushes them like any record.
+    #[test]
+    fn tiles_are_records_in_their_place() {
+        let tile = |seed: u8| crate::protocol::Tile { x: 1, y: 2, w: 3, h: 4, data: vec![seed; 5], held: Held::default() };
+        let mut wire = Wire::default();
+        let frames = wire
+            .encode(vec![ServerMsg::Tiles(vec![tile(1), tile(2)]), resize(), ServerMsg::Tiles(vec![tile(3)])])
+            .unwrap();
+        assert_eq!(frames.len(), 3);
+        let seen: Vec<(u8, u8)> =
+            binary(&frames).iter().flat_map(|f| records(f)).map(|r| (r.0, r.3[0])).collect();
+        assert_eq!(seen, vec![(TILE, 1), (TILE, 2), (TILE, 3)]);
+        assert_eq!(wire.totals.tiles, 3);
+        assert_eq!(wire.totals.video, 0);
     }
 
     /// A unit's share of the queue budget rides the batch it went out in.

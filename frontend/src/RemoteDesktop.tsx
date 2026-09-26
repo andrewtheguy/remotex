@@ -44,6 +44,7 @@ export default function RemoteDesktop({
     size,
     hostScale,
     renderPlan,
+    tiling,
     connection,
     canClipboard,
     canAudio,
@@ -174,6 +175,7 @@ export default function RemoteDesktop({
           hostScale={hostScale}
           connection={connection}
           renderPlan={renderPlan}
+          tiling={tiling}
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}

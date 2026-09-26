@@ -50,7 +50,7 @@ function parseBatch(payload: Buffer): Batch {
     const op = payload.readUInt8(at);
     // An op this parser does not know stops it here, which is where the bad byte
     // is. Both real parsers reject rather than guess: `decodeBatchFrame` drops the
-    // whole frame, and `batch_units` in tests/common/mod.rs refuses the op.
+    // whole frame, and `batch_records` in tests/common/mod.rs refuses the op.
     if (op !== OP_VIDEO) {
       badOp = op;
       exact = false;

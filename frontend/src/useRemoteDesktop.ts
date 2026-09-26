@@ -509,6 +509,9 @@ export function useRemoteDesktop(
   const [videoDecode, setVideoDecode] = useState<string | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
+  // Whether the picture arrives as PNG tiles rather than video, from `tiling`.
+  // False in the picker and at every `connected`, until the gateway says otherwise.
+  const [tiling, setTiling] = useState(false);
   // What this session is speaking, from `connected`: the protocol and the target's
   // subtype where it has one. Empty in the picker, and read only by the card — no
   // behaviour hangs off it, because every capability that varies by subtype already
@@ -1516,6 +1519,7 @@ export function useRemoteDesktop(
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
+      setTiling(false);
       // The operator's QA overlay, stated per session like everything else on
       // `connected`: this browser holds no preference for it and offers no
       // toggle, the same way it offers none for `resize`.
@@ -1664,6 +1668,9 @@ export function useRemoteDesktop(
         case "resizing":
           setRemoteResizing(msg.active);
           break;
+        case "tiling":
+          setTiling(msg.active);
+          break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -1693,6 +1700,7 @@ export function useRemoteDesktop(
           // video at all.
           setVideoError(null);
           setRenderPlan("");
+          setTiling(false);
           setConnection("");
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
@@ -2589,6 +2597,7 @@ export function useRemoteDesktop(
     size,
     hostScale,
     renderPlan,
+    tiling,
     connection,
     canClipboard,
     canAudio,

@@ -248,7 +248,7 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
-        (VideoSink::new("test", frame_tx, plan, feedback), frame_rx)
+        (VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None), frame_rx)
     }
 
     // The detection itself is not testable here, and the reason is the same one

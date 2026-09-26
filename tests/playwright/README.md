@@ -28,8 +28,9 @@ deliberately a second implementation rather than an import of the SPA's, because
 wrong parser would otherwise agree with itself.
 
 `video-stream.spec.ts` is the desktop's stream read from the same socket. Video is
-VP9 only, so everything it asserts is decidable without asking the browser anything.
-It parses VIDEO records itself — op, keyframe flags byte, the desktop size the last
+VP9 only, and the harness desktop is well within the video ceiling, so every record
+is VIDEO — tiles are only for a desktop past it — and everything it asserts is
+decidable without asking the browser anything. It parses VIDEO records itself — op, keyframe flags byte, the desktop size the last
 `resize` announced — and checks that no access unit outran the `videoFormat` that
 says how to decode it.
 

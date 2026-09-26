@@ -102,6 +102,13 @@ documentation.
   Preserve the announced configuration and color-space behavior described in
   [The codec](docs/architecture.md#the-codec) and
   [Choosing a chroma](docs/architecture.md#choosing-a-chroma).
+- The one picture that is not video is PNG tiles, and only for a desktop past the
+  video ceiling on a source that hands over its own rectangles: VNC without
+  `resize`. Each is a rectangle exactly as the server sent it. Do not add a key
+  that selects tiles, use them within the ceiling, cut, merge or cache rectangles
+  in the gateway, or give them to a source with `resize` or without rectangles,
+  which still ends on the ceiling's refusal. See
+  [Tiles past the ceiling](docs/architecture.md#tiles-past-the-ceiling).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. The supported target
   choices are Opus and unresampled PCM passthrough; do not add another encoder.

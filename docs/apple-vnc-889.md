@@ -340,6 +340,17 @@ framebuffer, not over the one on screen). The browser then:
 
 This is the one place the browser rescales remote pixels (see AGENTS.md).
 
+At factor 1.0 the combined framebuffer is the screens' native pixels side by side,
+and it is often past what a video stream encodes: a 2x screen beside a 1x one
+measured 5376×2287. Standard never resizes (`resize = false`), so the gateway
+cannot ask for less. Instead it passes the Mac's own rectangles through: each zlib
+rectangle of a `FramebufferUpdate`, decoded, goes to the browser whole as one PNG
+tile at the Mac's place and size, and the mosaic composes the framebuffer they are
+drawn into. Nothing about the RFB side changes — the Mac sends zlib rectangles
+either way. Going back to one screen returns the session to video at the next
+layout. See
+[tiles past the ceiling](architecture.md#tiles-past-the-ceiling).
+
 ### The High Performance virtual display
 
 High Performance hides the Mac's physical screens and moves every window to a
