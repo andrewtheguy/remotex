@@ -10,7 +10,7 @@ which is the only client.
 ```text
 browser SPA over loopback or the network
    │  /api: authentication, targets, session claim
-   │  /ws: JSON control/input, binary video batches
+   │  /ws: JSON control/input, binary picture batches
    │  /ws/audio: the audio format, then binary audio frames
    │  /ws/camera: the camera format and H.264 samples up, start/stop down
    ▼
@@ -21,6 +21,9 @@ axum server ── single session slot ── protocol engine
 
 RDP and VNC frames are decoded in the gateway and sent as one VP9 stream of the
 whole desktop, at the quality and chroma the target's render plan resolves to. A
+VNC desktop too large for that stream, on a target that does not resize it, goes
+instead as the server's own rectangles, one PNG each — see
+[tiles past the ceiling](#tiles-past-the-ceiling). A
 Mac is reached
 over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
@@ -73,15 +76,19 @@ updates in source order even though each encode runs off the engine's own task.
 ### The video stream
 
 Every target reaches the browser the same way: the whole framebuffer as one
-inter-frame VP9 stream, for the whole session.
+inter-frame VP9 stream. The one exception is a VNC desktop past the stream's
+picture ceiling on a target without `resize`, which goes as the server's own
+rectangles instead — see [tiles past the ceiling](#tiles-past-the-ceiling).
 
-> **There is no tile transport any more.** Earlier releases also sent each changed
-> region as an independent PNG or WebP still (`render_type = "tiles"`, with
+> **There is no configurable tile transport.** Earlier releases also sent each
+> changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
 > `render_subtype`, `image_quality`, a per-tile photographic classifier, a
 > `render_motion` switch that streamed only the moving regions, a slot cache,
 > `COPY` records and the `render_grid_debug` overlay). All of it was removed after
 > **v0.0.253**; `git checkout v0.0.253` recovers it, including the classifier's
-> research notes in `docs/still-image-classification-research.md`.
+> research notes in `docs/still-image-classification-research.md`. Tiles past the
+> ceiling are not that: no key selects them, and a tile is a rectangle exactly as
+> the server sent it — never cut, merged, classified or cached by the gateway.
 
 A target's stream keys are per target, and every one has a default:
 
@@ -105,12 +112,15 @@ The engines never see the config keys. They collapse to one `RenderPlan`
 ```text
 video_quality / render_chroma / render_adaptive*
   → TargetConfig::render_plan(browser chroma) → RenderPlan → vnc::run / rdp::run
-  → VideoSink::new(engine, frame_tx, plan) → DesktopStream (src/stream.rs) → vp9::Stream
+  → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
+  → DesktopStream (src/stream.rs) → vp9::Stream
 ```
 
 Every size an engine asks a remote for is held under the stream's picture ceiling
 (`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a pinned
-`width`/`height` past it is refused at config load.
+`width`/`height` past it is refused at config load. A remote the gateway cannot
+size can still answer past it; what happens then is
+[tiles past the ceiling](#tiles-past-the-ceiling).
 
 Five rules hold the stream up, and each is a rule somewhere:
 
@@ -188,6 +198,52 @@ decoder: no hardware VP9 decoder takes profile 1, so it always decodes in softwa
 iPadOS, refuses the configuration by name the way it would refuse any other.
 `a_444_stream_keeps_the_colour_420_averages_away` in `src/vp9.rs` is the round
 trip that pins the difference, through the archive's own decoder.
+
+#### Tiles past the ceiling
+
+A desktop past the picture ceiling is one a video stream will not encode
+(`video::check_picture`). The gateway sizes every desktop it asks for under it, so
+only a remote it cannot size gets there: a Mac in Standard mode on All Displays —
+5376×2287 over a 2x screen beside a 1x one, measured — or a generic VNC server
+whose desktop is simply that large.
+
+Such a desktop goes to the browser as the server's own rectangles when the source
+has them. RFB does: a `FramebufferUpdate` is a list of rectangles, each with its
+place and size, whatever encoding carries its pixels (zlib from a Mac, ZRLE and the
+rest from other servers). Each rectangle is decoded as always, then sent whole as
+one PNG `TILE` record at the same `x`, `y`, `w` and `h` — not trimmed by the shadow,
+not merged, not cut. The browser draws each where the server put it, in record
+order, into the same framebuffer a `mosaic` composes from.
+
+`TileSupport` in `src/encode.rs` is the source's side of it, fixed when the engine
+starts, and the sink decides the carriage at each `Resize` against the ceiling:
+
+| Source | `TileSupport` | Past the ceiling |
+|---|---|---|
+| VNC (generic, Apple Standard) without `resize` | `Rects` | tiles |
+| VNC with `resize`, Apple High Performance, RDP | `None` | refused, as before: "a video stream will not encode a W×H picture" |
+
+`resize` rules tiles out because it is the gateway sizing the remote: every size it
+asks for is under the ceiling, and a remote that answers past it has refused what
+it was asked. High Performance's picture is the media stream's whole decoded
+pictures, not rectangles, and its virtual display is held under the ceiling.
+
+Within the ceiling the same session is video. A resize that crosses it changes the
+carriage there: rectangles taken before the `Resize` go out before it, the remote
+repaints the resized desktop in full as it does after any resize, and a desktop
+back under the ceiling starts its stream again from an announcement and a keyframe.
+After every `Resize` of a `Rects` source the gateway sends `tiling` (`active`
+true or false), which is how the session card knows to say "PNG tiles" in place
+of the render dial.
+
+A tile depends on nothing before it, so there is no interval, keyframe or quality
+walk: every rectangle goes out, PNG-encoded on a blocking worker with the fastest
+compression, and a reattach is repainted by the full update it already asks the
+remote for. Tiles take their share of `QUEUE_BUDGET` like an access unit, so a slow
+browser still holds the engine back rather than letting the backlog grow. The cost
+is size: a PNG of a changing region is far larger than a delta frame of it — a
+591×433 animation measured 157 KB a tile — and one rectangle larger than a batch's
+256 KB goes out as a batch of its own.
 
 ### Choosing a chroma
 
@@ -462,14 +518,18 @@ Screen updates use little-endian binary frames:
 ```text
 u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
+TILE     op 0x01: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 ```
 
-`VIDEO` is the only record. One frame carries every unit ready at once, so a backlog
-does not cost one WebSocket event per unit. Receivers reject unknown operations and
-truncated records, and reject a nonzero frame flags byte. A `VIDEO` record's own
-flags byte is `0x01` for a keyframe and nothing else — any other bit is rejected
-the same way.
+One frame carries every record ready at once, so a backlog does not cost one
+WebSocket event per record. Receivers reject unknown operations and truncated
+records, and reject a nonzero frame flags byte. A `VIDEO` record's own flags byte
+is `0x01` for a keyframe and nothing else — any other bit is rejected the same
+way. A `TILE` record is one rectangle the remote sent, as a PNG, drawn at `(x, y)`
+over what the canvas holds; one of no width, height or payload is rejected. A
+session's records are `VIDEO` unless its desktop is
+[past the ceiling](#tiles-past-the-ceiling).
 
 `sequence` starts at one and increases for the lifetime of one session-socket
 attachment. After the paint worker has finished the batch's ordered
@@ -837,8 +897,9 @@ backing ceiling. This changes what the remote is asked to render, not how the
 browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
 the remainder bare. A pinned size already
 over the ceiling at 1x is rejected during config parsing; a physical or
-non-resizable remote may still reach the encoder's refusal because the gateway
-cannot ask it for a smaller desktop.
+non-resizable remote may still answer past it because the gateway cannot ask it
+for a smaller desktop: a VNC one goes as [tiles](#tiles-past-the-ceiling), and any
+other reaches the encoder's refusal.
 
 High Performance paces what the window asks for. A second
 `SetDisplayConfiguration` overlapping the first, or a region of the old size
@@ -1070,6 +1131,10 @@ draws every screen at its points at the browser's own density, and the page maps
 pointer positions back through the same regions (`frontend/src/mosaic.ts`). It is
 the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
+Taken at factor 1.0, that combined framebuffer is often past the video ceiling —
+a 2x screen beside a 1x one measured 5376×2287 — and then arrives as the Mac's
+own rectangles, drawn into the same off-screen framebuffer the mosaic composes
+from ([tiles past the ceiling](#tiles-past-the-ceiling)).
 
 **RFB 003.889** is Apple's own protocol revision, and both Apple subtypes speak
 it, as Apple's viewer answers every Mac before choosing a mode after ServerInit.
