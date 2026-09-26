@@ -137,6 +137,10 @@ offered what a decoded one is: every bitrate entry capped at 12 Mbit/s, on a
 virtual display refreshed 30 times a second. That cap sits below the 20 Mbit/s
 floor of the Mac's rate control ([Rate control](apple-vnc-889.md#rate-control)),
 so the offer is the only thing that bounds the stream, and nothing adapts it.
+The Mac still marks rate adaptation enabled: High Performance does that
+unconditionally and has no Adaptive/Full UI setting. Its controller simply has
+no effective range below the floor. Standard mode's **Adaptive** choice is an
+unrelated selection of RFB encodings.
 
 High Performance is not made for a slow link. Apple's
 [guide](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac)
@@ -147,8 +151,8 @@ adapted for is resolution: carrying a 4K display, not a link that cannot carry
 the stream. The plan is what Apple's viewer does:
 
 - **The offer.** Apple's entries, up to 100 Mbit/s, which the Mac caps at 60. With
-  no rate reports the Mac's controller is expected to hold at its 20 Mbit/s floor,
-  as it does when no report arrives.
+  no rate reports the Mac's always-enabled controller holds at its 20 Mbit/s
+  floor, as measured when no report arrives.
 - **Rate reports.** `RCTL` reports on the picture's leg, with the one-way delay the
   receiver measures, which take the Mac to about 58 Mbit/s on a clear link and walk
   it down towards the floor as the delay grows. For a passed stream the delay that
@@ -164,6 +168,10 @@ the stream. The plan is what Apple's viewer does:
   Safari, rather than the one macwork's first capture did.
 
 None of it has been measured with the raised cap or at 4K.
+
+This would restore the automatic control Apple's High Performance viewer always
+runs; it would not add an Adaptive mode or make `render_adaptive` govern the
+Mac's encoder. That target key remains the gateway's VP9 walk.
 
 A slow link is not a passed stream's to answer. A browser on one is served by a
 target without `hevc_passthrough`, whose VP9 the adaptive walk lowers; a passed

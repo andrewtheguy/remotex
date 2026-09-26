@@ -105,10 +105,11 @@ A target's stream keys are per target, and every one has a default:
   [the codec](#the-codec) for why it, and not the quality, is where a desktop
   stream's picture goes, and [choosing a chroma](#choosing-a-chroma) for when to
   take the decision away from the browser.
-- `render_adaptive` (on unless a target writes `false`) lets the quality track the
-  measured link down to `render_adaptive_min` (default 20, or the dial itself where
-  that is lower) — see [what the link will bear](#choosing-a-chroma) for the signal
-  and the walk. Turned off, the walk is the pressure-only one floored at 1.
+- `render_adaptive` (on unless a target writes `false`) lets VP9 encoded in the
+  gateway track the measured link down to `render_adaptive_min` (default 20, or
+  the dial itself where that is lower) — see
+  [what the link will bear](#choosing-a-chroma) for the signal and the walk.
+  Turned off, the walk is the pressure-only one floored at 1.
 - `hevc_passthrough` (off unless a target writes `true`, and only on
   `ard-high-performance`) passes the Mac's HEVC to a browser that takes it, which
   none of the keys above then reach.
@@ -316,11 +317,23 @@ The target's quality keys do not reach a passed stream, which is coded at wlshar
 `ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
 as VP9. With `hevc_passthrough = true`, a browser whose decoder takes the Mac's
 stream is sent it instead, as the Mac sent it, and the gateway neither decodes nor
-encodes a picture of it. It is for a LAN: High Performance's own rate control works
-between 20 and 60 Mbit/s ([Rate control](apple-vnc-889.md#rate-control)), and a
-passed stream has no quality walk behind it. Unlike wlshare's stream, which is
-coded for adaptation and walks its quality by the fence round trip, the Mac's
-stream here is passed straight: nothing reports the browser's queue back to it.
+encodes a picture of it. It is for a LAN. High Performance always enables its
+own rate controller, between 20 and 60 Mbit/s
+([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
+behavior, not Standard mode's **Adaptive** quality choice. The current 12 Mbit/s
+offer lies below that controller's floor and the gateway sends it no rate reports,
+so the Mac's controller has no effective range to walk. A passed stream has no
+other quality walk behind it. Unlike wlshare's stream, which is coded for
+adaptation and walks its quality by the fence round trip, the Mac's stream here
+is passed straight: nothing reports the browser's queue back to it.
+
+Three controls with similar names therefore remain separate:
+
+| Control | Selection | What it reaches |
+|---|---|---|
+| Standard **Adaptive** / **Full** | Apple's viewer, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
+| High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range when reports and the offer leave a range |
+| `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway: all pictures after local HEVC decoding, or only the VP9 gaps while HEVC passes |
 
 - **The browser selects.** The page asks its `VideoDecoder` once, at load, about
   the configuration macwork's stream announces, `hev1.4.10.L150.BE.8`
@@ -367,7 +380,9 @@ stream here is passed straight: nothing reports the browser's queue back to it.
   keyframe and its deltas, where whole-screen PNG tiles of a playing video came to
   about 5 MB each on macvm.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
-  walk govern only VP9: the gaps, and the whole picture of a browser that says no. The sound is unchanged:
+  walk govern only VP9: the gaps, and the whole picture of a browser that says no.
+  `render_adaptive` neither enables nor disables the Mac's separate, always-on
+  High Performance controller. The sound is unchanged:
   it still needs the AAC-ELD decoder, so the key is behind `apple-hp-media` with the
   subtype.
 
@@ -439,8 +454,10 @@ answers it. Quality moves through `Stream::set_quality`, which re-tunes the runn
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
-`render_adaptive` gives the same walk a second signal and an operator's
-floor, on every target that has not turned it off. The signal is the client's own lag: the paint window already tracks how
+`render_adaptive` gives the same walk a second signal and an operator's floor on
+every VP9 picture encoded here, unless its target turned the walk off. On a
+decoded High Performance session that is the whole picture; on a passed one it
+is only the VP9 picture between HEVC stretches. The signal is the client's own lag: the paint window already tracks how
 long the oldest unacknowledged batch has been owed, and `LinkFeedback`
 (`src/feedback.rs`) publishes that age minus a baseline — the smallest recent
 end-to-end time, so distance never reads as queueing; RustDesk and Guacamole

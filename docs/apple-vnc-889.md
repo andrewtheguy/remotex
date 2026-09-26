@@ -84,8 +84,14 @@ modes (see [Connecting](#connecting)).
 |---|---|---|
 | Encodings | Adaptive: Apple's private `0x3f3` and `0x3ea`, then zlib and ZRLE. Full: zlib, then ZRLE. | The media stream (1010), then as Adaptive. |
 | Displays | The physical ones, selected with `SetDisplay`, scaled with `SetServerScaling`. | One or two virtual displays from `SetDisplayConfiguration`, 60 Hz unless a preference says otherwise. |
-| Quality menu | Adaptive or Full. | Disabled while the media stream runs. |
+| Quality menu | Adaptive or Full, selecting RFB framebuffer encodings. | No choice. The control is disabled while the media stream runs; its separate rate controller is automatic. |
 | Refused beside it | A virtual display, dynamic resolution, HDR. | No virtual display, or a screen other than the virtual ones. |
+
+Standard's **Adaptive** label does not name a High Performance setting. The
+High Performance video profile always enables AVConference's rate adaptation,
+with fixed 20 and 60 Mbit/s bounds, whether or not its reports can make the
+encoder move between them. The viewer exposes no switch for it. See
+[Rate control](#rate-control).
 
 - **A Mac without High Performance.** Apple's viewer offers the mode only when the
   Mac's ServerInit lists `SetDisplayConfiguration` and a feature flag of the
@@ -717,12 +723,17 @@ other failures (see [Liveness](#the-stream)).
 
 ### Rate control
 
+This is High Performance's automatic media-stream control, not the **Adaptive**
+quality choice in Standard mode. Every measured High Performance video
+configuration, including Apple's viewer's, enables rate adaptation; its audio
+configuration does not. The viewer offers no setting for it.
+
 The Mac's encoder follows a rate controller on the Mac that works from the
 viewer's reports alone. It moves between a floor of 20 Mbit/s and a ceiling of
 the offer's bitrate entries, capped at 60 Mbit/s. The floor and the 60 Mbit/s
-ceiling are the Mac's own settings for screen sharing, and no offer field is known
-to lower the floor. The daemon logs the controller's state every 5 s: target,
-cap, measured bitrate, round-trip time, one-way delay and loss.
+ceiling are fixed by the Mac's screen-sharing video profile, and no offer field
+is known to lower the floor. The daemon logs the controller's state every 5 s:
+target, cap, measured bitrate, round-trip time, one-way delay and loss.
 
 - **The report.** An RTCP APP packet named `RCTL` with a 20-byte payload, sent
   on the picture's leg as SRTCP. It must be the only packet in its datagram: the
@@ -757,14 +768,16 @@ cap, measured bitrate, round-trip time, one-way delay and loss.
   and was not answered.
 - **Below the floor.** An offer capped under 20 Mbit/s pins the controller at
   its floor, and the encoder runs at the cap whatever is reported. Remotex's
-  12 Mbit/s cap is such an offer, so its stream has no rate control at all.
+  12 Mbit/s cap is such an offer, so the controller remains enabled but has no
+  effective range to adapt within.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
   every 50 ms, and acknowledges each decoded tile picture with a 4-byte APP
   packet for the encoder's long-term references. On a quiet link its target sat
   at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
   so its reports were not read: the layout above comes from AVConference's code
   that builds and parses them, confirmed by a probe whose reports the Mac took as
-  it takes the viewer's.
+  it takes the viewer's. This happens whenever High Performance runs; it is not
+  selected by a quality control.
 
 These are the virtual Mac's measurements, with synthetic reports. A congested
 link to a physical Mac has not been observed.
