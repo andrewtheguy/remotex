@@ -10,9 +10,8 @@
 //!
 //! ## What the extension is for, here
 //!
-//! **Compression**: standard zlib (`ENCODING_ZLIB`, decoded in
-//! [`crate::vnc_encodings`]) instead of raw pixels, which is around fifty times
-//! fewer bytes on a static desktop. Apple's private framebuffer codecs would do
+//! **Compression**: standard ZRLE (`ENCODING_ZRLE`, decoded in
+//! [`crate::vnc_encodings`]) instead of raw pixels. Apple's private framebuffer codecs would do
 //! better still, but their payload formats are unresolved in the reference this
 //! was written from, and a client must not advertise an encoding it cannot decode.
 //!
@@ -41,8 +40,8 @@
 //! Standard `ard` refuses resize because it shares physical displays;
 //! `ard-high-performance` can resize its virtual display. `ard-high-performance`
 //! takes its picture and sound from the media stream once it is up
-//! ([`crate::vnc_apple_media`]): zlib rectangles carry the picture only until
-//! then. `ard` keeps its picture on zlib and carries no sound.
+//! ([`crate::vnc_apple_media`]): ZRLE rectangles carry the picture only until
+//! then. `ard` keeps its picture on ZRLE and carries no sound.
 //! Every Apple subtype uses Apple's native pasteboard protocol, enabling
 //! monitoring before the rekey and carrying fetches and clipboard data inside the
 //! encrypted transport.
@@ -62,7 +61,7 @@ use log::{debug, warn};
 use crate::protocol::{
     CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM, MosaicRect, MosaicRegion,
 };
-use crate::vnc::ENCODING_ZLIB;
+use crate::vnc::ENCODING_ZRLE;
 use crate::vnc_encodings::inflate_independent;
 
 /// Raw pixels, the standard RFB encoding, still the fallback here.
@@ -71,7 +70,7 @@ const ENCODING_RAW: i32 = 0;
 /// [`ENCODINGS`] and so are named here rather than reached for across modules.
 const ENCODING_DESKTOP_SIZE: i32 = -223;
 const ENCODING_LAST_RECT: i32 = -224;
-// Standard RFB zlib lives in [`crate::vnc`] as `ENCODING_ZLIB`, imported above: it
+// Standard RFB ZRLE lives in [`crate::vnc`] as `ENCODING_ZRLE`, imported above: it
 // is not Apple's alone, since every generic target is offered it too.
 /// The record layer's key, delivered as a rectangle before the record layer
 /// exists. See [`crate::vnc_record`].
@@ -101,9 +100,9 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// neither no display information at all. Order matters for one thing only, the
 /// preferred codec, which is the first of zlib, ZRLE and Apple's own codecs listed.
 /// Measured on macOS 26.6 and read from the daemon — see
-/// docs/apple-vnc-889.md, "Which encodings make the Mac report its displays". zlib is therefore asked for from the start,
-/// in both subtypes: measured at 398 KB for a 3200x1800 frame against 23 MB of raw
-/// pixels.
+/// docs/apple-vnc-889.md, "Which encodings make the Mac report its displays". ZRLE is
+/// therefore the one codec listed, in both subtypes, and not zlib: its per-tile runs
+/// and palettes take the redundancy out before deflate sees the bytes.
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
@@ -124,7 +123,7 @@ pub const ENCODINGS: &[i32] = &[
     ENCODING_KEYBOARD_SOURCE,
     ENCODING_DESKTOP_SIZE,
     ENCODING_LAST_RECT,
-    ENCODING_ZLIB,
+    ENCODING_ZRLE,
 ];
 
 /// Bytes of one entry in a display configuration's mode table.
@@ -1111,8 +1110,8 @@ mod tests {
     /// Dropping `DisplayInfo` or the layout from the list costs the display
     /// information silently, with a session that still connects and paints.
     #[test]
-    fn the_list_asks_for_displays_and_zlib_but_not_the_media_stream() {
-        for encoding in [ENCODING_DISPLAY_INFO, ENCODING_DISPLAY_LAYOUT, ENCODING_ZLIB] {
+    fn the_list_asks_for_displays_and_zrle_but_not_the_media_stream() {
+        for encoding in [ENCODING_DISPLAY_INFO, ENCODING_DISPLAY_LAYOUT, ENCODING_ZRLE] {
             assert!(ENCODINGS.contains(&encoding), "{encoding:#x}");
         }
         assert!(!ENCODINGS.contains(&0x3f2), "the media stream is asked for once a display exists");

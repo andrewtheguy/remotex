@@ -25,8 +25,8 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | zlib | none; the Mac's own output is left alone |
-| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, zlib until it is up | AAC-ELD over the media stream |
+| `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
+| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, ZRLE until it is up | AAC-ELD over the media stream |
 
 `ard-high-performance` is High Performance as Apple's viewer has it, and needs a
 gateway built with the `apple-hp-media` feature. Remotex does not offer a
@@ -38,10 +38,10 @@ combination.
 | | |
 |---|---|
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
-| Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib, the cursor cache, the display layout and the metadata framing. |
+| Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is zlib throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from zlib until the stream is up and across display changes. |
+| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from ZRLE until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -109,8 +109,8 @@ places:
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
   session in cleartext after authentication, keystrokes and the media stream's
   keys included. Remotex always asks, in both modes.
-- **Standard's picture.** `ard` asks for zlib, Apple's Full quality, where Adaptive
-  asks first for the private codecs remotex cannot decode.
+- **Standard's picture.** `ard` asks for ZRLE alone, where Full quality asks for
+  zlib first and Adaptive first for the private codecs remotex cannot decode.
 
 ## Connecting
 
@@ -172,8 +172,8 @@ The Mac reports its screens according to which of two encodings the client's
 | `DisplayInfo` without `AppleDisplayLayout` | the older `DisplayInfo` |
 | neither | nothing about its displays |
 
-`vnc_apple::ENCODINGS` asks for zlib from the start (a 3200×1800 frame is about
-400 KB against 23 MB raw) along with the layout.
+`vnc_apple::ENCODINGS` asks for ZRLE from the start, and for no zlib, along with
+the layout.
 
 Advertising is a promise: every advertised encoding must be decodable, or at least
 steppable. `CursorPos` (`0x44c`) has no payload. `DisplayInfo` is 10 bytes of
@@ -211,9 +211,14 @@ The Mac may send a `MiscStatus` in the cleartext window between `SetEncryption`
 and the rekey, notably after a server restart with stale clipboard state; the
 client must step over it.
 
-**zlib** (`0x06`) is one deflate stream for the life of the connection. Each
-rectangle is a `u32` length and a chunk of that stream, inflating to exactly
-`w × h × 4`. On a static desktop it is roughly 50:1, in either mode.
+**ZRLE** (`0x10`) is standard RFB: one deflate stream for the life of the
+connection, each rectangle a `u32` length and a chunk of it holding 64×64 tiles,
+each raw, run-length encoded, palettised or both, with three-byte CPIXELs in the
+pixel format `SetPixelFormat` asks for. The Mac encodes it whenever it is the first
+of zlib, ZRLE and its own codecs listed.
+
+**zlib** (`0x06`), not listed, is the same stream holding raw
+`w × h × 4` pixels. On a static desktop it measured roughly 50:1, in either mode.
 
 **The cursor cache** (`0x450`) stores a shape when its compressed length is nonzero
 and selects a stored one when it is zero. A shape is a `w·h·4` BGRA pixmap followed
@@ -343,10 +348,10 @@ This is the one place the browser rescales remote pixels (see AGENTS.md).
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side,
 and it is often past what a video stream encodes: a 2x screen beside a 1x one
 measured 5376×2287. Standard never resizes (`resize = false`), so the gateway
-cannot ask for less. Instead it passes the Mac's own rectangles through: each zlib
+cannot ask for less. Instead it passes the Mac's own rectangles through: each ZRLE
 rectangle of a `FramebufferUpdate`, decoded, goes to the browser whole as one PNG
 tile at the Mac's place and size, and the mosaic composes the framebuffer they are
-drawn into. Nothing about the RFB side changes — the Mac sends zlib rectangles
+drawn into. Nothing about the RFB side changes — the Mac sends ZRLE rectangles
 either way. Going back to one screen returns the session to video at the next
 layout. See
 [tiles past the ceiling](architecture.md#tiles-past-the-ceiling).
@@ -400,7 +405,7 @@ A backing size twice the logical one makes a 2x display.
 Three behaviours of the Mac shape how remotex resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
-  it is offered again, so the picture is zlib's until the new display's stream
+  it is offered again, so the picture is ZRLE's until the new display's stream
   delivers — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
@@ -545,7 +550,8 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | keyboard source | `0x455` | 1109 | |
 | `DeviceInfo` | `0x456` | 1110 | not advertised |
 | media stream | `0x3f2` | 1010 | in a second `SetEncodings` |
-| zlib | `0x06` | 6 | standard RFB |
+| ZRLE | `0x10` | 16 | standard RFB |
+| zlib | `0x06` | 6 | standard RFB, not advertised |
 | Raw | `0x00` | 0 | standard RFB |
 | `DesktopSize` | — | −223 | pseudo-encoding |
 | `LastRect` | — | −224 | pseudo-encoding |
@@ -561,7 +567,7 @@ from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
-(`src/vnc_apple_media.rs`). Zlib carries the picture only until the stream
+(`src/vnc_apple_media.rs`). ZRLE carries the picture only until the stream
 delivers and across display changes. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
@@ -732,12 +738,13 @@ other failures (see [Liveness](#the-stream)).
 
 ### RFB while the stream runs
 
-The Mac keeps answering `FramebufferUpdateRequest`s with zlib for the region asked
-for, and pushes unrequested zlib inside the armed `AutoFrameBufferUpdate` region.
+The Mac keeps answering `FramebufferUpdateRequest`s with RFB pixels for the region
+asked for, and pushes them unrequested inside the armed `AutoFrameBufferUpdate`
+region.
 Once a picture of the current size has arrived, remotex polls and arms one pixel.
 That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
 moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
-zlib screen unasked, which is decoded to keep the deflate stream in step and not
+screen unasked, which is decoded to keep the deflate stream in step and not
 shown.
 
 This also ends the input freeze behind a playing video. With the gateway capped at
@@ -752,7 +759,7 @@ Every display change stops both legs, so the sound drops out with the picture
 until the new stream starts. The Mac then re-sends message 1 on its own,
 with no stream behind it. A new offer after the new layout starts a new stream on
 the same ports, under a new SSRC, with an IDR at the new size. Remotex offers once
-the resize's cover comes down, and zlib shows the new display until then.
+the resize's cover comes down, and ZRLE shows the new display until then.
 
 ### Reaching the gateway
 

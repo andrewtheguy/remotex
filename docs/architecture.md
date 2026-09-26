@@ -209,8 +209,8 @@ whose desktop is simply that large.
 
 Such a desktop goes to the browser as the server's own rectangles when the source
 has them. RFB does: a `FramebufferUpdate` is a list of rectangles, each with its
-place and size, whatever encoding carries its pixels (zlib from a Mac, ZRLE and the
-rest from other servers). Each rectangle is decoded as always, then sent whole as
+place and size, whatever encoding carries its pixels (ZRLE from a Mac, any of the
+standard ones from other servers). Each rectangle is decoded as always, then sent whole as
 one PNG `TILE` record at the same `x`, `y`, `w` and `h` — not trimmed by the shadow,
 not merged, not cut. The browser draws each where the server put it, in record
 order, into the same framebuffer a `mosaic` composes from.
@@ -1085,7 +1085,7 @@ target, so a server can always say its size changed; `resize = true` decides onl
 whether the window asks it to change, with `SetDesktopSize`. Generic VNC clipboard support uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. Both Apple
 subtypes negotiate Apple's display metadata and native pasteboard instead, and ask
-for zlib in their first `SetEncodings`.
+for ZRLE in their first `SetEncodings`.
 
 **Apple Standard mode remains fixed-size.** It rejects `resize = true`, shares the
 Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
@@ -1145,7 +1145,7 @@ display layout sets the actual framebuffer geometry. There is no client-side
 resize mode or one-shot button. The Mac supplies that virtual display the way
 it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
-gateway built with the `apple-hp-media` feature. Zlib rectangles carry the
+gateway built with the `apple-hp-media` feature. ZRLE rectangles carry the
 picture until the stream delivers and across every display change. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings

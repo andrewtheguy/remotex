@@ -374,7 +374,7 @@ async fn serve_scrolling_vnc(
 // virtual display once one is configured, the physical screen otherwise — and a
 // framebuffer update *inside* that record layer. The fake accepts the media
 // stream the gateway offers and names no ports for it, which keeps the picture on
-// zlib for the gateway's first-picture allowance: the stream's own packets are
+// RFB pixels for the gateway's first-picture allowance: the stream's own packets are
 // UDP, and `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which
 // ends the session.
 //
@@ -1981,7 +1981,7 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
 }
 
 /// A Mac that refuses the media stream ends the session, as it ends Apple's
-/// viewer's: High Performance does not go on over zlib alone.
+/// viewer's: High Performance does not go on over ZRLE alone.
 #[tokio::test]
 async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
     let (mac_port, _requests, _actions, fake_mac) =
