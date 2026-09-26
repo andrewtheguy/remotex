@@ -712,7 +712,7 @@ other failures (see [Liveness](#the-stream)).
   64-unit queue.
 - **Onward.** The decoder's 16-bit PCM goes to the session's audio bridge two
   units at a time, one Opus packet's worth, and from there the same way every
-  target's sound goes: Opus or PCM passthrough on `/ws/audio`. The format is
+  target's sound goes: Opus on `/ws/audio`. The format is
   announced when the decoder opens and withdrawn when the receiver ends.
 - **Authentication.** Every packet is authenticated with its leg's own
   server-to-viewer key before it is decrypted, and the reports that keep the leg

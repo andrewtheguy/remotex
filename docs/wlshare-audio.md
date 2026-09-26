@@ -83,8 +83,8 @@ wlshare sends it as its own update, ahead of any pixels, on the first
 
 The format is the client's to choose — the server converts whatever the desktop
 plays into it — so there is nothing to negotiate. This gateway asks for
-**signed 16-bit, 2 channels, 48 000 Hz**, which is Opus's own rate and the
-passthrough encoder's PCM, and so needs no resampler on either path.
+**signed 16-bit, 2 channels, 48 000 Hz**, which is Opus's own rate, and so
+needs no resampler.
 
 | Offset | Type | Field |
 |---|---|---|
@@ -127,7 +127,7 @@ the gateway asks for a signed one, so it never flips. Decoded samples are
 interleaved, little-endian, and bit for bit what wlshare captured.
 
 FLAC is lossless, so the gateway's Opus encode stays the only lossy step on the
-way to the browser, and passthrough stays exactly the desktop's samples. On the
+way to the browser. On the
 RFB connection music and speech cost about two-thirds of their 1.5 Mbit/s PCM
 rate or less, and a desktop playing nothing, whose capture still runs, a few
 bytes a frame.
@@ -150,7 +150,7 @@ announces late is still taken.
 - Each frame is decoded by symphonia's FLAC decoder into interleaved
   little-endian 16-bit stereo, which is what was asked for and what the queue
   takes, and goes to the bridge as one wave buffer. From there the path is every
-  target's: the queue, the Opus or passthrough encoder, `/ws/audio`
+  target's: the queue, the Opus encoder, `/ws/audio`
   ([Audio frames](architecture.md#audio-frames)).
 - A frame that does not decode, or does not hold exactly 960 stereo frames, is
   dropped with a warning: each FLAC frame decodes on its own, so it costs its
@@ -210,14 +210,7 @@ hands the bridge the same samples; the RFB leg's own rate has not been measured
 on a live desktop.
 
 With a 6-second 440/660 Hz stereo tone playing into the default sink through
-`pw-play`, a passthrough target on this host:
-
-```
-format: {"type":"audioFormat","codec":"pcm-s16le","sampleRate":48000,"channels":2,"packetFrames":0,"head":""}
-551 frames, 551 packets, 1128448 bytes = 5.88s of 48000 Hz audio, peak 12000
-```
-
-The same target under Opus, tone playing and then silent:
+`pw-play`, then silence, on this host:
 
 ```
 306 frames, 306 packets, 73746 bytes     tone:    241 bytes a packet

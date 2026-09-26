@@ -110,8 +110,8 @@ documentation.
   which still ends on the ceiling's refusal. See
   [Tiles past the ceiling](docs/architecture.md#tiles-past-the-ceiling).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
-  the subscription. Do not put audio on the session socket. The supported target
-  choices are Opus and unresampled PCM passthrough; do not add another encoder.
+  the subscription. Do not put audio on the session socket. Remote audio is Opus
+  only; there is no codec key, and do not add another encoder or a passthrough.
   Preserve claim-bound eviction and the source-format/resampling boundaries in
   [Audio frames](docs/architecture.md#audio-frames).
 - Generic VNC audio is wlshare's audio extension — FLAC frames, with the QEMU

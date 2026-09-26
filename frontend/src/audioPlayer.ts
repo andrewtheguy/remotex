@@ -1,8 +1,6 @@
-// Browser-owned remote audio: a packet becomes an `AudioBuffer`, and Web Audio
-// schedules it with bounded lead. There are two ways to get from one to the
-// other and `audioFormat` says which — WebCodecs decodes an encoded packet, and
-// a passthrough packet is already samples. The scheduling half below is the same
-// either way and is where the interesting behaviour is.
+// Browser-owned remote audio: WebCodecs decodes an Opus packet into an
+// `AudioBuffer`, and Web Audio schedules it with bounded lead. The scheduling
+// half below is where the interesting behaviour is.
 //
 // AudioContext creation stays in the enabling click wherever the browser needs one
 // (AUDIO_NEEDS_GESTURE). That WebCodecs exists at all is
@@ -12,48 +10,19 @@ import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
 /** What `audioFormat` said, which is everything needed to play the packets. */
 export interface AudioFormat {
-  /** `"opus"` — a WebCodecs codec string — or {@link PCM_CODEC}. */
+  /** `"opus"`, the WebCodecs codec string. */
   codec: string;
   /**
-   * The rate the packets are at: 48 kHz for Opus, because that is what the
-   * gateway resampled to, and the remote's own rate under {@link PCM_CODEC},
-   * because nothing resampled it. An `AudioBuffer` carries its own rate, so a
-   * context at a different one simply resamples on playback.
+   * The rate the packets are at: 48 kHz, because that is what the gateway
+   * resampled to. An `AudioBuffer` carries its own rate, so a context at a
+   * different one simply resamples on playback.
    */
   sampleRate: number;
   channels: number;
-  /**
-   * Samples in one packet at `sampleRate`: 960 on Opus, and 0 under
-   * {@link PCM_CODEC}, whose packets are whatever length the remote's buffers
-   * were and so carry their own.
-   */
+  /** Samples in one packet at `sampleRate`: 960. */
   packetFrames: number;
-  /**
-   * `OpusHead`, verbatim: WebCodecs takes it as the config's `description`.
-   * Empty under {@link PCM_CODEC}, where there is no decoder to configure.
-   */
+  /** `OpusHead`, verbatim: WebCodecs takes it as the config's `description`. */
   head: Uint8Array;
-}
-
-/**
- * The gateway is sending the remote's PCM as it arrived, not an encoded stream.
- *
- * Deliberately not a WebCodecs codec string, because there is no WebCodecs
- * decoder for PCM and this path does not want one: the packets are interleaved
- * signed 16-bit little-endian samples at `sampleRate`, which is what an
- * `AudioBuffer` holds already. The name spells the sample format out because
- * `audioFormat`'s other fields do not carry it.
- */
-export const PCM_CODEC = "pcm-s16le";
-
-/**
- * Whether this format has to go through WebCodecs, or is samples already.
- *
- * The one branch in this file, and it is about the wire rather than the browser:
- * `audioFormat` says which of the two the gateway chose for this target.
- */
-export function needsDecoder(format: AudioFormat): boolean {
-  return format.codec !== PCM_CODEC;
 }
 
 /**
@@ -90,10 +59,7 @@ export interface AudioPlayer {
  * A guess, and it has to be one: the context may have to exist inside the
  * enabling click, and `audioFormat` arrives a round trip later. 48 kHz is the
  * rate the gateway encodes at (src/pcm48.rs) and what most output hardware runs
- * at, so the common case resamples nothing. A passthrough stream at 44.1 kHz does get
- * resampled here — by Web Audio, on playback, exactly as it would be by the OS
- * mixer for any buffer whose rate is not the device's. Nothing about the samples
- * that crossed the network changed.
+ * at, so the common case resamples nothing.
  */
 const STREAM_RATE = 48_000;
 
@@ -109,7 +75,7 @@ const SPLICE_FADE_S = 0.004;
  *
  * A decoder needs *increasing* timestamps on its input and derives nothing else
  * from them, so this is a label rather than a measurement — but it is the honest
- * label. Only the encoded path uses it; passthrough never reaches a decoder.
+ * label.
  */
 function packetDurationUs(format: AudioFormat): number {
   return Math.round((format.packetFrames / format.sampleRate) * 1_000_000);
@@ -227,42 +193,34 @@ export function createAudioPlayer(
   // Each keeps its gain node so the stop can be a fade rather than a cut.
   let playing: { source: AudioBufferSourceNode; gain: GainNode }[] = [];
 
-  // Null on the passthrough path, where a packet is already samples. That is the
-  // whole of the difference: everything below `schedule` is shared, because a
-  // buffer is a buffer however it was arrived at.
-  const decoder = needsDecoder(format) ? createDecoder() : null;
-
-  function createDecoder(): AudioDecoder {
-    const built = new AudioDecoder({
-      output: (data) => {
-        try {
-          // Checked before the buffer is built, not after: `createBuffer`
-          // throws on a zero-length buffer rather than returning an empty one.
-          if (data.numberOfFrames > 0) {
-            schedule(toAudioBuffer(context, data));
-          }
-        } finally {
-          data.close();
+  const decoder = new AudioDecoder({
+    output: (data) => {
+      try {
+        // Checked before the buffer is built, not after: `createBuffer`
+        // throws on a zero-length buffer rather than returning an empty one.
+        if (data.numberOfFrames > 0) {
+          schedule(toAudioBuffer(context, data));
         }
-      },
-      // Nothing is recoverable here: a decoder that has failed will not decode the
-      // next packet either, and there is no second representation to switch to. This
-      // is also where "this browser cannot decode this codec" lands — `configure`
-      // accepts an unsupported codec and fails asynchronously — so the message names
-      // the codec, which is the thing worth putting in a bug report.
-      error: (e) => {
-        console.error("audio: the decoder failed", e);
-        close();
-        handlers.onError(
-          e instanceof Error && e.name === "NotSupportedError"
-            ? `This browser cannot decode the ${format.codec} audio the gateway sends.`
-            : "This browser's audio decoder failed.",
-        );
-      },
-    });
-    built.configure(decoderConfig(format));
-    return built;
-  }
+      } finally {
+        data.close();
+      }
+    },
+    // Nothing is recoverable here: a decoder that has failed will not decode the
+    // next packet either, and there is no second representation to switch to. This
+    // is also where "this browser cannot decode this codec" lands — `configure`
+    // accepts an unsupported codec and fails asynchronously — so the message names
+    // the codec, which is the thing worth putting in a bug report.
+    error: (e) => {
+      console.error("audio: the decoder failed", e);
+      close();
+      handlers.onError(
+        e instanceof Error && e.name === "NotSupportedError"
+          ? `This browser cannot decode the ${format.codec} audio the gateway sends.`
+          : "This browser's audio decoder failed.",
+      );
+    },
+  });
+  decoder.configure(decoderConfig(format));
 
   function schedule(buffer: AudioBuffer): void {
     if (closed || buffer.length === 0) {
@@ -326,161 +284,29 @@ export function createAudioPlayer(
       held.source.stop();
     }
     playing = [];
-    if (decoder && decoder.state !== "closed") {
+    if (decoder.state !== "closed") {
       decoder.close();
     }
     void context.close();
   }
 
-  /** Passthrough: a packet is already samples, so this runs inline. */
-  function playPassthrough(packets: Uint8Array[]): void {
-    for (const packet of packets) {
-      if (packet.byteLength < format.channels * 2) {
-        continue; // too short to hold a frame
-      }
-      try {
-        schedule(pcmToAudioBuffer(context, packet, format));
-      } catch (e) {
-        // Caught because this conversion is synchronous, unlike the decoder's,
-        // which reports through `error` above. A throw here — a channel count
-        // `createBuffer` refuses, a context already closing — would otherwise
-        // escape into the socket's frame dispatch and take the whole message
-        // loop with it, costing the desktop as well as the sound.
-        console.error("audio: cannot play a passthrough packet", e);
-        close();
-        handlers.onError(
-          "This browser could not play the audio the gateway sends.",
-        );
-        return;
-      }
-    }
-  }
-
-  function decodeEncoded(built: AudioDecoder, packets: Uint8Array[]): void {
-    if (built.state !== "configured") {
-      return;
-    }
-    for (const packet of packets) {
-      // Every packet on this wire is independently decodable — an Opus packet
-      // is — so they are all key frames, which is also why a listener can
-      // attach mid-stream at all.
-      built.decode(
-        new EncodedAudioChunk({ type: "key", timestamp, data: packet }),
-      );
-      timestamp += packetUs;
-    }
-  }
-
   return {
     push(packets) {
-      if (closed) {
+      if (closed || decoder.state !== "configured") {
         return;
       }
-      if (decoder) {
-        decodeEncoded(decoder, packets);
-      } else {
-        playPassthrough(packets);
+      for (const packet of packets) {
+        // Every packet on this wire is independently decodable — an Opus packet
+        // is — so they are all key frames, which is also why a listener can
+        // attach mid-stream at all.
+        decoder.decode(
+          new EncodedAudioChunk({ type: "key", timestamp, data: packet }),
+        );
+        timestamp += packetUs;
       }
     },
     close,
   };
-}
-
-/**
- * One passthrough packet, split into a planar `f32` channel each.
- *
- * The only conversion on this whole path, and it is forced: `AudioBuffer` holds
- * planar `f32` and there is no arrangement in which it does not. `/ 32768` is the
- * exact inverse of the gateway's own scaling (src/pcm48.rs), so `i16::MIN` maps
- * to exactly -1.0 and nothing is clipped.
- *
- * Planar rather than interleaved for the same reason the gateway's resampler
- * works that way: anything that treats interleaved samples as one signal blends
- * left into right.
- *
- * The frame count comes from the packet's own length, because there is nowhere
- * else it could come from — passthrough packets are whatever size the remote's
- * wave buffers were, which is why `packetFrames` is 0. A trailing part-frame is
- * dropped; the gateway holds one back rather than sending it (src/pcm_stream.rs),
- * so this is the floor under a malformed packet rather than a case that happens.
- */
-export function pcmChannels(
-  packet: Uint8Array,
-  channels: number,
-  // Backed by an `ArrayBuffer` rather than the wider `ArrayBufferLike`, which is
-  // what `copyToChannel` takes: a `SharedArrayBuffer` is not something these are
-  // ever built on, and saying so here is what lets the buffer be filled directly.
-): Float32Array<ArrayBuffer>[] {
-  const frames = Math.floor(packet.byteLength / (channels * 2));
-  const planes: Float32Array<ArrayBuffer>[] = [];
-  // An `Int16Array` view when one is possible — several times faster than a
-  // DataView at the ~96k reads/s a stereo stream costs, and the wire format is
-  // little-endian, which is the only order such a view can read. The view needs
-  // an even byte offset; `decodeAudioFrame` hands out subarrays whose offsets
-  // are even in practice (2-byte headers between packets), so the DataView
-  // below is the floor, not the common case.
-  if (PLATFORM_LE && packet.byteOffset % 2 === 0) {
-    const samples = new Int16Array(
-      packet.buffer,
-      packet.byteOffset,
-      frames * channels,
-    );
-    for (let channel = 0; channel < channels; channel++) {
-      const plane = new Float32Array(frames);
-      for (
-        let frame = 0, at = channel;
-        frame < frames;
-        frame++, at += channels
-      ) {
-        plane[frame] = samples[at] / 32_768;
-      }
-      planes.push(plane);
-    }
-    return planes;
-  }
-  // A view over the packet's own bytes: `decodeAudioFrame` hands out subarrays,
-  // so the offset is not zero and `new DataView(packet.buffer)` would read some
-  // other packet in the same frame.
-  const view = new DataView(
-    packet.buffer,
-    packet.byteOffset,
-    packet.byteLength,
-  );
-  for (let channel = 0; channel < channels; channel++) {
-    const plane = new Float32Array(frames);
-    for (let frame = 0; frame < frames; frame++) {
-      plane[frame] =
-        view.getInt16((frame * channels + channel) * 2, true) / 32_768;
-    }
-    planes.push(plane);
-  }
-  return planes;
-}
-
-// Whether this machine's own byte order is the wire's. `Int16Array` reads in
-// platform order, so the fast path above is only correct where this is true —
-// which is every browser platform that exists, but checked rather than assumed.
-const PLATFORM_LE =
-  new Uint8Array(new Uint16Array([0x0102]).buffer)[0] === 0x02;
-
-/** One passthrough packet as something Web Audio can play. */
-function pcmToAudioBuffer(
-  context: AudioContext,
-  packet: Uint8Array,
-  format: AudioFormat,
-): AudioBuffer {
-  const planes = pcmChannels(packet, format.channels);
-  const buffer = context.createBuffer(
-    format.channels,
-    // Never zero: `createBuffer` throws on a zero-length buffer, and the caller
-    // already skips a packet too short to hold a frame.
-    Math.max(planes[0]?.length ?? 0, 1),
-    format.sampleRate,
-  );
-  for (const [channel, plane] of planes.entries()) {
-    buffer.copyToChannel(plane, channel);
-  }
-  return buffer;
 }
 
 /**

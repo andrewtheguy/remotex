@@ -4,8 +4,7 @@
 //! sound is the remote's and fans out to a listener, the camera is the
 //! browser's and funnels in to the remote. What crosses this bridge inbound is
 //! **already encoded** H.264 — the browser's own `VideoEncoder` made it, the
-//! Windows host decodes it, and the gateway moves bytes without owning a codec,
-//! the same bargain `audio_codec = "pcm"` strikes in the other direction.
+//! Windows host decodes it, and the gateway moves bytes without owning a codec.
 //! Outbound go the host's streaming decisions — start, stop, "next one must be
 //! a keyframe" — which are the only things a capturing browser cannot know.
 //!

@@ -56,25 +56,6 @@ test("an encoded stream names its codec, its shape and its packet length", () =>
   );
 });
 
-test("passthrough says it reached no decoder, at the remote's own rate", () => {
-  // The whole point of the branch: no decoder ran, so this browser's codec support
-  // cannot be what is wrong with the sound. 44.1 kHz keeps its fraction.
-  assert.equal(
-    audioLabel({
-      available: true,
-      enabled: true,
-      error: null,
-      stream: {
-        codec: "pcm-s16le",
-        sampleRate: 44_100,
-        channels: 2,
-        packetFrames: 0,
-      },
-    }),
-    "pcm-s16le · 44.1 kHz stereo · passthrough, no decoder",
-  );
-});
-
 test("a channel count that is neither mono nor stereo still names itself", () => {
   assert.equal(
     audioLabel({

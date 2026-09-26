@@ -667,20 +667,13 @@ fn describe_audio(target: &TargetConfig) -> String {
         return "off".to_owned();
     }
     let plan = target.audio_plan();
-    match plan.codec {
-        crate::config::AudioCodec::Pcm => {
-            "pcm passthrough, 1.41 Mbit/s, no encoder and no decoder".to_owned()
+    let ceiling = plan.bitrate_bps / 1000;
+    match plan.adaptive_floor_bps {
+        Some(floor) if floor < plan.bitrate_bps => {
+            format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s", floor / 1000)
         }
-        crate::config::AudioCodec::Opus => {
-            let ceiling = plan.bitrate_bps / 1000;
-            match plan.adaptive_floor_bps {
-                Some(floor) if floor < plan.bitrate_bps => {
-                    format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s", floor / 1000)
-                }
-                // A walk clamped to its ceiling, or none: the rate is the rate.
-                Some(_) | None => format!("opus at {ceiling} kbit/s"),
-            }
-        }
+        // A walk clamped to its ceiling, or none: the rate is the rate.
+        Some(_) | None => format!("opus at {ceiling} kbit/s"),
     }
 }
 

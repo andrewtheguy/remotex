@@ -8,13 +8,10 @@
 // The Render row already says what the *gateway* resolved to. These two say what
 // this browser ended up doing with it, which is a different fact and the one that
 // is otherwise invisible: `render` names a motion codec but never says a stream
-// decoder was configured, and it says nothing at all about audio, whose codec is a
-// per-target choice made in the operator's config file (`audio_codec`) and
+// decoder was configured, and it says nothing at all about audio, whose format is
 // announced only on the audio socket. Until they existed, "why is there no sound"
-// and "which decoder is this browser running" were answerable only by reading that
-// file and the console.
-
-import { PCM_CODEC } from "./audioPlayer.ts";
+// and "which decoder is this browser running" were answerable only by reading the
+// console.
 
 /**
  * The wire fields of `audioFormat`, minus the `OpusHead` bytes.
@@ -42,8 +39,8 @@ export interface AudioRow {
   stream: AudioStreamInfo | null;
 }
 
-// 48 kHz, 44.1 kHz — the two this path actually produces, written the way somebody
-// comparing them to a device's rate would say them.
+// 48 kHz, written the way somebody comparing it to a device's rate would say it.
+// A fractional rate such as 44.1 kHz keeps its fraction.
 function rateLabel(hz: number): string {
   const khz = hz / 1000;
   return `${Number.isInteger(khz) ? khz : khz.toFixed(1)} kHz`;
@@ -60,16 +57,10 @@ function channelsLabel(count: number): string {
  * The stream itself: codec, rate, channels, and how much sound is in one packet.
  *
  * The packet length is given in milliseconds rather than as `packetFrames`,
- * because that is the figure a person can compare to what they are hearing — and
- * passthrough has none to give, its packets being whatever length the remote's
- * wave buffers were. Naming it as passthrough is the point of that branch: no
- * decoder ran, so a browser's codec support cannot be what is wrong.
+ * because that is the figure a person can compare to what they are hearing.
  */
 function streamLabel(stream: AudioStreamInfo): string {
   const shape = `${rateLabel(stream.sampleRate)} ${channelsLabel(stream.channels)}`;
-  if (stream.codec === PCM_CODEC) {
-    return `${stream.codec} · ${shape} · passthrough, no decoder`;
-  }
   const ms = (stream.packetFrames / stream.sampleRate) * 1000;
   return `${stream.codec} · ${shape} · ${Number(ms.toFixed(1))} ms packets`;
 }

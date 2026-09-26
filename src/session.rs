@@ -1641,8 +1641,6 @@ mod tests {
         resize: bool,
         clipboard: bool,
         audio: bool,
-        /// `None` is the target saying nothing, which is Opus.
-        audio_codec: Option<crate::config::AudioCodec>,
         camera: bool,
         microphone: bool,
     }
@@ -1654,7 +1652,6 @@ mod tests {
                 resize: false,
                 clipboard: false,
                 audio: false,
-                audio_codec: None,
                 camera: false,
                 microphone: false,
             }
@@ -1684,12 +1681,6 @@ mod tests {
             self.audio = true;
             self
         }
-
-        const fn audio_codec(mut self, codec: crate::config::AudioCodec) -> Self {
-            self.audio = true;
-            self.audio_codec = Some(codec);
-            self
-        }
     }
 
     /// What the plain fake targets are: VNC with nothing switched on.
@@ -1717,7 +1708,6 @@ mod tests {
             clipboard: meta.clipboard,
             audio_key: None,
             audio: meta.audio,
-            audio_codec: meta.audio_codec,
             camera: meta.camera,
             microphone: meta.microphone,
             video_quality: None,
@@ -1766,10 +1756,6 @@ mod tests {
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).audio()),
             fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
             fake_target_with("rdp-mic", Meta::of(Protocol::Rdp).microphone()),
-            fake_target_with(
-                "rdp-pcm",
-                Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
-            ),
             // A target that streams. Nothing refuses it: the browser capability probe
             // that could is gone, and what a client can decode is answered by its own
             // decoder rather than by this connect.
@@ -2724,9 +2710,6 @@ mod tests {
 
     /// Assert the next event configures a decoder, and that it says what a decoder
     /// needs. Returns the codec, for the one test that cares which one it got.
-    ///
-    /// Encoded targets only — passthrough announces none of this, which is what
-    /// `a_pcm_target_is_announced_as_the_remotes_own_bytes` is for.
     async fn expect_audio_format(packets: &mut mpsc::Receiver<ServerMsg>) -> &'static str {
         match recv_audio(packets).await {
             ServerMsg::AudioFormat {
@@ -2799,72 +2782,6 @@ mod tests {
 
         audio.wave(one_frame_of_pcm());
         assert_eq!(expect_audio(&mut sound.packets).await, 1, "and it keeps going");
-    }
-
-    /// The target's `audio_codec` is what the client is told, and the whole
-    /// difference reaches the socket.
-    ///
-    /// Asserted here rather than in `pcm_stream` because this is the seam that could
-    /// go wrong without either stream being at fault: a session that read the key and
-    /// then announced Opus anyway would send raw samples described as an encoded
-    /// stream, which is noise with no error anywhere.
-    ///
-    /// Passthrough end to end, which is the only place the claim can actually be
-    /// checked: the bytes the engine put on the queue are the bytes that reach the
-    /// socket, byte for byte, and the announcement tells the client to play them
-    /// rather than decode them.
-    ///
-    /// [`crate::pcm_stream`]'s own tests prove the stream does not alter a buffer.
-    /// This proves nothing between it and the client does either — a resample or a
-    /// re-frame quietly reintroduced anywhere on this path fails here and nowhere
-    /// else.
-    #[tokio::test]
-    async fn a_pcm_target_is_announced_as_the_remotes_own_bytes() {
-        let (mgr, hooks) = manager_with_fake_engine();
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full).await.unwrap();
-        expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-pcm", None).await.unwrap();
-        expect_connected_meta(
-            &mut att.events,
-            "rdp-pcm",
-            Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
-        )
-        .await;
-        // Held, not dropped: letting the engine's channel ends go ends the engine,
-        // and the session falls back to the picker before any audio is asked for.
-        let ends = hooks.try_recv().unwrap();
-        let audio = ends
-            .2
-            .clone()
-            .expect("an audio target's engine is given a bridge");
-
-        let mut sound = mgr.attach_audio(&token).unwrap();
-        match recv_audio(&mut sound.packets).await {
-            ServerMsg::AudioFormat {
-                codec,
-                sample_rate,
-                packet_frames,
-                head,
-                ..
-            } => {
-                assert_eq!(codec, "pcm-s16le");
-                assert_eq!(sample_rate, 44_100, "the remote's rate, because nothing resampled");
-                assert_eq!(packet_frames, 0, "each packet's length is its own");
-                assert!(head.is_empty(), "there is no decoder to configure");
-            }
-            other => panic!("expected the audio format, got {other:?}"),
-        }
-
-        // Not silence: a buffer whose bytes can be told apart from any other.
-        let wave: Vec<u8> = (0..2_048u32).map(|byte| byte as u8).collect();
-        audio.wave(wave.clone());
-        match recv_audio(&mut sound.packets).await {
-            ServerMsg::Audio(packets) => {
-                assert_eq!(packets, vec![wave], "the wave buffer, unaltered");
-            }
-            other => panic!("expected audio packets, got {other:?}"),
-        }
     }
 
     /// A second socket on one claim must not leave two pumps on one queue: every

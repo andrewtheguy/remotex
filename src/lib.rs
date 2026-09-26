@@ -23,7 +23,6 @@ pub mod keymap;
 pub mod mic;
 pub mod opus_stream;
 pub mod pcm48;
-pub mod pcm_stream;
 pub mod protocol;
 pub mod rdp;
 pub mod rdp_camera;

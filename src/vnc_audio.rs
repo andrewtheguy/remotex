@@ -78,7 +78,7 @@ const SERVER_BEGIN: u16 = 1;
 ///
 /// The format is the *client's* to choose — the server converts whatever the
 /// desktop plays into it — so there is nothing to negotiate and nothing to
-/// resample: this is Opus's own rate, and the passthrough encoder's PCM.
+/// resample: this is Opus's own rate.
 pub const SOURCE_FORMAT: PcmFormat = PcmFormat {
     channels: 2,
     sample_rate: 48_000,
