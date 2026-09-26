@@ -614,7 +614,7 @@ async def main() -> int:
                     pass
             if viewport_task is not None and not viewport_task.done():
                 viewport_task.cancel()
-        print(f"\n  {frames} video frames")
+        print(f"\n  {frames} binary frames")
         if args.records:
             print(f"  {tiles} tile records, {video_units} video records")
         if args.audio:
