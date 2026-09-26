@@ -106,9 +106,8 @@ documentation.
   [The codec](docs/architecture.md#the-codec) and
   [Choosing a chroma](docs/architecture.md#choosing-a-chroma).
 - The one picture that is not video is PNG tiles: for a desktop past the video
-  ceiling on a source that hands over its own rectangles, VNC without `resize`,
-  and for the gaps around a passed High Performance stream. Each is a rectangle
-  exactly as the server sent it. Do not add a key that selects tiles, use them
+  ceiling on a source that hands over its own rectangles, VNC without `resize`.
+  Each is a rectangle exactly as the server sent it. Do not add a key that selects tiles, use them
   within the ceiling on any other session, cut, merge or cache rectangles in the
   gateway, or give them to any other source with `resize` or without rectangles,
   which still ends on the ceiling's refusal. See
@@ -150,7 +149,8 @@ documentation.
 - `hevc_passthrough` on `ard-high-performance` passes the Mac's HEVC access units,
   as the Mac sent them, to a browser that said its decoder takes them, for a LAN;
   every other browser is sent VP9 as without the key. The Mac's ZRLE rectangles
-  fill the stream's gaps as tiles, and a PLI is a passed stream's repaint. Keep it
+  fill the stream's gaps as VP9 encoded here, each switch between the two starting
+  at a keyframe, and a PLI is a passed stream's repaint. Keep it
   to that stream: no other remote's HEVC, and a passed unit is never altered. See
   [Apple's HEVC, passed through](docs/architecture.md#apples-hevc-passed-through).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension

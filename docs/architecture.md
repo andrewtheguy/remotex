@@ -231,7 +231,6 @@ starts, and the sink decides the carriage at each `Resize` against the ceiling:
 |---|---|---|
 | VNC (generic, Apple Standard) without `resize` | `Rects` | tiles |
 | VNC with `resize`, Apple High Performance, RDP | `None` | refused, as before: "a video stream will not encode a W×H picture" |
-| Apple High Performance with its HEVC passed | `Gaps` | the Mac's rectangles are tiles at every size; see [below](#apples-hevc-passed-through) |
 
 `resize` rules tiles out because it is the gateway sizing the remote: every size it
 asks for is under the ceiling, and a remote that answers past it has refused what
@@ -317,7 +316,7 @@ The target's quality keys do not reach a passed stream, which is coded at wlshar
 `ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
 as VP9. With `hevc_passthrough = true`, a browser whose decoder takes the Mac's
 stream is sent it instead, as the Mac sent it, and the gateway neither decodes nor
-encodes a picture. It is for a LAN: High Performance's own rate control works
+encodes a picture of it. It is for a LAN: High Performance's own rate control works
 between 20 and 60 Mbit/s ([Rate control](apple-vnc-889.md#rate-control)), and a
 passed stream has no quality walk behind it. Unlike wlshare's stream, which is
 coded for adaptation and walks its quality by the fence round trip, the Mac's
@@ -354,16 +353,21 @@ stream here is passed straight: nothing reports the browser's queue back to it.
   A link that cannot carry the stream fills the receiver's queue of 15 units, half
   a second of the display's refresh; a full queue drops to the next keyframe, as
   the decoder's queue does.
-- **The gaps are the Mac's rectangles.** ZRLE carries the picture until the stream
-  is up and across every display change. In a passed session each of those
-  rectangles goes to the browser as one PNG tile at the Mac's place and size, as
-  [tiles past the ceiling](#tiles-past-the-ceiling) do (`TileSupport::Gaps`),
-  whatever the desktop's size and although the target has `resize`. The session
-  card goes on naming the passed stream, and no `tiling` message is sent: the
-  picture is the stream, and the tiles only fill in until it flows. Once it does,
-  ZRLE is decoded only to keep its deflate stream in step, as in a decoded session.
+- **The gaps are VP9 encoded here.** ZRLE carries the picture until the stream is
+  up and across every display change, and in a passed session its rectangles are
+  encoded as they are in a decoded one: through the shadow into the mirror, and
+  out as VP9 at the target's dial. The two take turns as the picture, and the
+  browser's decoder is replaced at each turn, by the `VideoFormat` that opens it:
+  a rectangle while the stream passes starts VP9 over at a keyframe
+  (`VideoSink::damage`), and the stream coming back starts at an IDR. While the
+  stream passes, nothing is encoded here — a repaint is the Mac's IDR, not a VP9
+  keyframe — and ZRLE is decoded only to keep its deflate stream in step. A display
+  change asks the Mac for the whole desktop, as it does in a decoded session, since
+  the mirror has seen nothing of what the stream showed. The gap costs a VP9
+  keyframe and its deltas, where whole-screen PNG tiles of a playing video came to
+  about 5 MB each on macvm.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
-  walk govern only the VP9 a browser that says no is sent. The sound is unchanged:
+  walk govern only VP9: the gaps, and the whole picture of a browser that says no. The sound is unchanged:
   it still needs the AAC-ELD decoder, so the key is behind `apple-hp-media` with the
   subtype.
 

@@ -1484,12 +1484,8 @@ pub async fn run(
     // those — on a session the window does not size. With `resize` the gateway asks
     // for every size and holds each under the ceiling, and a remote that answers
     // past it is refused. Never High Performance's, whose picture is the media
-    // stream's.
-    // A passed High Performance stream is the one other exception: the Mac's ZRLE
-    // fills its gaps as tiles at any size, since nothing here encodes video for it.
-    let tiles = if plan.apple_hevc {
-        TileSupport::Gaps
-    } else if config.resize || config.subtype == Some(Subtype::ArdHighPerformance) {
+    // stream's, decoded or passed, with ZRLE's encoded here in its gaps.
+    let tiles = if config.resize || config.subtype == Some(Subtype::ArdHighPerformance) {
         TileSupport::None
     } else {
         TileSupport::Rects
@@ -3032,14 +3028,14 @@ async fn blit_picture(
 /// Pass a unit of the Mac's HEVC to the browser, as [`show_picture`] shows a
 /// decoded picture: one of another size, or one that comes while a resize holds
 /// the display, is dropped, and the first one of a display takes the picture over
-/// from ZRLE. A dropped unit is one the next ones predict from, so the browser
-/// starts over at a keyframe, which the Mac is asked for as soon as a unit is held
-/// back waiting for one.
+/// from ZRLE, whose rectangles went out as video encoded here. A dropped unit is one
+/// the next ones predict from, so the browser starts over at a keyframe, which the
+/// Mac is asked for as soon as a unit is held back waiting for one.
 async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &SharedMedia) -> anyhow::Result<()> {
     let first = {
         let mut d = shared.desktop.lock().unwrap();
         if unit.size != d.size || d.hp.holds_pixels() {
-            sink.reset_render();
+            sink.restart_pass();
             return Ok(());
         }
         !std::mem::replace(&mut d.media_live, true)
@@ -3542,7 +3538,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             // starts it again at the new size with a keyframe of the
                             // whole desktop, and a full request would only have it
                             // send a second one, which no shadow is there to skip.
-                            let full = resized && !sink.passing();
+                            // The Mac's passed HEVC is owed one: ZRLE carries the
+                            // picture after a display change, as video encoded here.
+                            let full = resized && !(passthrough.is_some() && sink.passing());
                             send(uplink, &update_request(!full, size)).await?;
                         }
                     }

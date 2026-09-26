@@ -290,10 +290,6 @@ pub enum TileSupport {
     /// The source's updates are rectangles, which it hands to [`VideoSink::damage`]
     /// whole while [`VideoSink::tiling`] says so.
     Rects,
-    /// The picture is the remote's own stream passed through ([`VideoSink::pass_hevc`]),
-    /// and the source's rectangles fill its gaps — before it flows and across a display
-    /// change — as tiles, whatever the desktop's size: nothing here encodes video.
-    Gaps,
 }
 
 /// One item in the ordered queue.
@@ -345,7 +341,8 @@ struct Shared {
     round_returned: Notify,
     /// Whether the picture is the remote's own stream, passed through
     /// ([`VideoSink::pass`]) rather than encoded here. Set by the first frame passed,
-    /// cleared when the desktop goes to tiles.
+    /// cleared when the desktop goes to tiles and by a rectangle damaged while it is
+    /// set, which takes the picture back to the stream encoded here.
     passing: AtomicBool,
     /// The browser must start the passed stream over: drop what is not a keyframe,
     /// and announce the configuration again ahead of the one that is. Set from the
@@ -402,7 +399,7 @@ impl Shared {
         let RenderPlan { quality, adaptive, chroma, .. } = plan;
         Self {
             tile_support,
-            tiling: AtomicBool::new(tile_support == TileSupport::Gaps),
+            tiling: AtomicBool::new(false),
             rects: Mutex::default(),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
@@ -475,10 +472,20 @@ impl VideoSink {
     ///
     /// While [`Self::tiling`] the rectangle is kept whole instead, to go out as one
     /// tile of its own at the next [`Self::frame`].
+    ///
+    /// A rectangle while a passed stream is the picture ([`Self::passing`]) is the gap
+    /// after it: the source's own rectangles carry the picture again, as the stream
+    /// encoded here, which starts at a keyframe behind its announcement for a browser
+    /// whose decoder was the passed stream's. The passed stream starts over the same
+    /// way when it comes back.
     pub async fn damage(&self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         if self.tiling() {
             self.shared.rects.lock().unwrap().push((rect, rgb.to_vec()));
             return Ok(());
+        }
+        if self.shared.passing.swap(false, Ordering::Relaxed) {
+            debug!("{}: the source's rectangles carry the picture again, as video encoded here", self.engine);
+            self.reset_render();
         }
         self.shared.video.lock().await.stream.blit(rect, rgb)
     }
@@ -534,6 +541,12 @@ impl VideoSink {
     pub async fn frame(&self) -> anyhow::Result<()> {
         if self.tiling() {
             return self.queue_tiles().await;
+        }
+        // The browser is decoding the passed stream: a unit coded here would be one
+        // its decoder was not built for. What the mirror holds waits for the gap
+        // [`Self::damage`] opens, which starts the stream here over at a keyframe.
+        if self.passing() {
+            return Ok(());
         }
         let mut video = self.shared.video.lock().await;
         if video.stream.round_out() {
@@ -620,8 +633,12 @@ impl VideoSink {
     /// window settled. The deadline is what comes back for them.
     ///
     /// `None` while the mirror is clean, so an idle stream parks on
-    /// [`std::future::pending`] instead of waking an engine to encode nothing.
+    /// [`std::future::pending`] instead of waking an engine to encode nothing, and
+    /// while a passed stream is the picture, when [`Self::frame`] encodes nothing.
     pub async fn due_at(&self) -> Option<tokio::time::Instant> {
+        if self.passing() {
+            return None;
+        }
         let video = self.shared.video.lock().await;
         if !video.stream.dirty() {
             return None;
@@ -670,6 +687,13 @@ impl VideoSink {
     /// able to start over, which is why the keyframe is armed here.
     pub fn reset_render(&self) {
         self.shared.keyframe_owed.store(true, Ordering::Relaxed);
+        self.restart_pass();
+    }
+
+    /// Start only the passed stream over, at its next keyframe: for a unit the engine
+    /// dropped, which the ones after it predict from. The stream encoded here is not
+    /// touched, since the browser's picture is not in question.
+    pub fn restart_pass(&self) {
         self.shared.pass_restart.store(true, Ordering::Relaxed);
     }
 
@@ -702,6 +726,10 @@ impl VideoSink {
     /// report, so there is no fence to echo. A browser that must start over is sent
     /// nothing until an IDR, and `false` says this unit was dropped for one: only the
     /// Mac can send it, and a screen that stays still would never bring one unasked.
+    ///
+    /// Its gaps — before it flows and across a display change — are the Mac's
+    /// rectangles, encoded here as VP9 ([`Self::damage`]); the stream coming back
+    /// after one starts over at an IDR, announced for the decoder VP9 displaced.
     pub async fn pass_hevc(
         &self,
         w: u16,
@@ -809,7 +837,6 @@ impl VideoSink {
             let tiling = match self.shared.tile_support {
                 TileSupport::None => false,
                 TileSupport::Rects => !video::within_ceiling((u32::from(w), u32::from(h))),
-                TileSupport::Gaps => true,
             };
             if self.shared.tiling.swap(tiling, Ordering::Relaxed) != tiling {
                 if tiling {
@@ -1316,35 +1343,63 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// A passed High Performance stream: the Mac's rectangles are tiles whatever the
-    /// desktop's size, with no `tiling` said, since the picture is still the stream;
-    /// its units go out as passed ones do, and one dropped for a keyframe says so,
-    /// for the engine to ask the Mac.
+    /// A passed High Performance stream and the Mac's rectangles around it take turns
+    /// as the picture, each starting at a keyframe behind its announcement: the gap
+    /// is VP9 encoded here, the stream is the Mac's HEVC, and nothing is encoded here
+    /// while the stream passes. A unit dropped for a keyframe says so, for the engine
+    /// to ask the Mac.
     #[tokio::test]
-    async fn the_gaps_around_a_passed_hevc_stream_are_tiles() {
-        let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), TileSupport::Gaps);
-        assert!(sink.tiling(), "tiles from the start, before any resize");
-        sink.msg(ServerMsg::Resize { w: 1600, h: 1000, scale: UNSCALED }).await.unwrap();
-        let rect = Rect::from_size(0, 0, 2, 2).unwrap();
-        sink.damage(rect, &[7; 12]).await.unwrap();
-        sink.frame().await.unwrap();
-        let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe };
-        assert!(!sink.pass_hevc(1600, 1000, vec![1; 30], hevc(false)).await.unwrap(), "dropped for a keyframe");
-        assert!(sink.pass_hevc(1600, 1000, vec![2; 900], hevc(true)).await.unwrap());
-        sink.flush().await;
+    async fn the_gaps_around_a_passed_hevc_stream_are_video_encoded_here() {
+        const HEVC: &str = "hev1.4.10.L150.BE.8";
+        let (sink, mut frame_rx) = video_sink(64, 48).await;
+        let rect = Rect::from_size(0, 0, 64, 48).unwrap();
+        let hevc = |keyframe| crate::stream::Passed { decode: HEVC.to_owned(), keyframe };
+        let is_vp9 = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode } if decode.starts_with("vp09"));
+        let is_hevc = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode } if decode == HEVC);
 
-        let out = drain(&mut frame_rx, 4).await;
-        assert!(matches!(&out[0], ServerMsg::Resize { .. }), "{:?}", out[0]);
-        assert!(matches!(&out[1], ServerMsg::Tiles(tiles) if tiles.len() == 1), "{:?}", out[1]);
-        assert!(
-            matches!(&out[2], ServerMsg::VideoFormat { decode } if decode == "hev1.4.10.L150.BE.8"),
-            "{:?}",
-            out[2]
-        );
-        assert!(matches!(&out[3], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 900));
-        assert!(frame_rx.try_recv().is_err(), "no `tiling` message and nothing else");
-        assert!(sink.tiling(), "a resize leaves the gaps as tiles");
+        // Before the stream flows: VP9 from the rectangles.
+        sink.damage(rect, &[7; 64 * 48 * 3]).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(is_vp9(&out[0]), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
+
+        // The stream takes over at its IDR, announced.
+        assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap(), "dropped for a keyframe");
+        assert!(sink.pass_hevc(64, 48, vec![2; 900], hevc(true)).await.unwrap());
+        assert!(sink.pass_hevc(64, 48, vec![3; 40], hevc(false)).await.unwrap());
+        // A repaint while it passes encodes nothing here.
+        sink.reset_render();
+        sink.frame().await.unwrap();
+        assert_eq!(sink.due_at().await, None);
+        assert!(sink.pass_hevc(64, 48, vec![4; 800], hevc(true)).await.unwrap());
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 5).await;
+        assert!(is_hevc(&out[0]), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 900));
+        assert!(matches!(&out[2], ServerMsg::Video(unit) if !unit.keyframe && unit.data.len() == 40));
+        assert!(is_hevc(&out[3]), "a repaint announces again: {:?}", out[3]);
+        assert!(matches!(&out[4], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 800));
+        assert!(frame_rx.try_recv().is_err(), "nothing encoded here while the stream passed");
+
+        // A gap: VP9 again, from a keyframe, although its stream was built before.
+        sink.damage(rect, &[9; 64 * 48 * 3]).await.unwrap();
+        assert!(!sink.passing());
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(is_vp9(&out[0]), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
+
+        // And the stream back, from an IDR, announced for the decoder VP9 displaced.
+        assert!(!sink.pass_hevc(64, 48, vec![5; 30], hevc(false)).await.unwrap());
+        assert!(sink.pass_hevc(64, 48, vec![6; 700], hevc(true)).await.unwrap());
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(is_hevc(&out[0]), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 700));
+        assert!(frame_rx.try_recv().is_err());
     }
 
     /// Only the 4:4:4 stream the announcement describes is passed.

@@ -575,7 +575,7 @@ sound, and one that stops (see [Liveness](#the-stream)).
 Remotex decodes the picture and encodes it as VP9, unless the target sets
 `hevc_passthrough` and the browser decodes the Mac's HEVC: then each access unit
 goes to the browser as it came, described by the stream's own sequence parameter
-set, and ZRLE's rectangles fill the gaps as PNG tiles. A PLI is its repaint. See
+set, and ZRLE's rectangles fill the gaps as VP9 encoded here. A PLI is its repaint. See
 [Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through).
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
