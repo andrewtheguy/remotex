@@ -37,7 +37,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::{RenderPlan, Subtype, TargetConfig};
-use crate::encode::VideoSink;
+use crate::encode::{TileSupport, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
@@ -1464,7 +1464,17 @@ pub async fn run(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = VideoSink::new("vnc", frame_tx, plan, feedback);
+    // An RFB update is rectangles, so a desktop past the video ceiling can go as
+    // those — on a session the window does not size. With `resize` the gateway asks
+    // for every size and holds each under the ceiling, and a remote that answers
+    // past it is refused. Never High Performance's, whose picture is the media
+    // stream's.
+    let tiles = if config.resize || config.subtype == Some(Subtype::ArdHighPerformance) {
+        TileSupport::None
+    } else {
+        TileSupport::Rects
+    };
+    let sink = VideoSink::new("vnc", frame_tx, plan, feedback, tiles);
     session(config, display, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
 }
@@ -4335,6 +4345,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // deflate stream in step: the Mac still answers the one-pixel polls, and pushes
     // a whole screen on its own at a login.
     if desktop.lock().unwrap().media_live {
+        return Ok(RectEffect::pixels(rect));
+    }
+
+    // A rectangle carried as a tile goes out whole, as the server sent it. The
+    // shadow still records it, for a later CopyRect to read its source from.
+    if sink.tiling() {
+        shadow.lock().unwrap().accept(rect, &rgb);
+        sink.damage(rect, &rgb).await?;
         return Ok(RectEffect::pixels(rect));
     }
 
@@ -7636,7 +7654,7 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
         };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
-        let sink = VideoSink::new("vnc", frame_tx, plan, feedback);
+        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::None);
         // Larger than any desktop these tests paint, so a rectangle lands in the
         // mirror without the `Resize` a live engine would have sent first.
         sink.presize(256, 256);

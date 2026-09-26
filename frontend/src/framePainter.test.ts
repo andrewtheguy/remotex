@@ -252,9 +252,9 @@ test("a video record with an unknown flag drops the batch", async () => {
   assert.deepEqual(cropped, []);
 });
 
-test("a record that is not a VIDEO record drops the batch", async () => {
+test("a record of an unknown op drops the batch", async () => {
   const frame = batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]);
-  new Uint8Array(frame)[8] = 0x01;
+  new Uint8Array(frame)[8] = 0x02;
   await announced().draw(frame);
   assert.deepEqual(chunkTypes, []);
 });
@@ -443,4 +443,116 @@ test("a refusal gives way to a configuration the browser takes", async () => {
     "the refusal outlived its configuration",
   );
   assert.equal(configured.at(-1), "vp09.01.40.08");
+});
+
+interface TileRecord {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  png: number[];
+}
+
+// A batch of TILE records: `0x01 | u16 x | u16 y | u16 w | u16 h | u32 len | png`.
+function tileFrame(tiles: TileRecord[]): ArrayBuffer {
+  const bytes: number[] = [];
+  const u16 = (n: number) => bytes.push(n & 0xff, (n >> 8) & 0xff);
+  const u32 = (n: number) =>
+    bytes.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
+  bytes.push(0x02, 0x00);
+  u16(tiles.length);
+  u32(1);
+  for (const tile of tiles) {
+    bytes.push(0x01);
+    u16(tile.x);
+    u16(tile.y);
+    u16(tile.w);
+    u16(tile.h);
+    u32(tile.png.length);
+    bytes.push(...tile.png);
+  }
+  return new Uint8Array(bytes).buffer;
+}
+
+// The browser's PNG decode, which this runtime has none of. A PNG whose first byte
+// is 0 is one the browser would not decode; any other decodes to a bitmap that
+// remembers it was closed.
+const realCreateImageBitmap = globalThis.createImageBitmap;
+let bitmaps: { closed: boolean }[] = [];
+
+function installBitmaps() {
+  bitmaps = [];
+  globalThis.createImageBitmap = (async (blob: Blob) => {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    assert.equal(blob.type, "image/png");
+    if (bytes[0] === 0) {
+      throw new DOMException("not an image", "InvalidStateError");
+    }
+    const bitmap = {
+      closed: false,
+      close() {
+        bitmap.closed = true;
+      },
+    };
+    bitmaps.push(bitmap);
+    return bitmap;
+  }) as unknown as typeof createImageBitmap;
+}
+
+test("a tile is drawn where the remote put it, and needs no stream", async () => {
+  installBitmaps();
+  try {
+    const p = painter();
+    await p.draw(
+      tileFrame([
+        { x: 0, y: 0, w: 64, h: 64, png: [1] },
+        { x: 10, y: 20, w: 3, h: 4, png: [2] },
+      ]),
+    );
+    assert.deepEqual(
+      cropped.map(({ sx, sy }) => [sx, sy]),
+      [
+        [0, 0],
+        [10, 20],
+      ],
+      "tiles are drawn at their place, in wire order",
+    );
+    assert.equal(decoders, 0, "a tile built a video decoder");
+    assert.ok(bitmaps.every((bitmap) => bitmap.closed));
+    assert.deepEqual(videoKeyframeAsks, []);
+  } finally {
+    globalThis.createImageBitmap = realCreateImageBitmap;
+  }
+});
+
+test("a tile that will not decode asks for a repaint and draws the rest", async () => {
+  installBitmaps();
+  try {
+    const p = painter();
+    await p.draw(
+      tileFrame([
+        { x: 0, y: 0, w: 8, h: 8, png: [0] },
+        { x: 5, y: 6, w: 8, h: 8, png: [1] },
+      ]),
+    );
+    assert.deepEqual(
+      cropped.map(({ sx, sy }) => [sx, sy]),
+      [[5, 6]],
+    );
+    assert.equal(videoKeyframeAsks.length, 1);
+  } finally {
+    globalThis.createImageBitmap = realCreateImageBitmap;
+  }
+});
+
+test("a tile of no area is malformed and asks for a repaint", async () => {
+  installBitmaps();
+  try {
+    const p = painter();
+    await p.draw(tileFrame([{ x: 0, y: 0, w: 0, h: 8, png: [1] }]));
+    assert.deepEqual(cropped, []);
+    assert.equal(videoKeyframeAsks.length, 1);
+  } finally {
+    globalThis.createImageBitmap = realCreateImageBitmap;
+  }
 });

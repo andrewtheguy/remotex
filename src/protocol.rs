@@ -386,21 +386,29 @@ pub enum ClientMsg {
 ///
 /// record = u8 op | body   (little-endian throughout)
 ///
+/// 0x01 TILE      u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// ```
 ///
-/// `VIDEO` is the only record. Its flags are `0x01` for a keyframe and nothing else; a receiver rejects any
+/// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
 /// other bit, as it does for the frame's own flags byte. The encoder knows which frames are
 /// keyframes, so telling the client costs one byte and saves it parsing a bitstream — which is
 /// what it used to do, and which VP9 does not offer: VP9 carries no parameter sets, so there is
 /// nothing in the payload to read.
+///
+/// A `TILE` record is one rectangle the remote sent, as it sent it — see [`Tile`]. A receiver
+/// rejects a tile with no width, height or payload.
 ///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
     pub const HEADER_LEN: usize = 8;
 
+    pub const OP_TILE: u8 = 0x01;
     pub const OP_VIDEO: u8 = 0x03;
+
+    /// Bytes a `TILE` record costs besides its PNG.
+    pub const TILE_HEADER_LEN: usize = 13;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
@@ -556,6 +564,19 @@ impl Held {
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
     }
 
+    /// Move up to `bytes` of this share into a share of its own, for one payload of
+    /// several that were budgeted together and may leave in different batches.
+    pub fn split(&mut self, bytes: usize) -> Self {
+        let Some(share) = &mut self.share else {
+            return Self::default();
+        };
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(share.bytes);
+        share.bytes -= bytes;
+        Self {
+            share: Some(Share { budget: std::sync::Arc::clone(&share.budget), bytes, limit: share.limit }),
+        }
+    }
+
     /// Correct an estimated share to the payload's real size. What was taken in
     /// excess goes back at once; what is missing is taken only if it is there,
     /// because the task that settles is the one everything queued behind it waits
@@ -642,6 +663,60 @@ impl VideoUnit {
     }
 }
 
+/// One rectangle of the remote's framebuffer, carried as a `TILE` record inside a
+/// [`batch`] frame: the pixels the remote sent for it, at the place and size it sent
+/// them, as a PNG.
+///
+/// The contract every client implements:
+///
+/// - `(x, y, w, h)` is the remote's own rectangle, in framebuffer pixels. The gateway
+///   neither cuts nor merges them: one rectangle the remote sent is one tile.
+/// - A client draws the PNG at `(x, y)` over what it holds, in record order, and a
+///   later tile covers an earlier one. There is no chain: a tile depends on nothing
+///   before it, so a client that has just attached starts from the full update the
+///   remote is asked for.
+#[derive(Debug, Clone)]
+pub struct Tile {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    /// The rectangle's pixels, PNG-encoded.
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+}
+
+impl Tile {
+    /// Encode one rectangle of packed RGB888.
+    pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
+        let expected = usize::from(w) * usize::from(h) * 3;
+        anyhow::ensure!(
+            rgb.len() == expected,
+            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
+            rgb.len()
+        );
+        let data = encode_png(w, h, png::ColorType::Rgb, rgb)?;
+        Ok(Self { x, y, w, h, data, held: Held::default() })
+    }
+
+    /// What this tile will cost inside a batch, PNG included.
+    pub fn record_len(&self) -> usize {
+        batch::TILE_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this tile as a `TILE` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_TILE);
+        out.extend_from_slice(&self.x.to_le_bytes());
+        out.extend_from_slice(&self.y.to_le_bytes());
+        out.extend_from_slice(&self.w.to_le_bytes());
+        out.extend_from_slice(&self.h.to_le_bytes());
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
 /// Largest cursor edge a client is asked to draw. Real pointers are 32x32 or
 /// 64x64; a shape past this is dropped rather than sent, because a CSS cursor
 /// that big is ignored by the browser and would leave no pointer at all.
@@ -715,7 +790,7 @@ impl CursorShape {
 /// `Fast` means `Filter::Adaptive` — all five PNG filters run and scored per
 /// row — and this runs on the session's hot path.
 ///
-/// The PNG a [`CursorShape`] carries.
+/// The PNG a [`CursorShape`] and a [`Tile`] carry.
 fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(pixels.len() / 4 + 256);
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
@@ -796,6 +871,9 @@ pub enum ServerMsg {
     /// it is a binary record, and [`crate::wire`] puts it in a batch in its place
     /// among the control messages around it, which is load-bearing.
     Video(VideoUnit),
+    /// Rectangles of the framebuffer, each as the remote sent it. Binary records
+    /// like [`ServerMsg::Video`], ordered the same way, one `TILE` record each.
+    Tiles(Vec<Tile>),
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1119,7 +1197,7 @@ impl ServerMsg {
     /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Video(_) | ServerMsg::Audio(_) => return None,
+            ServerMsg::Video(_) | ServerMsg::Tiles(_) | ServerMsg::Audio(_) => return None,
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
@@ -1878,5 +1956,46 @@ mod tests {
             out,
             [batch::OP_VIDEO, batch::VIDEO_KEYFRAME, 0x02, 0x01, 0x04, 0x03, 2, 0, 0, 0, 0xAA, 0xBB]
         );
+    }
+
+    // The record layout `protocol.ts` (decodeBatchFrame) parses.
+    #[test]
+    fn tile_record_layout_is_op_le_place_size_len_png() {
+        let tile = Tile { x: 0x0102, y: 0x0304, w: 0x0506, h: 0x0708, data: vec![0xAA], held: Held::default() };
+        let mut out = Vec::new();
+        tile.write_record(&mut out);
+        assert_eq!(out.len(), tile.record_len());
+        assert_eq!(out, [batch::OP_TILE, 2, 1, 4, 3, 6, 5, 8, 7, 1, 0, 0, 0, 0xAA]);
+    }
+
+    /// A tile is a PNG of exactly the rectangle it names, which the browser decodes
+    /// with nothing but the payload.
+    #[test]
+    fn a_tile_is_a_png_of_its_rectangle() {
+        let rgb: Vec<u8> = (0..3 * 2 * 3).map(|i| i as u8).collect();
+        let tile = Tile::from_rgb(5, 6, 3, 2, &rgb).unwrap();
+        assert_eq!((tile.x, tile.y, tile.w, tile.h), (5, 6, 3, 2));
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&tile.data)).read_info().unwrap();
+        let mut buf = vec![0; decoder.output_buffer_size().unwrap()];
+        let info = decoder.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (3, 2, png::ColorType::Rgb));
+        assert_eq!(&buf[..info.buffer_size()], &rgb[..]);
+        assert!(Tile::from_rgb(0, 0, 3, 2, &rgb[1..]).is_err(), "a short payload is refused");
+    }
+
+    /// A share split off another takes its bytes with it, and both go back.
+    #[tokio::test]
+    async fn a_split_share_returns_both_halves() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(100));
+        let mut whole = Held::take(&budget, 60, 100).await;
+        let part = whole.split(25);
+        assert_eq!(budget.available_permits(), 40);
+        drop(part);
+        assert_eq!(budget.available_permits(), 65);
+        let rest = whole.split(1000);
+        drop(whole);
+        assert_eq!(budget.available_permits(), 65, "the remainder moved to the split");
+        drop(rest);
+        assert_eq!(budget.available_permits(), 100);
     }
 }

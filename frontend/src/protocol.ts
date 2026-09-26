@@ -338,11 +338,26 @@ export type ControlMsg =
 // configure the decoder, and always arrives first. See `VideoUnit` in src/protocol.rs
 // for the whole contract.
 export interface VideoMsg {
+  kind: "video";
   w: number;
   h: number;
   keyframe: boolean;
   data: Uint8Array;
 }
+
+// One rectangle of the remote's framebuffer, as the remote sent it: a PNG to draw
+// at (x, y) over what the canvas holds. It depends on nothing before it. See `Tile`
+// in src/protocol.rs for the contract.
+export interface TileMsg {
+  kind: "tile";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  data: Uint8Array;
+}
+
+export type BatchRecord = VideoMsg | TileMsg;
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
@@ -352,6 +367,8 @@ const AUDIO_PACKET_HEADER_LEN = 2;
 const CAMERA_FRAME_KIND = 0x04;
 const CAMERA_KEYFRAME = 0x01;
 const MIC_FRAME_KIND = 0x05;
+const OP_TILE = 0x01;
+const TILE_HEADER_LEN = 13;
 const OP_VIDEO = 0x03;
 const VIDEO_HEADER_LEN = 10;
 // A VIDEO record's only flag: a decoder that has seen nothing before it can start here.
@@ -359,7 +376,7 @@ const VIDEO_HEADER_LEN = 10;
 // than guessed at — the same strictness the batch's own flags byte gets.
 const VIDEO_KEYFRAME = 0x01;
 
-// Parse a binary batch frame into its access units. Layout (little-endian,
+// Parse a binary batch frame into its records. Layout (little-endian,
 // matching `batch` in `src/protocol.rs`):
 //
 //   offset 0: u8  frame kind, always 0x02 (batch)
@@ -368,22 +385,26 @@ const VIDEO_KEYFRAME = 0x01;
 //   offset 4: u32 sequence, increasing per attachment
 //   offset 8: records, back to back
 //
+//   TILE  (op 0x01):     u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
 // only because the header carries a record count — without it, a short read
 // would look like a complete but smaller batch.
-export function decodeBatchFrame(buf: ArrayBuffer): VideoMsg[] | null {
+export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
   if (batchFrameSequence(buf) === null) {
     return null;
   }
   const view = new DataView(buf);
   const count = view.getUint16(2, true);
-  const records: VideoMsg[] = [];
+  const records: BatchRecord[] = [];
   let at = BATCH_HEADER_LEN;
   while (at < buf.byteLength) {
-    const parsed = decodeVideo(view, buf, at);
+    const parsed =
+      view.getUint8(at) === OP_TILE
+        ? decodeTile(view, buf, at)
+        : decodeVideo(view, buf, at);
     if (!parsed) {
       return null;
     }
@@ -433,9 +454,39 @@ function decodeVideo(
   }
   return {
     record: {
+      kind: "video",
       w: view.getUint16(at + 2, true),
       h: view.getUint16(at + 4, true),
       keyframe: (flags & VIDEO_KEYFRAME) !== 0,
+      data: new Uint8Array(buf, start, len),
+    },
+    next: start + len,
+  };
+}
+
+// A tile of no area or no payload is malformed: nothing could be drawn for it.
+function decodeTile(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: TileMsg; next: number } | null {
+  if (at + TILE_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const w = view.getUint16(at + 5, true);
+  const h = view.getUint16(at + 7, true);
+  const len = view.getUint32(at + 9, true);
+  const start = at + TILE_HEADER_LEN;
+  if (w === 0 || h === 0 || len === 0 || start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "tile",
+      x: view.getUint16(at + 1, true),
+      y: view.getUint16(at + 3, true),
+      w,
+      h,
       data: new Uint8Array(buf, start, len),
     },
     next: start + len,

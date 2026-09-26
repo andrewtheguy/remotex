@@ -167,15 +167,33 @@ pub struct BatchUnit {
     pub payload: Vec<u8>,
 }
 
-/// Parse a server -> client binary frame into its access units.
+/// One `TILE` record parsed out of a batch frame: a rectangle the remote sent, where
+/// it sent it, as a PNG.
+#[allow(dead_code)]
+pub struct BatchTile {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub png: Vec<u8>,
+}
+
+/// One record of a batch frame.
+#[allow(dead_code)]
+pub enum BatchRecord {
+    Unit(BatchUnit),
+    Tile(BatchTile),
+}
+
+/// Parse a server -> client binary frame into its records.
 ///
 /// One parser for every test that looks at what was painted, so a wire change is
 /// applied once. Asserts the envelope's own invariants on the way through — kind,
 /// zero flags, a record count that matches the records present, and records that
-/// exactly fill the frame — so every test that reads a unit also checks the frame
+/// exactly fill the frame — so every test that reads a record also checks the frame
 /// carrying it was well formed.
 #[allow(dead_code)]
-pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
+pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
     use remotex::protocol::batch;
 
     assert!(frame.len() >= batch::HEADER_LEN, "frame is shorter than a batch header");
@@ -184,26 +202,51 @@ pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
     let count = u16::from_le_bytes([frame[2], frame[3]]);
 
     let mut at = batch::HEADER_LEN;
-    let mut units = Vec::new();
+    let mut records = Vec::new();
     while at < frame.len() {
+        let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
+        let le32 = |o: usize| {
+            u32::from_le_bytes([frame[at + o], frame[at + o + 1], frame[at + o + 2], frame[at + o + 3]])
+                as usize
+        };
+        if frame[at] == batch::OP_TILE {
+            let len = le32(9);
+            let start = at + batch::TILE_HEADER_LEN;
+            let png = frame[start..start + len].to_vec();
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "a tile that is not a PNG");
+            records.push(BatchRecord::Tile(BatchTile { x: le(1), y: le(3), w: le(5), h: le(7), png }));
+            at = start + len;
+            continue;
+        }
         assert_eq!(frame[at], batch::OP_VIDEO, "unknown record op {}", frame[at]);
         let flags = frame[at + 1];
         assert_eq!(flags & !batch::VIDEO_KEYFRAME, 0, "unknown record flags {flags:#x}");
-        let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
-        let len =
-            u32::from_le_bytes([frame[at + 6], frame[at + 7], frame[at + 8], frame[at + 9]]) as usize;
+        let len = le32(6);
         let start = at + batch::VIDEO_HEADER_LEN;
-        units.push(BatchUnit {
+        records.push(BatchRecord::Unit(BatchUnit {
             keyframe: flags & batch::VIDEO_KEYFRAME != 0,
             w: le(2),
             h: le(4),
             payload: frame[start..start + len].to_vec(),
-        });
+        }));
         at = start + len;
     }
     assert_eq!(at, frame.len(), "records must exactly fill the frame");
-    assert_eq!(units.len(), usize::from(count), "the header's count must match the records present");
-    units
+    assert_eq!(records.len(), usize::from(count), "the header's count must match the records present");
+    records
+}
+
+/// The access units of a batch frame, for a target carried as video: a tile in it
+/// fails the test.
+#[allow(dead_code)]
+pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
+    batch_records(frame)
+        .into_iter()
+        .map(|record| match record {
+            BatchRecord::Unit(unit) => unit,
+            BatchRecord::Tile(tile) => panic!("a {}x{} tile on a video target", tile.w, tile.h),
+        })
+        .collect()
 }
 
 /// Let the gateway log during an opted-in e2e run.

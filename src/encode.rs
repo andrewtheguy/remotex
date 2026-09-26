@@ -27,7 +27,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
-use crate::protocol::{Held, ServerMsg};
+use crate::protocol::{Held, ServerMsg, Tile};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -277,6 +277,21 @@ struct Video {
     coarse_at: Option<tokio::time::Instant>,
 }
 
+/// Whether a source can carry its picture as tiles, for a desktop too large for a
+/// video stream ([`video::within_ceiling`]).
+///
+/// A desktop within the ceiling is always one VP9 stream. Past it, a source whose
+/// own updates are rectangles has each one sent as it came, one PNG [`Tile`] each,
+/// and any other ends the session with [`video::check_picture`]'s refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileSupport {
+    /// The picture is video or nothing.
+    None,
+    /// The source's updates are rectangles, which it hands to [`VideoSink::damage`]
+    /// whole while [`VideoSink::tiling`] says so.
+    Rects,
+}
+
 /// One item in the ordered queue.
 enum Pending {
     /// One round in flight: an encode on a blocking worker, yielding the round itself
@@ -289,6 +304,9 @@ enum Pending {
     ///
     /// With the share of [`QUEUE_BUDGET`] taken for it, at the last round's size.
     Round(JoinHandle<(Round, anyhow::Result<Produced>, u64)>, Held),
+    /// One remote update's rectangles being PNG-encoded on a blocking worker, with
+    /// the share of [`QUEUE_BUDGET`] taken for them, at the last update's size.
+    Tiles(JoinHandle<(anyhow::Result<Vec<Tile>>, u64)>, Held),
     Msg(ServerMsg),
     /// A caller waiting for everything pushed before it to have reached `frame_tx`.
     Flush(oneshot::Sender<()>),
@@ -300,6 +318,13 @@ enum Pending {
 /// reports them: an engine's `run` returning drops the thread's whole runtime, so a
 /// line the task logged on its own way out would be cancelled before it printed.
 struct Shared {
+    tile_support: TileSupport,
+    /// Whether the desktop is past the ceiling and carried as tiles — see
+    /// [`TileSupport`]. Decided by each `Resize` ([`VideoSink::msg`]).
+    tiling: AtomicBool,
+    /// While [`Self::tiling`], the rectangles [`VideoSink::damage`] has taken since
+    /// the last [`VideoSink::frame`], in the order they came.
+    rects: Mutex<Vec<(Rect, Vec<u8>)>>,
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. The error itself, so the cause chain survives
     /// the hop from the task to the push. See [`VideoSink::closed`].
@@ -326,6 +351,9 @@ struct Shared {
     feedback: Arc<LinkFeedback>,
     units: AtomicU64,
     encoded_bytes: AtomicU64,
+    /// Tiles sent while [`Self::tiling`], and their PNG bytes.
+    tiles: AtomicU64,
+    tile_bytes: AtomicU64,
     /// Of [`Self::units`], those a decoder could start from, and what they cost. Read
     /// together: see [`Totals`].
     keyframes: AtomicU64,
@@ -355,9 +383,12 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>) -> Self {
+    fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, tile_support: TileSupport) -> Self {
         let RenderPlan { quality, adaptive, chroma } = plan;
         Self {
+            tile_support,
+            tiling: AtomicBool::new(false),
+            rects: Mutex::default(),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
                 stream: DesktopStream::new(quality, chroma),
@@ -370,6 +401,8 @@ impl Shared {
             feedback,
             units: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
+            tiles: AtomicU64::new(0),
+            tile_bytes: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
@@ -401,15 +434,17 @@ impl VideoSink {
     /// Start an encoder for one engine. `engine` prefixes its log lines. `plan` is
     /// the resolved render dial ([`crate::config::TargetConfig::render_plan`]).
     /// `feedback` is the session's link measurement ([`crate::feedback`]), read by
-    /// an adaptive plan.
+    /// an adaptive plan. `tiles` says whether the source can carry a desktop past the
+    /// video ceiling as tiles.
     pub fn new(
         engine: &'static str,
         frame_tx: mpsc::Sender<ServerMsg>,
         plan: RenderPlan,
         feedback: Arc<LinkFeedback>,
+        tiles: TileSupport,
     ) -> Self {
         let (tx, rx) = mpsc::channel(ENCODE_DEPTH);
-        let shared = Arc::new(Shared::new(plan, feedback));
+        let shared = Arc::new(Shared::new(plan, feedback, tiles));
         tokio::spawn(order_loop(engine, rx, frame_tx, Arc::clone(&shared)));
         Self { engine, tx, shared }
     }
@@ -419,8 +454,43 @@ impl VideoSink {
     /// Nothing is sent until the engine says a frame has ended ([`Self::frame`]):
     /// the unit of the encoder is the whole framebuffer, and a rectangle is only a
     /// part of the next one.
+    ///
+    /// While [`Self::tiling`] the rectangle is kept whole instead, to go out as one
+    /// tile of its own at the next [`Self::frame`].
     pub async fn damage(&self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
+        if self.tiling() {
+            self.shared.rects.lock().unwrap().push((rect, rgb.to_vec()));
+            return Ok(());
+        }
         self.shared.video.lock().await.stream.blit(rect, rgb)
+    }
+
+    /// Whether the desktop is past the video ceiling and carried as tiles: then
+    /// [`Self::damage`] wants each rectangle whole, as the remote sent it, and a
+    /// source must not trim it. Changes only with a `Resize` through [`Self::msg`].
+    pub fn tiling(&self) -> bool {
+        self.shared.tiling.load(Ordering::Relaxed)
+    }
+
+    /// Queue the rectangles taken since the last call as tiles, PNG-encoded on a
+    /// blocking worker, in their place among the messages around them. Every one goes
+    /// out and none waits for an interval: nothing re-sends a rectangle.
+    async fn queue_tiles(&self) -> anyhow::Result<()> {
+        let rects = std::mem::take(&mut *self.shared.rects.lock().unwrap());
+        if rects.is_empty() {
+            return Ok(());
+        }
+        let handle = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let tiles = rects
+                .iter()
+                .map(|(rect, rgb)| Tile::from_rgb(rect.left, rect.top, rect.w(), rect.h(), rgb))
+                .collect();
+            (tiles, micros(started))
+        });
+        let estimate = usize::try_from(self.shared.round_bytes.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
+        let held = self.hold(estimate).await;
+        self.push(Pending::Tiles(handle, held)).await
     }
 
     /// One remote frame has ended: encode everything [`Self::damage`] has blitted
@@ -444,6 +514,9 @@ impl VideoSink {
     /// must also call it when [`Self::due_at`] says to — see there for why that second
     /// half is not optional.
     pub async fn frame(&self) -> anyhow::Result<()> {
+        if self.tiling() {
+            return self.queue_tiles().await;
+        }
         let mut video = self.shared.video.lock().await;
         if video.stream.round_out() {
             // The previous round is still encoding, and it *is* this call's answer:
@@ -607,9 +680,34 @@ impl VideoSink {
     /// end the session silently on the picker. Building the mirror and the stream
     /// waits for [`Self::damage`], which is on the engines' `?` path and ends the
     /// session with the message attached.
+    ///
+    /// A resize is also where the picture moves between video and tiles, for a source
+    /// that has them ([`TileSupport`]): past the ceiling it is tiles, within it video.
+    /// Either way the remote repaints the resized desktop in full, which is what a
+    /// browser changing carriage starts from; back on video, the stream starts over
+    /// from a keyframe as a browser that attached would.
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
+        if self.tiling() {
+            // Rectangles taken before this message are drawn before it.
+            self.queue_tiles().await?;
+        }
         if let ServerMsg::Resize { w, h, .. } = &msg {
-            self.shared.video.lock().await.stream.want(*w, *h);
+            let (w, h) = (*w, *h);
+            let tiling = self.shared.tile_support == TileSupport::Rects
+                && !video::within_ceiling((u32::from(w), u32::from(h)));
+            if self.shared.tiling.swap(tiling, Ordering::Relaxed) != tiling {
+                if tiling {
+                    info!(
+                        "{}: a {w}x{h} desktop is past what a video stream encodes; \
+                         its rectangles go to the browser as tiles",
+                        self.engine
+                    );
+                } else {
+                    info!("{}: a {w}x{h} desktop goes to the browser as video again", self.engine);
+                    self.reset_render();
+                }
+            }
+            self.shared.video.lock().await.stream.want(w, h);
         }
         self.push(Pending::Msg(msg)).await
     }
@@ -665,7 +763,7 @@ impl VideoSink {
     /// zeroes says nothing.
     fn report(&self) {
         let totals = Totals::of(&self.shared);
-        if totals.units > 0 {
+        if totals.units > 0 || totals.tiles > 0 {
             info!("{}: encode totals: {totals}", self.engine);
         }
     }
@@ -768,6 +866,12 @@ async fn order_loop(
                 continue;
             }
             Pending::Round(handle, held) => (handle, held),
+            Pending::Tiles(handle, held) => {
+                if !forward_tiles(engine, &shared, &frame_tx, handle, held).await {
+                    break;
+                }
+                continue;
+            }
         };
         // `waiting` accrues only while the handle is found unfinished, so a round
         // already encoded when its turn comes adds encode time and no waiting — the
@@ -848,6 +952,45 @@ async fn order_loop(
     }
 }
 
+/// Collect one update's tiles and forward them, each with its part of the share
+/// taken for them all. `false` when the queue is done: the encode failed, or the
+/// browser has gone.
+async fn forward_tiles(
+    engine: &'static str,
+    shared: &Shared,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+    handle: JoinHandle<(anyhow::Result<Vec<Tile>>, u64)>,
+    mut held: Held,
+) -> bool {
+    let started = Instant::now();
+    let joined = handle.await;
+    shared.waited_micros.fetch_add(micros(started), Ordering::Relaxed);
+    let mut tiles = match joined {
+        Ok((Ok(tiles), encode_micros)) => {
+            shared.encode_micros.fetch_add(encode_micros, Ordering::Relaxed);
+            tiles
+        }
+        Ok((Err(e), _)) => {
+            give_up(engine, shared, e.context("tile encode failed"));
+            return false;
+        }
+        Err(e) => {
+            give_up(engine, shared, anyhow::Error::new(e).context("tile encoder stopped"));
+            return false;
+        }
+    };
+    let bytes: usize = tiles.iter().map(|tile| tile.data.len()).sum();
+    shared.round_bytes.store(bytes as u64, Ordering::Relaxed);
+    held.settle(bytes);
+    for tile in &mut tiles {
+        tile.held = held.split(tile.data.len());
+    }
+    shared.tiles.fetch_add(tiles.len() as u64, Ordering::Relaxed);
+    shared.tile_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    debug!("{engine}: {} tile(s): {bytes} bytes", tiles.len());
+    frame_tx.send(ServerMsg::Tiles(tiles)).await.is_ok()
+}
+
 /// Record why the queue stopped, for the engine's next push to report.
 fn give_up(engine: &str, shared: &Shared, error: anyhow::Error) {
     warn!("{engine}: {error:#}");
@@ -882,6 +1025,8 @@ fn micros(since: Instant) -> u64 {
 struct Totals {
     units: u64,
     encoded_bytes: u64,
+    tiles: u64,
+    tile_bytes: u64,
     keyframes: u64,
     keyframe_bytes: u64,
     skipped: u64,
@@ -899,6 +1044,8 @@ impl Totals {
         Self {
             units: shared.units.load(Ordering::Relaxed),
             encoded_bytes: shared.encoded_bytes.load(Ordering::Relaxed),
+            tiles: shared.tiles.load(Ordering::Relaxed),
+            tile_bytes: shared.tile_bytes.load(Ordering::Relaxed),
             keyframes: shared.keyframes.load(Ordering::Relaxed),
             keyframe_bytes: shared.keyframe_bytes.load(Ordering::Relaxed),
             skipped: shared.skipped.load(Ordering::Relaxed),
@@ -915,11 +1062,14 @@ impl fmt::Display for Totals {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} access unit(s) / {} bytes, {} keyframe(s) / {} bytes, {} skipped, \
+            "{} access unit(s) / {} bytes, {} tile(s) / {} bytes, \
+             {} keyframe(s) / {} bytes, {} skipped, \
              {} round(s) coarsened (lowest quality {}), \
              {}µs encoding in {}µs of waiting, engine stalled {}µs",
             self.units,
             self.encoded_bytes,
+            self.tiles,
+            self.tile_bytes,
             self.keyframes,
             self.keyframe_bytes,
             self.skipped,
@@ -970,12 +1120,98 @@ mod tests {
     /// it needs before it will accept any pixels.
     async fn video_sink(w: u16, h: u16) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback());
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), TileSupport::None);
         sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         // The resize itself, so a test can count what follows.
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
         (sink, frame_rx)
+    }
+
+    /// A sink for a source that can carry an oversize desktop as tiles, told the
+    /// desktop is `w`×`h`.
+    async fn tile_sink(w: u16, h: u16) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), TileSupport::Rects);
+        sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
+        (sink, frame_rx)
+    }
+
+    /// Past the ceiling, a source with rectangles has each one sent as it came:
+    /// one tile per rectangle, at its place and size, in order, and no stream.
+    #[tokio::test]
+    async fn an_oversize_desktop_goes_as_the_sources_own_rectangles() {
+        let (sink, mut frame_rx) = tile_sink(5376, 2288).await;
+        assert!(sink.tiling());
+
+        let rects = [rect(5000, 2000, 7, 5), rect(3, 4, 64, 2)];
+        for (seed, area) in rects.iter().enumerate() {
+            sink.damage(*area, &rgb(area.w(), area.h(), seed as u8)).await.unwrap();
+        }
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let Some(ServerMsg::Tiles(tiles)) = frame_rx.recv().await else {
+            panic!("an oversize desktop did not go as tiles");
+        };
+        let placed: Vec<_> = tiles.iter().map(|t| (t.x, t.y, t.w, t.h)).collect();
+        assert_eq!(placed, vec![(5000, 2000, 7, 5), (3, 4, 64, 2)]);
+        assert!(frame_rx.try_recv().is_err(), "an oversize desktop sent more than its tiles");
+        assert!(sink.due_at().await.is_none(), "a tile waits for nothing");
+    }
+
+    /// Within the ceiling a source with rectangles is video like any other, and a
+    /// source without them past the ceiling fails as it always has.
+    #[tokio::test]
+    async fn tiles_are_only_for_a_desktop_video_cannot_carry() {
+        let (sink, mut frame_rx) = tile_sink(1280, 800).await;
+        assert!(!sink.tiling());
+        let area = rect(0, 0, 64, 64);
+        sink.damage(area, &rgb(64, 64, 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain_units(&mut frame_rx, 1).await;
+
+        let (sink, _frame_rx) = video_sink(5376, 2288).await;
+        assert!(!sink.tiling());
+        let error = sink.damage(area, &rgb(64, 64, 1)).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("will not encode a 5376x2288 picture"),
+            "unexpected refusal: {error:#}"
+        );
+    }
+
+    /// A desktop that shrinks back under the ceiling is video again, and its stream
+    /// starts where a decoder can: an announcement and a keyframe. A desktop that
+    /// grows past it sends what it had pending first, then tiles.
+    #[tokio::test]
+    async fn crossing_the_ceiling_changes_the_carriage_at_the_resize() {
+        let (sink, mut frame_rx) = tile_sink(1280, 800).await;
+        let area = rect(0, 0, 64, 64);
+        sink.damage(area, &rgb(64, 64, 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain_units(&mut frame_rx, 1).await;
+
+        sink.msg(ServerMsg::Resize { w: 5376, h: 2288, scale: UNSCALED }).await.unwrap();
+        sink.damage(area, &rgb(64, 64, 2)).await.unwrap();
+        sink.msg(ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).await.unwrap();
+        assert!(!sink.tiling());
+        sink.damage(area, &rgb(64, 64, 3)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 5).await;
+        assert!(matches!(out[0], ServerMsg::Resize { w: 5376, .. }));
+        assert!(
+            matches!(&out[1], ServerMsg::Tiles(tiles) if tiles.len() == 1),
+            "the rectangle taken past the ceiling did not go out before the next resize"
+        );
+        assert!(matches!(out[2], ServerMsg::Resize { w: 1280, .. }));
+        assert!(matches!(out[3], ServerMsg::VideoFormat { .. }), "video came back unannounced");
+        assert!(matches!(&out[4], ServerMsg::Video(unit) if unit.keyframe));
     }
 
     /// Take the next `units` access units, stepping over the format announcements among them.
@@ -1364,7 +1600,7 @@ mod tests {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let plan = RenderPlan { quality: 60, adaptive: Some(10), chroma: Chroma::Subsampled };
-        let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link));
+        let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), TileSupport::None);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
@@ -1437,7 +1673,7 @@ mod tests {
     #[tokio::test]
     async fn a_desktop_too_large_fails_on_the_pixel_path_not_the_message_path() {
         let (frame_tx, _frame_rx) = mpsc::channel(64);
-        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback());
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), TileSupport::None);
 
         sink.msg(ServerMsg::Resize { w: 5120, h: 2880, scale: UNSCALED })
             .await
@@ -1473,7 +1709,7 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_frame_channel_is_reported_as_a_closed_channel() {
         let (frame_tx, frame_rx) = mpsc::channel(1);
-        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback());
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), TileSupport::None);
         drop(frame_rx);
 
         sink.msg(ServerMsg::RemoteOs { macos: false }).await.unwrap();
@@ -1619,7 +1855,7 @@ mod tests {
     #[test]
     fn an_adaptive_plan_carries_its_floor_into_the_walk() {
         let plan = RenderPlan { quality: 60, adaptive: Some(25), chroma: Chroma::Subsampled };
-        let shared = Shared::new(plan, feedback());
+        let shared = Shared::new(plan, feedback(), TileSupport::None);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware, "the walk ignores lag");
         assert_eq!(video.congestion.floor, 25);

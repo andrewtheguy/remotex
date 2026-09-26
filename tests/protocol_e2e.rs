@@ -56,6 +56,22 @@ async fn spawn_fake_vnc() -> u16 {
     spawn_fake_vnc_with_clipboard(None).await.0
 }
 
+/// As [`spawn_fake_vnc`], with a desktop of `w`×`h`.
+async fn spawn_fake_vnc_sized(w: u16, h: u16) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = serve_fake_vnc(stream, (w, h), None, tx).await;
+            });
+        }
+    });
+    port
+}
+
 /// As [`spawn_fake_vnc`], but the server announces `cut_text` as its clipboard
 /// and reports every `ClientCutText` it receives on the returned channel.
 ///
@@ -76,7 +92,7 @@ async fn spawn_fake_vnc_with_clipboard(
         while let Ok((stream, _)) = listener.accept().await {
             let tx = tx.clone();
             tokio::spawn(async move {
-                let _ = serve_fake_vnc(stream, cut_text, tx).await;
+                let _ = serve_fake_vnc(stream, (FAKE_DESKTOP, FAKE_DESKTOP), cut_text, tx).await;
             });
         }
     });
@@ -85,6 +101,7 @@ async fn spawn_fake_vnc_with_clipboard(
 
 async fn serve_fake_vnc(
     mut stream: TcpStream,
+    (w, h): (u16, u16),
     cut_text: Option<&'static [u8]>,
     received_cut_text: mpsc::UnboundedSender<Vec<u8>>,
 ) -> std::io::Result<()> {
@@ -97,8 +114,8 @@ async fn serve_fake_vnc(
     stream.read_exact(&mut [0u8; 1]).await?; // ClientInit (shared flag)
 
     let mut server_init = Vec::new();
-    server_init.extend_from_slice(&FAKE_DESKTOP.to_be_bytes());
-    server_init.extend_from_slice(&FAKE_DESKTOP.to_be_bytes());
+    server_init.extend_from_slice(&w.to_be_bytes());
+    server_init.extend_from_slice(&h.to_be_bytes());
     server_init.extend_from_slice(&[0u8; 16]); // native pixel format (overridden)
     server_init.extend_from_slice(&4u32.to_be_bytes());
     server_init.extend_from_slice(b"fake");
@@ -139,14 +156,11 @@ async fn serve_fake_vnc(
                 update.extend_from_slice(&1u16.to_be_bytes()); // one rect
                 update.extend_from_slice(&0u16.to_be_bytes()); // x
                 update.extend_from_slice(&0u16.to_be_bytes()); // y
-                update.extend_from_slice(&FAKE_DESKTOP.to_be_bytes());
-                update.extend_from_slice(&FAKE_DESKTOP.to_be_bytes());
+                update.extend_from_slice(&w.to_be_bytes());
+                update.extend_from_slice(&h.to_be_bytes());
                 update.extend_from_slice(&0i32.to_be_bytes()); // raw encoding
                 // BGRX pixels (the format the engine forces).
-                update.extend_from_slice(&vec![
-                    0x40u8;
-                    usize::from(FAKE_DESKTOP) * usize::from(FAKE_DESKTOP) * 4
-                ]);
+                update.extend_from_slice(&vec![0x40u8; usize::from(w) * usize::from(h) * 4]);
                 stream.write_all(&update).await?;
             }
             // KeyEvent
@@ -1278,15 +1292,16 @@ async fn expect_picker(ws: &mut Ws) {
 }
 
 /// Read from the socket until a binary frame of the desktop's stream arrives.
-async fn expect_frame(ws: &mut Ws) {
+async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchRecord> {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
                     // are checked on the way past.
-                    assert!(!common::batch_units(&frame).is_empty());
-                    return;
+                    let records = common::batch_records(&frame);
+                    assert!(!records.is_empty());
+                    return records;
                 }
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1298,7 +1313,7 @@ async fn expect_frame(ws: &mut Ws) {
         panic!("websocket ended while waiting for a frame");
     })
     .await
-    .expect("timed out waiting for a frame");
+    .expect("timed out waiting for a frame")
 }
 
 async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) -> ScrollRequest {
@@ -1532,6 +1547,57 @@ async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_
     let mut ws_b = connect_ws(addr, &token_b, &cookie).await;
     expect_resize(&mut ws_b, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_frame(&mut ws_b).await;
+}
+
+/// On a session the window does not size, a desktop past what a video stream
+/// encodes goes to the browser as the server's own rectangles — one tile each, at its place and size — and a reattach repaints it
+/// the same way. Within the ceiling the same server is video (the tests above).
+#[tokio::test]
+async fn an_oversize_vnc_desktop_goes_as_the_servers_rectangles() {
+    // A long side just past 3840, and as little else as that allows.
+    let (w, h) = (3842, 2);
+    let vnc_port = spawn_fake_vnc_sized(w, h).await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, w, h).await;
+
+    let the_whole_rect = |records: Vec<common::BatchRecord>| match records.as_slice() {
+        [common::BatchRecord::Tile(tile)] => assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, w, h)),
+        _ => panic!("expected the server's one rectangle as one tile"),
+    };
+    the_whole_rect(expect_frame(&mut ws).await);
+
+    // A reattach asks the server for the whole desktop, and it comes back as tiles.
+    ws.close(None).await.unwrap();
+    drop(ws);
+    let (status, body) =
+        common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
+    assert_eq!(status, 200, "reclaim after detach failed: {body}");
+    let token = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    expect_resize(&mut ws, w, h).await;
+    the_whole_rect(expect_frame(&mut ws).await);
+}
+
+/// With `resize` the window sizes the desktop and tiles are never used: a server
+/// that answers past the ceiling ends the session with the stream's refusal.
+#[tokio::test]
+async fn an_oversize_vnc_desktop_under_resize_is_refused() {
+    let (w, h) = (3842, 2);
+    let vnc_port = spawn_fake_vnc_sized(w, h).await;
+    let addr = spawn_app(TargetConfig { resize: true, ..target(Protocol::Vnc, vnc_port) }).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    let error = expect_error(&mut ws).await;
+    assert!(error.contains("will not encode a 3842x2 picture"), "unexpected error: {error}");
 }
 
 /// Logging out ends the desktop, and the login after it starts from the picker.
@@ -2019,7 +2085,12 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
-    expect_frame(&mut ws).await;
+    // A desktop within the ceiling is video, whatever the source can do.
+    let records = expect_frame(&mut ws).await;
+    assert!(
+        records.iter().all(|record| matches!(record, common::BatchRecord::Unit(_))),
+        "a desktop within the ceiling went as tiles"
+    );
 
     for (button, bit) in [("right", 0x02), ("middle", 0x04)] {
         for pressed in [true, false] {
