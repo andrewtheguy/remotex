@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.270"
+version = "0.0.271"
 
 [package]
 name = "remotex"
@@ -95,18 +95,6 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # no C, no assembler, the same bargain as above — and three times the speed of the
 # scalar loop it replaced, which on a six-core host was two fifths of a 1080p encode.
 yuv = "0.8"
-# OpenH264, for the H.264 a Windows host draws video with on the graphics pipeline
-# (src/rdp_client/avc.rs): AVC420 and both AVC444 shapes, decoded here and encoded
-# as VP9 like every other rectangle. The wrapper crate is crates.io's; its sys
-# crate is patched below to `openh264-prebuilt`, the same crate with its `cc` and
-# `nasm` build replaced by a download of the archive OpenH264's own Makefile
-# built — the same bargain as libvpx above, and a clean build that no longer
-# compiles Cisco's C++. The x86-64 archives keep OpenH264's CPUID dispatch, so the
-# release binaries keep their x86-64 floor; arm64 gets NEON. BSD-2-Clause. Cisco's
-# licence for the AVC patent pool covers the binary Cisco ships, not a build of
-# the source, which is what the archive is; the `libloading` feature that would
-# fetch Cisco's binary at run time is off.
-openh264 = "0.9.8"
 # FFmpeg's HEVC decoder, for High Performance's HEVC screen video
 # (src/vnc_apple_media.rs), behind the `apple-hp-media` feature above: the Mac's
 # picture over its media stream, decoded here and re-encoded as VP9. The same
@@ -302,10 +290,3 @@ strip = false
 lto = false
 codegen-units = 16
 incremental = true
-
-# The `openh264` wrapper above reaches OpenH264 through `openh264-sys2`, which this
-# replaces with the drop-in from `openh264-prebuilt` (see the wrapper's entry): same
-# name, version and bindings, and a build script that downloads that repository's
-# latest archive for the target instead of compiling OpenH264's C++.
-[patch.crates-io]
-openh264-sys2 = { git = "https://github.com/andrewtheguy/openh264-prebuilt", tag = "v2.6.0-20260926174449-d069f50" }
