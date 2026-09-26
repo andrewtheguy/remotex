@@ -125,12 +125,15 @@ The client sets `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in the GCC core data, and
 Windows host answers by opening `Microsoft::Windows::RDS::Graphics` over `drdynvc`
 — the same dynamic channel transport Display Control rides, so `drdynvc` is asked
 for when either key is on. The client accepts the channel and at once advertises
-every capability set from version 8 to 10.7 (`proto/gfx.rs::caps_advertise`), each
-with the small cache and none with `AVC_DISABLED`, so the host may draw with H.264
-in every mode it has; 10.4 is the set that lets a host mix H.264 with the other
-codecs in one frame, which is how Windows draws a desktop with video playing on
-it. `THINCLIENT` and `AVC_THINCLIENT` are deliberately not set. The host confirms
-the newest set it knows — a Windows 11 host, 10.7 — and then draws.
+every capability set from version 8 to 10.4, and 10.7
+(`proto/gfx.rs::caps_advertise`), each with the small cache and none with
+`AVC_DISABLED`, so the host may draw with H.264 in every mode it has; 10.4 is the
+set that lets a host mix H.264 with the other codecs in one frame, which is how
+Windows draws a desktop with video playing on it. 10.5 and 10.6 are left out and
+10.7 carries `SCALEDMAP_DISABLE`: from 10.5 a host may map surfaces to the output
+through the scaled mappings this client ignores, and only 10.7 has a flag to
+refuse them. `THINCLIENT` and `AVC_THINCLIENT` are deliberately not set. The host
+confirms the newest set it knows — a Windows 11 host, 10.7 — and then draws.
 
 Every PDU the host sends on the channel is wrapped in RDP 8 bulk compression
 (`proto/zgfx.rs`), a port of FreeRDP's decoder: a fixed Huffman table over

@@ -87,8 +87,6 @@ pub const CAPVERSION_101: u32 = 0x000A_0100;
 pub const CAPVERSION_102: u32 = 0x000A_0200;
 pub const CAPVERSION_103: u32 = 0x000A_0301;
 pub const CAPVERSION_104: u32 = 0x000A_0400;
-pub const CAPVERSION_105: u32 = 0x000A_0502;
-pub const CAPVERSION_106: u32 = 0x000A_0600;
 pub const CAPVERSION_107: u32 = 0x000A_0701;
 /// The client keeps the smaller bitmap cache: 4096 slots and 16 MiB, rather than
 /// 25600 and 100 MiB. Version 10.3 has no such flag; choosing it implies the same.
@@ -344,20 +342,24 @@ pub(crate) fn pdu(command: u16, body: &[u8]) -> Vec<u8> {
     w.finish()
 }
 
-/// What this client can take: every capability set from version 8 to 10.7, with
-/// the small cache, and H.264 in every mode.
+/// What this client can take: every capability set from version 8 to 10.4, and
+/// 10.7, with the small cache, and H.264 in every mode.
 ///
 /// The host confirms the newest set it knows, and what the sets add over version 8
 /// is H.264: 8.1 with the YUV420 mode flagged on, 10 implying the YUV444 mode as
 /// well, 10.1 the second YUV444 layout, and 10.4 H.264 in the same frame as the
 /// other codecs — which is how a current Windows host draws a desktop with video
-/// playing on it, the video in AVC and the rest in ClearCodec and Progressive, and
-/// why every set up to 10.7 is here. `AVC_THINCLIENT`, which would ask for the
-/// whole desktop in AVC444, is not set: the host's own choice by region is the
-/// better picture for text. `THINCLIENT` is deliberately not set either: a current
-/// host ignores it, and an older one would answer it with RemoteFX rather than the
-/// progressive form. 10.7's `SCALEDMAP_DISABLE` is set, since the scaled mappings
-/// are commands this client ignores.
+/// playing on it, the video in AVC and the rest in ClearCodec and Progressive.
+/// `AVC_THINCLIENT`, which would ask for the whole desktop in AVC444, is not set:
+/// the host's own choice by region is the better picture for text. `THINCLIENT`
+/// is deliberately not set either: a current host ignores it, and an older one
+/// would answer it with RemoteFX rather than the progressive form.
+///
+/// 10.5 and 10.6 are left out, and 10.7 carries `SCALEDMAP_DISABLE`: from 10.5 a
+/// host may map a surface to the output through the scaled mappings, commands
+/// this client ignores, and only 10.7 has a flag to say so. A host that knows
+/// 10.5 or 10.6 but not 10.7 settles on 10.4, as it does with FreeRDP built
+/// without image scaling.
 pub fn caps_advertise() -> Vec<u8> {
     let sets = [
         (CAPVERSION_8, Some(CAPS_SMALL_CACHE)),
@@ -368,12 +370,10 @@ pub fn caps_advertise() -> Vec<u8> {
         (CAPVERSION_102, Some(CAPS_SMALL_CACHE)),
         (CAPVERSION_103, Some(0)),
         (CAPVERSION_104, Some(CAPS_SMALL_CACHE)),
-        (CAPVERSION_105, Some(CAPS_SMALL_CACHE)),
-        (CAPVERSION_106, Some(CAPS_SMALL_CACHE)),
         (CAPVERSION_107, Some(CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE)),
     ];
     let mut w = Writer::with_capacity(2 + sets.len() * 12 + 12);
-    w.u16_le(u16::try_from(sets.len()).expect("ten"));
+    w.u16_le(u16::try_from(sets.len()).expect("eight"));
     for (version, flags) in sets {
         w.u32_le(version);
         match flags {
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(r.u16_le().unwrap(), CMD_CAPS_ADVERTISE);
         assert_eq!(r.u16_le().unwrap(), 0);
         assert_eq!(r.u32_le().unwrap() as usize, caps.len());
-        assert_eq!(r.u16_le().unwrap(), 10);
+        assert_eq!(r.u16_le().unwrap(), 8);
         let mut set = || (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap());
         assert_eq!(set(), (CAPVERSION_8, 4, CAPS_SMALL_CACHE));
         assert_eq!(set(), (CAPVERSION_81, 4, CAPS_SMALL_CACHE | CAPS_AVC420_ENABLED));
@@ -638,8 +638,7 @@ mod tests {
         assert_eq!(set(), (CAPVERSION_102, 4, CAPS_SMALL_CACHE));
         assert_eq!(set(), (CAPVERSION_103, 4, 0));
         assert_eq!(set(), (CAPVERSION_104, 4, CAPS_SMALL_CACHE));
-        assert_eq!(set(), (CAPVERSION_105, 4, CAPS_SMALL_CACHE));
-        assert_eq!(set(), (CAPVERSION_106, 4, CAPS_SMALL_CACHE));
+        // Not 10.5 or 10.6: they would let the host use the scaled mappings.
         assert_eq!(set(), (CAPVERSION_107, 4, CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE));
         assert!(r.is_empty());
 

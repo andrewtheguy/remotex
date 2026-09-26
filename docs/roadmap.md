@@ -215,7 +215,7 @@ beside it. That crash is the risk now, and stage 2 starts with its backtrace.
 
 ### `THINCLIENT` in the graphics capability advertise
 
-`caps_advertise` in `proto/gfx.rs` sends every version from 8 to 10.7 with the
+`caps_advertise` in `proto/gfx.rs` sends every version from 8 to 10.4, and 10.7, with the
 small cache and leaves `RDPGFX_CAPS_FLAG_THINCLIENT` unset. A current Windows host, the only host this client targets, ignores the
 flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
 progressive form, are not supported, so there is nothing for the flag to change.
