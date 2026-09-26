@@ -135,16 +135,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rpm
 
-      # OpenH264's x86-64 SIMD is assembled with nasm (packaging/README.md);
-      # without one on the PATH its sys crate silently builds the slower C++.
-      - name: Install nasm for OpenH264
-        if: matrix.target-note == 'linux-x86_64'
-        run: sudo apt-get install -y nasm
-
-      - name: Install nasm for OpenH264
-        if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
-
       # jemalloc takes its page size from the build host, and a 4K build refuses to
       # start on the 16K and 64K kernels arm64 boards ship (Raspberry Pi 5). 64K pages
       # run on all three. Set for every later step, so the container binary gets it too.

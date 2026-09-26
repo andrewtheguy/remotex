@@ -97,15 +97,15 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 yuv = "0.8"
 # OpenH264, for the H.264 a Windows host draws video with on the graphics pipeline
 # (src/rdp_client/avc.rs): AVC420 and both AVC444 shapes, decoded here and encoded
-# as VP9 like every other rectangle. Cisco's decoder, built from its vendored
-# source by the sys crate's `cc` — C++ throughout, so the build needs a C++
-# compiler — with its x86-64 assembly when `nasm` is on the PATH and the portable
-# C++ when it is not, which the sys crate's build output says. The assembly chooses
-# its SSE and AVX paths at run time from the CPU it finds, and the C++ is compiled
-# for the baseline, so the release binaries keep their x86-64 floor; arm64 gets
-# NEON through `cc`. BSD-2-Clause. Cisco's licence for the AVC patent pool covers
-# the binary Cisco ships, not a build from source, which is what this is; the
-# `libloading` feature that would fetch Cisco's binary at run time is off.
+# as VP9 like every other rectangle. The wrapper crate is crates.io's; its sys
+# crate is patched below to `openh264-prebuilt`, the same crate with its `cc` and
+# `nasm` build replaced by a download of the archive OpenH264's own Makefile
+# built — the same bargain as libvpx above, and a clean build that no longer
+# compiles Cisco's C++. The x86-64 archives keep OpenH264's CPUID dispatch, so the
+# release binaries keep their x86-64 floor; arm64 gets NEON. BSD-2-Clause. Cisco's
+# licence for the AVC patent pool covers the binary Cisco ships, not a build of
+# the source, which is what the archive is; the `libloading` feature that would
+# fetch Cisco's binary at run time is off.
 openh264 = "0.9.8"
 # FFmpeg's HEVC decoder, for High Performance's HEVC screen video
 # (src/vnc_apple_media.rs), behind the `apple-hp-media` feature above: the Mac's
@@ -302,3 +302,10 @@ strip = false
 lto = false
 codegen-units = 16
 incremental = true
+
+# The `openh264` wrapper above reaches OpenH264 through `openh264-sys2`, which this
+# replaces with the drop-in from `openh264-prebuilt` (see the wrapper's entry): same
+# name, version and bindings, and a build script that downloads that repository's
+# latest archive for the target instead of compiling OpenH264's C++.
+[patch.crates-io]
+openh264-sys2 = { git = "https://github.com/andrewtheguy/openh264-prebuilt", tag = "v2.6.0-20260926170220-e070a14" }
