@@ -28,8 +28,8 @@ Mac is reached
 over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
 or in High Performance with `ard-high-performance` (a virtual display, with its
-picture and sound over the Mac's media stream, as Apple's viewer takes them). Remote audio is either encoded as
-Opus or passed through as PCM and sent on `/ws/audio`, never on the picture queue.
+picture and sound over the Mac's media stream, as Apple's viewer takes them). Remote audio is encoded as
+Opus and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
 extension on a generic VNC target. The redirection is experimental —
@@ -61,7 +61,7 @@ see [Camera frames](#camera-frames).
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | libvpx — the video codec |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs`, `pcm_stream.rs` | PCM queue, Opus encoding or PCM passthrough, resampling |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding, resampling |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -607,12 +607,10 @@ repeated: u16 packet length | packet bytes
 ```
 
 There is no codec byte in the binary frame; the codec is named once, out of
-band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
-
-| `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
-|---|---|---|---|---|---|
-| `opus` (default) | `opus` | `audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`, default 32 | 48 000 | 960 (20 ms) | `OpusHead` |
-| `pcm` | `pcm-s16le` | 1.41 Mbps at 44.1 kHz, 1.54 at 48 | the source's: 44 100 for RDP, 48 000 for wlshare | 0 (self-describing) | empty |
+band, in `audioFormat`. It is always Opus: `codec` is `opus`, `sampleRate`
+48 000, `packetFrames` 960 (20 ms), and `head` the `OpusHead`. The rate is
+`audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`,
+default 32.
 
 Opus is encoded in `Application::Audio` mode under constrained VBR, set
 explicitly in `src/opus_stream.rs`: `audio_bitrate` is the average the encoder
@@ -634,31 +632,9 @@ While the link is *behind*, wave buffers that are pure silence are shed before
 the encoder instead of queued — silence is the one content whose loss cannot be
 heard, the client just receives no packets for a while (what a quiet remote
 already produces), and the backlog drains by exactly that much. All three keys
-are Opus-only and refused beside `pcm`, which has no encoder to tune; the floor
-is also refused beside `audio_adaptive = false`, and the default floor is held
-to a lower `audio_bitrate` rather than refused.
-
-`pcm` is passthrough: the remote's wave buffer becomes one packet, byte for
-byte, with no encoder in the gateway and no decoder in the client. `pcm-s16le`
-is deliberately not a WebCodecs codec string — the packets are interleaved
-signed 16-bit little-endian samples, which is what an `AudioBuffer` holds
-already, so the client builds one directly and schedules it on the same path an
-Opus packet reaches after decoding. That makes it the only option whose packets
-reach no decoder at all — which is a property of the path, not a compatibility
-escape hatch: the client refuses to start without WebCodecs either way.
-
-It also makes it the only option whose `sampleRate` follows the source: 44.1 kHz
-from an RDP host or a Mac, 48 kHz from wlshare. An
-`AudioBuffer` carries its own rate, so a context built at 48 kHz before the
-format arrived simply resamples on playback, exactly as the OS mixer would for
-any buffer that is not at the device's rate.
-
-The bandwidth is the whole of the trade: 1.41 Mbit/s at 44.1 kHz, 1.54 at 48, is
-fifteen times Opus or more, and
-is a local-network proposition only. It is not a quality argument — Opus at 96
-kbps is well clear of audible loss on this material. Guacamole carries desktop
-audio this way and only this way (its single encoder emits
-`audio/L16;rate=44100,channels=2`), which is where the option came from.
+are refused on a target without `audio`; the floor is also refused beside
+`audio_adaptive = false`, and the default floor is held to a lower
+`audio_bitrate` rather than refused.
 
 The RDP engine carries sound over MS-RDPEA (`rdp_client/proto/rdpsnd.rs`).
 `audio = true` names the `rdpsnd` and `rdpdr` static channels and leaves
@@ -694,12 +670,10 @@ that FIFO, which would deliver stale audio faithfully.
 
 The client owns its playback schedule. It starts at the current audio playhead
 with no added cushion and clamps accumulated lead to 300 ms, trimming the front
-of an incoming buffer instead of turning temporary jitter into lasting latency. What
-reaches that schedule differs by codec, and only there. The client does not decode
-anything itself: an *encoded* stream goes to WebCodecs, so a codec a browser will
-not take surfaces as a decoder error naming it rather than as silence. A
-`pcm-s16le` stream reaches no decoder at all; the client turns the packet into an
-`AudioBuffer` and schedules it directly.
+of an incoming buffer instead of turning temporary jitter into lasting latency.
+The client does not decode anything itself: the stream goes to WebCodecs, so a
+codec a browser will not take surfaces as a decoder error naming it rather than
+as silence.
 
 An **`ard-high-performance`** engine always carries sound, from the Mac's media
 stream: AAC-ELD at 48 kHz stereo over SRTP, authenticated and decrypted per
@@ -718,8 +692,8 @@ touches the Mac's sound output either, which keeps playing where the Mac sends i
 An audio-enabled **generic VNC** engine has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
 with an empty rectangle, at which point the gateway names the format it wants —
-48 kHz, 16-bit stereo, little-endian, so under `pcm` the packets are 48 kHz
-rather than 44.1, and `audioFormat` says so — and turns the stream on; the sound then
+48 kHz, 16-bit stereo, little-endian, which is Opus's own rate — and turns the
+stream on; the sound then
 arrives as FLAC frames on the RFB connection itself, and each is decoded into
 exactly the samples wlshare captured, in the format the queue takes. A server
 that announces nothing gives a desktop and no sound, which is the whole of the
@@ -789,8 +763,7 @@ Windows 11 creates the channel and installs the redirected device as a real
 camera, enumerable by every capture application, for exactly as long as the camera
 socket holds it plugged.
 
-The gateway never transcodes — the PCM-passthrough bargain in the other
-direction. The browser encodes Annex B Constrained Baseline H.264
+The gateway never transcodes. The browser encodes Annex B Constrained Baseline H.264
 (`frontend/src/cameraSender.ts`) from a capture asked for at 640 pixels wide and at
 most 15 frames a second — a host without a GPU was measured taking samples below 30,
 and a faster camera only fills the queue until it drops to a keyframe — the host's

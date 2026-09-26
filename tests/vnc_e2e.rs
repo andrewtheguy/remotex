@@ -96,7 +96,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             clipboard: true,          // exercise the clipboard bridge
             audio_key: None,
             audio: false,             // VNC has no audio channel at all
-            audio_codec: None,
             camera: false,
             microphone: false,
             video_quality: None,

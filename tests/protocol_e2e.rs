@@ -1188,7 +1188,6 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         clipboard,
         audio_key: None,
         audio: false,
-        audio_codec: None,
         camera: false,
         microphone: false,
         video_quality: None,

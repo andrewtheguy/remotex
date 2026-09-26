@@ -5,10 +5,6 @@
 //! groups to 48 kHz. A codec then draws whatever packet size it wants out of the
 //! result.
 //!
-//! Not on the passthrough path, which reaches the wire without any of this — see
-//! [`crate::pcm_stream`]. Resampling is precisely what that option exists not to
-//! do, so nothing there may start routing through here.
-//!
 //! The group size is deliberately *not* a packet size. 882 in and 960 out is
 //! exact at 44.1 kHz, and that exactness is what lets the resampler be driven from
 //! its input side. Fixing the group and buffering the output is what keeps a
@@ -418,9 +414,7 @@ mod tests {
     }
 
     /// `i16::MIN` has to land on exactly -1.0 and nothing may exceed full scale,
-    /// because a sample that wraps is a click on every peak. The client's own
-    /// passthrough conversion is the inverse of this and pins the same two ends
-    /// (`frontend/src/audioPlayer.test.ts`).
+    /// because a sample that wraps is a click on every peak.
     #[test]
     fn the_ends_of_the_range_survive_the_conversion_to_f32() {
         let format = PcmFormat {

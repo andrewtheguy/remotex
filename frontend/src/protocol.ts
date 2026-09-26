@@ -242,12 +242,8 @@ export type ControlMsg =
   // thrown away the audio it was meant to decode.
   //
   // `codec` is `opus`, with the base64 `OpusHead` in `head` and `sampleRate` the
-  // 48 kHz the gateway resampled to — or `pcm-s16le`, which is not a WebCodecs
-  // codec at all: `head` is then empty, `sampleRate` is the remote's own, and the
-  // packets are interleaved signed 16-bit little-endian samples to play directly.
-  // `packetFrames` is the samples in one packet at `sampleRate` — 960 on Opus, and
-  // 0 on passthrough, whose packets carry their own length — and is the one thing
-  // a client cannot derive for itself.
+  // 48 kHz the gateway resampled to. `packetFrames` is the samples in one packet
+  // at `sampleRate` — 960 — and is the one thing a client cannot derive for itself.
   | {
       type: "audioFormat";
       codec: string;

@@ -1863,7 +1863,6 @@ mod tests {
             clipboard: false,
             audio_key: None,
             audio,
-            audio_codec: None,
             camera: false,
             microphone: false,
             video_quality: None,

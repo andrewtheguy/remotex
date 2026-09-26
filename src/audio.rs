@@ -2,22 +2,21 @@
 //!
 //! The broadcast queue never blocks the engine read loop and drops its oldest
 //! complete buffer when a listener falls behind. Encoding happens only while a
-//! client is attached; quiet remotes emit nothing. What a buffer is turned into
-//! is the target's ([`AudioCodec`]) — Opus packets, or the same bytes back out
-//! again — and everything else here is the same either way.
+//! client is attached; quiet remotes emit nothing. A buffer is turned into Opus
+//! packets at the rate the target's [`AudioPlan`] holds.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use bytes::Bytes;
 use futures_util::Stream;
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, watch};
 
-use crate::config::{AudioCodec, AudioPlan};
+use crate::config::AudioPlan;
 use crate::opus_stream::{OpusStream, OPUS_CODEC};
-use crate::pcm_stream::{PcmStream, PCM_CODEC};
 
 /// Complete PCM wave buffers retained before the oldest one is dropped.
 ///
@@ -62,9 +61,7 @@ const AUDIO_ADJUST_COOLDOWN: Duration = Duration::from_secs(2);
 /// PCM because it is the one [RDPSND audio format](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpea/30a6cc00-31c4-4e15-9aa4-95a5c5074697)
 /// clients and servers are both required to support, so accepting a compressed
 /// RDP format would make this depend on what a particular Windows version happens
-/// to offer. What the *gateway* then sends a browser is a separate question, and
-/// the target's [`AudioCodec`] answers it: Opus for anything that leaves the
-/// building, or these same bytes for a link fast enough not to care.
+/// to offer. What the *gateway* then sends a browser is Opus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PcmFormat {
     pub channels: u16,
@@ -80,7 +77,7 @@ impl PcmFormat {
 
     /// Bytes a second of this format occupies — RDPSND's `nAvgBytesPerSec`, and
     /// the number Opus exists to shrink: 176 400 for the format below, which is
-    /// 1.41 Mbit/s and exactly what `audio_codec = "pcm"` puts on the wire.
+    /// 1.41 Mbit/s.
     pub const fn byte_rate(self) -> u32 {
         self.sample_rate * self.block_align() as u32
     }
@@ -225,15 +222,15 @@ impl AudioListener {
     }
 
     /// Return everything the client has to be told, and a live-only stream of
-    /// packet batches. The stream ends with the bridge or consumer; a format this
-    /// codec cannot carry fails here.
+    /// packet batches. The stream ends with the bridge or consumer; a format the
+    /// encoder cannot carry fails here.
     pub fn into_packets(
         self,
         format: PcmFormat,
         plan: AudioPlan,
     ) -> Result<EncodedAudio<impl Stream<Item = Vec<Bytes>>>, anyhow::Error> {
         struct State {
-            encoder: PacketEncoder,
+            encoder: OpusStream,
             waves: broadcast::Receiver<Bytes>,
             /// The adaptive walk's verdict, written by whoever sends the packets;
             /// `None` on a fixed-rate plan. Read here because this is the side
@@ -248,11 +245,8 @@ impl AudioListener {
             started: tokio::time::Instant,
         }
 
-        let codec = plan.codec;
-        let (encoder, head) = PacketEncoder::new(format, plan)
-            .map_err(|e| anyhow::anyhow!("cannot carry {format:?} as {}: {e}", codec.name()))?;
-        let name = encoder.codec_name();
-        let sample_rate = encoder.sample_rate();
+        let (encoder, head) = OpusStream::new(format, plan.bitrate_bps)
+            .with_context(|| format!("cannot carry {format:?} as opus"))?;
         let packet_frames = encoder.packet_frames();
         let signals = plan
             .adaptive_floor_bps
@@ -271,9 +265,9 @@ impl AudioListener {
                     Ok(samples) => samples,
                     // Old audio was dropped while this consumer was behind.
                     // Skipping forward is the point: the alternative is a delay that
-                    // never comes back. The encoder carries on — packets on both
-                    // codecs are independently decodable, so a gap is a gap in the
-                    // sound rather than a broken stream.
+                    // never comes back. The encoder carries on — Opus packets are
+                    // independently decodable, so a gap is a gap in the sound
+                    // rather than a broken stream.
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
                         // The queue only laggs when the sender stopped draining it,
@@ -333,9 +327,9 @@ impl AudioListener {
                     state.started.elapsed().as_millis(),
                 );
                 match state.encoder.push(&samples) {
-                    // Empty when the buffer did not complete a packet — a partial
-                    // Opus frame, or a part-frame of PCM. Yielding nothing would
-                    // end the stream, so keep reading instead.
+                    // Empty when the buffer did not complete an Opus frame.
+                    // Yielding nothing would end the stream, so keep reading
+                    // instead.
                     Ok(packets) if packets.is_empty() => continue,
                     Ok(packets) => return Some((packets, state)),
                     Err(e) => {
@@ -346,8 +340,8 @@ impl AudioListener {
             }
         });
         Ok(EncodedAudio {
-            codec: name,
-            sample_rate,
+            codec: OPUS_CODEC,
+            sample_rate: crate::pcm48::SAMPLE_RATE,
             channels: format.channels,
             packet_frames,
             head,
@@ -369,21 +363,17 @@ fn is_silence(pcm: &[u8]) -> bool {
 
 /// A configured stream, and everything the client needs to play it.
 pub struct EncodedAudio<S> {
-    /// What this is: `opus`, or [`crate::pcm_stream::PCM_CODEC`]. Only the first
-    /// of those is a WebCodecs codec string, which is the client's cue that the
-    /// second needs no decoder.
+    /// The WebCodecs codec string the client configures its decoder with: `opus`.
     pub codec: &'static str,
-    /// The rate the client plays at: [`crate::pcm48::SAMPLE_RATE`] for Opus,
-    /// because that is what it was resampled to, and the *remote's* own rate for
-    /// passthrough, because nothing resampled it.
+    /// The rate the client plays at: [`crate::pcm48::SAMPLE_RATE`], because that
+    /// is what the encoder resampled to.
     pub sample_rate: u32,
     pub channels: u16,
-    /// Samples per packet at [`Self::sample_rate`]: 960 for Opus, and 0 for
-    /// passthrough, whose packets are whatever size the remote sent and therefore
-    /// describe their own length. The client turns it into a packet duration,
-    /// which is the one thing it cannot work out from the fields above.
+    /// Samples per packet at [`Self::sample_rate`]: 960. The client turns it into
+    /// a packet duration, which is the one thing it cannot work out from the
+    /// fields above.
     pub packet_frames: u32,
-    /// `OpusHead`, or empty when there is no decoder to configure.
+    /// `OpusHead`, the decoder's configuration.
     pub head: Vec<u8>,
     /// `Some` exactly when the plan is adaptive: the sender's handle for
     /// reporting how its sends went ([`AudioCongestion`] writes through it) and
@@ -520,79 +510,6 @@ impl AudioCongestion {
     }
 }
 
-/// The two ways a wave buffer reaches the wire, as one thing the pump can hold.
-///
-/// An enum rather than a trait object: there are two of them, both live in this
-/// crate, and the dispatch is one `match` per wave buffer.
-enum PacketEncoder {
-    /// Boxed because the two are wildly different sizes — an Opus encoder carries
-    /// a resampler and its scratch buffers, passthrough carries a `Vec` — and an
-    /// enum as big as its largest variant would put half a kilobyte on the stack
-    /// to hold neither. One allocation per audio subscription.
-    Opus(Box<OpusStream>),
-    Pcm(PcmStream),
-}
-
-impl PacketEncoder {
-    fn new(format: PcmFormat, plan: AudioPlan) -> Result<(Self, Vec<u8>), anyhow::Error> {
-        Ok(match plan.codec {
-            AudioCodec::Opus => {
-                let (stream, head) = OpusStream::new(format, plan.bitrate_bps)?;
-                (Self::Opus(Box::new(stream)), head)
-            }
-            AudioCodec::Pcm => {
-                let (stream, head) = PcmStream::new(format)?;
-                (Self::Pcm(stream), head)
-            }
-        })
-    }
-
-    /// Forwarded to the Opus encoder. Passthrough has no rate to move, and no
-    /// caller: [`AudioSignals`] exists only on a plan the config has already
-    /// guaranteed is Opus.
-    fn set_bitrate(&mut self, bitrate_bps: i32) -> Result<(), anyhow::Error> {
-        match self {
-            Self::Opus(stream) => stream.set_bitrate(bitrate_bps),
-            Self::Pcm(_) => Ok(()),
-        }
-    }
-
-    fn codec_name(&self) -> &'static str {
-        match self {
-            Self::Opus(_) => OPUS_CODEC,
-            Self::Pcm(_) => PCM_CODEC,
-        }
-    }
-
-    fn sample_rate(&self) -> u32 {
-        match self {
-            Self::Opus(_) => crate::pcm48::SAMPLE_RATE,
-            Self::Pcm(stream) => stream.sample_rate(),
-        }
-    }
-
-    fn packet_frames(&self) -> u32 {
-        match self {
-            Self::Opus(stream) => stream.packet_frames(),
-            Self::Pcm(stream) => stream.packet_frames(),
-        }
-    }
-
-    fn frames_encoded(&self) -> u64 {
-        match self {
-            Self::Opus(stream) => stream.frames_encoded(),
-            Self::Pcm(stream) => stream.frames_encoded(),
-        }
-    }
-
-    fn push(&mut self, pcm: &Bytes) -> Result<Vec<Bytes>, anyhow::Error> {
-        match self {
-            Self::Opus(stream) => stream.push(pcm),
-            Self::Pcm(stream) => stream.push(pcm),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -601,8 +518,8 @@ mod tests {
 
     use super::*;
 
-    /// What this format costs on the wire, which is the whole reason the default
-    /// is Opus and not this — and, at `audio_codec = "pcm"`, exactly the bill.
+    /// What this format would cost on the wire, which is the whole reason it is
+    /// sent as Opus.
     #[test]
     fn the_negotiated_format_is_cd_quality_pcm() {
         assert_eq!(PCM_CD_QUALITY.block_align(), 4);
@@ -762,36 +679,19 @@ mod tests {
         assert_eq!(next(&mut second).await.unwrap().len(), 1);
     }
 
-    /// The header the two options hand back, side by side. Everything else in
-    /// this module is codec-blind, so this is the one place the difference is
-    /// visible: passthrough announces the remote's own rate and no decoder
-    /// configuration at all, which is what tells a client to skip WebCodecs.
+    /// The header a listener hands back: Opus at the rate it resampled to, and the
+    /// `OpusHead` the client configures its decoder with.
     #[tokio::test]
-    async fn the_two_options_describe_themselves_differently() {
+    async fn the_stream_describes_itself() {
         let bridge = AudioBridge::new();
         let opus = bridge
             .take_listener()
-            .into_packets(PCM_CD_QUALITY, crate::config::AudioPlan::fixed(AudioCodec::Opus))
+            .into_packets(PCM_CD_QUALITY, AudioPlan::fixed())
             .expect("opus");
         assert_eq!(opus.codec, "opus");
         assert_eq!(opus.sample_rate, crate::pcm48::SAMPLE_RATE);
         assert_eq!(opus.packet_frames, 960);
         assert_eq!(&opus.head[0..8], b"OpusHead");
-
-        let pcm = bridge
-            .take_listener()
-            .into_packets(PCM_CD_QUALITY, crate::config::AudioPlan::fixed(AudioCodec::Pcm))
-            .expect("passthrough");
-        assert_eq!(pcm.codec, "pcm-s16le");
-        assert_eq!(pcm.sample_rate, PCM_CD_QUALITY.sample_rate, "not resampled");
-        assert_eq!(pcm.packet_frames, 0, "each packet's length is its own");
-        assert!(pcm.head.is_empty(), "there is nothing to configure");
-
-        // And the bytes really are the bytes: one buffer in, the same buffer out.
-        let mut stream = Box::pin(pcm.packets);
-        let wave: Vec<u8> = (0..64u8).collect();
-        bridge.wave(wave.clone());
-        assert_eq!(next(&mut stream).await.expect("a packet"), vec![wave]);
     }
 
     /// The backpressure rule: the producer is never held up, and what gives way
@@ -859,7 +759,6 @@ mod tests {
     /// The adaptive plan every walk test runs on: default Opus rate, default floor.
     fn adaptive_plan() -> AudioPlan {
         AudioPlan {
-            codec: AudioCodec::Opus,
             bitrate_bps: 96_000,
             adaptive_floor_bps: Some(32_000),
         }

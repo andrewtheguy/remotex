@@ -66,7 +66,7 @@ log = "0.4"
 env_logger = "0.11"
 futures-util = "0.3"
 # Refcounted buffers for the audio path: a wave buffer is handed to the bridge
-# once and every hop after it — the broadcast queue, the passthrough packets —
+# once and every hop after it — the broadcast queue, the encoder —
 # clones a pointer instead of 32 KB. Already in the tree through axum.
 bytes = "1"
 toml = "1"
@@ -129,12 +129,6 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
 # that is already there. `OpusHead` is still built by hand in src/opus_stream.rs,
 # because a decoder needs it wherever it arrives from.
-#
-# The other audio option (`audio_codec = "pcm"`, src/pcm_stream.rs) needs no
-# dependency at all, which is most of its point: passthrough copies the remote's
-# bytes to the socket, so there is no encoder to link and no codec licence to
-# carry. A second *encoder* was tried here and removed — see the pcm_stream module
-# doc for why compressing harder was the wrong axis.
 # FLAC, which is how wlshare carries a desktop's sound on the RFB connection
 # (src/vnc_audio.rs): lossless, so the Opus encode above stays the only lossy
 # step. symphonia's decoder, pure Rust, and only the FLAC bundle of it —
