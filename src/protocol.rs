@@ -994,6 +994,12 @@ pub enum ServerMsg {
     /// Sent only by the Apple High Performance engine, and again on reattach
     /// while a resize is in progress.
     Resizing { active: bool },
+    /// Whether the desktop the `Resize` before this describes goes to the browser as
+    /// the remote's own rectangles ([`ServerMsg::Tiles`]) rather than as video,
+    /// because it is past what a video stream encodes. Sent after every `Resize` of
+    /// a source that can carry its picture that way — see
+    /// [`crate::encode::TileSupport`] — and never by one that cannot.
+    Tiling { active: bool },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
     /// `requested` distinguishes those paths so an explicit panel read does
@@ -1131,6 +1137,7 @@ enum ControlMsg<'a> {
     RemoteOs { macos: bool },
     TouchReady,
     Resizing { active: bool },
+    Tiling { active: bool },
     Clipboard {
         text: &'a str,
         #[serde(rename = "changedAtMs")]
@@ -1263,6 +1270,7 @@ impl ServerMsg {
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
+            ServerMsg::Tiling { active } => control(&ControlMsg::Tiling { active: *active }),
             ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
@@ -1761,6 +1769,10 @@ mod tests {
                     format!(r#"{{"type":"resizing","active":{active}}}"#)
                 ),
                 None => panic!("resizing must be a text frame"),
+            }
+            match (ServerMsg::Tiling { active }).text_frame() {
+                Some(json) => assert_eq!(json, format!(r#"{{"type":"tiling","active":{active}}}"#)),
+                None => panic!("tiling must be a text frame"),
             }
         }
         match (ServerMsg::Clipboard {

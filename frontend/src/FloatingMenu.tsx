@@ -24,6 +24,7 @@ import {
   type AudioRow,
   type AudioStreamInfo,
   audioLabel,
+  renderLabel,
   videoLabel,
 } from "./mediaLabel.ts";
 import { keepTabWithin } from "./modalFocus.ts";
@@ -560,6 +561,7 @@ function ScreenHelp({
   hostScale,
   connection,
   renderPlan,
+  tiling,
   audio,
   videoDecode,
 }: {
@@ -567,10 +569,11 @@ function ScreenHelp({
   hostScale: number;
   connection: string;
   renderPlan: string;
+  tiling: boolean;
   audio: AudioRow;
   videoDecode: string | null;
 }) {
-  const video = videoLabel(videoDecode);
+  const video = videoLabel(videoDecode, tiling);
   return (
     <>
       <h3>This session</h3>
@@ -608,7 +611,7 @@ function ScreenHelp({
               decides how the picture looks and costs and that nothing else reveals: it
               lives in the operator's config file, which whoever is looking at the screen
               usually does not have. Empty only before `connected`. */}
-          <dd>{renderPlan || "Waiting for the target"}</dd>
+          <dd>{renderLabel(renderPlan, tiling)}</dd>
         </div>
         <div className="help-item">
           <dt>Audio</dt>
@@ -902,6 +905,7 @@ export default function FloatingMenu({
   hostScale,
   connection,
   renderPlan,
+  tiling,
   canAudio,
   audioEnabled,
   audioError,
@@ -968,6 +972,8 @@ export default function FloatingMenu({
   connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
+  // Whether the picture is arriving as PNG tiles instead, from `tiling`.
+  tiling: boolean;
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
@@ -1511,6 +1517,7 @@ export default function FloatingMenu({
             hostScale={hostScale}
             connection={connection}
             renderPlan={renderPlan}
+            tiling={tiling}
             audio={{
               available: canAudio,
               enabled: audioEnabled,

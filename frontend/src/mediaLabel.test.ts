@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { audioLabel, videoLabel } from "./mediaLabel.ts";
+import { audioLabel, renderLabel, videoLabel } from "./mediaLabel.ts";
 
 const OPUS = {
   codec: "opus",
@@ -97,6 +97,20 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
 });
 
 test("the video row waits for the format, then names it", () => {
-  assert.equal(videoLabel(null), "Waiting for the video format");
-  assert.equal(videoLabel("vp09.00.40.08"), "vp09.00.40.08");
+  assert.equal(videoLabel(null, false), "Waiting for the video format");
+  assert.equal(videoLabel("vp09.00.40.08", false), "vp09.00.40.08");
+  assert.equal(
+    videoLabel("vp09.00.40.08", true),
+    "Not in use: the picture is PNG tiles",
+  );
+});
+
+test("the Render row says tiles while the desktop is past what video carries", () => {
+  const plan = "video q90 4:4:4 · adaptive ≥20";
+  assert.equal(renderLabel("", false), "Waiting for the target");
+  assert.equal(renderLabel(plan, false), plan);
+  assert.equal(
+    renderLabel(plan, true),
+    "PNG tiles: the desktop is past what video carries",
+  );
 });

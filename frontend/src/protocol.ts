@@ -284,6 +284,11 @@ export type ControlMsg =
   // Pushed by the gateway, which alone knows when the Mac has settled; the
   // page never infers it.
   | { type: "resizing"; active: boolean }
+  // Whether the desktop the `resize` before this describes arrives as the remote's
+  // own rectangles (TILE records) rather than as video, because it is past what a
+  // video stream encodes. Sent after every `resize` of a source that can do that,
+  // and never by one that cannot — whose pictures are always video.
+  | { type: "tiling"; active: boolean }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
   // follows `active`, so a selection the remote refused leaves the panel

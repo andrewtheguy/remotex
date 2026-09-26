@@ -708,6 +708,10 @@ impl VideoSink {
                 }
             }
             self.shared.video.lock().await.stream.want(w, h);
+            if self.shared.tile_support == TileSupport::Rects {
+                self.push(Pending::Msg(msg)).await?;
+                return self.push(Pending::Msg(ServerMsg::Tiling { active: tiling })).await;
+            }
         }
         self.push(Pending::Msg(msg)).await
     }
@@ -1136,6 +1140,11 @@ mod tests {
         sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
+        let tiling = !video::within_ceiling((u32::from(w), u32::from(h)));
+        assert!(
+            matches!(frame_rx.recv().await, Some(ServerMsg::Tiling { active }) if active == tiling),
+            "a resize of a source that can tile did not say which carriage follows"
+        );
         (sink, frame_rx)
     }
 
@@ -1203,15 +1212,17 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
 
-        let out = drain(&mut frame_rx, 5).await;
+        let out = drain(&mut frame_rx, 7).await;
         assert!(matches!(out[0], ServerMsg::Resize { w: 5376, .. }));
+        assert!(matches!(out[1], ServerMsg::Tiling { active: true }));
         assert!(
-            matches!(&out[1], ServerMsg::Tiles(tiles) if tiles.len() == 1),
+            matches!(&out[2], ServerMsg::Tiles(tiles) if tiles.len() == 1),
             "the rectangle taken past the ceiling did not go out before the next resize"
         );
-        assert!(matches!(out[2], ServerMsg::Resize { w: 1280, .. }));
-        assert!(matches!(out[3], ServerMsg::VideoFormat { .. }), "video came back unannounced");
-        assert!(matches!(&out[4], ServerMsg::Video(unit) if unit.keyframe));
+        assert!(matches!(out[3], ServerMsg::Resize { w: 1280, .. }));
+        assert!(matches!(out[4], ServerMsg::Tiling { active: false }));
+        assert!(matches!(out[5], ServerMsg::VideoFormat { .. }), "video came back unannounced");
+        assert!(matches!(&out[6], ServerMsg::Video(unit) if unit.keyframe));
     }
 
     /// Take the next `units` access units, stepping over the format announcements among them.
