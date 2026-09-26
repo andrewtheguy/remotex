@@ -129,7 +129,7 @@ frame at, which its desktop clients want for their own throughput readout too. I
 is one change to the wire, to be made with the desktop clients' throughput support
 rather than ahead of it.
 
-### The rate of Apple's passed HEVC
+### Apple's passed HEVC at 4K
 
 A passed High Performance stream
 ([Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through)) is
@@ -138,7 +138,13 @@ virtual display refreshed 30 times a second. That cap sits below the 20 Mbit/s
 floor of the Mac's rate control ([Rate control](apple-vnc-889.md#rate-control)),
 so the offer is the only thing that bounds the stream, and nothing adapts it.
 
-The plan for a LAN of 100 Mbit/s or more is what Apple's viewer does:
+High Performance is not made for a slow link. Apple's
+[guide](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac)
+asks for high bandwidth and consistently low latency, recommends a wired
+connection, and names 75 Mbit/s for a single 4K display, its virtual display's
+largest (3840×2160, within the gateway's ceiling). So what a passed stream is
+adapted for is resolution: carrying a 4K display, not a link that cannot carry
+the stream. The plan is what Apple's viewer does:
 
 - **The offer.** Apple's entries, up to 100 Mbit/s, which the Mac caps at 60. With
   no rate reports the Mac's controller is expected to hold at its 20 Mbit/s floor,
@@ -150,8 +156,22 @@ The plan for a LAN of 100 Mbit/s or more is what Apple's viewer does:
   window (`src/feedback.rs`).
 - **60 Hz.** A virtual display refreshed 60 times a second, which a passed stream
   can carry since nothing here decodes it.
+- **The level the browser is asked about.** The page asks its decoder about level
+  5.0 (`L150`), macwork's stream at 1600×1000, and 5.0 carries 4K at 30 pictures a
+  second. The Mac does not name the least level that fits, though: macvm's stream
+  announced 5.1 (`L153`) at 2880×1800 and 30 Hz, and 4K at 60 needs 5.1 anyway. So
+  the question is to name the level the Mac announces, measured in Chrome and
+  Safari, rather than the one macwork's first capture did.
 
-None of it has been measured with the raised cap.
+None of it has been measured with the raised cap or at 4K.
+
+A slow link is not a passed stream's to answer. A browser on one is served by a
+target without `hevc_passthrough`, whose VP9 the adaptive walk lowers; a passed
+session is not switched to VP9 for it, though the gaps' switch would make that
+possible. A brief stall stays what it is: the Mac's units predict from every one
+before, so none can be dropped alone, and a full queue drops to the next IDR and
+asks the Mac for one, which brings the picture back as one fresh frame rather than
+a replay of the backlog.
 
 ### Source payloads the gateway decodes instead of forwarding
 
